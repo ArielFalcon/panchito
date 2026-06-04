@@ -1,12 +1,13 @@
-// Filtro B del harness: gate estático sobre los specs generados, ANTES de
-// gastar un navegador. Revisa "en seco" que los tests:
-//   1. compilan (typecheck),
-//   2. pasan el linter de Playwright (caza esperas fijas, asserts triviales,
-//      element handles, awaits faltantes…),
-//   3. cargan en Playwright (`test --list`).
-// Si algo falla, los specs son inválidos: la generación fue mala y no tiene
-// sentido ejecutarlos. Cada chequeo se inyecta → la orquestación es verificable
-// con stubs; los runners reales (que hacen spawn) son el borde no cubierto.
+// Harness Filter B: static gate over the generated specs, BEFORE spending a
+// browser. Checks "dry" that the tests:
+//   1. compile (typecheck),
+//   2. pass the Playwright linter (catches hard waits, trivial asserts, element
+//      handles, missing awaits...),
+//   3. load in Playwright (`test --list`),
+//   4. carry valid metadata (manifest).
+// If anything fails the specs are invalid: generation was bad and running them
+// makes no sense. Each check is injected, so the orchestration is verifiable with
+// stubs; the real runners (which spawn) are the uncovered boundary.
 
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -22,19 +23,19 @@ export interface ValidateDeps {
   typecheck(specDir: string): Promise<CheckResult>;
   lint(specDir: string): Promise<CheckResult>;
   listTests(specDir: string): Promise<CheckResult>;
-  checkManifest(specDir: string): Promise<CheckResult>; // metadata estándar válida
+  checkManifest(specDir: string): Promise<CheckResult>; // standard metadata is valid
 }
 
 export interface ValidationResult {
   ok: boolean;
-  errors: string[]; // un error por chequeo fallido, con su salida (para el agente)
+  errors: string[]; // one error per failed check, with its output (for the agent)
 }
 
 export async function validateSpecs(
   specDir: string,
   deps: ValidateDeps,
 ): Promise<ValidationResult> {
-  // Se corren TODOS (no corta al primero) para devolver feedback completo.
+  // Run ALL of them (do not stop at the first) to return complete feedback.
   const checks: Array<[string, (d: string) => Promise<CheckResult>]> = [
     ["typecheck", deps.typecheck],
     ["lint", deps.lint],
@@ -49,9 +50,9 @@ export async function validateSpecs(
   return { ok: errors.length === 0, errors };
 }
 
-// Runners por defecto: ejecutan las herramientas DENTRO del proyecto `e2e/` del
-// repo (su propia config/tooling). Requieren tsc/eslint/playwright disponibles
-// (deps del propio proyecto e2e, instaladas por el orchestrator antes del gate).
+// Default runners: run the tools INSIDE the repo's `e2e/` project (its own
+// config/tooling). They require tsc/eslint/playwright to be available (the e2e
+// project's own deps, installed by the orchestrator before this gate).
 function sh(cmd: string, args: string[], e2eDir: string): Promise<CheckResult> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { cwd: e2eDir, env: { ...process.env } });
@@ -73,7 +74,7 @@ export const defaultValidateDeps: ValidateDeps = {
       const v = validateManifest(raw);
       return { ok: v.ok, output: v.errors.join("\n") };
     } catch (e) {
-      return { ok: false, output: `e2e/.qa/manifest.json ilegible o ausente: ${String(e)}` };
+      return { ok: false, output: `e2e/.qa/manifest.json unreadable or missing: ${String(e)}` };
     }
   },
 };

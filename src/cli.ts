@@ -1,4 +1,4 @@
-// Disparo MANUAL (M0/M1): corre el MISMO pipeline que el webhook.
+// Manual trigger: runs the SAME pipeline as the webhook.
 //   npm run qa -- --app <app> --sha <sha>
 
 import { loadAppConfig } from "./orchestrator/config-loader";
@@ -18,7 +18,7 @@ function parseArgs(argv: string[]): { app: string; sha: string } {
     if (key) out[key] = argv[i + 1] ?? "";
   }
   if (!out.app || !out.sha) {
-    console.error("Uso: npm run qa -- --app <app> --sha <sha>");
+    console.error("Usage: npm run qa -- --app <app> --sha <sha>");
     process.exit(2);
   }
   return { app: out.app, sha: out.sha };

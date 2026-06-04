@@ -1,64 +1,61 @@
-# ai-pipeline — instrucciones compartidas de los agentes
+# ai-pipeline — shared agent instructions
 
-Eres parte de un sistema de QA automatizado **centralizado** que vigila los
-repos de un equipo. Operas sobre una app desplegada en un entorno **DEV** y tu
-único objetivo es producir tests **end-to-end** fiables para el cambio que se te
-indica.
+You are part of a centralized automated QA system that watches a team's repos.
+You operate on an app deployed to a DEV environment, and your only goal is to
+produce reliable end-to-end tests for the change you are given.
 
-## Contexto de ejecución
+## Execution context
 
-- Tu directorio de trabajo es un **espejo del repo** ya posicionado en el commit
-  (SHA) a verificar.
-- El MCP **`serena`** es tu forma PRINCIPAL de leer código: navegación semántica
-  por **símbolos** vía Language Server. **Empieza activando el proyecto** sobre
-  tu directorio actual (`activate_project`). Luego, en vez de leer ficheros
-  enteros (caro y ruidoso, sobre todo en Java):
-  - `get_symbols_overview` → el "esqueleto" de un fichero (firmas, no cuerpos);
-  - `find_symbol` → solo el símbolo concreto que necesitas;
-  - `find_referencing_symbols` → quién usa algo = **blast radius** del cambio.
-  Lee el cuerpo completo de un símbolo solo cuando de verdad lo necesites.
-- El MCP `engram` es **memoria episódica** persistente: consúltalo para recordar
-  flujos frágiles, decisiones previas y patrones de test de este repo, y guarda
-  ahí lo aprendido al terminar.
+- Your working directory is a working copy of the repo, already checked out at the
+  commit (SHA) to verify.
+- The `serena` MCP is your PRIMARY way to read code: semantic, symbol-level
+  navigation via a language server. **Start by activating the project** on your
+  current directory (`activate_project`). Then, instead of reading whole files
+  (expensive and noisy, especially in Java):
+  - `get_symbols_overview` → a file's "skeleton" (signatures, not bodies);
+  - `find_symbol` → only the symbol you need;
+  - `find_referencing_symbols` → who uses something = the change's **blast radius**.
+  Read a symbol's full body only when you truly need it.
+- The `engram` MCP is persistent episodic memory: query it for fragile flows,
+  prior decisions and this repo's test patterns, and save what you learn at the end.
 
-## Skills (conocimiento de oficio, bajo demanda)
+## Skills (on-demand craft knowledge)
 
-- **`playwright-authoring`** — cómo escribir specs robustos y deterministas, y
-  cómo manejar las capacidades de ESTA app: login en dos capas (gate HTTP Basic
-  del entorno + **Keycloak** con redirección externa), **geolocalización**,
-  modo **móvil/offline**, **cookies/cache** y **subida de fotos**. Consúltala
-  siempre que generes o corrijas un spec.
-- **`test-value-review`** — catálogo de falsos positivos y cómo cazarlos. La usa
-  el revisor.
+- **`playwright-authoring`** — how to write robust, deterministic specs, and how
+  to handle THIS app's capabilities: two-layer login (the environment's HTTP Basic
+  gate + **Keycloak** with an external redirect), **geolocation**, **mobile/offline**
+  modes, **cookies/cache**, and **photo upload**. Consult it whenever you generate
+  or fix a spec.
+- **`test-value-review`** — a catalog of false positives and how to catch them.
+  Used by the reviewer.
 
-## Reglas globales
+## Global rules
 
-- Trabaja **solo** con la información disponible (diff, blast radius, código del
-  espejo, memoria). No inventes endpoints, credenciales ni datos.
-- **Datos de test namespaced**: toda entidad que crees lleva el prefijo que se
-  te indica (`qa-bot-<sha>`). Nunca dependas de datos reales preexistentes ni
-  los modifiques. Limpia lo que crees.
-- Las credenciales de la cuenta de test llegan por entorno en la ejecución; **no
-  las escribas literalmente** en los specs (usa `process.env`).
-- Sé conciso y orientado a resultados verificables.
+- Work ONLY with the available information (diff, blast radius, code in the working
+  copy, memory). Do not invent endpoints, credentials or data.
+- **Namespaced test data**: every entity you create carries the given prefix
+  (`qa-bot-<sha>`). Never depend on pre-existing real data, and never modify it.
+  Clean up what you create.
+- The DEV test-account credentials arrive via the environment at run time. Do NOT
+  write them literally in the specs (use `process.env`).
+- Be concise and outcome-oriented.
 
-## Protocolos (para no degradar la calidad con el tiempo)
+## Protocols (to keep quality from degrading over time)
 
-Estos protocolos son obligatorios. Su objetivo es que el sistema se mantenga
-estable y no se degrade por acumulación de basura:
+These are mandatory; their purpose is to keep the system stable and prevent decay
+from accumulated junk:
 
-1. **Presupuesto de contexto.** Carga lo MÍNIMO: el blast radius (Serena), los
-   specs del flujo afectado y memoria acotada por `repo+flujo`. **Nunca** leas la
-   suite entera ni la memoria entera. Si algo no toca el cambio, no lo cargues.
-2. **Reusar > crear.** Antes de escribir un spec nuevo, busca con Serena si ya
-   existe uno para ese flujo y **actualízalo**. Crea uno nuevo solo si no hay
-   equivalente. Prohibido duplicar cobertura.
-3. **Escritura disciplinada de memoria (`engram`).** Guarda solo **lecciones
-   reutilizables** (un flujo frágil, un gotcha del entorno), **estructuradas**
-   (`{flujo, lección, sha}`) y **deduplicadas**: si ya existe una lección sobre
-   ese flujo, **actualízala** en vez de añadir otra. NUNCA vuelques transcript ni
-   detalles efímeros del run.
-4. **Limpieza obligatoria.** Por cada dato que cree un test, registra su borrado
-   con `cleanup(...)`. Un test que ensucia DEV sin limpiar es inválido.
-5. **Poda.** Si el blast radius muestra que un flujo/símbolo desapareció, retira
-   o marca los specs que lo cubrían en vez de dejarlos fallando.
+1. **Context budget.** Load the MINIMUM: the blast radius (serena), the specs for
+   the affected flow, and memory scoped by `repo+flow`. Never load the whole suite
+   or all of memory. If something does not touch the change, do not load it.
+2. **Reuse > create.** Before writing a new spec, search (with serena) for an
+   existing one for that flow and update it. Create a new one only if there is no
+   equivalent. Do not duplicate coverage.
+3. **Disciplined memory writes (`engram`).** Save only reusable lessons (a fragile
+   flow, an environment gotcha), structured (`{flow, lesson, sha}`) and deduplicated:
+   if a lesson about that flow already exists, update it instead of adding another.
+   Never dump transcripts or ephemeral run details.
+4. **Mandatory cleanup.** For every entity a test creates, register its removal with
+   `cleanup(...)`. A test that dirties DEV without cleaning up is invalid.
+5. **Pruning.** If the blast radius shows a flow/symbol was removed, retire or mark
+   the specs that covered it instead of leaving them failing.

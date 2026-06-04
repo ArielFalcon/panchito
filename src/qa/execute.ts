@@ -1,8 +1,8 @@
-// Filtro C del harness: ejecuta los E2E ya persistidos contra DEV y clasifica
-// el resultado (pass/fail/flaky). El runner se inyecta: el default usa
-// Playwright con la config base (retries → detección de flakiness, trace
-// on-first-retry); en tests se stubbea. El output se SANITIZA antes de
-// devolverse (puede traer PII/datos de DEV que luego irían a un Issue).
+// Harness Filter C: runs the persisted E2E tests against DEV and classifies the
+// outcome (pass/fail/flaky). The runner is injected: the default uses Playwright
+// with the base config (retries → flakiness detection, trace on-first-retry); in
+// tests it is stubbed. The output is SANITIZED before being returned (it may
+// carry PII/DEV data that would later feed an Issue).
 
 import { spawn } from "node:child_process";
 import { QaRunResult } from "../types";
@@ -15,7 +15,7 @@ export interface ExecuteOptions {
 }
 
 export interface RunOutput {
-  report: unknown; // reporte JSON de Playwright
+  report: unknown; // Playwright JSON report
   logs: string;
 }
 
@@ -23,9 +23,9 @@ export interface ExecuteDeps {
   runSuite(args: { dir: string; baseUrl: string; namespace: string }): Promise<RunOutput>;
 }
 
-// La limpieza de los datos namespaced NO vive aquí: cada test la hace en su
-// teardown vía el fixture `cleanup` (config/e2e/fixtures.ts), que es donde se
-// conoce cómo deshacer cada entidad. Aquí solo se ejecuta y se clasifica.
+// Cleanup of the namespaced data does NOT live here: each test does it in its
+// teardown via the `cleanup` fixture (config/e2e/fixtures.ts), where it knows how
+// to undo each entity. Here we only run and classify.
 export async function runE2E(
   specDir: string,
   opts: ExecuteOptions,
@@ -47,11 +47,11 @@ export async function runE2E(
   };
 }
 
-// Runner por defecto: ejecuta Playwright en el proyecto `e2e/` del repo (con su
-// propia config/fixtures) y reporter JSON. Playwright NO es dependencia del
-// template (arrastraría navegadores): vive en el entorno donde corre el servicio
-// (la imagen del orchestrator se basa en la de Playwright). PW_BASE_URL apunta a
-// DEV; PW_NAMESPACE es el prefijo de datos del run (lo leen las fixtures).
+// Default runner: runs Playwright in the repo's `e2e/` project (with its own
+// config/fixtures) and the JSON reporter. Playwright is not a dependency of this
+// template (it would pull in browsers): it lives in the environment where the
+// service runs (the orchestrator image is based on the Playwright image).
+// PW_BASE_URL points to DEV; PW_NAMESPACE is the run's data prefix (read by the fixtures).
 export const defaultExecuteDeps: ExecuteDeps = {
   runSuite: ({ dir, baseUrl, namespace }) =>
     new Promise((resolve, reject) => {
@@ -69,7 +69,7 @@ export const defaultExecuteDeps: ExecuteDeps = {
         try {
           report = JSON.parse(stdout);
         } catch {
-          /* stdout no era JSON parseable */
+          /* stdout was not parseable JSON */
         }
         resolve({ report, logs: stderr || stdout });
       });

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { renderIssue } from "./reporter";
 
-test("incluye SHA, casos fallidos y logs", () => {
+test("includes SHA, failed cases and logs", () => {
   const body = renderIssue(
     {
       sha: "abc123",
@@ -12,18 +12,18 @@ test("incluye SHA, casos fallidos y logs", () => {
         { name: "login ok", status: "pass" },
         { name: "checkout", status: "fail", detail: "timeout" },
       ],
-      logs: "salida sanitizada",
+      logs: "sanitized output",
     },
-    "no convergió en maxIterations",
+    "did not converge in maxIterations",
   );
   assert.match(body, /abc123/);
   assert.match(body, /checkout — timeout/);
-  assert.match(body, /no convergió/);
-  assert.match(body, /salida sanitizada/);
-  assert.doesNotMatch(body, /login ok/); // solo lista los fallidos
+  assert.match(body, /did not converge/);
+  assert.match(body, /sanitized output/);
+  assert.doesNotMatch(body, /login ok/); // only lists the failed ones
 });
 
-test("sin nota del revisor no rompe el render", () => {
+test("a missing reviewer note does not break the render", () => {
   const body = renderIssue({ sha: "x", verdict: "fail", passed: false, cases: [], logs: "" });
-  assert.match(body, /sin detalle de casos/);
+  assert.match(body, /no case detail/);
 });

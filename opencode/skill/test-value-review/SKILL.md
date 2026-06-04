@@ -1,51 +1,51 @@
 ---
 name: test-value-review
-description: Cómo juzgar si un test E2E APORTA VALOR (no solo si está verde). Catálogo de anti-patrones de falso positivo y cómo detectarlos. Úsala al revisar tests (rol qa-reviewer).
+description: How to judge whether an E2E test ADDS VALUE (not just whether it is green). Catalog of false-positive anti-patterns and how to detect them. Use it when reviewing tests (qa-reviewer role).
 ---
 
-# Revisión de VALOR de un test
+# Reviewing a test's VALUE
 
-Un test verde no vale nada si **no se pondría rojo cuando la funcionalidad se
-rompe**. Tu trabajo no es comprobar que el test pasa: es **intentar demostrar que
-el test no sirve**. Asume mala fe del test hasta que demuestre lo contrario.
+A green test is worthless if it **would not turn red when the functionality
+breaks**. Your job is not to confirm the test passes: it is to **try to prove the
+test is useless**. Assume bad faith from the test until it proves otherwise.
 
-## La pregunta central
+## The central question
 
-> *¿Existe una forma de que la feature esté rota y este test SIGA en verde?*
+> *Is there any way the feature could be broken and this test still be green?*
 
-Si la respuesta es sí, el test es un falso positivo → `approved: false` con una
-corrección concreta.
+If the answer is yes, the test is a false positive → `approved: false` with a
+concrete correction.
 
-## Catálogo de anti-patrones (rechaza si ves alguno)
+## Anti-pattern catalog (reject if you see any)
 
-1. **Assert ausente o trivial.** Solo hace clics/navega; o asevera algo que es
-   cierto siempre (`toBeVisible()` de algo que ya estaba, `expect(true)`,
-   comprobar que la URL existe). → Pide un assert sobre el **resultado** del flujo.
-2. **Assert no ligado al cambio.** El objetivo dice "X" pero el assert verifica
-   "Y" no relacionado. → El test no cubre lo que dice cubrir.
-3. **Aceptaría el camino roto.** Si la acción fallara en silencio, el test
-   pasaría igual (p. ej. asevera que aparece un botón, no que la operación
-   ocurrió). → Aserta el efecto, no la mera presencia de UI.
-4. **Tautología / depende de su propio mock.** Comprueba algo que el propio test
-   montó, o mockea la red (aquí prohibido) y verifica el mock. → Sin valor.
-5. **Datos preexistentes.** Asume que existe un dato real ("usuario admin",
-   "pedido 42") en vez de crearlo namespaced. → Frágil y no aislado.
-6. **No determinista.** `waitForTimeout`, orden implícito entre tests, locators
-   CSS/XPath frágiles, sin cleanup. → Flaky garantizado.
-7. **Sin limpieza.** Crea datos y no registra su borrado con `cleanup`. → Ensucia
-   DEV y degrada el entorno.
-8. **Cobertura que ignora el cambio.** El diff toca un flujo que el test no
-   ejercita. → Falta el test del flujo afectado.
-9. **Metadata incoherente.** El `objective`/`targets` del manifest no se
-   corresponde con lo que el test hace de verdad.
-10. **Oráculo débil.** Verifica un estado intermedio en vez del resultado final
-    observable por el usuario.
+1. **Missing or trivial assert.** Only clicks/navigates; or asserts something that
+   is always true (`toBeVisible()` on something already there, `expect(true)`,
+   checking that the URL exists). → Require an assert on the flow's **outcome**.
+2. **Assert not tied to the change.** The objective says "X" but the assert checks
+   an unrelated "Y". → The test does not cover what it claims to.
+3. **Would accept the broken path.** If the action failed silently, the test would
+   pass anyway (e.g. asserts a button appears, not that the operation happened). →
+   Assert the effect, not the mere presence of UI.
+4. **Tautology / depends on its own mock.** Checks something the test itself set
+   up, or mocks the network (forbidden here) and verifies the mock. → No value.
+5. **Pre-existing data.** Assumes a real entity exists ("admin user", "order 42")
+   instead of creating it namespaced. → Fragile and not isolated.
+6. **Non-deterministic.** `waitForTimeout`, implicit ordering between tests,
+   fragile CSS/XPath locators, no cleanup. → Guaranteed flaky.
+7. **No cleanup.** Creates data and does not register its removal with `cleanup`. →
+   Dirties DEV and degrades the environment.
+8. **Coverage that ignores the change.** The diff touches a flow the test does not
+   exercise. → The affected-flow test is missing.
+9. **Incoherent metadata.** The manifest's `objective`/`targets` do not match what
+   the test actually does.
+10. **Weak oracle.** Verifies an intermediate state instead of the final outcome
+    the user observes.
 
-## Cómo emites el veredicto
+## How you emit the verdict
 
-Por cada problema, una corrección **específica y accionable** (qué cambiar y por
-qué). Si y solo si no encuentras ninguno tras intentarlo de verdad, aprueba.
+For each problem, one **specific, actionable** correction (what to change and why).
+If and only if you find none after genuinely trying, approve.
 
 ```json
-{ "approved": false, "corrections": ["El test asevera que el botón 'Publicar' es visible, pero no que la foto se publicó: pasaría aunque la subida falle. Asevera que aparece la publicación creada con su id namespaced."] }
+{ "approved": false, "corrections": ["The test asserts that the 'Publish' button is visible, but not that the photo was published: it would pass even if the upload fails. Assert that the created post appears with its namespaced id."] }
 ```

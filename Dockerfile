@@ -1,12 +1,12 @@
-# Contenedor `orchestrator`: nuestra infra Node (webhook, gate, espejo,
-# ejecución E2E, reporte). La generación agéntica la hace el contenedor
-# `opencode` aparte (ver docker-compose.yml + opencode/Dockerfile).
+# `orchestrator` container: the Node infrastructure (webhook, gate, working copy,
+# E2E execution, reporting). The agentic generation runs in the separate
+# `opencode` container (see docker-compose.yml + opencode/Dockerfile).
 #
-# Base = imagen oficial de Playwright (Node + navegadores ya instalados): aquí
-# se EJECUTAN los E2E que el agente generó, contra DEV.
+# Base = the official Playwright image (Node + browsers preinstalled): this is
+# where the agent-generated E2E tests RUN, against DEV.
 FROM mcr.microsoft.com/playwright:v1.50.0-jammy
 
-# git: para clonar/posicionar los espejos de los repos vigilados.
+# git: to clone/check out the working copies of the watched repos.
 RUN apt-get update && apt-get install -y --no-install-recommends git \
   && rm -rf /var/lib/apt/lists/*
 
@@ -17,9 +17,9 @@ RUN npm install --omit=dev || npm install
 
 COPY . .
 
-# El tooling e2e (Playwright runner + eslint + tsc) NO se instala aquí: vive en
-# `e2e/` de cada repo y el orchestrator hace `npm ci` ahí por run (qa/setup.ts).
-# La imagen ya trae los navegadores de Playwright (base mcr...playwright).
+# The e2e tooling (Playwright runner + eslint + tsc) is NOT installed here: it
+# lives in each repo's `e2e/`, and the orchestrator runs `npm ci` there per run
+# (qa/setup.ts). The image already ships the Playwright browsers.
 
-# Arranque del servicio: webhook + cola secuencial.
+# Service entry point: webhook + sequential queue.
 CMD ["npm", "run", "start"]

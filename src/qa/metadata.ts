@@ -1,27 +1,27 @@
-// Metadata estándar por test (vive en e2e/.qa/manifest.json del repo). Es la
-// pieza de la que cuelgan el dedup, la poda, la selección por impacto y el
-// mérito. Aquí solo definimos el esquema y su VALIDACIÓN (parte del Filtro B):
-// un test sin metadata válida hace inválido el run. Los campos MEDIDOS/derivados
-// (coverage, sensitivity, ledger, merit) los rellena el sistema más adelante;
-// los de día 1 (objetivo, flujo, targets, changeRef) los escribe el agente.
+// Standard per-test metadata (lives in the repo's e2e/.qa/manifest.json). It is
+// what dedup, pruning, impact-based selection and merit hang off. Here we define
+// the schema and its VALIDATION (part of Filter B): a test without valid metadata
+// makes the run invalid. The measured/derived fields (coverage, sensitivity,
+// ledger, merit) are filled by the system; the day-one fields (objective, flow,
+// targets, changeRef) are written by the agent.
 
 export interface QaTestMeta {
-  id: string; // estable y único (p. ej. "checkout/over-10-items")
-  objective: string; // criterio de aceptación: "dado X, cuando Y, entonces Z"
-  flow: string; // flujo de usuario (p. ej. "checkout")
+  id: string; // stable and unique (e.g. "checkout/over-10-items")
+  objective: string; // acceptance criterion: "given X, when Y, then Z"
+  flow: string; // user flow (e.g. "checkout")
   useCase?: string;
-  targets: string[]; // INTENCIÓN: símbolos/rutas que pretende ejercitar (blast radius)
+  targets: string[]; // INTENT: symbols/routes it aims to exercise (blast radius)
   changeRef: { sha: string; type: string; pr?: number; ticket?: string };
   criticality?: "critical" | "normal";
   owner?: string; // "qa-bot" | "human"
   createdAt?: string;
 
-  // --- medido/derivado (opcional; lo completa el sistema, no el agente) ---
-  coverage?: { files?: string[]; functions?: string[] }; // MEDIDO en el último run
+  // Measured/derived fields, populated by the system (not the agent); optional.
+  coverage?: { files?: string[]; functions?: string[] }; // measured on the last run
   sensitivity?: { status: "pass" | "fail" | "unknown"; method?: string; at?: string };
   stability?: { runs: number; flakyRuns: number };
   ledger?: { caughtRegressions: number; falsePositives: number };
-  merit?: number; // derivado de lo anterior (no fuente)
+  merit?: number; // derived from the above (not a source value)
 }
 
 export interface ManifestValidation {
@@ -29,11 +29,11 @@ export interface ManifestValidation {
   errors: string[];
 }
 
-// Valida el manifest (array de QaTestMeta). Exige solo los campos de día 1; los
-// medidos son opcionales. Un array vacío es válido (repo sin tests todavía).
+// Validates the manifest (array of QaTestMeta). Requires only the day-one fields;
+// the measured ones are optional. An empty array is valid (repo with no tests yet).
 export function validateManifest(raw: unknown): ManifestValidation {
   if (!Array.isArray(raw)) {
-    return { ok: false, errors: ["el manifest (e2e/.qa/manifest.json) debe ser un array"] };
+    return { ok: false, errors: ["the manifest (e2e/.qa/manifest.json) must be an array"] };
   }
   const errors: string[] = [];
   const ids = new Set<string>();
@@ -42,17 +42,17 @@ export function validateManifest(raw: unknown): ManifestValidation {
     const m = (entry ?? {}) as Partial<QaTestMeta>;
     const tag = nonEmpty(m.id) ? m.id! : `#${i}`;
 
-    if (!nonEmpty(m.id)) errors.push(`entrada #${i}: falta 'id'`);
-    else if (ids.has(m.id!)) errors.push(`'${m.id}': id duplicado`);
+    if (!nonEmpty(m.id)) errors.push(`entry #${i}: missing 'id'`);
+    else if (ids.has(m.id!)) errors.push(`'${m.id}': duplicate id`);
     else ids.add(m.id!);
 
-    if (!nonEmpty(m.objective)) errors.push(`'${tag}': falta 'objective'`);
-    if (!nonEmpty(m.flow)) errors.push(`'${tag}': falta 'flow'`);
+    if (!nonEmpty(m.objective)) errors.push(`'${tag}': missing 'objective'`);
+    if (!nonEmpty(m.flow)) errors.push(`'${tag}': missing 'flow'`);
     if (!Array.isArray(m.targets) || m.targets.length === 0) {
-      errors.push(`'${tag}': 'targets' vacío (¿qué pretende ejercitar?)`);
+      errors.push(`'${tag}': empty 'targets' (what does it exercise?)`);
     }
     if (!m.changeRef || !nonEmpty(m.changeRef.sha) || !nonEmpty(m.changeRef.type)) {
-      errors.push(`'${tag}': 'changeRef' incompleto (sha + type)`);
+      errors.push(`'${tag}': incomplete 'changeRef' (sha + type)`);
     }
   });
 

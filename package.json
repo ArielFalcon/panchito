@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Motor agnóstico de QA E2E asistido por IA. Template: la app vigilada se acopla solo por config/ + .env.",
+  "description": "App-agnostic AI-assisted E2E QA engine. Template: a watched app is onboarded via config/ + .env only.",
   "scripts": {
     "qa": "tsx src/cli.ts",
     "start": "tsx src/index.ts",

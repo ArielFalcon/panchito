@@ -1,49 +1,49 @@
-# Autenticación (dos capas)
+# Authentication (two layers)
 
-Esta app tiene **dos credenciales distintas**. No las confundas.
+This app has **two distinct credentials**. Do not confuse them.
 
-## Capa 1 — Gate del entorno DEV (HTTP Basic Auth)
+## Layer 1 — DEV environment gate (HTTP Basic Auth)
 
-Todo el entorno DEV está protegido por el diálogo nativo del navegador
-(usuario/contraseña). **No se interactúa con ese diálogo**: se resuelve con
-`httpCredentials`, ya configurado en `playwright.config.ts` desde
-`DEV_ENV_USER`/`DEV_ENV_PASS` y restringido al origen de la app. No tienes que
-hacer nada en el spec; solo saber que por eso DEV "ya está abierto".
+The whole DEV environment is protected by the browser's native dialog
+(username/password). **You do not interact with that dialog**: it is handled by
+`httpCredentials`, already configured in `playwright.config.ts` from
+`DEV_ENV_USER`/`DEV_ENV_PASS` and scoped to the app origin. You do not need to do
+anything in the spec; just know that this is why DEV is "already open".
 
-## Capa 2 — Login de la app (Keycloak, redirección externa)
+## Layer 2 — App login (Keycloak, external redirect)
 
-Al pulsar el botón de login, la app **redirige al dominio de Keycloak** (fuera
-del dominio de la app), donde se introduce usuario y contraseña
-(`DEV_TEST_USER`/`DEV_TEST_PASS`), y al aceptar **vuelve a la app**.
+Pressing the login button **redirects to the Keycloak domain** (outside the app),
+where the username and password are entered (`DEV_TEST_USER`/`DEV_TEST_PASS`), and
+on success it **returns to the app**.
 
-El fixture `authenticate()` ya hace este flujo; **ajusta los selectores** al
-login real (el botón de la app y, en Keycloak, normalmente `#username`,
-`#password`, `#kc-login`). Cross-domain funciona dentro del mismo contexto.
+The `authenticate()` fixture already performs this flow; **adjust the selectors**
+to the real login (the app's button and, in Keycloak, usually `#username`,
+`#password`, `#kc-login`). Cross-domain works within the same context.
 
 ```ts
-test("área privada visible tras login", async ({ page, authenticate }) => {
+test("private area visible after login", async ({ page, authenticate }) => {
   await authenticate();
-  await expect(page.getByRole("heading", { name: /mi perfil/i })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /my profile/i })).toBeVisible();
 });
 ```
 
-## Páginas públicas (sin login)
+## Public pages (no login)
 
-La app tiene navegación pública. Para esos tests **no llames a `authenticate()`**
-(seguirás pasando la capa 1, que es del entorno).
+The app has public navigation. For those tests **do not call `authenticate()`**
+(you will still pass layer 1, which belongs to the environment).
 
-## Optimización: cachear la sesión con storageState
+## Optimization: cache the session with storageState
 
-El login por Keycloak es lento. Para no repetirlo en cada test, hazlo **una vez**
-en un setup y guarda el estado, y reúsalo:
+The Keycloak login is slow. To avoid repeating it in every test, do it **once** in
+a setup and save the state, then reuse it:
 
 ```ts
-// auth.setup.ts (proyecto de setup)
+// auth.setup.ts (a setup project)
 import { test as setup } from "../fixtures";
 setup("login", async ({ page, authenticate, context }) => {
   await authenticate();
   await context.storageState({ path: "e2e/.auth/user.json" });
 });
 ```
-Luego los tests autenticados usan `test.use({ storageState: "e2e/.auth/user.json" })`.
-Guarda `.auth/` en `.gitignore` del proyecto e2e (es estado de sesión, no código).
+Then authenticated tests use `test.use({ storageState: "e2e/.auth/user.json" })`.
+Add `.auth/` to the e2e project's `.gitignore` (it is session state, not code).

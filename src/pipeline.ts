@@ -1,9 +1,10 @@
-// Pipeline completo de QA, compartido por TODOS los disparadores (CLI manual y
-// webhook). La INFRA determinística vive aquí (gate, espejo, harness, publicación
-// y reporte); la GENERACIÓN agéntica la delega en OpenCode (ver
-// integrations/opencode-client.ts + opencode/opencode.json). La fuente de verdad
-// de los tests es la carpeta `e2e/` DEL REPO (git), no un volumen. Los pasos con
-// red/efectos se inyectan vía PipelineDeps → orden y ramas verificables con stubs.
+// Full QA pipeline, shared by every trigger (manual CLI and webhook). The
+// deterministic infrastructure lives here (gate, working copy, harness,
+// publishing, reporting); the agentic generation is delegated to OpenCode
+// (see integrations/opencode-client.ts + opencode/opencode.json). The source of
+// truth for the tests is the repo's `e2e/` folder in git, not a volume. Steps
+// that touch the network or have side effects are injected via PipelineDeps, so
+// ordering and branches are verifiable with stubs.
 
 import { join } from "node:path";
 import { AppConfig } from "./orchestrator/config-loader";
@@ -20,7 +21,7 @@ import { github } from "./integrations/github";
 import { renderIssue } from "./report/reporter";
 import { AgentResult, QaRunResult, TriggerSource } from "./types";
 
-// Carpeta de tests dentro del repo (fuente de verdad, versionada en git).
+// Tests live in this folder inside the repo (git is the source of truth).
 const E2E_DIR = "e2e";
 
 export interface GenerateInput {
@@ -30,17 +31,17 @@ export interface GenerateInput {
   mirrorDir: string;
   namespace: string;
   needsReview: boolean;
-  intent: CommitIntent; // tipo + mensaje + ficheros → el agente define el objetivo
+  intent: CommitIntent; // type + message + files; the agent derives the objective from it
 }
 
 export interface PipelineDeps {
   waitForDeploy(target: DeployTarget, sha: string): Promise<void>;
   prepare(repo: string, sha: string): Promise<{ mirrorDir: string; diff: string; message: string }>;
   generate(input: GenerateInput): Promise<AgentResult>;
-  setupE2e(e2eDir: string): Promise<void>; // instala deps del proyecto e2e
+  setupE2e(e2eDir: string): Promise<void>; // installs the e2e project's dependencies
   validate(e2eDir: string): Promise<{ ok: boolean; errors: string[] }>;
   execute(e2eDir: string, opts: { baseUrl: string; namespace: string }): Promise<QaRunResult>;
-  isHealthy(versionUrl: string): Promise<boolean>; // ¿DEV sano AHORA? (infra vs calidad)
+  isHealthy(versionUrl: string): Promise<boolean>; // is DEV healthy right now? (infra vs quality)
   publish(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string }): Promise<{ prUrl: string } | null>;
   openIssue(repo: string, title: string, body: string): Promise<{ url: string }>;
   log?(msg: string): void;
@@ -95,39 +96,39 @@ export async function runPipeline(
 ): Promise<QaRunResult> {
   const log = deps.log ?? (() => {});
   const shadow = app.qa.shadow ?? false;
-  log(`[qa] App=${app.name}  SHA=${sha}  (${source})${shadow ? "  [MODO SOMBRA]" : ""}`);
+  log(`[qa] app=${app.name}  sha=${sha}  (${source})${shadow ? "  [SHADOW MODE]" : ""}`);
 
-  // 1. Gate: esperar a que DEV corra este SHA y esté healthy.
+  // 1. Gate: wait until DEV runs this SHA and is healthy.
   const target: DeployTarget = {
     name: app.name,
     versionUrl: app.dev.versionUrl,
     pollIntervalMs: app.dev.pollIntervalMs,
     deployTimeoutMs: app.dev.deployTimeoutMs,
   };
-  log("[qa] Esperando deploy estable en DEV...");
+  log("[qa] waiting for a stable deploy on DEV...");
   await deps.waitForDeploy(target, sha);
 
-  // 2. Espejo del repo al SHA (cwd del agente y donde vive `e2e/`) + diff + mensaje.
-  log("[qa] Preparando espejo y diff...");
+  // 2. Working copy of the repo at the SHA (the agent's cwd, holds `e2e/`) + diff + message.
+  log("[qa] preparing working copy and diff...");
   const { mirrorDir, diff, message } = await deps.prepare(app.repo, sha);
   const e2eDir = join(mirrorDir, E2E_DIR);
   const ns = testDataNamespace(app.qa.testDataPrefix, sha);
 
-  // 3. Clasificar el commit (Conventional Commits, contrastado con el diff).
-  //    skip → no hay nada que probar. regression → no se generan tests nuevos,
-  //    solo se confirma que los existentes siguen verdes. generate → flujo completo.
+  // 3. Classify the commit (Conventional Commits, cross-checked against the diff):
+  //    skip → nothing to test; regression → run the existing suite without
+  //    generating; generate → full flow.
   const cls = classifyCommit(message, diff);
-  log(`[qa] Commit '${cls.type}' → ${cls.action}${cls.contradiction ? " (contradicción mensaje/diff)" : ""}: ${cls.reason}`);
+  log(`[qa] commit '${cls.type}' → ${cls.action}${cls.contradiction ? " (message/diff contradiction)" : ""}: ${cls.reason}`);
   if (cls.action === "skip") {
-    log(`[qa] Sin objetivo testeable (${cls.type}); no se ejecuta.`);
+    log(`[qa] no testable objective (${cls.type}); nothing to run.`);
     return { sha: ns, verdict: "skipped", passed: true, cases: [], logs: cls.reason };
   }
   const generating = cls.action === "generate";
 
-  // 4. Generar (solo si procede): el agente escribe/mejora `e2e/`.
+  // 4. Generate (only when applicable): the agent writes/improves `e2e/`.
   let result: AgentResult | null = null;
   if (generating) {
-    log("[qa] Generando E2E con OpenCode...");
+    log("[qa] generating E2E tests with OpenCode...");
     result = await deps.generate({
       repo: app.repo,
       sha,
@@ -138,69 +139,69 @@ export async function runPipeline(
       intent: cls,
     });
   } else {
-    log("[qa] Regresión: no se generan tests; se valida y ejecuta la suite existente.");
+    log("[qa] regression: not generating tests; validating and running the existing suite.");
   }
 
-  // 5. Filtro B — gate estático sobre `e2e/` (instala deps + typecheck/lint/list/manifest).
+  // 5. Filter B — static gate over `e2e/` (install deps + typecheck/lint/list/manifest).
   await deps.setupE2e(e2eDir);
-  log("[qa] Validando specs (typecheck + lint + list)...");
+  log("[qa] validating specs (typecheck + lint + list + manifest)...");
   const validation = await deps.validate(e2eDir);
   if (!validation.ok) {
-    const invalid = infraOrResult(ns, "invalid", validation.errors.join("\n\n"));
-    await report(app, sha, invalid, deps, log, shadow, "los E2E generados no superaron el gate estático");
+    const invalid = resultOf(ns, "invalid", validation.errors.join("\n\n"));
+    await report(app, sha, invalid, deps, log, shadow, "the E2E tests did not pass the static gate");
     return invalid;
   }
 
-  // 5. Pre-flight de salud: DEV pudo caerse durante la generación. Si no está
-  //    sano, el run no es concluyente → infra, NO se reporta como bug.
+  // 6. Health pre-flight: DEV may have gone down during generation. If it is not
+  //    healthy the run is inconclusive → infra error, not reported as a bug.
   if (!(await deps.isHealthy(app.dev.versionUrl))) {
-    const infra = infraOrResult(ns, "infra-error", "DEV no está sano antes de ejecutar");
+    const infra = resultOf(ns, "infra-error", "DEV is not healthy before execution");
     await report(app, sha, infra, deps, log, shadow);
     return infra;
   }
 
-  // 6. Filtro C — ejecutar contra DEV (clasifica pass/fail/flaky).
-  log(`[qa] Ejecutando E2E (namespace ${ns}) contra ${app.dev.baseUrl}...`);
+  // 7. Filter C — run against DEV (classifies pass/fail/flaky).
+  log(`[qa] running E2E (namespace ${ns}) against ${app.dev.baseUrl}...`);
   let run = await deps.execute(e2eDir, { baseUrl: app.dev.baseUrl, namespace: ns });
 
-  // 7. Infra vs calidad: si hubo fallos PERO DEV ya no está sano, los fallos son
-  //    de infraestructura, no del código → reclasifica para no abrir Issue falso.
+  // 8. Infra vs quality: if there were failures BUT DEV is no longer healthy, the
+  //    failures are infrastructure, not code → reclassify so no false Issue is opened.
   if (run.verdict === "fail" && !(await deps.isHealthy(app.dev.versionUrl))) {
-    run = infraOrResult(ns, "infra-error", "fallos con DEV no saludable: tratado como infraestructura");
+    run = resultOf(ns, "infra-error", "failures with an unhealthy DEV: treated as infrastructure");
   }
 
-  // 8. Decisión final.
+  // 9. Final decision.
   if (run.verdict !== "pass") {
     await report(app, sha, run, deps, log, shadow, result?.note);
   } else if (!generating) {
-    // Regresión en verde: no hay tests nuevos que publicar.
-    log(`[qa] OK — regresión en verde para ${sha}.`);
+    // Regression passed: there are no new tests to publish.
+    log(`[qa] OK — regression green for ${sha}.`);
   } else if (app.qa.needsReview && !result!.approved) {
-    // Verde en el harness PERO el revisor independiente no aprobó (caza falsos
-    // positivos que el harness no ve) → NO se publica; se reporta para iteración.
+    // Green in the harness BUT the independent reviewer rejected it (it catches
+    // false positives the harness cannot) → do not publish; report for iteration.
     await issueOrShadow(
       shadow,
       deps,
       log,
       app.repo,
-      `QA: el revisor no aprobó los E2E en ${sha}`,
+      `QA: the reviewer did not approve the E2E tests for ${sha}`,
       renderIssue(run, result!.note),
     );
   } else if (shadow) {
-    log(`[qa] (sombra) E2E en verde; habría abierto PR de la suite.`);
+    log(`[qa] (shadow) E2E green; a suite PR would have been opened.`);
   } else {
     const pr = await deps.publish({ repo: app.repo, sha, mirrorDir, baseBranch: app.baseBranch ?? "main" });
-    log(pr ? `[qa] OK — E2E en verde; PR de la suite: ${pr.prUrl}` : `[qa] OK — E2E en verde (sin cambios en e2e/).`);
+    log(pr ? `[qa] OK — E2E green; suite PR: ${pr.prUrl}` : `[qa] OK — E2E green (no changes in e2e/).`);
   }
   return run;
 }
 
-function infraOrResult(ns: string, verdict: QaRunResult["verdict"], logs: string): QaRunResult {
+function resultOf(ns: string, verdict: QaRunResult["verdict"], logs: string): QaRunResult {
   return { sha: ns, verdict, passed: false, cases: [], logs };
 }
 
-// Issue solo para fallo real o specs inválidos. Flaky → cuarentena. Infra → log.
-// En modo sombra nunca se abren Issues.
+// Open an Issue only for a real failure or invalid specs. Flaky → quarantine.
+// Infra errors → log only. In shadow mode no Issue is ever opened.
 async function report(
   app: AppConfig,
   sha: string,
@@ -213,16 +214,16 @@ async function report(
   if (app.report.onFailure !== "github-issue") return;
   switch (run.verdict) {
     case "fail":
-      await issueOrShadow(shadow, deps, log, app.repo, `QA E2E falló en ${sha}`, renderIssue(run, note));
+      await issueOrShadow(shadow, deps, log, app.repo, `QA E2E failed at ${sha}`, renderIssue(run, note));
       break;
     case "invalid":
-      await issueOrShadow(shadow, deps, log, app.repo, `QA no pudo validar los E2E generados en ${sha}`, renderIssue(run, note));
+      await issueOrShadow(shadow, deps, log, app.repo, `QA could not validate the generated E2E tests at ${sha}`, renderIssue(run, note));
       break;
     case "infra-error":
-      log(`[qa] INFRA — ${run.logs} — no se reporta como bug.`);
+      log(`[qa] INFRA — ${run.logs} — not reported as a bug.`);
       break;
     case "flaky":
-      log(`[qa] FLAKY — ${flakyNames(run)} en cuarentena (sin PR ni Issue de fallo).`);
+      log(`[qa] FLAKY — ${flakyNames(run)} quarantined (no PR, no failure Issue).`);
       break;
   }
 }
@@ -236,11 +237,11 @@ async function issueOrShadow(
   body: string,
 ): Promise<void> {
   if (shadow) {
-    log(`[qa] (sombra) habría abierto Issue: "${title}"`);
+    log(`[qa] (shadow) would have opened an Issue: "${title}"`);
     return;
   }
   const issue = await deps.openIssue(repo, title, body);
-  log(`[qa] Issue abierto: ${issue.url}`);
+  log(`[qa] Issue opened: ${issue.url}`);
 }
 
 function flakyNames(run: QaRunResult): string {

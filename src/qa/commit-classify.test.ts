@@ -13,7 +13,7 @@ const logicDiff = [
 const commentDiff = [
   "diff --git a/src/checkout.ts b/src/checkout.ts",
   "+++ b/src/checkout.ts",
-  "+// corrige un typo en el comentario",
+  "+// fix a typo in the comment",
 ].join("\n");
 
 const movedLineDiff = [
@@ -23,51 +23,51 @@ const movedLineDiff = [
   "+  doThing(x);",
 ].join("\n");
 
-test("feat → generar", () => {
-  assert.equal(classifyCommit("feat: nueva pantalla de pago", logicDiff).action, "generate");
+test("feat → generate", () => {
+  assert.equal(classifyCommit("feat: new payment screen", logicDiff).action, "generate");
 });
 
-test("fix → generar (regresión del bug)", () => {
-  assert.equal(classifyCommit("fix(checkout): falla con >10 ítems", logicDiff).action, "generate");
+test("fix → generate (regression test for the bug)", () => {
+  assert.equal(classifyCommit("fix(checkout): fails with >10 items", logicDiff).action, "generate");
 });
 
-test("refactor sin lógica nueva → solo regresión", () => {
-  const c = classifyCommit("refactor: unifica auth", movedLineDiff);
+test("refactor without new logic → regression only", () => {
+  const c = classifyCommit("refactor: unify auth", movedLineDiff);
   assert.equal(c.action, "regression");
   assert.equal(c.contradiction, false);
 });
 
-test("style con solo comentarios → skip", () => {
-  assert.equal(classifyCommit("style: corrige comentarios", commentDiff).action, "skip");
+test("style with only comments → skip", () => {
+  assert.equal(classifyCommit("style: fix comments", commentDiff).action, "skip");
 });
 
-test("CONTRADICCIÓN: refactor pero el diff añade lógica → escala a generar", () => {
-  const c = classifyCommit("refactor: limpieza", logicDiff);
+test("CONTRADICTION: refactor but the diff adds logic → escalates to generate", () => {
+  const c = classifyCommit("refactor: cleanup", logicDiff);
   assert.equal(c.action, "generate");
   assert.equal(c.contradiction, true);
-  assert.match(c.reason, /añade lógica/);
+  assert.match(c.reason, /adds logic/);
 });
 
-test("breaking change siempre genera", () => {
-  assert.equal(classifyCommit("refactor!: cambia el contrato de auth", commentDiff).action, "generate");
+test("a breaking change always generates", () => {
+  assert.equal(classifyCommit("refactor!: change the auth contract", commentDiff).action, "generate");
   assert.equal(classifyCommit("feat: x\n\nBREAKING CHANGE: api", commentDiff).breaking, true);
 });
 
-test("una línea movida NO se confunde con lógica añadida (neto 0)", () => {
-  assert.equal(classifyCommit("style: reordena", movedLineDiff).hasLogicChange, false);
+test("a moved line is not mistaken for added logic (net 0)", () => {
+  assert.equal(classifyCommit("style: reorder", movedLineDiff).hasLogicChange, false);
 });
 
-test("tipo desconocido → genera (ante la duda)", () => {
-  assert.equal(classifyCommit("actualiza cosas", logicDiff).type, "unknown");
-  assert.equal(classifyCommit("actualiza cosas", logicDiff).action, "generate");
+test("unknown type → generate (when in doubt)", () => {
+  assert.equal(classifyCommit("update stuff", logicDiff).type, "unknown");
+  assert.equal(classifyCommit("update stuff", logicDiff).action, "generate");
 });
 
-test("deduce los ficheros cambiados del diff (scope se infiere de aquí)", () => {
+test("derives the changed files from the diff (scope is inferred from these)", () => {
   const files = parseChangedFiles(logicDiff);
   assert.deepEqual(files, ["src/checkout.ts"]);
 });
 
-test("lógica solo en ficheros de código (un .md con if no cuenta)", () => {
+test("logic counts only in source files (a .md with an if does not count)", () => {
   const mdDiff = ["diff --git a/README.md b/README.md", "+++ b/README.md", "+if you want to..."].join("\n");
-  assert.equal(classifyCommit("docs: actualiza readme", mdDiff).hasLogicChange, false);
+  assert.equal(classifyCommit("docs: update readme", mdDiff).hasLogicChange, false);
 });

@@ -1,44 +1,43 @@
-# Cookies/cache y subida de fotos
+# Cookies/cache and photo upload
 
-## Leer cookies, cache y localStorage
+## Reading cookies, cache and localStorage
 
-La app guarda información en cookies y cache; algunos tests asertan sobre ella.
+The app stores information in cookies and cache; some tests assert on it.
 
 ```ts
 import { readCookies, readStorage } from "../fixtures";
 
-test("guarda la sesión en cookie", async ({ page, context, authenticate }) => {
+test("stores the session in a cookie", async ({ page, context, authenticate }) => {
   await authenticate();
   const [session] = await readCookies(context, "session_id");
   expect(session?.value).toBeTruthy();
 
-  const theme = await readStorage(page, "theme");   // un valor de localStorage
+  const theme = await readStorage(page, "theme");   // a localStorage value
   expect(theme).toBe("dark");
 });
 ```
-Para todas las cookies: `readCookies(context)`. Para todo el localStorage:
-`readStorage(page)`.
+For all cookies: `readCookies(context)`. For all of localStorage: `readStorage(page)`.
 
-## Subir fotos (assets + su metadata)
+## Uploading photos (assets + their metadata)
 
-Las imágenes viven en `e2e/assets/` y su **metadata opcional** (qué probar con
-cada una) en `e2e/assets/assets.json`. Antes de escribir un test de subida,
-**lee `assets.json`** para elegir el asset adecuado y saber qué verificar.
+Images live in `e2e/assets/` and their **optional metadata** (what to test with
+each one) in `e2e/assets/assets.json`. Before writing an upload test, **read
+`assets.json`** to pick the right asset and learn what to verify.
 
 ```ts
 import { asset } from "../fixtures";
 
-test("sube foto y sugiere sitios cercanos", async ({ page, authenticate, cleanup }) => {
+test("uploads a photo and suggests nearby places", async ({ page, authenticate, cleanup }) => {
   await authenticate();
-  await page.goto("/subir");
-  await page.getByLabel(/foto/i).setInputFiles(asset("playa.jpg"));
-  // la app, por la geolocalización + EXIF, sugiere sitios cercanos:
-  await expect(page.getByRole("list", { name: /sitios cercanos/i })).toBeVisible();
+  await page.goto("/upload");
+  await page.getByLabel(/photo/i).setInputFiles(asset("beach.jpg"));
+  // due to geolocation + EXIF, the app suggests nearby places:
+  await expect(page.getByRole("list", { name: /nearby places/i })).toBeVisible();
   await page.getByRole("option").first().click();
-  await page.getByRole("button", { name: /publicar/i }).click();
-  cleanup(async () => { /* borra la publicación creada */ });
-  await expect(page.getByText(/publicado/i)).toBeVisible();
+  await page.getByRole("button", { name: /publish/i }).click();
+  cleanup(async () => { /* delete the created post */ });
+  await expect(page.getByText(/published/i)).toBeVisible();
 });
 ```
-Si necesitas un asset que no existe, créalo en `e2e/assets/` y añádelo a
-`assets.json` con su `whatToTest`.
+If you need an asset that does not exist, create it in `e2e/assets/` and add it to
+`assets.json` with its `whatToTest`.

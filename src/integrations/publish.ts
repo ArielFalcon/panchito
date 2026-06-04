@@ -1,10 +1,11 @@
-// Publicación de los E2E generados como PR (con auto-merge si procede). Es la
-// PERSISTENCIA real: la fuente de verdad de los tests es la carpeta `e2e/` DEL
-// REPO de la app, versionada en git — no un volumen. Cada run en verde abre un
-// PR con lo que el agente escribió/mejoró en `e2e/`; si no tocó nada, no hay PR.
+// Publishes the generated E2E tests as a PR (with auto-merge when possible). This
+// is the real PERSISTENCE: the source of truth for the tests is the app repo's
+// `e2e/` folder in git, not a volume. Every green run opens a PR with whatever
+// the agent wrote/improved in `e2e/`; if nothing changed, no PR is opened.
 //
-// git y las llamadas a GitHub se inyectan → la lógica (skip-sin-cambios, rama,
-// auto-merge best-effort) es verificable con stubs; el push/PR real es el borde.
+// git and the GitHub calls are injected, so the logic (skip-when-no-changes,
+// branching, best-effort auto-merge) is verifiable with stubs; the real push/PR
+// is the integration boundary.
 
 import { Git, realGit, authHeaderArgs } from "./repo-mirror";
 import { github, PullRequest } from "./github";
@@ -13,7 +14,7 @@ import { shortSha } from "../qa/test-data";
 export interface PublishInput {
   repo: string;
   sha: string;
-  mirrorDir: string; // espejo del repo (donde vive `e2e/`)
+  mirrorDir: string; // working copy of the repo (where `e2e/` lives)
   baseBranch: string;
 }
 
@@ -32,10 +33,10 @@ export async function publishE2e(
 ): Promise<{ prUrl: string } | null> {
   const { mirrorDir, sha, repo, baseBranch } = input;
 
-  // ¿El agente modificó `e2e/`? Si no, la suite ya cubría el cambio → sin PR.
+  // Did the agent modify `e2e/`? If not, the suite already covered the change → no PR.
   const status = await deps.git(["status", "--porcelain", "--", E2E_DIR], mirrorDir);
   if (!status.trim()) {
-    deps.log?.("[qa] sin cambios en e2e/ — la suite ya cubre el cambio, no se abre PR.");
+    deps.log?.("[qa] no changes in e2e/ — the suite already covers the change, no PR opened.");
     return null;
   }
 
@@ -47,24 +48,24 @@ export async function publishE2e(
   await deps.git(["checkout", "-B", branch], mirrorDir);
   await deps.git(["add", "--", E2E_DIR], mirrorDir);
   await deps.git(
-    ["-c", `user.name=${name}`, "-c", `user.email=${email}`, "commit", "-m", `test(e2e): QA automatizado para ${short}`],
+    ["-c", `user.name=${name}`, "-c", `user.email=${email}`, "commit", "-m", `test(e2e): automated QA for ${short}`],
     mirrorDir,
   );
   await deps.git([...authHeaderArgs(), "push", "--force-with-lease", "-u", "origin", branch], mirrorDir);
 
   const pr = await deps.createPullRequest(repo, {
-    title: `QA E2E para ${short}`,
+    title: `QA E2E for ${short}`,
     head: branch,
     base: baseBranch,
-    body: `Tests E2E generados/actualizados por ai-pipeline para \`${sha}\`. Harness en verde (typecheck + lint + ejecución estable contra DEV).`,
+    body: `E2E tests generated/updated by ai-pipeline for \`${sha}\`. Harness green (typecheck + lint + stable run against DEV).`,
   });
 
-  // Auto-merge best-effort: si el repo no lo permite, se deja el PR abierto.
+  // Best-effort auto-merge: if the repo does not allow it, leave the PR open.
   try {
     await deps.enableAutoMerge(pr.nodeId);
-    deps.log?.(`[qa] PR abierto con auto-merge: ${pr.url}`);
+    deps.log?.(`[qa] PR opened with auto-merge: ${pr.url}`);
   } catch (e) {
-    deps.log?.(`[qa] PR abierto (auto-merge no disponible, mergéalo a mano): ${pr.url} — ${String(e)}`);
+    deps.log?.(`[qa] PR opened (auto-merge unavailable, merge it manually): ${pr.url} — ${String(e)}`);
   }
   return { prUrl: pr.url };
 }

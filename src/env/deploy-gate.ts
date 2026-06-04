@@ -1,7 +1,7 @@
-// Gate de deploy: no se prueba nada hasta confirmar que DEV corre exactamente
-// el SHA esperado y está healthy. Resuelve el "DEV tarda unos minutos en
-// estabilizar". fetch/sleep/now se inyectan para poder verificar el gate con
-// stubs en tests unitarios (sin red real ni esperas reales).
+// Deploy gate: nothing is tested until DEV is confirmed to run exactly the
+// expected SHA and to be healthy (DEV takes a few minutes to stabilize after a
+// deploy). fetch/sleep/now are injected so the gate is verifiable with stubs in
+// unit tests, without real network or real waits.
 
 export interface DeployTarget {
   name: string;
@@ -20,7 +20,7 @@ export class DeployTimeoutError extends Error {
     public readonly app: string,
     public readonly sha: string,
   ) {
-    super(`Deploy gate timeout: ${app} no alcanzó el SHA ${sha} a tiempo`);
+    super(`Deploy gate timeout: ${app} did not reach SHA ${sha} in time`);
     this.name = "DeployTimeoutError";
   }
 }

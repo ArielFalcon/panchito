@@ -1,10 +1,10 @@
-// Clasificador de commits (Conventional Commits / release-please). Da la
-// INTENCIÓN del cambio para definir el objetivo del test y para filtrar commits
-// que no llevan pruebas. Es ORIENTATIVO: la tabla tipo→acción es el defecto,
-// pero se contrasta con el diff — si el mensaje dice "sin cambios" (refactor/
-// style/chore...) pero el diff AÑADE lógica, se escala a generar (el mensaje
-// contradice al código). El scope NO se lee del paréntesis: se deduce de los
-// ficheros cambiados (el mensaje da intención, los ficheros dan el dónde).
+// Commit classifier (Conventional Commits). Provides the change INTENT used to
+// define the test objective and to filter commits that carry no tests. It is
+// ADVISORY: the type→action table is the default, but it is cross-checked against
+// the diff — if the message claims "no behavior change" (refactor/style/chore...)
+// yet the diff ADDS logic, it escalates to generate (the message contradicts the
+// code). The scope is NOT read from parentheses: it is derived from the changed
+// files (the message gives intent, the files give the "where").
 
 export type CommitType =
   | "feat" | "fix" | "perf" | "refactor" | "chore"
@@ -15,19 +15,19 @@ export type CommitAction = "generate" | "regression" | "skip";
 export interface CommitIntent {
   type: CommitType;
   breaking: boolean;
-  message: string; // primera línea (lo que el agente usa como intención)
-  changedFiles: string[]; // de aquí el agente deduce el scope/área
+  message: string; // first line (what the agent uses as intent)
+  changedFiles: string[]; // the agent derives the scope/area from these
 }
 
 export interface CommitClassification extends CommitIntent {
-  hasLogicChange: boolean; // señal del diff: ¿añade lógica neta?
-  contradiction: boolean; // el mensaje dice "sin pruebas" pero el diff añade lógica
+  hasLogicChange: boolean; // diff signal: does it add net logic?
+  contradiction: boolean; // the message claims "no tests" but the diff adds logic
   action: CommitAction;
   reason: string;
 }
 
-// Acción por defecto según el tipo. feat/fix → pruebas; perf/refactor → solo
-// regresión (comportamiento igual); el resto no lleva pruebas.
+// Default action per type. feat/fix → tests; perf/refactor → regression only
+// (behavior unchanged); the rest carry no tests.
 const DEFAULT_ACTION: Record<CommitType, CommitAction> = {
   feat: "generate",
   fix: "generate",
@@ -40,7 +40,7 @@ const DEFAULT_ACTION: Record<CommitType, CommitAction> = {
   build: "skip",
   test: "skip",
   revert: "skip",
-  unknown: "generate", // sin convención reconocible: ante la duda, se prueba
+  unknown: "generate", // no recognizable convention: when in doubt, test
 };
 
 export function classifyCommit(message: string, diff: string): CommitClassification {
@@ -51,21 +51,19 @@ export function classifyCommit(message: string, diff: string): CommitClassificat
 
   let action: CommitAction = breaking ? "generate" : DEFAULT_ACTION[type];
   let contradiction = false;
-  let reason = `tipo=${type}`;
+  let reason = `type=${type}`;
 
   if (breaking) {
-    reason = "breaking change → genera";
+    reason = "breaking change → generate";
   } else if ((action === "skip" || action === "regression") && hasLogicChange) {
-    // El mensaje no promete comportamiento nuevo, pero el diff sí lo añade.
+    // The message promises no new behavior, but the diff adds it.
     contradiction = true;
     action = "generate";
-    reason = `mensaje '${type}' no esperaba pruebas, pero el diff añade lógica → se escala a generar`;
+    reason = `message '${type}' expected no tests, but the diff adds logic → escalated to generate`;
   }
 
   return { type, breaking, message: firstLine, changedFiles, hasLogicChange, contradiction, action, reason };
 }
-
-// --- parsing ---------------------------------------------------------------
 
 const TYPES = new Set<string>([
   "feat", "fix", "perf", "refactor", "chore", "style", "docs", "ci", "build", "test", "revert",
@@ -73,7 +71,7 @@ const TYPES = new Set<string>([
 
 function parseHeader(message: string): { type: CommitType; breaking: boolean } {
   const first = (message.split("\n")[0] ?? "").trim();
-  // tipo, scope opcional (ignorado), `!` opcional de breaking, `:`
+  // type, optional scope (ignored), optional `!` for breaking, `:`
   const m = first.match(/^(\w+)(?:\([^)]*\))?(!)?:/);
   const raw = m?.[1]?.toLowerCase();
   const type = (raw && TYPES.has(raw) ? raw : "unknown") as CommitType;
@@ -100,9 +98,9 @@ function isSourceFile(path: string): boolean {
   return SOURCE_EXT.has(ext);
 }
 
-// Lógica añadida NETA = (líneas de lógica añadidas) − (eliminadas), solo en
-// ficheros de código. El neto distingue "añade lógica" (positivo) de "mueve una
-// línea" (≈0): así un `style` que solo reubica código no se escala por error.
+// Net added logic = (added logic lines) − (removed logic lines), counting source
+// files only. The net distinguishes "adds logic" (positive) from "moves a line"
+// (≈0), so a `style` commit that only relocates code is not escalated by mistake.
 function netLogicAdded(diff: string): number {
   let currentSource = false;
   let added = 0;
@@ -131,6 +129,6 @@ const LOGIC = /\b(if|else|for|while|switch|case|return|function|class|interface|
 function looksLikeLogic(content: string): boolean {
   const t = content.trim();
   if (!t) return false;
-  if (/^(\/\/|\*|\/\*|\*\/|#|<!--|-->)/.test(t)) return false; // comentario
+  if (/^(\/\/|\*|\/\*|\*\/|#|<!--|-->)/.test(t)) return false; // comment line
   return LOGIC.test(t);
 }

@@ -1,13 +1,13 @@
-# Dos servicios de larga vida:
-#   orchestrator → nuestra infra Node (webhook, gate, espejo, ejecución, reporte)
-#   opencode     → el motor agéntico `opencode serve` + los MCP (serena, engram)
+# Two long-lived services:
+#   orchestrator → the Node infrastructure (webhook, gate, working copy, execution, reporting)
+#   opencode     → the agentic engine `opencode serve` + the MCPs (serena, engram)
 #
-# Comparten el volumen `mirrors`: el orchestrator clona/posiciona el espejo del
-# repo y el agente de OpenCode lee/escribe ahí (cwd de la sesión). Como ambos
-# servicios son permanentes, la memoria (engram) y los espejos persisten.
+# They share the `mirrors` volume: the orchestrator clones/checks out the repo
+# working copy and the OpenCode agent reads/writes there (the session cwd). Since
+# both services are persistent, memory (engram) and the working copies persist.
 #
-# Los secretos los inyecta Doppler (`doppler run -- docker compose up`); el
-# env_file .env es solo para correr en local sin Doppler.
+# Doppler injects the secrets (`doppler run -- docker compose up`); the env_file
+# .env is only for running locally without Doppler.
 
 services:
   orchestrator:
@@ -17,17 +17,17 @@ services:
     depends_on:
       - opencode
     ports:
-      - "${PORT:-8080}:8080" # recibe los webhooks post-deploy
+      - "${PORT:-8080}:8080" # receives the post-deploy webhooks
     environment:
       OPENCODE_SERVE_URL: http://opencode:4096
       MIRROR_DIR: /app/.mirrors
     volumes:
-      - ./config:/app/config # config (incluye el seed config/e2e) en caliente
-      - mirrors:/app/.mirrors # espejos locales (compartidos con opencode); el harness corre sobre <repo>/e2e aquí
-      # La suite E2E NO se persiste en volumen: vive en git (carpeta e2e/ del repo de la app).
+      - ./config:/app/config # config (includes the config/e2e seed), hot-reloaded
+      - mirrors:/app/.mirrors # local working copies (shared with opencode); the harness runs over <repo>/e2e here
+      # The E2E suite is NOT persisted in a volume: it lives in git (the app repo's e2e/ folder).
 
   opencode:
-    build: ./opencode # opencode oficial + uv/JDK (Serena) + engram (ver opencode/Dockerfile)
+    build: ./opencode # official opencode + uv/JDK (Serena) + engram (see opencode/Dockerfile)
     env_file: .env
     restart: always
     command: ["serve", "--hostname", "0.0.0.0", "--port", "4096"]
@@ -35,10 +35,10 @@ services:
       MIRROR_DIR: /app/.mirrors
       ENGRAM_DATA_DIR: /data
     volumes:
-      - ./opencode:/root/.config/opencode # opencode.json + agentes + AGENTS.md
-      - mirrors:/app/.mirrors # MISMA ruta que el orchestrator: el agente lee/escribe aquí (Serena cachea en <repo>/.serena)
-      - serena-cache:/root/.cache/uv # caché de uv/Serena (evita re-descargar en cada arranque)
-      - engram-data:/data # SQLite de memoria episódica (engram) — persiste entre reinicios
+      - ./opencode:/root/.config/opencode # opencode.json + agents + AGENTS.md + skills
+      - mirrors:/app/.mirrors # SAME path as the orchestrator: the agent reads/writes here (Serena caches in <repo>/.serena)
+      - serena-cache:/root/.cache/uv # uv/Serena cache (avoids re-downloading on each boot)
+      - engram-data:/data # engram's episodic-memory SQLite — persists across restarts
 
 volumes:
   mirrors:

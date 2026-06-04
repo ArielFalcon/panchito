@@ -2,7 +2,7 @@
   "name": "ai-pipeline-e2e",
   "version": "0.1.0",
   "private": true,
-  "description": "Seed del proyecto e2e (Filtro A del harness): config, fixtures y tooling. Se copia en e2e/ del repo de la app la primera vez; a partir de ahí el repo es su dueño.",
+  "description": "e2e project seed (harness Filter A): config, fixtures and tooling. Copied into the app repo's e2e/ folder the first time; from then on the repo owns it.",
   "type": "module",
   "devDependencies": {
     "@playwright/test": "^1.50.0",

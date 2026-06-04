@@ -1,6 +1,6 @@
-// Renderizado del Issue. Los logs ya vienen sanitizados desde qa/execute (o son
-// los errores del gate estático cuando el run es "invalid"); aquí solo se
-// formatean para humanos.
+// Renders the Issue body. Logs arrive already sanitized from qa/execute (or are
+// the static-gate errors when the run is "invalid"); here we only format them
+// for humans.
 
 import { QaRunResult } from "../types";
 
@@ -9,22 +9,22 @@ export function renderIssue(run: QaRunResult, note?: string): string {
   const flaky = run.cases.filter((c) => c.status === "flaky");
   const lines = [
     `**SHA:** \`${run.sha}\``,
-    `**Veredicto:** ${run.verdict}`,
-    note ? `**Nota:** ${note}` : "",
+    `**Verdict:** ${run.verdict}`,
+    note ? `**Note:** ${note}` : "",
     "",
-    "### Casos fallidos",
+    "### Failed cases",
     failed.length
       ? failed.map((c) => `- ❌ ${c.name}${c.detail ? ` — ${c.detail}` : ""}`).join("\n")
-      : "_(sin detalle de casos)_",
-    flaky.length ? "\n### Inestables (cuarentena)" : "",
+      : "_(no case detail)_",
+    flaky.length ? "\n### Flaky (quarantined)" : "",
     flaky.length ? flaky.map((c) => `- ⚠️ ${c.name}`).join("\n") : "",
     "",
-    "### Logs (sanitizados)",
+    "### Logs (sanitized)",
     "```",
     run.logs,
     "```",
     "",
-    "_Traza disponible en los artefactos del run (trace on-first-retry)._",
+    "_Trace available in the run artifacts (trace on-first-retry)._",
   ];
   return lines.filter((l) => l !== "").join("\n");
 }

@@ -1,171 +1,166 @@
 # ai-pipeline
 
-QA E2E **centralizado y asistido por IA**. Replica lo que harías con OpenCode en
-tu máquina, pero como un servicio que **observa todos los repos** del equipo y
-**prueba sobre DEV**: cuando un commit se despliega a DEV, un agente genera tests
-E2E sobre el blast radius del cambio, los ejecuta contra DEV y abre un **GitHub
-Issue** si algo falla.
+**Centralized, AI-assisted E2E QA.** A service that **watches a team's repos** and
+**tests against DEV**: when a commit is deployed to DEV, an agent generates E2E
+tests for the change's blast radius, runs them against DEV, and opens a **GitHub
+Issue** if something fails.
 
-Es un **template**: no trae ninguna app acoplada. Cada app vigilada se conecta
-solo por `config/apps/<app>.yaml`. Los secretos los inyecta **Doppler** en
-runtime (no se commitea nada).
+It is a **template**: no app is bundled. Each watched app is onboarded via
+`config/apps/<app>.yaml`. Secrets are injected at runtime by **Doppler** (nothing
+is committed).
 
-## Arquitectura
+## Architecture
 
-Dos servicios de larga vida (ver `docker-compose.yml`):
+Two long-lived services (see `docker-compose.yml`):
 
 ```
-   GitHub (push → deploy DEV)
+   GitHub (push → deploy to DEV)
             │  webhook { repo, sha }
             ▼
  ┌─────────────────────┐        HTTP        ┌──────────────────────────┐
  │   orchestrator      │  ───────────────▶  │   opencode  (serve)      │
- │  (este repo, Node)  │   sesión + prompt  │  agente qa-generator     │
- │                     │ ◀───────────────   │   └─ subagente qa-reviewer│
- │  webhook + cola     │   specs escritos   │  MCP: serena, engram     │
- │  gate · espejo      │   en el espejo     └──────────────────────────┘
- │  ejecución · reporte│         ▲  cwd = espejo (volumen compartido)
+ │  (this repo, Node)  │  session + prompt  │  qa-generator agent      │
+ │                     │ ◀───────────────   │   └─ qa-reviewer subagent │
+ │  webhook + queue    │   specs written    │  MCP: serena, engram     │
+ │  gate · working copy│   in the copy      └──────────────────────────┘
+ │  execution · report │         ▲  cwd = working copy (shared volume)
  └─────────────────────┘─────────┘
 ```
 
-- **`orchestrator`** (este repo): la **infra determinística** — recibe el
-  webhook, encola un run, espera el deploy (gate por SHA), prepara una **copia de
-  trabajo del repo** (solo para que el agente LEA código y para versionar los
-  tests en `e2e/`; **nunca se construye ni se levanta la app**), **dispara
-  OpenCode**, ejecuta los E2E con Playwright **contra DEV** y publica/abre Issue.
-  Todo con dependencias inyectables → verificable por tests unitarios.
-- **`opencode`**: el **motor agéntico**. `opencode serve` corre los agentes
-  definidos en `opencode/opencode.json` y los MCP: **`serena`** (navegación
-  semántica de código vía LSP — blast radius con `find_referencing_symbols` y
-  lectura por firmas, no por ficheros enteros) y `engram` (memoria episódica).
-  El agente escribe los `.spec.ts` en el espejo (volumen compartido) y nosotros
-  los recogemos.
+- **`orchestrator`** (this repo): the **deterministic infrastructure** — receives
+  the webhook, enqueues a run, waits for the deploy (SHA gate), prepares a
+  **working copy of the repo** (only so the agent can READ code and so the tests in
+  `e2e/` can be versioned; **the app is never built or started**), **triggers
+  OpenCode**, runs the E2E tests with Playwright **against DEV**, and publishes/
+  reports. Everything with injectable dependencies → verifiable by unit tests.
+- **`opencode`**: the **agentic engine**. `opencode serve` runs the agents defined
+  in `opencode/opencode.json` and the MCPs: **`serena`** (semantic code navigation
+  via LSP — blast radius with `find_referencing_symbols`, reading by signatures
+  rather than whole files) and `engram` (episodic memory). The agent writes the
+  `.spec.ts` files into the working copy (a shared volume) and we collect them.
 
-### Agentes (opencode/)
+### Agents (opencode/)
 
-| Agente | Modelo | Rol |
+| Agent | Model | Role |
 |---|---|---|
-| `qa-generator` (primary) | **DeepSeek V4 Pro** | genera los E2E, invoca al revisor, itera |
-| `qa-reviewer` (subagent) | **Qwen 3.7 Max** | juez independiente de calidad; emite veredicto |
+| `qa-generator` (primary) | **DeepSeek V4 Pro** | generates the E2E tests, invokes the reviewer, iterates |
+| `qa-reviewer` (subagent) | **Qwen 3.7 Max** | independent quality judge; emits a verdict |
 
-El loop primario↔revisor vive **dentro** de OpenCode. Modelos distintos para
-garantizar independencia del juicio. Instrucciones en 3 capas: reglas comunes en
-`opencode/AGENTS.md`, rol/procedimiento por agente en `opencode/agent/*.md`, y
-**skills** (conocimiento de oficio bajo demanda) en `opencode/skill/`:
-`playwright-authoring` (autoría + capacidades de la app: Keycloak en dos capas,
-geolocalización, móvil/offline, cookies/cache, subida de fotos) y
-`test-value-review` (catálogo de falsos positivos para el revisor).
+The primary↔reviewer loop lives **inside** OpenCode. Different models guarantee
+independent judgment. Instructions are layered: shared rules in
+`opencode/AGENTS.md`, per-agent role/procedure in `opencode/agent/*.md`, and
+**skills** (on-demand craft knowledge) in `opencode/skill/`:
+`playwright-authoring` (authoring + this app's capabilities: two-layer Keycloak,
+geolocation, mobile/offline, cookies/cache, photo upload) and `test-value-review`
+(false-positive catalog for the reviewer).
 
-> **Credenciales del modelo:** una **única** key — la de tu suscripción
-> **OpenCode Go** (o Zen) — en `OPENCODE_API_KEY`. OpenCode da acceso a sus
-> modelos por nombre con el prefijo `opencode-go/` (no hay keys por proveedor).
-> Los IDs (`opencode-go/deepseek-v4-pro`, `opencode-go/qwen3.7-max`) están en
-> `opencode/opencode.json`; verifícalos con `opencode models` si tu plan cambia.
+> **Model credentials:** a **single** key — your **OpenCode Go** (or Zen)
+> subscription — in `OPENCODE_API_KEY`. OpenCode exposes its models by name with
+> the `opencode-go/` prefix (no per-provider keys). The IDs
+> (`opencode-go/deepseek-v4-pro`, `opencode-go/qwen3.7-max`) live in
+> `opencode/opencode.json`; verify them with `opencode models` if your plan changes.
 
-## Flujo de un run (`src/pipeline.ts`)
+## Run flow (`src/pipeline.ts`)
 
-1. **Gate** — espera a que DEV corra ese SHA y esté healthy (`/version`).
-2. **Espejo + clasificación** — clone/fetch + checkout del SHA; extrae diff y
-   mensaje. **Clasifica el commit** (Conventional Commits, contrastado con el
-   diff): `style/docs/chore` sin lógica → `skipped` (no se prueba nada);
-   `refactor/perf` → solo regresión (no genera); `feat/fix` (o un `refactor` que
-   el diff revela que **sí** añade lógica) → genera. Filtra ruido y coste antes
-   de gastar un token.
-3. **Generar** — abre una sesión OpenCode con cwd = espejo; el agente define el
-   **objetivo** desde la intención del commit, escribe/mejora los tests en
-   **`e2e/` del repo** (fuente de verdad en git) con su **metadata**
-   (`e2e/.qa/manifest.json`: objetivo, flujo, targets) y los revisa. Si el repo
-   no tiene `e2e/`, se siembra desde el seed (`config/e2e/`).
-4. **Validar (Filtro B)** — `npm ci` en `e2e/` + gate estático: typecheck + lint
-   (`eslint-plugin-playwright`) + `playwright --list` + **metadata válida**. Si
-   no pasan, el run es `invalid` y no se ejecuta.
-5. **Ejecutar (Filtro C)** — corre los specs con Playwright contra DEV, con
-   datos namespaced `qa-bot-<sha>`, y clasifica `pass`/`fail`/`flaky` (retries
-   como señal de inestabilidad). El output se **sanitiza** antes de reusarse.
-6. **Decisión** — antes de ejecutar se re-chequea la **salud de DEV**; si está
-   caído, el run es `infra-error` (no se reporta como bug). En verde **y con el
-   revisor aprobando**, el agente comitea `e2e/` y se abre un **PR con
-   auto-merge**; así la suite mejora sola, versionada. Verde pero **revisor no
-   aprueba** → Issue (no se publica). `fail`/`invalid` → Issue; fallo con DEV
-   caído → `infra-error` (sin Issue); `flaky` → cuarentena; verde sin cambios →
-   ni PR ni ruido.
+1. **Gate** — wait until DEV runs that SHA and is healthy (`/version`).
+2. **Working copy + classification** — clone/fetch + checkout the SHA; extract the
+   diff and message. **Classify the commit** (Conventional Commits, cross-checked
+   against the diff): `style/docs/chore` without logic → `skipped` (nothing tested);
+   `refactor/perf` → regression only (no generation); `feat/fix` (or a `refactor`
+   the diff reveals **does** add logic) → generate. Filters noise and cost before
+   spending a token.
+3. **Generate** — open an OpenCode session with cwd = working copy; the agent
+   derives the **objective** from the commit intent, writes/improves the tests in
+   the **repo's `e2e/`** (source of truth in git) with their **metadata**
+   (`e2e/.qa/manifest.json`: objective, flow, targets), and reviews them. If the
+   repo has no `e2e/`, it is seeded from `config/e2e/`.
+4. **Validate (Filter B)** — `npm ci` in `e2e/` + static gate: typecheck + lint
+   (`eslint-plugin-playwright`) + `playwright --list` + **valid metadata**. If any
+   fails, the run is `invalid` and is not executed.
+5. **Execute (Filter C)** — run the specs with Playwright against DEV, with
+   namespaced data `qa-bot-<sha>`, and classify `pass`/`fail`/`flaky` (retries as a
+   flakiness signal). The output is **sanitized** before reuse.
+6. **Decision** — before executing, DEV **health is re-checked**; if it is down,
+   the run is `infra-error` (not reported as a bug). On green **and with the
+   reviewer approving**, the agent commits `e2e/` and a **PR with auto-merge** is
+   opened, so the suite improves itself, versioned. Green but **reviewer rejects** →
+   Issue (not published). `fail`/`invalid` → Issue; failure with DEV down →
+   `infra-error` (no Issue); `flaky` → quarantine; green with no changes → no PR, no noise.
 
-> **Modo sombra** (`qa.shadow: true`): corre todo el flujo pero **no publica PRs
-> ni abre Issues**, solo loguea qué haría. Pensado para el rodaje inicial al
-> conectar un repo, sin ensuciar nada.
+> **Shadow mode** (`qa.shadow: true`): runs the whole flow but **does not publish
+> PRs or open Issues**, only logs what it would do. Meant for the initial rollout
+> when onboarding a repo, without dirtying anything.
 
-### Harness de E2E (calidad y consistencia)
+### E2E harness (quality and consistency)
 
-- **Capa A — estandarización**: el seed `config/e2e/` (config base de Playwright,
-  fixtures compartidas — login, `namespace`, `ns()` — y reglas de lint) se siembra
-  en `e2e/` del repo la primera vez. A partir de ahí **el repo es su dueño** y el
-  agente lo mantiene/mejora; el login real se implementa una vez en el fixture
-  `authenticate`. (App única con microservicios estandarizados → una sola
-  librería de fixtures compartida, no por-repo.)
-- **Capa B — gate estático** (`src/qa/validate.ts`): valida los specs sin gastar
-  navegador (compilan, lint, cargan).
-- **Capa C — gate de flakiness** (`src/qa/execute.ts` + `playwright-report.ts`):
-  un test que solo pasa tras reintento se marca `flaky` → cuarentena, no se da
-  por bueno ni rompe como fallo real.
+- **Layer A — standardization**: the `config/e2e/` seed (base Playwright config,
+  shared fixtures — login, `namespace`, `ns()` — and lint rules) is seeded into the
+  repo's `e2e/` the first time. From then on **the repo owns it** and the agent
+  maintains/improves it; the real login is implemented once in the `authenticate`
+  fixture. (Single app with standardized microservices → one shared fixtures
+  library, not per-repo.)
+- **Layer B — static gate** (`src/qa/validate.ts`): validates the specs without
+  spending a browser (compile, lint, load, metadata).
+- **Layer C — flakiness gate** (`src/qa/execute.ts` + `playwright-report.ts`): a
+  test that only passes after a retry is marked `flaky` → quarantine; it is not
+  accepted nor does it break as a real failure.
 
-### Persistencia (dónde vive cada cosa al reiniciar)
+### Persistence (where each thing lives across restarts)
 
-- **Suite E2E (specs + fixtures)** → **git**, en `e2e/` del repo de la app. Es la
-  fuente de verdad: versionada, revisable, sobrevive a la pérdida del host. El
-  agente la mejora vía PR (auto-merge si pasa el harness).
-- **engram** (memoria episódica) → volumen `engram-data`. **No es regenerable**:
-  es lo único que conviene respaldar. Sobrevive a reinicios de contenedor.
-- **Índice de Serena y espejos** → volúmenes (`serena-cache`, `mirrors`). Cachés
-  **regenerables**: si se pierden, se reconstruyen/re-clonan.
+- **E2E suite (specs + fixtures)** → **git**, in the app repo's `e2e/`. The source
+  of truth: versioned, reviewable, survives host loss. The agent improves it via PR.
+- **engram** (episodic memory) → the `engram-data` volume. **Not regenerable**: the
+  only thing worth backing up. Survives container restarts.
+- **Serena index and working copies** → volumes (`serena-cache`, `mirrors`).
+  **Regenerable** caches: if lost, they are rebuilt/re-cloned.
 
-> Los volúmenes con nombre sobreviven a `restart`/`down`+`up`; se pierden con
-> `down -v` o si se destruye el host. Por eso la fuente de verdad está en git.
+> Named volumes survive `restart`/`down`+`up`; they are lost with `down -v` or if
+> the host is destroyed. That is why the source of truth lives in git.
 
-## Sanitización (con Doppler)
+## Sanitization
 
-Como Doppler inyecta los secretos en runtime, el **código del repo ya viene
-limpio**. El sanitizer (`src/orchestrator/sanitizer.ts`) cubre el residual:
-redacta secretos/PII/hosts internos en (a) el **diff** antes de mandarlo a
-OpenCode y (b) el **output de ejecución** antes de citarlo en un Issue —que es
-donde podrían aparecer datos de DEV. Los datos de test son sintéticos y
-namespaced.
+Repo source is already clean (Doppler injects secrets at runtime). The sanitizer
+(`src/orchestrator/sanitizer.ts`) covers the residual: it redacts secrets/PII/
+internal hosts in (a) the **diff** before sending it to OpenCode and (b) the
+**execution output** before quoting it in an Issue — where DEV data could appear.
+Test data is synthetic and namespaced.
 
-## Uso
+## Usage
 
 ```bash
 npm install
-npm test          # tests unitarios de la infra (red/OpenCode/Playwright stubbeados)
+npm test          # unit tests of the infrastructure (network/OpenCode/Playwright stubbed)
 npm run typecheck
 
-# Acopla una app:
-cp config/apps/example.yaml config/apps/mi-app.yaml   # edita repo, dev, flujos
+# Onboard an app:
+cp config/apps/example.yaml config/apps/my-app.yaml   # edit repo, dev, etc.
 
-# Disparo manual del run (corre el MISMO pipeline que el webhook):
-npm run qa -- --app mi-app --sha <commit-sha>
+# Manually trigger a run (runs the SAME pipeline as the webhook):
+npm run qa -- --app my-app --sha <commit-sha>
 ```
 
-### Despliegue (Docker)
+### Deployment (Docker)
 
 ```bash
-# Con Doppler inyectando los secretos:
+# With Doppler injecting the secrets:
 doppler run -- docker compose up --build
-# (o copia .env.example → .env para correr en local sin Doppler)
+# (or copy .env.example → .env to run locally without Doppler)
 ```
 
-- `orchestrator`: imagen basada en Playwright (Node + navegadores) + git. El
-  tooling e2e (Filtros B/C) se instala por run en `e2e/` del repo (`npm ci`).
-- `opencode`: imagen oficial de OpenCode + `uv` y los runtimes de lenguaje que
-  use Serena (JDK para Java, etc.) + `engram` (ver `opencode/Dockerfile`).
-- Volúmenes: `mirrors` (compartido entre ambos; Serena cachea en `<repo>/.serena`),
-  `serena-cache` (caché de uv/Serena), `engram-data` (memoria). La suite E2E NO
-  usa volumen: vive en git.
+- `orchestrator`: image based on Playwright (Node + browsers) + git. The e2e
+  tooling (Filters B/C) is installed per run in the repo's `e2e/` (`npm ci`).
+- `opencode`: the official OpenCode image + `uv` and the language runtimes Serena
+  needs (JDK for Java, etc.) + `engram` (see `opencode/Dockerfile`).
+- Volumes: `mirrors` (shared by both; Serena caches in `<repo>/.serena`),
+  `serena-cache` (uv/Serena cache), `engram-data` (memory). The E2E suite uses no
+  volume: it lives in git.
 
-## Principios
+## Principles
 
-1. Infra determinística (gate, espejo, ejecución, reporte) separada del motor
-   agéntico (OpenCode).
-2. Especificidad de la app solo en `config/`; agentes y modelos solo en
-   `opencode/`. Nada de esto en `src/`.
-3. Sanitización en los datos que salen del sistema (diff → modelo, logs → Issue).
-4. Revisor independiente (modelo distinto al primario), condicional por app.
-5. Cola **secuencial**: un run a la vez, sin QA concurrente pisándose en DEV.
+1. Deterministic infrastructure (gate, working copy, execution, reporting) is
+   separated from the agentic engine (OpenCode).
+2. App specificity lives only in `config/`; agents and models only in `opencode/`.
+   Neither lives in `src/`.
+3. Sanitization on data leaving the system (diff → model, logs → Issue).
+4. Independent reviewer (a different model from the primary), per-app conditional.
+5. **Sequential** queue: one run at a time, no concurrent QA clobbering DEV.

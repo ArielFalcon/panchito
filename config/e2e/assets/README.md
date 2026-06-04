@@ -1,27 +1,27 @@
-# Assets de los tests (subida de fotos)
+# Test assets (photo upload)
 
-Aquí viven los ficheros (imágenes) que los tests suben, y su **metadata
-opcional** en `assets.json`. El agente lee esa metadata para saber qué probar
-con cada asset; se resuelve la ruta con `asset("foto.jpg")` (fixtures).
+The files (images) that tests upload live here, along with their **optional
+metadata** in `assets.json`. The agent reads that metadata to know what to test
+with each asset; the path is resolved with `asset("photo.jpg")` (see fixtures).
 
-## `assets.json` — metadata por asset (opcional)
+## `assets.json` — per-asset metadata (optional)
 
-Array de entradas. Solo `file` es obligatorio; el resto explica el caso de uso:
+An array of entries. Only `file` is required; the rest explains the use case:
 
 ```json
 [
   {
-    "file": "playa.jpg",
-    "description": "Foto de playa con geolocalización en EXIF",
-    "useCase": "subida con sitio cercano sugerido",
-    "whatToTest": "que al subirla aparezca la lista de sitios cercanos y se pueda elegir uno"
+    "file": "beach.jpg",
+    "description": "Beach photo with geolocation in EXIF",
+    "useCase": "upload with a suggested nearby place",
+    "whatToTest": "that uploading it shows the nearby-places list and one can be selected"
   }
 ]
 ```
 
-| Campo | Obligatorio | Para qué |
+| Field | Required | Purpose |
 |---|---|---|
-| `file` | sí | nombre del fichero en esta carpeta |
-| `description` | no | qué es la imagen |
-| `useCase` | no | en qué flujo se usa |
-| `whatToTest` | no | qué debe verificar el test al subirla |
+| `file` | yes | file name in this folder |
+| `description` | no | what the image is |
+| `useCase` | no | which flow it is used in |
+| `whatToTest` | no | what the test should verify when uploading it |

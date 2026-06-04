@@ -1,7 +1,7 @@
-// Servidor de webhook (opción 2: servicio hospedado). Recibe el aviso tras el
-// merge a main + deploy a DEV y encola un run. El núcleo (verificación de
-// firma, parseo del payload, decisión de status) es puro y verificable; el
-// servidor HTTP solo lo envuelve.
+// Webhook server (hosted-service option). Receives the notification after a
+// merge to main + deploy to DEV and enqueues a run. The core (signature check,
+// payload parsing, status decision) is pure and verifiable; the HTTP server only
+// wraps it.
 
 import { createServer, Server } from "node:http";
 import { createHmac, timingSafeEqual } from "node:crypto";
@@ -24,12 +24,12 @@ export function parseWebhook(body: unknown): WebhookPayload | null {
   if (!body || typeof body !== "object") return null;
   const b = body as Record<string, unknown>;
 
-  // Forma simple { repo, sha }
+  // Simple shape { repo, sha }
   if (typeof b.repo === "string" && typeof b.sha === "string") {
     return { repo: b.repo, sha: b.sha };
   }
 
-  // Evento push de GitHub: { repository: { full_name }, after }
+  // GitHub push event: { repository: { full_name }, after }
   const repository = b.repository as { full_name?: unknown } | undefined;
   if (typeof repository?.full_name === "string" && typeof b.after === "string") {
     return { repo: repository.full_name, sha: b.after };
@@ -50,20 +50,20 @@ export function handleWebhook(
   opts: { secret?: string },
 ): WebhookResult {
   if (opts.secret && !verifySignature(opts.secret, rawBody, signature)) {
-    return { status: 401, message: "firma inválida" };
+    return { status: 401, message: "invalid signature" };
   }
   let json: unknown;
   try {
     json = JSON.parse(rawBody);
   } catch {
-    return { status: 400, message: "JSON inválido" };
+    return { status: 400, message: "invalid JSON" };
   }
   const payload = parseWebhook(json);
-  if (!payload) return { status: 422, message: "payload sin repo/sha reconocible" };
-  return { status: 202, message: "encolado", payload };
+  if (!payload) return { status: 422, message: "payload without a recognizable repo/sha" };
+  return { status: 202, message: "enqueued", payload };
 }
 
-const MAX_BODY_BYTES = 1_000_000; // 1 MB: cota contra payloads abusivos (DoS)
+const MAX_BODY_BYTES = 1_000_000; // 1 MB: bound against abusive payloads (DoS)
 
 export function createWebhookServer(opts: {
   secret?: string;
@@ -72,7 +72,7 @@ export function createWebhookServer(opts: {
   return createServer((req, res) => {
     if (req.method !== "POST") {
       res.writeHead(405, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ message: "método no permitido" }));
+      res.end(JSON.stringify({ message: "method not allowed" }));
       return;
     }
     let body = "";
@@ -82,7 +82,7 @@ export function createWebhookServer(opts: {
       if (body.length > MAX_BODY_BYTES) {
         aborted = true;
         res.writeHead(413, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ message: "payload demasiado grande" }));
+        res.end(JSON.stringify({ message: "payload too large" }));
         req.destroy();
       }
     });

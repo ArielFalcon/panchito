@@ -1,38 +1,40 @@
-# Proyecto e2e — SEED del harness
+# e2e project — harness SEED
 
-Este directorio es el **seed**: la plantilla que el orchestrator **copia dentro
-de `e2e/` del repo de la app** la primera vez que ese repo no tiene proyecto de
-tests. A partir de ahí, **la fuente de verdad es `e2e/` en el repo** (versionada
-en git), y el agente la mantiene y mejora run tras run vía PRs.
+This directory is the **seed**: the template the orchestrator **copies into the
+app repo's `e2e/` folder** the first time that repo has no test project. From
+then on, **the source of truth is `e2e/` in the repo** (versioned in git), and
+the agent maintains and improves it run after run via PRs.
 
-## Qué siembra
+## What it seeds
 
-| Fichero | Para qué |
+| File | Purpose |
 |---|---|
-| `playwright.config.ts` | Config base: retries (señal de flakiness), trace on-first-retry, reporter JSON, `data-testid`, un worker, `baseURL` desde `PW_BASE_URL`. |
-| `fixtures.ts` | Caja de herramientas que el agente importa: fixture `namespace`, slot `authenticate`, helper `ns()`. |
-| `eslint.config.js` | Filtro B (lint): caza esperas fijas, element handles, tests sin assert, locators crudos. |
-| `tsconfig.json` | Filtro B (typecheck). |
-| `package.json` | Deps del proyecto (Playwright runner, eslint, tsc). |
+| `playwright.config.ts` | Base config: retries (flakiness signal), trace on-first-retry, JSON reporter, `data-testid`, single worker, `baseURL` from `PW_BASE_URL`, HTTP Basic gate, default geolocation, mobile project. |
+| `fixtures.ts` | Toolbox the agent imports: `namespace` fixture, `authenticate`, `cleanup`, and helpers `setLocation`/`goOffline`/`readCookies`/`readStorage`/`asset`. |
+| `eslint.config.js` | Filter B (lint): catches hard waits, element handles, tests without asserts. |
+| `tsconfig.json` | Filter B (typecheck). |
+| `package.json` | The project's deps (Playwright runner, eslint, tsc). |
+| `.qa/manifest.json` | Per-test metadata registry (objective, flow, targets...). |
+| `assets/` | Files uploaded by tests and their optional metadata. |
 
-## Convenciones (una sola app, microservicios estandarizados)
+## Conventions (single app, standardized microservices)
 
-- Una **única librería de fixtures compartida** (`fixtures.ts`) en la raíz de
-  `e2e/`; los specs se organizan por microservicio en subcarpetas.
-- El agente **reutiliza y mejora** lo existente; no duplica. El login real de la
-  app se implementa una vez sobreescribiendo el fixture `authenticate`.
+- A **single shared fixtures library** (`fixtures.ts`) at the root of `e2e/`;
+  specs are organized per microservice in subfolders.
+- The agent **reuses and improves** what exists; it does not duplicate. The app's
+  real login is implemented once by overriding the `authenticate` fixture.
 
-## Cómo lo invoca el orchestrator
+## How the orchestrator invokes it
 
-Con `cwd` = `e2e/` del repo y por entorno `PW_BASE_URL` (DEV) + `PW_NAMESPACE`:
+With `cwd` = the repo's `e2e/` and env `PW_BASE_URL` (DEV) + `PW_NAMESPACE`:
 
 ```
-npm ci                               # setup (deps del proyecto)
-npx tsc --noEmit                     # Filtro B: typecheck
-npx eslint .                         # Filtro B: lint
-npx playwright test --list           # Filtro B: cargan
-npx playwright test --reporter=json  # Filtro C: ejecuta + detecta flaky
+npm ci                               # setup (project deps)
+npx tsc --noEmit                     # Filter B: typecheck
+npx eslint .                         # Filter B: lint
+npx playwright test --list           # Filter B: load
+npx playwright test --reporter=json  # Filter C: run + detect flaky
 ```
 
-En verde, el agente comitea `e2e/` y se abre un PR (auto-merge si el repo lo
-permite).
+On green, the agent commits `e2e/` and a PR is opened (auto-merge if the repo
+allows it).

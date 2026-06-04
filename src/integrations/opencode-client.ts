@@ -1,15 +1,13 @@
-// Disparador del motor agéntico OpenCode. Sustituye al loop primario↔revisor,
-// a los providers y al cliente MCP hechos a mano: ahora la generación, la
-// revisión (subagente) y el acceso a serena/engram viven DENTRO de OpenCode
-// (ver opencode/opencode.json). Aquí solo abrimos una sesión contra
-// `opencode serve`, le pasamos el contexto del cambio, y el agente escribe/
-// actualiza los tests en la carpeta `e2e/` del espejo (que es un repo git: esa
-// es la fuente de verdad). No recogemos artefactos: el harness corre sobre
-// `e2e/` y la publicación comitea el diff de git.
+// Trigger for the OpenCode agentic engine. Generation, review (subagent) and
+// access to serena/engram all live INSIDE OpenCode (see opencode/opencode.json).
+// Here we only open a session against `opencode serve`, pass it the change
+// context, and the agent writes/updates the tests in the working copy's `e2e/`
+// folder (a git repo: the source of truth). We collect no artifacts: the harness
+// runs over `e2e/` and publishing commits the git diff.
 //
-// La SDK se inyecta vía OpencodeDeps: la lógica verificable (prompt, parseo del
-// veredicto, orquestación) se testea con stubs; la conexión real a
-// `opencode serve` es el borde no cubierto por unitarios.
+// The SDK is injected via OpencodeDeps: the verifiable logic (prompt building,
+// verdict parsing, orchestration) is tested with stubs; the real connection to
+// `opencode serve` is the boundary not covered by unit tests.
 
 import { AgentResult } from "../types";
 import { CommitIntent } from "../qa/commit-classify";
@@ -19,21 +17,21 @@ export interface OpencodeRunInput {
   repo: string;
   sha: string;
   diff: string;
-  mirrorDir: string; // cwd del agente: espejo del repo (contiene `e2e/`)
-  e2eRelDir: string; // carpeta de tests relativa a mirrorDir (p. ej. "e2e")
-  namespace: string; // prefijo de datos de test (qa-bot-<sha>)
+  mirrorDir: string; // the agent's cwd: working copy of the repo (holds `e2e/`)
+  e2eRelDir: string; // tests folder relative to mirrorDir (e.g. "e2e")
+  namespace: string; // test-data prefix (qa-bot-<sha>)
   needsReview: boolean;
-  intent: CommitIntent; // intención del commit (tipo + mensaje + ficheros)
+  intent: CommitIntent; // commit intent (type + message + files)
 }
 
-// Una sesión abierta contra `opencode serve`. prompt() envía el mensaje al
-// agente `qa-generator` y devuelve su texto final (incl. el JSON de cierre).
+// A session opened against `opencode serve`. prompt() sends the message to the
+// `qa-generator` agent and returns its final text (including the closing JSON).
 export interface OpencodeSession {
   prompt(text: string): Promise<string>;
 }
 
 export interface OpencodeDeps {
-  // Abre una sesión para `agent` con `cwd` como directorio de proyecto.
+  // Opens a session for `agent` with `cwd` as the project directory.
   open(agent: string, cwd: string): Promise<OpencodeSession>;
 }
 
@@ -51,7 +49,7 @@ export async function runOpencode(
   const finalText = await session.prompt(buildPrompt(input));
 
   const verdict = parseVerdict(finalText);
-  // Sin revisión configurada, el veredicto del subagente no aplica: se aprueba.
+  // When review is disabled, the subagent verdict does not apply: approve.
   const approved = input.needsReview ? verdict.approved : true;
 
   return {
@@ -59,45 +57,45 @@ export async function runOpencode(
     specs: verdict.specs,
     reviewed: input.needsReview,
     approved,
-    note: approved ? undefined : verdict.note ?? "el revisor no aprobó los E2E",
+    note: approved ? undefined : verdict.note ?? "the reviewer did not approve the E2E tests",
   };
 }
 
-// Ensambla el mensaje dinámico para el agente. La inteligencia de "cómo" vive
-// en opencode/agent/qa-generator.md; aquí solo va el contexto del cambio. El
-// diff se sanitiza igualmente (defensa en profundidad — barato).
+// Assembles the dynamic message for the agent. The "how" lives in
+// opencode/agent/qa-generator.md; only the change context goes here. The diff is
+// sanitized anyway (cheap defense in depth).
 export function buildPrompt(input: OpencodeRunInput): string {
   const { intent } = input;
   return [
-    `Genera/actualiza tests E2E para los flujos afectados por el commit ${input.sha} de ${input.repo}.`,
+    `Generate/update E2E tests for the flows affected by commit ${input.sha} of ${input.repo}.`,
     ``,
-    `## Intención del cambio (Conventional Commits)`,
-    `- Tipo: ${intent.type}${intent.breaking ? " (BREAKING)" : ""}`,
-    `- Mensaje: ${sanitizeText(intent.message)}`,
-    `- Ficheros cambiados (deduce de aquí el scope/área): ${intent.changedFiles.join(", ") || "(desconocido)"}`,
-    `El mensaje da la INTENCIÓN; define a partir de ella el objetivo (criterio de aceptación)`,
-    `de cada test. Pero CONTRASTA con el diff: si el código hace más de lo que dice el`,
-    `mensaje, cubre lo que el código realmente cambia, no solo lo que el mensaje promete.`,
+    `## Change intent (Conventional Commits)`,
+    `- Type: ${intent.type}${intent.breaking ? " (BREAKING)" : ""}`,
+    `- Message: ${sanitizeText(intent.message)}`,
+    `- Changed files (derive the scope/area from these): ${intent.changedFiles.join(", ") || "(unknown)"}`,
+    `The message gives the INTENT; derive each test's objective (acceptance criterion)`,
+    `from it. But CROSS-CHECK against the diff: if the code does more than the message`,
+    `claims, cover what the code actually changes, not just what the message promises.`,
     ``,
-    `- Trabaja en la carpeta de tests del repo: ${input.e2eRelDir}/ (fuente de verdad en git).`,
-    `  Reutiliza y mejora los fixtures/specs que ya existan; no dupliques.`,
-    `- Por cada test, añade/actualiza su entrada en ${input.e2eRelDir}/.qa/manifest.json con`,
+    `- Work in the repo's tests folder: ${input.e2eRelDir}/ (source of truth in git).`,
+    `  Reuse and improve existing fixtures/specs; do not duplicate.`,
+    `- For each test, add/update its entry in ${input.e2eRelDir}/.qa/manifest.json with`,
     `  { id, objective, flow, targets, changeRef:{sha:"${input.sha}",type:"${intent.type}"} }.`,
-    `- Prefijo de datos de test: ${input.namespace}`,
+    `- Test-data prefix: ${input.namespace}`,
     input.needsReview
-      ? `- Revisión obligatoria: invoca al subagente qa-reviewer y aplica sus correcciones.`
-      : `- Revisión desactivada para este run: no invoques a qa-reviewer.`,
+      ? `- Review required: invoke the qa-reviewer subagent and apply its corrections.`
+      : `- Review disabled for this run: do not invoke qa-reviewer.`,
     ``,
-    `## Diff del commit`,
+    `## Commit diff`,
     "```diff",
     sanitizeText(input.diff),
     "```",
   ].join("\n");
 }
 
-// Extrae el JSON de cierre del agente. Tolerante: busca el ÚLTIMO objeto JSON
-// con `approved` (esté o no en un bloque ```json). Si no hay uno válido, se
-// asume no aprobado (fail-closed) para no publicar por accidente.
+// Extracts the agent's closing JSON. Tolerant: looks for the LAST JSON object
+// with `approved` (whether or not it sits in a ```json block). If none is valid,
+// it assumes not approved (fail-closed) so nothing is published by accident.
 export function parseVerdict(text: string): FinalVerdict {
   const candidates = text.match(/\{[\s\S]*?\}/g) ?? [];
   for (let i = candidates.length - 1; i >= 0; i--) {
@@ -111,18 +109,18 @@ export function parseVerdict(text: string): FinalVerdict {
         };
       }
     } catch {
-      /* no era JSON parseable; sigue probando candidatos anteriores */
+      /* not parseable JSON; keep trying earlier candidates */
     }
   }
-  return { approved: false, specs: [], note: "el agente no emitió veredicto" };
+  return { approved: false, specs: [], note: "the agent emitted no verdict" };
 }
 
-// Tope de tiempo para una promesa: si vence, rechaza. Evita que un run del
-// agente colgado bloquee la cola (que es secuencial → bloquearía TODOS los
-// repos). Verificable con stubs.
+// Timeout wrapper for a promise: rejects if it elapses. Prevents a hung agent run
+// from blocking the (sequential) queue, which would block every repo. Verifiable
+// with stubs.
 export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${label}: timeout tras ${ms}ms`)), ms);
+    const timer = setTimeout(() => reject(new Error(`${label}: timed out after ${ms}ms`)), ms);
     p.then(
       (v) => {
         clearTimeout(timer);
@@ -136,12 +134,11 @@ export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promis
   });
 }
 
-const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 min por run del agente
+const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes per agent run
 
-// --- Borde de integración: conexión real a `opencode serve` -----------------
-// No cubierto por unitarios (igual que el runner Playwright). La SDK se importa
-// de forma perezosa para que los tests no requieran el paquete instalado.
-// OPENCODE_SERVE_URL apunta al contenedor `opencode` (ver docker-compose).
+// Integration boundary: real connection to `opencode serve`. Not covered by unit
+// tests (like the Playwright runner). The SDK is imported lazily so tests do not
+// require the package. OPENCODE_SERVE_URL points to the `opencode` container.
 export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
   const { createOpencodeClient } = await import("@opencode-ai/sdk");
   const client = createOpencodeClient({
@@ -150,13 +147,13 @@ export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
   const timeoutMs = Number(process.env.OPENCODE_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
 
   return {
-    // `directory` (query) posiciona la sesión en el espejo del repo: el agente
-    // lee/escribe ahí. El espejo es un volumen compartido con el contenedor
-    // `opencode`, así que la ruta es válida en ambos lados.
+    // `directory` (query) positions the session in the repo working copy: the
+    // agent reads/writes there. The working copy is a volume shared with the
+    // `opencode` container, so the path is valid on both sides.
     open: async (agent, cwd) => {
       const created = await client.session.create({ query: { directory: cwd } });
       const id = created.data?.id;
-      if (!id) throw new Error("OpenCode: la sesión no devolvió id");
+      if (!id) throw new Error("OpenCode: the session returned no id");
       return {
         prompt: (text) =>
           withTimeout(
@@ -175,7 +172,7 @@ export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
   };
 }
 
-// Concatena el texto de las partes de texto de la respuesta del agente.
+// Concatenates the text of the text parts in the agent's response.
 function extractText(parts: Array<{ type: string }> | undefined): string {
   return (parts ?? [])
     .filter((p): p is { type: "text"; text: string } => p.type === "text")

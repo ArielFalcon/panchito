@@ -1,26 +1,20 @@
-# Plantilla de app vigilada. COPIA a config/apps/<tu-app>.yaml y rellena.
-# Los ${VARS} se expanden desde el entorno (.env) — no pongas secretos aquí.
+# Watched-app template. COPY to config/apps/<your-app>.yaml and fill it in.
+# ${VARS} are expanded from the environment (.env) — do not put secrets here.
 
 name: "example"
-repo: "org/example"            # owner/repo en GitHub (Issues + PRs de la suite E2E)
-baseBranch: "main"             # rama destino de los PR de QA (default: main)
+repo: "org/example"            # owner/repo on GitHub (Issues + E2E suite PRs)
+baseBranch: "main"             # target branch for the QA pull requests
 
 dev:
   baseUrl: "https://dev.example.internal"
-  versionUrl: "https://dev.example.internal/version"  # debe devolver { sha, healthy }
-  pollIntervalMs: 10000        # cada cuánto consulta el gate
-  deployTimeoutMs: 600000      # 10 min para que DEV estabilice en el nuevo SHA
+  versionUrl: "https://dev.example.internal/version"  # must return { sha, healthy }
+  pollIntervalMs: 10000        # how often the gate polls
+  deployTimeoutMs: 600000      # 10 min for DEV to stabilize on the new SHA
 
 qa:
-  needsReview: true            # el revisor estricto valida los E2E generados
-  shadow: false                # true = corre todo pero NO publica PR ni abre Issues (rodaje inicial)
-  testDataPrefix: "qa-bot"     # entidades de test namespaced por SHA
-  criticalFlows:               # pistas de qué priorizar (serena afina por símbolos)
-    - "login"
-    - "checkout"
-  credentials:                 # REFERENCIAS a env, no valores
-    testUser: "${DEV_TEST_USER}"
-    testPass: "${DEV_TEST_PASS}"
+  needsReview: true            # the strict reviewer validates the generated E2E tests
+  shadow: false                # true = run everything but do NOT publish PRs or open Issues (initial rollout)
+  testDataPrefix: "qa-bot"     # test entities namespaced per SHA
 
 report:
   onFailure: "github-issue"

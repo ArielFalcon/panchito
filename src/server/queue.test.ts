@@ -4,7 +4,7 @@ import { JobQueue } from "./queue";
 
 const tick = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-test("procesa de a uno (sin solapamiento) y en orden", async () => {
+test("processes one at a time (no overlap) and in order", async () => {
   const q = new JobQueue();
   const order: string[] = [];
   let running = 0;
@@ -23,11 +23,11 @@ test("procesa de a uno (sin solapamiento) y en orden", async () => {
   q.enqueue(job("c", 1));
   await q.drain();
 
-  assert.deepEqual(order, ["a", "b", "c"]); // orden preservado
-  assert.equal(maxConcurrent, 1); // nunca dos a la vez
+  assert.deepEqual(order, ["a", "b", "c"]); // order preserved
+  assert.equal(maxConcurrent, 1); // never two at once
 });
 
-test("un job que falla no detiene los siguientes", async () => {
+test("a failing job does not stop the following ones", async () => {
   const errors: unknown[] = [];
   const q = new JobQueue((e) => errors.push(e));
   const done: string[] = [];
@@ -36,15 +36,15 @@ test("un job que falla no detiene los siguientes", async () => {
     throw new Error("boom");
   });
   q.enqueue(async () => {
-    done.push("siguiente");
+    done.push("next");
   });
   await q.drain();
 
   assert.equal(errors.length, 1);
-  assert.deepEqual(done, ["siguiente"]);
+  assert.deepEqual(done, ["next"]);
 });
 
-test("size refleja lo pendiente y vuelve a 0 al drenar", async () => {
+test("size reflects pending work and returns to 0 after draining", async () => {
   const q = new JobQueue();
   q.enqueue(async () => await tick(5));
   q.enqueue(async () => await tick(5));

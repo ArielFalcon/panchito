@@ -2,10 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { setupE2eProject, SetupDeps } from "./setup";
 
-test("repo con proyecto e2e: instala, no bootstrapea", async () => {
+test("repo with an e2e project: installs, does not bootstrap", async () => {
   const seq: string[] = [];
   const deps: SetupDeps = {
-    hasManifest: () => true,
+    hasProject: () => true,
     bootstrap: () => seq.push("bootstrap"),
     install: async () => {
       seq.push("install");
@@ -15,11 +15,11 @@ test("repo con proyecto e2e: instala, no bootstrapea", async () => {
   assert.deepEqual(seq, ["install"]);
 });
 
-test("repo sin proyecto e2e: siembra el seed y luego instala", async () => {
+test("repo without an e2e project: seeds first, then installs", async () => {
   const seq: string[] = [];
   let seeded = "";
   const deps: SetupDeps = {
-    hasManifest: () => false,
+    hasProject: () => false,
     bootstrap: (d) => {
       seeded = d;
       seq.push("bootstrap");
@@ -29,6 +29,6 @@ test("repo sin proyecto e2e: siembra el seed y luego instala", async () => {
     },
   };
   await setupE2eProject("/mirror/e2e", deps);
-  assert.deepEqual(seq, ["bootstrap", "install"]); // bootstrap ANTES de install
+  assert.deepEqual(seq, ["bootstrap", "install"]); // bootstrap BEFORE install
   assert.equal(seeded, "/mirror/e2e");
 });

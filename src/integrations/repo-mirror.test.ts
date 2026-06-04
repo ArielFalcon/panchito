@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ensureMirror, getCommitDiff, MirrorDeps } from "./repo-mirror";
 
-// authArgs() depende de GITHUB_TOKEN; lo limpiamos para aislar la lógica.
+// authHeaderArgs() depends on GITHUB_TOKEN; clear it to isolate the logic.
 delete process.env.GITHUB_TOKEN;
 
 function recorder(exists: boolean): MirrorDeps & { calls: string[][] } {
@@ -18,7 +18,7 @@ function recorder(exists: boolean): MirrorDeps & { calls: string[][] } {
   };
 }
 
-test("clona, hace checkout forzado y limpia si el espejo no existe", async () => {
+test("clones, force-checks out and cleans when the working copy does not exist", async () => {
   const d = recorder(false);
   const dir = await ensureMirror("org/app", "abc123", d);
   assert.equal(dir, "/tmp/mirrors/org__app");
@@ -27,7 +27,7 @@ test("clona, hace checkout forzado y limpia si el espejo no existe", async () =>
   assert.deepEqual(d.calls[2], ["clean", "-fd", "-e", "node_modules"]);
 });
 
-test("hace fetch, checkout forzado y limpieza si el espejo ya existe", async () => {
+test("fetches, force-checks out and cleans when the working copy already exists", async () => {
   const d = recorder(true);
   await ensureMirror("org/app", "abc123", d);
   assert.deepEqual(d.calls[0], ["fetch", "origin"]);
@@ -35,7 +35,7 @@ test("hace fetch, checkout forzado y limpieza si el espejo ya existe", async () 
   assert.deepEqual(d.calls[2], ["clean", "-fd", "-e", "node_modules"]);
 });
 
-test("getCommitDiff usa git show del SHA", async () => {
+test("getCommitDiff uses git show of the SHA", async () => {
   const d = recorder(true);
   const diff = await getCommitDiff("/tmp/mirrors/org__app", "abc123", d);
   assert.equal(diff, "diff-output");

@@ -1,6 +1,6 @@
-// Carga y valida la configuración específica de la app vigilada. Toda la
-// especificidad vive aquí (config/), nunca en el código. Los ${VARS} en el
-// YAML se expanden desde el entorno: las credenciales no viven en el repo.
+// Loads and validates the configuration of a watched app. All app-specific
+// detail lives here (config/), never in the code. ${VARS} in the YAML are
+// expanded from the environment, so credentials never live in the repo.
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -11,7 +11,7 @@ const ROOT = process.env.AI_PIPELINE_ROOT ?? process.cwd();
 export interface AppConfig {
   name: string;
   repo: string;
-  baseBranch?: string; // rama destino de los PR de QA (default "main")
+  baseBranch?: string; // target branch for the QA pull requests (defaults to "main")
   dev: {
     baseUrl: string;
     versionUrl: string;
@@ -21,9 +21,7 @@ export interface AppConfig {
   qa: {
     needsReview: boolean;
     testDataPrefix: string;
-    criticalFlows: string[];
-    credentials?: Record<string, string>;
-    shadow?: boolean; // modo sombra: corre todo pero NO publica PR ni abre Issues
+    shadow?: boolean; // shadow mode: run everything but do NOT publish PRs or open Issues
   };
   report: { onFailure: string };
 }
@@ -31,13 +29,13 @@ export interface AppConfig {
 export function loadAppConfig(name: string, root = ROOT): AppConfig {
   const path = join(root, "config", "apps", `${name}.yaml`);
   if (!existsSync(path)) {
-    throw new Error(`No existe config/apps/${name}.yaml — ¿acoplaste la app?`);
+    throw new Error(`config/apps/${name}.yaml not found — is the app onboarded?`);
   }
   const raw = expandEnv(readFileSync(path, "utf8"));
   return parse(raw) as AppConfig;
 }
 
-// Resuelve la config a partir del repo del evento (el webhook trae repo+sha).
+// Resolves the config from the event's repo (the webhook carries repo + sha).
 export function loadAppConfigByRepo(repo: string, root = ROOT): AppConfig | null {
   const dir = join(root, "config", "apps");
   if (!existsSync(dir)) return null;

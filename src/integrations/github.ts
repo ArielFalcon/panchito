@@ -1,5 +1,6 @@
-// Integración con GitHub: abrir Issues (fallo/inválido) y abrir PRs con los E2E
-// generados (auto-merge si el harness pasó). En verde sin fallos no hay ruido.
+// GitHub integration: open Issues (failure/invalid) and open PRs with the
+// generated E2E tests (auto-merge when the harness passed). On green with no
+// failures, nothing is done (no noise).
 
 import { requireEnv } from "../util/env";
 
@@ -47,10 +48,10 @@ export const github = {
     return { url: data.html_url, nodeId: data.node_id, number: data.number };
   },
 
-  // Auto-merge vía GraphQL: el PR se fusiona cuando los checks REQUERIDOS del
-  // repo pasen. Requiere que el repo tenga "Allow auto-merge" activado (y, en la
-  // práctica, branch protection con checks). Si no, la mutación falla → el
-  // llamador lo trata como best-effort y deja el PR abierto.
+  // Auto-merge via GraphQL: the PR merges once the repo's REQUIRED checks pass.
+  // Requires the repo to have "Allow auto-merge" enabled (and, in practice,
+  // branch protection with checks). Otherwise the mutation fails and the caller
+  // treats it as best-effort, leaving the PR open.
   async enableAutoMerge(nodeId: string, mergeMethod = "SQUASH"): Promise<void> {
     const res = await fetch("https://api.github.com/graphql", {
       method: "POST",
@@ -70,4 +71,3 @@ export const github = {
     }
   },
 };
-

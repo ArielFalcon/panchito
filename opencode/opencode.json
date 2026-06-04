@@ -3,14 +3,14 @@
   "instructions": ["./AGENTS.md"],
   "agent": {
     "qa-generator": {
-      "description": "Genera tests E2E Playwright para el blast radius de un commit y los escribe en e2e/.",
+      "description": "Generates Playwright E2E tests for a commit's blast radius and writes them in e2e/.",
       "mode": "primary",
       "model": "opencode-go/deepseek-v4-pro",
       "prompt": "{file:./agent/qa-generator.md}",
       "tools": { "write": true, "edit": true, "read": true, "bash": true }
     },
     "qa-reviewer": {
-      "description": "Juez independiente de calidad de los E2E. No escribe: emite veredicto JSON.",
+      "description": "Independent E2E quality judge. Does not write: emits a JSON verdict.",
       "mode": "subagent",
       "model": "opencode-go/qwen3.7-max",
       "prompt": "{file:./agent/qa-reviewer.md}",

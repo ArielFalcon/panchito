@@ -4,25 +4,25 @@ import { validateManifest } from "./metadata";
 
 const valid = {
   id: "checkout/over-10-items",
-  objective: "Con >10 ítems, el checkout completa el pago",
+  objective: "With >10 items, checkout completes the payment",
   flow: "checkout",
   targets: ["CheckoutService.validateCart"],
   changeRef: { sha: "abc1234", type: "fix" },
 };
 
-test("manifest vacío es válido (repo sin tests todavía)", () => {
+test("an empty manifest is valid (repo with no tests yet)", () => {
   assert.equal(validateManifest([]).ok, true);
 });
 
-test("entrada completa es válida", () => {
+test("a complete entry is valid", () => {
   assert.equal(validateManifest([valid]).ok, true);
 });
 
-test("rechaza si no es array", () => {
+test("rejects a non-array", () => {
   assert.equal(validateManifest({}).ok, false);
 });
 
-test("exige objective, flow, targets y changeRef", () => {
+test("requires objective, flow, targets and changeRef", () => {
   const r = validateManifest([{ id: "x" }]);
   assert.equal(r.ok, false);
   assert.match(r.errors.join(" "), /objective/);
@@ -31,13 +31,13 @@ test("exige objective, flow, targets y changeRef", () => {
   assert.match(r.errors.join(" "), /changeRef/);
 });
 
-test("detecta ids duplicados", () => {
+test("detects duplicate ids", () => {
   const r = validateManifest([valid, valid]);
   assert.equal(r.ok, false);
-  assert.match(r.errors.join(" "), /id duplicado/);
+  assert.match(r.errors.join(" "), /duplicate id/);
 });
 
-test("targets vacío no vale", () => {
+test("empty targets is not allowed", () => {
   const r = validateManifest([{ ...valid, targets: [] }]);
   assert.equal(r.ok, false);
   assert.match(r.errors.join(" "), /targets/);

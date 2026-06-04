@@ -1,10 +1,9 @@
-// Defensa en profundidad para los DATOS que salen del sistema: el output de
-// ejecución de los E2E (qa/execute.ts) antes de citarlo en un Issue, y el diff
-// antes de mandarlo a OpenCode. Redacta secretos, hosts/IPs internos y PII.
-//
-// Nota: con los secretos inyectados por Doppler en runtime (no commiteados),
-// el código del repo ya viene limpio; este sanitizer cubre el residual —
-// datos de DEV que aparezcan en logs y cualquier secreto colado en un diff.
+// Defense in depth for DATA leaving the system: the E2E execution output
+// (qa/execute.ts) before it is quoted in an Issue, and the diff before it is sent
+// to OpenCode. Redacts secrets, internal hosts/IPs and PII. Repo source is
+// already clean (secrets are injected at runtime by Doppler, never committed);
+// this covers the residual — DEV data that shows up in logs and any secret that
+// slips into a diff.
 
 const SECRET_PATTERNS: RegExp[] = [
   /(?:api[_-]?key|token|secret|password|passwd|pwd)\s*[:=]\s*\S+/gi,
@@ -15,12 +14,12 @@ const SECRET_PATTERNS: RegExp[] = [
 ];
 
 const INTERNAL_HOST_PATTERNS: RegExp[] = [
-  // IPv4 privadas (10/8, 192.168/16, 172.16/12)
+  // Private IPv4 ranges (10/8, 192.168/16, 172.16/12)
   /\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b/g,
 ];
 
-// PII: solo email. Patrones más amplios (teléfonos) destrozarían diffs/código
-// con falsos positivos; el email es lo bastante distintivo para redactar seguro.
+// PII: email only. Broader patterns (phone numbers) would wreck diffs/code with
+// false positives; an email is distinctive enough to redact safely.
 const PII_PATTERNS: RegExp[] = [/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g];
 
 export function sanitizeText(input: string): string {

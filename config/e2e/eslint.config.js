@@ -1,9 +1,9 @@
-// Linter del Filtro B: el "corrector de estilo" que caza los errores típicos de
-// tests E2E mal escritos SIN ejecutarlos. Si algo de esto salta, el run es
-// "invalid" y los specs no llegan a ejecutarse.
+// Filter B linter: the "style checker" that catches the typical mistakes of
+// badly written E2E tests WITHOUT running them. If any of this fires, the run is
+// "invalid" and the specs are never executed.
 //
-// typescript-eslint aporta el PARSER de TypeScript (sin él, ESLint no entiende
-// la sintaxis .ts y el gate fallaría por error de parseo, no por calidad real).
+// typescript-eslint provides the TypeScript PARSER (without it ESLint cannot
+// understand .ts syntax and the gate would fail on a parse error, not on quality).
 
 import playwright from "eslint-plugin-playwright";
 import tseslint from "typescript-eslint";
@@ -14,11 +14,11 @@ export default tseslint.config(
   {
     files: ["**/*.spec.ts", "fixtures.ts"],
     rules: {
-      // Esperas fijas (sleep) → fuente nº1 de flakiness.
+      // Hard waits (sleep) → the #1 source of flakiness.
       "playwright/no-wait-for-timeout": "error",
-      // Element handles en vez de locators → frágil.
+      // Element handles instead of locators → fragile.
       "playwright/no-element-handle": "error",
-      // Un test sin assert no prueba nada (falso positivo garantizado).
+      // A test without an assert proves nothing (guaranteed false positive).
       "playwright/expect-expect": "error",
     },
   },

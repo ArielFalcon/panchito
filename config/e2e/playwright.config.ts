@@ -1,12 +1,13 @@
-// Config base de Playwright — SEED del harness (Filtro A). Se copia en `e2e/`
-// del repo la primera vez; luego el repo es su dueño y el agente la mantiene.
+// Base Playwright config — harness SEED (Filter A). It is copied into the repo's
+// `e2e/` folder the first time; from then on the repo owns it and the agent
+// maintains it.
 //
-// El orchestrator inyecta por entorno: PW_BASE_URL (DEV) y PW_NAMESPACE.
-// Dos capas de credenciales (no confundir):
-//   - DEV_ENV_USER/PASS → HTTP Basic Auth que protege TODO el entorno DEV (el
-//     diálogo nativo del navegador con usuario/contraseña). Va en httpCredentials.
-//   - DEV_TEST_USER/PASS → login de la APP vía Keycloak (formulario). Va en el
-//     fixture `authenticate` (ver fixtures.ts), NO aquí.
+// The orchestrator injects via env: PW_BASE_URL (DEV) and PW_NAMESPACE.
+// Two credential layers (do not confuse them):
+//   - DEV_ENV_USER/PASS  → HTTP Basic Auth that protects the WHOLE DEV
+//     environment (the browser's native user/password dialog). Goes in httpCredentials.
+//   - DEV_TEST_USER/PASS → the APP login via Keycloak (a form). Goes in the
+//     `authenticate` fixture (see fixtures.ts), NOT here.
 
 import { defineConfig, devices } from "@playwright/test";
 
@@ -17,14 +18,14 @@ export default defineConfig({
   testMatch: "**/*.spec.ts",
   fullyParallel: false,
   workers: 1,
-  retries: 2, // retries = SEÑAL de flakiness (Filtro C), no arreglo
+  retries: 2, // retries = flakiness SIGNAL (Filter C), not a fix
   reporter: [["json"]],
   use: {
     baseURL: process.env.PW_BASE_URL,
     trace: "on-first-retry",
     testIdAttribute: "data-testid",
-    // Capa 1: pasa el gate HTTP Basic del entorno DEV. `origin` lo restringe a
-    // la app, para NO enviar estas credenciales a Keycloak (otro dominio).
+    // Layer 1: gets past the DEV environment's HTTP Basic gate. `origin` scopes it
+    // to the app so these credentials are NOT sent to Keycloak (a different origin).
     httpCredentials: process.env.DEV_ENV_USER
       ? {
           username: process.env.DEV_ENV_USER,
@@ -32,8 +33,8 @@ export default defineConfig({
           origin: appOrigin,
         }
       : undefined,
-    // Geolocalización determinista por defecto (la app ubica al usuario en el
-    // mapa). Los tests que necesiten otra ubicación usan setLocation() (fixtures).
+    // Deterministic default geolocation (the app places the user on a map). Tests
+    // that need another location use setLocation() (see fixtures.ts).
     permissions: ["geolocation"],
     geolocation: {
       latitude: Number(process.env.PW_GEO_LAT ?? 40.4168),
@@ -42,8 +43,8 @@ export default defineConfig({
   },
   projects: [
     { name: "desktop", use: { ...devices["Desktop Chrome"] } },
-    // Modo móvil: los tests móviles se ejecutan con este proyecto o con
-    // test.use({ ...devices["iPhone 13"] }) por test.
+    // Mobile mode: mobile tests run with this project, or with
+    // test.use({ ...devices["iPhone 13"] }) per test.
     { name: "mobile", use: { ...devices["iPhone 13"] } },
   ],
 });

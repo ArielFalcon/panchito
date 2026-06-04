@@ -1,39 +1,40 @@
-# Locators, esperas y flakiness
+# Locators, waiting and flakiness
 
-Adaptado de [TestDino playwright-skill](https://github.com/testdino-hq/playwright-skill) (MIT).
+Adapted from [TestDino playwright-skill](https://github.com/testdino-hq/playwright-skill) (MIT).
 
-## Locators (de mejor a peor)
+## Locators (best to worst)
 
-1. `getByRole("button", { name: /publicar/i })` — semántico, accesible. **Preferido.**
-2. `getByLabel`, `getByPlaceholder`, `getByText` — para formularios/contenido.
-3. `getByTestId("...")` — cuando no hay rol claro (atributo `data-testid`).
-4. ❌ CSS/XPath crudos, clases autogeneradas, `nth-child` — frágiles, prohibidos.
+1. `getByRole("button", { name: /publish/i })` — semantic, accessible. **Preferred.**
+2. `getByLabel`, `getByPlaceholder`, `getByText` — for forms/content.
+3. `getByTestId("...")` — when there is no clear role (`data-testid` attribute).
+4. ❌ Raw CSS/XPath, auto-generated classes, `nth-child` — fragile, forbidden.
 
-Encadena por contexto para desambiguar: `page.getByRole("listitem").filter({ hasText: "X" })`.
+Chain by context to disambiguate: `page.getByRole("listitem").filter({ hasText: "X" })`.
 
-## Esperas web-first (auto-retry)
+## Web-first waiting (auto-retry)
 
-Playwright reintenta las aserciones hasta que se cumplen o expira el timeout. Úsalo:
+Playwright retries assertions until they hold or the timeout elapses. Use it:
 
 ```ts
-await expect(page.getByRole("status")).toHaveText(/listo/i);
+await expect(page.getByRole("status")).toHaveText(/ready/i);
 await expect(page.getByRole("row")).toHaveCount(3);
 ```
 
-- ❌ **Nunca** `page.waitForTimeout(ms)` (sleep): es la causa nº1 de flakiness.
-- ❌ Evita `waitForLoadState("networkidle")`: poco fiable.
-- ✅ Espera a un estado **observable** (un elemento visible, un texto, una URL):
-  `await page.waitForURL(/\/exito/)`.
+- ❌ **Never** `page.waitForTimeout(ms)` (sleep): the #1 source of flakiness.
+- ❌ Avoid `waitForLoadState("networkidle")`: unreliable.
+- ✅ Wait for an **observable** state (a visible element, a text, a URL):
+  `await page.waitForURL(/\/success/)`.
 
-## Acciones con auto-waiting
+## Actions with auto-waiting
 
-`click`, `fill`, etc. ya esperan a que el elemento sea accionable. No metas
-esperas manuales antes. Si una acción "necesita" un sleep para funcionar, el
-problema es el locator o un estado no esperado, no el timing.
+`click`, `fill`, etc. already wait for the element to be actionable. Do not add
+manual waits before them. If an action "needs" a sleep to work, the problem is the
+locator or an unexpected state, not timing.
 
-## Diagnosticar flakiness
+## Diagnosing flakiness
 
-La config guarda **trace `on-first-retry`**. Si un test es flaky, abre la traza
-(`npx playwright show-trace`) y mira el paso exacto que falló: casi siempre es un
-locator ambiguo, una aserción sobre algo aún no renderizado, o datos no
-namespaced que colisionan. Arréglalo en origen; **no** subas retries ni sleeps.
+The config saves a **trace on-first-retry**. If a test is flaky, open the trace
+(`npx playwright show-trace`) and look at the exact failing step: it is almost
+always an ambiguous locator, an assertion on something not yet rendered, or
+non-namespaced data that collides. Fix it at the source; do **not** raise retries
+or add sleeps.

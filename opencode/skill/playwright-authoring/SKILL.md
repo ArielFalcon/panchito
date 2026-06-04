@@ -1,52 +1,52 @@
 ---
 name: playwright-authoring
-description: Cómo escribir tests E2E Playwright robustos y deterministas (locators, esperas, fixtures, autenticación, geolocalización, móvil/offline, cookies/cache, subida de ficheros). Úsala SIEMPRE que generes o corrijas un spec.
+description: How to write robust, deterministic Playwright E2E tests (locators, waiting, fixtures, authentication, geolocation, mobile/offline, cookies/cache, file upload). Use it WHENEVER you generate or fix a spec.
 ---
 
-# Autoría de E2E con Playwright
+# Playwright E2E authoring
 
-Conocimiento de oficio para escribir specs que pasen el harness a la primera y
-no sean flaky. Patrón base: **fixtures** (no Page Object Model). Material de
-referencia adaptado de [TestDino playwright-skill](https://github.com/testdino-hq/playwright-skill) (MIT).
+Craft knowledge for writing specs that pass the harness on the first try and are
+not flaky. Base pattern: **fixtures** (not Page Object Model). Reference material
+adapted from [TestDino playwright-skill](https://github.com/testdino-hq/playwright-skill) (MIT).
 
-> **Precedencia:** las reglas de `AGENTS.md` y del prompt del agente MANDAN sobre
-> cualquier guía de aquí. En concreto: **nada de mocks de red** (ejercitamos DEV
-> real), datos namespaced, `cleanup` obligatorio, locators por rol/testid.
+> **Precedence:** the rules in `AGENTS.md` and the agent prompt OVERRIDE any guide
+> here. In particular: **no network mocks** (we exercise the real DEV), namespaced
+> data, mandatory `cleanup`, role/testid locators.
 
-## Reglas duras (siempre)
+## Hard rules (always)
 
-- **Locators**: `getByRole`, `getByLabel`, `getByTestId`. Nunca CSS/XPath frágil.
-- **Esperas web-first**: usa los `expect(locator).toBeVisible()` etc. con
-  auto-retry. **Prohibido `waitForTimeout`** (sleep) y `networkidle`.
-- **Un assert real** sobre el resultado observable, no solo clics.
-- **Fixtures** del repo (`./fixtures`): `test`, `expect`, `ns`, y los helpers
+- **Locators**: `getByRole`, `getByLabel`, `getByTestId`. Never fragile CSS/XPath.
+- **Web-first waiting**: use `expect(locator).toBeVisible()` etc. with auto-retry.
+  **No `waitForTimeout`** (sleep) and no `networkidle`.
+- **One real assert** on the observable outcome, not just clicks.
+- **Repo fixtures** (`./fixtures`): `test`, `expect`, `ns`, and the helpers
   (`setLocation`, `goOffline`, `readCookies`, `readStorage`, `asset`).
-- **Determinismo**: sin orden implícito entre tests; cada uno se basta solo.
+- **Determinism**: no implicit ordering between tests; each one stands on its own.
 
-## Cuándo leer cada referencia (divulgación progresiva)
+## When to read each reference (progressive disclosure)
 
-Lee el fichero concreto solo cuando el test lo necesite:
+Read the specific file only when the test needs it:
 
-- **`auth.md`** — login de la app. Esta app tiene DOS capas: el gate HTTP Basic
-  del entorno DEV y el login por **Keycloak** (redirección fuera del dominio).
-  También cómo cachear sesión con storageState y cómo probar páginas públicas.
-- **`browser-conditions.md`** — **geolocalización**, modo **móvil** y modo
-  **offline**, y permisos del navegador.
-- **`storage-and-uploads.md`** — leer **cookies/cache/localStorage** para
-  asertar, y **subir fotos** usando los assets y su metadata.
-- **`locators-and-waiting.md`** — patrones finos de locators y esperas, y cómo
-  diagnosticar flakiness (trace viewer).
+- **`auth.md`** — app login. This app has TWO layers: the DEV environment's HTTP
+  Basic gate and the **Keycloak** login (redirect outside the domain). Also how to
+  cache the session with storageState and how to test public pages.
+- **`browser-conditions.md`** — **geolocation**, **mobile** mode and **offline**
+  mode, and browser permissions.
+- **`storage-and-uploads.md`** — reading **cookies/cache/localStorage** for
+  assertions, and **uploading photos** using the assets and their metadata.
+- **`locators-and-waiting.md`** — fine-grained locator and waiting patterns, and
+  how to diagnose flakiness (trace viewer).
 
-## Estructura de un spec
+## Structure of a spec
 
 ```ts
 import { test, expect, ns } from "../fixtures";
 
-test("checkout con >10 ítems completa el pago", async ({ page, namespace, authenticate, cleanup }) => {
-  await authenticate();                         // omite esto en tests públicos
-  const item = ns(namespace, "item");           // datos namespaced
-  cleanup(async () => { /* borra `item` */ });  // limpia lo que creas
-  // ... ejercita el flujo real contra DEV ...
-  await expect(page.getByRole("status")).toHaveText(/pago completado/i); // assert real
+test("checkout with >10 items completes the payment", async ({ page, namespace, authenticate, cleanup }) => {
+  await authenticate();                         // omit this in public tests
+  const item = ns(namespace, "item");           // namespaced data
+  cleanup(async () => { /* delete `item` */ });  // clean up what you create
+  // ... exercise the real flow against DEV ...
+  await expect(page.getByRole("status")).toHaveText(/payment complete/i); // real assert
 });
 ```

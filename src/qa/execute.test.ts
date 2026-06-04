@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runE2E, ExecuteDeps } from "./execute";
 
-test("ejecuta, mapea casos y SANITIZA los logs", async () => {
+test("runs, maps cases and SANITIZES the logs", async () => {
   const deps: ExecuteDeps = {
     runSuite: async () => ({
       report: {
@@ -12,7 +12,7 @@ test("ejecuta, mapea casos y SANITIZA los logs", async () => {
             specs: [
               { title: "ok", ok: true },
               {
-                title: "rota",
+                title: "broken",
                 ok: false,
                 tests: [{ results: [{ status: "failed", error: { message: "boom" } }] }],
               },
@@ -20,8 +20,8 @@ test("ejecuta, mapea casos y SANITIZA los logs", async () => {
           },
         ],
       },
-      // log con un secreto que NO debe salir hacia el LLM/Issue
-      logs: "corriendo... token: ghs_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa fin",
+      // a log with a secret that must NOT reach the LLM/Issue
+      logs: "running... token: ghs_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa end",
     }),
   };
 
@@ -30,11 +30,11 @@ test("ejecuta, mapea casos y SANITIZA los logs", async () => {
   assert.equal(run.verdict, "fail");
   assert.equal(run.passed, false);
   assert.equal(run.cases.length, 2);
-  assert.doesNotMatch(run.logs, /ghs_aaaa/); // secreto redactado
+  assert.doesNotMatch(run.logs, /ghs_aaaa/); // secret redacted
   assert.match(run.logs, /\[REDACTED_SECRET\]/);
 });
 
-test("clasifica flaky cuando hay casos inestables y ninguno falla", async () => {
+test("classifies flaky when there are unstable cases and none fail", async () => {
   const deps: ExecuteDeps = {
     runSuite: async () => ({
       report: { suites: [{ specs: [{ title: "x", tests: [{ status: "flaky" }] }] }] },
@@ -46,7 +46,7 @@ test("clasifica flaky cuando hay casos inestables y ninguno falla", async () => 
   assert.equal(run.passed, false);
 });
 
-test("todo en verde => verdict pass", async () => {
+test("all green => verdict pass", async () => {
   const deps: ExecuteDeps = {
     runSuite: async () => ({ report: { stats: { unexpected: 0 } }, logs: "ok" }),
   };

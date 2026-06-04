@@ -13,7 +13,7 @@ const app: AppConfig = {
     pollIntervalMs: 1,
     deployTimeoutMs: 100,
   },
-  qa: { needsReview: true, testDataPrefix: "qa-bot", criticalFlows: [] },
+  qa: { needsReview: true, testDataPrefix: "qa-bot" },
   report: { onFailure: "github-issue" },
 };
 
@@ -36,8 +36,8 @@ function deps(
     validation?: { ok: boolean; errors: string[] };
     prUrl?: string | null;
     agent?: AgentResult;
-    healthy?: boolean | boolean[]; // un valor, o una secuencia por llamada
-    message?: string; // mensaje del commit (clasificación)
+    healthy?: boolean | boolean[]; // a single value, or a sequence per call
+    message?: string; // commit message (classification)
     diff?: string;
   } = {},
 ): Harness {
@@ -50,7 +50,7 @@ function deps(
     },
     prepare: async () => {
       calls.push("prepare");
-      return { mirrorDir: "/mirrors/org__demo", diff: opts.diff ?? "DIFF", message: opts.message ?? "feat: cambio" };
+      return { mirrorDir: "/mirrors/org__demo", diff: opts.diff ?? "DIFF", message: opts.message ?? "feat: change" };
     },
     generate: async () => {
       calls.push("generate");
@@ -90,14 +90,14 @@ function passing(): QaRunResult {
   return { sha: "s", verdict: "pass", passed: true, cases: [], logs: "" };
 }
 
-test("verde: orquesta gate → prepare → generate → setup → validate → health → execute → publish", async () => {
+test("green: orchestrates gate → prepare → generate → setup → validate → health → execute → publish", async () => {
   const calls: string[] = [];
   await runPipeline(app, "abc123", deps(passing(), calls), "manual");
-  // en verde, el re-check de salud post-fallo se cortocircuita (solo 1 health)
+  // on green, the post-failure health re-check short-circuits (only 1 health)
   assert.deepEqual(calls, ["gate", "prepare", "generate", "setup", "validate", "health", "execute", "publish"]);
 });
 
-test("verde abre PR, NO Issue", async () => {
+test("green opens a PR, NOT an Issue", async () => {
   const calls: string[] = [];
   const d = deps(passing(), calls);
   await runPipeline(app, "abc123", d);
@@ -105,7 +105,7 @@ test("verde abre PR, NO Issue", async () => {
   assert.equal(d.issues.length, 0);
 });
 
-test("verde sin cambios en e2e: no rompe (publish devuelve null)", async () => {
+test("green with no changes in e2e: does not break (publish returns null)", async () => {
   const calls: string[] = [];
   const d = deps(passing(), calls, { prUrl: null });
   const run = await runPipeline(app, "abc123", d);
@@ -113,7 +113,7 @@ test("verde sin cambios en e2e: no rompe (publish devuelve null)", async () => {
   assert.equal(d.issues.length, 0);
 });
 
-test("al fallar abre Issue con el SHA y NO publica", async () => {
+test("on failure opens an Issue with the SHA and does NOT publish", async () => {
   const calls: string[] = [];
   const d = deps(
     { sha: "s", verdict: "fail", passed: false, cases: [{ name: "login", status: "fail" }], logs: "x" },
@@ -125,7 +125,7 @@ test("al fallar abre Issue con el SHA y NO publica", async () => {
   assert.match(d.issues[0]!, /abc123/);
 });
 
-test("flaky: ni PR ni Issue (cuarentena)", async () => {
+test("flaky: neither PR nor Issue (quarantine)", async () => {
   const calls: string[] = [];
   const d = deps(
     { sha: "s", verdict: "flaky", passed: false, cases: [{ name: "checkout", status: "flaky" }], logs: "" },
@@ -136,7 +136,7 @@ test("flaky: ni PR ni Issue (cuarentena)", async () => {
   assert.equal(d.issues.length, 0);
 });
 
-test("specs inválidos: NO ejecuta ni publica, abre Issue de validación", async () => {
+test("invalid specs: does NOT execute or publish, opens a validation Issue", async () => {
   const calls: string[] = [];
   const d = deps(passing(), calls, { validation: { ok: false, errors: ["[lint] no-wait-for-timeout"] } });
   const run = await runPipeline(app, "abc123", d);
@@ -144,31 +144,31 @@ test("specs inválidos: NO ejecuta ni publica, abre Issue de validación", async
   assert.ok(!calls.includes("execute"));
   assert.ok(!calls.includes("publish"));
   assert.equal(d.issues.length, 1);
-  assert.match(d.issues[0]!, /no pudo validar/);
+  assert.match(d.issues[0]!, /could not validate/);
 });
 
-test("verde pero el revisor NO aprobó: no publica, abre Issue de revisión", async () => {
+test("green but the reviewer did NOT approve: does not publish, opens a review Issue", async () => {
   const calls: string[] = [];
-  const rejected: AgentResult = { output: "x", specs: [], reviewed: true, approved: false, note: "falsos positivos" };
+  const rejected: AgentResult = { output: "x", specs: [], reviewed: true, approved: false, note: "false positives" };
   const d = deps(passing(), calls, { agent: rejected });
   await runPipeline(app, "abc123", d);
   assert.equal(d.published, false);
   assert.equal(d.issues.length, 1);
-  assert.match(d.issues[0]!, /el revisor no aprobó/);
+  assert.match(d.issues[0]!, /did not approve/);
 });
 
-test("DEV no sano antes de ejecutar: infra-error, ni ejecuta ni reporta como bug", async () => {
+test("DEV unhealthy before execution: infra-error, neither executes nor reports as a bug", async () => {
   const calls: string[] = [];
   const d = deps(passing(), calls, { healthy: false });
   const run = await runPipeline(app, "abc123", d);
   assert.equal(run.verdict, "infra-error");
   assert.ok(!calls.includes("execute"));
-  assert.equal(d.issues.length, 0); // infra NO abre Issue
+  assert.equal(d.issues.length, 0); // infra does NOT open an Issue
 });
 
-test("fallos con DEV caído a mitad: se reclasifica a infra-error (sin Issue)", async () => {
+test("failures with DEV down mid-run: reclassified to infra-error (no Issue)", async () => {
   const calls: string[] = [];
-  // sano en el pre-flight, caído en el re-check post-fallo
+  // healthy in the pre-flight, down in the post-failure re-check
   const failing: QaRunResult = { sha: "s", verdict: "fail", passed: false, cases: [{ name: "x", status: "fail" }], logs: "" };
   const d = deps(failing, calls, { healthy: [true, false] });
   const run = await runPipeline(app, "abc123", d);
@@ -176,34 +176,34 @@ test("fallos con DEV caído a mitad: se reclasifica a infra-error (sin Issue)", 
   assert.equal(d.issues.length, 0);
 });
 
-test("commit style (sin lógica): skipped, no genera ni ejecuta", async () => {
+test("style commit (no logic): skipped, neither generates nor executes", async () => {
   const calls: string[] = [];
-  const d = deps(passing(), calls, { message: "style: reordena comentarios", diff: "" });
+  const d = deps(passing(), calls, { message: "style: reorder comments", diff: "" });
   const run = await runPipeline(app, "abc123", d);
   assert.equal(run.verdict, "skipped");
   assert.equal(run.passed, true);
-  assert.deepEqual(calls, ["gate", "prepare"]); // ni generate ni execute
+  assert.deepEqual(calls, ["gate", "prepare"]); // neither generate nor execute
 });
 
-test("commit refactor sin lógica: regresión (ejecuta existentes, NO genera ni publica)", async () => {
+test("refactor commit without logic: regression (runs existing, does NOT generate or publish)", async () => {
   const calls: string[] = [];
-  const d = deps(passing(), calls, { message: "refactor: unifica auth", diff: "DIFF" });
+  const d = deps(passing(), calls, { message: "refactor: unify auth", diff: "DIFF" });
   await runPipeline(app, "abc123", d);
-  assert.ok(!calls.includes("generate")); // no genera
-  assert.ok(calls.includes("execute")); // pero sí valida/ejecuta la suite
-  assert.equal(d.published, false); // nada nuevo que publicar
+  assert.ok(!calls.includes("generate")); // does not generate
+  assert.ok(calls.includes("execute")); // but does validate/run the suite
+  assert.equal(d.published, false); // nothing new to publish
 });
 
-test("refactor que SÍ añade lógica (contradicción): se escala a generar", async () => {
+test("refactor that DOES add logic (contradiction): escalates to generate", async () => {
   const calls: string[] = [];
   const logicDiff = ["diff --git a/src/x.ts b/src/x.ts", "+++ b/src/x.ts", "+if (a) { return f(); }"].join("\n");
-  const d = deps(passing(), calls, { message: "refactor: limpieza", diff: logicDiff });
+  const d = deps(passing(), calls, { message: "refactor: cleanup", diff: logicDiff });
   await runPipeline(app, "abc123", d);
-  assert.ok(calls.includes("generate")); // contradicción → genera
+  assert.ok(calls.includes("generate")); // contradiction → generate
   assert.equal(d.published, true);
 });
 
-test("modo sombra: en verde NO publica, solo loguea", async () => {
+test("shadow mode: on green does NOT publish, only logs", async () => {
   const calls: string[] = [];
   const shadowApp = { ...app, qa: { ...app.qa, shadow: true } };
   const d = deps(passing(), calls);
@@ -212,7 +212,7 @@ test("modo sombra: en verde NO publica, solo loguea", async () => {
   assert.equal(d.issues.length, 0);
 });
 
-test("modo sombra: ante fallo NO abre Issue", async () => {
+test("shadow mode: on failure does NOT open an Issue", async () => {
   const calls: string[] = [];
   const shadowApp = { ...app, qa: { ...app.qa, shadow: true } };
   const d = deps(

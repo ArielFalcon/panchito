@@ -1,9 +1,9 @@
-// Parser puro del reporter JSON de Playwright → casos pass/fail/flaky. Aislado
-// para poder verificarlo con un reporte de muestra sin ejecutar navegadores.
+// Pure parser of the Playwright JSON report → pass/fail/flaky cases. Isolated so
+// it can be verified with a sample report without running browsers.
 //
-// Flaky = Filtro C del harness: Playwright marca un test como "flaky" cuando
-// falla y luego pasa en un reintento (retries configurados en la config base).
-// Tratamos esa inestabilidad como NO fiable → cuarentena, no fallo real.
+// Flaky is Filter C of the harness: Playwright marks a test "flaky" when it fails
+// and then passes on a retry (retries are set in the base config). We treat that
+// instability as NOT trustworthy → quarantine, not a real failure.
 
 import { CaseStatus, RunVerdict } from "../types";
 
@@ -14,8 +14,8 @@ export interface PwCase {
 }
 
 export interface ParsedReport {
-  verdict: RunVerdict; // "pass" | "fail" | "flaky" (nunca "invalid": eso es el gate estático)
-  passed: boolean; // atajo: verdict === "pass"
+  verdict: RunVerdict; // "pass" | "fail" | "flaky" (never "invalid": that is the static gate)
+  passed: boolean; // shorthand for verdict === "pass"
   cases: PwCase[];
 }
 
@@ -52,10 +52,11 @@ export function parsePlaywrightReport(json: unknown): ParsedReport {
     for (const suite of suites ?? []) {
       const title = [prefix, suite.title].filter(Boolean).join(" › ");
       for (const spec of suite.specs ?? []) {
+        const status = specStatus(spec);
         cases.push({
           name: [title, spec.title].filter(Boolean).join(" › "),
-          status: specStatus(spec),
-          detail: specStatus(spec) === "pass" ? undefined : firstError(spec),
+          status,
+          detail: status === "pass" ? undefined : firstError(spec),
         });
       }
       walk(suite.suites, title);
@@ -67,8 +68,8 @@ export function parsePlaywrightReport(json: unknown): ParsedReport {
   return { verdict, passed: verdict === "pass", cases };
 }
 
-// Estado de un spec, priorizando el `status` por test de Playwright cuando
-// existe (expected/unexpected/flaky); si no, cae al `ok`/results heredado.
+// A spec's status, preferring Playwright's per-test `status` when present
+// (expected/unexpected/flaky); otherwise falls back to the legacy `ok`/results.
 function specStatus(spec: PwSpec): CaseStatus {
   const statuses = (spec.tests ?? []).map((t) => t.status).filter(Boolean) as string[];
   if (statuses.length) {
@@ -76,7 +77,7 @@ function specStatus(spec: PwSpec): CaseStatus {
     if (statuses.includes("flaky")) return "flaky";
     return "pass";
   }
-  // Fallback (reportes sin status por test): no distingue flaky.
+  // Fallback (reports without per-test status): cannot distinguish flaky.
   const ok =
     spec.ok ??
     (spec.tests ?? []).every((t) =>
@@ -91,7 +92,7 @@ function aggregate(cases: PwCase[], report: PwReport): RunVerdict {
     if (cases.some((c) => c.status === "flaky")) return "flaky";
     return "pass";
   }
-  // Sin specs detectados: usa los stats globales.
+  // No specs detected: use the global stats.
   if ((report.stats?.unexpected ?? 0) > 0) return "fail";
   if ((report.stats?.flaky ?? 0) > 0) return "flaky";
   return "pass";

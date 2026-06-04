@@ -4,14 +4,14 @@ import { validateSpecs, ValidateDeps } from "./validate";
 
 const ok = async () => ({ ok: true, output: "" });
 
-test("ok cuando los cuatro chequeos pasan", async () => {
+test("ok when the four checks pass", async () => {
   const deps: ValidateDeps = { typecheck: ok, lint: ok, listTests: ok, checkManifest: ok };
   const res = await validateSpecs("/dir", deps);
   assert.equal(res.ok, true);
   assert.equal(res.errors.length, 0);
 });
 
-test("acumula TODOS los fallos (no corta al primero) con su etiqueta", async () => {
+test("accumulates ALL failures (does not stop at the first) with their label", async () => {
   const deps: ValidateDeps = {
     typecheck: async () => ({ ok: false, output: "TS2322 type error" }),
     lint: ok,
@@ -25,12 +25,12 @@ test("acumula TODOS los fallos (no corta al primero) con su etiqueta", async () 
   assert.match(res.errors[1]!, /\[list\] no spec files/);
 });
 
-test("metadata inválida marca el run como inválido", async () => {
+test("invalid metadata makes the run invalid", async () => {
   const deps: ValidateDeps = {
     typecheck: ok,
     lint: ok,
     listTests: ok,
-    checkManifest: async () => ({ ok: false, output: "'login': falta 'objective'" }),
+    checkManifest: async () => ({ ok: false, output: "'login': missing 'objective'" }),
   };
   const res = await validateSpecs("/dir", deps);
   assert.equal(res.ok, false);

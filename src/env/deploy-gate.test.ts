@@ -15,7 +15,7 @@ const target: DeployTarget = {
   deployTimeoutMs: 1000,
 };
 
-// Reloj controlado: cada llamada a now() avanza una cantidad fija.
+// Controlled clock: each now() call advances by a fixed amount.
 function clock(stepMs: number) {
   let t = 0;
   return () => {
@@ -25,11 +25,11 @@ function clock(stepMs: number) {
   };
 }
 
-test("resuelve cuando DEV alcanza el SHA y está healthy", async () => {
+test("resolves when DEV reaches the SHA and is healthy", async () => {
   const responses: (VersionInfo | null)[] = [
-    null, // aún no responde
-    { sha: "abc123", healthy: false }, // desplegando
-    { sha: "abc123", healthy: true }, // listo
+    null, // not responding yet
+    { sha: "abc123", healthy: false }, // deploying
+    { sha: "abc123", healthy: true }, // ready
   ];
   let i = 0;
   const deps: GateDeps = {
@@ -38,19 +38,19 @@ test("resuelve cuando DEV alcanza el SHA y está healthy", async () => {
     now: clock(50),
   };
   await assert.doesNotReject(waitForDeploy(target, "abc123", deps));
-  assert.equal(i, 3); // consultó hasta encontrar el match
+  assert.equal(i, 3); // polled until it found the match
 });
 
-test("lanza DeployTimeoutError si nunca alcanza el SHA", async () => {
+test("throws DeployTimeoutError if it never reaches the SHA", async () => {
   const deps: GateDeps = {
-    fetchVersion: async () => ({ sha: "viejo", healthy: true }),
+    fetchVersion: async () => ({ sha: "old", healthy: true }),
     sleep: async () => {},
-    now: clock(300), // supera deployTimeoutMs=1000 en pocas vueltas
+    now: clock(300), // exceeds deployTimeoutMs=1000 in a few iterations
   };
-  await assert.rejects(() => waitForDeploy(target, "nuevo", deps), DeployTimeoutError);
+  await assert.rejects(() => waitForDeploy(target, "new", deps), DeployTimeoutError);
 });
 
-test("no acepta el SHA correcto si no está healthy", async () => {
+test("does not accept the right SHA if it is not healthy", async () => {
   const deps: GateDeps = {
     fetchVersion: async () => ({ sha: "abc123", healthy: false }),
     sleep: async () => {},

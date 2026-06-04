@@ -21,7 +21,7 @@ function deps(status: string, opts: { autoMergeFails?: boolean } = {}): PublishD
       return { url: "https://github.com/org/app/pull/7", nodeId: "PR_node", number: 7 };
     },
     enableAutoMerge: async () => {
-      if (opts.autoMergeFails) throw new Error("auto-merge no permitido");
+      if (opts.autoMergeFails) throw new Error("auto-merge not allowed");
       pr.autoMerged = true;
     },
     log: () => {},
@@ -30,22 +30,22 @@ function deps(status: string, opts: { autoMergeFails?: boolean } = {}): PublishD
 
 const input = { repo: "org/app", sha: "abc1234567", mirrorDir: "/mirrors/org__app", baseBranch: "main" };
 
-test("sin cambios en e2e/ NO abre PR", async () => {
+test("no changes in e2e/ → no PR opened", async () => {
   const d = deps("   \n  ");
   const res = await publishE2e(input, d);
   assert.equal(res, null);
   assert.equal(d.pr.created, false);
-  // solo consultó status, no comiteó ni pusheó
+  // only queried status; did not commit or push
   assert.deepEqual(d.gitCalls.map((c) => c[0]), ["status"]);
 });
 
-test("con cambios: rama, commit, push, PR y auto-merge", async () => {
+test("with changes: branch, commit, push, PR and auto-merge", async () => {
   const d = deps(" M e2e/login.spec.ts");
   const res = await publishE2e(input, d);
   assert.equal(res?.prUrl, "https://github.com/org/app/pull/7");
   assert.equal(d.pr.created, true);
   assert.equal(d.pr.autoMerged, true);
-  // secuencia de operaciones git (el commit lleva flags -c user.* delante)
+  // git operation sequence (the commit carries -c user.* flags up front)
   assert.ok(d.gitCalls.some((c) => c[0] === "status"));
   assert.ok(d.gitCalls.some((c) => c[0] === "checkout" && c.includes("qa/e2e-abc1234")));
   assert.ok(d.gitCalls.some((c) => c[0] === "add"));
@@ -53,10 +53,10 @@ test("con cambios: rama, commit, push, PR y auto-merge", async () => {
   assert.ok(d.gitCalls.some((c) => c.includes("push")));
 });
 
-test("auto-merge best-effort: si falla, el PR queda abierto igual", async () => {
+test("best-effort auto-merge: if it fails, the PR stays open anyway", async () => {
   const d = deps(" M e2e/x.spec.ts", { autoMergeFails: true });
   const res = await publishE2e(input, d);
   assert.equal(res?.prUrl, "https://github.com/org/app/pull/7");
   assert.equal(d.pr.created, true);
-  assert.equal(d.pr.autoMerged, false); // no rompe el run
+  assert.equal(d.pr.autoMerged, false); // does not break the run
 });

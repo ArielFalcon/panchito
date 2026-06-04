@@ -4,10 +4,10 @@ import { testDataNamespace, shortSha } from "./test-data";
 
 const SHA = "abc1234567890";
 
-test("namespace usa prefijo + sha corto", () => {
+test("namespace uses prefix + short sha", () => {
   assert.equal(testDataNamespace("qa-bot", SHA), "qa-bot-abc1234");
 });
 
-test("shortSha recorta a 7", () => {
+test("shortSha trims to 7", () => {
   assert.equal(shortSha(SHA), "abc1234");
 });

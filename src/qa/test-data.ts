@@ -1,9 +1,9 @@
-// Higiene de datos de test contra la DB real de DEV. En vez de DB efímera,
-// namespacing por SHA: toda entidad creada lleva el prefijo qa-bot-<sha7>,
-// identificable y limpiable (cada test la borra en su teardown). Funciones
-// puras (verificables sin red).
+// Test-data hygiene against the real DEV database. Instead of an ephemeral DB, we
+// namespace by SHA: every entity a test creates carries the prefix qa-bot-<sha7>,
+// so it is identifiable and cleanable (each test removes it in its teardown).
+// Pure functions (verifiable without network).
 
-// SHA corto (7) — formato canónico para ramas, namespaces y títulos.
+// Short SHA (7 chars) — the canonical form for branches, namespaces and titles.
 export function shortSha(sha: string): string {
   return sha.slice(0, 7);
 }

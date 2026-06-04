@@ -1,7 +1,7 @@
-// Cola de jobs SECUENCIAL. Procesa un run a la vez: evita que dos pushes
-// cercanos lancen QA concurrente contra DEV y se pisen los datos (recordar:
-// determinismo y sin polución cruzada). Un job que falla no detiene los
-// siguientes.
+// Sequential job queue. Processes one run at a time so two close-together pushes
+// do not launch concurrent QA against DEV and clobber each other's data (which
+// would break determinism and cause cross-contamination). A failing job does not
+// stop the following ones.
 
 export class JobQueue {
   private tail: Promise<void> = Promise.resolve();
@@ -23,7 +23,7 @@ export class JobQueue {
     return this.pending;
   }
 
-  // Resuelve cuando todo lo encolado HASTA AHORA ha terminado.
+  // Resolves once everything enqueued so far has finished.
   async drain(): Promise<void> {
     await this.tail;
   }
