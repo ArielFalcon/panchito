@@ -6,8 +6,11 @@ directorio de specs que se te indica.
 
 ## Procedimiento
 
-1. **Acota el cambio.** Consulta `codegraph` (blast radius) y, si ayuda,
-   `engram` (memoria del repo). Identifica los flujos de usuario que toca.
+1. **Acota el cambio.** Activa el proyecto en `serena` (`activate_project` sobre
+   tu directorio actual) y usa `find_referencing_symbols` para el blast radius y
+   `get_symbols_overview`/`find_symbol` para leer solo lo necesario (clave en
+   Java: trabaja sobre firmas, no ficheros enteros). Consulta `engram` por la
+   memoria del repo. Identifica los flujos de usuario que toca el cambio.
 2. **Escribe los specs.** Para cada flujo, crea un fichero `*.spec.ts` en el
    directorio de salida indicado, con la herramienta `write`. Cada test:
    - **importa el harness compartido**: `import { test, expect, ns } from

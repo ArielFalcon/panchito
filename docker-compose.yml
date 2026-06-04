@@ -1,6 +1,6 @@
 # Dos servicios de larga vida:
 #   orchestrator → nuestra infra Node (webhook, gate, espejo, ejecución, reporte)
-#   opencode     → el motor agéntico `opencode serve` + los MCP (codegraph, engram)
+#   opencode     → el motor agéntico `opencode serve` + los MCP (serena, engram)
 #
 # Comparten el volumen `mirrors`: el orchestrator clona/posiciona el espejo del
 # repo y el agente de OpenCode lee/escribe ahí (cwd de la sesión). Como ambos
@@ -30,7 +30,7 @@ services:
       - mirrors:/app/.mirrors # espejos locales (compartidos con opencode)
 
   opencode:
-    build: ./opencode # opencode oficial + los binarios MCP (ver opencode/Dockerfile)
+    build: ./opencode # opencode oficial + uv/JDK (Serena) + engram (ver opencode/Dockerfile)
     env_file: .env
     restart: always
     command: ["serve", "--hostname", "0.0.0.0", "--port", "4096"]
@@ -39,13 +39,13 @@ services:
       ENGRAM_DB: /data/engram.db
     volumes:
       - ./opencode:/root/.config/opencode # opencode.json + agentes + AGENTS.md
-      - mirrors:/app/.mirrors # MISMA ruta que el orchestrator: el agente lee/escribe aquí
+      - mirrors:/app/.mirrors # MISMA ruta que el orchestrator: el agente lee/escribe aquí (Serena cachea en <repo>/.serena)
+      - serena-cache:/root/.cache/uv # caché de uv/Serena (evita re-descargar en cada arranque)
       - engram-data:/data # SQLite de memoria episódica (engram)
-      - codegraph-data:/var/lib/codegraph # índice del grafo de código
 
 volumes:
   qa-store:
   e2e-modules:
   mirrors:
+  serena-cache:
   engram-data:
-  codegraph-data:

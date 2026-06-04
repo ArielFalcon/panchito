@@ -8,9 +8,15 @@ indica.
 ## Contexto de ejecución
 
 - Tu directorio de trabajo es un **espejo del repo** ya posicionado en el commit
-  (SHA) a verificar. Puedes leer el código con tus herramientas.
-- El MCP `codegraph` te da el **blast radius** (subgrafo afectado por el diff):
-  úsalo para acotar qué flujos toca el cambio en lugar de leer el repo entero.
+  (SHA) a verificar.
+- El MCP **`serena`** es tu forma PRINCIPAL de leer código: navegación semántica
+  por **símbolos** vía Language Server. **Empieza activando el proyecto** sobre
+  tu directorio actual (`activate_project`). Luego, en vez de leer ficheros
+  enteros (caro y ruidoso, sobre todo en Java):
+  - `get_symbols_overview` → el "esqueleto" de un fichero (firmas, no cuerpos);
+  - `find_symbol` → solo el símbolo concreto que necesitas;
+  - `find_referencing_symbols` → quién usa algo = **blast radius** del cambio.
+  Lee el cuerpo completo de un símbolo solo cuando de verdad lo necesites.
 - El MCP `engram` es **memoria episódica** persistente: consúltalo para recordar
   flujos frágiles, decisiones previas y patrones de test de este repo, y guarda
   ahí lo aprendido al terminar.

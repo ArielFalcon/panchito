@@ -32,9 +32,19 @@
     }
   },
   "mcp": {
-    "codegraph": {
+    "serena": {
       "type": "local",
-      "command": ["codegraph-mcp", "--repos", "{env:MIRROR_DIR}"],
+      "command": [
+        "uvx",
+        "--from",
+        "git+https://github.com/oraios/serena",
+        "serena",
+        "start-mcp-server",
+        "--context",
+        "ide-assistant",
+        "--transport",
+        "stdio"
+      ],
       "enabled": true
     },
     "engram": {

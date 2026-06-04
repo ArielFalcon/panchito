@@ -1,5 +1,5 @@
 // Espejos locales de los repos vigilados. El servicio (permanente) clona/
-// actualiza cada repo y hace checkout del SHA, para que codegraph pueda
+// actualiza cada repo y hace checkout del SHA, para que serena (LSP) pueda
 // calcular el blast radius y para extraer el diff del commit. git/exists se
 // inyectan para verificar la lógica sin tocar disco ni red en tests.
 

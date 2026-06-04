@@ -22,7 +22,7 @@ Dos servicios de larga vida (ver `docker-compose.yml`):
  │   orchestrator      │  ───────────────▶  │   opencode  (serve)      │
  │  (este repo, Node)  │   sesión + prompt  │  agente qa-generator     │
  │                     │ ◀───────────────   │   └─ subagente qa-reviewer│
- │  webhook + cola     │   specs escritos   │  MCP: codegraph, engram  │
+ │  webhook + cola     │   specs escritos   │  MCP: serena, engram     │
  │  gate · espejo      │   en el espejo     └──────────────────────────┘
  │  ejecución · reporte│         ▲  cwd = espejo (volumen compartido)
  └─────────────────────┘─────────┘
@@ -34,9 +34,11 @@ Dos servicios de larga vida (ver `docker-compose.yml`):
   Issue si falla. Todo con dependencias inyectables → verificable por tests
   unitarios.
 - **`opencode`**: el **motor agéntico**. `opencode serve` corre los agentes
-  definidos en `opencode/opencode.json` y los MCP (`codegraph` para el blast
-  radius, `engram` para la memoria episódica). El agente escribe los `.spec.ts`
-  en el espejo (volumen compartido) y nosotros los recogemos.
+  definidos en `opencode/opencode.json` y los MCP: **`serena`** (navegación
+  semántica de código vía LSP — blast radius con `find_referencing_symbols` y
+  lectura por firmas, no por ficheros enteros) y `engram` (memoria episódica).
+  El agente escribe los `.spec.ts` en el espejo (volumen compartido) y nosotros
+  los recogemos.
 
 ### Agentes (opencode/)
 
@@ -107,11 +109,13 @@ doppler run -- docker compose up --build
 # (o copia .env.example → .env para correr en local sin Doppler)
 ```
 
-- `orchestrator`: imagen basada en Playwright (Node + navegadores) + git.
-- `opencode`: imagen oficial de OpenCode + los binarios MCP (ver
-  `opencode/Dockerfile`, donde se instalan `codegraph-mcp` y `engram-mcp`).
-- Volúmenes: `mirrors` (compartido entre ambos), `qa-store` (suite de
-  regresión), `engram-data` (memoria), `codegraph-data` (índice del grafo).
+- `orchestrator`: imagen basada en Playwright (Node + navegadores) + git, con el
+  tooling de `config/e2e` instalado (Filtros B/C).
+- `opencode`: imagen oficial de OpenCode + `uv` y los runtimes de lenguaje que
+  use Serena (JDK para Java, etc.) + `engram` (ver `opencode/Dockerfile`).
+- Volúmenes: `mirrors` (compartido entre ambos; Serena cachea en `<repo>/.serena`),
+  `qa-store` (suite de regresión), `e2e-modules` (tooling e2e), `serena-cache`
+  (caché de uv/Serena), `engram-data` (memoria).
 
 ## Principios
 

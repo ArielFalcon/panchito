@@ -13,7 +13,7 @@ dev:
 qa:
   needsReview: true            # el revisor estricto valida los E2E generados
   testDataPrefix: "qa-bot"     # entidades de test namespaced por SHA
-  criticalFlows:               # pistas de qué priorizar (el codegraph afina)
+  criticalFlows:               # pistas de qué priorizar (serena afina por símbolos)
     - "login"
     - "checkout"
   credentials:                 # REFERENCIAS a env, no valores

@@ -1,6 +1,6 @@
 // Disparador del motor agéntico OpenCode. Sustituye al loop primario↔revisor,
 // a los providers y al cliente MCP hechos a mano: ahora la generación, la
-// revisión (subagente) y el acceso a codegraph/engram viven DENTRO de OpenCode
+// revisión (subagente) y el acceso a serena/engram viven DENTRO de OpenCode
 // (ver opencode/opencode.json). Aquí solo abrimos una sesión contra
 // `opencode serve`, le pasamos el contexto del cambio, y recogemos los .spec.ts
 // que el agente escribió en el espejo.
