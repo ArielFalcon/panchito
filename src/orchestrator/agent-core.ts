@@ -7,8 +7,7 @@ import { AgentContext, AgentResult } from "../types";
 import { sanitize } from "./sanitizer";
 import { buildPrompt, buildUserMessage } from "./prompt-builder";
 import { runLoop, LoopDeps } from "./loop";
-import { codegraph } from "../integrations/codegraph";
-import { engram } from "../integrations/engram";
+import { buildCodegraph, buildEngram } from "../integrations/factory";
 import { opencode } from "../providers/opencode";
 import { gemini } from "../providers/gemini";
 
@@ -25,8 +24,8 @@ const defaultDeps: RunDeps = {
     reviewer: ({ system, messages, temperature }) =>
       gemini.completeJson({ system, messages, temperature }),
   },
-  getImpactRadius: (repo, diff) => codegraph.getImpactRadius(repo, diff),
-  getMemory: (repo) => engram.getContext(repo),
+  getImpactRadius: (repo, diff) => buildCodegraph().getImpactRadius(repo, diff),
+  getMemory: (repo) => buildEngram().getContext(repo),
 };
 
 export async function runAgent(

@@ -50,6 +50,20 @@ export function loadSystemPrompt(role: string, root = ROOT): string {
   return [base, rolePrompt].filter(Boolean).join("\n\n");
 }
 
+export interface McpServer {
+  url?: string;
+  enabled?: boolean;
+}
+
+export function loadMcpServers(root = ROOT): Record<string, McpServer> {
+  const path = join(root, "config", "tools", "mcp-servers.yaml");
+  if (!existsSync(path)) return {};
+  const parsed = parse(expandEnv(readFileSync(path, "utf8"))) as {
+    servers?: Record<string, McpServer>;
+  };
+  return parsed.servers ?? {};
+}
+
 function readMaybe(path: string): string {
   return existsSync(path) ? readFileSync(path, "utf8") : "";
 }

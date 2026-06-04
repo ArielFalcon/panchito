@@ -347,15 +347,19 @@ Demuestra el **lazo completo** sin inteligencia todavía.
 **Cierre M0:** un comando manual con `{app, sha}` espera el deploy, corre un E2E
 contra DEV y, si falla, abre un Issue. El lazo end-to-end vive.
 
-### M1 — Generación real
-- `codegraph.getImpactRadius` calculando blast radius desde el `sha`.
-- Primario (OpenCode Go) generando E2E del blast radius; revisor (Gemini Flash)
-  validando con el loop de §6.
+### M1 — Generación real ✅ (cableado + verificado por tests unitarios)
+- Cliente MCP (JSON-RPC, transporte inyectable) y `codegraph.getImpactRadius`
+  vía MCP; `engram` (memoria) vía MCP. Construidos desde
+  `config/tools/mcp-servers.yaml`; degradan a impl. nula si no hay servidor.
+- `repo-mirror`: clone/fetch + checkout del SHA y diff del commit → blast radius.
+- Runner E2E (Playwright, reporter JSON → casos) con runner inyectable.
+- Sanitización del output de ejecución (`qa/execute.ts`) antes de reportar.
 - Persistencia de los E2E en el volumen (`qa/store.ts`).
-- Sanitizer cubriendo todas las fracciones (§7).
 
-**Cierre M1:** un cambio real produce E2E generados y revisados, ejecutados
-contra DEV, persistidos, con Issue accionable al fallar.
+**Cierre M1:** el lazo genera E2E (primario) revisados (revisor), los ejecuta vía
+runner Playwright contra DEV, sanitiza el output y persiste los artefactos. Las
+piezas de red/MCP/runner son inyectables y están cubiertas por tests unitarios;
+la ejecución real se activa al acoplar una app + sidecars MCP + Playwright.
 
 ### M2 — Disparo automático
 - `server/webhook.ts` recibe `{ repo, sha }` del repo vigilado tras el deploy.

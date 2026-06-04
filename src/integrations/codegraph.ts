@@ -1,12 +1,24 @@
 // Contexto ESTRUCTURAL del código vía code-review-graph (MCP). getImpactRadius
 // devuelve solo el subgrafo afectado por el diff (blast radius), no el repo
-// entero. Como el servicio es permanente, el MCP corre como sidecar de larga
-// vida (ver docker-compose) — sin el problema de bootstrap del modelo efímero.
+// entero. El cliente MCP se inyecta (factory lo construye desde config); si no
+// hay servidor configurado se usa nullCodegraph (comportamiento M0).
 
-export const codegraph = {
-  async getImpactRadius(_repo: string, _diff: string): Promise<string | null> {
-    // TODO(M1): conectar al MCP code-review-graph (get_impact_radius) usando un
-    // espejo local del repo en el SHA. Devuelve null en M0 (sin MCP cableado).
-    return null;
-  },
+import { McpClient } from "./mcp/client";
+
+export interface Codegraph {
+  getImpactRadius(repo: string, diff: string): Promise<string | null>;
+}
+
+export const nullCodegraph: Codegraph = {
+  getImpactRadius: async () => null,
 };
+
+export function makeCodegraph(client: McpClient): Codegraph {
+  return {
+    async getImpactRadius(repo, diff) {
+      const res = await client.callTool("get_impact_radius", { repo, diff });
+      if (res == null || res === "") return null;
+      return typeof res === "string" ? res : JSON.stringify(res);
+    },
+  };
+}

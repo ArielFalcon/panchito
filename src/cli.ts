@@ -5,8 +5,9 @@
 import { loadAppConfig } from "./orchestrator/config-loader";
 import { waitForDeploy } from "./env/deploy-gate";
 import { runAgent } from "./orchestrator/agent-core";
-import { runE2E } from "./qa/execute";
+import { runE2E, defaultExecuteDeps } from "./qa/execute";
 import { testDataNamespace } from "./qa/test-data";
+import { ensureMirror, getCommitDiff, defaultMirrorDeps } from "./integrations/repo-mirror";
 import { github } from "./integrations/github";
 import { QaRunResult } from "./types";
 
@@ -26,23 +27,28 @@ async function main(): Promise<void> {
     },
     sha,
   );
-  console.log(`[qa] DEV estable en ${sha}. Generando E2E...`);
+  console.log(`[qa] DEV estable en ${sha}. Preparando espejo y diff...`);
 
-  // 2. Generar (+ revisar) los E2E del cambio.
+  // 2. Espejo del repo al SHA + diff del commit (alimenta el blast radius).
+  const mirrorDir = await ensureMirror(app.repo, sha, defaultMirrorDeps);
+  const diff = await getCommitDiff(mirrorDir, sha, defaultMirrorDeps);
+
+  // 3. Generar (+ revisar) los E2E del cambio.
   const result = await runAgent({
     source: "manual",
     task: `Genera tests E2E para los flujos afectados por el commit ${sha}.`,
     repo: app.repo,
     sha,
+    diff,
     metadata: { needsReview: app.qa.needsReview },
   });
 
-  // 3. Ejecutar contra DEV con datos namespaced.
+  // 4. Ejecutar contra DEV con datos namespaced.
   const ns = testDataNamespace(app.qa.testDataPrefix, sha);
   console.log(`[qa] Ejecutando E2E (namespace ${ns}) contra ${app.dev.baseUrl}...`);
-  const run = await runE2E(result, { baseUrl: app.dev.baseUrl, namespace: ns });
+  const run = await runE2E(result, { baseUrl: app.dev.baseUrl, namespace: ns }, defaultExecuteDeps);
 
-  // 4. Reportar.
+  // 5. Reportar.
   if (!run.passed) {
     console.error("[qa] FALLO.");
     if (app.report.onFailure === "github-issue") {
