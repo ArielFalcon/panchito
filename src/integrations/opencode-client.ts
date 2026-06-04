@@ -104,6 +104,27 @@ export function parseVerdict(text: string): FinalVerdict {
   return { approved: false, specs: [], note: "el agente no emitió veredicto" };
 }
 
+// Tope de tiempo para una promesa: si vence, rechaza. Evita que un run del
+// agente colgado bloquee la cola (que es secuencial → bloquearía TODOS los
+// repos). Verificable con stubs.
+export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label}: timeout tras ${ms}ms`)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
+const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 min por run del agente
+
 // --- Borde de integración: conexión real a `opencode serve` -----------------
 // No cubierto por unitarios (igual que el runner Playwright). La SDK se importa
 // de forma perezosa para que los tests no requieran el paquete instalado.
@@ -113,6 +134,7 @@ export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
   const client = createOpencodeClient({
     baseUrl: process.env.OPENCODE_SERVE_URL ?? "http://opencode:4096",
   });
+  const timeoutMs = Number(process.env.OPENCODE_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
 
   return {
     // `directory` (query) posiciona la sesión en el espejo del repo: el agente
@@ -123,14 +145,18 @@ export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
       const id = created.data?.id;
       if (!id) throw new Error("OpenCode: la sesión no devolvió id");
       return {
-        prompt: async (text) => {
-          const res = await client.session.prompt({
-            path: { id },
-            query: { directory: cwd },
-            body: { agent, parts: [{ type: "text", text }] },
-          });
-          return extractText(res.data?.parts);
-        },
+        prompt: (text) =>
+          withTimeout(
+            client.session
+              .prompt({
+                path: { id },
+                query: { directory: cwd },
+                body: { agent, parts: [{ type: "text", text }] },
+              })
+              .then((res) => extractText(res.data?.parts)),
+            timeoutMs,
+            "OpenCode prompt",
+          ),
       };
     },
   };

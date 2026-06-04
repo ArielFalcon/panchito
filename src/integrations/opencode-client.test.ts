@@ -4,6 +4,7 @@ import {
   buildPrompt,
   parseVerdict,
   runOpencode,
+  withTimeout,
   OpencodeDeps,
   OpencodeRunInput,
 } from "./opencode-client";
@@ -90,4 +91,14 @@ test("runOpencode sin revisión aprueba aunque no haya veredicto", async () => {
   const res = await runOpencode({ ...input, needsReview: false }, deps("hecho, sin JSON"));
   assert.equal(res.reviewed, false);
   assert.equal(res.approved, true);
+});
+
+test("withTimeout resuelve si la promesa llega a tiempo", async () => {
+  const v = await withTimeout(Promise.resolve("ok"), 1000, "x");
+  assert.equal(v, "ok");
+});
+
+test("withTimeout rechaza si vence el plazo", async () => {
+  const lenta = new Promise((r) => setTimeout(() => r("tarde"), 50));
+  await assert.rejects(() => withTimeout(lenta, 5, "agente"), /timeout tras 5ms/);
 });

@@ -9,6 +9,14 @@ export interface PullRequest {
   number: number;
 }
 
+function ghHeaders(): Record<string, string> {
+  return {
+    Authorization: `Bearer ${requireEnv("GITHUB_TOKEN")}`,
+    Accept: "application/vnd.github+json",
+    "Content-Type": "application/json",
+  };
+}
+
 export const github = {
   async openIssue(
     repo: string,
@@ -17,11 +25,7 @@ export const github = {
   ): Promise<{ url: string }> {
     const res = await fetch(`https://api.github.com/repos/${repo}/issues`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${requireEnv("GITHUB_TOKEN")}`,
-        Accept: "application/vnd.github+json",
-        "Content-Type": "application/json",
-      },
+      headers: ghHeaders(),
       body: JSON.stringify({ title, body }),
     });
     if (!res.ok) throw new Error(`GitHub error ${res.status}: ${await res.text()}`);
@@ -35,11 +39,7 @@ export const github = {
   ): Promise<PullRequest> {
     const res = await fetch(`https://api.github.com/repos/${repo}/pulls`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${requireEnv("GITHUB_TOKEN")}`,
-        Accept: "application/vnd.github+json",
-        "Content-Type": "application/json",
-      },
+      headers: ghHeaders(),
       body: JSON.stringify(args),
     });
     if (!res.ok) throw new Error(`GitHub PR error ${res.status}: ${await res.text()}`);

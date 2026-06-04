@@ -21,9 +21,11 @@ export interface RunOutput {
 
 export interface ExecuteDeps {
   runSuite(args: { dir: string; baseUrl: string; namespace: string }): Promise<RunOutput>;
-  cleanup?(namespace: string): Promise<void>;
 }
 
+// La limpieza de los datos namespaced NO vive aquí: cada test la hace en su
+// teardown vía el fixture `cleanup` (config/e2e/fixtures.ts), que es donde se
+// conoce cómo deshacer cada entidad. Aquí solo se ejecuta y se clasifica.
 export async function runE2E(
   specDir: string,
   opts: ExecuteOptions,
@@ -35,15 +37,6 @@ export async function runE2E(
     namespace: opts.namespace,
   });
   const parsed = parsePlaywrightReport(report);
-
-  // Limpieza best-effort de los datos namespaced del run.
-  if (deps.cleanup) {
-    try {
-      await deps.cleanup(opts.namespace);
-    } catch {
-      /* no bloquea el reporte */
-    }
-  }
 
   return {
     sha: opts.namespace,

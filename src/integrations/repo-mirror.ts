@@ -1,6 +1,7 @@
-// Espejos locales de los repos vigilados. El servicio (permanente) clona/
-// actualiza cada repo y hace checkout del SHA, para que serena (LSP) pueda
-// calcular el blast radius y para extraer el diff del commit. git/exists se
+// Copia de trabajo local de los repos vigilados. OJO: es de SOLO LECTURA para
+// el agente (leer código con Serena, sacar el diff) y de ESCRITURA solo para la
+// carpeta `e2e/` (los tests, que se commitean por PR). NUNCA se construye ni se
+// levanta la app: el sistema bajo prueba es el entorno DEV. git/exists se
 // inyectan para verificar la lógica sin tocar disco ni red en tests.
 
 import { execFile } from "node:child_process";
@@ -15,7 +16,7 @@ export interface MirrorDeps {
   root?: string;
 }
 
-function mirrorRoot(): string {
+function workdirRoot(): string {
   return process.env.MIRROR_DIR ?? join(process.cwd(), ".mirrors");
 }
 
@@ -32,15 +33,21 @@ export function authHeaderArgs(): string[] {
   return token ? ["-c", `http.extraHeader=Authorization: Bearer ${token}`] : [];
 }
 
+// Deja la copia de trabajo PRÍSTINA en el SHA. `checkout -f` descarta cambios en
+// ficheros trackeados (p. ej. e2e/ tocado por un run previo que no publicó) y
+// `clean -fd` borra los no trackeados (specs sobrantes), EXCEPTO node_modules
+// para no reinstalar las deps del proyecto e2e en cada run. Sin esto, los runs
+// que no publican contaminarían el siguiente (o romperían el checkout).
 export async function ensureMirror(repo: string, sha: string, deps: MirrorDeps): Promise<string> {
-  const root = deps.root ?? mirrorRoot();
+  const root = deps.root ?? workdirRoot();
   const dir = join(root, repo.replace("/", "__"));
   if (!deps.exists(dir)) {
     await deps.git([...authHeaderArgs(), "clone", remoteUrl(repo), dir]);
   } else {
     await deps.git([...authHeaderArgs(), "fetch", "origin"], dir);
   }
-  await deps.git(["checkout", sha], dir);
+  await deps.git(["checkout", "-f", sha], dir);
+  await deps.git(["clean", "-fd", "-e", "node_modules"], dir);
   return dir;
 }
 

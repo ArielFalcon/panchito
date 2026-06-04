@@ -29,10 +29,11 @@ Dos servicios de larga vida (ver `docker-compose.yml`):
 ```
 
 - **`orchestrator`** (este repo): la **infra determinística** — recibe el
-  webhook, encola un run, espera el deploy (gate por SHA), prepara el espejo del
-  repo, **dispara OpenCode**, ejecuta los E2E con Playwright contra DEV y abre el
-  Issue si falla. Todo con dependencias inyectables → verificable por tests
-  unitarios.
+  webhook, encola un run, espera el deploy (gate por SHA), prepara una **copia de
+  trabajo del repo** (solo para que el agente LEA código y para versionar los
+  tests en `e2e/`; **nunca se construye ni se levanta la app**), **dispara
+  OpenCode**, ejecuta los E2E con Playwright **contra DEV** y publica/abre Issue.
+  Todo con dependencias inyectables → verificable por tests unitarios.
 - **`opencode`**: el **motor agéntico**. `opencode serve` corre los agentes
   definidos en `opencode/opencode.json` y los MCP: **`serena`** (navegación
   semántica de código vía LSP — blast radius con `find_referencing_symbols` y

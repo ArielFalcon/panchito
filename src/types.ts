@@ -1,7 +1,7 @@
 // Contratos compartidos por todo el sistema. El disparador (webhook, manual,
 // cron) construye el contexto del run y la orquestación vive en pipeline.ts.
 
-export type TriggerSource = "webhook" | "manual" | "cron" | "chat";
+export type TriggerSource = "webhook" | "manual";
 
 // Resultado de una corrida del agente OpenCode. El agente escribe los E2E
 // DIRECTAMENTE en `e2e/` del espejo (la fuente de verdad es git, no este

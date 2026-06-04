@@ -8,6 +8,7 @@
 
 import { Git, realGit, authHeaderArgs } from "./repo-mirror";
 import { github, PullRequest } from "./github";
+import { shortSha } from "../qa/test-data";
 
 export interface PublishInput {
   repo: string;
@@ -38,7 +39,7 @@ export async function publishE2e(
     return null;
   }
 
-  const short = sha.slice(0, 7);
+  const short = shortSha(sha);
   const branch = `qa/e2e-${short}`;
   const name = process.env.GIT_AUTHOR_NAME ?? "ai-pipeline-qa";
   const email = process.env.GIT_AUTHOR_EMAIL ?? "ai-pipeline-qa@users.noreply.github.com";

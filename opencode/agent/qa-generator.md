@@ -26,7 +26,9 @@ la fuente de verdad, versionada en git: reutiliza y mejora lo que ya exista.
    - usa **locators por rol o `data-testid`** (`getByRole`/`getByTestId`), nunca
      CSS/XPath frágil ni `waitForTimeout`,
    - tiene **al menos un assert real** sobre el resultado (no solo clics),
-   - es **determinista** y **limpia** lo que crea.
+   - es **determinista** y **limpia lo que crea**: por cada entidad creada,
+     registra su borrado con `cleanup(async () => { ... })` del harness, para que
+     no queden datos basura en DEV.
 
    El harness valida esto luego con lint + typecheck; si un spec no cumple, el
    run se marca inválido. Escribe specs que pasen ese gate a la primera.
