@@ -21,9 +21,12 @@ services:
     environment:
       OPENCODE_SERVE_URL: http://opencode:4096
       MIRROR_DIR: /app/.mirrors
+      E2E_PROJECT_DIR: /app/config/e2e # proyecto e2e (harness): cwd de validate/execute
+      QA_STORE_DIR: /app/config/e2e/specs # los specs se persisten DENTRO del proyecto e2e
     volumes:
       - ./config:/app/config # config en caliente (sin rebuild)
-      - qa-store:/app/.qa-store # suite de regresión E2E persistida
+      - e2e-modules:/app/config/e2e/node_modules # tooling e2e (poblado desde la imagen; no lo pisa el bind de ./config)
+      - qa-store:/app/config/e2e/specs # suite de regresión E2E persistida
       - mirrors:/app/.mirrors # espejos locales (compartidos con opencode)
 
   opencode:
@@ -42,6 +45,7 @@ services:
 
 volumes:
   qa-store:
+  e2e-modules:
   mirrors:
   engram-data:
   codegraph-data:

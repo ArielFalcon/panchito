@@ -6,6 +6,7 @@ test("incluye SHA, casos fallidos y logs", () => {
   const body = renderIssue(
     {
       sha: "abc123",
+      verdict: "fail",
       passed: false,
       cases: [
         { name: "login ok", status: "pass" },
@@ -23,6 +24,6 @@ test("incluye SHA, casos fallidos y logs", () => {
 });
 
 test("sin nota del revisor no rompe el render", () => {
-  const body = renderIssue({ sha: "x", passed: false, cases: [], logs: "" });
+  const body = renderIssue({ sha: "x", verdict: "fail", passed: false, cases: [], logs: "" });
   assert.match(body, /sin detalle de casos/);
 });

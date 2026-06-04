@@ -24,7 +24,15 @@ const generated: AgentResult = {
   approved: true,
 };
 
-function deps(run: QaRunResult, calls: string[]): PipelineDeps & { issues: string[] } {
+interface Harness extends PipelineDeps {
+  issues: string[];
+}
+
+function deps(
+  run: QaRunResult,
+  calls: string[],
+  opts: { validation?: { ok: boolean; errors: string[] } } = {},
+): Harness {
   const issues: string[] = [];
   return {
     issues,
@@ -42,6 +50,15 @@ function deps(run: QaRunResult, calls: string[]): PipelineDeps & { issues: strin
       assert.equal(input.namespace, "qa-bot-abc123"); // namespace ya resuelto
       return generated;
     },
+    persist: async (_artifacts, ns) => {
+      calls.push("persist");
+      return `/qa-store/${ns}`;
+    },
+    validate: async (specDir) => {
+      calls.push("validate");
+      assert.equal(specDir, "/qa-store/qa-bot-abc123");
+      return opts.validation ?? { ok: true, errors: [] };
+    },
     execute: async () => {
       calls.push("execute");
       return run;
@@ -53,16 +70,19 @@ function deps(run: QaRunResult, calls: string[]): PipelineDeps & { issues: strin
   };
 }
 
-test("orquesta gate → prepare → generate → execute en orden", async () => {
+function passing(): QaRunResult {
+  return { sha: "s", verdict: "pass", passed: true, cases: [], logs: "" };
+}
+
+test("orquesta gate → prepare → generate → persist → validate → execute en orden", async () => {
   const calls: string[] = [];
-  const d = deps({ sha: "s", passed: true, cases: [], logs: "" }, calls);
-  await runPipeline(app, "abc123", d, "manual");
-  assert.deepEqual(calls, ["gate", "prepare", "generate", "execute"]);
+  await runPipeline(app, "abc123", deps(passing(), calls), "manual");
+  assert.deepEqual(calls, ["gate", "prepare", "generate", "persist", "validate", "execute"]);
 });
 
 test("en verde NO abre Issue", async () => {
   const calls: string[] = [];
-  const d = deps({ sha: "s", passed: true, cases: [], logs: "" }, calls);
+  const d = deps(passing(), calls);
   await runPipeline(app, "abc123", d);
   assert.equal(d.issues.length, 0);
 });
@@ -70,10 +90,32 @@ test("en verde NO abre Issue", async () => {
 test("al fallar abre Issue con el SHA en el título", async () => {
   const calls: string[] = [];
   const d = deps(
-    { sha: "s", passed: false, cases: [{ name: "login", status: "fail" }], logs: "x" },
+    { sha: "s", verdict: "fail", passed: false, cases: [{ name: "login", status: "fail" }], logs: "x" },
     calls,
   );
   await runPipeline(app, "abc123", d);
   assert.equal(d.issues.length, 1);
   assert.match(d.issues[0]!, /abc123/);
+});
+
+test("flaky NO abre Issue (cuarentena)", async () => {
+  const calls: string[] = [];
+  const d = deps(
+    { sha: "s", verdict: "flaky", passed: false, cases: [{ name: "checkout", status: "flaky" }], logs: "" },
+    calls,
+  );
+  await runPipeline(app, "abc123", d);
+  assert.equal(d.issues.length, 0);
+});
+
+test("specs inválidos: NO ejecuta y abre Issue de validación", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, {
+    validation: { ok: false, errors: ["[lint] no-wait-for-timeout"] },
+  });
+  const run = await runPipeline(app, "abc123", d);
+  assert.equal(run.verdict, "invalid");
+  assert.ok(!calls.includes("execute")); // no se ejecutó
+  assert.equal(d.issues.length, 1);
+  assert.match(d.issues[0]!, /no pudo validar/);
 });

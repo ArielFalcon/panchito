@@ -20,9 +20,24 @@ export interface Artifact {
 }
 
 // Resultado de EJECUTAR los E2E contra DEV.
+//   pass    → todo verde y estable
+//   fail    → al menos un caso falla de forma consistente (Issue real)
+//   flaky   → casos inestables (pasan unas veces y otras no) → cuarentena
+//   invalid → los specs generados no superaron el gate estático (no compilan,
+//             lint o no cargan): no se llegaron a ejecutar
+export type RunVerdict = "pass" | "fail" | "flaky" | "invalid";
+export type CaseStatus = "pass" | "fail" | "flaky";
+
+export interface QaCase {
+  name: string;
+  status: CaseStatus;
+  detail?: string;
+}
+
 export interface QaRunResult {
   sha: string;
-  passed: boolean;
-  cases: Array<{ name: string; status: "pass" | "fail"; detail?: string }>;
+  verdict: RunVerdict;
+  passed: boolean; // atajo: verdict === "pass"
+  cases: QaCase[];
   logs: string; // sanitizado antes de cualquier reuso por el LLM
 }

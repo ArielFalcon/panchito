@@ -1,12 +1,11 @@
-// Ejecuta los E2E generados contra DEV y recoge resultados. Antes de ejecutar
-// persiste los artefactos (suite de regresión). El runner se inyecta: el
-// default usa Playwright (side-effecting, no cubierto por tests unitarios); en
-// tests se stubbea. El output de ejecución se SANITIZA antes de devolverse
-// (puede contener PII/datos de DEV que luego alimentarían al LLM).
+// Filtro C del harness: ejecuta los E2E ya persistidos contra DEV y clasifica
+// el resultado (pass/fail/flaky). El runner se inyecta: el default usa
+// Playwright con la config base (retries → detección de flakiness, trace
+// on-first-retry); en tests se stubbea. El output se SANITIZA antes de
+// devolverse (puede traer PII/datos de DEV que luego irían a un Issue).
 
 import { spawn } from "node:child_process";
-import { AgentResult, QaRunResult } from "../types";
-import { saveArtifacts } from "./store";
+import { QaRunResult } from "../types";
 import { parsePlaywrightReport } from "./playwright-report";
 import { sanitizeText } from "../orchestrator/sanitizer";
 
@@ -26,14 +25,12 @@ export interface ExecuteDeps {
 }
 
 export async function runE2E(
-  result: AgentResult,
+  specDir: string,
   opts: ExecuteOptions,
   deps: ExecuteDeps,
 ): Promise<QaRunResult> {
-  const { dir } = await saveArtifacts(result.artifacts, opts.namespace);
-
   const { report, logs } = await deps.runSuite({
-    dir,
+    dir: specDir,
     baseUrl: opts.baseUrl,
     namespace: opts.namespace,
   });
@@ -50,21 +47,24 @@ export async function runE2E(
 
   return {
     sha: opts.namespace,
+    verdict: parsed.verdict,
     passed: parsed.passed,
     cases: parsed.cases,
     logs: sanitizeText(logs),
   };
 }
 
-// Runner por defecto: ejecuta Playwright en `dir` con reporter JSON. Playwright
-// NO es dependencia del template (arrastraría navegadores): debe estar
-// disponible en el entorno donde corra el servicio. PW_BASE_URL apunta a DEV.
+// Runner por defecto: ejecuta Playwright en el proyecto e2e (config/e2e) con
+// reporter JSON, apuntando testDir al `dir` del run. Playwright NO es
+// dependencia del template (arrastraría navegadores): vive en el entorno donde
+// corre el servicio (la imagen del orchestrator se basa en la de Playwright).
+// PW_BASE_URL apunta a DEV; PW_SPEC_DIR es el dir de specs de este run.
 export const defaultExecuteDeps: ExecuteDeps = {
-  runSuite: ({ dir, baseUrl }) =>
+  runSuite: ({ dir, baseUrl, namespace }) =>
     new Promise((resolve, reject) => {
       const child = spawn("npx", ["playwright", "test", "--reporter=json"], {
-        cwd: dir,
-        env: { ...process.env, PW_BASE_URL: baseUrl },
+        cwd: process.env.E2E_PROJECT_DIR ?? "config/e2e",
+        env: { ...process.env, PW_BASE_URL: baseUrl, PW_SPEC_DIR: dir, PW_NAMESPACE: namespace },
       });
       let stdout = "";
       let stderr = "";

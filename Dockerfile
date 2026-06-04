@@ -17,5 +17,9 @@ RUN npm install --omit=dev || npm install
 
 COPY . .
 
+# Tooling del proyecto e2e (Playwright runner + eslint + tsc) con el que corren
+# los Filtros B (validación) y C (ejecución) sobre los specs generados.
+RUN npm install --prefix config/e2e
+
 # Arranque del servicio: webhook + cola secuencial.
 CMD ["npm", "run", "start"]

@@ -55,9 +55,26 @@ reglas compartidas en `opencode/AGENTS.md`.
 2. **Espejo** — clone/fetch + checkout del SHA; extrae el diff del commit.
 3. **Generar** — abre una sesión OpenCode con cwd = espejo, le pasa el diff +
    namespace + dir de salida; el agente escribe los specs y los revisa.
-4. **Ejecutar** — corre los specs con Playwright contra DEV, con datos
-   namespaced `qa-bot-<sha>`. El output se **sanitiza** antes de reusarse.
-5. **Reportar** — Issue accionable solo si falla; en verde, sin ruido.
+4. **Validar (Filtro B)** — gate estático sobre los specs: typecheck + lint
+   (`eslint-plugin-playwright`) + `playwright --list`. Si no pasan, el run es
+   `invalid` y no se ejecuta.
+5. **Ejecutar (Filtro C)** — corre los specs con Playwright contra DEV, con
+   datos namespaced `qa-bot-<sha>`, y clasifica `pass`/`fail`/`flaky` (retries
+   como señal de inestabilidad). El output se **sanitiza** antes de reusarse.
+6. **Reportar** — Issue solo si `fail` o `invalid`; los `flaky` van a cuarentena
+   (log, sin Issue); en verde, sin ruido.
+
+### Harness de E2E (calidad y consistencia)
+
+- **Capa A — estandarización** (`config/e2e/`): config base de Playwright,
+  fixtures compartidas (login, `namespace`, `ns()`) y reglas de lint que el
+  agente debe respetar. Modelo híbrido: el esqueleto es común; el login real de
+  cada app lo rellena el agente por repo y se persiste.
+- **Capa B — gate estático** (`src/qa/validate.ts`): valida los specs sin gastar
+  navegador (compilan, lint, cargan).
+- **Capa C — gate de flakiness** (`src/qa/execute.ts` + `playwright-report.ts`):
+  un test que solo pasa tras reintento se marca `flaky` → cuarentena, no se da
+  por bueno ni rompe como fallo real.
 
 ## Sanitización (con Doppler)
 

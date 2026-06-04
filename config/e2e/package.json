@@ -1,0 +1,15 @@
+{
+  "name": "ai-pipeline-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Proyecto e2e compartido (Filtro A del harness): config, fixtures y tooling con los que corren TODOS los specs generados.",
+  "type": "module",
+  "devDependencies": {
+    "@playwright/test": "^1.50.0",
+    "@types/node": "^22.0.0",
+    "eslint": "^9.0.0",
+    "eslint-plugin-playwright": "^2.0.0",
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.0.0"
+  }
+}

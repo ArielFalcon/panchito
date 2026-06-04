@@ -40,6 +40,38 @@ test("sin specs cae a stats.unexpected", () => {
   assert.equal(parsePlaywrightReport({ stats: { unexpected: 2 } }).passed, false);
 });
 
+test("marca flaky cuando un test pasó tras reintento (status flaky)", () => {
+  const report = {
+    suites: [
+      {
+        title: "checkout.spec.ts",
+        specs: [
+          { title: "estable", tests: [{ status: "expected" }] },
+          { title: "inestable", tests: [{ status: "flaky" }] },
+        ],
+      },
+    ],
+  };
+  const parsed = parsePlaywrightReport(report);
+  assert.equal(parsed.verdict, "flaky"); // ningún fail, pero hay flaky
+  assert.equal(parsed.passed, false);
+  assert.equal(parsed.cases.find((c) => c.status === "flaky")?.name.includes("inestable"), true);
+});
+
+test("un fail consistente gana sobre un flaky", () => {
+  const report = {
+    suites: [
+      {
+        specs: [
+          { title: "a", tests: [{ status: "flaky" }] },
+          { title: "b", tests: [{ status: "unexpected", results: [{ error: { message: "boom" } }] }] },
+        ],
+      },
+    ],
+  };
+  assert.equal(parsePlaywrightReport(report).verdict, "fail");
+});
+
 test("deriva ok desde results cuando no hay spec.ok", () => {
   const report = {
     suites: [
