@@ -1,28 +1,30 @@
-# Servicio permanente + sidecars MCP de larga vida. Como el servicio no es
+# Servicio permanente (M2) + sidecars MCP de larga vida. Como el servicio no es
 # efímero, la memoria (Engram) persiste en un volumen y los MCP no necesitan
-# bootstrap por run. (Los servicios MCP se completan en M1/M2.)
+# bootstrap por run.
 
 services:
   orchestrator:
     build: .
     env_file: .env
     restart: always
+    ports:
+      - "${PORT:-8080}:8080" # recibe los webhooks
     volumes:
-      - ./config:/app/config     # config en caliente (sin rebuild)
-      - qa-store:/app/.qa-store  # suite de regresión E2E persistida
-    # ports:
-    #   - "8080:8080"            # webhook server (M2)
+      - ./config:/app/config # config en caliente (sin rebuild)
+      - qa-store:/app/.qa-store # suite de regresión E2E persistida
+      - mirrors:/app/.mirrors # espejos locales de los repos vigilados
 
-  # --- Sidecars MCP (M1/M2) ---
+  # --- Sidecars MCP: habilita las URLs en config/tools/mcp-servers.yaml ---
   # codegraph:
   #   image: code-review-graph:latest
   #   volumes:
-  #     - ./.mirrors:/mirrors    # espejos locales de los repos vigilados
+  #     - mirrors:/mirrors        # comparte los espejos para el blast radius
   # engram:
   #   image: engram:latest
   #   volumes:
-  #     - engram-data:/data      # SQLite persistente (memoria episódica)
+  #     - engram-data:/data       # SQLite persistente (memoria episódica)
 
 volumes:
   qa-store:
+  mirrors:
   # engram-data:

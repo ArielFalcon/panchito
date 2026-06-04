@@ -32,9 +32,27 @@ MCP y red inyectables/stubbeados — no toca servicios reales):
 - **Runner E2E** con Playwright (reporter JSON → casos pass/fail) y
   **sanitización del output de ejecución** antes de reportar.
 
-Pendiente (M2): disparo automático por webhook + sidecars MCP en docker-compose.
+**M2 — servicio (disparo automático)**
+- `pipeline.ts`: el lazo completo extraído a un módulo, compartido por el CLI y
+  el webhook (deps inyectables → orquestación testeada).
+- `server/webhook.ts`: servidor HTTP que recibe `{ repo, sha }` (forma simple o
+  evento push de GitHub), verifica la firma HMAC (`x-hub-signature-256`) y encola
+  el run.
+- `server/queue.ts`: cola **secuencial** — un run a la vez, evita QA concurrente
+  pisándose en DEV; un fallo no detiene la cola.
+- `docker-compose.yml`: servicio con puerto, volúmenes (suite de regresión +
+  espejos) y los sidecars MCP listos para habilitar.
+
 El runner por defecto requiere Playwright disponible en el entorno (no es
 dependencia del template para no arrastrar navegadores).
+
+### Modo servicio (M2)
+
+```bash
+npm start            # levanta el webhook en :$PORT (default 8080)
+# El repo vigilado, tras desplegar a DEV, hace POST con { repo, sha }
+# (o reenvía su evento push de GitHub). Firma con WEBHOOK_SECRET si se define.
+```
 
 ## Uso
 

@@ -2,7 +2,7 @@
 // especificidad vive aquí (config/), nunca en el código. Los ${VARS} en el
 // YAML se expanden desde el entorno: las credenciales no viven en el repo.
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 
@@ -33,6 +33,18 @@ export function loadAppConfig(name: string, root = ROOT): AppConfig {
   }
   const raw = expandEnv(readFileSync(path, "utf8"));
   return parse(raw) as AppConfig;
+}
+
+// Resuelve la config a partir del repo del evento (el webhook trae repo+sha).
+export function loadAppConfigByRepo(repo: string, root = ROOT): AppConfig | null {
+  const dir = join(root, "config", "apps");
+  if (!existsSync(dir)) return null;
+  for (const file of readdirSync(dir)) {
+    if (!file.endsWith(".yaml")) continue;
+    const cfg = loadAppConfig(file.replace(/\.yaml$/, ""), root);
+    if (cfg.repo === repo) return cfg;
+  }
+  return null;
 }
 
 export function loadAiIgnore(root = ROOT): string[] {

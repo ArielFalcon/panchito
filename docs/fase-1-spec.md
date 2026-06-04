@@ -361,14 +361,21 @@ runner Playwright contra DEV, sanitiza el output y persiste los artefactos. Las
 piezas de red/MCP/runner son inyectables y están cubiertas por tests unitarios;
 la ejecución real se activa al acoplar una app + sidecars MCP + Playwright.
 
-### M2 — Disparo automático
-- `server/webhook.ts` recibe `{ repo, sha }` del repo vigilado tras el deploy.
-- `repo-mirror` mantiene espejos actualizados.
-- Reporte de Issue pulido (pasos, logs sanitizados, SHA, casos fallidos).
-- `docker-compose` con servicio + MCP sidecars + volúmenes.
+### M2 — Disparo automático ✅ (cableado + verificado por tests unitarios)
+- `pipeline.ts`: lazo completo extraído y compartido por CLI y webhook (deps
+  inyectables; orquestación, orden y rama "fallo → Issue" cubiertos por tests).
+- `server/webhook.ts`: recibe `{ repo, sha }` (forma simple o evento push de
+  GitHub), verifica firma HMAC `x-hub-signature-256`, encola el run.
+- `server/queue.ts`: cola secuencial (un run a la vez; un fallo no la detiene).
+- `repo-mirror` mantiene espejos actualizados (M1).
+- Reporte de Issue (`report/reporter.ts`): SHA, casos fallidos, logs sanitizados,
+  nota del revisor.
+- `docker-compose` con servicio (puerto + volúmenes) y sidecars MCP listos.
 
 **Cierre M2:** mergear a `main` dispara todo solo; el equipo recibe Issues sin
-intervención. Adaptar a otra app = solo `config/apps/<app>.yaml`.
+intervención. Adaptar a otra app = solo `config/apps/<app>.yaml`. La ejecución
+real se activa al acoplar app + sidecars MCP + Playwright; el runner y la red son
+inyectables y están cubiertos por tests unitarios.
 
 ---
 

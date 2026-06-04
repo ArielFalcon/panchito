@@ -1,9 +1,30 @@
-// Arranque del SERVICIO permanente. En M2 aquí se levanta el webhook server
-// (src/server/webhook.ts) que recibe { repo, sha } tras el deploy a DEV y
-// encola un run. En M0 el disparo es manual:
-//
-//   npm run qa -- --app <app> --sha <sha>
+// Arranque del SERVICIO permanente (M2). Recibe webhooks tras el deploy a DEV
+// y encola un run por evento; la cola los procesa de a uno. El disparo manual
+// (CLI) sigue disponible vía src/cli.ts.
 
-console.log(
-  "ai-pipeline — servicio (M2, webhook). Para M0 usa: npm run qa -- --app <app> --sha <sha>",
-);
+import { JobQueue } from "./server/queue";
+import { createWebhookServer } from "./server/webhook";
+import { loadAppConfigByRepo } from "./orchestrator/config-loader";
+import { runPipeline, defaultPipelineDeps } from "./pipeline";
+
+const port = Number(process.env.PORT ?? 8080);
+const queue = new JobQueue((e) => console.error("[qa] run falló:", e));
+
+const server = createWebhookServer({
+  secret: process.env.WEBHOOK_SECRET,
+  onRun: ({ repo, sha }) => {
+    const app = loadAppConfigByRepo(repo);
+    if (!app) {
+      console.warn(`[qa] sin config/apps para ${repo}; evento ignorado`);
+      return;
+    }
+    console.log(`[qa] encolado ${repo}@${sha} (cola: ${queue.size + 1})`);
+    queue.enqueue(async () => {
+      await runPipeline(app, sha, defaultPipelineDeps(), "webhook");
+    });
+  },
+});
+
+server.listen(port, () => {
+  console.log(`ai-pipeline escuchando webhooks en :${port}`);
+});
