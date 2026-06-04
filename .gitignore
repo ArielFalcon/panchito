@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+.env.local
+*.log
+
+# Volumen local de artefactos E2E y memoria (se persiste fuera del repo)
+.qa-store/
+*.db
+*.sqlite
+
+# Espejos locales de los repos vigilados
+.mirrors/

@@ -1,0 +1,24 @@
+# Plantilla de app vigilada. COPIA a config/apps/<tu-app>.yaml y rellena.
+# Los ${VARS} se expanden desde el entorno (.env) — no pongas secretos aquí.
+
+name: "example"
+repo: "org/example"            # owner/repo en GitHub (donde se abren los Issues)
+
+dev:
+  baseUrl: "https://dev.example.internal"
+  versionUrl: "https://dev.example.internal/version"  # debe devolver { sha, healthy }
+  pollIntervalMs: 10000        # cada cuánto consulta el gate
+  deployTimeoutMs: 600000      # 10 min para que DEV estabilice en el nuevo SHA
+
+qa:
+  needsReview: true            # el revisor estricto valida los E2E generados
+  testDataPrefix: "qa-bot"     # entidades de test namespaced por SHA
+  criticalFlows:               # pistas de qué priorizar (el codegraph afina)
+    - "login"
+    - "checkout"
+  credentials:                 # REFERENCIAS a env, no valores
+    testUser: "${DEV_TEST_USER}"
+    testPass: "${DEV_TEST_PASS}"
+
+report:
+  onFailure: "github-issue"
