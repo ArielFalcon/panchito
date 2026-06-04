@@ -7,11 +7,15 @@ la fuente de verdad, versionada en git: reutiliza y mejora lo que ya exista.
 
 ## Procedimiento
 
-1. **Acota el cambio.** Activa el proyecto en `serena` (`activate_project` sobre
-   tu directorio actual) y usa `find_referencing_symbols` para el blast radius y
+1. **Define el objetivo desde la intención.** El prompt te da el tipo y mensaje
+   del commit (Conventional Commits) y los ficheros cambiados. De ahí sale el
+   **objetivo** (criterio de aceptación) de cada test: un `fix:` → un test que
+   pina el bug arreglado; un `feat:` → un test del comportamiento nuevo. **Pero
+   contrasta con el diff**: si el código hace más de lo que dice el mensaje,
+   cubre lo que el código realmente cambia. Luego activa el proyecto en `serena`
+   (`activate_project`) y usa `find_referencing_symbols` (blast radius) y
    `get_symbols_overview`/`find_symbol` para leer solo lo necesario (clave en
-   Java: trabaja sobre firmas, no ficheros enteros). Consulta `engram` por la
-   memoria del repo. Identifica los flujos de usuario que toca el cambio.
+   Java: firmas, no ficheros enteros). Consulta `engram` por la memoria del repo.
 2. **Escribe los specs.** En `e2e/` (subcarpeta por microservicio), crea o
    actualiza ficheros `*.spec.ts` con la herramienta `write`. Si el repo aún no
    tiene proyecto `e2e/`, ya está sembrado con el seed (config base + fixtures);
@@ -32,10 +36,19 @@ la fuente de verdad, versionada en git: reutiliza y mejora lo que ya exista.
 
    El harness valida esto luego con lint + typecheck; si un spec no cumple, el
    run se marca inválido. Escribe specs que pasen ese gate a la primera.
-3. **Revisa.** Invoca al subagente `qa-reviewer` con los specs que escribiste.
+3. **Registra la metadata.** Por cada test, añade o actualiza su entrada en
+   `e2e/.qa/manifest.json` con `{ id, objective, flow, targets, changeRef }`:
+   - `id`: estable y único (p. ej. `"checkout/over-10-items"`).
+   - `objective`: el criterio de aceptación en una frase.
+   - `flow`: el flujo de usuario; `targets`: símbolos/rutas que pretende ejercitar
+     (sácalos del blast radius).
+   - `changeRef`: `{ sha, type }` del commit.
+   Si actualizas un test existente para el mismo objetivo, **edita su entrada**,
+   no añadas otra (un objetivo = un test). El manifest se valida en el harness.
+4. **Revisa.** Invoca al subagente `qa-reviewer` con los specs que escribiste.
    Aplica sus correcciones **sin** reescribir lo que ya estaba bien. Repite como
    mucho **2 rondas**; si no converges, deja los specs en su mejor estado.
-4. **Aprende.** Guarda en `engram` lo relevante (flujos frágiles, patrones).
+5. **Aprende.** Guarda en `engram` lo relevante (flujos frágiles, patrones).
 
 ## Salida final (obligatoria)
 

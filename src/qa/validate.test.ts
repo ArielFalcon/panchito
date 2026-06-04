@@ -4,8 +4,8 @@ import { validateSpecs, ValidateDeps } from "./validate";
 
 const ok = async () => ({ ok: true, output: "" });
 
-test("ok cuando los tres chequeos pasan", async () => {
-  const deps: ValidateDeps = { typecheck: ok, lint: ok, listTests: ok };
+test("ok cuando los cuatro chequeos pasan", async () => {
+  const deps: ValidateDeps = { typecheck: ok, lint: ok, listTests: ok, checkManifest: ok };
   const res = await validateSpecs("/dir", deps);
   assert.equal(res.ok, true);
   assert.equal(res.errors.length, 0);
@@ -16,6 +16,7 @@ test("acumula TODOS los fallos (no corta al primero) con su etiqueta", async () 
     typecheck: async () => ({ ok: false, output: "TS2322 type error" }),
     lint: ok,
     listTests: async () => ({ ok: false, output: "no spec files found" }),
+    checkManifest: ok,
   };
   const res = await validateSpecs("/dir", deps);
   assert.equal(res.ok, false);
@@ -24,13 +25,14 @@ test("acumula TODOS los fallos (no corta al primero) con su etiqueta", async () 
   assert.match(res.errors[1]!, /\[list\] no spec files/);
 });
 
-test("un único chequeo fallido marca inválido", async () => {
+test("metadata inválida marca el run como inválido", async () => {
   const deps: ValidateDeps = {
     typecheck: ok,
-    lint: async () => ({ ok: false, output: "playwright/no-wait-for-timeout" }),
+    lint: ok,
     listTests: ok,
+    checkManifest: async () => ({ ok: false, output: "'login': falta 'objective'" }),
   };
   const res = await validateSpecs("/dir", deps);
   assert.equal(res.ok, false);
-  assert.match(res.errors[0]!, /no-wait-for-timeout/);
+  assert.match(res.errors[0]!, /\[manifest\].*objective/);
 });

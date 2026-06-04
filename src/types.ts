@@ -23,7 +23,9 @@ export interface AgentResult {
 //             lint o no cargan): no se llegaron a ejecutar
 //   infra-error → el run no es concluyente por causa de infraestructura (DEV
 //             caído, etc.): NO se reporta como bug del código
-export type RunVerdict = "pass" | "fail" | "flaky" | "invalid" | "infra-error";
+//   skipped → el commit no lleva pruebas (style/docs/chore sin lógica): no se
+//             ejecuta nada
+export type RunVerdict = "pass" | "fail" | "flaky" | "invalid" | "infra-error" | "skipped";
 export type CaseStatus = "pass" | "fail" | "flaky";
 
 export interface QaCase {

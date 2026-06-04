@@ -56,6 +56,11 @@ export async function getCommitDiff(dir: string, sha: string, deps: MirrorDeps):
   return deps.git(["show", "--format=", sha], dir);
 }
 
+// Mensaje del commit (subject + body): da la INTENCIÓN para clasificar el cambio.
+export async function getCommitMessage(dir: string, sha: string, deps: MirrorDeps): Promise<string> {
+  return deps.git(["show", "-s", "--format=%B", sha], dir);
+}
+
 export const realGit: Git = (args, cwd) =>
   new Promise((resolve, reject) => {
     execFile("git", args, { cwd, maxBuffer: 64 * 1024 * 1024 }, (err, stdout) =>

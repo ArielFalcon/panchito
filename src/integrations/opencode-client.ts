@@ -12,6 +12,7 @@
 // `opencode serve` es el borde no cubierto por unitarios.
 
 import { AgentResult } from "../types";
+import { CommitIntent } from "../qa/commit-classify";
 import { sanitizeText } from "../orchestrator/sanitizer";
 
 export interface OpencodeRunInput {
@@ -22,6 +23,7 @@ export interface OpencodeRunInput {
   e2eRelDir: string; // carpeta de tests relativa a mirrorDir (p. ej. "e2e")
   namespace: string; // prefijo de datos de test (qa-bot-<sha>)
   needsReview: boolean;
+  intent: CommitIntent; // intención del commit (tipo + mensaje + ficheros)
 }
 
 // Una sesión abierta contra `opencode serve`. prompt() envía el mensaje al
@@ -65,11 +67,22 @@ export async function runOpencode(
 // en opencode/agent/qa-generator.md; aquí solo va el contexto del cambio. El
 // diff se sanitiza igualmente (defensa en profundidad — barato).
 export function buildPrompt(input: OpencodeRunInput): string {
+  const { intent } = input;
   return [
     `Genera/actualiza tests E2E para los flujos afectados por el commit ${input.sha} de ${input.repo}.`,
     ``,
-    `- Trabaja en la carpeta de tests del repo: ${input.e2eRelDir}/ (es la fuente de verdad, versionada en git).`,
+    `## Intención del cambio (Conventional Commits)`,
+    `- Tipo: ${intent.type}${intent.breaking ? " (BREAKING)" : ""}`,
+    `- Mensaje: ${sanitizeText(intent.message)}`,
+    `- Ficheros cambiados (deduce de aquí el scope/área): ${intent.changedFiles.join(", ") || "(desconocido)"}`,
+    `El mensaje da la INTENCIÓN; define a partir de ella el objetivo (criterio de aceptación)`,
+    `de cada test. Pero CONTRASTA con el diff: si el código hace más de lo que dice el`,
+    `mensaje, cubre lo que el código realmente cambia, no solo lo que el mensaje promete.`,
+    ``,
+    `- Trabaja en la carpeta de tests del repo: ${input.e2eRelDir}/ (fuente de verdad en git).`,
     `  Reutiliza y mejora los fixtures/specs que ya existan; no dupliques.`,
+    `- Por cada test, añade/actualiza su entrada en ${input.e2eRelDir}/.qa/manifest.json con`,
+    `  { id, objective, flow, targets, changeRef:{sha:"${input.sha}",type:"${intent.type}"} }.`,
     `- Prefijo de datos de test: ${input.namespace}`,
     input.needsReview
       ? `- Revisión obligatoria: invoca al subagente qa-reviewer y aplica sus correcciones.`

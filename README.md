@@ -61,14 +61,20 @@ reglas compartidas en `opencode/AGENTS.md`.
 ## Flujo de un run (`src/pipeline.ts`)
 
 1. **Gate** — espera a que DEV corra ese SHA y esté healthy (`/version`).
-2. **Espejo** — clone/fetch + checkout del SHA; extrae el diff del commit.
-3. **Generar** — abre una sesión OpenCode con cwd = espejo; el agente escribe/
-   mejora los tests en la carpeta **`e2e/` del repo** (fuente de verdad en git)
-   y los revisa. Si el repo no tiene `e2e/`, se siembra desde el seed
-   (`config/e2e/`).
+2. **Espejo + clasificación** — clone/fetch + checkout del SHA; extrae diff y
+   mensaje. **Clasifica el commit** (Conventional Commits, contrastado con el
+   diff): `style/docs/chore` sin lógica → `skipped` (no se prueba nada);
+   `refactor/perf` → solo regresión (no genera); `feat/fix` (o un `refactor` que
+   el diff revela que **sí** añade lógica) → genera. Filtra ruido y coste antes
+   de gastar un token.
+3. **Generar** — abre una sesión OpenCode con cwd = espejo; el agente define el
+   **objetivo** desde la intención del commit, escribe/mejora los tests en
+   **`e2e/` del repo** (fuente de verdad en git) con su **metadata**
+   (`e2e/.qa/manifest.json`: objetivo, flujo, targets) y los revisa. Si el repo
+   no tiene `e2e/`, se siembra desde el seed (`config/e2e/`).
 4. **Validar (Filtro B)** — `npm ci` en `e2e/` + gate estático: typecheck + lint
-   (`eslint-plugin-playwright`) + `playwright --list`. Si no pasan, el run es
-   `invalid` y no se ejecuta.
+   (`eslint-plugin-playwright`) + `playwright --list` + **metadata válida**. Si
+   no pasan, el run es `invalid` y no se ejecuta.
 5. **Ejecutar (Filtro C)** — corre los specs con Playwright contra DEV, con
    datos namespaced `qa-bot-<sha>`, y clasifica `pass`/`fail`/`flaky` (retries
    como señal de inestabilidad). El output se **sanitiza** antes de reusarse.

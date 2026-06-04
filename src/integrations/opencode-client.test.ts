@@ -17,6 +17,7 @@ const input: OpencodeRunInput = {
   e2eRelDir: "e2e",
   namespace: "qa-bot-abc123",
   needsReview: true,
+  intent: { type: "feat", breaking: false, message: "feat: nueva pantalla", changedFiles: ["src/x.ts"] },
 };
 
 function deps(finalText: string, captured?: { prompt?: string; agent?: string }): OpencodeDeps {
@@ -42,6 +43,14 @@ test("buildPrompt incluye repo, sha, namespace, carpeta e2e y el diff", () => {
   assert.match(p, /e2e\//);
   assert.match(p, /const x = 1;/);
   assert.match(p, /invoca al subagente qa-reviewer/);
+});
+
+test("buildPrompt incluye la intención del commit y pide actualizar el manifest", () => {
+  const p = buildPrompt(input);
+  assert.match(p, /Tipo: feat/);
+  assert.match(p, /feat: nueva pantalla/);
+  assert.match(p, /src\/x\.ts/); // ficheros cambiados (scope)
+  assert.match(p, /manifest\.json/);
 });
 
 test("buildPrompt sanitiza el diff (defensa en profundidad)", () => {

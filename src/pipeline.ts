@@ -8,8 +8,9 @@
 import { join } from "node:path";
 import { AppConfig } from "./orchestrator/config-loader";
 import { DeployTarget, waitForDeploy } from "./env/deploy-gate";
-import { ensureMirror, getCommitDiff, defaultMirrorDeps } from "./integrations/repo-mirror";
+import { ensureMirror, getCommitDiff, getCommitMessage, defaultMirrorDeps } from "./integrations/repo-mirror";
 import { runOpencode, defaultOpencodeDeps } from "./integrations/opencode-client";
+import { classifyCommit, CommitIntent } from "./qa/commit-classify";
 import { setupE2eProject, defaultSetupDeps } from "./qa/setup";
 import { validateSpecs, defaultValidateDeps } from "./qa/validate";
 import { runE2E, defaultExecuteDeps } from "./qa/execute";
@@ -29,11 +30,12 @@ export interface GenerateInput {
   mirrorDir: string;
   namespace: string;
   needsReview: boolean;
+  intent: CommitIntent; // tipo + mensaje + ficheros → el agente define el objetivo
 }
 
 export interface PipelineDeps {
   waitForDeploy(target: DeployTarget, sha: string): Promise<void>;
-  prepare(repo: string, sha: string): Promise<{ mirrorDir: string; diff: string }>;
+  prepare(repo: string, sha: string): Promise<{ mirrorDir: string; diff: string; message: string }>;
   generate(input: GenerateInput): Promise<AgentResult>;
   setupE2e(e2eDir: string): Promise<void>; // instala deps del proyecto e2e
   validate(e2eDir: string): Promise<{ ok: boolean; errors: string[] }>;
@@ -50,7 +52,8 @@ export function defaultPipelineDeps(): PipelineDeps {
     prepare: async (repo, sha) => {
       const mirrorDir = await ensureMirror(repo, sha, defaultMirrorDeps);
       const diff = await getCommitDiff(mirrorDir, sha, defaultMirrorDeps);
-      return { mirrorDir, diff };
+      const message = await getCommitMessage(mirrorDir, sha, defaultMirrorDeps);
+      return { mirrorDir, diff, message };
     },
     generate: async (input) =>
       runOpencode(
@@ -62,6 +65,7 @@ export function defaultPipelineDeps(): PipelineDeps {
           e2eRelDir: E2E_DIR,
           namespace: input.namespace,
           needsReview: input.needsReview,
+          intent: input.intent,
         },
         await defaultOpencodeDeps(),
       ),
@@ -103,24 +107,41 @@ export async function runPipeline(
   log("[qa] Esperando deploy estable en DEV...");
   await deps.waitForDeploy(target, sha);
 
-  // 2. Espejo del repo al SHA (cwd del agente y donde vive `e2e/`) + diff.
+  // 2. Espejo del repo al SHA (cwd del agente y donde vive `e2e/`) + diff + mensaje.
   log("[qa] Preparando espejo y diff...");
-  const { mirrorDir, diff } = await deps.prepare(app.repo, sha);
+  const { mirrorDir, diff, message } = await deps.prepare(app.repo, sha);
   const e2eDir = join(mirrorDir, E2E_DIR);
-
-  // 3. Generar (+ revisar) los E2E con OpenCode: el agente escribe/mejora `e2e/`.
   const ns = testDataNamespace(app.qa.testDataPrefix, sha);
-  log("[qa] Generando E2E con OpenCode...");
-  const result = await deps.generate({
-    repo: app.repo,
-    sha,
-    diff,
-    mirrorDir,
-    namespace: ns,
-    needsReview: app.qa.needsReview,
-  });
 
-  // 4. Filtro B — gate estático sobre `e2e/` (instala deps + typecheck/lint/list).
+  // 3. Clasificar el commit (Conventional Commits, contrastado con el diff).
+  //    skip → no hay nada que probar. regression → no se generan tests nuevos,
+  //    solo se confirma que los existentes siguen verdes. generate → flujo completo.
+  const cls = classifyCommit(message, diff);
+  log(`[qa] Commit '${cls.type}' → ${cls.action}${cls.contradiction ? " (contradicción mensaje/diff)" : ""}: ${cls.reason}`);
+  if (cls.action === "skip") {
+    log(`[qa] Sin objetivo testeable (${cls.type}); no se ejecuta.`);
+    return { sha: ns, verdict: "skipped", passed: true, cases: [], logs: cls.reason };
+  }
+  const generating = cls.action === "generate";
+
+  // 4. Generar (solo si procede): el agente escribe/mejora `e2e/`.
+  let result: AgentResult | null = null;
+  if (generating) {
+    log("[qa] Generando E2E con OpenCode...");
+    result = await deps.generate({
+      repo: app.repo,
+      sha,
+      diff,
+      mirrorDir,
+      namespace: ns,
+      needsReview: app.qa.needsReview,
+      intent: cls,
+    });
+  } else {
+    log("[qa] Regresión: no se generan tests; se valida y ejecuta la suite existente.");
+  }
+
+  // 5. Filtro B — gate estático sobre `e2e/` (instala deps + typecheck/lint/list/manifest).
   await deps.setupE2e(e2eDir);
   log("[qa] Validando specs (typecheck + lint + list)...");
   const validation = await deps.validate(e2eDir);
@@ -149,7 +170,12 @@ export async function runPipeline(
   }
 
   // 8. Decisión final.
-  if (run.verdict === "pass" && app.qa.needsReview && !result.approved) {
+  if (run.verdict !== "pass") {
+    await report(app, sha, run, deps, log, shadow, result?.note);
+  } else if (!generating) {
+    // Regresión en verde: no hay tests nuevos que publicar.
+    log(`[qa] OK — regresión en verde para ${sha}.`);
+  } else if (app.qa.needsReview && !result!.approved) {
     // Verde en el harness PERO el revisor independiente no aprobó (caza falsos
     // positivos que el harness no ve) → NO se publica; se reporta para iteración.
     await issueOrShadow(
@@ -158,17 +184,13 @@ export async function runPipeline(
       log,
       app.repo,
       `QA: el revisor no aprobó los E2E en ${sha}`,
-      renderIssue(run, result.note),
+      renderIssue(run, result!.note),
     );
-  } else if (run.verdict === "pass") {
-    if (shadow) {
-      log(`[qa] (sombra) E2E en verde; habría abierto PR de la suite.`);
-    } else {
-      const pr = await deps.publish({ repo: app.repo, sha, mirrorDir, baseBranch: app.baseBranch ?? "main" });
-      log(pr ? `[qa] OK — E2E en verde; PR de la suite: ${pr.prUrl}` : `[qa] OK — E2E en verde (sin cambios en e2e/).`);
-    }
+  } else if (shadow) {
+    log(`[qa] (sombra) E2E en verde; habría abierto PR de la suite.`);
   } else {
-    await report(app, sha, run, deps, log, shadow, result.note);
+    const pr = await deps.publish({ repo: app.repo, sha, mirrorDir, baseBranch: app.baseBranch ?? "main" });
+    log(pr ? `[qa] OK — E2E en verde; PR de la suite: ${pr.prUrl}` : `[qa] OK — E2E en verde (sin cambios en e2e/).`);
   }
   return run;
 }

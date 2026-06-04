@@ -9,6 +9,9 @@
 // con stubs; los runners reales (que hacen spawn) son el borde no cubierto.
 
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { validateManifest } from "./metadata";
 
 export interface CheckResult {
   ok: boolean;
@@ -19,6 +22,7 @@ export interface ValidateDeps {
   typecheck(specDir: string): Promise<CheckResult>;
   lint(specDir: string): Promise<CheckResult>;
   listTests(specDir: string): Promise<CheckResult>;
+  checkManifest(specDir: string): Promise<CheckResult>; // metadata estándar válida
 }
 
 export interface ValidationResult {
@@ -35,6 +39,7 @@ export async function validateSpecs(
     ["typecheck", deps.typecheck],
     ["lint", deps.lint],
     ["list", deps.listTests],
+    ["manifest", deps.checkManifest],
   ];
   const errors: string[] = [];
   for (const [name, run] of checks) {
@@ -62,4 +67,13 @@ export const defaultValidateDeps: ValidateDeps = {
   typecheck: (e2eDir) => sh("npx", ["tsc", "--noEmit"], e2eDir),
   lint: (e2eDir) => sh("npx", ["eslint", "."], e2eDir),
   listTests: (e2eDir) => sh("npx", ["playwright", "test", "--list"], e2eDir),
+  checkManifest: async (e2eDir) => {
+    try {
+      const raw = JSON.parse(readFileSync(join(e2eDir, ".qa", "manifest.json"), "utf8"));
+      const v = validateManifest(raw);
+      return { ok: v.ok, output: v.errors.join("\n") };
+    } catch (e) {
+      return { ok: false, output: `e2e/.qa/manifest.json ilegible o ausente: ${String(e)}` };
+    }
+  },
 };

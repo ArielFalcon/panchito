@@ -37,6 +37,8 @@ function deps(
     prUrl?: string | null;
     agent?: AgentResult;
     healthy?: boolean | boolean[]; // un valor, o una secuencia por llamada
+    message?: string; // mensaje del commit (clasificación)
+    diff?: string;
   } = {},
 ): Harness {
   const issues: string[] = [];
@@ -48,7 +50,7 @@ function deps(
     },
     prepare: async () => {
       calls.push("prepare");
-      return { mirrorDir: "/mirrors/org__demo", diff: "DIFF" };
+      return { mirrorDir: "/mirrors/org__demo", diff: opts.diff ?? "DIFF", message: opts.message ?? "feat: cambio" };
     },
     generate: async () => {
       calls.push("generate");
@@ -172,6 +174,33 @@ test("fallos con DEV caído a mitad: se reclasifica a infra-error (sin Issue)", 
   const run = await runPipeline(app, "abc123", d);
   assert.equal(run.verdict, "infra-error");
   assert.equal(d.issues.length, 0);
+});
+
+test("commit style (sin lógica): skipped, no genera ni ejecuta", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { message: "style: reordena comentarios", diff: "" });
+  const run = await runPipeline(app, "abc123", d);
+  assert.equal(run.verdict, "skipped");
+  assert.equal(run.passed, true);
+  assert.deepEqual(calls, ["gate", "prepare"]); // ni generate ni execute
+});
+
+test("commit refactor sin lógica: regresión (ejecuta existentes, NO genera ni publica)", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { message: "refactor: unifica auth", diff: "DIFF" });
+  await runPipeline(app, "abc123", d);
+  assert.ok(!calls.includes("generate")); // no genera
+  assert.ok(calls.includes("execute")); // pero sí valida/ejecuta la suite
+  assert.equal(d.published, false); // nada nuevo que publicar
+});
+
+test("refactor que SÍ añade lógica (contradicción): se escala a generar", async () => {
+  const calls: string[] = [];
+  const logicDiff = ["diff --git a/src/x.ts b/src/x.ts", "+++ b/src/x.ts", "+if (a) { return f(); }"].join("\n");
+  const d = deps(passing(), calls, { message: "refactor: limpieza", diff: logicDiff });
+  await runPipeline(app, "abc123", d);
+  assert.ok(calls.includes("generate")); // contradicción → genera
+  assert.equal(d.published, true);
 });
 
 test("modo sombra: en verde NO publica, solo loguea", async () => {
