@@ -52,6 +52,13 @@ El loop primario↔revisor vive **dentro** de OpenCode. Modelos distintos para
 garantizar independencia del juicio. Instrucciones en `opencode/agent/*.md` y
 reglas compartidas en `opencode/AGENTS.md`.
 
+> **Credenciales del modelo:** una **única** key — la de tu suscripción
+> **OpenCode Go** (o Zen) — en `OPENCODE_API_KEY`. OpenCode da acceso a sus
+> modelos por nombre con el prefijo `opencode/` (no hay keys por proveedor).
+> Los IDs (`opencode/deepseek-v4-pro`, `opencode/qwen3.7-max`) están en
+> `opencode/opencode.json`; verifícalos con `opencode models` y cámbialos en una
+> línea si tu plan expone otros slugs.
+
 ## Flujo de un run (`src/pipeline.ts`)
 
 1. **Gate** — espera a que DEV corra ese SHA y esté healthy (`/version`).

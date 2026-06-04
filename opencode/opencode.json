@@ -1,42 +1,18 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "instructions": ["./AGENTS.md"],
-  "provider": {
-    "deepseek": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "DeepSeek",
-      "options": {
-        "baseURL": "https://api.deepseek.com/v1",
-        "apiKey": "{env:DEEPSEEK_API_KEY}"
-      },
-      "models": {
-        "deepseek-v4-pro": { "name": "DeepSeek V4 Pro" }
-      }
-    },
-    "dashscope": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Qwen (DashScope)",
-      "options": {
-        "baseURL": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-        "apiKey": "{env:DASHSCOPE_API_KEY}"
-      },
-      "models": {
-        "qwen3-max": { "name": "Qwen 3 Max" }
-      }
-    }
-  },
   "agent": {
     "qa-generator": {
       "description": "Genera tests E2E Playwright para el blast radius de un commit y los escribe en e2e/.",
       "mode": "primary",
-      "model": "deepseek/deepseek-v4-pro",
+      "model": "opencode/deepseek-v4-pro",
       "prompt": "{file:./agent/qa-generator.md}",
       "tools": { "write": true, "edit": true, "read": true, "bash": true }
     },
     "qa-reviewer": {
       "description": "Juez independiente de calidad de los E2E. No escribe: emite veredicto JSON.",
       "mode": "subagent",
-      "model": "dashscope/qwen3-max",
+      "model": "opencode/qwen3.7-max",
       "prompt": "{file:./agent/qa-reviewer.md}",
       "tools": { "write": false, "edit": false, "bash": false, "read": true }
     }
