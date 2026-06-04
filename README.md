@@ -49,8 +49,12 @@ Dos servicios de larga vida (ver `docker-compose.yml`):
 | `qa-reviewer` (subagent) | **Qwen 3.7 Max** | juez independiente de calidad; emite veredicto |
 
 El loop primario↔revisor vive **dentro** de OpenCode. Modelos distintos para
-garantizar independencia del juicio. Instrucciones en `opencode/agent/*.md` y
-reglas compartidas en `opencode/AGENTS.md`.
+garantizar independencia del juicio. Instrucciones en 3 capas: reglas comunes en
+`opencode/AGENTS.md`, rol/procedimiento por agente en `opencode/agent/*.md`, y
+**skills** (conocimiento de oficio bajo demanda) en `opencode/skill/`:
+`playwright-authoring` (autoría + capacidades de la app: Keycloak en dos capas,
+geolocalización, móvil/offline, cookies/cache, subida de fotos) y
+`test-value-review` (catálogo de falsos positivos para el revisor).
 
 > **Credenciales del modelo:** una **única** key — la de tu suscripción
 > **OpenCode Go** (o Zen) — en `OPENCODE_API_KEY`. OpenCode da acceso a sus

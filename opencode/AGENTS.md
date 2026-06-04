@@ -21,6 +21,16 @@ indica.
   flujos frágiles, decisiones previas y patrones de test de este repo, y guarda
   ahí lo aprendido al terminar.
 
+## Skills (conocimiento de oficio, bajo demanda)
+
+- **`playwright-authoring`** — cómo escribir specs robustos y deterministas, y
+  cómo manejar las capacidades de ESTA app: login en dos capas (gate HTTP Basic
+  del entorno + **Keycloak** con redirección externa), **geolocalización**,
+  modo **móvil/offline**, **cookies/cache** y **subida de fotos**. Consúltala
+  siempre que generes o corrijas un spec.
+- **`test-value-review`** — catálogo de falsos positivos y cómo cazarlos. La usa
+  el revisor.
+
 ## Reglas globales
 
 - Trabaja **solo** con la información disponible (diff, blast radius, código del

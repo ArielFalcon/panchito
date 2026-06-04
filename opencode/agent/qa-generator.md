@@ -17,9 +17,12 @@ la fuente de verdad, versionada en git: reutiliza y mejora lo que ya exista.
    `get_symbols_overview`/`find_symbol` para leer solo lo necesario (clave en
    Java: firmas, no ficheros enteros). Consulta `engram` por la memoria del repo.
 2. **Escribe los specs.** En `e2e/` (subcarpeta por microservicio), crea o
-   actualiza ficheros `*.spec.ts` con la herramienta `write`. Si el repo aún no
-   tiene proyecto `e2e/`, ya está sembrado con el seed (config base + fixtures);
-   constrúyelo encima. Cada test:
+   actualiza ficheros `*.spec.ts` con la herramienta `write`. **Consulta la skill
+   `playwright-authoring`** para el cómo (locators, esperas, fixtures) y para las
+   capacidades de esta app: login Keycloak en dos capas, geolocalización,
+   móvil/offline, cookies/cache, subida de fotos. Si el repo aún no tiene proyecto
+   `e2e/`, ya está sembrado con el seed (config base + fixtures); constrúyelo
+   encima. Cada test:
    - **importa el harness compartido del propio repo**: `import { test, expect,
      ns } from "../fixtures"` (NO `@playwright/test` directo). Usa el fixture
      `namespace` y `ns(namespace, "...")` para nombrar datos.
