@@ -31,13 +31,15 @@ function deps(run: QaRunResult, calls: string[]): PipelineDeps & { issues: strin
     waitForDeploy: async () => {
       calls.push("gate");
     },
-    prepareDiff: async () => {
-      calls.push("diff");
-      return "DIFF";
+    prepare: async () => {
+      calls.push("prepare");
+      return { mirrorDir: "/mirrors/org__demo", diff: "DIFF" };
     },
-    generate: async (ctx) => {
+    generate: async (input) => {
       calls.push("generate");
-      assert.equal(ctx.diff, "DIFF"); // el diff fluye a la generación
+      assert.equal(input.diff, "DIFF"); // el diff fluye a la generación
+      assert.equal(input.mirrorDir, "/mirrors/org__demo"); // cwd del agente
+      assert.equal(input.namespace, "qa-bot-abc123"); // namespace ya resuelto
       return generated;
     },
     execute: async () => {
@@ -51,11 +53,11 @@ function deps(run: QaRunResult, calls: string[]): PipelineDeps & { issues: strin
   };
 }
 
-test("orquesta gate → diff → generate → execute en orden", async () => {
+test("orquesta gate → prepare → generate → execute en orden", async () => {
   const calls: string[] = [];
   const d = deps({ sha: "s", passed: true, cases: [], logs: "" }, calls);
   await runPipeline(app, "abc123", d, "manual");
-  assert.deepEqual(calls, ["gate", "diff", "generate", "execute"]);
+  assert.deepEqual(calls, ["gate", "prepare", "generate", "execute"]);
 });
 
 test("en verde NO abre Issue", async () => {

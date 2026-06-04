@@ -1,9 +1,10 @@
-// Defensa en profundidad. NINGUNA ruta al LLM lo evita. Redacta secretos,
-// hosts/IPs internos y PII antes de que cualquier fracción salga hacia el
-// modelo (externo, en US). Se aplica tanto al contexto de entrada como a
-// toda fracción ensamblada en el mensaje y a lo que se realimenta.
-
-import { AgentContext } from "../types";
+// Defensa en profundidad para los DATOS que salen del sistema: el output de
+// ejecución de los E2E (qa/execute.ts) antes de citarlo en un Issue, y el diff
+// antes de mandarlo a OpenCode. Redacta secretos, hosts/IPs internos y PII.
+//
+// Nota: con los secretos inyectados por Doppler en runtime (no commiteados),
+// el código del repo ya viene limpio; este sanitizer cubre el residual —
+// datos de DEV que aparezcan en logs y cualquier secreto colado en un diff.
 
 const SECRET_PATTERNS: RegExp[] = [
   /(?:api[_-]?key|token|secret|password|passwd|pwd)\s*[:=]\s*\S+/gi,
@@ -29,56 +30,4 @@ export function sanitizeText(input: string): string {
   for (const p of INTERNAL_HOST_PATTERNS) out = out.replace(p, "[REDACTED_HOST]");
   for (const p of PII_PATTERNS) out = out.replace(p, "[REDACTED_PII]");
   return out;
-}
-
-export function sanitize(ctx: AgentContext): AgentContext {
-  if (!ctx.diff) return ctx;
-  return { ...ctx, diff: sanitizeText(ctx.diff) };
-}
-
-const REGEX_SPECIALS = ".+^${}()|[]\\";
-
-// Convierte un glob simple (*, **, **/, ?) a RegExp anclado, recorriéndolo
-// carácter a carácter (evita corromper los fragmentos ya expandidos).
-function globToRegExp(glob: string): RegExp {
-  let re = "";
-  for (let i = 0; i < glob.length; i++) {
-    const c = glob[i]!;
-    if (c === "*") {
-      if (glob[i + 1] === "*") {
-        i++;
-        if (glob[i + 1] === "/") {
-          i++;
-          re += "(?:.*/)?"; // **/ => cero o más directorios
-        } else {
-          re += ".*"; // **  => cualquier cosa
-        }
-      } else {
-        re += "[^/]*"; // *   => un segmento
-      }
-    } else if (c === "?") {
-      re += "[^/]";
-    } else if (REGEX_SPECIALS.includes(c)) {
-      re += "\\" + c;
-    } else {
-      re += c;
-    }
-  }
-  return new RegExp(`^${re}$`);
-}
-
-// Aplica .aiignore: elimina del diff las secciones cuyo fichero casa con algún
-// patrón vetado, para que su contenido NUNCA llegue al LLM.
-export function stripIgnoredFiles(diff: string, patterns: string[]): string {
-  if (!patterns.length || !diff.includes("diff --git")) return diff;
-  const regexes = patterns.map(globToRegExp);
-  return diff
-    .split(/(?=^diff --git )/m)
-    .filter((section) => {
-      const m = section.match(/^diff --git a\/(\S+) b\/(\S+)/m);
-      if (!m) return true; // preámbulo u otra cosa: se conserva
-      const path = m[2] ?? m[1]!;
-      return !regexes.some((re) => re.test(path));
-    })
-    .join("");
 }

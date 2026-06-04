@@ -1,30 +1,47 @@
-# Servicio permanente (M2) + sidecars MCP de larga vida. Como el servicio no es
-# efímero, la memoria (Engram) persiste en un volumen y los MCP no necesitan
-# bootstrap por run.
+# Dos servicios de larga vida:
+#   orchestrator → nuestra infra Node (webhook, gate, espejo, ejecución, reporte)
+#   opencode     → el motor agéntico `opencode serve` + los MCP (codegraph, engram)
+#
+# Comparten el volumen `mirrors`: el orchestrator clona/posiciona el espejo del
+# repo y el agente de OpenCode lee/escribe ahí (cwd de la sesión). Como ambos
+# servicios son permanentes, la memoria (engram) y los espejos persisten.
+#
+# Los secretos los inyecta Doppler (`doppler run -- docker compose up`); el
+# env_file .env es solo para correr en local sin Doppler.
 
 services:
   orchestrator:
     build: .
     env_file: .env
     restart: always
+    depends_on:
+      - opencode
     ports:
-      - "${PORT:-8080}:8080" # recibe los webhooks
+      - "${PORT:-8080}:8080" # recibe los webhooks post-deploy
+    environment:
+      OPENCODE_SERVE_URL: http://opencode:4096
+      MIRROR_DIR: /app/.mirrors
     volumes:
       - ./config:/app/config # config en caliente (sin rebuild)
       - qa-store:/app/.qa-store # suite de regresión E2E persistida
-      - mirrors:/app/.mirrors # espejos locales de los repos vigilados
+      - mirrors:/app/.mirrors # espejos locales (compartidos con opencode)
 
-  # --- Sidecars MCP: habilita las URLs en config/tools/mcp-servers.yaml ---
-  # codegraph:
-  #   image: code-review-graph:latest
-  #   volumes:
-  #     - mirrors:/mirrors        # comparte los espejos para el blast radius
-  # engram:
-  #   image: engram:latest
-  #   volumes:
-  #     - engram-data:/data       # SQLite persistente (memoria episódica)
+  opencode:
+    build: ./opencode # opencode oficial + los binarios MCP (ver opencode/Dockerfile)
+    env_file: .env
+    restart: always
+    command: ["serve", "--hostname", "0.0.0.0", "--port", "4096"]
+    environment:
+      MIRROR_DIR: /app/.mirrors
+      ENGRAM_DB: /data/engram.db
+    volumes:
+      - ./opencode:/root/.config/opencode # opencode.json + agentes + AGENTS.md
+      - mirrors:/app/.mirrors # MISMA ruta que el orchestrator: el agente lee/escribe aquí
+      - engram-data:/data # SQLite de memoria episódica (engram)
+      - codegraph-data:/var/lib/codegraph # índice del grafo de código
 
 volumes:
   qa-store:
   mirrors:
-  # engram-data:
+  engram-data:
+  codegraph-data:

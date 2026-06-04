@@ -1,76 +1,107 @@
 # ai-pipeline
 
-Motor **agnóstico** de QA E2E asistido por IA. Vigila una app: cuando un commit
-llega a `main` y se despliega a DEV, genera tests E2E sobre el blast radius del
-cambio, los ejecuta contra DEV y abre un **GitHub Issue** si algo falla.
+QA E2E **centralizado y asistido por IA**. Replica lo que harías con OpenCode en
+tu máquina, pero como un servicio que **observa todos los repos** del equipo y
+**prueba sobre DEV**: cuando un commit se despliega a DEV, un agente genera tests
+E2E sobre el blast radius del cambio, los ejecuta contra DEV y abre un **GitHub
+Issue** si algo falla.
 
-Este repositorio es un **template**: no trae ninguna app acoplada. La app
-vigilada se conecta solo por `config/apps/<app>.yaml` + `.env` (ambos con tus
-valores; nunca se commitean credenciales).
+Es un **template**: no trae ninguna app acoplada. Cada app vigilada se conecta
+solo por `config/apps/<app>.yaml`. Los secretos los inyecta **Doppler** en
+runtime (no se commitea nada).
 
-> Diseño completo y decisiones: [`docs/fase-1-spec.md`](docs/fase-1-spec.md).
+## Arquitectura
 
-## Estado: M0 + M1 (motor completo, verificado por tests unitarios)
+Dos servicios de larga vida (ver `docker-compose.yml`):
 
-El motor agnóstico está cableado y **verificado por tests unitarios** (providers,
-MCP y red inyectables/stubbeados — no toca servicios reales):
-
-**M0 — núcleo**
-- `runAgent()` + loop primario↔revisor **a mano** (sin LangGraph): secuencial,
-  tope de iteraciones configurable, corte anti-estancamiento, delta-feedback.
-- Sanitización en el ensamblaje del mensaje (diff, contexto de código, memoria,
-  propuesta y correcciones).
-- Gate de deploy por SHA (`/version` → `{ sha, healthy }`) con timeout.
-- Namespacing de datos de test `qa-bot-<sha>`.
-
-**M1 — integración real (bordes inyectables)**
-- Cliente **MCP** (JSON-RPC) + integraciones `codegraph` (blast radius) y
-  `engram` (memoria), construidas desde `config/tools/mcp-servers.yaml`. Si un
-  servidor no está habilitado, se usa la implementación nula (degradación limpia).
-- **Espejos de repo** (`repo-mirror`): clone/fetch + checkout del SHA y extracción
-  del diff del commit que alimenta el blast radius.
-- **Runner E2E** con Playwright (reporter JSON → casos pass/fail) y
-  **sanitización del output de ejecución** antes de reportar.
-
-**M2 — servicio (disparo automático)**
-- `pipeline.ts`: el lazo completo extraído a un módulo, compartido por el CLI y
-  el webhook (deps inyectables → orquestación testeada).
-- `server/webhook.ts`: servidor HTTP que recibe `{ repo, sha }` (forma simple o
-  evento push de GitHub), verifica la firma HMAC (`x-hub-signature-256`) y encola
-  el run.
-- `server/queue.ts`: cola **secuencial** — un run a la vez, evita QA concurrente
-  pisándose en DEV; un fallo no detiene la cola.
-- `docker-compose.yml`: servicio con puerto, volúmenes (suite de regresión +
-  espejos) y los sidecars MCP listos para habilitar.
-
-El runner por defecto requiere Playwright disponible en el entorno (no es
-dependencia del template para no arrastrar navegadores).
-
-### Modo servicio (M2)
-
-```bash
-npm start            # levanta el webhook en :$PORT (default 8080)
-# El repo vigilado, tras desplegar a DEV, hace POST con { repo, sha }
-# (o reenvía su evento push de GitHub). Firma con WEBHOOK_SECRET si se define.
 ```
+   GitHub (push → deploy DEV)
+            │  webhook { repo, sha }
+            ▼
+ ┌─────────────────────┐        HTTP        ┌──────────────────────────┐
+ │   orchestrator      │  ───────────────▶  │   opencode  (serve)      │
+ │  (este repo, Node)  │   sesión + prompt  │  agente qa-generator     │
+ │                     │ ◀───────────────   │   └─ subagente qa-reviewer│
+ │  webhook + cola     │   specs escritos   │  MCP: codegraph, engram  │
+ │  gate · espejo      │   en el espejo     └──────────────────────────┘
+ │  ejecución · reporte│         ▲  cwd = espejo (volumen compartido)
+ └─────────────────────┘─────────┘
+```
+
+- **`orchestrator`** (este repo): la **infra determinística** — recibe el
+  webhook, encola un run, espera el deploy (gate por SHA), prepara el espejo del
+  repo, **dispara OpenCode**, ejecuta los E2E con Playwright contra DEV y abre el
+  Issue si falla. Todo con dependencias inyectables → verificable por tests
+  unitarios.
+- **`opencode`**: el **motor agéntico**. `opencode serve` corre los agentes
+  definidos en `opencode/opencode.json` y los MCP (`codegraph` para el blast
+  radius, `engram` para la memoria episódica). El agente escribe los `.spec.ts`
+  en el espejo (volumen compartido) y nosotros los recogemos.
+
+### Agentes (opencode/)
+
+| Agente | Modelo | Rol |
+|---|---|---|
+| `qa-generator` (primary) | **DeepSeek V4 Pro** | genera los E2E, invoca al revisor, itera |
+| `qa-reviewer` (subagent) | **Qwen 3.7 Max** | juez independiente de calidad; emite veredicto |
+
+El loop primario↔revisor vive **dentro** de OpenCode. Modelos distintos para
+garantizar independencia del juicio. Instrucciones en `opencode/agent/*.md` y
+reglas compartidas en `opencode/AGENTS.md`.
+
+## Flujo de un run (`src/pipeline.ts`)
+
+1. **Gate** — espera a que DEV corra ese SHA y esté healthy (`/version`).
+2. **Espejo** — clone/fetch + checkout del SHA; extrae el diff del commit.
+3. **Generar** — abre una sesión OpenCode con cwd = espejo, le pasa el diff +
+   namespace + dir de salida; el agente escribe los specs y los revisa.
+4. **Ejecutar** — corre los specs con Playwright contra DEV, con datos
+   namespaced `qa-bot-<sha>`. El output se **sanitiza** antes de reusarse.
+5. **Reportar** — Issue accionable solo si falla; en verde, sin ruido.
+
+## Sanitización (con Doppler)
+
+Como Doppler inyecta los secretos en runtime, el **código del repo ya viene
+limpio**. El sanitizer (`src/orchestrator/sanitizer.ts`) cubre el residual:
+redacta secretos/PII/hosts internos en (a) el **diff** antes de mandarlo a
+OpenCode y (b) el **output de ejecución** antes de citarlo en un Issue —que es
+donde podrían aparecer datos de DEV. Los datos de test son sintéticos y
+namespaced.
 
 ## Uso
 
 ```bash
 npm install
-cp .env.example .env        # rellena con tus valores (gitignored)
-cp config/apps/example.yaml config/apps/mi-app.yaml   # acopla tu app
+npm test          # tests unitarios de la infra (red/OpenCode/Playwright stubbeados)
+npm run typecheck
 
-npm test                    # tests unitarios del motor
-npm run typecheck           # chequeo de tipos
+# Acopla una app:
+cp config/apps/example.yaml config/apps/mi-app.yaml   # edita repo, dev, flujos
 
-# Disparo manual del lazo (M0):
+# Disparo manual del run (corre el MISMO pipeline que el webhook):
 npm run qa -- --app mi-app --sha <commit-sha>
 ```
 
+### Despliegue (Docker)
+
+```bash
+# Con Doppler inyectando los secretos:
+doppler run -- docker compose up --build
+# (o copia .env.example → .env para correr en local sin Doppler)
+```
+
+- `orchestrator`: imagen basada en Playwright (Node + navegadores) + git.
+- `opencode`: imagen oficial de OpenCode + los binarios MCP (ver
+  `opencode/Dockerfile`, donde se instalan `codegraph-mcp` y `engram-mcp`).
+- Volúmenes: `mirrors` (compartido entre ambos), `qa-store` (suite de
+  regresión), `engram-data` (memoria), `codegraph-data` (índice del grafo).
+
 ## Principios
 
-1. `runAgent()` agnóstico al disparador.
-2. Especificidad de la app solo en `config/`, nunca en `src/`.
-3. Sanitización obligatoria — ninguna ruta al LLM la evita.
-4. Revisor independiente (modelo distinto al primario), condicional.
+1. Infra determinística (gate, espejo, ejecución, reporte) separada del motor
+   agéntico (OpenCode).
+2. Especificidad de la app solo en `config/`; agentes y modelos solo en
+   `opencode/`. Nada de esto en `src/`.
+3. Sanitización en los datos que salen del sistema (diff → modelo, logs → Issue).
+4. Revisor independiente (modelo distinto al primario), condicional por app.
+5. Cola **secuencial**: un run a la vez, sin QA concurrente pisándose en DEV.

@@ -1,25 +1,16 @@
-// Contratos compartidos por todo el sistema. AgentContext es la única
-// entrada del núcleo: cualquier disparador (webhook, manual, cron, chat)
-// construye uno de estos y se lo pasa a runAgent.
+// Contratos compartidos por todo el sistema. El disparador (webhook, manual,
+// cron) construye el contexto del run y la orquestación vive en pipeline.ts.
 
 export type TriggerSource = "webhook" | "manual" | "cron" | "chat";
 
-export interface AgentContext {
-  source: TriggerSource;
-  task: string; // instrucción de alto nivel (proviene de config)
-  repo?: string;
-  sha?: string; // commit a verificar — clave para el gate de deploy
-  diff?: string;
-  userId?: string;
-  metadata?: Record<string, unknown>;
-}
-
+// Resultado de una corrida del agente OpenCode: los E2E que escribió + el
+// veredicto del subagente revisor (resuelto DENTRO de OpenCode).
 export interface AgentResult {
-  output: string; // texto principal / propuesta del primario
+  output: string; // texto final del agente (incl. su veredicto de cierre)
   artifacts: Artifact[]; // los tests E2E generados
-  reviewed: boolean; // si pasó por el revisor
+  reviewed: boolean; // si la revisión estaba activada
   approved: boolean; // veredicto del revisor (true si no se revisó)
-  note?: string; // motivo de cierre cuando no se aprobó (no convergió, etc.)
+  note?: string; // motivo cuando no se aprobó (no convergió, etc.)
 }
 
 export interface Artifact {

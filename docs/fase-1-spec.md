@@ -1,5 +1,14 @@
 # ai-pipeline — Especificación revisada · Fase 1
 
+> **Nota (pivote a agente):** el sistema migró de un loop primario↔revisor
+> hecho a mano + clientes MCP propios a delegar la **generación agéntica en
+> OpenCode** (`opencode serve`), con los agentes y MCP definidos en
+> `opencode/`. `src/` conserva solo la infra determinística (gate, espejo,
+> ejecución, reporte). Ver el `README.md` para la arquitectura vigente; las
+> secciones de abajo describen el diseño previo y se mantienen como contexto
+> histórico de las decisiones que siguen vigentes (config/ vs src/,
+> sanitización, revisor independiente, cola secuencial).
+
 > Esta especificación **reemplaza** el alcance original de la guía
 > (`ai-brain — Especificación de implementación`) en los puntos donde nuestras
 > decisiones de diseño cambiaron el rumbo. Conserva la filosofía (núcleo
