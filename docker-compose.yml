@@ -33,12 +33,12 @@ services:
     command: ["serve", "--hostname", "0.0.0.0", "--port", "4096"]
     environment:
       MIRROR_DIR: /app/.mirrors
-      ENGRAM_DB: /data/engram.db
+      ENGRAM_DATA_DIR: /data
     volumes:
       - ./opencode:/root/.config/opencode # opencode.json + agentes + AGENTS.md
       - mirrors:/app/.mirrors # MISMA ruta que el orchestrator: el agente lee/escribe aquí (Serena cachea en <repo>/.serena)
       - serena-cache:/root/.cache/uv # caché de uv/Serena (evita re-descargar en cada arranque)
-      - engram-data:/data # SQLite de memoria episódica (engram)
+      - engram-data:/data # SQLite de memoria episódica (engram) — persiste entre reinicios
 
 volumes:
   mirrors:
