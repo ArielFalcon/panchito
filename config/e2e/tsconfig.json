@@ -8,5 +8,6 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["fixtures.ts", "specs/**/*.ts"]
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules"]
 }

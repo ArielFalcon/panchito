@@ -1,14 +1,16 @@
-// Config base de Playwright — parte del HARNESS (Filtro A: estandarización).
-// Todos los specs generados (de cualquier app) corren con ESTA config, así el
-// comportamiento es consistente entre repos y runs.
+// Config base de Playwright — SEED del harness (Filtro A: estandarización).
+// Se copia dentro de `e2e/` del repo la primera vez; a partir de ahí el repo es
+// su dueño y el agente la mantiene. Todos los specs corren con esta config, así
+// el comportamiento es consistente entre microservicios y runs.
 //
-// El orchestrator inyecta por entorno: PW_BASE_URL (DEV), PW_SPEC_DIR (carpeta
-// de specs de este run) y PW_NAMESPACE (prefijo de datos qa-bot-<sha>).
+// El orchestrator inyecta por entorno: PW_BASE_URL (DEV) y PW_NAMESPACE (prefijo
+// de datos qa-bot-<sha>, que leen las fixtures).
 
 import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
-  testDir: process.env.PW_SPEC_DIR ?? "./specs",
+  testDir: ".",
+  testMatch: "**/*.spec.ts",
   // Un run a la vez contra DEV (la cola del servicio ya serializa los runs;
   // dentro del run evitamos colisiones de datos namespaced).
   fullyParallel: false,

@@ -3,20 +3,16 @@
 
 export type TriggerSource = "webhook" | "manual" | "cron" | "chat";
 
-// Resultado de una corrida del agente OpenCode: los E2E que escribió + el
-// veredicto del subagente revisor (resuelto DENTRO de OpenCode).
+// Resultado de una corrida del agente OpenCode. El agente escribe los E2E
+// DIRECTAMENTE en `e2e/` del espejo (la fuente de verdad es git, no este
+// objeto); aquí solo viaja el veredicto del subagente revisor (resuelto DENTRO
+// de OpenCode) y el texto final.
 export interface AgentResult {
   output: string; // texto final del agente (incl. su veredicto de cierre)
-  artifacts: Artifact[]; // los tests E2E generados
+  specs: string[]; // nombres de specs que dijo haber escrito/actualizado
   reviewed: boolean; // si la revisión estaba activada
   approved: boolean; // veredicto del revisor (true si no se revisó)
   note?: string; // motivo cuando no se aprobó (no convergió, etc.)
-}
-
-export interface Artifact {
-  path: string; // ruta sugerida del fichero (vacío => se autogenera al persistir)
-  content: string;
-  kind: "e2e" | "doc" | "other";
 }
 
 // Resultado de EJECUTAR los E2E contra DEV.

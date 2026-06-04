@@ -17,9 +17,9 @@ RUN npm install --omit=dev || npm install
 
 COPY . .
 
-# Tooling del proyecto e2e (Playwright runner + eslint + tsc) con el que corren
-# los Filtros B (validación) y C (ejecución) sobre los specs generados.
-RUN npm install --prefix config/e2e
+# El tooling e2e (Playwright runner + eslint + tsc) NO se instala aquí: vive en
+# `e2e/` de cada repo y el orchestrator hace `npm ci` ahí por run (qa/setup.ts).
+# La imagen ya trae los navegadores de Playwright (base mcr...playwright).
 
 # Arranque del servicio: webhook + cola secuencial.
 CMD ["npm", "run", "start"]

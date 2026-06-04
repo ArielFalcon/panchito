@@ -21,13 +21,10 @@ services:
     environment:
       OPENCODE_SERVE_URL: http://opencode:4096
       MIRROR_DIR: /app/.mirrors
-      E2E_PROJECT_DIR: /app/config/e2e # proyecto e2e (harness): cwd de validate/execute
-      QA_STORE_DIR: /app/config/e2e/specs # los specs se persisten DENTRO del proyecto e2e
     volumes:
-      - ./config:/app/config # config en caliente (sin rebuild)
-      - e2e-modules:/app/config/e2e/node_modules # tooling e2e (poblado desde la imagen; no lo pisa el bind de ./config)
-      - qa-store:/app/config/e2e/specs # suite de regresión E2E persistida
-      - mirrors:/app/.mirrors # espejos locales (compartidos con opencode)
+      - ./config:/app/config # config (incluye el seed config/e2e) en caliente
+      - mirrors:/app/.mirrors # espejos locales (compartidos con opencode); el harness corre sobre <repo>/e2e aquí
+      # La suite E2E NO se persiste en volumen: vive en git (carpeta e2e/ del repo de la app).
 
   opencode:
     build: ./opencode # opencode oficial + uv/JDK (Serena) + engram (ver opencode/Dockerfile)
@@ -44,8 +41,6 @@ services:
       - engram-data:/data # SQLite de memoria episódica (engram)
 
 volumes:
-  qa-store:
-  e2e-modules:
   mirrors:
   serena-cache:
   engram-data:

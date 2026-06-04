@@ -11,6 +11,7 @@ const ROOT = process.env.AI_PIPELINE_ROOT ?? process.cwd();
 export interface AppConfig {
   name: string;
   repo: string;
+  baseBranch?: string; // rama destino de los PR de QA (default "main")
   dev: {
     baseUrl: string;
     versionUrl: string;

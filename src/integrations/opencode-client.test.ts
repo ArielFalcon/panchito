@@ -7,20 +7,16 @@ import {
   OpencodeDeps,
   OpencodeRunInput,
 } from "./opencode-client";
-import { Artifact } from "../types";
 
 const input: OpencodeRunInput = {
   repo: "org/demo",
   sha: "abc123",
   diff: "diff --git a/x b/x\n+const x = 1;",
   mirrorDir: "/mirrors/org__demo",
-  specRelDir: ".qa-specs/qa-bot-abc123",
-  specAbsDir: "/mirrors/org__demo/.qa-specs/qa-bot-abc123",
+  e2eRelDir: "e2e",
   namespace: "qa-bot-abc123",
   needsReview: true,
 };
-
-const specs: Artifact[] = [{ path: "login.spec.ts", content: "test(...)", kind: "e2e" }];
 
 function deps(finalText: string, captured?: { prompt?: string; agent?: string }): OpencodeDeps {
   return {
@@ -34,16 +30,15 @@ function deps(finalText: string, captured?: { prompt?: string; agent?: string })
         },
       };
     },
-    readSpecs: () => specs,
   };
 }
 
-test("buildPrompt incluye repo, sha, namespace, dir de salida y el diff", () => {
+test("buildPrompt incluye repo, sha, namespace, carpeta e2e y el diff", () => {
   const p = buildPrompt(input);
   assert.match(p, /abc123/);
   assert.match(p, /org\/demo/);
   assert.match(p, /qa-bot-abc123/);
-  assert.match(p, /\.qa-specs\/qa-bot-abc123/);
+  assert.match(p, /e2e\//);
   assert.match(p, /const x = 1;/);
   assert.match(p, /invoca al subagente qa-reviewer/);
 });
@@ -76,11 +71,11 @@ test("parseVerdict sin veredicto falla cerrado (approved=false)", () => {
   assert.equal(v.approved, false);
 });
 
-test("runOpencode dispara el agente qa-generator y recoge los specs", async () => {
+test("runOpencode dispara el agente qa-generator y propaga el veredicto", async () => {
   const captured: { prompt?: string; agent?: string } = {};
   const res = await runOpencode(input, deps('{ "approved": true, "specs": ["login.spec.ts"] }', captured));
   assert.equal(captured.agent, "qa-generator");
-  assert.equal(res.artifacts.length, 1);
+  assert.deepEqual(res.specs, ["login.spec.ts"]);
   assert.equal(res.reviewed, true);
   assert.equal(res.approved, true);
 });

@@ -2,26 +2,24 @@
 // a los providers y al cliente MCP hechos a mano: ahora la generación, la
 // revisión (subagente) y el acceso a serena/engram viven DENTRO de OpenCode
 // (ver opencode/opencode.json). Aquí solo abrimos una sesión contra
-// `opencode serve`, le pasamos el contexto del cambio, y recogemos los .spec.ts
-// que el agente escribió en el espejo.
+// `opencode serve`, le pasamos el contexto del cambio, y el agente escribe/
+// actualiza los tests en la carpeta `e2e/` del espejo (que es un repo git: esa
+// es la fuente de verdad). No recogemos artefactos: el harness corre sobre
+// `e2e/` y la publicación comitea el diff de git.
 //
 // La SDK se inyecta vía OpencodeDeps: la lógica verificable (prompt, parseo del
-// veredicto, lectura de specs, orquestación) se testea con stubs; la conexión
-// real a `opencode serve` es el borde no cubierto por unitarios (igual que
-// Playwright en qa/execute.ts).
+// veredicto, orquestación) se testea con stubs; la conexión real a
+// `opencode serve` es el borde no cubierto por unitarios.
 
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { Artifact, AgentResult } from "../types";
+import { AgentResult } from "../types";
 import { sanitizeText } from "../orchestrator/sanitizer";
 
 export interface OpencodeRunInput {
   repo: string;
   sha: string;
   diff: string;
-  mirrorDir: string; // cwd del agente: espejo del repo en el SHA
-  specRelDir: string; // dónde escribe el agente, relativo a mirrorDir
-  specAbsDir: string; // misma ruta absoluta, para que NOSOTROS leamos los specs
+  mirrorDir: string; // cwd del agente: espejo del repo (contiene `e2e/`)
+  e2eRelDir: string; // carpeta de tests relativa a mirrorDir (p. ej. "e2e")
   namespace: string; // prefijo de datos de test (qa-bot-<sha>)
   needsReview: boolean;
 }
@@ -35,8 +33,6 @@ export interface OpencodeSession {
 export interface OpencodeDeps {
   // Abre una sesión para `agent` con `cwd` como directorio de proyecto.
   open(agent: string, cwd: string): Promise<OpencodeSession>;
-  // Lee los .spec.ts que el agente escribió en `dir`.
-  readSpecs(dir: string): Artifact[];
 }
 
 interface FinalVerdict {
@@ -53,14 +49,12 @@ export async function runOpencode(
   const finalText = await session.prompt(buildPrompt(input));
 
   const verdict = parseVerdict(finalText);
-  const artifacts = deps.readSpecs(input.specAbsDir);
-
   // Sin revisión configurada, el veredicto del subagente no aplica: se aprueba.
   const approved = input.needsReview ? verdict.approved : true;
 
   return {
     output: finalText,
-    artifacts,
+    specs: verdict.specs,
     reviewed: input.needsReview,
     approved,
     note: approved ? undefined : verdict.note ?? "el revisor no aprobó los E2E",
@@ -72,9 +66,10 @@ export async function runOpencode(
 // diff se sanitiza igualmente (defensa en profundidad — barato).
 export function buildPrompt(input: OpencodeRunInput): string {
   return [
-    `Genera tests E2E para los flujos afectados por el commit ${input.sha} de ${input.repo}.`,
+    `Genera/actualiza tests E2E para los flujos afectados por el commit ${input.sha} de ${input.repo}.`,
     ``,
-    `- Directorio de salida de los specs (relativo a tu cwd): ${input.specRelDir}`,
+    `- Trabaja en la carpeta de tests del repo: ${input.e2eRelDir}/ (es la fuente de verdad, versionada en git).`,
+    `  Reutiliza y mejora los fixtures/specs que ya existan; no dupliques.`,
     `- Prefijo de datos de test: ${input.namespace}`,
     input.needsReview
       ? `- Revisión obligatoria: invoca al subagente qa-reviewer y aplica sus correcciones.`
@@ -89,7 +84,7 @@ export function buildPrompt(input: OpencodeRunInput): string {
 
 // Extrae el JSON de cierre del agente. Tolerante: busca el ÚLTIMO objeto JSON
 // con `approved` (esté o no en un bloque ```json). Si no hay uno válido, se
-// asume no aprobado (fail-closed) para no reportar verde por accidente.
+// asume no aprobado (fail-closed) para no publicar por accidente.
 export function parseVerdict(text: string): FinalVerdict {
   const candidates = text.match(/\{[\s\S]*?\}/g) ?? [];
   for (let i = candidates.length - 1; i >= 0; i--) {
@@ -120,7 +115,6 @@ export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
   });
 
   return {
-    readSpecs: readSpecsFrom,
     // `directory` (query) posiciona la sesión en el espejo del repo: el agente
     // lee/escribe ahí. El espejo es un volumen compartido con el contenedor
     // `opencode`, así que la ruta es válida en ambos lados.
@@ -148,21 +142,4 @@ function extractText(parts: Array<{ type: string }> | undefined): string {
     .filter((p): p is { type: "text"; text: string } => p.type === "text")
     .map((p) => p.text)
     .join("");
-}
-
-// Lectura por defecto de los specs escritos por el agente.
-export function readSpecsFrom(dir: string): Artifact[] {
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return []; // el agente no escribió nada
-  }
-  return entries
-    .filter((f) => f.endsWith(".spec.ts"))
-    .map((f) => ({
-      path: f,
-      content: readFileSync(join(dir, f), "utf8"),
-      kind: "e2e" as const,
-    }));
 }

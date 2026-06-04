@@ -25,8 +25,9 @@ function remoteUrl(repo: string): string {
 }
 
 // Auth por cabecera efímera (-c http.extraHeader): NO persiste el token en
-// .git/config como sí haría embeberlo en la URL del remoto.
-function authArgs(): string[] {
+// .git/config como sí haría embeberlo en la URL del remoto. Se exporta para que
+// el publicador (publish.ts) reuse la misma auth al hacer push.
+export function authHeaderArgs(): string[] {
   const token = process.env.GITHUB_TOKEN;
   return token ? ["-c", `http.extraHeader=Authorization: Bearer ${token}`] : [];
 }
@@ -35,9 +36,9 @@ export async function ensureMirror(repo: string, sha: string, deps: MirrorDeps):
   const root = deps.root ?? mirrorRoot();
   const dir = join(root, repo.replace("/", "__"));
   if (!deps.exists(dir)) {
-    await deps.git([...authArgs(), "clone", remoteUrl(repo), dir]);
+    await deps.git([...authHeaderArgs(), "clone", remoteUrl(repo), dir]);
   } else {
-    await deps.git([...authArgs(), "fetch", "origin"], dir);
+    await deps.git([...authHeaderArgs(), "fetch", "origin"], dir);
   }
   await deps.git(["checkout", sha], dir);
   return dir;

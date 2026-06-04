@@ -54,17 +54,17 @@ export async function runE2E(
   };
 }
 
-// Runner por defecto: ejecuta Playwright en el proyecto e2e (config/e2e) con
-// reporter JSON, apuntando testDir al `dir` del run. Playwright NO es
-// dependencia del template (arrastraría navegadores): vive en el entorno donde
-// corre el servicio (la imagen del orchestrator se basa en la de Playwright).
-// PW_BASE_URL apunta a DEV; PW_SPEC_DIR es el dir de specs de este run.
+// Runner por defecto: ejecuta Playwright en el proyecto `e2e/` del repo (con su
+// propia config/fixtures) y reporter JSON. Playwright NO es dependencia del
+// template (arrastraría navegadores): vive en el entorno donde corre el servicio
+// (la imagen del orchestrator se basa en la de Playwright). PW_BASE_URL apunta a
+// DEV; PW_NAMESPACE es el prefijo de datos del run (lo leen las fixtures).
 export const defaultExecuteDeps: ExecuteDeps = {
   runSuite: ({ dir, baseUrl, namespace }) =>
     new Promise((resolve, reject) => {
       const child = spawn("npx", ["playwright", "test", "--reporter=json"], {
-        cwd: process.env.E2E_PROJECT_DIR ?? "config/e2e",
-        env: { ...process.env, PW_BASE_URL: baseUrl, PW_SPEC_DIR: dir, PW_NAMESPACE: namespace },
+        cwd: dir,
+        env: { ...process.env, PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace },
       });
       let stdout = "";
       let stderr = "";

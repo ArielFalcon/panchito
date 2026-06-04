@@ -44,15 +44,12 @@ export async function validateSpecs(
   return { ok: errors.length === 0, errors };
 }
 
-// Runners por defecto: ejecutan las herramientas en el proyecto e2e
-// (config/e2e), apuntando al dir de specs del run. Requieren tsc/eslint/
-// playwright disponibles en el entorno (imagen del orchestrator).
-function sh(cmd: string, args: string[], specDir: string): Promise<CheckResult> {
+// Runners por defecto: ejecutan las herramientas DENTRO del proyecto `e2e/` del
+// repo (su propia config/tooling). Requieren tsc/eslint/playwright disponibles
+// (deps del propio proyecto e2e, instaladas por el orchestrator antes del gate).
+function sh(cmd: string, args: string[], e2eDir: string): Promise<CheckResult> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, {
-      cwd: process.env.E2E_PROJECT_DIR ?? "config/e2e",
-      env: { ...process.env, PW_SPEC_DIR: specDir },
-    });
+    const child = spawn(cmd, args, { cwd: e2eDir, env: { ...process.env } });
     let out = "";
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (out += d));
@@ -62,7 +59,7 @@ function sh(cmd: string, args: string[], specDir: string): Promise<CheckResult> 
 }
 
 export const defaultValidateDeps: ValidateDeps = {
-  typecheck: (specDir) => sh("npx", ["tsc", "--noEmit", "-p", "tsconfig.json"], specDir),
-  lint: (specDir) => sh("npx", ["eslint", specDir], specDir),
-  listTests: (specDir) => sh("npx", ["playwright", "test", "--list"], specDir),
+  typecheck: (e2eDir) => sh("npx", ["tsc", "--noEmit"], e2eDir),
+  lint: (e2eDir) => sh("npx", ["eslint", "."], e2eDir),
+  listTests: (e2eDir) => sh("npx", ["playwright", "test", "--list"], e2eDir),
 };

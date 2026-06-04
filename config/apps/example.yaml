@@ -2,7 +2,8 @@
 # Los ${VARS} se expanden desde el entorno (.env) — no pongas secretos aquí.
 
 name: "example"
-repo: "org/example"            # owner/repo en GitHub (donde se abren los Issues)
+repo: "org/example"            # owner/repo en GitHub (Issues + PRs de la suite E2E)
+baseBranch: "main"             # rama destino de los PR de QA (default: main)
 
 dev:
   baseUrl: "https://dev.example.internal"

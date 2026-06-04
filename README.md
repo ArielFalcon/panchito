@@ -55,28 +55,47 @@ reglas compartidas en `opencode/AGENTS.md`.
 
 1. **Gate** — espera a que DEV corra ese SHA y esté healthy (`/version`).
 2. **Espejo** — clone/fetch + checkout del SHA; extrae el diff del commit.
-3. **Generar** — abre una sesión OpenCode con cwd = espejo, le pasa el diff +
-   namespace + dir de salida; el agente escribe los specs y los revisa.
-4. **Validar (Filtro B)** — gate estático sobre los specs: typecheck + lint
+3. **Generar** — abre una sesión OpenCode con cwd = espejo; el agente escribe/
+   mejora los tests en la carpeta **`e2e/` del repo** (fuente de verdad en git)
+   y los revisa. Si el repo no tiene `e2e/`, se siembra desde el seed
+   (`config/e2e/`).
+4. **Validar (Filtro B)** — `npm ci` en `e2e/` + gate estático: typecheck + lint
    (`eslint-plugin-playwright`) + `playwright --list`. Si no pasan, el run es
    `invalid` y no se ejecuta.
 5. **Ejecutar (Filtro C)** — corre los specs con Playwright contra DEV, con
    datos namespaced `qa-bot-<sha>`, y clasifica `pass`/`fail`/`flaky` (retries
    como señal de inestabilidad). El output se **sanitiza** antes de reusarse.
-6. **Reportar** — Issue solo si `fail` o `invalid`; los `flaky` van a cuarentena
-   (log, sin Issue); en verde, sin ruido.
+6. **Publicar / reportar** — en verde, el agente comitea `e2e/` y se abre un
+   **PR con auto-merge** (si el repo lo permite); así la suite mejora sola, run
+   tras run, versionada. `fail`/`invalid` → Issue; `flaky` → cuarentena (sin PR
+   ni Issue); verde sin cambios → ni PR ni ruido.
 
 ### Harness de E2E (calidad y consistencia)
 
-- **Capa A — estandarización** (`config/e2e/`): config base de Playwright,
-  fixtures compartidas (login, `namespace`, `ns()`) y reglas de lint que el
-  agente debe respetar. Modelo híbrido: el esqueleto es común; el login real de
-  cada app lo rellena el agente por repo y se persiste.
+- **Capa A — estandarización**: el seed `config/e2e/` (config base de Playwright,
+  fixtures compartidas — login, `namespace`, `ns()` — y reglas de lint) se siembra
+  en `e2e/` del repo la primera vez. A partir de ahí **el repo es su dueño** y el
+  agente lo mantiene/mejora; el login real se implementa una vez en el fixture
+  `authenticate`. (App única con microservicios estandarizados → una sola
+  librería de fixtures compartida, no por-repo.)
 - **Capa B — gate estático** (`src/qa/validate.ts`): valida los specs sin gastar
   navegador (compilan, lint, cargan).
 - **Capa C — gate de flakiness** (`src/qa/execute.ts` + `playwright-report.ts`):
   un test que solo pasa tras reintento se marca `flaky` → cuarentena, no se da
   por bueno ni rompe como fallo real.
+
+### Persistencia (dónde vive cada cosa al reiniciar)
+
+- **Suite E2E (specs + fixtures)** → **git**, en `e2e/` del repo de la app. Es la
+  fuente de verdad: versionada, revisable, sobrevive a la pérdida del host. El
+  agente la mejora vía PR (auto-merge si pasa el harness).
+- **engram** (memoria episódica) → volumen `engram-data`. **No es regenerable**:
+  es lo único que conviene respaldar. Sobrevive a reinicios de contenedor.
+- **Índice de Serena y espejos** → volúmenes (`serena-cache`, `mirrors`). Cachés
+  **regenerables**: si se pierden, se reconstruyen/re-clonan.
+
+> Los volúmenes con nombre sobreviven a `restart`/`down`+`up`; se pierden con
+> `down -v` o si se destruye el host. Por eso la fuente de verdad está en git.
 
 ## Sanitización (con Doppler)
 
@@ -109,13 +128,13 @@ doppler run -- docker compose up --build
 # (o copia .env.example → .env para correr en local sin Doppler)
 ```
 
-- `orchestrator`: imagen basada en Playwright (Node + navegadores) + git, con el
-  tooling de `config/e2e` instalado (Filtros B/C).
+- `orchestrator`: imagen basada en Playwright (Node + navegadores) + git. El
+  tooling e2e (Filtros B/C) se instala por run en `e2e/` del repo (`npm ci`).
 - `opencode`: imagen oficial de OpenCode + `uv` y los runtimes de lenguaje que
   use Serena (JDK para Java, etc.) + `engram` (ver `opencode/Dockerfile`).
 - Volúmenes: `mirrors` (compartido entre ambos; Serena cachea en `<repo>/.serena`),
-  `qa-store` (suite de regresión), `e2e-modules` (tooling e2e), `serena-cache`
-  (caché de uv/Serena), `engram-data` (memoria).
+  `serena-cache` (caché de uv/Serena), `engram-data` (memoria). La suite E2E NO
+  usa volumen: vive en git.
 
 ## Principios
 

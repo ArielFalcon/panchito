@@ -29,7 +29,7 @@ test("ejecuta, mapea casos y SANITIZA los logs", async () => {
     },
   };
 
-  const run = await runE2E("/qa-store/qa-bot-abc1234", { baseUrl: "https://dev", namespace: "qa-bot-abc1234" }, deps);
+  const run = await runE2E("/mirrors/org__app/e2e", { baseUrl: "https://dev", namespace: "qa-bot-abc1234" }, deps);
 
   assert.equal(run.verdict, "fail");
   assert.equal(run.passed, false);
