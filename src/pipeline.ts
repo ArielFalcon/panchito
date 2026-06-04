@@ -38,6 +38,7 @@ export interface PipelineDeps {
   setupE2e(e2eDir: string): Promise<void>; // instala deps del proyecto e2e
   validate(e2eDir: string): Promise<{ ok: boolean; errors: string[] }>;
   execute(e2eDir: string, opts: { baseUrl: string; namespace: string }): Promise<QaRunResult>;
+  isHealthy(versionUrl: string): Promise<boolean>; // ¿DEV sano AHORA? (infra vs calidad)
   publish(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string }): Promise<{ prUrl: string } | null>;
   openIssue(repo: string, title: string, body: string): Promise<{ url: string }>;
   log?(msg: string): void;
@@ -67,6 +68,15 @@ export function defaultPipelineDeps(): PipelineDeps {
     setupE2e: (e2eDir) => setupE2eProject(e2eDir, defaultSetupDeps),
     validate: (e2eDir) => validateSpecs(e2eDir, defaultValidateDeps),
     execute: (e2eDir, opts) => runE2E(e2eDir, opts, defaultExecuteDeps),
+    isHealthy: async (versionUrl) => {
+      try {
+        const res = await fetch(versionUrl);
+        if (!res.ok) return false;
+        return ((await res.json()) as { healthy?: boolean }).healthy === true;
+      } catch {
+        return false;
+      }
+    },
     publish: (input) => publishE2e(input, defaultPublishDeps),
     openIssue: (repo, title, body) => github.openIssue(repo, title, body),
     log: (m) => console.log(m),
@@ -80,7 +90,8 @@ export async function runPipeline(
   source: TriggerSource = "webhook",
 ): Promise<QaRunResult> {
   const log = deps.log ?? (() => {});
-  log(`[qa] App=${app.name}  SHA=${sha}  (${source})`);
+  const shadow = app.qa.shadow ?? false;
+  log(`[qa] App=${app.name}  SHA=${sha}  (${source})${shadow ? "  [MODO SOMBRA]" : ""}`);
 
   // 1. Gate: esperar a que DEV corra este SHA y esté healthy.
   const target: DeployTarget = {
@@ -114,62 +125,100 @@ export async function runPipeline(
   log("[qa] Validando specs (typecheck + lint + list)...");
   const validation = await deps.validate(e2eDir);
   if (!validation.ok) {
-    const invalid: QaRunResult = {
-      sha: ns,
-      verdict: "invalid",
-      passed: false,
-      cases: [],
-      logs: validation.errors.join("\n\n"),
-    };
-    await report(app, sha, invalid, deps, log, "los E2E generados no superaron el gate estático");
+    const invalid = infraOrResult(ns, "invalid", validation.errors.join("\n\n"));
+    await report(app, sha, invalid, deps, log, shadow, "los E2E generados no superaron el gate estático");
     return invalid;
   }
 
-  // 5. Filtro C — ejecutar contra DEV (clasifica pass/fail/flaky).
-  log(`[qa] Ejecutando E2E (namespace ${ns}) contra ${app.dev.baseUrl}...`);
-  const run = await deps.execute(e2eDir, { baseUrl: app.dev.baseUrl, namespace: ns });
+  // 5. Pre-flight de salud: DEV pudo caerse durante la generación. Si no está
+  //    sano, el run no es concluyente → infra, NO se reporta como bug.
+  if (!(await deps.isHealthy(app.dev.versionUrl))) {
+    const infra = infraOrResult(ns, "infra-error", "DEV no está sano antes de ejecutar");
+    await report(app, sha, infra, deps, log, shadow);
+    return infra;
+  }
 
-  // 6. Verde → publicar como PR (auto-merge si el repo lo permite). Fallo/inválido
-  //    → Issue. Flaky → cuarentena (sin PR ni Issue de fallo).
-  if (run.verdict === "pass") {
-    const pr = await deps.publish({ repo: app.repo, sha, mirrorDir, baseBranch: app.baseBranch ?? "main" });
-    if (pr) log(`[qa] OK — E2E en verde; PR de la suite: ${pr.prUrl}`);
-    else log(`[qa] OK — E2E en verde (sin cambios en e2e/).`);
+  // 6. Filtro C — ejecutar contra DEV (clasifica pass/fail/flaky).
+  log(`[qa] Ejecutando E2E (namespace ${ns}) contra ${app.dev.baseUrl}...`);
+  let run = await deps.execute(e2eDir, { baseUrl: app.dev.baseUrl, namespace: ns });
+
+  // 7. Infra vs calidad: si hubo fallos PERO DEV ya no está sano, los fallos son
+  //    de infraestructura, no del código → reclasifica para no abrir Issue falso.
+  if (run.verdict === "fail" && !(await deps.isHealthy(app.dev.versionUrl))) {
+    run = infraOrResult(ns, "infra-error", "fallos con DEV no saludable: tratado como infraestructura");
+  }
+
+  // 8. Decisión final.
+  if (run.verdict === "pass" && app.qa.needsReview && !result.approved) {
+    // Verde en el harness PERO el revisor independiente no aprobó (caza falsos
+    // positivos que el harness no ve) → NO se publica; se reporta para iteración.
+    await issueOrShadow(
+      shadow,
+      deps,
+      log,
+      app.repo,
+      `QA: el revisor no aprobó los E2E en ${sha}`,
+      renderIssue(run, result.note),
+    );
+  } else if (run.verdict === "pass") {
+    if (shadow) {
+      log(`[qa] (sombra) E2E en verde; habría abierto PR de la suite.`);
+    } else {
+      const pr = await deps.publish({ repo: app.repo, sha, mirrorDir, baseBranch: app.baseBranch ?? "main" });
+      log(pr ? `[qa] OK — E2E en verde; PR de la suite: ${pr.prUrl}` : `[qa] OK — E2E en verde (sin cambios en e2e/).`);
+    }
   } else {
-    await report(app, sha, run, deps, log, result.note);
+    await report(app, sha, run, deps, log, shadow, result.note);
   }
   return run;
 }
 
-// Issue solo para fallo real o specs inválidos. Los flaky van a cuarentena.
+function infraOrResult(ns: string, verdict: QaRunResult["verdict"], logs: string): QaRunResult {
+  return { sha: ns, verdict, passed: false, cases: [], logs };
+}
+
+// Issue solo para fallo real o specs inválidos. Flaky → cuarentena. Infra → log.
+// En modo sombra nunca se abren Issues.
 async function report(
   app: AppConfig,
   sha: string,
   run: QaRunResult,
   deps: PipelineDeps,
   log: (m: string) => void,
+  shadow: boolean,
   note?: string,
 ): Promise<void> {
   if (app.report.onFailure !== "github-issue") return;
   switch (run.verdict) {
-    case "fail": {
-      const issue = await deps.openIssue(app.repo, `QA E2E falló en ${sha}`, renderIssue(run, note));
-      log(`[qa] FALLO — Issue abierto: ${issue.url}`);
+    case "fail":
+      await issueOrShadow(shadow, deps, log, app.repo, `QA E2E falló en ${sha}`, renderIssue(run, note));
       break;
-    }
-    case "invalid": {
-      const issue = await deps.openIssue(
-        app.repo,
-        `QA no pudo validar los E2E generados en ${sha}`,
-        renderIssue(run, note),
-      );
-      log(`[qa] INVÁLIDO — Issue abierto: ${issue.url}`);
+    case "invalid":
+      await issueOrShadow(shadow, deps, log, app.repo, `QA no pudo validar los E2E generados en ${sha}`, renderIssue(run, note));
       break;
-    }
+    case "infra-error":
+      log(`[qa] INFRA — ${run.logs} — no se reporta como bug.`);
+      break;
     case "flaky":
       log(`[qa] FLAKY — ${flakyNames(run)} en cuarentena (sin PR ni Issue de fallo).`);
       break;
   }
+}
+
+async function issueOrShadow(
+  shadow: boolean,
+  deps: PipelineDeps,
+  log: (m: string) => void,
+  repo: string,
+  title: string,
+  body: string,
+): Promise<void> {
+  if (shadow) {
+    log(`[qa] (sombra) habría abierto Issue: "${title}"`);
+    return;
+  }
+  const issue = await deps.openIssue(repo, title, body);
+  log(`[qa] Issue abierto: ${issue.url}`);
 }
 
 function flakyNames(run: QaRunResult): string {

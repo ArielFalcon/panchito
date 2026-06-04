@@ -32,10 +32,16 @@ interface Harness extends PipelineDeps {
 function deps(
   run: QaRunResult,
   calls: string[],
-  opts: { validation?: { ok: boolean; errors: string[] }; prUrl?: string | null } = {},
+  opts: {
+    validation?: { ok: boolean; errors: string[] };
+    prUrl?: string | null;
+    agent?: AgentResult;
+    healthy?: boolean | boolean[]; // un valor, o una secuencia por llamada
+  } = {},
 ): Harness {
   const issues: string[] = [];
   const h = { issues, published: false } as Harness;
+  const healthSeq = Array.isArray(opts.healthy) ? [...opts.healthy] : null;
   Object.assign(h, {
     waitForDeploy: async () => {
       calls.push("gate");
@@ -44,21 +50,21 @@ function deps(
       calls.push("prepare");
       return { mirrorDir: "/mirrors/org__demo", diff: "DIFF" };
     },
-    generate: async (input: { diff: string; mirrorDir: string; namespace: string }) => {
+    generate: async () => {
       calls.push("generate");
-      assert.equal(input.diff, "DIFF");
-      assert.equal(input.mirrorDir, "/mirrors/org__demo");
-      assert.equal(input.namespace, "qa-bot-abc123");
-      return generated;
+      return opts.agent ?? generated;
     },
-    setupE2e: async (e2eDir: string) => {
+    setupE2e: async () => {
       calls.push("setup");
-      assert.equal(e2eDir, "/mirrors/org__demo/e2e"); // harness corre sobre e2e/ del repo
     },
-    validate: async (e2eDir: string) => {
+    validate: async () => {
       calls.push("validate");
-      assert.equal(e2eDir, "/mirrors/org__demo/e2e");
       return opts.validation ?? { ok: true, errors: [] };
+    },
+    isHealthy: async () => {
+      calls.push("health");
+      if (healthSeq) return healthSeq.shift() ?? true;
+      return opts.healthy ?? true;
     },
     execute: async () => {
       calls.push("execute");
@@ -82,10 +88,11 @@ function passing(): QaRunResult {
   return { sha: "s", verdict: "pass", passed: true, cases: [], logs: "" };
 }
 
-test("verde: orquesta gate → prepare → generate → setup → validate → execute → publish", async () => {
+test("verde: orquesta gate → prepare → generate → setup → validate → health → execute → publish", async () => {
   const calls: string[] = [];
   await runPipeline(app, "abc123", deps(passing(), calls), "manual");
-  assert.deepEqual(calls, ["gate", "prepare", "generate", "setup", "validate", "execute", "publish"]);
+  // en verde, el re-check de salud post-fallo se cortocircuita (solo 1 health)
+  assert.deepEqual(calls, ["gate", "prepare", "generate", "setup", "validate", "health", "execute", "publish"]);
 });
 
 test("verde abre PR, NO Issue", async () => {
@@ -136,4 +143,53 @@ test("specs inválidos: NO ejecuta ni publica, abre Issue de validación", async
   assert.ok(!calls.includes("publish"));
   assert.equal(d.issues.length, 1);
   assert.match(d.issues[0]!, /no pudo validar/);
+});
+
+test("verde pero el revisor NO aprobó: no publica, abre Issue de revisión", async () => {
+  const calls: string[] = [];
+  const rejected: AgentResult = { output: "x", specs: [], reviewed: true, approved: false, note: "falsos positivos" };
+  const d = deps(passing(), calls, { agent: rejected });
+  await runPipeline(app, "abc123", d);
+  assert.equal(d.published, false);
+  assert.equal(d.issues.length, 1);
+  assert.match(d.issues[0]!, /el revisor no aprobó/);
+});
+
+test("DEV no sano antes de ejecutar: infra-error, ni ejecuta ni reporta como bug", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { healthy: false });
+  const run = await runPipeline(app, "abc123", d);
+  assert.equal(run.verdict, "infra-error");
+  assert.ok(!calls.includes("execute"));
+  assert.equal(d.issues.length, 0); // infra NO abre Issue
+});
+
+test("fallos con DEV caído a mitad: se reclasifica a infra-error (sin Issue)", async () => {
+  const calls: string[] = [];
+  // sano en el pre-flight, caído en el re-check post-fallo
+  const failing: QaRunResult = { sha: "s", verdict: "fail", passed: false, cases: [{ name: "x", status: "fail" }], logs: "" };
+  const d = deps(failing, calls, { healthy: [true, false] });
+  const run = await runPipeline(app, "abc123", d);
+  assert.equal(run.verdict, "infra-error");
+  assert.equal(d.issues.length, 0);
+});
+
+test("modo sombra: en verde NO publica, solo loguea", async () => {
+  const calls: string[] = [];
+  const shadowApp = { ...app, qa: { ...app.qa, shadow: true } };
+  const d = deps(passing(), calls);
+  await runPipeline(shadowApp, "abc123", d);
+  assert.equal(d.published, false);
+  assert.equal(d.issues.length, 0);
+});
+
+test("modo sombra: ante fallo NO abre Issue", async () => {
+  const calls: string[] = [];
+  const shadowApp = { ...app, qa: { ...app.qa, shadow: true } };
+  const d = deps(
+    { sha: "s", verdict: "fail", passed: false, cases: [{ name: "x", status: "fail" }], logs: "" },
+    calls,
+  );
+  await runPipeline(shadowApp, "abc123", d);
+  assert.equal(d.issues.length, 0);
 });

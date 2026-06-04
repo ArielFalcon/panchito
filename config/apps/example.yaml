@@ -13,6 +13,7 @@ dev:
 
 qa:
   needsReview: true            # el revisor estricto valida los E2E generados
+  shadow: false                # true = corre todo pero NO publica PR ni abre Issues (rodaje inicial)
   testDataPrefix: "qa-bot"     # entidades de test namespaced por SHA
   criticalFlows:               # pistas de qué priorizar (serena afina por símbolos)
     - "login"

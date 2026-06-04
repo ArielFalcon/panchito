@@ -66,10 +66,17 @@ reglas compartidas en `opencode/AGENTS.md`.
 5. **Ejecutar (Filtro C)** — corre los specs con Playwright contra DEV, con
    datos namespaced `qa-bot-<sha>`, y clasifica `pass`/`fail`/`flaky` (retries
    como señal de inestabilidad). El output se **sanitiza** antes de reusarse.
-6. **Publicar / reportar** — en verde, el agente comitea `e2e/` y se abre un
-   **PR con auto-merge** (si el repo lo permite); así la suite mejora sola, run
-   tras run, versionada. `fail`/`invalid` → Issue; `flaky` → cuarentena (sin PR
-   ni Issue); verde sin cambios → ni PR ni ruido.
+6. **Decisión** — antes de ejecutar se re-chequea la **salud de DEV**; si está
+   caído, el run es `infra-error` (no se reporta como bug). En verde **y con el
+   revisor aprobando**, el agente comitea `e2e/` y se abre un **PR con
+   auto-merge**; así la suite mejora sola, versionada. Verde pero **revisor no
+   aprueba** → Issue (no se publica). `fail`/`invalid` → Issue; fallo con DEV
+   caído → `infra-error` (sin Issue); `flaky` → cuarentena; verde sin cambios →
+   ni PR ni ruido.
+
+> **Modo sombra** (`qa.shadow: true`): corre todo el flujo pero **no publica PRs
+> ni abre Issues**, solo loguea qué haría. Pensado para el rodaje inicial al
+> conectar un repo, sin ensuciar nada.
 
 ### Harness de E2E (calidad y consistencia)
 

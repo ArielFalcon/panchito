@@ -21,7 +21,9 @@ export interface AgentResult {
 //   flaky   → casos inestables (pasan unas veces y otras no) → cuarentena
 //   invalid → los specs generados no superaron el gate estático (no compilan,
 //             lint o no cargan): no se llegaron a ejecutar
-export type RunVerdict = "pass" | "fail" | "flaky" | "invalid";
+//   infra-error → el run no es concluyente por causa de infraestructura (DEV
+//             caído, etc.): NO se reporta como bug del código
+export type RunVerdict = "pass" | "fail" | "flaky" | "invalid" | "infra-error";
 export type CaseStatus = "pass" | "fail" | "flaky";
 
 export interface QaCase {

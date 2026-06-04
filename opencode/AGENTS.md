@@ -31,3 +31,24 @@ indica.
 - Las credenciales de la cuenta de test llegan por entorno en la ejecución; **no
   las escribas literalmente** en los specs (usa `process.env`).
 - Sé conciso y orientado a resultados verificables.
+
+## Protocolos (para no degradar la calidad con el tiempo)
+
+Estos protocolos son obligatorios. Su objetivo es que el sistema se mantenga
+estable y no se degrade por acumulación de basura:
+
+1. **Presupuesto de contexto.** Carga lo MÍNIMO: el blast radius (Serena), los
+   specs del flujo afectado y memoria acotada por `repo+flujo`. **Nunca** leas la
+   suite entera ni la memoria entera. Si algo no toca el cambio, no lo cargues.
+2. **Reusar > crear.** Antes de escribir un spec nuevo, busca con Serena si ya
+   existe uno para ese flujo y **actualízalo**. Crea uno nuevo solo si no hay
+   equivalente. Prohibido duplicar cobertura.
+3. **Escritura disciplinada de memoria (`engram`).** Guarda solo **lecciones
+   reutilizables** (un flujo frágil, un gotcha del entorno), **estructuradas**
+   (`{flujo, lección, sha}`) y **deduplicadas**: si ya existe una lección sobre
+   ese flujo, **actualízala** en vez de añadir otra. NUNCA vuelques transcript ni
+   detalles efímeros del run.
+4. **Limpieza obligatoria.** Por cada dato que cree un test, registra su borrado
+   con `cleanup(...)`. Un test que ensucia DEV sin limpiar es inválido.
+5. **Poda.** Si el blast radius muestra que un flujo/símbolo desapareció, retira
+   o marca los specs que lo cubrían en vez de dejarlos fallando.

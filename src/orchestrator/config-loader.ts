@@ -23,6 +23,7 @@ export interface AppConfig {
     testDataPrefix: string;
     criticalFlows: string[];
     credentials?: Record<string, string>;
+    shadow?: boolean; // modo sombra: corre todo pero NO publica PR ni abre Issues
   };
   report: { onFailure: string };
 }
