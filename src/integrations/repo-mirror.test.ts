@@ -2,6 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ensureMirror, getCommitDiff, MirrorDeps } from "./repo-mirror";
 
+// authArgs() depende de GITHUB_TOKEN; lo limpiamos para aislar la lógica.
+delete process.env.GITHUB_TOKEN;
+
 function recorder(exists: boolean): MirrorDeps & { calls: string[][] } {
   const calls: string[][] = [];
   return {

@@ -224,7 +224,7 @@ export async function runLoop(ctx, codeContext, memory): Promise<AgentResult> {
     // --- Primario: genera/corrige los E2E ---
     proposal = await opencode.complete({
       model: process.env.OPENCODE_MODEL!,
-      system: buildPrompt("primary-agent", ctx),
+      system: buildSystemPrompt("primary-agent"),
       messages,
     });
 
@@ -232,7 +232,7 @@ export async function runLoop(ctx, codeContext, memory): Promise<AgentResult> {
 
     // --- Revisor: juez independiente, determinístico, JSON ---
     const verdict = await gemini.completeJson({
-      system: buildPrompt("reviewer-agent", ctx),
+      system: buildSystemPrompt("reviewer-agent"),
       messages: [{ role: "user", content: sanitizeText(proposal) }],
       temperature: 0,
     }); // -> { approved: boolean, corrections: string[] }

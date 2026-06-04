@@ -7,7 +7,7 @@ import { AgentContext } from "../types";
 import { loadSystemPrompt } from "./config-loader";
 import { sanitizeText } from "./sanitizer";
 
-export function buildPrompt(role: string, _ctx: AgentContext): string {
+export function buildSystemPrompt(role: string): string {
   return loadSystemPrompt(role);
 }
 

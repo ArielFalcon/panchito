@@ -27,8 +27,12 @@ export const opencode = {
     });
     if (!res.ok) throw new Error(`OpenCode error ${res.status}: ${await res.text()}`);
     const data = (await res.json()) as {
-      choices: Array<{ message: { content: string } }>;
+      choices?: Array<{ message?: { content?: string } }>;
     };
-    return data.choices[0]!.message.content;
+    const content = data.choices?.[0]?.message?.content;
+    if (typeof content !== "string") {
+      throw new Error("OpenCode: respuesta sin choices[0].message.content");
+    }
+    return content;
   },
 };

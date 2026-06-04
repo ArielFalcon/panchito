@@ -21,20 +21,23 @@ function mirrorRoot(): string {
 
 function remoteUrl(repo: string): string {
   const base = process.env.GIT_REMOTE_BASE ?? "https://github.com";
-  const token = process.env.GITHUB_TOKEN;
-  if (token && base.startsWith("https://github.com")) {
-    return `https://x-access-token:${token}@github.com/${repo}.git`;
-  }
   return `${base}/${repo}.git`;
+}
+
+// Auth por cabecera efímera (-c http.extraHeader): NO persiste el token en
+// .git/config como sí haría embeberlo en la URL del remoto.
+function authArgs(): string[] {
+  const token = process.env.GITHUB_TOKEN;
+  return token ? ["-c", `http.extraHeader=Authorization: Bearer ${token}`] : [];
 }
 
 export async function ensureMirror(repo: string, sha: string, deps: MirrorDeps): Promise<string> {
   const root = deps.root ?? mirrorRoot();
   const dir = join(root, repo.replace("/", "__"));
   if (!deps.exists(dir)) {
-    await deps.git(["clone", remoteUrl(repo), dir]);
+    await deps.git([...authArgs(), "clone", remoteUrl(repo), dir]);
   } else {
-    await deps.git(["fetch", "origin"], dir);
+    await deps.git([...authArgs(), "fetch", "origin"], dir);
   }
   await deps.git(["checkout", sha], dir);
   return dir;

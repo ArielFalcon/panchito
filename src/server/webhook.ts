@@ -63,6 +63,8 @@ export function handleWebhook(
   return { status: 202, message: "encolado", payload };
 }
 
+const MAX_BODY_BYTES = 1_000_000; // 1 MB: cota contra payloads abusivos (DoS)
+
 export function createWebhookServer(opts: {
   secret?: string;
   onRun: (p: WebhookPayload) => void;
@@ -74,9 +76,20 @@ export function createWebhookServer(opts: {
       return;
     }
     let body = "";
-    req.on("data", (chunk) => (body += chunk));
+    let aborted = false;
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > MAX_BODY_BYTES) {
+        aborted = true;
+        res.writeHead(413, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ message: "payload demasiado grande" }));
+        req.destroy();
+      }
+    });
     req.on("end", () => {
-      const sig = req.headers["x-hub-signature-256"] as string | undefined;
+      if (aborted) return;
+      const header = req.headers["x-hub-signature-256"];
+      const sig = typeof header === "string" ? header : undefined;
       const result = handleWebhook(body, sig, { secret: opts.secret });
       if (result.payload) opts.onRun(result.payload);
       res.writeHead(result.status, { "Content-Type": "application/json" });

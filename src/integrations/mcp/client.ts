@@ -62,6 +62,13 @@ export function extractToolResult(result: unknown): unknown {
   return result;
 }
 
+// Normaliza un resultado de herramienta a texto (o null si vacío). Compartido
+// por las integraciones para no repetir la coerción.
+export function coerceText(res: unknown): string | null {
+  if (res == null || res === "") return null;
+  return typeof res === "string" ? res : JSON.stringify(res);
+}
+
 export function httpTransport(url: string): McpTransport {
   return {
     async send(req) {

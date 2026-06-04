@@ -3,7 +3,7 @@
 // entero. El cliente MCP se inyecta (factory lo construye desde config); si no
 // hay servidor configurado se usa nullCodegraph (comportamiento M0).
 
-import { McpClient } from "./mcp/client";
+import { McpClient, coerceText } from "./mcp/client";
 
 export interface Codegraph {
   getImpactRadius(repo: string, diff: string): Promise<string | null>;
@@ -16,9 +16,7 @@ export const nullCodegraph: Codegraph = {
 export function makeCodegraph(client: McpClient): Codegraph {
   return {
     async getImpactRadius(repo, diff) {
-      const res = await client.callTool("get_impact_radius", { repo, diff });
-      if (res == null || res === "") return null;
-      return typeof res === "string" ? res : JSON.stringify(res);
+      return coerceText(await client.callTool("get_impact_radius", { repo, diff }));
     },
   };
 }

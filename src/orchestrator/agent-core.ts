@@ -4,8 +4,9 @@
 // se inyectan para mantener el núcleo verificable.
 
 import { AgentContext, AgentResult } from "../types";
-import { sanitize } from "./sanitizer";
-import { buildPrompt, buildUserMessage } from "./prompt-builder";
+import { sanitize, stripIgnoredFiles } from "./sanitizer";
+import { buildSystemPrompt, buildUserMessage } from "./prompt-builder";
+import { loadAiIgnore } from "./config-loader";
 import { runLoop, LoopDeps } from "./loop";
 import { buildCodegraph, buildEngram } from "../integrations/factory";
 import { opencode } from "../providers/opencode";
@@ -32,9 +33,13 @@ export async function runAgent(
   ctx: AgentContext,
   deps: RunDeps = defaultDeps,
 ): Promise<AgentResult> {
-  // 1. Sanitizar el contexto de entrada. El resto de fracciones se sanitizan
-  //    en el ensamblaje del mensaje (prompt-builder).
-  const clean = sanitize(ctx);
+  // 1. Sanitizar: redactar secretos/PII y descartar los ficheros vetados por
+  //    .aiignore (su contenido NUNCA llega al LLM ni al MCP). El resto de
+  //    fracciones se sanitizan al ensamblar el mensaje (prompt-builder).
+  const redacted = sanitize(ctx);
+  const clean: AgentContext = redacted.diff
+    ? { ...redacted, diff: stripIgnoredFiles(redacted.diff, loadAiIgnore()) }
+    : redacted;
 
   // 2. Blast radius: solo el subgrafo afectado por el diff.
   const codeContext =
@@ -47,8 +52,8 @@ export async function runAgent(
   const needsReview = (clean.metadata?.needsReview as boolean | undefined) ?? true;
   return runLoop(
     {
-      systemPrimary: buildPrompt("primary-agent", clean),
-      systemReviewer: buildPrompt("reviewer-agent", clean),
+      systemPrimary: buildSystemPrompt("primary-agent"),
+      systemReviewer: buildSystemPrompt("reviewer-agent"),
       userMessage: buildUserMessage(clean, codeContext, memory),
       needsReview,
     },

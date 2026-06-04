@@ -20,9 +20,7 @@ const INTERNAL_HOST_PATTERNS: RegExp[] = [
 
 // PII: solo email. Patrones más amplios (teléfonos) destrozarían diffs/código
 // con falsos positivos; el email es lo bastante distintivo para redactar seguro.
-const PII_PATTERNS: RegExp[] = [
-  /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g,
-];
+const PII_PATTERNS: RegExp[] = [/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g];
 
 export function sanitizeText(input: string): string {
   if (!input) return input;
@@ -36,4 +34,51 @@ export function sanitizeText(input: string): string {
 export function sanitize(ctx: AgentContext): AgentContext {
   if (!ctx.diff) return ctx;
   return { ...ctx, diff: sanitizeText(ctx.diff) };
+}
+
+const REGEX_SPECIALS = ".+^${}()|[]\\";
+
+// Convierte un glob simple (*, **, **/, ?) a RegExp anclado, recorriéndolo
+// carácter a carácter (evita corromper los fragmentos ya expandidos).
+function globToRegExp(glob: string): RegExp {
+  let re = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i]!;
+    if (c === "*") {
+      if (glob[i + 1] === "*") {
+        i++;
+        if (glob[i + 1] === "/") {
+          i++;
+          re += "(?:.*/)?"; // **/ => cero o más directorios
+        } else {
+          re += ".*"; // **  => cualquier cosa
+        }
+      } else {
+        re += "[^/]*"; // *   => un segmento
+      }
+    } else if (c === "?") {
+      re += "[^/]";
+    } else if (REGEX_SPECIALS.includes(c)) {
+      re += "\\" + c;
+    } else {
+      re += c;
+    }
+  }
+  return new RegExp(`^${re}$`);
+}
+
+// Aplica .aiignore: elimina del diff las secciones cuyo fichero casa con algún
+// patrón vetado, para que su contenido NUNCA llegue al LLM.
+export function stripIgnoredFiles(diff: string, patterns: string[]): string {
+  if (!patterns.length || !diff.includes("diff --git")) return diff;
+  const regexes = patterns.map(globToRegExp);
+  return diff
+    .split(/(?=^diff --git )/m)
+    .filter((section) => {
+      const m = section.match(/^diff --git a\/(\S+) b\/(\S+)/m);
+      if (!m) return true; // preámbulo u otra cosa: se conserva
+      const path = m[2] ?? m[1]!;
+      return !regexes.some((re) => re.test(path));
+    })
+    .join("");
 }
