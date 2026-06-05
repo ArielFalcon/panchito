@@ -30,11 +30,14 @@ ai-pipeline turns every deploy into a QA checkpoint, automatically.
 | **Multi-app, single engine** | One centralized service watches all your team's repos. Each app gets its own namespace for test data and persistent memory. |
 | **Shadow mode** | Onboard a repo without touching it: the full pipeline runs, but PRs and Issues are only logged. Flip the switch when you are ready. |
 
-### What it is not
+<details>
+<summary>What it is not</summary>
 
 - It does **not** build or start your app. Tests run against the live DEV URL.
 - It does **not** replace your existing test suite. It augments it with AI-generated E2E coverage.
 - It does **not** require per-app code changes. Onboarding is a YAML config file.
+
+</details>
 
 ---
 
@@ -53,12 +56,28 @@ flowchart LR
     O -->|publishes| PR[GitHub PR / Issue]
 ```
 
-Two services run side by side, communicating over a single HTTP boundary. Both share a volume for repo working copies so the AI agent reads code and writes tests directly where the orchestrator expects them.
+<table>
+<tr>
+<td width="50%" valign="top">
 
-| Service | Role |
-|---|---|
-| **Orchestrator** (Node.js) | Receives webhooks, manages the queue, clones repos, runs Playwright, publishes results. All deterministic logic lives here. |
-| **OpenCode** (AI engine) | Runs the AI agents that read code, generate tests, and review quality. Uses Serena for semantic code navigation and Engram for persistent memory. |
+### Orchestrator
+**Node.js** deterministic infrastructure.
+
+Receives webhooks, manages the sequential queue, clones repos, runs Playwright against DEV, publishes results. Every side-effecting step is dependency-injected and unit-tested with stubs.
+
+</td>
+<td width="50%" valign="top">
+
+### OpenCode
+**AI engine** running two models.
+
+The `qa-generator` agent reads code via Serena (semantic LSP navigation) and writes Playwright specs. The `qa-reviewer` subagent independently judges quality. Engram provides persistent episodic memory across runs.
+
+</td>
+</tr>
+</table>
+
+Both services share a volume for repo working copies. The AI agent reads code and writes tests directly where the orchestrator expects them.
 
 ### The QA pipeline
 
@@ -86,7 +105,8 @@ Every run follows the same sequence, whether triggered by a webhook or manually:
 | Flaky tests | Quarantined, no Issue created |
 | DEV unhealthy | Marked as infrastructure error, not a code bug |
 
-### Execution modes
+<details>
+<summary>Execution modes</summary>
 
 | Mode | When to use |
 |---|---|
@@ -95,7 +115,10 @@ Every run follows the same sequence, whether triggered by a webhook or manually:
 | `exhaustive` | Full audit: re-evaluates every existing test and regenerates the suite |
 | `manual` | Focused: generation guided by a natural language prompt |
 
-### Quality gates
+</details>
+
+<details>
+<summary>Quality gates</summary>
 
 Three layers prevent low-quality tests from entering the suite:
 
@@ -104,6 +127,8 @@ Three layers prevent low-quality tests from entering the suite:
 | **Static analysis** | Tests that do not compile, violate lint rules, or have missing metadata |
 | **AI reviewer** | Tests with trivial assertions, fragile selectors, or no real verification of the change |
 | **Flakiness detection** | Tests that pass only after retries are quarantined instead of accepted |
+
+</details>
 
 ---
 
@@ -162,7 +187,8 @@ The project uses two AI models via a single OpenCode API key. Both are pre-confi
 | GitHub token | `.env` as `GITHUB_TOKEN` | Yes, for PR and Issue creation |
 | Webhook secret | `.env` as `WEBHOOK_SECRET` | Yes, for production webhook validation |
 
-**What is pre-configured automatically:**
+<details>
+<summary>What is pre-configured automatically</summary>
 
 | Item | Where | Notes |
 |---|---|---|
@@ -171,6 +197,8 @@ The project uses two AI models via a single OpenCode API key. Both are pre-confi
 | Quality review criteria | `opencode/skill/test-value-review/` | False-positive pattern catalog |
 | MCP servers (Serena, Engram) | `opencode/opencode.json` | Code navigation + persistent memory |
 | Docker images | `Dockerfile`, `opencode/Dockerfile` | Both services build from these |
+
+</details>
 
 ### Onboard an app
 
@@ -205,7 +233,8 @@ report:
 npm run qa -- --app my-app --sha <commit-sha>
 ```
 
-### Run in different modes
+<details>
+<summary>Run in different modes</summary>
 
 ```bash
 # Fill coverage gaps across the whole repo
@@ -218,6 +247,8 @@ npm run qa -- --app my-app --sha <commit-sha> --mode exhaustive
 npm run qa -- --app my-app --sha <commit-sha> --mode manual --guidance "test the checkout flow with an empty cart"
 ```
 
+</details>
+
 ### Deploy with Docker
 
 ```bash
@@ -228,7 +259,8 @@ doppler run -- docker compose up --build
 docker compose up --build
 ```
 
-Trigger a run from the command line once the services are up:
+<details>
+<summary>Trigger a run via webhook</summary>
 
 ```bash
 SHA=$(git ls-remote https://github.com/your-org/your-repo main | cut -f1)
@@ -236,6 +268,8 @@ curl -X POST localhost:8080 \
   -H 'content-type: application/json' \
   -d "{\"repo\":\"your-org/your-repo\",\"sha\":\"$SHA\"}"
 ```
+
+</details>
 
 ---
 
