@@ -15,7 +15,10 @@ adapted from [TestDino playwright-skill](https://github.com/testdino-hq/playwrig
 
 ## Hard rules (always)
 
-- **Locators**: `getByRole`, `getByLabel`, `getByTestId`. Never fragile CSS/XPath.
+- **Locators**: `getByRole` (preferred), `getByLabel`, `getByTestId`. Never fragile
+  CSS/XPath. **Always scope to a section**: locate the section by heading/landmark
+  first, then narrow within it — never do `page.getByText(...)` without scope.
+  See `locators-and-waiting.md` for the full selector rules.
 - **Web-first waiting**: use `expect(locator).toBeVisible()` etc. with auto-retry.
   **No `waitForTimeout`** (sleep) and no `networkidle`.
 - **One real assert** on the observable outcome, not just clicks.

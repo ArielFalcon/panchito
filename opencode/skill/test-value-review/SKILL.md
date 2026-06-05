@@ -32,13 +32,24 @@ concrete correction.
    instead of creating it namespaced. → Fragile and not isolated.
 6. **Non-deterministic.** `waitForTimeout`, implicit ordering between tests,
    fragile CSS/XPath locators, no cleanup. → Guaranteed flaky.
-7. **No cleanup.** Creates data and does not register its removal with `cleanup`. →
+7. **Ambiguous selector / no scope.** Any `getByText`, `locator`, or `getByRole`
+   that targets the ENTIRE page (`page.getByText(...)`) instead of first scoping
+   to a section container (e.g. locate the section by heading, then narrow within
+   it: `section.getByText(...)`). Also: regex patterns that match inside other
+   strings — `/:h/` matches inside `:hi`, `/:about/` inside `:about-me`. → Use
+   `getByRole` with `{ name }` or `getByText(":h", { exact: true })` for literal
+   matches. For regex, prefer word boundaries (`/\b:h\b/`) or anchors (`/^:h$/`).
+   If the same text legitimately appears in multiple sections (e.g. "TypeScript"
+   in both Skills and Projects), scope to the target section first — never
+   assert on `page.getByText("TypeScript")` alone. → Reject: any test where a
+   `getByText` or regex could match >1 element at runtime (strict-mode violation).
+8. **No cleanup.** Creates data and does not register its removal with `cleanup`. →
    Dirties DEV and degrades the environment.
-8. **Coverage that ignores the change.** The diff touches a flow the test does not
+9. **Coverage that ignores the change.** The diff touches a flow the test does not
    exercise. → The affected-flow test is missing.
-9. **Incoherent metadata.** The manifest's `objective`/`targets` do not match what
-   the test actually does.
-10. **Weak oracle.** Verifies an intermediate state instead of the final outcome
+10. **Incoherent metadata.** The manifest's `objective`/`targets` do not match what
+    the test actually does.
+11. **Weak oracle.** Verifies an intermediate state instead of the final outcome
     the user observes.
 
 ## How you emit the verdict

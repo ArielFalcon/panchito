@@ -9,6 +9,37 @@ Adapted from [TestDino playwright-skill](https://github.com/testdino-hq/playwrig
 3. `getByTestId("...")` — when there is no clear role (`data-testid` attribute).
 4. ❌ Raw CSS/XPath, auto-generated classes, `nth-child` — fragile, forbidden.
 
+## Hard rules for selectors (MANDATORY)
+
+- **Always scope to a section.** Never use `page.getByText("X")` without first
+  locating the containing section. Locate the section by its heading or landmark
+  role, then narrow within it:
+  ```ts
+  // ❌ WRONG — "TypeScript" matches 8 elements across the whole page
+  await expect(page.getByText("TypeScript")).toBeVisible();
+  
+  // ✅ RIGHT — scoped to the Skills section
+  const skills = page.getByRole("heading", { name: "Skills" }).locator("..");
+  await expect(skills.getByText("TypeScript")).toBeVisible();
+  ```
+- **Regex must be unambiguous.** A pattern like `/:h/` matches inside `:hi`,
+  `/:about/` inside `:about-me`. When using `getByText` with a regex:
+  ```ts
+  // ❌ WRONG — /:h/ also matches ":hi" text, causing strict-mode violation
+  await expect(page.getByText(/:h/)).toBeVisible();
+  
+  // ✅ RIGHT — use exact text match or word boundaries
+  await expect(page.getByText(":h", { exact: true })).toBeVisible();
+  // or
+  await expect(page.getByText(/\b:h\b/)).toBeVisible();
+  ```
+- **Prefer `getByRole` with `{ name }` over `getByText` with regex.** Role-based
+  selectors are inherently scoped to interactive/semantic elements and less prone
+  to ambiguity.
+- **When the same text appears in multiple sections** (e.g. "TypeScript" in Skills,
+  Projects, and Education), scope to the target section FIRST — never assert on
+  the whole page.
+
 Chain by context to disambiguate: `page.getByRole("listitem").filter({ hasText: "X" })`.
 
 ## Web-first waiting (auto-retry)
