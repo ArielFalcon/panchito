@@ -19,7 +19,7 @@ import { publishE2e, defaultPublishDeps } from "./integrations/publish";
 import { testDataNamespace } from "./qa/test-data";
 import { github } from "./integrations/github";
 import { renderIssue } from "./report/reporter";
-import { AgentResult, QaRunResult, TriggerSource, RunMode, RunOptions } from "./types";
+import { AgentResult, QaCase, QaRunResult, TriggerSource, RunMode, RunOptions } from "./types";
 
 // Tests live in this folder inside the repo (git is the source of truth).
 const E2E_DIR = "e2e";
@@ -32,9 +32,11 @@ export interface GenerateInput {
   namespace: string;
   needsReview: boolean;
   mode: RunMode;
+  appName: string; // engram project namespace — scopes memory per app
   intent?: CommitIntent; // diff mode: type + message + files; the agent derives the objective
   guidance?: string; // manual mode: user instructions on what to test
   openapi?: string | string[]; // optional hint: where the repo's OpenAPI contract(s) live
+  fixCases?: QaCase[]; // re-generation: failed cases from a previous execution to fix
 }
 
 export interface PipelineDeps {
@@ -70,9 +72,11 @@ export function defaultPipelineDeps(): PipelineDeps {
           namespace: input.namespace,
           needsReview: input.needsReview,
           mode: input.mode,
+          appName: input.appName,
           intent: input.intent,
           guidance: input.guidance,
           openapi: input.openapi,
+          fixCases: input.fixCases,
         },
         await defaultOpencodeDeps(),
       ),
@@ -163,6 +167,7 @@ export async function runPipeline(
       namespace: ns,
       needsReview: app.qa.needsReview,
       mode,
+      appName: app.name,
       intent,
       guidance: opts.guidance,
       openapi: app.openapi,
@@ -209,6 +214,63 @@ export async function runPipeline(
   //    failures are infrastructure, not code → reclassify so no false Issue is opened.
   if (run.verdict === "fail" && !(await devHealthy())) {
     run = resultOf(ns, "infra-error", "failures with an unhealthy DEV: treated as infrastructure");
+  }
+
+  // Re-generation on failure (max 1 retry): feed failed cases back to the agent
+  // so it can fix selector issues, scoping, and regex ambiguity before reporting.
+  const MAX_RETRIES = 1;
+  for (let retry = 0; retry < MAX_RETRIES && run.verdict === "fail" && generating; retry++) {
+    const failed = run.cases.filter((c) => c.status === "fail");
+    log(
+      `[qa] ${failed.length} test(s) failed:\n` +
+        failed.map((c) => `  ❌ ${c.name}${c.detail ? ` — ${c.detail.slice(0, 200)}` : ""}`).join("\n"),
+    );
+
+    log("[qa] re-generating with failure feedback...");
+    result = await deps.generate({
+      repo: app.repo,
+      sha,
+      diff,
+      mirrorDir,
+      namespace: ns,
+      needsReview: app.qa.needsReview,
+      mode,
+      appName: app.name,
+      intent,
+      guidance: opts.guidance,
+      openapi: app.openapi,
+      fixCases: failed,
+    });
+    log(
+      `[qa] agent (retry): approved=${result.approved} specs=[${result.specs.join(", ")}]` +
+        (result.note ? ` note=${result.note}` : ""),
+    );
+
+    if (result.specs.length === 0) {
+      log("[qa] retry agent produced no fixes; keeping original verdict.");
+      break;
+    }
+
+    // Re-validate the fixed specs and, if they pass, re-execute.
+    const reValidation = await deps.validate(e2eDir);
+    if (!reValidation.ok) {
+      log(`[qa] retry validation failed:\n${reValidation.errors.join("\n")}`);
+      break;
+    }
+
+    if (!(await devHealthy())) {
+      log("[qa] DEV unhealthy before retry execution; keeping original verdict.");
+      break;
+    }
+
+    log("[qa] re-running E2E with fixed tests...");
+    const retryRun = await deps.execute(e2eDir, { baseUrl: app.dev.baseUrl, namespace: ns });
+    if (retryRun.verdict === "fail" && !(await devHealthy())) {
+      run = resultOf(ns, "infra-error", "failures with an unhealthy DEV: treated as infrastructure");
+      break;
+    }
+    run = retryRun;
+    log(`[qa] retry verdict: ${run.verdict}`);
   }
 
   // 9. Final decision.

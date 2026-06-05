@@ -18,6 +18,7 @@ const input: OpencodeRunInput = {
   namespace: "qa-bot-abc123",
   needsReview: true,
   mode: "diff",
+  appName: "demo-app",
   intent: { type: "feat", breaking: false, message: "feat: new screen", changedFiles: ["src/x.ts"] },
 };
 
@@ -31,6 +32,7 @@ function deps(finalText: string, captured?: { prompt?: string; agent?: string })
           if (captured) captured.prompt = text;
           return finalText;
         },
+        dispose: async () => {},
       };
     },
   };
@@ -44,6 +46,7 @@ test("buildPrompt includes repo, sha, namespace, e2e folder and the diff", () =>
   assert.match(p, /e2e\//);
   assert.match(p, /const x = 1;/);
   assert.match(p, /invoke the qa-reviewer subagent/);
+  assert.match(p, /project="demo-app"/);
 });
 
 test("buildPrompt includes the commit intent and asks to update the manifest", () => {

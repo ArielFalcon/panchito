@@ -1,20 +1,37 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "instructions": ["./AGENTS.md"],
+  "server": {
+    "port": 4096,
+    "hostname": "0.0.0.0"
+  },
+  "compaction": {
+    "auto": true,
+    "tail_turns": 2,
+    "preserve_recent_tokens": 16000
+  },
+  "tool_output": {
+    "max_lines": 4000,
+    "max_bytes": 102400
+  },
   "agent": {
     "qa-generator": {
       "description": "Generates Playwright E2E tests for a commit's blast radius and writes them in e2e/.",
       "mode": "primary",
       "model": "opencode-go/deepseek-v4-pro",
       "prompt": "{file:./agent/qa-generator.md}",
-      "tools": { "write": true, "edit": true, "read": true, "bash": true }
+      "tools": { "write": true, "edit": true, "read": true, "bash": true },
+      "steps": 50,
+      "temperature": 0.2
     },
     "qa-reviewer": {
       "description": "Independent E2E quality judge. Does not write: emits a JSON verdict.",
       "mode": "subagent",
       "model": "opencode-go/qwen3.7-max",
       "prompt": "{file:./agent/qa-reviewer.md}",
-      "tools": { "write": false, "edit": false, "bash": false, "read": true }
+      "tools": { "write": false, "edit": false, "bash": false, "read": true },
+      "steps": 10,
+      "temperature": 0.1
     }
   },
   "mcp": {
@@ -35,9 +52,9 @@
     },
     "engram": {
       "type": "local",
-      "command": ["engram", "mcp"],
+      "command": ["engram", "mcp", "--tools=agent"],
       "environment": { "ENGRAM_DATA_DIR": "{env:ENGRAM_DATA_DIR}" },
-      "enabled": false
+      "enabled": true
     }
   }
 }

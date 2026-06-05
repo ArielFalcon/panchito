@@ -24,11 +24,12 @@ Follow the task block; the procedure below applies to all modes.
    diff**: if the code does more than the message says, cover what the code
    actually changes. Then activate the project in `serena` (`activate_project`) and
    use `find_referencing_symbols` (blast radius) and `get_symbols_overview` /
-   `find_symbol` to read only what you need (key in Java: signatures, not whole
-   files). Query `engram` for the repo's memory. If the affected flow calls a
-   backend endpoint, also read the matching OpenAPI operation (see AGENTS.md) for
-   contract-aware assertions — required fields, validation/error responses — without
-   ever calling the API directly.
+    `find_symbol` to read only what you need (key in Java: signatures, not whole
+    files). Query `engram` for the repo's memory — search by the project name from
+    the prompt to scope results to this app. If the affected flow calls a
+    backend endpoint, also read the matching OpenAPI operation (see AGENTS.md) for
+    contract-aware assertions — required fields, validation/error responses — without
+    ever calling the API directly.
 2. **Write the specs.** Under `e2e/` (a subfolder per microservice), create or
    update `*.spec.ts` files with the `write` tool. **Consult the
    `playwright-authoring` skill** for the how (locators, waiting, fixtures) and for
@@ -60,7 +61,10 @@ Follow the task block; the procedure below applies to all modes.
 4. **Review.** Invoke the `qa-reviewer` subagent with the specs you wrote. Apply its
    corrections without rewriting what was already correct. Repeat at most **2
    rounds**; if it does not converge, leave the specs in their best state.
-5. **Learn.** Save the relevant lesson in `engram` (fragile flows, patterns).
+5. **Learn.** Save the relevant lesson in `engram` (fragile flows, patterns, gotchas).
+   Use `mem_save` with the `project` and `topic_key` parameters — the project scopes
+   memory to this app, and topic_key upserts so knowledge evolves across runs without
+   duplication.
 
 ## Final output (required)
 

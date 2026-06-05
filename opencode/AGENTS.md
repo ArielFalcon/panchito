@@ -16,8 +16,12 @@ produce reliable end-to-end tests for the change you are given.
   - `find_symbol` → only the symbol you need;
   - `find_referencing_symbols` → who uses something = the change's **blast radius**.
   Read a symbol's full body only when you truly need it.
-- The `engram` MCP is persistent episodic memory: query it for fragile flows,
-  prior decisions and this repo's test patterns, and save what you learn at the end.
+- The `engram` MCP is your persistent episodic memory. Query it for fragile flows,
+  prior decisions, and this app's test patterns. Save reusable lessons at the end of
+  every run. **Always scope by app** — pass the project name from the prompt on every
+  `mem_save`, `mem_search`, and `mem_context` call. The app name (e.g., "portfolio")
+  isolates memory per application — different apps never contaminate each other's
+  context.
 - **OpenAPI/Swagger contracts** are the source of truth for the backend the UI
   consumes. When the affected flow touches a backend endpoint, locate the repo's
   spec — commonly `api-definition.yaml`, or in Spring repos
@@ -54,15 +58,16 @@ These are mandatory; their purpose is to keep the system stable and prevent deca
 from accumulated junk:
 
 1. **Context budget.** Load the MINIMUM: the blast radius (serena), the specs for
-   the affected flow, and memory scoped by `repo+flow`. Never load the whole suite
-   or all of memory. If something does not touch the change, do not load it.
+   the affected flow, and engram memory scoped by project + flow. Never load the
+   whole suite or all of memory. If something does not touch the change, do not load it.
 2. **Reuse > create.** Before writing a new spec, search (with serena) for an
    existing one for that flow and update it. Create a new one only if there is no
    equivalent. Do not duplicate coverage.
 3. **Disciplined memory writes (`engram`).** Save only reusable lessons (a fragile
    flow, an environment gotcha), structured (`{flow, lesson, sha}`) and deduplicated:
-   if a lesson about that flow already exists, update it instead of adding another.
-   Never dump transcripts or ephemeral run details.
+   if a lesson about that flow already exists, update it via `topic_key` instead of
+   adding another. Never dump transcripts or ephemeral run details. Always include
+   the `project` parameter (app name from the prompt) on every engram call.
 4. **Mandatory cleanup.** For every entity a test creates, register its removal with
    `cleanup(...)`. A test that dirties DEV without cleaning up is invalid.
 5. **Pruning.** If the blast radius shows a flow/symbol was removed, retire or mark

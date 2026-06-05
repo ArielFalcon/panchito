@@ -9,7 +9,7 @@
 // verdict parsing, orchestration) is tested with stubs; the real connection to
 // `opencode serve` is the boundary not covered by unit tests.
 
-import { AgentResult, RunMode } from "../types";
+import { AgentResult, QaCase, RunMode } from "../types";
 import { CommitIntent } from "../qa/commit-classify";
 import { sanitizeText } from "../orchestrator/sanitizer";
 
@@ -22,15 +22,20 @@ export interface OpencodeRunInput {
   namespace: string; // test-data prefix (qa-bot-<sha>)
   needsReview: boolean;
   mode: RunMode;
+  appName: string; // engram project — scopes all memory to this app
   intent?: CommitIntent; // diff mode: commit intent (type + message + files)
   guidance?: string; // manual mode: user instructions
   openapi?: string | string[]; // optional hint (from app config): where the repo's OpenAPI contract(s) live
+  fixCases?: QaCase[]; // re-generation: failed cases from a previous execution to fix
 }
 
 // A session opened against `opencode serve`. prompt() sends the message to the
 // `qa-generator` agent and returns its final text (including the closing JSON).
+// dispose() cleans up the session; call it when the session is no longer needed
+// to avoid memory leaks on the server (sessions are never auto-cleaned).
 export interface OpencodeSession {
   prompt(text: string): Promise<string>;
+  dispose(): Promise<void>;
 }
 
 export interface OpencodeDeps {
@@ -49,37 +54,65 @@ export async function runOpencode(
   deps: OpencodeDeps,
 ): Promise<AgentResult> {
   const session = await deps.open("qa-generator", input.mirrorDir);
-  const finalText = await session.prompt(buildPrompt(input));
+  try {
+    const finalText = await session.prompt(buildPrompt(input));
 
-  const verdict = parseVerdict(finalText);
-  // When review is disabled, the subagent verdict does not apply: approve.
-  const approved = input.needsReview ? verdict.approved : true;
+    const verdict = parseVerdict(finalText);
+    // When review is disabled, the subagent verdict does not apply: approve.
+    const approved = input.needsReview ? verdict.approved : true;
 
-  return {
-    output: finalText,
-    specs: verdict.specs,
-    reviewed: input.needsReview,
-    approved,
-    note: approved ? undefined : verdict.note ?? "the reviewer did not approve the E2E tests",
-  };
+    return {
+      output: finalText,
+      specs: verdict.specs,
+      reviewed: input.needsReview,
+      approved,
+      note: approved ? undefined : verdict.note ?? "the reviewer did not approve the E2E tests",
+    };
+  } finally {
+    await session.dispose().catch(() => {
+      // Session cleanup is best-effort; never let a cleanup failure shadow the result.
+    });
+  }
 }
 
 // Assembles the dynamic message for the agent. The "how" lives in
 // opencode/agent/qa-generator.md and the skills; only the task + context go here.
 // The diff/guidance are sanitized (cheap defense in depth).
 export function buildPrompt(input: OpencodeRunInput): string {
+  // Fix mode: prepend failure feedback before the original task.
+  const fixBlock = input.fixCases?.length
+    ? [
+        `## Fix failing tests`,
+        ``,
+        `The following tests FAILED during execution against DEV. Fix ONLY these`,
+        `tests; do NOT rewrite or touch tests that passed.`,
+        ``,
+        `Failed cases:`,
+        ...input.fixCases.map(
+          (c) => `- ${c.name}${c.detail ? `: ${c.detail.slice(0, 300)}` : ""}`,
+        ),
+        ``,
+        `For each failure:`,
+        `1. Read the test file to understand what it asserts`,
+        `2. Fix the root cause (scope the selector to a section, use getByRole,`,
+        `   make the regex unambiguous — do NOT just add .first())`,
+        `3. Keep the test's objective and assertions — fix only what's broken`,
+        `4. Update the manifest if the test id or targets changed`,
+      ]
+    : [];
+
   const changeType = input.intent?.type ?? input.mode;
-  // Hint only (where to look). The agent locates and reads the spec itself; the
-  // orchestrator never resolves or parses it. Empty/absent → no line (the agent
-  // searches common locations, or the repo simply has no backend contract).
   const openapiHint = Array.isArray(input.openapi) ? input.openapi.join(", ") : input.openapi;
   return [
+    ...fixBlock,
+    ...(fixBlock.length ? [``] : []),
     buildTask(input),
     ``,
     `## Working rules`,
     `- Work in the repo's tests folder: ${input.e2eRelDir}/ (source of truth in git). Reuse and improve existing fixtures/specs; do not duplicate.`,
     `- For each test, add/update its entry in ${input.e2eRelDir}/.qa/manifest.json with { id, objective, flow, targets, changeRef:{sha:"${input.sha}",type:"${changeType}"} }.`,
     `- Test-data prefix: ${input.namespace}`,
+    `- engram memory: use project="${input.appName}" on ALL mem_save, mem_search, mem_context, and mem_session_summary calls. Never omit the project parameter — this isolates memory per app and prevents cross-contamination across different applications.`,
     `- Consult the playwright-authoring skill for robust specs and this app's capabilities.`,
     ...(openapiHint
       ? [
@@ -199,8 +232,17 @@ export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
   setGlobalDispatcher(new Agent({ headersTimeout: timeoutMs + 30_000, bodyTimeout: timeoutMs + 30_000 }));
 
   const { createOpencodeClient } = await import("@opencode-ai/sdk");
+
+  const serverPassword = process.env.OPENCODE_SERVER_PASSWORD;
   const client = createOpencodeClient({
     baseUrl: process.env.OPENCODE_SERVE_URL ?? "http://opencode:4096",
+    ...(serverPassword
+      ? {
+          headers: {
+            Authorization: `Basic ${Buffer.from(`opencode:${serverPassword}`).toString("base64")}`,
+          },
+        }
+      : {}),
   });
 
   return {
@@ -230,6 +272,7 @@ export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
             timeoutMs,
             "OpenCode prompt",
           ),
+        dispose: () => client.session.delete({ path: { id } }).then(() => {}),
       };
     },
   };

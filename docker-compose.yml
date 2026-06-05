@@ -15,7 +15,8 @@ services:
     env_file: .env
     restart: always
     depends_on:
-      - opencode
+      opencode:
+        condition: service_healthy
     ports:
       - "${PORT:-8080}:8080" # receives the post-deploy webhooks
     environment:
@@ -34,13 +35,23 @@ services:
     environment:
       MIRROR_DIR: /app/.mirrors
       ENGRAM_DATA_DIR: /data
+      OPENCODE_PRINT_LOGS: "true"
+      OPENCODE_LOG_LEVEL: ${OPENCODE_LOG_LEVEL:-INFO}
     volumes:
       - ./opencode:/root/.config/opencode # opencode.json + agents + AGENTS.md + skills
       - mirrors:/app/.mirrors # SAME path as the orchestrator: the agent reads/writes here (Serena caches in <repo>/.serena)
       - serena-cache:/root/.cache/uv # uv/Serena cache (avoids re-downloading on each boot)
       - engram-data:/data # engram's episodic-memory SQLite — persists across restarts
+      - opencode-data:/root/.local/share/opencode # sessions + auth — survives restarts
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4096/global/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
 
 volumes:
   mirrors:
   serena-cache:
   engram-data:
+  opencode-data:
