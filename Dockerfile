@@ -13,7 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends git \
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
-RUN npm install --omit=dev || npm install
+# Install ALL deps (not --omit=dev): the service runs TypeScript directly via
+# `tsx` at runtime (no build step), and tsx is a devDependency.
+RUN npm install
 
 COPY . .
 
