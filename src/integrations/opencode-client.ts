@@ -180,11 +180,18 @@ const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes per agent run
 // tests (like the Playwright runner). The SDK is imported lazily so tests do not
 // require the package. OPENCODE_SERVE_URL points to the `opencode` container.
 export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
+  const timeoutMs = Number(process.env.OPENCODE_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
+  // The agent turn is a single long-held HTTP request: the server sends no
+  // response until the agent finishes, which can exceed undici's default 5-minute
+  // headers timeout (e.g. complete/exhaustive runs). Raise undici's timeouts so
+  // our withTimeout is the effective deadline, not a transport-level abort.
+  const { setGlobalDispatcher, Agent } = await import("undici");
+  setGlobalDispatcher(new Agent({ headersTimeout: timeoutMs + 30_000, bodyTimeout: timeoutMs + 30_000 }));
+
   const { createOpencodeClient } = await import("@opencode-ai/sdk");
   const client = createOpencodeClient({
     baseUrl: process.env.OPENCODE_SERVE_URL ?? "http://opencode:4096",
   });
-  const timeoutMs = Number(process.env.OPENCODE_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
 
   return {
     // `directory` (query) positions the session in the repo working copy: the
