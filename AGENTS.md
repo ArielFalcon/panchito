@@ -1,7 +1,5 @@
 # AGENTS.md
 
-> Deep context lives in `HANDOFF.md` (origin, rejected designs, value/trust meta-risk, full roadmap). Read it before any non-trivial change. This file is the operational distillation for OpenCode agents.
-
 ## What this is
 
 `ai-pipeline` is an **app-agnostic, centralized AI-assisted E2E QA engine**. It watches team repos; when a commit is deployed to DEV, an OpenCode agent generates Playwright E2E tests for the blast radius, runs them against the live DEV site, and — when green + reviewer-approved — commits them into the app repo's `e2e/` folder via a PR with auto-merge. Failures open a GitHub Issue.
@@ -103,7 +101,7 @@ Prompt layers: `opencode/AGENTS.md` (shared rules) → `opencode/agent/*.md` (pe
 
 ## The value/trust risk
 
-The quality loop is circular: one LLM generates, another reviews, and the harness only checks that tests *run green*, not that they're *meaningful*. The system can drift into a large suite that never catches anything. The work that breaks this is **change-coverage gating** (does executing the test cover the diff-changed lines?) — see `HANDOFF.md` §5 — **not more prompt tuning**. Keep this front of mind before expanding the agent or reviewer.
+The quality loop is circular: one LLM generates, another reviews, and the harness only checks that tests *run green*, not that they're *meaningful*. The system can drift into a large suite that never catches anything. The work that breaks this is **change-coverage gating** (does executing the test cover the diff-changed lines?) — **not more prompt tuning**. Keep this front of mind before expanding the agent or reviewer.
 
 ## Current state
 

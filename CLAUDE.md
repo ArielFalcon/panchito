@@ -2,10 +2,6 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> Deep context lives in `HANDOFF.md` (origin, rejected designs, the value/trust
-> meta-risk, and the full roadmap). Read it before any non-trivial change. This
-> file is the operational distillation.
-
 ## What this is
 
 `ai-pipeline` is an **app-agnostic, centralized AI-assisted E2E QA engine** (a
@@ -200,7 +196,7 @@ only objective gate (the harness) checks a test *runs green*, not that it is
 *meaningful*. There is no ground-truth signal yet, so the system optimizes a proxy
 and can drift into a large suite that never catches anything (Goodhart). The work
 that breaks this is **change-coverage gating** (does executing the test cover the
-lines the diff changed?) — the keystone of the §5 roadmap in `HANDOFF.md` — **not
+lines the diff changed?) — the keystone of the upcoming change-coverage work — **not
 more prompt tuning**. Keep this front of mind before expanding the agent or the
 reviewer.
 
@@ -208,5 +204,4 @@ reviewer.
 
 `main` runs end-to-end against `ArielFalcon/portfolio` (a public Astro static site
 on Vercel) in **shadow mode** with the deploy gate skipped (no `/version`). engram
-is temporarily disabled (`enabled: false` in `opencode.json`) to keep the smoke
-minimal. The roadmap and pending decisions are in `HANDOFF.md` §5.
+is enabled for persistent agent memory across runs.

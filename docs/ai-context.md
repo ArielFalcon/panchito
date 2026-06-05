@@ -2,7 +2,7 @@
 
 > Status: **foundation implemented** (the schema + deterministic validator). The
 > generation mode, consumption, and cadence are designed below and sequenced as the
-> next slices. Built against the invariants in `CLAUDE.md` / `HANDOFF.md`.
+> next slices. Built against the invariants in `CLAUDE.md`.
 
 ## The problem it solves
 
