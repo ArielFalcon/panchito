@@ -90,11 +90,24 @@ function passing(): QaRunResult {
   return { sha: "s", verdict: "pass", passed: true, cases: [], logs: "" };
 }
 
-test("green: orchestrates gate → prepare → generate → setup → validate → health → execute → publish", async () => {
+test("green: orchestrates gate → prepare → setup → generate → validate → health → execute → publish", async () => {
   const calls: string[] = [];
   await runPipeline(app, "abc123", deps(passing(), calls), "manual");
-  // on green, the post-failure health re-check short-circuits (only 1 health)
-  assert.deepEqual(calls, ["gate", "prepare", "generate", "setup", "validate", "health", "execute", "publish"]);
+  // setup runs before generate (so the agent has the seed); on green the
+  // post-failure health re-check short-circuits (only 1 health).
+  assert.deepEqual(calls, ["gate", "prepare", "setup", "generate", "validate", "health", "execute", "publish"]);
+});
+
+test("agent writes no specs (no-op change): skipped, does not validate/execute/publish", async () => {
+  const calls: string[] = [];
+  const noop: AgentResult = { output: "the change needs no tests", specs: [], reviewed: true, approved: true };
+  const d = deps(passing(), calls, { agent: noop });
+  const run = await runPipeline(app, "abc123", d);
+  assert.equal(run.verdict, "skipped");
+  assert.ok(calls.includes("generate"));
+  assert.ok(!calls.includes("validate"));
+  assert.ok(!calls.includes("execute"));
+  assert.equal(d.published, false);
 });
 
 test("green opens a PR, NOT an Issue", async () => {

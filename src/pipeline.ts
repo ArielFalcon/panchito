@@ -132,7 +132,11 @@ export async function runPipeline(
   }
   const generating = cls.action === "generate";
 
-  // 4. Generate (only when applicable): the agent writes/improves `e2e/`.
+  // 4. Set up the e2e project (bootstrap the seed if missing + install deps) so
+  //    the agent has the shared fixtures/config to build on.
+  await deps.setupE2e(e2eDir);
+
+  // 5. Generate (only when applicable): the agent writes/improves `e2e/`.
   let result: AgentResult | null = null;
   if (generating) {
     log("[qa] generating E2E tests with OpenCode...");
@@ -150,12 +154,18 @@ export async function runPipeline(
         (result.note ? ` note=${result.note}` : "") +
         `\n[qa] agent output (first 600 chars): ${result.output.slice(0, 600)}`,
     );
+    // The agent is the authority on whether the change needs tests. If it
+    // approved and wrote none, this is a legitimate no-op (the commit classifier
+    // forced generation, but the actual change has nothing to cover) → skip.
+    if (result.approved && result.specs.length === 0) {
+      log("[qa] the agent determined the change needs no E2E tests; nothing to run.");
+      return { sha: ns, verdict: "skipped", passed: true, cases: [], logs: result.note ?? result.output.slice(0, 300) };
+    }
   } else {
     log("[qa] regression: not generating tests; validating and running the existing suite.");
   }
 
-  // 5. Filter B — static gate over `e2e/` (install deps + typecheck/lint/list/manifest).
-  await deps.setupE2e(e2eDir);
+  // 6. Filter B — static gate over `e2e/` (typecheck/lint/list/manifest).
   log("[qa] validating specs (typecheck + lint + list + manifest)...");
   const validation = await deps.validate(e2eDir);
   if (!validation.ok) {
