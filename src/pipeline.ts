@@ -34,6 +34,7 @@ export interface GenerateInput {
   mode: RunMode;
   intent?: CommitIntent; // diff mode: type + message + files; the agent derives the objective
   guidance?: string; // manual mode: user instructions on what to test
+  openapi?: string | string[]; // optional hint: where the repo's OpenAPI contract(s) live
 }
 
 export interface PipelineDeps {
@@ -71,6 +72,7 @@ export function defaultPipelineDeps(): PipelineDeps {
           mode: input.mode,
           intent: input.intent,
           guidance: input.guidance,
+          openapi: input.openapi,
         },
         await defaultOpencodeDeps(),
       ),
@@ -163,6 +165,7 @@ export async function runPipeline(
       mode,
       intent,
       guidance: opts.guidance,
+      openapi: app.openapi,
     });
     log(
       `[qa] agent: approved=${result.approved} specs=[${result.specs.join(", ")}]` +

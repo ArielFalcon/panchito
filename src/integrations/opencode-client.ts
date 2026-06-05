@@ -24,6 +24,7 @@ export interface OpencodeRunInput {
   mode: RunMode;
   intent?: CommitIntent; // diff mode: commit intent (type + message + files)
   guidance?: string; // manual mode: user instructions
+  openapi?: string | string[]; // optional hint (from app config): where the repo's OpenAPI contract(s) live
 }
 
 // A session opened against `opencode serve`. prompt() sends the message to the
@@ -68,6 +69,10 @@ export async function runOpencode(
 // The diff/guidance are sanitized (cheap defense in depth).
 export function buildPrompt(input: OpencodeRunInput): string {
   const changeType = input.intent?.type ?? input.mode;
+  // Hint only (where to look). The agent locates and reads the spec itself; the
+  // orchestrator never resolves or parses it. Empty/absent → no line (the agent
+  // searches common locations, or the repo simply has no backend contract).
+  const openapiHint = Array.isArray(input.openapi) ? input.openapi.join(", ") : input.openapi;
   return [
     buildTask(input),
     ``,
@@ -76,6 +81,11 @@ export function buildPrompt(input: OpencodeRunInput): string {
     `- For each test, add/update its entry in ${input.e2eRelDir}/.qa/manifest.json with { id, objective, flow, targets, changeRef:{sha:"${input.sha}",type:"${changeType}"} }.`,
     `- Test-data prefix: ${input.namespace}`,
     `- Consult the playwright-authoring skill for robust specs and this app's capabilities.`,
+    ...(openapiHint
+      ? [
+          `- OpenAPI contract(s) for this repo: ${openapiHint}. For any backend endpoint the affected flow touches, read the matching operation and assert against its contract (required fields, enums, validation/error responses). Drive the app through the web UI like a user — never call the API directly.`,
+        ]
+      : []),
     input.needsReview
       ? `- Review required: invoke the qa-reviewer subagent and apply its corrections.`
       : `- Review disabled for this run: do not invoke qa-reviewer.`,

@@ -65,6 +65,19 @@ test("buildPrompt without review instructs not to invoke the reviewer", () => {
   assert.match(p, /do not invoke qa-reviewer/);
 });
 
+test("buildPrompt includes the OpenAPI hint and the no-direct-call rule when configured", () => {
+  const p = buildPrompt({ ...input, openapi: "**/src/main/resources/openapi/*.yaml" });
+  assert.match(p, /OpenAPI contract/);
+  assert.match(p, /src\/main\/resources\/openapi/);
+  assert.match(p, /never call the API directly/);
+});
+
+test("buildPrompt joins multiple OpenAPI globs and omits the line when no hint is set", () => {
+  const many = buildPrompt({ ...input, openapi: ["a/openapi.yaml", "b/api-definition.yaml"] });
+  assert.match(many, /a\/openapi\.yaml, b\/api-definition\.yaml/);
+  assert.doesNotMatch(buildPrompt(input), /OpenAPI contract/); // input has no openapi → no line
+});
+
 test("buildPrompt complete mode: whole-repo analysis + persisted coverage", () => {
   const p = buildPrompt({ ...input, mode: "complete", intent: undefined });
   assert.match(p, /WHOLE repository/);

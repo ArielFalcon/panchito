@@ -5,6 +5,16 @@ name: "example"
 repo: "org/example"            # owner/repo on GitHub (Issues + E2E suite PRs)
 baseBranch: "main"             # target branch for the QA pull requests
 
+# Optional: where this repo keeps its OpenAPI/Swagger contract(s) — a glob or a list
+# of globs relative to the repo root. The QA AGENT locates and reads them as authoring
+# context (to write contract-aware assertions: required fields, enums, error responses);
+# the orchestrator never parses them, and the agent never calls the API directly (it
+# drives the app through the web UI). Omit for repos with no backend contract (e.g. a
+# static frontend). Example for an Angular + Spring monorepo:
+# openapi:
+#   - "**/src/main/resources/openapi/*.yaml"
+#   - "**/api-definition.yaml"
+
 dev:
   baseUrl: "https://dev.example.internal"
   # versionUrl is OPTIONAL: a `/version` endpoint returning { sha, healthy }. The

@@ -25,7 +25,10 @@ Follow the task block; the procedure below applies to all modes.
    actually changes. Then activate the project in `serena` (`activate_project`) and
    use `find_referencing_symbols` (blast radius) and `get_symbols_overview` /
    `find_symbol` to read only what you need (key in Java: signatures, not whole
-   files). Query `engram` for the repo's memory.
+   files). Query `engram` for the repo's memory. If the affected flow calls a
+   backend endpoint, also read the matching OpenAPI operation (see AGENTS.md) for
+   contract-aware assertions — required fields, validation/error responses — without
+   ever calling the API directly.
 2. **Write the specs.** Under `e2e/` (a subfolder per microservice), create or
    update `*.spec.ts` files with the `write` tool. **Consult the
    `playwright-authoring` skill** for the how (locators, waiting, fixtures) and for

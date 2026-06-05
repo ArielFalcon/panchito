@@ -50,7 +50,7 @@ export const github = {
 
   // Auto-merge via GraphQL: the PR merges once the repo's REQUIRED checks pass.
   // Requires the repo to have "Allow auto-merge" enabled (and, in practice,
-  // branch protection with checks). Otherwise the mutation fails and the caller
+  // branch protection with checks). Otherwise, the mutation fails and the caller
   // treats it as best-effort, leaving the PR open.
   async enableAutoMerge(nodeId: string, mergeMethod = "SQUASH"): Promise<void> {
     const res = await fetch("https://api.github.com/graphql", {

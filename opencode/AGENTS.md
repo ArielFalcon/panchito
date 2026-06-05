@@ -18,6 +18,14 @@ produce reliable end-to-end tests for the change you are given.
   Read a symbol's full body only when you truly need it.
 - The `engram` MCP is persistent episodic memory: query it for fragile flows,
   prior decisions and this repo's test patterns, and save what you learn at the end.
+- **OpenAPI/Swagger contracts** are the source of truth for the backend the UI
+  consumes. When the affected flow touches a backend endpoint, locate the repo's
+  spec — commonly `api-definition.yaml`, or in Spring repos
+  `src/main/resources/openapi/` (the prompt may give a hint; search with serena/glob
+  if it is elsewhere) — and read the matching operation for its required fields,
+  enums, validations and error responses. This is KNOWLEDGE for stronger assertions
+  and negative cases. You still drive the app through the web UI like a user and
+  **never call the API directly** (no curl, no direct HTTP).
 
 ## Skills (on-demand craft knowledge)
 

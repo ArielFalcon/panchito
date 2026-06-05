@@ -12,6 +12,12 @@ export interface AppConfig {
   name: string;
   repo: string;
   baseBranch?: string; // target branch for the QA pull requests (defaults to "main")
+  // Optional hint: where this repo keeps its OpenAPI/Swagger contract(s), as a glob
+  // (or globs) relative to the repo root (e.g. "**/src/main/resources/openapi/*.yaml"
+  // or "**/api-definition.yaml"). The AGENT reads them as authoring context; this only
+  // tells it where to look when the layout is non-standard. Omit it and the agent
+  // searches common locations. App-specific by nature → it belongs here in config.
+  openapi?: string | string[];
   dev: {
     baseUrl: string;
     // Omit versionUrl to skip the deploy gate and health checks (for sites that

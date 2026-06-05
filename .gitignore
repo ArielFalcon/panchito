@@ -11,3 +11,5 @@ dist/
 
 # Espejos locales de los repos vigilados
 .mirrors/
+/.idea/
+/.claude/
