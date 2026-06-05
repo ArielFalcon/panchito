@@ -14,9 +14,11 @@ export interface AppConfig {
   baseBranch?: string; // target branch for the QA pull requests (defaults to "main")
   dev: {
     baseUrl: string;
-    versionUrl: string;
-    pollIntervalMs: number;
-    deployTimeoutMs: number;
+    // Omit versionUrl to skip the deploy gate and health checks (for sites that
+    // are already deployed and expose no `/version` endpoint, e.g. a static site).
+    versionUrl?: string;
+    pollIntervalMs?: number;
+    deployTimeoutMs?: number;
   };
   qa: {
     needsReview: boolean;

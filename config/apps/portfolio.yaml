@@ -1,0 +1,20 @@
+# Test connection: Ariel's portfolio (Astro static CV site on Vercel).
+# Public, single page, no login. No /version endpoint → the deploy gate is skipped.
+# First run is in shadow mode: it generates, validates and runs the tests, but
+# does NOT open PRs or Issues.
+
+name: "portfolio"
+repo: "ArielFalcon/portfolio"
+baseBranch: "main"
+
+dev:
+  baseUrl: "https://portfolio-arielfalcons-projects.vercel.app"   # the deployed public URL
+  # no versionUrl → deploy gate skipped (the site is already deployed)
+
+qa:
+  needsReview: true
+  shadow: true                # first run: no PR, no Issues — only logs what it would do
+  testDataPrefix: "qa-bot"
+
+report:
+  onFailure: "github-issue"
