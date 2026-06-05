@@ -12,7 +12,7 @@
 
 **Autonomous E2E QA that watches your repos and tests every deploy against DEV.**
 
-When a commit lands on DEV, an AI agent reads the change, writes Playwright tests for what could break, runs them against the live environment, and either opens a PR with the new tests or files a GitHub Issue if something fails.
+When a commit lands on DEV, an AI agent reads the change, writes Playwright tests for what could break, runs them against the live environment, and either opens a PR against the app's repository with the new tests or files a GitHub Issue if something fails.
 
 It is app-agnostic: onboard any repo by adding a single YAML file. No app code lives here.
 
@@ -26,7 +26,7 @@ ai-pipeline turns every deploy into a QA checkpoint, automatically.
 |---|---|
 | **Commit-aware testing** | Reads the diff and commit message to understand what changed. Skips style-only commits, writes targeted tests for features and fixes, runs regression-only for refactors. |
 | **Two-model review** | A different AI model reviews every generated test for value. Tests that click without asserting, use fragile selectors, or miss the actual change are rejected before they reach the suite. |
-| **Self-improving suite** | When tests pass and the reviewer approves, they are committed back to the repo via PR. The suite grows with every deploy and never degrades into "green noise." |
+| **Self-improving suite** | When tests pass and the reviewer approves, they are committed to the app's repository via PR with auto-merge. The suite grows with every deploy and never degrades into "green noise." |
 | **Multi-app, single engine** | One centralized service watches all your team's repos. Each app gets its own namespace for test data and persistent memory. |
 | **Shadow mode** | Onboard a repo without touching it: the full pipeline runs, but PRs and Issues are only logged. Flip the switch when you are ready. |
 
@@ -80,7 +80,7 @@ Every run follows the same sequence, whether triggered by a webhook or manually:
 
 | Outcome | Action |
 |---|---|
-| All green, reviewer approved | PR with auto-merge commits tests into the repo |
+| All green, reviewer approved | PR with auto-merge commits tests into the app's repository |
 | All green, reviewer rejected | GitHub Issue for the team to iterate |
 | Failures detected | GitHub Issue with sanitized logs |
 | Flaky tests | Quarantined, no Issue created |

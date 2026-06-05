@@ -36,5 +36,6 @@ npx playwright test --list           # Filter B: load
 npx playwright test --reporter=json  # Filter C: run + detect flaky
 ```
 
-On green, the agent commits `e2e/` and a PR is opened (auto-merge if the repo
-allows it).
+On green, the agent commits `e2e/` into the app repo and a PR is opened against it
+(auto-merge if the repo allows it). The tests live in the app's own git history, not
+in ai-pipeline.
