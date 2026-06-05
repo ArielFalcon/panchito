@@ -8,7 +8,7 @@ repo: "ArielFalcon/portfolio"
 baseBranch: "main"
 
 dev:
-  baseUrl: "https://CHANGE-ME.vercel.app"   # the deployed public URL (your Vercel/custom domain)
+  baseUrl: "https://portfolio-arielfalcons-projects.vercel.app"   # the deployed public URL
   # no versionUrl → deploy gate skipped (the site is already deployed)
 
 qa:
