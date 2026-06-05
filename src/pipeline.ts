@@ -154,6 +154,7 @@ export async function runPipeline(
   log("[qa] validating specs (typecheck + lint + list + manifest)...");
   const validation = await deps.validate(e2eDir);
   if (!validation.ok) {
+    log(`[qa] static gate failed:\n${validation.errors.join("\n")}`);
     const invalid = resultOf(ns, "invalid", validation.errors.join("\n\n"));
     await report(app, sha, invalid, deps, log, shadow, "the E2E tests did not pass the static gate");
     return invalid;

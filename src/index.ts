@@ -20,7 +20,8 @@ const server = createWebhookServer({
     }
     console.log(`[qa] enqueued ${repo}@${sha} (queue: ${queue.size + 1})`);
     queue.enqueue(async () => {
-      await runPipeline(app, sha, defaultPipelineDeps(), "webhook");
+      const run = await runPipeline(app, sha, defaultPipelineDeps(), "webhook");
+      console.log(`[qa] run finished ${repo}@${sha}: verdict=${run.verdict}`);
     });
   },
 });
