@@ -10,6 +10,24 @@
 
 </div>
 
+## Contents
+
+- [1. Overview](#1-overview)
+- [2. How it works](#2-how-it-works)
+  - [Architecture](#architecture)
+  - [The QA pipeline](#the-qa-pipeline)
+  - [What happens at the end](#what-happens-at-the-end)
+- [3. Getting started](#3-getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Install and verify](#install-and-verify)
+  - [Configure your API key](#configure-your-api-key)
+  - [AI model configuration](#ai-model-configuration)
+  - [Onboard an app](#onboard-an-app)
+  - [Trigger a manual run](#trigger-a-manual-run)
+  - [Deploy with Docker](#deploy-with-docker)
+
+---
+
 **Autonomous E2E QA that watches your repos and tests every deploy against DEV.**
 
 When a commit lands on DEV, an AI agent reads the change, writes Playwright tests for what could break, runs them against the live environment, and either opens a PR against the app's repository with the new tests or files a GitHub Issue if something fails.
