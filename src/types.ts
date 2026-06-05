@@ -3,6 +3,24 @@
 
 export type TriggerSource = "webhook" | "manual";
 
+// Execution mode for a run (taken from the POST body; defaults to "diff").
+//   diff       → test the change of the given commit (its blast radius). The
+//                commit is classified (Conventional Commits) to decide whether to
+//                generate, run regression only, or skip.
+//   complete   → analyze the WHOLE repo + existing suite, estimate coverage and
+//                importance, persist that analysis, and generate tests for the
+//                important UNCOVERED flows (the delta over the existing suite).
+//   exhaustive → like complete, but re-evaluate the WHOLE suite from scratch
+//                (audit every existing test for correctness/value/necessity and
+//                regenerate), not just the delta.
+//   manual     → generation focused by user-provided `guidance`.
+export type RunMode = "diff" | "complete" | "exhaustive" | "manual";
+
+export interface RunOptions {
+  mode: RunMode;
+  guidance?: string; // used by "manual"
+}
+
 // Outcome of an OpenCode agent run. The agent writes the E2E tests directly into
 // the working copy's `e2e/` folder (git is the source of truth, not this object);
 // only the reviewer subagent's verdict (resolved inside OpenCode) and the final

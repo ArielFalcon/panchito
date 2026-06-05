@@ -9,7 +9,7 @@
 // verdict parsing, orchestration) is tested with stubs; the real connection to
 // `opencode serve` is the boundary not covered by unit tests.
 
-import { AgentResult } from "../types";
+import { AgentResult, RunMode } from "../types";
 import { CommitIntent } from "../qa/commit-classify";
 import { sanitizeText } from "../orchestrator/sanitizer";
 
@@ -21,7 +21,9 @@ export interface OpencodeRunInput {
   e2eRelDir: string; // tests folder relative to mirrorDir (e.g. "e2e")
   namespace: string; // test-data prefix (qa-bot-<sha>)
   needsReview: boolean;
-  intent: CommitIntent; // commit intent (type + message + files)
+  mode: RunMode;
+  intent?: CommitIntent; // diff mode: commit intent (type + message + files)
+  guidance?: string; // manual mode: user instructions
 }
 
 // A session opened against `opencode serve`. prompt() sends the message to the
@@ -62,29 +64,67 @@ export async function runOpencode(
 }
 
 // Assembles the dynamic message for the agent. The "how" lives in
-// opencode/agent/qa-generator.md; only the change context goes here. The diff is
-// sanitized anyway (cheap defense in depth).
+// opencode/agent/qa-generator.md and the skills; only the task + context go here.
+// The diff/guidance are sanitized (cheap defense in depth).
 export function buildPrompt(input: OpencodeRunInput): string {
-  const { intent } = input;
+  const changeType = input.intent?.type ?? input.mode;
+  return [
+    buildTask(input),
+    ``,
+    `## Working rules`,
+    `- Work in the repo's tests folder: ${input.e2eRelDir}/ (source of truth in git). Reuse and improve existing fixtures/specs; do not duplicate.`,
+    `- For each test, add/update its entry in ${input.e2eRelDir}/.qa/manifest.json with { id, objective, flow, targets, changeRef:{sha:"${input.sha}",type:"${changeType}"} }.`,
+    `- Test-data prefix: ${input.namespace}`,
+    `- Consult the playwright-authoring skill for robust specs and this app's capabilities.`,
+    input.needsReview
+      ? `- Review required: invoke the qa-reviewer subagent and apply its corrections.`
+      : `- Review disabled for this run: do not invoke qa-reviewer.`,
+  ].join("\n");
+}
+
+// The mode-specific task block.
+function buildTask(input: OpencodeRunInput): string {
+  if (input.mode === "complete" || input.mode === "exhaustive") {
+    return [
+      input.mode === "exhaustive"
+        ? `Audit and REGENERATE the entire E2E suite of ${input.repo} from scratch.`
+        : `Analyze the WHOLE repository ${input.repo} and grow the E2E suite where it matters.`,
+      ``,
+      `1. Read the existing tests in ${input.e2eRelDir}/ and the app code (use serena:`,
+      `   activate_project, get_symbols_overview, find_symbol, find_referencing_symbols) to`,
+      `   build a COVERAGE + IMPORTANCE map: which user flows already have tests and which`,
+      `   important/complex flows do NOT. Until real coverage instrumentation exists,`,
+      `   estimate coverage by reading the existing specs and the code.`,
+      `2. Persist this analysis in ${input.e2eRelDir}/.qa/analysis.json (flows, covered vs`,
+      `   uncovered, importance, lastSha:"${input.sha}") so it need not be redone from`,
+      `   scratch next time; if it already exists, update it incrementally.`,
+      input.mode === "exhaustive"
+        ? `3. Re-evaluate EVERY existing test for correctness, value and necessity (apply the test-value-review criteria): remove or rewrite tests that are trivial, false positives, redundant or obsolete. Ensure every important flow is covered — a fully re-evaluated suite, not a delta.`
+        : `3. Generate tests ONLY for the important UNCOVERED flows (the delta over the existing suite). Do not duplicate existing coverage.`,
+    ].join("\n");
+  }
+  if (input.mode === "manual") {
+    return [
+      `Generate/update E2E tests for ${input.repo}, FOCUSED on the following guidance:`,
+      ``,
+      sanitizeText(input.guidance ?? "(no guidance provided)"),
+      ``,
+      `Use serena to read the relevant code and the existing ${input.e2eRelDir}/ suite.`,
+      `Stay focused on the guidance; do not generate unrelated tests.`,
+    ].join("\n");
+  }
+  // diff (default)
+  const intent = input.intent;
   return [
     `Generate/update E2E tests for the flows affected by commit ${input.sha} of ${input.repo}.`,
     ``,
     `## Change intent (Conventional Commits)`,
-    `- Type: ${intent.type}${intent.breaking ? " (BREAKING)" : ""}`,
-    `- Message: ${sanitizeText(intent.message)}`,
-    `- Changed files (derive the scope/area from these): ${intent.changedFiles.join(", ") || "(unknown)"}`,
-    `The message gives the INTENT; derive each test's objective (acceptance criterion)`,
-    `from it. But CROSS-CHECK against the diff: if the code does more than the message`,
-    `claims, cover what the code actually changes, not just what the message promises.`,
-    ``,
-    `- Work in the repo's tests folder: ${input.e2eRelDir}/ (source of truth in git).`,
-    `  Reuse and improve existing fixtures/specs; do not duplicate.`,
-    `- For each test, add/update its entry in ${input.e2eRelDir}/.qa/manifest.json with`,
-    `  { id, objective, flow, targets, changeRef:{sha:"${input.sha}",type:"${intent.type}"} }.`,
-    `- Test-data prefix: ${input.namespace}`,
-    input.needsReview
-      ? `- Review required: invoke the qa-reviewer subagent and apply its corrections.`
-      : `- Review disabled for this run: do not invoke qa-reviewer.`,
+    `- Type: ${intent?.type ?? "unknown"}${intent?.breaking ? " (BREAKING)" : ""}`,
+    `- Message: ${sanitizeText(intent?.message ?? "")}`,
+    `- Changed files (derive the scope/area from these): ${intent?.changedFiles.join(", ") || "(unknown)"}`,
+    `The message gives the INTENT; derive each test's objective from it. But CROSS-CHECK`,
+    `against the diff: if the code does more than the message claims, cover what the code`,
+    `actually changes, not just what the message promises.`,
     ``,
     `## Commit diff`,
     "```diff",

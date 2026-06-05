@@ -5,10 +5,18 @@
 
 import { createServer, Server } from "node:http";
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { RunMode } from "../types";
 
 export interface WebhookPayload {
   repo: string;
   sha: string;
+  mode: RunMode; // defaults to "diff" when absent
+  guidance?: string; // for "manual" mode
+}
+
+const MODES: RunMode[] = ["diff", "complete", "exhaustive", "manual"];
+function asMode(v: unknown): RunMode {
+  return typeof v === "string" && (MODES as string[]).includes(v) ? (v as RunMode) : "diff";
 }
 
 export function verifySignature(secret: string, body: string, signature?: string): boolean {
@@ -23,16 +31,17 @@ export function verifySignature(secret: string, body: string, signature?: string
 export function parseWebhook(body: unknown): WebhookPayload | null {
   if (!body || typeof body !== "object") return null;
   const b = body as Record<string, unknown>;
+  const guidance = typeof b.guidance === "string" ? b.guidance : undefined;
 
-  // Simple shape { repo, sha }
+  // Simple shape { repo, sha, mode?, guidance? }
   if (typeof b.repo === "string" && typeof b.sha === "string") {
-    return { repo: b.repo, sha: b.sha };
+    return { repo: b.repo, sha: b.sha, mode: asMode(b.mode), guidance };
   }
 
-  // GitHub push event: { repository: { full_name }, after }
+  // GitHub push event: { repository: { full_name }, after } → always "diff"
   const repository = b.repository as { full_name?: unknown } | undefined;
   if (typeof repository?.full_name === "string" && typeof b.after === "string") {
-    return { repo: repository.full_name, sha: b.after };
+    return { repo: repository.full_name, sha: b.after, mode: "diff" };
   }
 
   return null;

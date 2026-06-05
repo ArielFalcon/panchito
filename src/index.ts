@@ -12,15 +12,15 @@ const queue = new JobQueue((e) => console.error("[qa] run failed:", e));
 
 const server = createWebhookServer({
   secret: process.env.WEBHOOK_SECRET,
-  onRun: ({ repo, sha }) => {
+  onRun: ({ repo, sha, mode, guidance }) => {
     const app = loadAppConfigByRepo(repo);
     if (!app) {
       console.warn(`[qa] no config/apps entry for ${repo}; event ignored`);
       return;
     }
-    console.log(`[qa] enqueued ${repo}@${sha} (queue: ${queue.size + 1})`);
+    console.log(`[qa] enqueued ${repo}@${sha} mode=${mode} (queue: ${queue.size + 1})`);
     queue.enqueue(async () => {
-      const run = await runPipeline(app, sha, defaultPipelineDeps(), "webhook");
+      const run = await runPipeline(app, sha, defaultPipelineDeps(), "webhook", { mode, guidance });
       console.log(`[qa] run finished ${repo}@${sha}: verdict=${run.verdict}`);
     });
   },

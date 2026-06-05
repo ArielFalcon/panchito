@@ -17,6 +17,7 @@ const input: OpencodeRunInput = {
   e2eRelDir: "e2e",
   namespace: "qa-bot-abc123",
   needsReview: true,
+  mode: "diff",
   intent: { type: "feat", breaking: false, message: "feat: new screen", changedFiles: ["src/x.ts"] },
 };
 
@@ -62,6 +63,27 @@ test("buildPrompt sanitizes the diff (defense in depth)", () => {
 test("buildPrompt without review instructs not to invoke the reviewer", () => {
   const p = buildPrompt({ ...input, needsReview: false });
   assert.match(p, /do not invoke qa-reviewer/);
+});
+
+test("buildPrompt complete mode: whole-repo analysis + persisted coverage", () => {
+  const p = buildPrompt({ ...input, mode: "complete", intent: undefined });
+  assert.match(p, /WHOLE repository/);
+  assert.match(p, /COVERAGE \+ IMPORTANCE map/);
+  assert.match(p, /analysis\.json/);
+  assert.match(p, /UNCOVERED flows/);
+  assert.doesNotMatch(p, /## Commit diff/); // no diff for whole-repo mode
+});
+
+test("buildPrompt exhaustive mode: re-evaluates the whole suite", () => {
+  const p = buildPrompt({ ...input, mode: "exhaustive", intent: undefined });
+  assert.match(p, /REGENERATE the entire E2E suite/);
+  assert.match(p, /Re-evaluate EVERY existing test/);
+});
+
+test("buildPrompt manual mode: includes the user guidance", () => {
+  const p = buildPrompt({ ...input, mode: "manual", intent: undefined, guidance: "test the contact form validation" });
+  assert.match(p, /FOCUSED on the following guidance/);
+  assert.match(p, /contact form validation/);
 });
 
 test("parseVerdict reads the closing JSON (in a ```json block)", () => {

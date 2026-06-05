@@ -91,6 +91,25 @@ geolocation, mobile/offline, cookies/cache, photo upload) and `test-value-review
 > PRs or open Issues**, only logs what it would do. Meant for the initial rollout
 > when onboarding a repo, without dirtying anything.
 
+### Execution modes
+
+The POST body accepts a `mode` (default `diff`). All modes share the same harness,
+execution and publishing; only the agent's task and the commit-classification step
+change:
+
+| Mode | Body | What the agent does |
+|---|---|---|
+| `diff` (default) | `{repo, sha}` | Test the flows affected by the commit (its blast radius). The commit is classified to decide generate / regression / skip. |
+| `complete` | `{repo, sha, mode:"complete"}` | Analyze the **whole repo** + existing suite, estimate coverage and importance (persisted to `e2e/.qa/analysis.json`), and generate tests for the important **uncovered** flows (the delta). |
+| `exhaustive` | `{repo, sha, mode:"exhaustive"}` | Like `complete`, but **re-evaluate the whole suite** (audit every existing test for correctness/value/necessity and regenerate), not just the delta. |
+| `manual` | `{repo, sha, mode:"manual", guidance:"..."}` | Generation focused by the user's `guidance`. |
+
+Also available via the CLI: `npm run qa -- --app <app> --sha <sha> --mode complete`
+(and `--guidance "..."` for `manual`).
+
+> Note: until real coverage instrumentation exists (see HANDOFF §5.1), `complete`/
+> `exhaustive` estimate coverage by reading the existing specs and the code.
+
 ### E2E harness (quality and consistency)
 
 - **Layer A — standardization**: the `config/e2e/` seed (base Playwright config,

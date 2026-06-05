@@ -19,7 +19,7 @@ import { publishE2e, defaultPublishDeps } from "./integrations/publish";
 import { testDataNamespace } from "./qa/test-data";
 import { github } from "./integrations/github";
 import { renderIssue } from "./report/reporter";
-import { AgentResult, QaRunResult, TriggerSource } from "./types";
+import { AgentResult, QaRunResult, TriggerSource, RunMode, RunOptions } from "./types";
 
 // Tests live in this folder inside the repo (git is the source of truth).
 const E2E_DIR = "e2e";
@@ -31,7 +31,9 @@ export interface GenerateInput {
   mirrorDir: string;
   namespace: string;
   needsReview: boolean;
-  intent: CommitIntent; // type + message + files; the agent derives the objective from it
+  mode: RunMode;
+  intent?: CommitIntent; // diff mode: type + message + files; the agent derives the objective
+  guidance?: string; // manual mode: user instructions on what to test
 }
 
 export interface PipelineDeps {
@@ -66,7 +68,9 @@ export function defaultPipelineDeps(): PipelineDeps {
           e2eRelDir: E2E_DIR,
           namespace: input.namespace,
           needsReview: input.needsReview,
+          mode: input.mode,
           intent: input.intent,
+          guidance: input.guidance,
         },
         await defaultOpencodeDeps(),
       ),
@@ -93,10 +97,12 @@ export async function runPipeline(
   sha: string,
   deps: PipelineDeps,
   source: TriggerSource = "webhook",
+  opts: RunOptions = { mode: "diff" },
 ): Promise<QaRunResult> {
   const log = deps.log ?? (() => {});
   const shadow = app.qa.shadow ?? false;
-  log(`[qa] app=${app.name}  sha=${sha}  (${source})${shadow ? "  [SHADOW MODE]" : ""}`);
+  const mode = opts.mode;
+  log(`[qa] app=${app.name}  sha=${sha}  mode=${mode}  (${source})${shadow ? "  [SHADOW MODE]" : ""}`);
 
   // 1. Gate: wait until DEV runs this SHA and is healthy. Skipped when no
   //    version endpoint is configured (the site is assumed already deployed).
@@ -121,16 +127,23 @@ export async function runPipeline(
   const e2eDir = join(mirrorDir, E2E_DIR);
   const ns = testDataNamespace(app.qa.testDataPrefix, sha);
 
-  // 3. Classify the commit (Conventional Commits, cross-checked against the diff):
-  //    skip → nothing to test; regression → run the existing suite without
-  //    generating; generate → full flow.
-  const cls = classifyCommit(message, diff);
-  log(`[qa] commit '${cls.type}' → ${cls.action}${cls.contradiction ? " (message/diff contradiction)" : ""}: ${cls.reason}`);
-  if (cls.action === "skip") {
-    log(`[qa] no testable objective (${cls.type}); nothing to run.`);
-    return { sha: ns, verdict: "skipped", passed: true, cases: [], logs: cls.reason };
+  // 3. Classify the commit (Conventional Commits, cross-checked against the diff)
+  //    — ONLY in "diff" mode. Other modes (complete/exhaustive/manual) are
+  //    whole-repo or guided tasks, so they always generate.
+  let generating = true;
+  let intent: CommitIntent | undefined;
+  if (mode === "diff") {
+    const cls = classifyCommit(message, diff);
+    log(`[qa] commit '${cls.type}' → ${cls.action}${cls.contradiction ? " (message/diff contradiction)" : ""}: ${cls.reason}`);
+    if (cls.action === "skip") {
+      log(`[qa] no testable objective (${cls.type}); nothing to run.`);
+      return { sha: ns, verdict: "skipped", passed: true, cases: [], logs: cls.reason };
+    }
+    generating = cls.action === "generate";
+    intent = cls;
+  } else {
+    log(`[qa] mode=${mode}: whole-repo/guided run (commit classification skipped).`);
   }
-  const generating = cls.action === "generate";
 
   // 4. Set up the e2e project (bootstrap the seed if missing + install deps) so
   //    the agent has the shared fixtures/config to build on.
@@ -147,18 +160,20 @@ export async function runPipeline(
       mirrorDir,
       namespace: ns,
       needsReview: app.qa.needsReview,
-      intent: cls,
+      mode,
+      intent,
+      guidance: opts.guidance,
     });
     log(
       `[qa] agent: approved=${result.approved} specs=[${result.specs.join(", ")}]` +
         (result.note ? ` note=${result.note}` : "") +
         `\n[qa] agent output (first 600 chars): ${result.output.slice(0, 600)}`,
     );
-    // The agent is the authority on whether the change needs tests. If it
-    // approved and wrote none, this is a legitimate no-op (the commit classifier
-    // forced generation, but the actual change has nothing to cover) → skip.
+    // The agent is the authority on whether tests are needed. If it approved and
+    // wrote none, this is a legitimate no-op (a diff with nothing to cover, or a
+    // complete run where everything important is already covered) → skip.
     if (result.approved && result.specs.length === 0) {
-      log("[qa] the agent determined the change needs no E2E tests; nothing to run.");
+      log("[qa] the agent produced no tests (nothing to cover); nothing to run.");
       return { sha: ns, verdict: "skipped", passed: true, cases: [], logs: result.note ?? result.output.slice(0, 300) };
     }
   } else {

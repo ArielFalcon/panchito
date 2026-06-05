@@ -14,17 +14,31 @@ test("verifySignature accepts a valid signature and rejects an invalid/missing o
   assert.equal(verifySignature(SECRET, body, undefined), false);
 });
 
-test("parseWebhook understands the simple shape { repo, sha }", () => {
+test("parseWebhook understands the simple shape { repo, sha } (mode defaults to diff)", () => {
   assert.deepEqual(parseWebhook({ repo: "org/app", sha: "abc" }), {
     repo: "org/app",
     sha: "abc",
+    mode: "diff",
+    guidance: undefined,
   });
 });
 
-test("parseWebhook understands the GitHub push event", () => {
+test("parseWebhook reads mode and guidance", () => {
+  assert.deepEqual(parseWebhook({ repo: "org/app", sha: "abc", mode: "manual", guidance: "test login" }), {
+    repo: "org/app",
+    sha: "abc",
+    mode: "manual",
+    guidance: "test login",
+  });
+  // unknown mode falls back to diff
+  assert.equal(parseWebhook({ repo: "a", sha: "b", mode: "nope" })?.mode, "diff");
+  assert.equal(parseWebhook({ repo: "a", sha: "b", mode: "complete" })?.mode, "complete");
+});
+
+test("parseWebhook understands the GitHub push event (mode diff)", () => {
   assert.deepEqual(
     parseWebhook({ repository: { full_name: "org/app" }, after: "deadbeef" }),
-    { repo: "org/app", sha: "deadbeef" },
+    { repo: "org/app", sha: "deadbeef", mode: "diff" },
   );
 });
 
@@ -51,7 +65,7 @@ test("handleWebhook: 202 + payload with a correct signature", () => {
   const body = '{"repo":"org/app","sha":"abc"}';
   const r = handleWebhook(body, sign(body), { secret: SECRET });
   assert.equal(r.status, 202);
-  assert.deepEqual(r.payload, { repo: "org/app", sha: "abc" });
+  assert.deepEqual(r.payload, { repo: "org/app", sha: "abc", mode: "diff", guidance: undefined });
 });
 
 test("handleWebhook: with no secret configured it does not require a signature", () => {

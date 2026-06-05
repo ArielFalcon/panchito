@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runPipeline, PipelineDeps } from "./pipeline";
+import { runPipeline, PipelineDeps, GenerateInput } from "./pipeline";
 import { AppConfig } from "./orchestrator/config-loader";
-import { AgentResult, QaRunResult } from "./types";
+import { AgentResult, QaRunResult, RunMode } from "./types";
 
 const app: AppConfig = {
   name: "demo",
@@ -27,6 +27,8 @@ const generated: AgentResult = {
 interface Harness extends PipelineDeps {
   issues: string[];
   published: boolean;
+  genMode?: RunMode;
+  genGuidance?: string;
 }
 
 function deps(
@@ -52,8 +54,10 @@ function deps(
       calls.push("prepare");
       return { mirrorDir: "/mirrors/org__demo", diff: opts.diff ?? "DIFF", message: opts.message ?? "feat: change" };
     },
-    generate: async () => {
+    generate: async (input: GenerateInput) => {
       calls.push("generate");
+      h.genMode = input.mode;
+      h.genGuidance = input.guidance;
       return opts.agent ?? generated;
     },
     setupE2e: async () => {
@@ -214,6 +218,24 @@ test("refactor that DOES add logic (contradiction): escalates to generate", asyn
   await runPipeline(app, "abc123", d);
   assert.ok(calls.includes("generate")); // contradiction → generate
   assert.equal(d.published, true);
+});
+
+test("complete mode: skips commit classification and generates regardless of the message", async () => {
+  const calls: string[] = [];
+  // a 'style' message would skip in diff mode; in complete mode it must still generate
+  const d = deps(passing(), calls, { message: "style: nits", diff: "" });
+  await runPipeline(app, "abc123", d, "manual", { mode: "complete" });
+  assert.ok(calls.includes("generate"));
+  assert.ok(calls.includes("execute"));
+  assert.equal(d.genMode, "complete");
+});
+
+test("manual mode: passes the guidance through to generate", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls);
+  await runPipeline(app, "abc123", d, "manual", { mode: "manual", guidance: "test the CV download button" });
+  assert.equal(d.genMode, "manual");
+  assert.equal(d.genGuidance, "test the CV download button");
 });
 
 test("shadow mode: on green does NOT publish, only logs", async () => {
