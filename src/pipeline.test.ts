@@ -212,6 +212,17 @@ test("shadow mode: on green does NOT publish, only logs", async () => {
   assert.equal(d.issues.length, 0);
 });
 
+test("no version endpoint: skips the gate and health checks (already-deployed site)", async () => {
+  const calls: string[] = [];
+  const gateless = { ...app, dev: { baseUrl: "https://cv" } };
+  const d = deps(passing(), calls);
+  await runPipeline(gateless, "abc123", d);
+  assert.ok(!calls.includes("gate")); // deploy gate skipped
+  assert.ok(!calls.includes("health")); // health checks skipped (no source)
+  assert.ok(calls.includes("execute")); // still runs the suite
+  assert.equal(d.published, true);
+});
+
 test("shadow mode: on failure does NOT open an Issue", async () => {
   const calls: string[] = [];
   const shadowApp = { ...app, qa: { ...app.qa, shadow: true } };

@@ -98,15 +98,22 @@ export async function runPipeline(
   const shadow = app.qa.shadow ?? false;
   log(`[qa] app=${app.name}  sha=${sha}  (${source})${shadow ? "  [SHADOW MODE]" : ""}`);
 
-  // 1. Gate: wait until DEV runs this SHA and is healthy.
-  const target: DeployTarget = {
-    name: app.name,
-    versionUrl: app.dev.versionUrl,
-    pollIntervalMs: app.dev.pollIntervalMs,
-    deployTimeoutMs: app.dev.deployTimeoutMs,
-  };
-  log("[qa] waiting for a stable deploy on DEV...");
-  await deps.waitForDeploy(target, sha);
+  // 1. Gate: wait until DEV runs this SHA and is healthy. Skipped when no
+  //    version endpoint is configured (the site is assumed already deployed).
+  const versionUrl = app.dev.versionUrl;
+  const devHealthy = () => (versionUrl ? deps.isHealthy(versionUrl) : Promise.resolve(true));
+  if (versionUrl) {
+    const target: DeployTarget = {
+      name: app.name,
+      versionUrl,
+      pollIntervalMs: app.dev.pollIntervalMs ?? 10_000,
+      deployTimeoutMs: app.dev.deployTimeoutMs ?? 600_000,
+    };
+    log("[qa] waiting for a stable deploy on DEV...");
+    await deps.waitForDeploy(target, sha);
+  } else {
+    log("[qa] no version endpoint configured; skipping the deploy gate.");
+  }
 
   // 2. Working copy of the repo at the SHA (the agent's cwd, holds `e2e/`) + diff + message.
   log("[qa] preparing working copy and diff...");
@@ -154,7 +161,7 @@ export async function runPipeline(
 
   // 6. Health pre-flight: DEV may have gone down during generation. If it is not
   //    healthy the run is inconclusive → infra error, not reported as a bug.
-  if (!(await deps.isHealthy(app.dev.versionUrl))) {
+  if (!(await devHealthy())) {
     const infra = resultOf(ns, "infra-error", "DEV is not healthy before execution");
     await report(app, sha, infra, deps, log, shadow);
     return infra;
@@ -166,7 +173,7 @@ export async function runPipeline(
 
   // 8. Infra vs quality: if there were failures BUT DEV is no longer healthy, the
   //    failures are infrastructure, not code → reclassify so no false Issue is opened.
-  if (run.verdict === "fail" && !(await deps.isHealthy(app.dev.versionUrl))) {
+  if (run.verdict === "fail" && !(await devHealthy())) {
     run = resultOf(ns, "infra-error", "failures with an unhealthy DEV: treated as infrastructure");
   }
 

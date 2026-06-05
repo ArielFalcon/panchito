@@ -7,7 +7,10 @@ baseBranch: "main"             # target branch for the QA pull requests
 
 dev:
   baseUrl: "https://dev.example.internal"
-  versionUrl: "https://dev.example.internal/version"  # must return { sha, healthy }
+  # versionUrl is OPTIONAL: a `/version` endpoint returning { sha, healthy }. The
+  # pipeline waits for it (deploy gate) and uses it for health checks. OMIT it for
+  # already-deployed sites with no such endpoint (e.g. a static site) → gate skipped.
+  versionUrl: "https://dev.example.internal/version"
   pollIntervalMs: 10000        # how often the gate polls
   deployTimeoutMs: 600000      # 10 min for DEV to stabilize on the new SHA
 
