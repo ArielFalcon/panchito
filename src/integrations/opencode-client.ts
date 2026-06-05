@@ -152,6 +152,7 @@ export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
     // `opencode` container, so the path is valid on both sides.
     open: async (agent, cwd) => {
       const created = await client.session.create({ query: { directory: cwd } });
+      if (created.error) throw new Error(`OpenCode session.create failed: ${JSON.stringify(created.error)}`);
       const id = created.data?.id;
       if (!id) throw new Error("OpenCode: the session returned no id");
       return {
@@ -163,7 +164,12 @@ export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
                 query: { directory: cwd },
                 body: { agent, parts: [{ type: "text", text }] },
               })
-              .then((res) => extractText(res.data?.parts)),
+              .then((res) => {
+                // Surface OpenCode errors instead of silently returning empty
+                // (e.g. unknown agent, model not found, auth failure).
+                if (res.error) throw new Error(`OpenCode session.prompt failed: ${JSON.stringify(res.error)}`);
+                return extractText(res.data?.parts);
+              }),
             timeoutMs,
             "OpenCode prompt",
           ),

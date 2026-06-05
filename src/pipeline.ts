@@ -145,6 +145,11 @@ export async function runPipeline(
       needsReview: app.qa.needsReview,
       intent: cls,
     });
+    log(
+      `[qa] agent: approved=${result.approved} specs=[${result.specs.join(", ")}]` +
+        (result.note ? ` note=${result.note}` : "") +
+        `\n[qa] agent output (first 600 chars): ${result.output.slice(0, 600)}`,
+    );
   } else {
     log("[qa] regression: not generating tests; validating and running the existing suite.");
   }
