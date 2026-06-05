@@ -37,7 +37,7 @@
       "type": "local",
       "command": ["engram", "mcp"],
       "environment": { "ENGRAM_DATA_DIR": "{env:ENGRAM_DATA_DIR}" },
-      "enabled": true
+      "enabled": false
     }
   }
 }
