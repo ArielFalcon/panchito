@@ -113,6 +113,18 @@ effect with a log line — used to onboard a repo without dirtying it.
 
 The mode-specific prompt is assembled by `buildTask` in `opencode-client.ts`.
 
+### Test targets (`RunOptions.target`, CLI `--target`, default `e2e`)
+
+Orthogonal to mode. `e2e` runs Playwright against DEV (the flow above). **`code`**
+tests source-code logic with **no web environment and no Playwright**: the agent writes
+tests in the repo's own framework, then the orchestrator installs the repo's deps and
+runs its own test suite, classifying by **exit code** (binary pass/fail — no flaky, no
+deploy gate, no static gate). Code-mode apps set `code: true` in their config and omit
+the `dev:` block. The runner auto-detects the ecosystem (node/python/go/…) in
+`src/qa/code-runner.ts`; only Node is guaranteed by the orchestrator image — add other
+runtimes to the `Dockerfile` like the Serena languages. Publish commits the new tests
+anywhere in the repo (`publishCode`), not just `e2e/`.
+
 ### Dependency injection is the testing strategy
 
 Every side-effecting step in `runPipeline` is injected via `PipelineDeps`
@@ -132,6 +144,12 @@ with the `opencode-go/` prefix (no per-provider keys):
 
 - `qa-generator` (primary, `deepseek-v4-pro`) — writes tests, can read/edit/bash.
 - `qa-reviewer` (subagent, `qwen3.7-max`) — read-only quality judge, emits a JSON verdict.
+- `qa-maintainer` (primary, `deepseek-v4-pro`) — self-repair of THIS repo: diagnoses
+  incidents, opens a fix PR; never touches watched repos. Used by `triggerMaintainer`.
+- `qa-assistant` (`deepseek-v4-flash`) — read-only run Q&A for the TUI chat; no tools,
+  answers only from the provided run context. Used by `/api/runs/:id/ask`.
+
+(The model ids are OpenCode-Go names that should be confirmed against `opencode models`.)
 
 Prompts are layered: `opencode/AGENTS.md` (shared rules + anti-degradation
 protocols) → `opencode/agent/*.md` (per-role procedure + JSON output contract) →

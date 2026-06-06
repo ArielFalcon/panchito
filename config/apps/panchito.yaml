@@ -1,0 +1,15 @@
+# Code mode: tests source-code logic directly (the repo's own test suite), with no
+# web environment or Playwright. A `dev` block is NOT required when code: true.
+name: "panchito"
+repo: "ArielFalcon/panchito"
+baseBranch: "main"
+
+code: true
+
+qa:
+  needsReview: true
+  shadow: false
+  testDataPrefix: "qa-bot"
+
+report:
+  onFailure: "github-issue"

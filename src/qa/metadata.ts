@@ -5,6 +5,8 @@
 // ledger, merit) are filled by the system; the day-one fields (objective, flow,
 // targets, changeRef) are written by the agent.
 
+import { ManifestSchema } from "../orchestrator/schemas";
+
 export interface QaTestMeta {
   id: string; // stable and unique (e.g. "checkout/over-10-items")
   objective: string; // acceptance criterion: "given X, when Y, then Z"
@@ -35,30 +37,32 @@ export function validateManifest(raw: unknown): ManifestValidation {
   if (!Array.isArray(raw)) {
     return { ok: false, errors: ["the manifest (e2e/.qa/manifest.json) must be an array"] };
   }
+
+  const result = ManifestSchema.safeParse(raw);
   const errors: string[] = [];
+
+  if (!result.success) {
+    errors.push(...result.error.issues.map(formatZodIssue));
+  }
+
+  // Zod cannot check for duplicate IDs across array entries — do it manually.
   const ids = new Set<string>();
-
-  raw.forEach((entry, i) => {
-    const m = (entry ?? {}) as Partial<QaTestMeta>;
-    const tag = nonEmpty(m.id) ? m.id! : `#${i}`;
-
-    if (!nonEmpty(m.id)) errors.push(`entry #${i}: missing 'id'`);
-    else if (ids.has(m.id!)) errors.push(`'${m.id}': duplicate id`);
-    else ids.add(m.id!);
-
-    if (!nonEmpty(m.objective)) errors.push(`'${tag}': missing 'objective'`);
-    if (!nonEmpty(m.flow)) errors.push(`'${tag}': missing 'flow'`);
-    if (!Array.isArray(m.targets) || m.targets.length === 0) {
-      errors.push(`'${tag}': empty 'targets' (what does it exercise?)`);
-    }
-    if (!m.changeRef || !nonEmpty(m.changeRef.sha) || !nonEmpty(m.changeRef.type)) {
-      errors.push(`'${tag}': incomplete 'changeRef' (sha + type)`);
+  raw.forEach((entry) => {
+    const m = (entry ?? {}) as Record<string, unknown>;
+    const id = typeof m.id === "string" ? m.id.trim() : "";
+    if (id.length > 0) {
+      if (ids.has(id)) {
+        errors.push(`'${id}': duplicate id`);
+      } else {
+        ids.add(id);
+      }
     }
   });
 
   return { ok: errors.length === 0, errors };
 }
 
-function nonEmpty(s: unknown): boolean {
-  return typeof s === "string" && s.trim().length > 0;
+function formatZodIssue(issue: { path: PropertyKey[]; message: string }): string {
+  const tag = issue.path.length > 0 ? `entry ${issue.path.join(".")}` : "manifest";
+  return `${tag}: ${issue.message}`;
 }

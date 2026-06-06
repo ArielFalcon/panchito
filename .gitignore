@@ -2,10 +2,12 @@ node_modules/
 dist/
 .env
 .env.local
+config/.api_token
 *.log
 
 # Volumen local de artefactos E2E y memoria (se persiste fuera del repo)
 .qa-store/
+data/
 *.db
 *.sqlite
 

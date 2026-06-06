@@ -15,6 +15,12 @@ baseBranch: "main"             # target branch for the QA pull requests
 #   - "**/src/main/resources/openapi/*.yaml"
 #   - "**/api-definition.yaml"
 
+# code mode: set `code: true` to test source-code logic directly (run the repo's
+# own test suite, classified by exit code) WITHOUT a web environment or Playwright.
+# In code mode the whole `dev:` block below is omitted (there is no DEV URL).
+# code: true
+
+# `dev` is REQUIRED for e2e apps (the default) and OMITTED for code-mode apps.
 dev:
   baseUrl: "https://dev.example.internal"
   # versionUrl is OPTIONAL: a `/version` endpoint returning { sha, healthy }. The

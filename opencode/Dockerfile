@@ -15,12 +15,14 @@ FROM node:22-bookworm
 ARG ENGRAM_VERSION=1.16.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl ca-certificates git openjdk-17-jdk-headless python3 \
-  && rm -rf /var/lib/apt/lists/* \
-  && curl -LsSf https://astral.sh/uv/install.sh | sh \
-  && npm install -g opencode-ai typescript typescript-language-server \
-  && curl -fsSL "https://github.com/Gentleman-Programming/engram/releases/download/v${ENGRAM_VERSION}/engram_${ENGRAM_VERSION}_linux_amd64.tar.gz" \
-    | tar -xz -C /usr/local/bin engram \
-  && chmod +x /usr/local/bin/engram
+   && rm -rf /var/lib/apt/lists/* \
+   && curl -LsSf https://astral.sh/uv/install.sh | sh \
+   && npm install -g opencode-ai typescript typescript-language-server \
+   && npm install -g @playwright/mcp \
+   && npx playwright install --with-deps chromium \
+   && curl -fsSL "https://github.com/Gentleman-Programming/engram/releases/download/v${ENGRAM_VERSION}/engram_${ENGRAM_VERSION}_linux_amd64.tar.gz" \
+     | tar -xz -C /usr/local/bin engram \
+   && chmod +x /usr/local/bin/engram
 ENV PATH="/root/.local/bin:${PATH}"
 
 ENTRYPOINT ["opencode"]

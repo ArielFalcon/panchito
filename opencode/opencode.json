@@ -20,7 +20,8 @@
       "mode": "primary",
       "model": "opencode-go/deepseek-v4-pro",
       "prompt": "{file:./agent/qa-generator.md}",
-      "tools": { "write": true, "edit": true, "read": true, "bash": true },
+      "tools": { "write": true, "edit": true, "read": true, "bash": true, "webfetch": false },
+      "mcp": ["serena", "engram", "playwright"],
       "steps": 50,
       "temperature": 0.2
     },
@@ -32,6 +33,35 @@
       "tools": { "write": false, "edit": false, "bash": false, "read": true },
       "steps": 10,
       "temperature": 0.1
+    },
+    "qa-maintainer": {
+      "description": "Self-maintenance agent for ai-pipeline itself. Diagnoses and fixes incidents; never touches watched app repos.",
+      "mode": "primary",
+      "model": "opencode-go/deepseek-v4-pro",
+      "prompt": "{file:./agent/qa-maintainer.md}",
+      "tools": { "write": true, "edit": true, "read": true, "bash": true },
+      "mcp": ["serena", "engram"],
+      "steps": 50,
+      "temperature": 0.1
+    },
+    "qa-assistant": {
+      "description": "Read-only run Q&A for the interactive layer (TUI chat). Strictly advisory: answers from the provided run context only, no tools, no repo access.",
+      "mode": "primary",
+      "model": "opencode-go/deepseek-v4-flash",
+      "prompt": "{file:./agent/qa-assistant.md}",
+      "tools": { "write": false, "edit": false, "read": false, "bash": false },
+      "steps": 5,
+      "temperature": 0.1
+    },
+    "qa-worker": {
+      "description": "Parallel worker for cheap per-flow test generation in complete/exhaustive mode. Writes ONE spec file per session, scoped to a single flow.",
+      "mode": "primary",
+      "model": "opencode-go/deepseek-v4-flash",
+      "prompt": "{file:./agent/qa-worker.md}",
+      "tools": { "write": true, "edit": false, "read": true, "bash": false },
+      "mcp": ["serena"],
+      "steps": 25,
+      "temperature": 0.3
     }
   },
   "mcp": {
@@ -54,6 +84,11 @@
       "type": "local",
       "command": ["engram", "mcp", "--tools=agent"],
       "environment": { "ENGRAM_DATA_DIR": "{env:ENGRAM_DATA_DIR}" },
+      "enabled": true
+    },
+    "playwright": {
+      "type": "local",
+      "command": ["npx", "@playwright/mcp", "--browser", "chromium", "--headless"],
       "enabled": true
     }
   }

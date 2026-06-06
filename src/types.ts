@@ -2,6 +2,7 @@
 // context and the orchestration lives in pipeline.ts.
 
 export type TriggerSource = "webhook" | "manual";
+export type TestTarget = "e2e" | "code";
 
 // Execution mode for a run (taken from the POST body; defaults to "diff").
 //   diff       → test the change of the given commit (its blast radius). The
@@ -17,8 +18,14 @@ export type TriggerSource = "webhook" | "manual";
 export type RunMode = "diff" | "complete" | "exhaustive" | "manual";
 
 export interface RunOptions {
+  target?: TestTarget; // defaults to "e2e" when omitted
   mode: RunMode;
-  guidance?: string; // used by "manual"
+  guidance?: string; // used by "manual" and by a human-in-the-loop continuation
+  // Continuation: seed the FIRST generation with these previously-failed cases (so the
+  // agent fixes them) and record the run it continues.
+  fixCases?: QaCase[];
+  parentRunId?: string;
+  previousNamespace?: string; // cleanup: namespace from an interrupted previous run
 }
 
 // Outcome of an OpenCode agent run. The agent writes the E2E tests directly into
@@ -50,6 +57,9 @@ export interface QaCase {
   name: string;
   status: CaseStatus;
   detail?: string;
+  flow?: string;
+  objective?: string;
+  reason?: string;
 }
 
 export interface QaRunResult {
@@ -58,4 +68,48 @@ export interface QaRunResult {
   passed: boolean; // shorthand for verdict === "pass"
   cases: QaCase[];
   logs: string; // sanitized before any reuse by the LLM
+}
+
+// A single spec produced by the AI agent with its objective and flow path.
+export interface SpecRecord {
+  name: string;
+  objective?: string;
+  flow?: string;
+}
+
+// Full run history record persisted in SQLite (src/server/history.ts).
+export interface RunRecord {
+  id: string;
+  app: string;
+  sha: string;
+  ref?: string;
+  target: TestTarget;
+  mode: RunMode;
+  status: "enqueued" | "running" | "done";
+  step?: string;
+  stepDetail?: string;
+  verdict?: RunVerdict;
+  passed?: number;
+  failed?: number;
+  note?: string;
+  retrying?: boolean;
+  parentRunId?: string;
+  cases: QaCase[];
+  specs?: SpecRecord[];
+  logs: string[];
+  at: string;
+}
+
+export type IncidentSeverity = "warn" | "error" | "critical";
+export type IncidentSource = "health-check" | "log-scraper" | "qa-generator" | "qa-reviewer" | "cli";
+
+export interface Incident {
+  id: string;
+  source: IncidentSource;
+  severity: IncidentSeverity;
+  summary: string;
+  detail?: string;
+  status: "pending" | "diagnosing" | "fixed" | "dismissed";
+  at: string;
+  prUrl?: string;
 }

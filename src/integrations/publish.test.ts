@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { publishE2e, PublishDeps } from "./publish";
+import { publishE2e, publishCode, PublishDeps } from "./publish";
 
 function deps(status: string, opts: { autoMergeFails?: boolean } = {}): PublishDeps & {
   gitCalls: string[][];
@@ -59,4 +59,21 @@ test("best-effort auto-merge: if it fails, the PR stays open anyway", async () =
   assert.equal(res?.prUrl, "https://github.com/org/app/pull/7");
   assert.equal(d.pr.created, true);
   assert.equal(d.pr.autoMerged, false); // does not break the run
+});
+
+test("publishCode: no test changes → no PR", async () => {
+  const d = deps("  \n ");
+  const res = await publishCode(input, d);
+  assert.equal(res, null);
+  assert.equal(d.pr.created, false);
+});
+
+test("publishCode: commits the whole tree (minus node_modules) on a qa/code- branch", async () => {
+  const d = deps(" A src/math.test.ts");
+  const res = await publishCode(input, d);
+  assert.equal(res?.prUrl, "https://github.com/org/app/pull/7");
+  assert.ok(d.gitCalls.some((c) => c[0] === "checkout" && c.includes("qa/code-abc1234")));
+  // the add/status pathspec excludes node_modules
+  assert.ok(d.gitCalls.some((c) => c[0] === "add" && c.includes(":(exclude)node_modules")));
+  assert.ok(d.gitCalls.some((c) => c.includes("commit") && c.includes("test(code): automated QA for abc1234")));
 });
