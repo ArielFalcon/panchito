@@ -1,0 +1,8 @@
+# Seed .gitignore copied into a watched repo's e2e/ on first run. Keeps install
+# artifacts and run outputs out of the QA PRs (publishE2e stages the e2e/ tree).
+node_modules/
+test-results/
+playwright-report/
+blob-report/
+.serena/
+*.log

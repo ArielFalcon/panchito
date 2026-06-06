@@ -22,6 +22,7 @@ test("runs, maps cases and SANITIZES the logs", async () => {
       },
       // a log with a secret that must NOT reach the LLM/Issue
       logs: "running... token: ghs_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa end",
+      ran: true,
     }),
   };
 
@@ -39,6 +40,7 @@ test("classifies flaky when there are unstable cases and none fail", async () =>
     runSuite: async () => ({
       report: { suites: [{ specs: [{ title: "x", tests: [{ status: "flaky" }] }] }] },
       logs: "ok",
+      ran: true,
     }),
   };
   const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-f" }, deps);
@@ -48,9 +50,30 @@ test("classifies flaky when there are unstable cases and none fail", async () =>
 
 test("all green => verdict pass", async () => {
   const deps: ExecuteDeps = {
-    runSuite: async () => ({ report: { stats: { unexpected: 0 } }, logs: "ok" }),
+    runSuite: async () => ({ report: { stats: { unexpected: 0 } }, logs: "ok", ran: true }),
   };
   const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-zzz" }, deps);
   assert.equal(run.passed, true);
   assert.equal(run.verdict, "pass");
+});
+
+test("a crashed runner (no parseable report) is infra-error, NEVER pass", async () => {
+  // The default runner sets ran:false when stdout is not JSON (Playwright failed
+  // to launch / config error). This must not be swallowed into a green run.
+  const deps: ExecuteDeps = {
+    runSuite: async () => ({ report: {}, logs: "Error: browserType.launch failed", ran: false }),
+  };
+  const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-crash" }, deps);
+  assert.equal(run.verdict, "infra-error");
+  assert.equal(run.passed, false);
+  assert.equal(run.cases.length, 0);
+});
+
+test("a ran-but-empty report ({}) is infra-error, not a false pass", async () => {
+  const deps: ExecuteDeps = {
+    runSuite: async () => ({ report: {}, logs: "weird", ran: true }),
+  };
+  const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-empty" }, deps);
+  assert.equal(run.verdict, "infra-error");
+  assert.equal(run.passed, false);
 });
