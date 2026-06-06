@@ -45,12 +45,13 @@
       "temperature": 0.1
     },
     "qa-assistant": {
-      "description": "Read-only run Q&A for the interactive layer (TUI chat). Strictly advisory: answers from the provided run context only, no tools, no repo access.",
+      "description": "Read-only run Q&A for the interactive layer (TUI chat). Has engram for persistent chat memory so it remembers past questions in the same session.",
       "mode": "primary",
       "model": "opencode-go/deepseek-v4-flash",
       "prompt": "{file:./agent/qa-assistant.md}",
       "tools": { "write": false, "edit": false, "read": false, "bash": false },
-      "steps": 5,
+      "mcp": ["engram"],
+      "steps": 10,
       "temperature": 0.1
     },
     "qa-worker": {

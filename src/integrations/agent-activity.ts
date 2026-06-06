@@ -25,9 +25,12 @@ export type DropReason = "no-session" | "unknown-session" | "unknown-kind";
 const DEFAULT_ALLOW: Record<string, ActivityKind> = {
   "message.part.updated": "message",  // streaming delta — the most valuable
   "message.updated": "message",       // full message update
+  "message.part.removed": "message",  // agent retracted text
   "file.edited": "file",              // agent wrote a file
   "command.executed": "tool",         // agent ran a command
   "session.status": "step",           // session lifecycle
+  "session.error": "step",            // session error (critical for debugging)
+  "todo.updated": "step",             // agent task progress
 };
 
 export interface RouteResult {
@@ -58,6 +61,11 @@ export function routeEvent(
     text = `edited ${String(event.properties.file)}`;
   } else if (kind === "tool" && event.properties?.command) {
     text = `ran: ${String(event.properties.command)}`;
+  } else if (event.type === "session.error" && event.properties?.error) {
+    text = `error: ${String(event.properties.error)}`;
+  } else if (event.type === "todo.updated" && event.properties?.todo) {
+    const todo = event.properties.todo as { content?: string; status?: string };
+    text = `todo [${todo.status ?? "?"}] ${todo.content ?? ""}`;
   }
 
   return { activity: { runId, kind, text: text.slice(0, 500) } };

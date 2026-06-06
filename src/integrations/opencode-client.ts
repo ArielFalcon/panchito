@@ -24,6 +24,28 @@ interface SessionEntry {
 
 const sessionRegistry = new Map<string, SessionEntry>();
 
+// Shared OpenCode SDK client — lazy-initialised once, reused by SSE stream AND
+// session operations. This avoids creating two independent HTTP connections to
+// the OpenCode server (official best practice: one client, many operations).
+let sharedClient: Awaited<ReturnType<typeof import("@opencode-ai/sdk").createOpencodeClient>> | undefined;
+
+async function getSharedClient() {
+  if (sharedClient) return sharedClient;
+  const { createOpencodeClient } = await import("@opencode-ai/sdk");
+  const serverPassword = process.env.OPENCODE_SERVER_PASSWORD;
+  sharedClient = createOpencodeClient({
+    baseUrl: process.env.OPENCODE_SERVE_URL ?? "http://opencode:4096",
+    ...(serverPassword
+      ? { headers: { Authorization: `Basic ${Buffer.from(`opencode:${serverPassword}`).toString("base64")}` } }
+      : {}),
+  });
+  return sharedClient;
+}
+
+export function disposeSharedClient(): void {
+  sharedClient = undefined;
+}
+
 // SSE live activity: routes OpenCode events to RunRecord logs in real time.
 export const activityRouter = new ActivityRouter();
 
@@ -43,10 +65,7 @@ export async function startEventStream(
   onActivity: (runId: string, text: string) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const { createOpencodeClient } = await import("@opencode-ai/sdk");
-  const client = createOpencodeClient({
-    baseUrl: process.env.OPENCODE_SERVE_URL ?? "http://opencode:4096",
-  });
+  const client = await getSharedClient();
 
   // The SDK's global.event() returns a Promise<ServerSentEventsResult> whose
   // `.stream` is an AsyncGenerator yielding GlobalEvent { directory, payload }.
@@ -73,7 +92,7 @@ export async function startEventStream(
       });
 
       if (activity) {
-        const prefix = activity.kind === "message" ? "💬" : activity.kind === "file" ? "📝" : activity.kind === "tool" ? "🔧" : "•";
+        const prefix = activity.kind === "message" ? "💬" : activity.kind === "file" ? "📝" : activity.kind === "tool" ? "🔧" : activity.text.includes("error") ? "⚠️" : "•";
         onActivity(activity.runId, `[qa] ${prefix} ${activity.text}`);
       }
     }
@@ -570,19 +589,7 @@ export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
   const { setGlobalDispatcher, Agent } = await import("undici");
   setGlobalDispatcher(new Agent({ headersTimeout: dispatcherTimeoutMs + 30_000, bodyTimeout: dispatcherTimeoutMs + 30_000 }));
 
-  const { createOpencodeClient } = await import("@opencode-ai/sdk");
-
-  const serverPassword = process.env.OPENCODE_SERVER_PASSWORD;
-  const client = createOpencodeClient({
-    baseUrl: process.env.OPENCODE_SERVE_URL ?? "http://opencode:4096",
-    ...(serverPassword
-      ? {
-          headers: {
-            Authorization: `Basic ${Buffer.from(`opencode:${serverPassword}`).toString("base64")}`,
-          },
-        }
-      : {}),
-  });
+  const client = await getSharedClient();
 
   return {
     // `directory` (query) positions the session in the repo working copy: the
