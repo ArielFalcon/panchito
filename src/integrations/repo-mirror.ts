@@ -25,6 +25,14 @@ function remoteUrl(repo: string): string {
   return `${base}/${repo}.git`;
 }
 
+// A commit SHA passed to git as a positional arg MUST be a hex id. A hex 7–40 string
+// can never be parsed as a git option (e.g. `--output=...`), which closes the
+// git-argument-injection surface from an attacker-controlled webhook/API sha.
+const HEX_SHA = /^[0-9a-f]{7,40}$/i;
+export function assertHexSha(sha: string): void {
+  if (!HEX_SHA.test(sha)) throw new Error(`invalid commit sha (must be 7–40 hex chars): ${JSON.stringify(sha)}`);
+}
+
 // Ephemeral header auth (-c http.extraHeader): does NOT persist the token in
 // .git/config the way embedding it in the remote URL would. Exported so the
 // publisher (publish.ts) reuses the same auth when pushing.
@@ -39,8 +47,9 @@ export function authHeaderArgs(): string[] {
 // the e2e project's deps are not reinstalled on every run. Without this, runs
 // that do not publish would contaminate the next one (or break the checkout).
 export async function ensureMirror(repo: string, sha: string, deps: MirrorDeps): Promise<string> {
+  assertHexSha(sha);
   const root = deps.root ?? workdirRoot();
-  const dir = join(root, repo.replace("/", "__"));
+  const dir = join(root, repo.replaceAll("/", "__"));
   if (!deps.exists(dir)) {
     await deps.git([...authHeaderArgs(), "clone", remoteUrl(repo), dir]);
   } else {
@@ -53,11 +62,13 @@ export async function ensureMirror(repo: string, sha: string, deps: MirrorDeps):
 
 // Diff of commit `sha` against its parent (content only, without the header).
 export async function getCommitDiff(dir: string, sha: string, deps: MirrorDeps): Promise<string> {
+  assertHexSha(sha);
   return deps.git(["show", "--format=", sha], dir);
 }
 
 // Commit message (subject + body): provides the INTENT used to classify the change.
 export async function getCommitMessage(dir: string, sha: string, deps: MirrorDeps): Promise<string> {
+  assertHexSha(sha);
   return deps.git(["show", "-s", "--format=%B", sha], dir);
 }
 
@@ -69,3 +80,11 @@ export const realGit: Git = (args, cwd) =>
   });
 
 export const defaultMirrorDeps: MirrorDeps = { git: realGit, exists: existsSync };
+
+// Resolves a symbolic ref (branch/tag) to a concrete SHA via git ls-remote.
+export async function resolveRef(repo: string, ref: string, deps: MirrorDeps): Promise<string> {
+  const stdout = await deps.git([...authHeaderArgs(), "ls-remote", remoteUrl(repo), ref]);
+  const sha = stdout.split(/\s/)[0];
+  if (!sha || sha.length < 40) throw new Error(`no SHA resolved for ${ref}`);
+  return sha;
+}

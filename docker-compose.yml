@@ -24,19 +24,32 @@ services:
       MIRROR_DIR: /app/.mirrors
     volumes:
       - ./config:/app/config # config (includes the config/e2e seed), hot-reloaded
+      - ./src:/app/src # source code hot-reload: maintainer fixes take effect on restart
+      - ./package.json:/app/package.json
+      - ./package-lock.json:/app/package-lock.json
       - mirrors:/app/.mirrors # local working copies (shared with opencode); the harness runs over <repo>/e2e here
+      - qa-data:/app/data # run history (SQLite) — persists across restarts; without this it is wiped each boot
       # The E2E suite is NOT persisted in a volume: it lives in git (the app repo's e2e/ folder).
 
   opencode:
     build: ./opencode # official opencode + uv/JDK (Serena) + engram (see opencode/Dockerfile)
-    env_file: .env
     restart: always
     command: ["serve", "--hostname", "0.0.0.0", "--port", "4096"]
+    # SECURITY: the agent container does NOT get the full .env. It receives ONLY the
+    # model key and the DEV credentials it needs for Playwright login — NEVER
+    # GITHUB_TOKEN / WEBHOOK_SECRET / QA_API_TOKEN. Git writes are the orchestrator's
+    # job, so the agent has no push credential to exfiltrate. (docker compose reads
+    # ./.env for ${VAR} interpolation, so this works locally and under Doppler.)
     environment:
       MIRROR_DIR: /app/.mirrors
       ENGRAM_DATA_DIR: /data
       OPENCODE_PRINT_LOGS: "true"
       OPENCODE_LOG_LEVEL: ${OPENCODE_LOG_LEVEL:-INFO}
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY}
+      DEV_ENV_USER: ${DEV_ENV_USER:-}
+      DEV_ENV_PASS: ${DEV_ENV_PASS:-}
+      DEV_TEST_USER: ${DEV_TEST_USER:-}
+      DEV_TEST_PASS: ${DEV_TEST_PASS:-}
     volumes:
       - ./opencode:/root/.config/opencode # opencode.json + agents + AGENTS.md + skills
       - mirrors:/app/.mirrors # SAME path as the orchestrator: the agent reads/writes here (Serena caches in <repo>/.serena)
@@ -52,6 +65,7 @@ services:
 
 volumes:
   mirrors:
+  qa-data:
   serena-cache:
   engram-data:
   opencode-data:

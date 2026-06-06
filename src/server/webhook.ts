@@ -1,9 +1,8 @@
-// Webhook server (hosted-service option). Receives the notification after a
-// merge to main + deploy to DEV and enqueues a run. The core (signature check,
-// payload parsing, status decision) is pure and verifiable; the HTTP server only
-// wraps it.
+// Webhook core. Receives the notification after a merge to main + deploy to DEV and
+// decides whether to enqueue a run. Pure and verifiable: signature check, payload
+// parsing, status decision. The HTTP wrapper lives in src/index.ts (which multiplexes
+// the webhook with the control API on one port).
 
-import { createServer, Server } from "node:http";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { RunMode } from "../types";
 
@@ -28,19 +27,21 @@ export function verifySignature(secret: string, body: string, signature?: string
   return timingSafeEqual(a, b);
 }
 
+const HEX_SHA = /^[0-9a-f]{7,40}$/i;
+
 export function parseWebhook(body: unknown): WebhookPayload | null {
   if (!body || typeof body !== "object") return null;
   const b = body as Record<string, unknown>;
   const guidance = typeof b.guidance === "string" ? b.guidance : undefined;
 
-  // Simple shape { repo, sha, mode?, guidance? }
-  if (typeof b.repo === "string" && typeof b.sha === "string") {
+  // Simple shape { repo, sha, mode?, guidance? } — sha must be a hex commit id.
+  if (typeof b.repo === "string" && typeof b.sha === "string" && HEX_SHA.test(b.sha)) {
     return { repo: b.repo, sha: b.sha, mode: asMode(b.mode), guidance };
   }
 
   // GitHub push event: { repository: { full_name }, after } → always "diff"
   const repository = b.repository as { full_name?: unknown } | undefined;
-  if (typeof repository?.full_name === "string" && typeof b.after === "string") {
+  if (typeof repository?.full_name === "string" && typeof b.after === "string" && HEX_SHA.test(b.after)) {
     return { repo: repository.full_name, sha: b.after, mode: "diff" };
   }
 
@@ -70,39 +71,4 @@ export function handleWebhook(
   const payload = parseWebhook(json);
   if (!payload) return { status: 422, message: "payload without a recognizable repo/sha" };
   return { status: 202, message: "enqueued", payload };
-}
-
-const MAX_BODY_BYTES = 1_000_000; // 1 MB: bound against abusive payloads (DoS)
-
-export function createWebhookServer(opts: {
-  secret?: string;
-  onRun: (p: WebhookPayload) => void;
-}): Server {
-  return createServer((req, res) => {
-    if (req.method !== "POST") {
-      res.writeHead(405, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ message: "method not allowed" }));
-      return;
-    }
-    let body = "";
-    let aborted = false;
-    req.on("data", (chunk) => {
-      body += chunk;
-      if (body.length > MAX_BODY_BYTES) {
-        aborted = true;
-        res.writeHead(413, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ message: "payload too large" }));
-        req.destroy();
-      }
-    });
-    req.on("end", () => {
-      if (aborted) return;
-      const header = req.headers["x-hub-signature-256"];
-      const sig = typeof header === "string" ? header : undefined;
-      const result = handleWebhook(body, sig, { secret: opts.secret });
-      if (result.payload) opts.onRun(result.payload);
-      res.writeHead(result.status, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ message: result.message }));
-    });
-  });
 }
