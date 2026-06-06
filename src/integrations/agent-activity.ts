@@ -52,11 +52,25 @@ export function routeEvent(
   if (!runId) return { dropped: "unknown-session" };
 
   // Build a human-readable text from the event properties.
-  let text = event.type;
+  let text = "";
   if (kind === "message" && event.properties) {
+    // Streaming delta (incremental text) — the most common and useful case.
     const delta = event.properties.delta as string | undefined;
-    const part = event.properties.part as { type?: string; text?: string } | undefined;
-    text = delta ?? part?.text ?? event.type;
+    if (delta?.trim()) {
+      text = delta;
+    } else {
+      // No delta → extract from the full Part object.
+      const part = event.properties.part as { type?: string; text?: string; tool?: string; title?: string } | undefined;
+      if (part?.type === "text" && part.text) {
+        text = part.text;
+      } else if (part?.type === "tool") {
+        text = `ran tool: ${part.tool ?? "?"}`;
+      } else if (part?.type === "reasoning") {
+        text = "(thinking…)";
+      } else if (part?.type === "subtask") {
+        text = `subtask: ${part.title ?? "?"}`;
+      }
+    }
   } else if (kind === "file" && event.properties?.file) {
     text = `edited ${String(event.properties.file)}`;
   } else if (kind === "tool" && event.properties?.command) {
@@ -67,6 +81,7 @@ export function routeEvent(
     const todo = event.properties.todo as { content?: string; status?: string };
     text = `todo [${todo.status ?? "?"}] ${todo.content ?? ""}`;
   }
+  if (!text) text = event.type;
 
   return { activity: { runId, kind, text: text.slice(0, 500) } };
 }
