@@ -1,0 +1,390 @@
+#!/usr/bin/env bash
+# qa — interactive layer for the ai-pipeline control API.
+# Talks HTTP to a RUNNING orchestrator (docker compose up). Needs: curl, jq.
+# Auth: set QA_API_TOKEN to match the service's QA_API_TOKEN.
+# Host:  override with QA_HOST (default localhost:8080).
+set -euo pipefail
+
+QA_HOST="${QA_HOST:-localhost:8080}"
+BASE="http://${QA_HOST}"
+
+if [ -t 1 ]; then
+  RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'; CYAN=$'\033[0;36m'
+  BOLD=$'\033[1m'; DIM=$'\033[2m'; NC=$'\033[0m'
+else
+  RED=''; GREEN=''; YELLOW=''; CYAN=''; BOLD=''; DIM=''; NC=''
+fi
+CHECK="${GREEN}✓${NC}"; CROSS="${RED}✗${NC}"; SPIN="${CYAN}⏳${NC}"; ARROW="${CYAN}▶${NC}"
+
+die() { echo "qa: $*" >&2; exit 1; }
+need_value() { [[ -n "${2:-}" ]] || die "missing value for $1"; }
+require_cmd() { command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not installed (the TUI needs curl + jq)"; }
+
+require_cmd curl
+require_cmd jq
+
+AUTH_HEADER=()
+[[ -n "${QA_API_TOKEN:-}" ]] && AUTH_HEADER=(-H "Authorization: Bearer ${QA_API_TOKEN}")
+
+usage() {
+  cat <<EOF
+qa — trigger and observe QA pipeline runs (needs the service running: docker compose up)
+
+Usage: qa <command> [options]
+
+Commands:
+  run <app>       Trigger a QA run
+    --target <t>    e2e | code (default: e2e)
+    --ref <ref>     Branch or tag to resolve to a SHA (default: main)
+    --latest        Shorthand for --ref main
+    --sha <sha>     Specific commit SHA (overrides --ref)
+    --mode <mode>   diff | complete | exhaustive | manual (default: diff)
+    --guidance ".." Instructions for manual mode
+    -w, --watch     Wait for completion and show a live dashboard
+    -j, --json      Output raw JSON (for CI/scripts)
+
+  status [app]    Queue status (no app) or the last run for an app
+  apps            List configured apps
+  logs <app>      Show logs for a run
+    --last N        Nth-last run (default: 1)
+  history <app>   Recent runs for an app
+    --limit N       Number of runs (default: 10)
+  maintainer      Self-maintenance agent
+    report          Report an incident
+      --summary ".."  What happened
+      --severity s    warn | error | critical (default: warn)
+      --source s      health-check | log-scraper | qa-generator | qa-reviewer | cli (default: cli)
+    status          Maintainer status
+    incidents       List recorded incidents
+  help            Show this help
+
+Env: QA_HOST (default localhost:8080) · QA_API_TOKEN (if the service requires auth)
+
+Examples:
+  qa run portfolio --latest --target e2e --mode complete --watch
+  qa run panchito --latest --target code --mode diff --watch
+  qa run portfolio --ref feature/x --watch
+  qa status
+  qa logs portfolio --last 2
+EOF
+  exit 0
+}
+
+# ── HTTP ──
+# request METHOD PATH [BODY] → sets REPLY_BODY/REPLY_CODE.
+#   returns 0 if an HTTP response arrived (any status), 1 if the connection failed.
+REPLY_BODY=""; REPLY_CODE=""
+request() {
+  local method="$1" path="$2" body="${3:-}"
+  local args=(-sS -X "$method" "${AUTH_HEADER[@]}" -w $'\n%{http_code}')
+  [[ -n "$body" ]] && args+=(-H "Content-Type: application/json" --data "$body")
+  local out
+  if ! out=$(curl "${args[@]}" "$BASE$path" 2>/dev/null); then
+    return 1
+  fi
+  REPLY_CODE="${out##*$'\n'}"
+  REPLY_BODY="${out%$'\n'*}"
+  case "$REPLY_CODE" in ''|*[!0-9]*) REPLY_CODE=0 ;; esac
+  return 0
+}
+
+# api METHOD PATH [BODY] → echoes body on 2xx; prints a precise error and returns 1 otherwise.
+api() {
+  if ! request "$@"; then
+    echo "qa: cannot reach ${QA_HOST} — is the service running? (docker compose up)" >&2
+    return 1
+  fi
+  if (( REPLY_CODE >= 400 )); then
+    local msg; msg=$(printf '%s' "$REPLY_BODY" | jq -r '.error // .message // empty' 2>/dev/null || true)
+    [[ "$REPLY_CODE" == 401 ]] && msg="unauthorized — set QA_API_TOKEN to match the service"
+    echo "qa: ${msg:-request failed (HTTP ${REPLY_CODE})}" >&2
+    return 1
+  fi
+  printf '%s' "$REPLY_BODY"
+}
+
+# ── commands ──
+
+cmd_run() {
+  local app="" target="e2e" ref="" sha="" mode="diff" guidance="" watch=false json=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --target)   need_value "$1" "${2:-}"; target="$2"; shift 2 ;;
+      --ref)      need_value "$1" "${2:-}"; ref="$2"; shift 2 ;;
+      --latest)   ref="main"; shift ;;
+      --sha)      need_value "$1" "${2:-}"; sha="$2"; shift 2 ;;
+      --mode)     need_value "$1" "${2:-}"; mode="$2"; shift 2 ;;
+      --guidance) need_value "$1" "${2:-}"; guidance="$2"; shift 2 ;;
+      -w|--watch) watch=true; shift ;;
+      -j|--json)  json=true; shift ;;
+      -*)         die "unknown flag: $1" ;;
+      *)          app="$1"; shift ;;
+    esac
+  done
+  [[ -n "$app" ]] || die "<app> is required (e.g. 'qa run portfolio --latest')"
+  case "$target" in e2e|code) ;; *) die "invalid --target '$target' (e2e|code)" ;; esac
+  case "$mode" in diff|complete|exhaustive|manual) ;; *) die "invalid --mode '$mode' (diff|complete|exhaustive|manual)" ;; esac
+  [[ -z "$sha" && -z "$ref" ]] && ref="main"
+
+  local body
+  body=$(jq -nc --arg app "$app" --arg target "$target" --arg mode "$mode" --arg sha "$sha" --arg ref "$ref" --arg guidance "$guidance" '
+    {app:$app, target:$target, mode:$mode}
+    + (if $sha != "" then {sha:$sha} elif $ref != "" then {ref:$ref} else {} end)
+    + (if $guidance != "" then {guidance:$guidance} else {} end)')
+
+  local resp; resp=$(api POST /api/runs "$body") || exit 1
+  local id; id=$(printf '%s' "$resp" | jq -r '.id')
+
+  if $json; then
+    printf '%s\n' "$resp"
+  else
+    local rsha; rsha=$(printf '%s' "$resp" | jq -r '.sha')
+    echo "${ARROW} ${app} · ${ref:-$sha} → ${rsha:0:7} · ${target}/${mode}  (${id})"
+  fi
+
+  $watch && watch_run "$id" "$json"
+}
+
+watch_run() {
+  local id="$1" json="$2" first=true
+  while true; do
+    if ! request GET "/api/runs/$id" || (( REPLY_CODE >= 400 )); then sleep 2; continue; fi
+    local data="$REPLY_BODY"
+    local verdict; verdict=$(printf '%s' "$data" | jq -r '.verdict // empty')
+
+    if $json; then
+      printf '%s\n' "$data"
+      [[ -n "$verdict" ]] && break
+      sleep 2; continue
+    fi
+
+    if [[ "$first" == false ]] && [ -t 1 ]; then printf '\033[H\033[J'; fi
+    first=false
+    render_dashboard "$data"
+    [[ -n "$verdict" ]] && break
+    sleep 2
+  done
+}
+
+render_dashboard() {
+  local data="$1"
+  local app sha target mode step verdict passed failed total
+  eval "$(printf '%s' "$data" | jq -r '@sh "app=\(.app) sha=\(.sha) target=\(.target//"e2e") mode=\(.mode) step=\(.step//"") verdict=\(.verdict//"") passed=\(.passed//0) failed=\(.failed//0) total=\(.cases|length)"')"
+
+  echo ""
+  echo " ${BOLD}${app}${NC} · ${sha:0:7} · ${target}/${mode}"
+  echo ""
+
+  case "$step" in
+    classify) echo " ${SPIN} classify" ;;
+    generate)
+      echo " ${CHECK} classify"
+      echo " ${SPIN} generate   generating tests..."
+      render_specs "$data"
+      ;;
+    validate)
+      echo " ${CHECK} classify"; echo " ${CHECK} generate"
+      render_specs "$data"
+      echo " ${SPIN} validate   typecheck + lint + list..."
+      ;;
+    execute)
+      echo " ${CHECK} classify"; echo " ${CHECK} generate"
+      render_specs "$data"
+      echo " ${CHECK} validate"
+      echo " ${SPIN} execute    running tests..."
+      ;;
+    retry)
+      echo " ${CHECK} classify"; echo " ${CHECK} generate"
+      render_specs "$data"
+      echo " ${CHECK} validate"
+      echo " ${YELLOW}↻${NC} retry      re-generating with failure feedback..."
+      ;;
+    done)
+      echo " ${CHECK} pipeline complete"
+      ;;
+  esac
+
+  if (( total > 0 )); then
+    echo ""
+    local shown=0
+    while IFS=$'\t' read -r status name; do
+      [[ -z "$name" ]] && continue
+      case "$status" in
+        fail)  echo "   ${RED}✗ ${name}${NC}" ;;
+        flaky) echo "   ${YELLOW}⚠ ${name}${NC}" ;;
+        *)     echo "   ${DIM}✓ ${name}${NC}" ;;
+      esac
+      shown=$((shown + 1))
+      (( shown >= 15 )) && { echo "   ${DIM}... and $((total - 15)) more${NC}"; break; }
+    done < <(printf '%s' "$data" | jq -r '.cases[]? | "\(.status)\t\(.name)"')
+
+    local pct=$(( passed * 100 / total )) filled bar="" i
+    filled=$(( pct / 5 ))
+    for ((i = 0; i < filled; i++)); do bar+="▓"; done
+    for ((i = filled; i < 20; i++)); do bar+="░"; done
+    echo ""
+    echo "   ${bar}  ${passed}/${total}"
+  fi
+
+  if [[ -n "$verdict" ]]; then
+    echo ""
+    echo " ────────────────────────────────────────────────"
+    case "$verdict" in
+      pass)        echo " ${CHECK} ${GREEN}${BOLD}verdict: pass${NC}" ;;
+      fail)        echo " ${CROSS} ${RED}${BOLD}verdict: fail${NC}" ;;
+      skipped)     echo " ${YELLOW}⊘ verdict: skipped${NC}" ;;
+      flaky)       echo " ${YELLOW}⚠ verdict: flaky (quarantined)${NC}" ;;
+      invalid)     echo " ${CROSS} ${RED}verdict: invalid (static gate)${NC}" ;;
+      infra-error) echo " ${YELLOW}⚙ verdict: infra-error (not a code bug)${NC}" ;;
+      *)           echo "   verdict: ${verdict}" ;;
+    esac
+    echo ""
+  fi
+}
+
+render_specs() {
+  local data="$1"
+  local count; count=$(printf '%s' "$data" | jq '.specs | length' 2>/dev/null || echo 0)
+  if [[ "$count" -gt 0 ]]; then
+    while IFS=$'\t' read -r name obj; do
+      if [[ -n "$obj" && "$obj" != "null" ]]; then
+        echo "   ${DIM}${name}${NC}  ${DIM}— ${obj}${NC}"
+      else
+        echo "   ${DIM}${name}${NC}"
+      fi
+    done < <(printf '%s' "$data" | jq -r '.specs[]? | "\(.name)\t\(.objective // "")"')
+  fi
+}
+
+cmd_status() {
+  local app="${1:-}"
+  if [[ -z "$app" ]]; then
+    local q; q=$(api GET /api/queue) || exit 1
+    printf '%s' "$q" | jq -r '"queue: \(.pending) pending  ·  running: \(if .running then .running.id + " (" + .running.app + ")" else "-" end)"'
+    return
+  fi
+  local runs; runs=$(api GET "/api/runs?app=${app}&limit=1") || exit 1
+  if [[ "$(printf '%s' "$runs" | jq 'length')" == "0" ]]; then echo "no runs yet for ${app}"; return; fi
+  printf '%s' "$runs" | jq -r '.[0]
+    | (.verdict // "running") as $v
+    | (if $v=="pass" then "✓" elif $v=="fail" then "✗" elif $v=="skipped" then "⊘" else "·" end) as $i
+    | "last: \(.sha[0:7]) · \(.mode) · \($i) \($v) · \(.passed // "-")/\((.passed//0)+(.failed//0)) passed"'
+}
+
+cmd_apps() {
+  local apps; apps=$(api GET /api/apps) || exit 1
+  printf '%s' "$apps" \
+    | jq -r '.[] | [.name, .repo, .baseUrl + (if .shadow then "  (shadow)" else "" end)] | @tsv' \
+    | awk -F'\t' '{printf "  %-15s → %-34s %s\n", $1, $2, $3}'
+}
+
+cmd_logs() {
+  local app="" last=1
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --last) need_value "$1" "${2:-}"; last="$2"; shift 2 ;;
+      -*)     die "unknown flag: $1" ;;
+      *)      app="$1"; shift ;;
+    esac
+  done
+  [[ -n "$app" ]] || die "<app> is required"
+
+  local runs; runs=$(api GET "/api/runs?app=${app}&limit=${last}") || exit 1
+  local id; id=$(printf '%s' "$runs" | jq -r ".[$((last - 1))].id // empty")
+  [[ -n "$id" ]] || die "no run #${last} for ${app}"
+
+  local data; data=$(api GET "/api/runs/${id}") || exit 1
+  local div; div=$(printf '─%.0s' {1..60})
+  echo "$div"
+  printf '%s' "$data" | jq -r '"run: \(.id)  app: \(.app)  sha: \(.sha[0:7])  mode: \(.mode)\nverdict: \(.verdict // "running")  passed: \(.passed // "-")  failed: \(.failed // "-")"'
+  echo "$div"
+  printf '%s' "$data" | jq -r '.logs[]?'
+  if [[ "$(printf '%s' "$data" | jq '.cases | length')" -gt 0 ]]; then
+    echo "$div"
+    printf '%s' "$data" | jq -r '.cases[] | "  \(if .status=="fail" then "✗" elif .status=="flaky" then "⚠" else "✓" end) \(.name)\(if .detail then " — " + (.detail[0:120]) else "" end)"'
+  fi
+}
+
+cmd_history() {
+  local app="" limit=10
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --limit) need_value "$1" "${2:-}"; limit="$2"; shift 2 ;;
+      -*)      die "unknown flag: $1" ;;
+      *)       app="$1"; shift ;;
+    esac
+  done
+  [[ -n "$app" ]] || die "<app> is required"
+
+  local runs; runs=$(api GET "/api/runs?app=${app}&limit=${limit}") || exit 1
+  printf '%s' "$runs" \
+    | jq -r '.[]
+        | (.verdict // "running") as $v
+        | (if $v=="pass" then "✓" elif $v=="fail" then "✗" elif $v=="skipped" then "⊘" else "·" end) as $i
+        | [.id, .mode, $i + " " + $v, "\(.passed // "-")/\((.passed//0)+(.failed//0))", (.at[0:16] | gsub("T"; " "))]
+        | @tsv' \
+    | awk -F'\t' '{printf "  %-22s %-11s %-10s %-8s %s\n", $1, $2, $3, $4, $5}'
+}
+
+# ── maintainer ──
+cmd_maintainer_report() {
+  local summary="" severity="warn" source="cli"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --summary) need_value "$1" "$2"; summary="$2"; shift 2 ;;
+      --severity) need_value "$1" "$2"; severity="$2"; shift 2 ;;
+      --source) need_value "$1" "$2"; source="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [[ -n "$summary" ]] || die "--summary is required"
+  local body; body=$(jq -n --arg src "$source" --arg sev "$severity" --arg sum "$summary" \
+    '{source:$src,severity:$sev,summary:$sum}')
+  request POST "/api/maintainer/report" "$body" || die "cannot reach $QA_HOST"
+  if [[ "$REPLY_CODE" != 202 ]]; then
+    echo "$REPLY_BODY" | jq -r '.error // .message' 2>/dev/null || echo "$REPLY_BODY"
+    exit 1
+  fi
+  local id; id=$(echo "$REPLY_BODY" | jq -r '.id')
+  echo "$ARROW incident recorded: $id"
+}
+
+cmd_maintainer_status() {
+  request GET "/api/maintainer/status" || die "cannot reach $QA_HOST"
+  echo "$REPLY_BODY" | jq -r '"status: \(.status) · pending: \(.pendingIncidents)"'
+}
+
+cmd_maintainer_incidents() {
+  request GET "/api/maintainer/incidents" || die "cannot reach $QA_HOST"
+  if [[ "$REPLY_BODY" == "[]" ]]; then
+    echo "no incidents recorded"
+    return
+  fi
+  echo "$REPLY_BODY" | jq -r '.[]
+    | [.id, .source, .severity, .status, .summary[:60]]
+    | @tsv' \
+    | awk -F'\t' '{printf "  %-20s %-14s %-8s %-10s %s\n", $1, $2, $3, $4, $5}'
+}
+
+cmd_maintainer() {
+  [[ $# -eq 0 ]] && { echo "qa: maintainer <report|status|incidents>"; exit 2; }
+  case "${1:-}" in
+    report)     shift; cmd_maintainer_report "$@" ;;
+    status)     cmd_maintainer_status ;;
+    incidents)  cmd_maintainer_incidents ;;
+    *)          echo "qa: unknown maintainer command '${1:-}'" >&2; exit 2 ;;
+  esac
+}
+
+# ── main ──
+[[ $# -eq 0 ]] && usage
+case "${1:-}" in
+  run)            shift; cmd_run "$@" ;;
+  status)         shift; cmd_status "${1:-}" ;;
+  apps)           cmd_apps ;;
+  logs)           shift; cmd_logs "$@" ;;
+  history)        shift; cmd_history "$@" ;;
+  maintainer)     shift; cmd_maintainer "$@" ;;
+  help|-h|--help) usage ;;
+  *)              echo "qa: unknown command '${1:-}'" >&2; usage ;;
+esac
