@@ -174,6 +174,7 @@ export interface OpencodeRunInput {
   openapi?: string | string[]; // optional hint (from app config): where the repo's OpenAPI contract(s) live
   fixCases?: QaCase[]; // re-generation: failed cases from a previous execution to fix
   reviewCorrections?: string[]; // re-generation: actionable corrections from a reviewer rejection
+  coverageGap?: string; // re-generation: changed lines not yet exercised (change-coverage gap)
   runId?: string; // maps the session to a RunRecord for SSE live activity
 }
 
@@ -621,6 +622,21 @@ export function buildPrompt(input: OpencodeRunInput): string {
       ]
     : [];
 
+  // Coverage-improvement mode: the executed tests did not exercise some changed lines. Tell the
+  // agent exactly which, so it extends/adds tests to cover the change (the change-coverage loop).
+  const coverageBlock = input.coverageGap
+    ? [
+        `## Cover the change (HIGH priority)`,
+        ``,
+        `The tests ran green but did NOT exercise all the lines this commit changed. Extend or add`,
+        `tests so those lines are actually executed and asserted (covering ≠ asserting — assert the`,
+        `behavior of the changed code, do not just touch the line):`,
+        ``,
+        input.coverageGap,
+        ``,
+      ]
+    : [];
+
   // Fix mode: prepend failure feedback before the original task.
   const fixBlock = input.fixCases?.length
     ? [
@@ -654,6 +670,7 @@ export function buildPrompt(input: OpencodeRunInput): string {
   const isCode = input.target === "code";
   return [
     ...reviewBlock,
+    ...coverageBlock,
     ...fixBlock,
     ...(fixBlock.length ? [``] : []),
     buildTask(input),

@@ -2,8 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runPipeline, PipelineDeps, GenerateInput } from "./pipeline";
 import { ReviewResult } from "./integrations/opencode-client";
+import { CoveredLines } from "./qa/change-coverage";
 import { AppConfig } from "./orchestrator/config-loader";
 import { AgentResult, QaRunResult, RunMode } from "./types";
+
+// A unified diff with one file and 4 added lines (1-4), so parseDiffHunks yields changed lines.
+const DIFF_4 = ["diff --git a/src/x.ts b/src/x.ts", "+++ b/src/x.ts", "@@ -0,0 +1,4 @@", "+a", "+b", "+c", "+d"].join("\n");
+const cov = (lines: number[]): CoveredLines => new Map([["src/x.ts", new Set(lines)]]);
 
 const app: AppConfig = {
   name: "demo",
@@ -45,6 +50,7 @@ function deps(
     healthy?: boolean | boolean[]; // a single value, or a sequence per call
     message?: string; // commit message (classification)
     diff?: string;
+    coverage?: Array<CoveredLines | null>; // a sequence of collectCoverage results, one per call
   } = {},
 ): Harness {
   const issues: string[] = [];
@@ -52,6 +58,7 @@ function deps(
   const healthSeq = Array.isArray(opts.healthy) ? [...opts.healthy] : null;
   const agentSeq = opts.agents ? [...opts.agents] : null;
   const reviewSeq = opts.review ? [...opts.review] : null;
+  const covSeq = opts.coverage ? [...opts.coverage] : null;
   Object.assign(h, {
     waitForDeploy: async () => {
       calls.push("gate");
@@ -73,6 +80,14 @@ function deps(
           review: async () => {
             calls.push("review");
             return reviewSeq!.shift() ?? { approved: true, corrections: [] };
+          },
+        }
+      : {}),
+    ...(opts.coverage
+      ? {
+          collectCoverage: async () => {
+            calls.push("coverage");
+            return covSeq!.length ? covSeq!.shift()! : null;
           },
         }
       : {}),
@@ -253,6 +268,60 @@ test("reviewer error fails open: trusts the generator and publishes", async () =
   assert.equal(calls.filter((c) => c === "generate").length, 1);
   assert.equal(h.published, true);
   assert.equal(h.issues.length, 0);
+});
+
+// ── change-coverage (Filter D) ───────────────────────────────────────────────
+
+const covApp = (mode: "off" | "signal" | "enforce", minRatio = 0.7): AppConfig => ({
+  ...app,
+  qa: { ...app.qa, changeCoverage: { mode, minRatio } },
+});
+
+test("change-coverage signal: low coverage is recorded but NEVER blocks publishing", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { diff: DIFF_4, coverage: [cov([1])] }); // 1/4 changed lines
+  await runPipeline(covApp("signal"), "abc123", d);
+  assert.ok(calls.includes("coverage"));
+  assert.equal(d.published, true);
+  assert.equal(d.issues.length, 0);
+});
+
+test("change-coverage enforce: low coverage that can't be improved blocks publish, opens an Issue", async () => {
+  const calls: string[] = [];
+  // first agent generates; the improvement attempt produces no new specs → cannot close the gap
+  const noFix: AgentResult = { output: "x", specs: [], reviewed: true, approved: true };
+  const d = deps(passing(), calls, { diff: DIFF_4, agents: [generated, noFix], coverage: [cov([1]), cov([1])] });
+  await runPipeline(covApp("enforce"), "abc123", d);
+  assert.equal(d.published, false);
+  assert.equal(d.issues.length, 1);
+  assert.match(d.issues[0]!, /change-coverage threshold/);
+});
+
+test("change-coverage enforce: the improvement closes the gap → publishes", async () => {
+  const calls: string[] = [];
+  // second collectCoverage (after the improvement re-run) reports full coverage
+  const d = deps(passing(), calls, { diff: DIFF_4, agents: [generated, generated], coverage: [cov([1]), cov([1, 2, 3, 4])] });
+  await runPipeline(covApp("enforce"), "abc123", d);
+  assert.equal(d.published, true);
+  assert.equal(d.issues.length, 0);
+  // the improvement regeneration received the coverage gap
+  assert.ok(d.genInputs.some((g) => typeof g.coverageGap === "string" && /not exercised/i.test(g.coverageGap!)));
+});
+
+test("change-coverage enforce: unmeasured coverage (null) is 'unknown' and never blocks", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { diff: DIFF_4, coverage: [null] });
+  await runPipeline(covApp("enforce"), "abc123", d);
+  assert.equal(d.published, true);
+  assert.equal(d.issues.length, 0);
+});
+
+test("change-coverage off: the step is skipped entirely", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { diff: DIFF_4, coverage: [cov([1])] });
+  await runPipeline(covApp("off"), "abc123", d);
+  assert.ok(!calls.includes("coverage"));
+  assert.equal(d.published, true);
 });
 
 test("DEV unhealthy before execution: infra-error, neither executes nor reports as a bug", async () => {

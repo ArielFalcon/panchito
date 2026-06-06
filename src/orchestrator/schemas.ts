@@ -24,6 +24,14 @@ export const AppConfigSchema = z
       needsReview: z.boolean(),
       testDataPrefix: z.string().min(1, { error: "qa.testDataPrefix is required" }),
       shadow: z.boolean().optional(),
+      // Change-coverage policy (the value keystone). off = skip; signal (default) = measure +
+      // record only; enforce = also try to close the gap and block publishing if it stays low.
+      changeCoverage: z
+        .object({
+          mode: z.enum(["off", "signal", "enforce"]).optional(),
+          minRatio: z.number().min(0).max(1).optional(),
+        })
+        .optional(),
     }),
     code: z.boolean().optional(),
     report: z.object({

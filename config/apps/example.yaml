@@ -34,6 +34,11 @@ qa:
   needsReview: true            # the strict reviewer validates the generated E2E tests
   shadow: false                # true = run everything but do NOT publish PRs or open Issues (initial rollout)
   testDataPrefix: "qa-bot"     # test entities namespaced per SHA
+  # Change-coverage (the value keystone): does the suite actually exercise the lines the commit
+  # changed? Optional; defaults to mode "signal", minRatio 0.7.
+  changeCoverage:
+    mode: signal               # off | signal (measure+record only) | enforce (close the gap, block if still low)
+    minRatio: 0.7              # fraction of changed lines that must be exercised to "pass"
 
 report:
   onFailure: "github-issue"

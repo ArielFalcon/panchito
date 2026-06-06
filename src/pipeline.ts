@@ -18,6 +18,18 @@ import { runE2E, defaultExecuteDeps, defaultCleanupDeps } from "./qa/execute";
 import { setupCodeProject, defaultCodeSetupDeps, runCodeTests, defaultCodeExecuteDeps } from "./qa/code-runner";
 import { publishE2e, publishCode, defaultPublishDeps } from "./integrations/publish";
 import { testDataNamespace } from "./qa/test-data";
+import {
+  parseDiffHunks,
+  computeChangeCoverage,
+  decideCoverage,
+  blocksPublish,
+  renderUncovered,
+  defaultCollectCoverage,
+  DEFAULT_COVERAGE_POLICY,
+  type CoveredLines,
+  type CoverageCollectInput,
+  type ChangeCoveragePolicy,
+} from "./qa/change-coverage";
 import { github } from "./integrations/github";
 import { renderIssue } from "./report/reporter";
 import { AgentResult, QaCase, QaRunResult, TriggerSource, RunMode, RunOptions, TestTarget } from "./types";
@@ -42,6 +54,7 @@ export interface GenerateInput {
   openapi?: string | string[]; // optional hint: where the repo's OpenAPI contract(s) live
   fixCases?: QaCase[]; // re-generation: failed cases from a previous execution to fix
   reviewCorrections?: string[]; // re-generation: corrections from a reviewer rejection
+  coverageGap?: string; // re-generation: changed lines not yet exercised (change-coverage)
   runId?: string; // for SSE live activity: maps the OpenCode session to this run record
 }
 
@@ -55,6 +68,10 @@ export interface PipelineDeps {
   cleanup(e2eDir: string, opts: { baseUrl: string; namespace: string }): Promise<void>; // orphan-data cleanup (best-effort)
   isHealthy(versionUrl: string): Promise<boolean>; // is DEV healthy right now? (infra vs quality)
   review?(input: ReviewInput, signal?: AbortSignal): Promise<ReviewResult>; // independent reviewer (null = disabled)
+  // Change-coverage provider (the value keystone). Returns the lines actually exercised by the
+  // run, repo-relative, or null when no usable coverage was produced (→ "unknown", never blocks).
+  // Absent (undefined) ⇒ the change-coverage step is skipped entirely.
+  collectCoverage?(input: CoverageCollectInput): Promise<CoveredLines | null>;
   publish(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string }): Promise<{ prUrl: string } | null>;
   // Code mode (target "code"): no web env, no Playwright. Install the repo's deps,
   // run its own test suite, classify by exit code, and publish the new tests.
@@ -92,6 +109,7 @@ export function defaultPipelineDeps(): PipelineDeps {
         openapi: input.openapi,
         fixCases: input.fixCases,
         reviewCorrections: input.reviewCorrections,
+        coverageGap: input.coverageGap,
         runId: input.runId,
       };
       const oc = await defaultOpencodeDeps();
@@ -125,6 +143,7 @@ export function defaultPipelineDeps(): PipelineDeps {
     },
     review: async (input, signal) =>
       reviewIndependently(input, await defaultOpencodeDeps(), { signal }),
+    collectCoverage: async (input) => defaultCollectCoverage(input),
     publish: (input) => publishE2e(input, defaultPublishDeps),
     openIssue: (repo, title, body) => github.openIssue(repo, title, body),
     log: (m) => console.log(m),
@@ -395,6 +414,53 @@ export async function runPipeline(
     log(`[qa] retry verdict: ${run.verdict}`);
   }
 
+  // 8. Filter D — change-coverage (the value keystone). Only for a per-commit DIFF run whose
+  //    suite is GREEN: does executing the tests actually exercise the lines the commit changed?
+  //    Skipped when no provider is wired (unit tests) or the policy is off. Unmeasured coverage is
+  //    "unknown" and NEVER blocks (determinism over zeal). signal = record only; enforce = try once
+  //    to close the gap, then block publishing if it stays below the threshold.
+  const covPolicy: ChangeCoveragePolicy = {
+    mode: app.qa.changeCoverage?.mode ?? DEFAULT_COVERAGE_POLICY.mode,
+    minRatio: app.qa.changeCoverage?.minRatio ?? DEFAULT_COVERAGE_POLICY.minRatio,
+  };
+  let coverageStatus: "pass" | "fail" | "unknown" = "unknown";
+  let coverageSummary = "";
+  if (deps.collectCoverage && generating && mode === "diff" && run.verdict === "pass" && covPolicy.mode !== "off") {
+    const changed = parseDiffHunks(diff);
+    if (changed.size > 0) {
+      onStep?.("coverage");
+      const changedFiles = [...changed.keys()];
+      const collect = (): Promise<CoveredLines | null> =>
+        deps.collectCoverage!({ target: isCode ? "code" : "e2e", repoDir: mirrorDir, e2eDir, changedFiles, namespace: ns });
+      let cc = computeChangeCoverage(changed, (await collect()) ?? new Map());
+      coverageStatus = decideCoverage(cc, covPolicy);
+      log(`[qa] change-coverage: ${coverageStatus} — ${cc.overall.coveredChanged}/${cc.overall.changedLines} changed lines (${(cc.overall.ratio * 100).toFixed(0)}%, policy=${covPolicy.mode}, min=${Math.round(covPolicy.minRatio * 100)}%)`);
+
+      // enforce: ONE attempt to close the gap (regenerate targeting the uncovered lines → re-run).
+      if (coverageStatus === "fail" && covPolicy.mode === "enforce") {
+        log(`[qa] enforce: attempting to close the coverage gap.\n[qa] ${renderUncovered(cc)}`);
+        checkSignal();
+        const improved = await generateAndReview(baseGenInput({ coverageGap: renderUncovered(cc) }));
+        if (improved.specs.length > 0 && improved.approved) {
+          const okStatic = isCode ? { ok: true, errors: [] } : await deps.validate(e2eDir);
+          if (okStatic.ok && (isCode || (await devHealthy()))) {
+            const reRun = isCode
+              ? await deps.executeCode(mirrorDir, { namespace: ns, onCase })
+              : await deps.execute(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: ns, onCase });
+            if (reRun.verdict === "pass") {
+              run = reRun;
+              result = improved;
+              cc = computeChangeCoverage(changed, (await collect()) ?? new Map());
+              coverageStatus = decideCoverage(cc, covPolicy);
+              log(`[qa] change-coverage after improvement: ${coverageStatus} (${(cc.overall.ratio * 100).toFixed(0)}%)`);
+            }
+          }
+        }
+      }
+      if (coverageStatus === "fail") coverageSummary = renderUncovered(cc);
+    }
+  }
+
   // 9. Final decision.
   const kind = isCode ? "code" : "E2E";
   if (run.verdict !== "pass") {
@@ -412,6 +478,17 @@ export async function runPipeline(
       app.repo,
       `QA: the reviewer did not approve the ${kind} tests for ${sha}`,
       renderIssue(run, result!.note),
+    );
+  } else if (blocksPublish(coverageStatus, covPolicy)) {
+    // Green AND reviewer-approved, but the tests do not exercise enough of the change (enforce):
+    // do NOT publish a suite that would not catch a regression in the changed code.
+    await issueOrShadow(
+      shadow,
+      deps,
+      log,
+      app.repo,
+      `QA: ${kind} tests for ${sha} are below the change-coverage threshold`,
+      renderIssue(run, coverageSummary || result?.note),
     );
   } else if (shadow) {
     log(`[qa] (shadow) ${kind} green; a suite PR would have been opened.`);
