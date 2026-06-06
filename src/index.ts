@@ -12,7 +12,7 @@ import { testDataNamespace } from "./qa/test-data";
 import { enqueueTrackedRun } from "./server/runner";
 import { performSwap, confirmSwapHealthy, realSwapFs, SWAP_MARKER_FILE } from "./server/self-update";
 import { resolveRef, defaultMirrorDeps, authHeaderArgs, type MirrorDeps } from "./integrations/repo-mirror";
-import { defaultOpencodeDeps, askAssistant, OpencodeDeps, startEventStream, getOpenSessions } from "./integrations/opencode-client";
+import { defaultOpencodeDeps, askAssistant, OpencodeDeps, startEventStream } from "./integrations/opencode-client";
 import { appendLog } from "./server/history";
 import { type RunMode, type TestTarget } from "./types";
 import { github } from "./integrations/github";
@@ -71,6 +71,8 @@ process.on("SIGTERM", () => {
   console.log("[qa] SIGTERM received — shutting down (new runs rejected)");
   shuttingDown = true;
   eventStreamController.abort();
+  // Best-effort: cancel SSE stream. OpenCode sessions are disposed by their
+  // own AbortSignals (wired through the queue → pipeline → opencode-client).
   setTimeout(() => {
     console.log("[qa] shutdown timeout — forcing exit");
     process.exit(1);
