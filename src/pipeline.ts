@@ -41,6 +41,7 @@ export interface GenerateInput {
   guidance?: string; // manual mode: user instructions on what to test
   openapi?: string | string[]; // optional hint: where the repo's OpenAPI contract(s) live
   fixCases?: QaCase[]; // re-generation: failed cases from a previous execution to fix
+  runId?: string; // for SSE live activity: maps the OpenCode session to this run record
 }
 
 export interface PipelineDeps {
@@ -90,6 +91,7 @@ export function defaultPipelineDeps(): PipelineDeps {
           guidance: input.guidance,
           openapi: input.openapi,
           fixCases: input.fixCases,
+          runId: input.runId,
         },
         await defaultOpencodeDeps(),
         { signal, onProgress },

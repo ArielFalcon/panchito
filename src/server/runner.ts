@@ -66,7 +66,7 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
               console.log(msg);
               appendLog(record.id, msg);
             };
-            return pipeline.generate(input, signal, onProgress);
+            return pipeline.generate({ ...input, runId: record.id }, signal, onProgress);
           },
         },
         req.source ?? "webhook",

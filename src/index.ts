@@ -12,7 +12,8 @@ import { testDataNamespace } from "./qa/test-data";
 import { enqueueTrackedRun } from "./server/runner";
 import { performSwap, confirmSwapHealthy, realSwapFs, SWAP_MARKER_FILE } from "./server/self-update";
 import { resolveRef, defaultMirrorDeps, authHeaderArgs, type MirrorDeps } from "./integrations/repo-mirror";
-import { defaultOpencodeDeps, askAssistant, OpencodeDeps } from "./integrations/opencode-client";
+import { defaultOpencodeDeps, askAssistant, OpencodeDeps, startEventStream } from "./integrations/opencode-client";
+import { appendLog } from "./server/history";
 import { type RunMode, type TestTarget } from "./types";
 import { github } from "./integrations/github";
 
@@ -607,6 +608,11 @@ const server = createServer(async (req, res) => {
 
 server.listen(port, () => {
   console.log(`ai-pipeline listening on :${port}${apiToken ? " (API auth on)" : ""}`);
+  // Start the SSE event stream from OpenCode so agent activity (tool calls,
+  // file edits, streaming text) is routed to RunRecord logs in real time.
+  startEventStream(
+    (runId, text) => appendLog(runId, text),
+  ).catch((err) => console.warn(`[qa] event stream failed: ${err instanceof Error ? err.message : String(err)}`));
   confirmSwapAfterBoot();
   finalizeInterruptedRuns();
   startHealthPoller();

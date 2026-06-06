@@ -29,6 +29,7 @@ function deps(finalText: string, captured?: { prompt?: string; agent?: string })
       if (captured) captured.agent = agent;
       assert.equal(cwd, input.mirrorDir); // the agent starts in the working copy
       return {
+        id: "test-session",
         prompt: async (text) => {
           if (captured) captured.prompt = text;
           return finalText;

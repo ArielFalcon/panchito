@@ -12,6 +12,8 @@
 import { AgentResult, QaCase, RunMode, TestTarget } from "../types";
 import { CommitIntent } from "../qa/commit-classify";
 import { sanitizeText } from "../orchestrator/sanitizer";
+import { ActivityRouter } from "./agent-activity";
+import { appendLog } from "../server/history";
 
 interface SessionEntry {
   id: string;
@@ -21,6 +23,68 @@ interface SessionEntry {
 }
 
 const sessionRegistry = new Map<string, SessionEntry>();
+
+// SSE live activity: routes OpenCode events to RunRecord logs in real time.
+export const activityRouter = new ActivityRouter();
+
+// Maps an OpenCode session to a run so SSE events are routed to the correct RunRecord.
+export function registerRunSession(sessionId: string, runId: string): void {
+  activityRouter.register(sessionId, runId);
+}
+
+export function unregisterRunSession(sessionId: string): void {
+  activityRouter.unregister(sessionId);
+}
+
+// Subscribes to OpenCode's global SSE event stream and routes every event through
+// the activityRouter. `onActivity` is called for each successfully routed event
+// with the runId and human-readable text. Runs until aborted.
+export async function startEventStream(
+  onActivity: (runId: string, text: string) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const { createOpencodeClient } = await import("@opencode-ai/sdk");
+  const client = createOpencodeClient({
+    baseUrl: process.env.OPENCODE_SERVE_URL ?? "http://opencode:4096",
+  });
+
+  // The SDK's global.event() returns a Promise<ServerSentEventsResult> whose
+  // `.stream` is an AsyncGenerator yielding GlobalEvent { directory, payload }.
+  const result = await client.global.event();
+  const stream = result.stream;
+  if (!stream) {
+    console.warn("[qa] SSE event stream returned no stream");
+    return;
+  }
+
+  const abortHandler = () => { /* stream is cancelled by breaking the loop */ };
+  signal?.addEventListener("abort", abortHandler, { once: true });
+
+  try {
+    for await (const event of stream) {
+      if (signal?.aborted) break;
+
+      const payload = event.payload;
+      if (!payload?.type) continue;
+
+      const activity = activityRouter.route({
+        type: payload.type,
+        properties: payload.properties,
+      });
+
+      if (activity) {
+        const prefix = activity.kind === "message" ? "💬" : activity.kind === "file" ? "📝" : activity.kind === "tool" ? "🔧" : "•";
+        onActivity(activity.runId, `[qa] ${prefix} ${activity.text}`);
+      }
+    }
+  } catch (err) {
+    if (!signal?.aborted) {
+      console.warn(`[qa] SSE event stream error: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  } finally {
+    signal?.removeEventListener("abort", abortHandler);
+  }
+}
 
 export function getOpenSessions(): SessionEntry[] {
   return [...sessionRegistry.values()];
@@ -71,6 +135,7 @@ export interface OpencodeRunInput {
   guidance?: string; // manual mode: user instructions
   openapi?: string | string[]; // optional hint (from app config): where the repo's OpenAPI contract(s) live
   fixCases?: QaCase[]; // re-generation: failed cases from a previous execution to fix
+  runId?: string; // maps the session to a RunRecord for SSE live activity
 }
 
 // A session opened against `opencode serve`. prompt() sends the message to the
@@ -78,6 +143,7 @@ export interface OpencodeRunInput {
 // dispose() cleans up the session; call it when the session is no longer needed
 // to avoid memory leaks on the server (sessions are never auto-cleaned).
 export interface OpencodeSession {
+  id: string;
   prompt(text: string): Promise<string>;
   dispose(): Promise<void>;
 }
@@ -102,6 +168,12 @@ export async function runOpencode(
 ): Promise<AgentResult> {
   const timeoutMs = agentTimeout(input.mode);
   const session = await deps.open("qa-generator", input.mirrorDir, { signal: opts?.signal, timeoutMs });
+
+  // Register this session for SSE live activity so the agent's real-time events
+  // (tool calls, file edits, streaming text) are routed to the RunRecord logs.
+  if (input.runId) {
+    registerRunSession(session.id, input.runId);
+  }
 
   // Heartbeat: while the agent prompt is blocking, emit periodic progress logs so
   // the TUI and chat assistant have live feedback during the (potentially long)
@@ -529,6 +601,7 @@ export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
       const promptTimeoutMs = opts?.timeoutMs ?? dispatcherTimeoutMs;
 
       return {
+        id,
         prompt: (text) =>
           withTimeout(
             client.session
