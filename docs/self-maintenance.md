@@ -90,6 +90,26 @@ This enables “Allow auto-merge” and requires the `ci` check on `main` (stric
 admins, no human-review requirement — the gate is CI + the layered safety gates, since the
 point is autonomous repair).
 
+### 9. Learning from failures (so it doesn’t break the same way twice)
+Every time a fix is rejected or rolled back — pre-deploy gate, canary unhealthy, boot crash-loop,
+or a red/timed-out required CI check — the orchestrator appends a record to a persistent failure
+memory (`data/maintainer-failures.json`, survives the restart). The next maintainer prompt opens
+with a **“Past fix attempts that FAILED — do NOT repeat these mistakes”** section listing the
+recent failures, what each one *assumed* the root cause was, what it changed, and why it failed.
+
+The crash-loop case is bridged from `boot-guard.mjs` (which can’t use the app’s modules): on
+rollback it drops `data/last-rollback.json`, and the restored, healthy app folds it into the
+failure memory on its next boot (`recoverRollbackRecord`).
+
+## Networking notes
+- **DNS:** both containers pin public resolvers (`dns: [1.1.1.1, 8.8.8.8]` in
+  `docker-compose.yml`) so egress to `github.com` / the model gateway / the DEV site is
+  deterministic under VPN/split-DNS. All GitHub git+API calls run in the **orchestrator** (the
+  agent has no token and never pushes), so a `github.com` DNS failure is an orchestrator problem.
+- **Proxy:** Node’s `fetch` doesn’t honor `HTTP_PROXY` by itself; `src/util/net.ts` installs
+  undici’s `EnvHttpProxyAgent` globally (a no-op when no proxy env is set), so the system is
+  proxy-ready without code changes.
+
 ## Threat model — why this can’t reach an irrecoverable state
 | Failure | Caught by | End state |
 |---|---|---|

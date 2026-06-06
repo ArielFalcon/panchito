@@ -14,6 +14,7 @@ import { CommitIntent } from "../qa/commit-classify";
 import { sanitizeText } from "../orchestrator/sanitizer";
 import { ActivityRouter } from "./agent-activity";
 import { appendLog } from "../server/history";
+import { installHttpDispatcher } from "../util/net";
 
 interface SessionEntry {
   id: string;
@@ -599,10 +600,9 @@ const MAX_AGENT_TIMEOUT_MS = Math.max(...Object.values(TIMEOUT_BY_MODE));
 // require the package. OPENCODE_SERVE_URL points to the `opencode` container.
 export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
   const dispatcherTimeoutMs = Number(process.env.OPENCODE_TIMEOUT_MS) || MAX_AGENT_TIMEOUT_MS;
-  // Raise undici timeouts for the worst-case agent turn (exhaustive = 25 min)
-  // so our per-prompt withTimeout is the effective deadline.
-  const { setGlobalDispatcher, Agent } = await import("undici");
-  setGlobalDispatcher(new Agent({ headersTimeout: dispatcherTimeoutMs + 30_000, bodyTimeout: dispatcherTimeoutMs + 30_000 }));
+  // Raise undici timeouts for the worst-case agent turn (exhaustive = 25 min) so our per-prompt
+  // withTimeout is the effective deadline, and route through any configured HTTP proxy.
+  await installHttpDispatcher(dispatcherTimeoutMs);
 
   const client = await getSharedClient();
 

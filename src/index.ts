@@ -12,6 +12,8 @@ import { testDataNamespace } from "./qa/test-data";
 import { enqueueTrackedRun } from "./server/runner";
 import { performSwap, confirmSwapHealthy, rollback, realSwapFs, SWAP_MARKER_FILE } from "./server/self-update";
 import { assessChange, assessRate, parseNumstat, readDeployHistory, recordDeploy } from "./server/merge-guard";
+import { recordFixFailure, readFixFailures, renderFailureMemory, realMemoryFs } from "./server/maintainer-memory";
+import { installHttpDispatcher } from "./util/net";
 import { resolveRef, defaultMirrorDeps, authHeaderArgs, type MirrorDeps } from "./integrations/repo-mirror";
 import { defaultOpencodeDeps, askAssistant, OpencodeDeps, startEventStream } from "./integrations/opencode-client";
 import { appendLog } from "./server/history";
@@ -27,6 +29,12 @@ const AUTONOMOUS_MAINTAINER = process.env.SELF_MAINTAINER_AUTOMERGE !== "false";
 // Persisted ledger of autonomous deploys (timestamps), used by the rate/loop guard. It lives
 // on the data volume so it survives the restart a hot-swap triggers (see merge-guard.ts).
 const DEPLOY_LEDGER = join(ROOT, "data", "maintainer-deploys.json");
+// Persistent memory of fixes that broke the service (rolled back / failed gate / failed CI),
+// injected into the next maintainer prompt so the agent does not repeat the same mistake.
+const FAILURE_MEMORY = join(ROOT, "data", "maintainer-failures.json");
+// Bridge written by boot-guard.mjs when it rolls back a crash-looping swap (the boot-guard can't
+// use the app's modules, so it drops the marker here for the app to fold into FAILURE_MEMORY).
+const ROLLBACK_BRIDGE = join(ROOT, "data", "last-rollback.json");
 
 const port = Number(process.env.PORT ?? 8080);
 const MAX_BODY = 1_000_000;
@@ -192,6 +200,9 @@ async function triggerMaintainer(): Promise<void> {
     // Step 2: Open agent session to diagnose and fix
     const session = await deps.open("qa-maintainer", maintainerWorkDir);
     try {
+      // Inject the memory of past failed fixes so the agent does not repeat a change that
+      // already broke the service for the same reason.
+      const failureMemory = renderFailureMemory(readFixFailures(FAILURE_MEMORY));
       const prompt = [
         "## Incident report",
         "",
@@ -199,6 +210,7 @@ async function triggerMaintainer(): Promise<void> {
         "Diagnose the root cause in the codebase (you are in the ai-pipeline repo)",
         "and implement a fix. After implementing, summarize what you changed.",
         "",
+        ...(failureMemory ? [failureMemory] : []),
         ...pending.map((i) =>
           [
             `### ${i.id}`,
@@ -345,11 +357,21 @@ async function triggerMaintainer(): Promise<void> {
         execSync("npm run typecheck", { cwd: maintainerWorkDir, stdio: "inherit" });
         execSync("npm test", { cwd: maintainerWorkDir, stdio: "inherit" });
       } catch (gateErr) {
+        const detail = gateErr instanceof Error ? gateErr.message : String(gateErr);
         recordIncident({
           source: "health-check",
           severity: "critical",
           summary: "maintainer fix FAILED its pre-deploy self-test gate — NOT deploying",
-          detail: gateErr instanceof Error ? gateErr.message : String(gateErr),
+          detail,
+        });
+        recordFixFailure(FAILURE_MEMORY, {
+          at: new Date().toISOString(),
+          reason: "pre-deploy-gate",
+          prTitle: summary.prTitle,
+          prUrl: pr.url,
+          changes: summary.changes,
+          rootCause: summary.justification?.rootCause,
+          detail: "npm typecheck/test failed on the fix branch",
         });
         return leaveForHuman("failed its pre-deploy self-test gate");
       }
@@ -371,6 +393,7 @@ async function triggerMaintainer(): Promise<void> {
         at: new Date().toISOString(),
         prUrl: pr.url,
         promote: { repo: SELF_REPO, prNumber: pr.number, nodeId: pr.nodeId },
+        fix: { prTitle: summary.prTitle, changes: summary.changes, rootCause: summary.justification.rootCause },
       });
       execSync("npm install --no-audit --no-fund", { cwd: process.cwd(), stdio: "inherit" });
       console.log("[maintainer] canary swap staged with rollback guard — restarting to verify, then promote.");
@@ -473,6 +496,15 @@ function confirmSwapAfterBoot(): void {
         summary: "maintainer canary failed its post-deploy health check — rolling back",
         detail: marker.prUrl,
       });
+      recordFixFailure(FAILURE_MEMORY, {
+        at: new Date().toISOString(),
+        reason: "canary-unhealthy",
+        prTitle: marker.fix?.prTitle,
+        prUrl: marker.prUrl,
+        changes: marker.fix?.changes,
+        rootCause: marker.fix?.rootCause,
+        detail: "the swapped code booted but did not serve /api/health",
+      });
       const rolled = rollback(process.cwd(), dataDir);
       console.error(`[maintainer] canary unhealthy — ${rolled ? "rolled back to previous code" : "NO backup to roll back to"}; PR left unmerged: ${marker.prUrl ?? ""}`);
       if (rolled) {
@@ -492,7 +524,7 @@ function confirmSwapAfterBoot(): void {
     // Then PROMOTE: merge the PR so main adopts the now-proven fix. Promotion is gated by the
     // OUTER GUARD (the required CI check on main) and is best-effort — the running service
     // already has the fix, so a promotion failure never rolls it back, only flags a human.
-    if (marker.promote) await promote(marker.promote, marker.prUrl);
+    if (marker.promote) await promote(marker.promote, marker.prUrl, marker.fix);
   }, 20_000);
 }
 
@@ -502,8 +534,14 @@ function confirmSwapAfterBoot(): void {
 //      guard is enforced server-side even if this process's own gates were ever weakened.
 //   2. Fallback (no branch protection / auto-merge configured): self-enforce the guard by
 //      polling CI and merging only on green. A failed/stuck CI leaves the PR open + an incident.
-async function promote(p: { repo: string; prNumber: number; nodeId: string }, prUrl?: string): Promise<void> {
+async function promote(
+  p: { repo: string; prNumber: number; nodeId: string },
+  prUrl?: string,
+  fix?: { prTitle?: string; changes?: string[]; rootCause?: string },
+): Promise<void> {
   const ref = prUrl ?? `PR #${p.prNumber}`;
+  const noteFailure = (reason: "ci-failed" | "ci-timeout", detail: string) =>
+    recordFixFailure(FAILURE_MEMORY, { at: new Date().toISOString(), reason, prTitle: fix?.prTitle, prUrl, changes: fix?.changes, rootCause: fix?.rootCause, detail });
   try {
     await github.enableAutoMerge(p.nodeId);
     console.log(`[maintainer] auto-merge enabled — GitHub will merge ${ref} once the required CI check passes.`);
@@ -529,6 +567,7 @@ async function promote(p: { repo: string; prNumber: number; nodeId: string }, pr
         summary: "maintainer canary healthy but its PR FAILED the required CI check — NOT merged to main",
         detail: ref,
       });
+      noteFailure("ci-failed", "the required CI check on main went red for this fix");
       console.warn(`[maintainer] CI failed for ${ref} — leaving the PR open (main untouched).`);
       return;
     }
@@ -555,6 +594,7 @@ async function promote(p: { repo: string; prNumber: number; nodeId: string }, pr
     summary: "maintainer canary healthy but its PR's CI did not complete in time — merge it manually once green",
     detail: ref,
   });
+  noteFailure("ci-timeout", "the required CI check did not complete within the promote window");
   console.warn(`[maintainer] CI did not complete in time for ${ref} — PR left open.`);
 }
 
@@ -572,6 +612,36 @@ async function canaryHealthy(): Promise<boolean> {
     if (i === 0) await new Promise((r) => setTimeout(r, 3_000));
   }
   return true;
+}
+
+// If boot-guard.mjs rolled back a crash-looping swap, it left a bridge file (it can't use the
+// app's modules). Fold it into the maintainer's failure memory + an incident so the agent learns
+// the fix crash-looped, then remove the bridge.
+function recoverRollbackRecord(): void {
+  const raw = realMemoryFs.read(ROLLBACK_BRIDGE);
+  if (!raw) return;
+  try {
+    const m = JSON.parse(raw) as { prUrl?: string; fix?: { prTitle?: string; changes?: string[]; rootCause?: string } };
+    recordFixFailure(FAILURE_MEMORY, {
+      at: new Date().toISOString(),
+      reason: "boot-crash-loop",
+      prTitle: m.fix?.prTitle,
+      prUrl: m.prUrl,
+      changes: m.fix?.changes,
+      rootCause: m.fix?.rootCause,
+      detail: "the swapped code failed to boot repeatedly; boot-guard restored the previous code",
+    });
+    recordIncident({
+      source: "health-check",
+      severity: "critical",
+      summary: "a maintainer fix crash-looped and was rolled back by the boot-guard",
+      detail: m.prUrl,
+    });
+    console.error(`[maintainer] recovered from a boot-guard rollback — recorded to failure memory.${m.prUrl ? ` (${m.prUrl})` : ""}`);
+  } catch {
+    /* corrupt bridge — ignore */
+  }
+  realMemoryFs.remove(ROLLBACK_BRIDGE);
 }
 
 function finalizeInterruptedRuns(): void {
@@ -732,12 +802,17 @@ const server = createServer(async (req, res) => {
 
 server.listen(port, () => {
   console.log(`ai-pipeline listening on :${port}${apiToken ? " (API auth on)" : ""}`);
+  // Make global fetch proxy-aware (HTTP(S)_PROXY/NO_PROXY) from boot, before any GitHub API or
+  // health call. No-op when no proxy is configured. (A per-run build refines the timeouts.)
+  const startupTimeout = Number(process.env.OPENCODE_TIMEOUT_MS) || 900_000;
+  installHttpDispatcher(startupTimeout).catch((err) => console.warn(`[qa] HTTP dispatcher setup failed: ${err instanceof Error ? err.message : String(err)}`));
   // Start the SSE event stream from OpenCode so agent activity (tool calls,
   // file edits, streaming text) is routed to RunRecord logs in real time.
   startEventStream(
     (runId, text) => appendLog(runId, text),
     eventStreamController.signal,
   ).catch((err) => console.warn(`[qa] event stream failed: ${err instanceof Error ? err.message : String(err)}`));
+  recoverRollbackRecord();
   confirmSwapAfterBoot();
   finalizeInterruptedRuns();
   startHealthPoller();

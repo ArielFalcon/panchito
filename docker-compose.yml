@@ -14,6 +14,12 @@ services:
     build: .
     env_file: .env
     restart: always
+    # Explicit public resolvers: Docker's embedded DNS (127.0.0.11) forwards to the host
+    # resolver, which under a VPN / split-DNS may fail to resolve external names (this caused
+    # "ENOTFOUND github.com" when opening the PR). Pinning resolvers makes egress deterministic.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     depends_on:
       opencode:
         condition: service_healthy
@@ -34,6 +40,11 @@ services:
   opencode:
     build: ./opencode # official opencode + uv/JDK (Serena) + engram (see opencode/Dockerfile)
     restart: always
+    # Same explicit resolvers as the orchestrator: the agent must reach the model gateway and
+    # the live DEV site (Playwright MCP) regardless of host/VPN DNS quirks.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     command: ["serve", "--hostname", "0.0.0.0", "--port", "4096"]
     # SECURITY: the agent container does NOT get the full .env. It receives ONLY the
     # model key and the DEV credentials it needs for Playwright login — NEVER

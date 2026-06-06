@@ -28,6 +28,9 @@ export interface SwapMarker {
   // main only ever receives code already proven to run. Absent for a plain (already-merged)
   // swap. If the canary fails, the boot-guard rolls back and the PR is simply never merged.
   promote?: { repo: string; prNumber: number; nodeId: string };
+  // Compact description of the fix being deployed, so a rollback (here or in boot-guard.mjs)
+  // can record WHAT failed into the maintainer's failure memory for the agent to learn from.
+  fix?: { prTitle?: string; changes?: string[]; rootCause?: string };
 }
 
 export interface SwapFs {
@@ -64,7 +67,12 @@ export function performSwap(
   appDir: string,
   sourceDir: string,
   dataDir: string,
-  opts: { at: string; prUrl?: string; promote?: { repo: string; prNumber: number; nodeId: string } },
+  opts: {
+    at: string;
+    prUrl?: string;
+    promote?: { repo: string; prNumber: number; nodeId: string };
+    fix?: { prTitle?: string; changes?: string[]; rootCause?: string };
+  },
   fs: SwapFs = realSwapFs,
 ): void {
   const liveSrc = join(appDir, "src");
@@ -85,7 +93,7 @@ export function performSwap(
   if (fs.exists(join(sourceDir, lock))) fs.cp(join(sourceDir, lock), join(appDir, lock));
 
   // 3. Arm the boot-guard.
-  fs.writeMarker(join(dataDir, SWAP_MARKER_FILE), { at: opts.at, attempt: 0, prUrl: opts.prUrl, promote: opts.promote });
+  fs.writeMarker(join(dataDir, SWAP_MARKER_FILE), { at: opts.at, attempt: 0, prUrl: opts.prUrl, promote: opts.promote, fix: opts.fix });
 }
 
 // Clear swap state once the new code is confirmed healthy after restart (removes marker

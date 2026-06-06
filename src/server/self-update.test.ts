@@ -46,13 +46,25 @@ test("performSwap backs up the live tree before overwriting it, then arms the ma
   const removeIdx = fs.ops.findIndex((o) => o === "rm /app/src");
   assert.ok(backupIdx >= 0 && removeIdx >= 0 && backupIdx < removeIdx, "backup must precede removing live src");
   assert.ok(fs.ops.includes("cp /work/src -> /app/src"), "new code copied into place");
-  assert.deepEqual(fs.marker, { at: "t1", attempt: 0, prUrl: "u", promote: undefined });
+  assert.deepEqual(fs.marker, { at: "t1", attempt: 0, prUrl: "u", promote: undefined, fix: undefined });
 });
 
-test("performSwap records promote info for the canary-before-merge flow", () => {
+test("performSwap records promote + fix info for the canary-before-merge flow", () => {
   const fs = fakeFs(new Set(["/app/src", "/app/package.json", "/work/src", "/work/package.json"]));
-  performSwap("/app", "/work", "/data", { at: "t2", prUrl: "u2", promote: { repo: "o/r", prNumber: 7, nodeId: "PR_node" } }, fs);
-  assert.deepEqual(fs.marker, { at: "t2", attempt: 0, prUrl: "u2", promote: { repo: "o/r", prNumber: 7, nodeId: "PR_node" } });
+  performSwap(
+    "/app",
+    "/work",
+    "/data",
+    { at: "t2", prUrl: "u2", promote: { repo: "o/r", prNumber: 7, nodeId: "PR_node" }, fix: { prTitle: "fix: x", changes: ["a.ts"], rootCause: "r" } },
+    fs,
+  );
+  assert.deepEqual(fs.marker, {
+    at: "t2",
+    attempt: 0,
+    prUrl: "u2",
+    promote: { repo: "o/r", prNumber: 7, nodeId: "PR_node" },
+    fix: { prTitle: "fix: x", changes: ["a.ts"], rootCause: "r" },
+  });
 });
 
 test("bootGuardDecision: none/increment/rollback by attempt count", () => {

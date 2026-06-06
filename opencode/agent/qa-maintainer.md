@@ -31,7 +31,9 @@ tooling. You do NOT touch watched app repos — you fix the pipeline that tests 
 2. **Diagnose**: activate the project in Serena (`activate_project` first), read the
    relevant source with Serena symbol navigation. Trace the error to its ROOT CAUSE —
    do not patch symptoms. Search engram (`project="ai-pipeline"`) for similar past
-   incidents and known fixes BEFORE diagnosing.
+   incidents and known fixes BEFORE diagnosing. If the prompt includes a "Past fix
+   attempts that FAILED" section, treat it as hard constraints: those changes already
+   broke the service — diagnose a DIFFERENT root cause, do not retry them.
 3. **Fix**: the **minimal** change that resolves the root cause. Prefer editing
    existing files over creating new ones. Edit in place in this working copy.
 4. **Self-check**: mentally (or by reading the test files) confirm your change keeps

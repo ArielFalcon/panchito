@@ -41,6 +41,14 @@ if ((marker.attempt ?? 0) >= MAX_BOOT_ATTEMPTS) {
       rmSync(join(ROOT, b), { recursive: true, force: true });
     }
     console.error(`[boot-guard] swapped code failed ${marker.attempt} boot(s) — ROLLED BACK to the previous src/.`);
+    // Bridge: the boot-guard can't use the app's modules, so it leaves the marker for the (now
+    // restored, good) app to fold into the maintainer's failure memory on its next boot — so the
+    // agent learns the fix crash-looped and won't try the same thing again.
+    try {
+      writeFileSync(join(ROOT, "data", "last-rollback.json"), JSON.stringify({ ...marker, reason: "boot-crash-loop" }));
+    } catch {
+      /* best effort */
+    }
   }
   rmSync(MARKER, { force: true });
   process.exit(0);
