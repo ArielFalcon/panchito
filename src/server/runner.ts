@@ -47,16 +47,26 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
       }
       updateRecord(record.id, { status: "running" });
       const appConfig = loadApp(req.app);
+      const pipeline = deps.pipeline ?? defaultPipelineDeps();
       const run = await runPipeline(
         appConfig,
         req.sha,
         {
-          ...(deps.pipeline ?? defaultPipelineDeps()),
+          ...pipeline,
           // Pipe every log message into the RunRecord so the chat assistant and
           // TUI have real-time context on what the pipeline is doing.
           log: (msg: string) => {
             console.log(msg);
             appendLog(record.id, msg);
+          },
+          // During generation, emit a heartbeat every 15s so the TUI and chat
+          // have live feedback while the agent is working (blocking prompt call).
+          generate: async (input, signal) => {
+            const onProgress = (msg: string) => {
+              console.log(msg);
+              appendLog(record.id, msg);
+            };
+            return pipeline.generate(input, signal, onProgress);
           },
         },
         req.source ?? "webhook",

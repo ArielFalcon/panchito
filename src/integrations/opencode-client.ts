@@ -98,10 +98,23 @@ interface FinalVerdict {
 export async function runOpencode(
   input: OpencodeRunInput,
   deps: OpencodeDeps,
-  opts?: { signal?: AbortSignal },
+  opts?: { signal?: AbortSignal; onProgress?: (msg: string) => void },
 ): Promise<AgentResult> {
   const timeoutMs = agentTimeout(input.mode);
   const session = await deps.open("qa-generator", input.mirrorDir, { signal: opts?.signal, timeoutMs });
+
+  // Heartbeat: while the agent prompt is blocking, emit periodic progress logs so
+  // the TUI and chat assistant have live feedback during the (potentially long)
+  // generation phase instead of complete silence.
+  const startedAt = Date.now();
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  if (opts?.onProgress) {
+    heartbeat = setInterval(() => {
+      const elapsed = Math.round((Date.now() - startedAt) / 1000);
+      opts.onProgress?.(`[qa] agent is working... (${elapsed}s elapsed)`);
+    }, 15_000);
+  }
+
   try {
     const finalText = await session.prompt(buildPrompt(input));
 
@@ -125,6 +138,7 @@ export async function runOpencode(
       note: approved ? undefined : verdict.note ?? "the reviewer did not approve the E2E tests",
     };
   } finally {
+    if (heartbeat) clearInterval(heartbeat);
     await session.dispose().catch((err) => {
       console.warn(`[qa] session dispose failed: ${err instanceof Error ? err.message : String(err)}`);
     });

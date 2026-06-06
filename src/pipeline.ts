@@ -46,7 +46,7 @@ export interface GenerateInput {
 export interface PipelineDeps {
   waitForDeploy(target: DeployTarget, sha: string): Promise<void>;
   prepare(repo: string, sha: string): Promise<{ mirrorDir: string; diff: string; message: string }>;
-  generate(input: GenerateInput, signal?: AbortSignal): Promise<AgentResult>;
+  generate(input: GenerateInput, signal?: AbortSignal, onProgress?: (msg: string) => void): Promise<AgentResult>;
   setupE2e(e2eDir: string): Promise<void>; // installs the e2e project's dependencies
   validate(e2eDir: string): Promise<{ ok: boolean; errors: string[] }>;
   execute(e2eDir: string, opts: { baseUrl: string; namespace: string; onCase?: (c: QaCase) => void }): Promise<QaRunResult>;
@@ -72,7 +72,7 @@ export function defaultPipelineDeps(): PipelineDeps {
       const message = await getCommitMessage(mirrorDir, sha, defaultMirrorDeps);
       return { mirrorDir, diff, message };
     },
-    generate: async (input, signal) =>
+    generate: async (input, signal, onProgress) =>
       runOpencode(
         {
           repo: input.repo,
@@ -92,7 +92,7 @@ export function defaultPipelineDeps(): PipelineDeps {
           fixCases: input.fixCases,
         },
         await defaultOpencodeDeps(),
-        { signal },
+        { signal, onProgress },
       ),
     setupE2e: (e2eDir) => setupE2eProject(e2eDir, defaultSetupDeps),
     validate: (e2eDir) => validateSpecs(e2eDir, defaultValidateDeps),
@@ -236,7 +236,7 @@ export async function runPipeline(
       guidance: opts.guidance,
       fixCases: opts.fixCases,
       openapi: app.openapi,
-    }, signal);
+    }, signal, log);
 
     // Independent review: when review is enabled, the orchestrator opens a SEPARATE
     // qa-reviewer session (not the generator's subagent) so the verdict is genuinely
@@ -354,7 +354,7 @@ export async function runPipeline(
       guidance: opts.guidance,
       openapi: app.openapi,
       fixCases: failed,
-    }, signal);
+    }, signal, log);
     log(
       `[qa] agent (retry): approved=${result.approved} specs=[${result.specs.join(", ")}]` +
         (result.note ? ` note=${result.note}` : ""),
