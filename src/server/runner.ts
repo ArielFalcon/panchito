@@ -8,7 +8,7 @@
 import { JobQueue } from "./queue";
 import { runPipeline, defaultPipelineDeps, PipelineDeps } from "../pipeline";
 import { loadAppConfig, AppConfig } from "../orchestrator/config-loader";
-import { createRecord, updateRecord, addCase, getRecord } from "./history";
+import { createRecord, updateRecord, addCase, getRecord, appendLog } from "./history";
 import { recordIncident } from "./maintainer";
 import { RunMode, TestTarget, TriggerSource, QaCase } from "../types";
 
@@ -50,7 +50,15 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
       const run = await runPipeline(
         appConfig,
         req.sha,
-        deps.pipeline ?? defaultPipelineDeps(),
+        {
+          ...(deps.pipeline ?? defaultPipelineDeps()),
+          // Pipe every log message into the RunRecord so the chat assistant and
+          // TUI have real-time context on what the pipeline is doing.
+          log: (msg: string) => {
+            console.log(msg);
+            appendLog(record.id, msg);
+          },
+        },
         req.source ?? "webhook",
         { mode: req.mode, target: req.target, guidance: req.guidance, fixCases: req.fixCases, parentRunId: req.parentRunId, previousNamespace: req.previousNamespace },
         (step, detail) => updateRecord(record.id, { step, stepDetail: detail, retrying: step === "retry" }),
