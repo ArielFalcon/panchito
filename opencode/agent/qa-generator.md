@@ -17,63 +17,96 @@ Follow the task block; the procedure below applies to all modes.
 
 ## Procedure
 
-1. **Derive the objective from the intent.** The prompt gives you the commit type
-   and message (Conventional Commits) and the changed files. From those, derive
-   each test's **objective** (acceptance criterion): a `fix:` → a test that pins
-   the fixed bug; a `feat:` → a test of the new behavior. **Cross-check against the
-   diff**: if the code does more than the message says, cover what the code
-   actually changes. Then activate the project in `serena` (`activate_project`) and
-   use `find_referencing_symbols` (blast radius) and `get_symbols_overview` /
-    `find_symbol` to read only what you need (key in Java: signatures, not whole
-    files). Query `engram` for the repo's memory — search by the project name from
-    the prompt to scope results to this app. If the affected flow calls a
-    backend endpoint, also read the matching OpenAPI operation (see AGENTS.md) for
-    contract-aware assertions — required fields, validation/error responses — without
-    ever calling the API directly.
-2. **Write the specs.** Under `e2e/` (a subfolder per microservice), create or
-   update `*.spec.ts` files with the `write` tool. **Consult the
-   `playwright-authoring` skill** for the how (locators, waiting, fixtures) and for
-   this app's capabilities: two-layer Keycloak login, geolocation, mobile/offline,
-   cookies/cache, photo upload. If the repo has no `e2e/` project yet, it is already
-   seeded (base config + fixtures); build on top of it. Each test must:
-   - **import the repo's own shared harness**: `import { test, expect, ns } from
-     "../fixtures"` (NOT `@playwright/test` directly). Use the `namespace` fixture
-     and `ns(namespace, "...")` to name data.
-   - fill in the app's login by overriding the `authenticate` fixture in
-     `e2e/fixtures.ts` (the real steps, reading credentials from `process.env`,
-     never literals). If it is already implemented from a previous run, reuse it.
-   - exercise the **real** path against DEV (no mocks).
-   - use **role or `data-testid` locators** (`getByRole`/`getByTestId`), never
-     fragile CSS/XPath or `waitForTimeout`.
-   - have **at least one real assert** on the outcome (not just clicks).
-   - be **deterministic** and **clean up what it creates**: for each entity created,
-     register its removal with `cleanup(async () => { ... })` so no junk data is
-     left on DEV.
-3. **Record the metadata.** For each test, add or update its entry in
-   `e2e/.qa/manifest.json` with `{ id, objective, flow, targets, changeRef }`:
-   - `id`: stable and unique (e.g. `"checkout/over-10-items"`).
-   - `objective`: the acceptance criterion in one sentence.
-   - `flow`: the user flow; `targets`: symbols/routes it aims to exercise (from the
-     blast radius).
-   - `changeRef`: `{ sha, type }` of the commit.
-   If you update an existing test for the same objective, **edit its entry**; do
-   not add another (one objective = one test). The manifest is validated by the harness.
-4. **Review.** Invoke the `qa-reviewer` subagent with the specs you wrote. Apply its
-   corrections without rewriting what was already correct. Repeat at most **2
-   rounds**; if it does not converge, leave the specs in their best state.
-5. **Learn.** Save the relevant lesson in `engram` (fragile flows, patterns, gotchas).
-   Use `mem_save` with the `project` and `topic_key` parameters — the project scopes
-   memory to this app, and topic_key upserts so knowledge evolves across runs without
-   duplication.
+### 1. Understand the change (Serena + engram)
 
-## Final output (required)
+Activate the project in `serena` (`activate_project`) and use
+`find_referencing_symbols` (blast radius) and `get_symbols_overview` /
+`find_symbol` to read only what you need. Query `engram` for the repo's memory —
+search by the project name from the prompt to scope results to this app. If the
+affected flow calls a backend endpoint, read the matching OpenAPI operation (see
+AGENTS.md) for contract-aware assertions.
 
-End with a single JSON block, with no text after it, in exactly this schema:
+### 2. Explore the live page (Playwright MCP — MANDATORY)
+
+**This step is NOT optional. You MUST explore the page before writing ANY test.**
+
+Use the Playwright MCP tools to navigate the DEV environment. The **LIVE DEV URL is
+given to you in the task prompt** ("LIVE DEV URL: ..."). Use that exact URL with
+`browser_navigate` — do NOT rely on a `PW_BASE_URL` env var (it is not set in your
+session; it is only set in the spec files at run time).
+
+1. **Navigate** to the affected page(s) with `browser_navigate` using the LIVE DEV
+   URL from the task prompt.
+2. **Take a snapshot** (`browser_snapshot`) to see the actual DOM structure,
+   element roles, labels, text content, and `data-testid` attributes.
+3. **Interact** with forms and navigation to verify the exact user flow:
+   click buttons, fill inputs, observe what appears and disappears.
+4. **Read runtime signals**: `browser_console_messages` (a JS error/warning on the
+   changed flow is a real bug — capture it and assert it does NOT happen) and
+   `browser_network_requests` (read the ACTUAL API calls the flow makes and their
+   responses — assert against their real status/shape, never an invented contract).
+5. **Document the real selectors** you will use — prefer `getByRole` with
+   `{ name }`, then `getByLabel`, then `getByTestId`. Never use CSS classes or
+   XPath.
+6. **Verify page transitions**: loading states, success messages, error displays.
+   Assert on what ACTUALLY appears, not what you assume.
+
+**If you cannot reach DEV** (network error, auth): note this in your verdict and
+do your best with code analysis alone, marking the limitation explicitly.
+
+### 3. Write the specs
+
+Under `e2e/`, create or update `*.spec.ts` files. **Consult the
+`playwright-authoring` skill** for the how (locators, waiting, fixtures) and for
+this app's capabilities: authentication, geolocation, mobile/offline,
+cookies/cache, file upload. Each test must:
+
+- **Use only selectors verified in step 2** — never invent selectors.
+- **Import the repo's shared harness**: `import { test, expect, ns } from
+  "../fixtures"` (NOT `@playwright/test` directly).
+- Fill in the app's login by overriding the `authenticate` fixture in
+  `e2e/fixtures.ts` (real steps, credentials from `process.env`, never literals).
+- Exercise the **real** path against DEV (no mocks).
+- Have **at least one real assert** on the observable outcome.
+- Be **deterministic** and **clean up** what it creates via `cleanup()`.
+
+### 4. Verify the tests compile (bash)
+
+After writing, run:
+```bash
+cd e2e && npx playwright test --list 2>&1
+```
+to verify the tests are discoverable. Fix any errors immediately.
+
+### 5. Record metadata
+
+For each test, add/update its entry in `e2e/.qa/manifest.json` with
+`{ id, objective, flow, targets, changeRef }`. One objective = one test.
+If updating an existing test, edit its entry — do not duplicate.
+
+### 6. Review (qa-reviewer subagent)
+
+Invoke the `qa-reviewer` subagent with the specs you wrote. Apply its
+corrections without rewriting what was correct. Repeat at most **2 rounds**;
+if it does not converge, note this in your verdict.
+
+### 7. Learn (engram)
+
+Save reusable lessons: fragile flows, selector gotchas, environment quirks.
+Use `mem_save` with `project` (the app name from the prompt) and `topic_key`
+to upsert so knowledge evolves across runs. **Always prefix topic_key with the
+test target** (e.g. `e2e/checkout`, `code/order-total`) so e2e and code-mode
+memory is isolated from each other. When searching, include the target in the
+query to avoid cross-mode contamination.
+
+## Final output
+
+End with a single JSON block, with no text after it:
 
 ```json
-{ "approved": true, "specs": ["login.spec.ts", "checkout.spec.ts"], "note": "" }
+{ "approved": true, "specs": ["login.spec.ts"], "note": "" }
 ```
 
 - `approved`: the reviewer's final verdict (`false` if it did not converge).
 - `specs`: names of the files you wrote/updated in `e2e/`.
-- `note`: the reason when `approved` is `false` (e.g. "did not converge in 2 rounds").
+- `note`: the reason when `approved` is `false`, or any limitation (e.g. "DEV unreachable, wrote tests from code analysis only").

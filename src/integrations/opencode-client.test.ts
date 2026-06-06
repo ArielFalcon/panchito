@@ -17,6 +17,7 @@ const input: OpencodeRunInput = {
   e2eRelDir: "e2e",
   namespace: "qa-bot-abc123",
   needsReview: true,
+  target: "e2e",
   mode: "diff",
   appName: "demo-app",
   intent: { type: "feat", breaking: false, message: "feat: new screen", changedFiles: ["src/x.ts"] },
@@ -24,7 +25,7 @@ const input: OpencodeRunInput = {
 
 function deps(finalText: string, captured?: { prompt?: string; agent?: string }): OpencodeDeps {
   return {
-    open: async (agent, cwd) => {
+    open: async (agent, cwd, _opts) => {
       if (captured) captured.agent = agent;
       assert.equal(cwd, input.mirrorDir); // the agent starts in the working copy
       return {
@@ -114,9 +115,14 @@ test("parseVerdict takes the LAST valid object", () => {
   assert.equal(v.note, "did not converge");
 });
 
-test("parseVerdict with no verdict fails closed (approved=false)", () => {
+test("parseVerdict with no verdict fails closed (approved=false) and flags the parse miss", () => {
   const v = parseVerdict("the agent said nothing structured");
   assert.equal(v.approved, false);
+  assert.equal(v.parsed, false); // distinguishes a parse miss from an explicit rejection
+});
+
+test("parseVerdict flags a successfully parsed verdict", () => {
+  assert.equal(parseVerdict('{ "approved": false, "specs": [] }').parsed, true);
 });
 
 test("runOpencode triggers the qa-generator agent and propagates the verdict", async () => {

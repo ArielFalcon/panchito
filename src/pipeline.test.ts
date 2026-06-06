@@ -76,6 +76,19 @@ function deps(
       calls.push("execute");
       return run;
     },
+    setupCode: async () => {
+      calls.push("setupCode");
+    },
+    executeCode: async () => {
+      calls.push("executeCode");
+      return run;
+    },
+    publishCode: async (input: { baseBranch: string }) => {
+      calls.push("publishCode");
+      assert.equal(input.baseBranch, "main");
+      h.published = true;
+      return opts.prUrl === undefined ? { prUrl: "https://github.com/org/demo/pull/9" } : opts.prUrl === null ? null : { prUrl: opts.prUrl };
+    },
     publish: async (input: { baseBranch: string }) => {
       calls.push("publish");
       assert.equal(input.baseBranch, "main");
@@ -267,4 +280,46 @@ test("shadow mode: on failure does NOT open an Issue", async () => {
   );
   await runPipeline(shadowApp, "abc123", d);
   assert.equal(d.issues.length, 0);
+});
+
+// ── Code mode (target "code") ────────────────────────────────────────────────
+const codeApp: AppConfig = {
+  name: "panchito",
+  repo: "org/panchito",
+  code: true,
+  qa: { needsReview: true, testDataPrefix: "qa-bot" },
+  report: { onFailure: "github-issue" },
+};
+
+test("code mode green: no gate/validate/health; setupCode → generate → executeCode → publishCode", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls);
+  await runPipeline(codeApp, "abc123", d, "manual", { mode: "diff", target: "code" });
+  assert.ok(!calls.includes("gate"), "no deploy gate in code mode");
+  assert.ok(!calls.includes("validate"), "no static gate in code mode");
+  assert.ok(!calls.includes("health"), "no health checks in code mode");
+  assert.ok(!calls.includes("execute"), "uses executeCode, not the Playwright runner");
+  assert.deepEqual(calls, ["prepare", "setupCode", "generate", "executeCode", "publishCode"]);
+  assert.equal(d.published, true);
+});
+
+test("code mode failure: opens a 'code tests failed' Issue, does not publish", async () => {
+  const calls: string[] = [];
+  const d = deps(
+    { sha: "s", verdict: "fail", passed: false, cases: [{ name: "node tests", status: "fail" }], logs: "1 failing" },
+    calls,
+  );
+  await runPipeline(codeApp, "abc123", d, "manual", { mode: "diff", target: "code" });
+  assert.equal(d.published, false);
+  assert.equal(d.issues.length, 1);
+  assert.match(d.issues[0]!, /code tests failed/);
+});
+
+test("code mode skip (no logic commit): does not generate or execute", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { message: "docs: readme", diff: "" });
+  const run = await runPipeline(codeApp, "abc123", d, "manual", { mode: "diff", target: "code" });
+  assert.equal(run.verdict, "skipped");
+  assert.ok(!calls.includes("generate"));
+  assert.ok(!calls.includes("executeCode"));
 });
