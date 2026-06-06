@@ -25,10 +25,12 @@ export interface PublishDeps {
   log?(msg: string): void;
 }
 
-const E2E_DIR = "e2e";
+// Commit e2e/ EXCEPT the volatile change-coverage dumps (e2e/.qa/coverage/*): committing them
+// would bloat PRs and, worse, make the "did anything change?" check think every run has changes.
+const E2E_PATHSPEC = ["e2e", ":(exclude)e2e/.qa/coverage", ":(exclude)e2e/.qa/coverage/**"];
 // Code-mode tests can live anywhere in the repo (the agent matches the repo's
 // conventions) — commit the whole tree, but never the installed dependencies.
-const CODE_PATHSPEC = [".", ":(exclude)node_modules", ":(exclude)**/node_modules"];
+const CODE_PATHSPEC = [".", ":(exclude)node_modules", ":(exclude)**/node_modules", ":(exclude)e2e/.qa/coverage/**"];
 
 interface PublishShape {
   statusPathspec: string[]; // pathspec for the "did anything change?" check
@@ -77,8 +79,8 @@ async function publishChanges(input: PublishInput, deps: PublishDeps, shape: Pub
 export async function publishE2e(input: PublishInput, deps: PublishDeps): Promise<{ prUrl: string } | null> {
   const short = shortSha(input.sha);
   return publishChanges(input, deps, {
-    statusPathspec: [E2E_DIR],
-    addPathspec: [E2E_DIR],
+    statusPathspec: E2E_PATHSPEC,
+    addPathspec: E2E_PATHSPEC,
     branch: `qa/e2e-${short}`,
     commitMsg: `test(e2e): automated QA for ${short}`,
     title: `QA E2E for ${short}`,

@@ -105,6 +105,44 @@ export const github = {
     return { merged: data.merged, state: data.state };
   },
 
+  // The OUTER GUARD's read side: the merge + aggregate-CI state of a PR, combining the PR object
+  // (merged/state) with the modern Checks API and the legacy commit-status API on the head commit.
+  // `checks` distinguishes "none" (NO checks exist yet/at all) from "success" (checks ran and are
+  // green) — critical so the promote loop does not merge during the window before CI registers.
+  async getPrStatus(
+    repo: string,
+    number: number,
+  ): Promise<{ merged: boolean; state: string; checks: "pending" | "success" | "failure" | "none" }> {
+    const prRes = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, { headers: ghHeaders() });
+    if (!prRes.ok) throw new Error(`GitHub get PR error ${prRes.status}: ${await prRes.text()}`);
+    const pr = (await prRes.json()) as { merged: boolean; state: string; head: { sha: string } };
+    const sha = pr.head.sha;
+
+    const [crRes, stRes] = await Promise.all([
+      fetch(`https://api.github.com/repos/${repo}/commits/${sha}/check-runs`, { headers: ghHeaders() }),
+      fetch(`https://api.github.com/repos/${repo}/commits/${sha}/status`, { headers: ghHeaders() }),
+    ]);
+    if (!crRes.ok) throw new Error(`GitHub check-runs error ${crRes.status}: ${await crRes.text()}`);
+    if (!stRes.ok) throw new Error(`GitHub status error ${stRes.status}: ${await stRes.text()}`);
+    const cr = (await crRes.json()) as { check_runs?: Array<{ status: string; conclusion: string | null }> };
+    const st = (await stRes.json()) as { state: string; total_count: number };
+
+    const runs = cr.check_runs ?? [];
+    let pending = false;
+    let failure = false;
+    for (const run of runs) {
+      if (run.status !== "completed") pending = true;
+      else if (run.conclusion && !["success", "neutral", "skipped"].includes(run.conclusion)) failure = true;
+    }
+    if (st.total_count > 0) {
+      if (st.state === "pending") pending = true;
+      if (st.state === "failure" || st.state === "error") failure = true;
+    }
+    const total = runs.length + st.total_count;
+    const checks = failure ? "failure" : pending ? "pending" : total === 0 ? "none" : "success";
+    return { merged: pr.merged, state: pr.state, checks };
+  },
+
   async getRepo(repo: string): Promise<RepoInfo> {
     const res = await fetch(`https://api.github.com/repos/${repo}`, {
       headers: ghHeaders(),

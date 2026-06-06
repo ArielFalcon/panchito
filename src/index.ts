@@ -10,7 +10,10 @@ import { handleMaintainerApi, recordIncident, setMaintainerStatus, getMaintainer
 import { getRecord, listRecords, currentRun, updateRecord, interruptedRecords } from "./server/history";
 import { testDataNamespace } from "./qa/test-data";
 import { enqueueTrackedRun } from "./server/runner";
-import { performSwap, confirmSwapHealthy, realSwapFs, SWAP_MARKER_FILE } from "./server/self-update";
+import { performSwap, confirmSwapHealthy, rollback, realSwapFs, SWAP_MARKER_FILE } from "./server/self-update";
+import { assessChange, assessRate, parseNumstat, readDeployHistory, recordDeploy } from "./server/merge-guard";
+import { recordFixFailure, readFixFailures, renderFailureMemory, realMemoryFs } from "./server/maintainer-memory";
+import { installHttpDispatcher } from "./util/net";
 import { resolveRef, defaultMirrorDeps, authHeaderArgs, type MirrorDeps } from "./integrations/repo-mirror";
 import { defaultOpencodeDeps, askAssistant, OpencodeDeps, startEventStream } from "./integrations/opencode-client";
 import { appendLog } from "./server/history";
@@ -23,6 +26,15 @@ const TOKEN_FILE = join(ROOT, "config", ".api_token");
 // The maintainer's autonomous merge+hot-swap is ON by default but can be disabled by
 // ops (then a maintainer fix stops at an open PR for a human to review and merge).
 const AUTONOMOUS_MAINTAINER = process.env.SELF_MAINTAINER_AUTOMERGE !== "false";
+// Persisted ledger of autonomous deploys (timestamps), used by the rate/loop guard. It lives
+// on the data volume so it survives the restart a hot-swap triggers (see merge-guard.ts).
+const DEPLOY_LEDGER = join(ROOT, "data", "maintainer-deploys.json");
+// Persistent memory of fixes that broke the service (rolled back / failed gate / failed CI),
+// injected into the next maintainer prompt so the agent does not repeat the same mistake.
+const FAILURE_MEMORY = join(ROOT, "data", "maintainer-failures.json");
+// Bridge written by boot-guard.mjs when it rolls back a crash-looping swap (the boot-guard can't
+// use the app's modules, so it drops the marker here for the app to fold into FAILURE_MEMORY).
+const ROLLBACK_BRIDGE = join(ROOT, "data", "last-rollback.json");
 
 const port = Number(process.env.PORT ?? 8080);
 const MAX_BODY = 1_000_000;
@@ -188,6 +200,9 @@ async function triggerMaintainer(): Promise<void> {
     // Step 2: Open agent session to diagnose and fix
     const session = await deps.open("qa-maintainer", maintainerWorkDir);
     try {
+      // Inject the memory of past failed fixes so the agent does not repeat a change that
+      // already broke the service for the same reason.
+      const failureMemory = renderFailureMemory(readFixFailures(FAILURE_MEMORY));
       const prompt = [
         "## Incident report",
         "",
@@ -195,6 +210,7 @@ async function triggerMaintainer(): Promise<void> {
         "Diagnose the root cause in the codebase (you are in the ai-pipeline repo)",
         "and implement a fix. After implementing, summarize what you changed.",
         "",
+        ...(failureMemory ? [failureMemory] : []),
         ...pending.map((i) =>
           [
             `### ${i.id}`,
@@ -210,9 +226,15 @@ async function triggerMaintainer(): Promise<void> {
         "Do NOT run git, do NOT clone, do NOT open a PR — the orchestrator owns all git",
         "operations and will commit, push and merge your changes for you.",
         "",
-        "This fix will be AUTO-MERGED to main and HOT-SWAPPED into the running service, so",
-        "you must PROVE it is necessary, minimal and safe. Output a summary in this format",
-        "(the `justification` is mandatory — without all three fields the fix is NOT deployed):",
+        "This fix is AUTO-DEPLOYED: it is hot-swapped into the running service, verified",
+        "healthy (the canary), and only then merged to main. So it must be NECESSARY, MINIMAL",
+        "and SAFE. Hard constraints (a fix that breaks them is blocked and left for a human):",
+        "  - Keep it small: at most 15 files / 400 changed lines.",
+        "  - Do NOT modify the recovery/build files: boot-guard.mjs, src/server/self-update.ts,",
+        "    src/server/merge-guard.ts, any Dockerfile, docker-compose.yml, or .github/ — these",
+        "    are the safety net and image build; changing them requires a human.",
+        "Output a summary in this format (the `justification` is mandatory — without all three",
+        "fields the fix is NOT deployed):",
         "```",
         "<!--MAINTAINER_SUMMARY",
         JSON.stringify({
@@ -295,68 +317,95 @@ async function triggerMaintainer(): Promise<void> {
         ].join("\n"),
       });
 
-      // Step 6: NO auto-merge. A self-modifying agent must never merge its own code
-      // into the branch it then deploys to itself — a human reviews and merges the PR.
-      console.log(`[maintainer] fix PR opened — awaiting human review and merge: ${pr.url}`);
-
       for (const inc of pending) updateIncident(inc.id, { status: "fixed", prUrl: pr.url });
       console.log(`[maintainer] fix PR opened: ${pr.url}`);
 
-      // Step 6: Safety gates BEFORE any autonomous merge + hot-swap.
-      //  (a) A valid necessity/optimality justification is MANDATORY (the requirement to
-      //      "prove the change is necessary and the solution optimal and safe").
-      if (!summary.justification) {
+      // The fix is now an OPEN PR. It is auto-deployed only after passing EVERY safety layer
+      // below. The deploy is a "canary before promote": the fix is hot-swapped into the
+      // RUNNING service first and proven healthy; main is merged only afterwards (in
+      // confirmSwapAfterBoot), so main — what a fresh container clones — is never poisoned by
+      // an unverified self-fix. Any layer that blocks leaves the PR open for a human.
+      const leaveForHuman = (why: string, severity: "warn" | "critical" = "warn") => {
         setMaintainerStatus("idle");
-        console.warn(`[maintainer] fix lacks a valid justification - PR left for a human, NOT auto-merging: ${pr.url}`);
-        return;
-      }
-      //  (b) Ops can disable autonomous merge entirely (then it stays a PR for a human).
-      if (!AUTONOMOUS_MAINTAINER) {
-        setMaintainerStatus("idle");
-        console.log(`[maintainer] autonomous merge disabled (SELF_MAINTAINER_AUTOMERGE=false) - PR left for a human: ${pr.url}`);
-        return;
-      }
-      //  (c) PRE-MERGE self-test gate: install + typecheck + tests on the fix branch HEAD.
-      //      A fix that fails its OWN gate is never merged.
+        if (severity === "critical") {
+          recordIncident({ source: "health-check", severity, summary: `maintainer fix NOT auto-deployed: ${why}`, detail: pr.url });
+        }
+        console.warn(`[maintainer] NOT auto-deploying (${why}) — PR left for a human: ${pr.url}`);
+      };
+
+      // Layer 1 — a valid necessity/minimality justification is MANDATORY.
+      if (!summary.justification) return leaveForHuman("fix lacks a valid justification");
+      // Layer 2 — ops kill-switch (default ON). When off, every fix stops at an open PR.
+      if (!AUTONOMOUS_MAINTAINER) return leaveForHuman("autonomous deploy disabled (SELF_MAINTAINER_AUTOMERGE=false)");
+
+      // Layer 3 — scope guard: the fix must be minimal and must NOT touch the recovery net or
+      // build/topology the canary cannot verify (boot-guard, self-update, merge-guard, …).
+      // --no-renames so a renamed protected file surfaces as a delete of its (protected) path
+      // rather than a single "old => new" entry that would slip past isProtectedPath.
+      const numstat = await mirrorDeps.git(["diff", "--numstat", "--no-renames", "origin/main...HEAD"], maintainerWorkDir);
+      const scope = assessChange(parseNumstat(numstat));
+      if (!scope.ok) return leaveForHuman(scope.reasons.join("; "), "critical");
+
+      // Layer 4 — rate / loop guard: cap autonomous deploys per window + cooldown, so a fix
+      // that doesn't fix cannot loop the system into endless self-modification.
+      const rate = assessRate(readDeployHistory(DEPLOY_LEDGER), Date.now());
+      if (!rate.ok) return leaveForHuman(rate.reasons.join("; "), "critical");
+
+      // Layer 5 — pre-deploy self-test gate: install + typecheck + tests on the fix branch.
+      // A fix that fails its OWN gate is never deployed.
       const { execSync } = await import("node:child_process");
       try {
         execSync("npm install --no-audit --no-fund", { cwd: maintainerWorkDir, stdio: "inherit" });
         execSync("npm run typecheck", { cwd: maintainerWorkDir, stdio: "inherit" });
         execSync("npm test", { cwd: maintainerWorkDir, stdio: "inherit" });
       } catch (gateErr) {
+        const detail = gateErr instanceof Error ? gateErr.message : String(gateErr);
         recordIncident({
           source: "health-check",
           severity: "critical",
-          summary: "maintainer fix FAILED its pre-merge self-test gate - NOT merging",
-          detail: gateErr instanceof Error ? gateErr.message : String(gateErr),
+          summary: "maintainer fix FAILED its pre-deploy self-test gate — NOT deploying",
+          detail,
         });
-        setMaintainerStatus("idle");
-        console.error(`[maintainer] pre-merge gate failed - refusing to merge. PR left for a human: ${pr.url}`);
-        return;
+        recordFixFailure(FAILURE_MEMORY, {
+          at: new Date().toISOString(),
+          reason: "pre-deploy-gate",
+          prTitle: summary.prTitle,
+          prUrl: pr.url,
+          changes: summary.changes,
+          rootCause: summary.justification?.rootCause,
+          detail: "npm typecheck/test failed on the fix branch",
+        });
+        return leaveForHuman("failed its pre-deploy self-test gate");
       }
 
-      // Step 7: Gate green -> merge deterministically (independent of branch protection).
-      await github.mergePullRequest(SELF_REPO, pr.number);
-      console.log(`[maintainer] gate green - merged ${pr.url}`);
-
-      // Step 8: Adopt the merged code and HOT-SWAP with rollback safety.
-      await mirrorDeps.git(["fetch", "origin"], maintainerWorkDir);
-      await mirrorDeps.git(["checkout", "-f", "main"], maintainerWorkDir);
-      await mirrorDeps.git(["reset", "--hard", "origin/main"], maintainerWorkDir);
-
-      // Never kill an in-flight QA run: wait for the queue to drain before swapping.
-      console.log("[maintainer] waiting for the queue to drain before hot-swap...");
+      // All gates green → CANARY DEPLOY. Never kill an in-flight QA run: drain the queue first.
+      console.log("[maintainer] all safety gates green — waiting for the queue to drain before canary swap...");
       await queue.drain();
 
-      // Atomic-ish swap: back up the running tree, stage the new code, arm the boot-guard
-      // marker. boot-guard.mjs (root, never swapped) restores the backup if the new code
-      // fails to boot healthy - so a bad fix can never brick the service.
+      // Swap the fix-branch code into the running tree (with backup + boot-guard marker) and
+      // attach the PR so the post-restart health check PROMOTES it (merges to main) only once
+      // the canary is healthy. boot-guard.mjs (never swapped) restores the backup if the new
+      // code fails to boot — and because the PR is unmerged at this point, a rollback leaves
+      // main pristine, so the service can never reach an unrecoverable state. If performSwap
+      // throws (e.g. a bind-mounted src/ in dev → EBUSY), the outer catch leaves the PR for a
+      // human and nothing is deployed — it fails safe.
       performSwap(process.cwd(), maintainerWorkDir, join(ROOT, "data"), {
         at: new Date().toISOString(),
         prUrl: pr.url,
+        promote: { repo: SELF_REPO, prNumber: pr.number, nodeId: pr.nodeId },
+        fix: { prTitle: summary.prTitle, changes: summary.changes, rootCause: summary.justification.rootCause },
       });
-      execSync("npm install --no-audit --no-fund", { cwd: process.cwd(), stdio: "inherit" });
-      console.log("[maintainer] swap staged with rollback guard - restarting to apply.");
+      // The swap is staged → count the deploy in the persisted ledger (survives the restart) so
+      // the rate guard sees it. Only counted once the swap actually succeeded.
+      recordDeploy(DEPLOY_LEDGER, Date.now());
+      // Best-effort dep sync for the new code. If it fails we still restart: the swapped code's
+      // boot will fail and the boot-guard rolls back — never leave a staged swap unapplied.
+      try {
+        execSync("npm install --no-audit --no-fund", { cwd: process.cwd(), stdio: "inherit" });
+      } catch (installErr) {
+        console.error(`[maintainer] post-swap npm install failed (${installErr instanceof Error ? installErr.message : String(installErr)}) — restarting anyway; boot-guard is the backstop.`);
+      }
+      console.log("[maintainer] canary swap staged with rollback guard — restarting to verify, then promote.");
       process.exit(0);
 
     } finally {
@@ -434,25 +483,202 @@ function recoverMaintainerState(): void {
   }
 }
 
-// After a maintainer hot-swap restart, the boot-guard armed a marker. If this (the new)
-// code comes up and answers a health check, the swap is GOOD → clear the marker + backups
-// so the boot-guard stops counting attempts. If it never gets here (crash), the boot-guard
-// rolls back after MAX_BOOT_ATTEMPTS.
+// After a maintainer canary swap restart, the boot-guard armed a marker. This is the
+// PROMOTE-OR-ROLLBACK decision point: if this (the new) code comes up and answers the health
+// check, the canary is GOOD → merge the PR to main (promote) and clear the marker + backups.
+// If the deep check fails, roll back to the backed-up code immediately and restart — the PR is
+// never merged, so main stays known-good. (A hard crash that never reaches here is caught by
+// boot-guard.mjs, which rolls back after MAX_BOOT_ATTEMPTS — same end state: main untouched.)
 function confirmSwapAfterBoot(): void {
-  const marker = realSwapFs.readMarker(join(ROOT, "data", SWAP_MARKER_FILE));
+  const dataDir = join(ROOT, "data");
+  const marker = realSwapFs.readMarker(join(dataDir, SWAP_MARKER_FILE));
   if (!marker) return;
-  console.log(`[maintainer] a swap is pending verification (attempt ${marker.attempt}) — checking health...`);
+  console.log(`[maintainer] a canary swap is pending verification (attempt ${marker.attempt}) — checking health...`);
   setTimeout(async () => {
+    const healthy = await canaryHealthy();
+    if (!healthy) {
+      // Functionally broken canary (booted but not serving): roll back to the backup now and
+      // restart into it. The PR is unmerged → main is still the last known-good code.
+      recordIncident({
+        source: "health-check",
+        severity: "critical",
+        summary: "maintainer canary failed its post-deploy health check — rolling back",
+        detail: marker.prUrl,
+      });
+      recordFixFailure(FAILURE_MEMORY, {
+        at: new Date().toISOString(),
+        reason: "canary-unhealthy",
+        prTitle: marker.fix?.prTitle,
+        prUrl: marker.prUrl,
+        changes: marker.fix?.changes,
+        rootCause: marker.fix?.rootCause,
+        detail: "the swapped code booted but did not serve /api/health",
+      });
+      const rolled = rollback(process.cwd(), dataDir);
+      console.error(`[maintainer] canary unhealthy — ${rolled ? "rolled back to previous code" : "NO backup to roll back to"}; PR left unmerged: ${marker.prUrl ?? ""}`);
+      if (rolled) {
+        try {
+          (await import("node:child_process")).execSync("npm install --no-audit --no-fund", { cwd: process.cwd(), stdio: "inherit" });
+        } catch {
+          /* best effort; boot-guard remains as the backstop */
+        }
+        process.exit(1); // restart into the restored, known-good code
+      }
+      return;
+    }
+    // Canary healthy → clear the rollback marker FIRST, so a slow promotion can never cause the
+    // boot-guard to roll back an already-healthy service on a later restart.
+    confirmSwapHealthy(process.cwd(), dataDir);
+    console.log(`[maintainer] canary verified healthy — cleared rollback marker.${marker.prUrl ? ` (${marker.prUrl})` : ""}`);
+    // Then PROMOTE: merge the PR so main adopts the now-proven fix. Promotion is gated by the
+    // OUTER GUARD (the required CI check on main) and is best-effort — the running service
+    // already has the fix, so a promotion failure never rolls it back, only flags a human.
+    if (marker.promote) await promote(marker.promote, marker.prUrl, marker.fix);
+  }, 20_000);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Promote a canary-verified fix to main, respecting the OUTER GUARD (the required CI check on
+// main). It (1) enables GitHub-native auto-merge so the guard is enforced server-side even if
+// this process dies, and (2) ALWAYS observes the outcome by polling — so it merges itself when
+// there is no branch protection, and records a failure into the maintainer memory whenever CI
+// goes red, for BOTH paths. The running service already has the fix, so a promote failure never
+// rolls anything back; it only leaves the PR open and flags a human.
+async function promote(
+  p: { repo: string; prNumber: number; nodeId: string },
+  prUrl?: string,
+  fix?: { prTitle?: string; changes?: string[]; rootCause?: string },
+): Promise<void> {
+  const ref = prUrl ?? `PR #${p.prNumber}`;
+  const noteFailure = (reason: "ci-failed" | "ci-timeout", detail: string) =>
+    recordFixFailure(FAILURE_MEMORY, { at: new Date().toISOString(), reason, prTitle: fix?.prTitle, prUrl, changes: fix?.changes, rootCause: fix?.rootCause, detail });
+  const mergeNow = async (why: string): Promise<void> => {
+    try {
+      await github.mergePullRequest(p.repo, p.prNumber);
+      console.log(`[maintainer] ${why} — promoted (merged) ${ref} to main.`);
+    } catch (err) {
+      recordIncident({
+        source: "health-check",
+        severity: "warn",
+        summary: "maintainer canary healthy and CI green but the merge call failed — merge it manually",
+        detail: `${ref} ${err instanceof Error ? err.message : String(err)}`.trim(),
+      });
+      console.warn(`[maintainer] merge failed for ${ref}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  // 1. Prefer GitHub-native auto-merge (server-side enforcement; survives our death). Unavailable
+  //    without branch protection — then we self-enforce by polling below.
+  let autoMerge = false;
+  try {
+    await github.enableAutoMerge(p.nodeId);
+    autoMerge = true;
+    console.log(`[maintainer] auto-merge enabled for ${ref} — GitHub will merge once the required CI check passes.`);
+  } catch (err) {
+    console.warn(`[maintainer] native auto-merge unavailable (${err instanceof Error ? err.message : String(err)}) — self-enforcing the CI gate.`);
+  }
+
+  // 2. Observe the outcome so we both finish the merge when appropriate and LEARN on CI failure.
+  const start = Date.now();
+  const deadline = start + 10 * 60 * 1000; // up to 10 min for CI to complete / auto-merge to land
+  const graceMs = 90 * 1000; // give CI time to register before trusting a "no checks" reading
+  while (Date.now() < deadline) {
+    let s: { merged: boolean; state: string; checks: "pending" | "success" | "failure" | "none" };
+    try {
+      s = await github.getPrStatus(p.repo, p.prNumber);
+    } catch (err) {
+      console.warn(`[maintainer] could not read PR status for ${ref}: ${err instanceof Error ? err.message : String(err)}`);
+      await sleep(15_000);
+      continue;
+    }
+    if (s.merged) {
+      console.log(`[maintainer] promoted (merged) ${ref} to main.`);
+      return;
+    }
+    if (s.state === "closed") {
+      noteFailure("ci-failed", "the PR was closed without merging");
+      console.warn(`[maintainer] ${ref} was closed without merging — not promoted.`);
+      return;
+    }
+    if (s.checks === "failure") {
+      recordIncident({
+        source: "health-check",
+        severity: "warn",
+        summary: "maintainer canary healthy but its PR FAILED the required CI check — NOT merged to main",
+        detail: ref,
+      });
+      noteFailure("ci-failed", "the required CI check on main went red for this fix");
+      console.warn(`[maintainer] CI failed for ${ref} — leaving the PR open (main untouched).`);
+      return;
+    }
+    if (!autoMerge && s.checks === "success") {
+      // No branch protection: CI is green, merge it ourselves.
+      await mergeNow("CI green");
+      return;
+    }
+    if (!autoMerge && s.checks === "none" && Date.now() - start > graceMs) {
+      // No CI configured and no protection: nothing to wait on → merge directly.
+      await mergeNow("no CI configured");
+      return;
+    }
+    // pending; or (autoMerge waiting for GitHub to land the merge); or (none still within grace).
+    await sleep(15_000);
+  }
+  recordIncident({
+    source: "health-check",
+    severity: "warn",
+    summary: "maintainer canary healthy but its PR did not merge in time (CI slow/stuck) — finish it manually",
+    detail: ref,
+  });
+  noteFailure("ci-timeout", "the required CI check did not complete (or auto-merge did not land) within the promote window");
+  console.warn(`[maintainer] promote timed out for ${ref} — PR left open.`);
+}
+
+// Canary health probe: two health checks a few seconds apart must both succeed, so a
+// momentary boot blip doesn't pass as healthy. The full test suite already ran in the
+// pre-deploy gate; this confirms the code actually boots and serves in the real container.
+async function canaryHealthy(): Promise<boolean> {
+  for (let i = 0; i < 2; i++) {
     try {
       const res = await fetch(`http://localhost:${port}/api/health`);
-      if (res.ok) {
-        confirmSwapHealthy(process.cwd(), join(ROOT, "data"));
-        console.log(`[maintainer] swap verified healthy — cleared rollback marker.${marker.prUrl ? ` (${marker.prUrl})` : ""}`);
-      }
+      if (!res.ok) return false;
     } catch {
-      /* unhealthy → leave the marker so the boot-guard rolls back on the next restart */
+      return false;
     }
-  }, 20_000);
+    if (i === 0) await new Promise((r) => setTimeout(r, 3_000));
+  }
+  return true;
+}
+
+// If boot-guard.mjs rolled back a crash-looping swap, it left a bridge file (it can't use the
+// app's modules). Fold it into the maintainer's failure memory + an incident so the agent learns
+// the fix crash-looped, then remove the bridge.
+function recoverRollbackRecord(): void {
+  const raw = realMemoryFs.read(ROLLBACK_BRIDGE);
+  if (!raw) return;
+  try {
+    const m = JSON.parse(raw) as { prUrl?: string; fix?: { prTitle?: string; changes?: string[]; rootCause?: string } };
+    recordFixFailure(FAILURE_MEMORY, {
+      at: new Date().toISOString(),
+      reason: "boot-crash-loop",
+      prTitle: m.fix?.prTitle,
+      prUrl: m.prUrl,
+      changes: m.fix?.changes,
+      rootCause: m.fix?.rootCause,
+      detail: "the swapped code failed to boot repeatedly; boot-guard restored the previous code",
+    });
+    recordIncident({
+      source: "health-check",
+      severity: "critical",
+      summary: "a maintainer fix crash-looped and was rolled back by the boot-guard",
+      detail: m.prUrl,
+    });
+    console.error(`[maintainer] recovered from a boot-guard rollback — recorded to failure memory.${m.prUrl ? ` (${m.prUrl})` : ""}`);
+  } catch {
+    /* corrupt bridge — ignore */
+  }
+  realMemoryFs.remove(ROLLBACK_BRIDGE);
 }
 
 function finalizeInterruptedRuns(): void {
@@ -613,12 +839,17 @@ const server = createServer(async (req, res) => {
 
 server.listen(port, () => {
   console.log(`ai-pipeline listening on :${port}${apiToken ? " (API auth on)" : ""}`);
+  // Make global fetch proxy-aware (HTTP(S)_PROXY/NO_PROXY) from boot, before any GitHub API or
+  // health call. No-op when no proxy is configured. (A per-run build refines the timeouts.)
+  const startupTimeout = Number(process.env.OPENCODE_TIMEOUT_MS) || 900_000;
+  installHttpDispatcher(startupTimeout).catch((err) => console.warn(`[qa] HTTP dispatcher setup failed: ${err instanceof Error ? err.message : String(err)}`));
   // Start the SSE event stream from OpenCode so agent activity (tool calls,
   // file edits, streaming text) is routed to RunRecord logs in real time.
   startEventStream(
     (runId, text) => appendLog(runId, text),
     eventStreamController.signal,
   ).catch((err) => console.warn(`[qa] event stream failed: ${err instanceof Error ? err.message : String(err)}`));
+  recoverRollbackRecord();
   confirmSwapAfterBoot();
   finalizeInterruptedRuns();
   startHealthPoller();

@@ -60,7 +60,7 @@
       "model": "opencode-go/deepseek-v4-flash",
       "prompt": "{file:./agent/qa-worker.md}",
       "tools": { "write": true, "edit": false, "read": true, "bash": false },
-      "mcp": ["serena"],
+      "mcp": ["serena", "playwright"],
       "steps": 25,
       "temperature": 0.3
     }
@@ -69,15 +69,12 @@
     "serena": {
       "type": "local",
       "command": [
-        "uvx",
-        "--from",
-        "git+https://github.com/oraios/serena",
         "serena",
         "start-mcp-server",
-        "--context",
-        "ide-assistant",
         "--transport",
-        "stdio"
+        "stdio",
+        "--context",
+        "ide-assistant"
       ],
       "enabled": true
     },

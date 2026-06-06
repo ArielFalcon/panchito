@@ -8,11 +8,15 @@
 // in git. For the "how" of each capability, see the `playwright-authoring` skill.
 
 import { test as base, expect, type BrowserContext, type Page } from "@playwright/test";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 export interface QaFixtures {
   namespace: string; // the run's data prefix (qa-bot-<sha>)
   authenticate: () => Promise<void>; // the app's real login (Keycloak)
   cleanup: (undo: () => Promise<void>) => void; // registers undo steps (LIFO, automatic)
+  // system-owned: do not edit — the orchestrator reads these dumps for change-coverage.
+  _coverage: void;
 }
 
 export const test = base.extend<QaFixtures>({
@@ -51,6 +55,37 @@ export const test = base.extend<QaFixtures>({
           await undo();
         } catch (e) {
           console.error("[cleanup] failed to undo test data:", e);
+        }
+      }
+    },
+    { auto: true },
+  ],
+
+  // system-owned: do not edit. Collects V8 JS coverage (Chromium) per test and dumps it to
+  // .qa/coverage/, which the orchestrator intersects with the diff for change-coverage. Best
+  // effort: a no-op on non-Chromium browsers or when coverage is disabled (PW_COVERAGE=0); never
+  // fails a test. Disabled automatically during the cleanup-only pass (PW_CLEANUP).
+  _coverage: [
+    async ({ page }, use, testInfo) => {
+      const enabled = process.env.PW_COVERAGE !== "0" && !process.env.PW_CLEANUP && !!page.coverage;
+      if (enabled) {
+        try {
+          await page.coverage.startJSCoverage({ resetOnNavigation: false });
+        } catch {
+          /* unsupported → skip */
+        }
+      }
+      await use();
+      if (enabled) {
+        try {
+          const entries = await page.coverage.stopJSCoverage();
+          // Per-namespace subdir (qa-bot-<sha>): the orchestrator reads only this run's dumps.
+          const dir = join(process.cwd(), ".qa", "coverage", process.env.PW_NAMESPACE ?? "local");
+          mkdirSync(dir, { recursive: true });
+          const safe = testInfo.titlePath.join("-").replace(/[^a-z0-9]+/gi, "-").slice(0, 60);
+          writeFileSync(join(dir, `${safe}-${testInfo.workerIndex}-${testInfo.repeatEachIndex}.json`), JSON.stringify(entries));
+        } catch {
+          /* best effort — coverage is a signal, never a blocker */
         }
       }
     },

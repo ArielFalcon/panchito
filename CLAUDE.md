@@ -146,6 +146,10 @@ with the `opencode-go/` prefix (no per-provider keys):
 - `qa-reviewer` (subagent, `qwen3.7-max`) — read-only quality judge, emits a JSON verdict.
 - `qa-maintainer` (primary, `deepseek-v4-pro`) — self-repair of THIS repo: diagnoses
   incidents, opens a fix PR; never touches watched repos. Used by `triggerMaintainer`.
+  The fix is **auto-deployed by default** (`SELF_MAINTAINER_AUTOMERGE`) through layered
+  safety gates (`src/server/merge-guard.ts`) + a **canary-before-promote** hot-swap with
+  boot-guard rollback, gated by a **required `ci` check on `main`** (the outer guard). See
+  [docs/self-maintenance.md](docs/self-maintenance.md) before touching this path.
 - `qa-assistant` (`deepseek-v4-flash`) — read-only run Q&A for the TUI chat; no tools,
   answers only from the provided run context. Used by `/api/runs/:id/ask`.
 

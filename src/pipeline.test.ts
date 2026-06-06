@@ -1,8 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runPipeline, PipelineDeps, GenerateInput } from "./pipeline";
+import { ReviewResult } from "./integrations/opencode-client";
+import { CoveredLines } from "./qa/change-coverage";
 import { AppConfig } from "./orchestrator/config-loader";
 import { AgentResult, QaRunResult, RunMode } from "./types";
+
+// A unified diff with one file and 4 added lines (1-4), so parseDiffHunks yields changed lines.
+const DIFF_4 = ["diff --git a/src/x.ts b/src/x.ts", "+++ b/src/x.ts", "@@ -0,0 +1,4 @@", "+a", "+b", "+c", "+d"].join("\n");
+const cov = (lines: number[]): CoveredLines => new Map([["src/x.ts", new Set(lines)]]);
 
 const app: AppConfig = {
   name: "demo",
@@ -29,6 +35,7 @@ interface Harness extends PipelineDeps {
   published: boolean;
   genMode?: RunMode;
   genGuidance?: string;
+  genInputs: GenerateInput[]; // every generate() call's input, to inspect reinjected corrections
 }
 
 function deps(
@@ -38,14 +45,20 @@ function deps(
     validation?: { ok: boolean; errors: string[] };
     prUrl?: string | null;
     agent?: AgentResult;
+    agents?: AgentResult[]; // a sequence of agent results, one per generate() call
+    review?: ReviewResult[]; // a sequence of independent-review verdicts, one per review() call
     healthy?: boolean | boolean[]; // a single value, or a sequence per call
     message?: string; // commit message (classification)
     diff?: string;
+    coverage?: Array<CoveredLines | null>; // a sequence of collectCoverage results, one per call
   } = {},
 ): Harness {
   const issues: string[] = [];
-  const h = { issues, published: false } as Harness;
+  const h = { issues, published: false, genInputs: [] } as unknown as Harness;
   const healthSeq = Array.isArray(opts.healthy) ? [...opts.healthy] : null;
+  const agentSeq = opts.agents ? [...opts.agents] : null;
+  const reviewSeq = opts.review ? [...opts.review] : null;
+  const covSeq = opts.coverage ? [...opts.coverage] : null;
   Object.assign(h, {
     waitForDeploy: async () => {
       calls.push("gate");
@@ -58,8 +71,26 @@ function deps(
       calls.push("generate");
       h.genMode = input.mode;
       h.genGuidance = input.guidance;
+      h.genInputs.push(input);
+      if (agentSeq) return agentSeq.shift() ?? opts.agent ?? generated;
       return opts.agent ?? generated;
     },
+    ...(opts.review
+      ? {
+          review: async () => {
+            calls.push("review");
+            return reviewSeq!.shift() ?? { approved: true, corrections: [] };
+          },
+        }
+      : {}),
+    ...(opts.coverage
+      ? {
+          collectCoverage: async () => {
+            calls.push("coverage");
+            return covSeq!.length ? covSeq!.shift()! : null;
+          },
+        }
+      : {}),
     setupE2e: async () => {
       calls.push("setup");
     },
@@ -185,6 +216,112 @@ test("green but the reviewer did NOT approve: does not publish, opens a review I
   assert.equal(d.published, false);
   assert.equal(d.issues.length, 1);
   assert.match(d.issues[0]!, /did not approve/);
+});
+
+test("reviewer rejects then approves: reinjects corrections, regenerates, and publishes", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, {
+    agents: [generated, generated], // round 0 + the regenerated round
+    review: [
+      { approved: false, corrections: ["a.spec.ts: assert the outcome, not just the click"] },
+      { approved: true, corrections: [] },
+    ],
+  });
+  await runPipeline(app, "abc123", d);
+  // generate ran twice (initial + after corrections); review ran twice
+  assert.equal(calls.filter((c) => c === "generate").length, 2);
+  assert.equal(calls.filter((c) => c === "review").length, 2);
+  // the second generate received the reviewer's corrections
+  assert.deepEqual(d.genInputs[1]!.reviewCorrections, ["a.spec.ts: assert the outcome, not just the click"]);
+  assert.equal(d.published, true);
+  assert.equal(d.issues.length, 0);
+});
+
+test("reviewer never converges: bounded at MAX_REVIEW_ROUNDS, no publish, opens a review Issue", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, {
+    agents: [generated, generated, generated],
+    review: [
+      { approved: false, corrections: ["x"] },
+      { approved: false, corrections: ["y"] },
+      { approved: false, corrections: ["z"] },
+    ],
+  });
+  await runPipeline(app, "abc123", d);
+  // 2 rounds: generate(initial) → review(reject) → generate(fix) → review(reject) → stop
+  assert.equal(calls.filter((c) => c === "generate").length, 2);
+  assert.equal(calls.filter((c) => c === "review").length, 2);
+  assert.equal(d.published, false);
+  assert.equal(d.issues.length, 1);
+  assert.match(d.issues[0]!, /did not approve/);
+});
+
+test("reviewer error fails open: trusts the generator and publishes", async () => {
+  const calls: string[] = [];
+  const h = deps(passing(), calls, {});
+  // a review() that throws → fail open
+  (h as PipelineDeps).review = async () => {
+    calls.push("review");
+    throw new Error("reviewer crashed");
+  };
+  await runPipeline(app, "abc123", h);
+  assert.equal(calls.filter((c) => c === "generate").length, 1);
+  assert.equal(h.published, true);
+  assert.equal(h.issues.length, 0);
+});
+
+// ── change-coverage (Filter D) ───────────────────────────────────────────────
+
+const covApp = (mode: "off" | "signal" | "enforce", minRatio = 0.7): AppConfig => ({
+  ...app,
+  qa: { ...app.qa, changeCoverage: { mode, minRatio } },
+});
+
+test("change-coverage signal: low coverage is recorded but NEVER blocks publishing", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { diff: DIFF_4, coverage: [cov([1])] }); // 1/4 changed lines
+  await runPipeline(covApp("signal"), "abc123", d);
+  assert.ok(calls.includes("coverage"));
+  assert.equal(d.published, true);
+  assert.equal(d.issues.length, 0);
+});
+
+test("change-coverage enforce: low coverage that can't be improved blocks publish, opens an Issue", async () => {
+  const calls: string[] = [];
+  // first agent generates; the improvement attempt produces no new specs → cannot close the gap
+  const noFix: AgentResult = { output: "x", specs: [], reviewed: true, approved: true };
+  const d = deps(passing(), calls, { diff: DIFF_4, agents: [generated, noFix], coverage: [cov([1]), cov([1])] });
+  await runPipeline(covApp("enforce"), "abc123", d);
+  assert.equal(d.published, false);
+  assert.equal(d.issues.length, 1);
+  assert.match(d.issues[0]!, /change-coverage threshold/);
+});
+
+test("change-coverage enforce: the improvement closes the gap → publishes", async () => {
+  const calls: string[] = [];
+  // second collectCoverage (after the improvement re-run) reports full coverage
+  const d = deps(passing(), calls, { diff: DIFF_4, agents: [generated, generated], coverage: [cov([1]), cov([1, 2, 3, 4])] });
+  await runPipeline(covApp("enforce"), "abc123", d);
+  assert.equal(d.published, true);
+  assert.equal(d.issues.length, 0);
+  // the improvement regeneration received the coverage gap
+  assert.ok(d.genInputs.some((g) => typeof g.coverageGap === "string" && /not exercised/i.test(g.coverageGap!)));
+});
+
+test("change-coverage enforce: unmeasured coverage (null) is 'unknown' and never blocks", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { diff: DIFF_4, coverage: [null] });
+  await runPipeline(covApp("enforce"), "abc123", d);
+  assert.equal(d.published, true);
+  assert.equal(d.issues.length, 0);
+});
+
+test("change-coverage off: the step is skipped entirely", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { diff: DIFF_4, coverage: [cov([1])] });
+  await runPipeline(covApp("off"), "abc123", d);
+  assert.ok(!calls.includes("coverage"));
+  assert.equal(d.published, true);
 });
 
 test("DEV unhealthy before execution: infra-error, neither executes nor reports as a bug", async () => {

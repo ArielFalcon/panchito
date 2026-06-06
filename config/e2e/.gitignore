@@ -6,3 +6,6 @@ playwright-report/
 blob-report/
 .serena/
 *.log
+# Volatile change-coverage dumps (system-owned, regenerated each run). The .qa/ manifest and
+# analysis.json ARE committed (suite metadata); the raw V8 coverage is not.
+.qa/coverage/
