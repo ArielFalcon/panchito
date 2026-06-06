@@ -10,9 +10,14 @@ import { Section } from "./Section";
 import { HistoryList, toHistoryItems } from "./HistoryList";
 
 export function Dashboard({ record }: { record: RunRecord }): React.ReactElement {
-  const { app, sha, target, mode, step, verdict, passed = 0, failed = 0, cases, specs } = record;
+  const { app, sha, target, mode, step, verdict, passed = 0, failed = 0, cases, specs, logs } = record;
   const total = cases.length;
   const isCode = target === "code";
+
+  // When a step is active, surface the latest pipeline log as live feedback so the
+  // operator can see what the pipeline is doing right now (e.g. "agent exploring
+  // page with Playwright MCP...").
+  const lastLog = logs.length > 0 ? logs[logs.length - 1]!.replace(/^\[qa\] /, "") : undefined;
 
   return (
     <Box flexDirection="column" paddingX={1}>
@@ -36,7 +41,9 @@ export function Dashboard({ record }: { record: RunRecord }): React.ReactElement
               key={s}
               step={s}
               state={st}
-              detail={s === step ? record.stepDetail : undefined}
+              // Show live detail on the active step. When retrying, "execute" is the active step
+              // (stepState maps "retry" → execute=active), so match that too.
+              detail={(s === step || (step === "retry" && s === "execute")) ? (record.stepDetail || lastLog) : undefined}
               caseCount={s === "execute" ? cc : undefined}
               specCount={s === "generate" ? specs?.length : undefined}
             >

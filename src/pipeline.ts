@@ -182,6 +182,7 @@ export async function runPipeline(
   }
 
   if (mode === "diff") {
+    onStep?.("classify");
     const cls = classifyCommit(message, diff);
     log(`[qa] commit '${cls.type}' → ${cls.action}${cls.contradiction ? " (message/diff contradiction)" : ""}: ${cls.reason}`);
     if (cls.action === "skip" && !isContinuation) {
@@ -218,6 +219,7 @@ export async function runPipeline(
   let result: AgentResult | null = null;
   if (generating) {
     checkSignal();
+    onStep?.("generate");
     log("[qa] generating E2E tests with OpenCode...");
     result = await deps.generate({
       repo: app.repo,
@@ -284,6 +286,7 @@ export async function runPipeline(
   //    mode has no separate static gate: running the repo's own suite IS the gate
   //    (the tests won't pass if the generated code doesn't compile), so we skip it.
   if (!isCode) {
+    onStep?.("validate");
     log("[qa] validating specs (typecheck + lint + list + manifest)...");
     const validation = await deps.validate(e2eDir);
     if (!validation.ok) {
@@ -315,6 +318,7 @@ export async function runPipeline(
     await report(app, sha, run, deps, log, shadow, isCode);
     return run;
   } else {
+    onStep?.("execute");
     log(`[qa] running E2E (namespace ${ns}) against ${app.dev.baseUrl}...`);
     run = await deps.execute(e2eDir, { baseUrl: app.dev.baseUrl, namespace: ns, onCase });
     // Infra vs quality: failures with an unhealthy DEV are infrastructure, not code.
@@ -334,6 +338,7 @@ export async function runPipeline(
     );
 
     log("[qa] re-generating with failure feedback...");
+    onStep?.("retry");
     result = await deps.generate({
       repo: app.repo,
       sha,
