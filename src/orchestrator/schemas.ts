@@ -1,0 +1,110 @@
+import { z } from "zod";
+
+// ── AppConfig schema ──────────────────────────────────────────────────────────
+// Validates YAML config loaded from config/apps/<name>.yaml. Replaces the unsafe
+// `parse(raw) as AppConfig` cast with runtime validation.
+export const AppConfigSchema = z
+  .object({
+    name: z.string().min(1, { error: "app name is required" }),
+    repo: z.string().min(1, { error: "repo is required (e.g. 'org/repo')" }),
+    baseBranch: z.string().optional(),
+    openapi: z.union([z.string(), z.array(z.string())]).optional(),
+    // `dev` is OPTIONAL: code-mode apps (code: true) test source-code logic with no
+    // web environment, so they have no DEV URL. The refine below enforces presence
+    // for e2e apps.
+    dev: z
+      .object({
+        baseUrl: z.url({ error: "dev.baseUrl must be a valid URL" }),
+        versionUrl: z.url().optional(),
+        pollIntervalMs: z.number().int().positive().optional(),
+        deployTimeoutMs: z.number().int().positive().optional(),
+      })
+      .optional(),
+    qa: z.object({
+      needsReview: z.boolean(),
+      testDataPrefix: z.string().min(1, { error: "qa.testDataPrefix is required" }),
+      shadow: z.boolean().optional(),
+    }),
+    code: z.boolean().optional(),
+    report: z.object({
+      onFailure: z.string().min(1),
+    }),
+  })
+  .refine((c) => c.code === true || c.dev !== undefined, {
+    error: "dev is required unless code: true (code mode has no web environment)",
+    path: ["dev"],
+  });
+
+export type ValidatedAppConfig = z.infer<typeof AppConfigSchema>;
+
+// ── Manifest entry schema ─────────────────────────────────────────────────────
+// Per-test metadata that lives in e2e/.qa/manifest.json. Validates the day-one
+// fields written by the agent; measured/derived fields are optional.
+export const ManifestEntrySchema = z.object({
+  id: z.string().min(1, { error: "manifest entry missing 'id'" }),
+  objective: z.string().min(1, { error: "manifest entry missing 'objective'" }),
+  flow: z.string().min(1, { error: "manifest entry missing 'flow'" }),
+  useCase: z.string().optional(),
+  targets: z.array(z.string()).min(1, { error: "manifest entry has empty 'targets'" }),
+  changeRef: z.object({
+    sha: z.string().min(1),
+    type: z.string().min(1),
+    pr: z.number().optional(),
+    ticket: z.string().optional(),
+  }),
+  criticality: z.enum(["critical", "normal"]).optional(),
+  owner: z.string().optional(),
+  createdAt: z.string().optional(),
+  coverage: z
+    .object({
+      files: z.array(z.string()).optional(),
+      functions: z.array(z.string()).optional(),
+    })
+    .optional(),
+  sensitivity: z
+    .object({
+      status: z.enum(["pass", "fail", "unknown"]),
+      method: z.string().optional(),
+      at: z.string().optional(),
+    })
+    .optional(),
+  stability: z
+    .object({
+      runs: z.number(),
+      flakyRuns: z.number(),
+    })
+    .optional(),
+  ledger: z
+    .object({
+      caughtRegressions: z.number(),
+      falsePositives: z.number(),
+    })
+    .optional(),
+  merit: z.number().optional(),
+});
+
+export const ManifestSchema = z.array(ManifestEntrySchema);
+
+export type ValidatedManifestEntry = z.infer<typeof ManifestEntrySchema>;
+
+// ── Webhook payload schema ────────────────────────────────────────────────────
+// Validates the incoming POST body from GitHub / manual triggers.
+export const WebhookPayloadSchema = z.object({
+  repo: z.string().min(1),
+  sha: z.string().min(7),
+  target: z.enum(["e2e", "code"]).optional(),
+  mode: z.enum(["diff", "complete", "exhaustive", "manual"]).optional(),
+  guidance: z.string().optional(),
+});
+
+export type ValidatedWebhookPayload = z.infer<typeof WebhookPayloadSchema>;
+
+// ── Final verdict schema ──────────────────────────────────────────────────────
+// Extracted from the AI agent's closing JSON. Used in parseVerdict.
+export const FinalVerdictSchema = z.object({
+  approved: z.boolean(),
+  specs: z.array(z.string()),
+  note: z.string().optional(),
+});
+
+export type ValidatedFinalVerdict = z.infer<typeof FinalVerdictSchema>;

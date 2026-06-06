@@ -5,42 +5,19 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
+import { AppConfigSchema, type ValidatedAppConfig } from "./schemas";
 
 const ROOT = process.env.AI_PIPELINE_ROOT ?? process.cwd();
 
-export interface AppConfig {
-  name: string;
-  repo: string;
-  baseBranch?: string; // target branch for the QA pull requests (defaults to "main")
-  // Optional hint: where this repo keeps its OpenAPI/Swagger contract(s), as a glob
-  // (or globs) relative to the repo root (e.g. "**/src/main/resources/openapi/*.yaml"
-  // or "**/api-definition.yaml"). The AGENT reads them as authoring context; this only
-  // tells it where to look when the layout is non-standard. Omit it and the agent
-  // searches common locations. App-specific by nature → it belongs here in config.
-  openapi?: string | string[];
-  dev: {
-    baseUrl: string;
-    // Omit versionUrl to skip the deploy gate and health checks (for sites that
-    // are already deployed and expose no `/version` endpoint, e.g. a static site).
-    versionUrl?: string;
-    pollIntervalMs?: number;
-    deployTimeoutMs?: number;
-  };
-  qa: {
-    needsReview: boolean;
-    testDataPrefix: string;
-    shadow?: boolean; // shadow mode: run everything but do NOT publish PRs or open Issues
-  };
-  report: { onFailure: string };
-}
+export interface AppConfig extends ValidatedAppConfig {}
 
-export function loadAppConfig(name: string, root = ROOT): AppConfig {
+export function loadAppConfig(name: string, root = ROOT): ValidatedAppConfig {
   const path = join(root, "config", "apps", `${name}.yaml`);
   if (!existsSync(path)) {
     throw new Error(`config/apps/${name}.yaml not found — is the app onboarded?`);
   }
   const raw = expandEnv(readFileSync(path, "utf8"));
-  return parse(raw) as AppConfig;
+  return AppConfigSchema.parse(parse(raw));
 }
 
 // Resolves the config from the event's repo (the webhook carries repo + sha).
@@ -53,6 +30,23 @@ export function loadAppConfigByRepo(repo: string, root = ROOT): AppConfig | null
     if (cfg.repo === repo) return cfg;
   }
   return null;
+}
+
+// Returns all configured apps (name, repo, baseUrl). A single malformed YAML
+// is skipped (and logged), never hiding every other app.
+export function listAppConfigs(root = ROOT): AppConfig[] {
+  const dir = join(root, "config", "apps");
+  if (!existsSync(dir)) return [];
+  const out: AppConfig[] = [];
+  for (const f of readdirSync(dir)) {
+    if (!f.endsWith(".yaml") || f.startsWith("example")) continue;
+    try {
+      out.push(loadAppConfig(f.replace(/\.yaml$/, ""), root));
+    } catch (err) {
+      console.warn(`[qa] skipping malformed config ${f}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return out;
 }
 
 function expandEnv(s: string): string {

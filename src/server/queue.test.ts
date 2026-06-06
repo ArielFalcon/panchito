@@ -32,10 +32,10 @@ test("a failing job does not stop the following ones", async () => {
   const q = new JobQueue((e) => errors.push(e));
   const done: string[] = [];
 
-  q.enqueue(async () => {
+  q.enqueue(async (_signal) => {
     throw new Error("boom");
   });
-  q.enqueue(async () => {
+  q.enqueue(async (_signal) => {
     done.push("next");
   });
   await q.drain();
@@ -46,9 +46,36 @@ test("a failing job does not stop the following ones", async () => {
 
 test("size reflects pending work and returns to 0 after draining", async () => {
   const q = new JobQueue();
-  q.enqueue(async () => await tick(5));
-  q.enqueue(async () => await tick(5));
+  q.enqueue(async (_signal) => await tick(5));
+  q.enqueue(async (_signal) => await tick(5));
   assert.equal(q.size, 2);
   await q.drain();
   assert.equal(q.size, 0);
+});
+
+test("cancel aborts the currently-running job via AbortSignal", async () => {
+  const q = new JobQueue();
+  let aborted = false;
+
+  q.enqueue(async (signal) => {
+    await new Promise<void>((_resolve, reject) => {
+      signal.addEventListener("abort", () => {
+        aborted = true;
+        reject(new Error("aborted"));
+      }, { once: true });
+      // Never resolve naturally
+    });
+  });
+
+  // Give the job time to start
+  await tick(5);
+  assert.equal(aborted, false);
+  assert.equal(q.cancel(), true);
+  await tick(5);
+  assert.equal(aborted, true);
+});
+
+test("cancel returns false when no job is running", () => {
+  const q = new JobQueue();
+  assert.equal(q.cancel(), false);
 });
