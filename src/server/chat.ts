@@ -19,12 +19,30 @@ export function buildRunContext(record: RunRecord, limits: ContextLimits = DEFAU
   const lines: string[] = [];
 
   // Pipeline phase reference so the assistant can interpret the step field.
+  // Descriptions are target-aware: code mode has no browser, no DEV, no Playwright.
+  const isCode = record.target === "code";
   lines.push(
-    "Pipeline phases: classify (reads commit diff + message, decides to skip/generate/regress),",
-    "generate (AI agent analyzes code, explores DEV with Playwright, writes E2E specs),",
-    "validate (typecheck + lint + test discovery + metadata check),",
-    "execute (runs Playwright tests against the live DEV environment),",
-    "retry (tests failed — agent is re-generating with failure feedback).",
+    isCode
+      ? [
+          "Pipeline phases for CODE target (source-code tests — no browser, no DEV environment, no Playwright):",
+          "classify (reads commit diff + message, decides to skip/generate/regress),",
+          "generate (AI agent analyzes source code and writes/updates unit or integration tests),",
+          "validate (typecheck + lint + test discovery + metadata check),",
+          "execute (runs source-code tests locally via the project's test runner),",
+          "retry (tests failed — agent is re-generating with failure feedback).",
+        ].join("\n")
+      : [
+          "Pipeline phases for E2E target (browser tests against the live DEV environment):",
+          "classify (reads commit diff + message, decides to skip/generate/regress),",
+          "generate (AI agent analyzes code, explores DEV with Playwright MCP, writes E2E specs),",
+          "validate (typecheck + lint + test discovery + metadata check),",
+          "execute (runs Playwright tests against the live DEV environment),",
+          "retry (tests failed — agent is re-generating with failure feedback).",
+        ].join("\n"),
+    "",
+    "IMPORTANT: Trust the actual run data (logs, cases, step, verdict, target, mode) over these generic",
+    "phase descriptions. If logs show unit tests but the description mentions Playwright, the logs are",
+    "correct — the description is wrong for this run. Targets: e2e = browser + DEV; code = source only.",
     "",
   );
 

@@ -26,9 +26,9 @@ test("stepState: done marks everything done; retry keeps execute active", () => 
 });
 
 test("verdictColor / verdictIcon map verdicts", () => {
-  assert.equal(verdictColor("pass"), "green");
-  assert.equal(verdictColor("fail"), "red");
-  assert.equal(verdictColor("infra-error"), "yellow");
+  assert.equal(verdictColor("pass"), "#3b7a57");
+  assert.equal(verdictColor("fail"), "#c0392b");
+  assert.equal(verdictColor("infra-error"), "#4a6877");
   assert.equal(verdictColor(undefined), "cyan");
   assert.equal(verdictIcon("pass"), "✓");
   assert.equal(verdictIcon("fail"), "✗");

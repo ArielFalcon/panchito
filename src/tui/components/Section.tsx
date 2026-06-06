@@ -22,7 +22,7 @@ export function Section({ step, state, detail, summary, caseCount, specCount, ch
   const icon = state === "active"
     ? <Text color="cyan"><Spinner type="dots" /></Text>
     : state === "done"
-    ? <Text color="green">✓</Text>
+    ? <Text color="#3b7a57">✓</Text>
     : <Text dimColor>·</Text>;
 
   return (

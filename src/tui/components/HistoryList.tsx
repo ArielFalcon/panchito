@@ -44,7 +44,7 @@ export function HistoryList({ items }: { items: HistoryItem[] }): React.ReactEle
             <Text dimColor>{`     ${item.reason}`}</Text>
           ) : null}
           {item.detail && item.status === "fail" ? (
-            <Text color="red">{`     ${item.detail.slice(0, 120)}`}</Text>
+            <Text color="#c0392b">{`     ${item.detail.slice(0, 120)}`}</Text>
           ) : null}
         </Box>
       )}

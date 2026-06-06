@@ -68,16 +68,18 @@ export function progressBar(passed: number, total: number, width = 20): string {
 export function verdictColor(verdict: RunVerdict | undefined): string {
   switch (verdict) {
     case "pass":
-      return "green";
+      return "#3b7a57";
     case "fail":
     case "invalid":
-      return "red";
+      return "#c0392b";
     case "skipped":
+      return "#6b685b";
     case "flaky":
+      return "#c2891b";
     case "infra-error":
-      return "yellow";
+      return "#4a6877";
     default:
-      return "cyan"; // running / unknown
+      return "cyan";
   }
 }
 
@@ -100,7 +102,7 @@ export function verdictIcon(verdict: RunVerdict | undefined): string {
 }
 
 export function caseColor(status: CaseStatus): string {
-  return status === "fail" ? "red" : status === "flaky" ? "yellow" : "gray";
+  return status === "fail" ? "#c0392b" : status === "flaky" ? "#c2891b" : "#6b685b";
 }
 
 export function caseIcon(status: CaseStatus): string {

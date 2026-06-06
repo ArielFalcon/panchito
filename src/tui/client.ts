@@ -67,6 +67,11 @@ export interface ClientOptions {
   fetchImpl?: typeof fetch; // injected in tests
 }
 
+export interface ChatEntry {
+  role: string;
+  text: string;
+}
+
 export interface QaClient {
   createRun(input: CreateRunInput): Promise<CreateRunResult>;
   getRun(id: string): Promise<RunRecord>;
@@ -74,6 +79,7 @@ export interface QaClient {
   getQueue(): Promise<QueueStatus>;
   listApps(): Promise<AppView[]>;
   ask(id: string, question: string): Promise<{ answer: string }>;
+  help(question: string, history?: ChatEntry[]): Promise<{ answer: string }>;
   continueRun(id: string, cases: string[], guidance?: string): Promise<{ id: string; parentRunId: string }>;
 }
 
@@ -117,6 +123,7 @@ export function createClient(opts: ClientOptions = {}): QaClient {
     getQueue: () => request<QueueStatus>("GET", "/api/queue"),
     listApps: () => request<AppView[]>("GET", "/api/apps"),
     ask: (id, question) => request<{ answer: string }>("POST", `/api/runs/${encodeURIComponent(id)}/ask`, { question }),
+    help: (question, history) => request<{ answer: string }>("POST", "/api/help", { question, history }),
     continueRun: (id, cases, guidance) =>
       request<{ id: string; parentRunId: string }>("POST", `/api/runs/${encodeURIComponent(id)}/continue`, { cases, guidance }),
   };

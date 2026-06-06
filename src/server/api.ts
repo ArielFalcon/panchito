@@ -9,6 +9,7 @@ import { RunMode, TestTarget, RunRecord } from "../types";
 import { AppConfig } from "../orchestrator/config-loader";
 import { sanitizeText } from "../orchestrator/sanitizer";
 import { buildRunContext } from "./chat";
+import { buildHelpContext } from "./help";
 import { json, readBody } from "./helpers";
 import { getOpenSessionCount } from "../integrations/opencode-client";
 
@@ -24,7 +25,7 @@ export interface ApiDeps {
   getRecord(id: string): RunRecord | undefined;
   listRecords(app: string, limit: number): RunRecord[];
   currentRun(): RunRecord | undefined;
-  ask?: (input: { context: string; question: string }) => Promise<string>;
+  ask?: (input: { context: string; question: string; instruction?: string }) => Promise<string>;
   cancelRun?: (id: string) => boolean;
   // Continuation (human-in-the-loop): re-run fixing the parent run's failed cases.
   // `cases` optionally narrows to specific failed case names; omitted → all failed.
@@ -82,6 +83,10 @@ export async function handleApi(
   const continueMatch = path.match(/^\/api\/runs\/([^/]+)\/continue$/);
   if (req.method === "POST" && continueMatch) {
     return await handleContinue(req, res, deps, continueMatch[1]!);
+  }
+
+  if (req.method === "POST" && path === "/api/help") {
+    return await handleHelp(req, res, deps);
   }
 
   return false;
@@ -268,6 +273,60 @@ async function handleAsk(req: IncomingMessage, res: ServerResponse, deps: ApiDep
     const context = buildRunContext(record, undefined, appInfo);
     const answer = await deps.ask({ context, question });
     // Sanitize on egress (logs→chat is a new egress path).
+    json(res, 200, { answer: sanitizeText(answer).text });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    json(res, 502, { error: `assistant failed: ${msg}` });
+  }
+  return true;
+}
+
+async function handleHelp(req: IncomingMessage, res: ServerResponse, deps: ApiDeps): Promise<boolean> {
+  if (!deps.ask) {
+    json(res, 501, { error: "help chat is not available (ask not wired)" });
+    return true;
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(await readBody(req));
+  } catch {
+    json(res, 400, { error: "invalid JSON" });
+    return true;
+  }
+
+  const question = typeof body.question === "string" ? body.question.trim() : "";
+  if (!question) {
+    json(res, 400, { error: "'question' is required" });
+    return true;
+  }
+
+  const historyLines: string[] = [];
+  if (Array.isArray(body.history)) {
+    for (const entry of body.history) {
+      if (typeof entry === "object" && entry !== null && "role" in entry && "text" in entry) {
+        const role = String((entry as { role: unknown }).role);
+        const text = String((entry as { text: unknown }).text);
+        historyLines.push(`${role}: ${text}`);
+      }
+    }
+  }
+
+  const productContext = buildHelpContext();
+  let fullContext = productContext;
+  if (historyLines.length > 0) {
+    fullContext += `\n\n## Recent conversation\n${historyLines.slice(-10).join("\n")}`;
+  }
+
+  try {
+    const answer = await deps.ask({
+      context: fullContext,
+      question,
+      instruction:
+        "You are a helpful assistant answering questions about panchito (the TUI for ai-pipeline). " +
+        "Use ONLY the context below. Be concise and friendly. If the context does not contain " +
+        "the answer, say so and suggest what the user could ask instead.",
+    });
     json(res, 200, { answer: sanitizeText(answer).text });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { render } from "ink";
 import { createClient, QaApiError, QaClient } from "./client";
 import { Watch, RunFlow } from "./app";
+import { HomeScreen } from "./components/HomeScreen";
 import { OnboardWizard } from "./components/OnboardWizard";
 import { caseIcon } from "./format";
 import { RunMode, TestTarget } from "../types";
@@ -209,7 +210,8 @@ async function main(): Promise<void> {
         return cmdOnboard();
       case undefined:
         if (!process.stdout.isTTY) return usage();
-        return await cmdRun(client, []);
+        render(<HomeScreen client={client} onExit={() => process.exit(0)} />);
+        return;
       case "-h":
       case "--help":
         return usage();

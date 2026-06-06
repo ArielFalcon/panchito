@@ -138,7 +138,7 @@ export function OnboardWizard({
           {step === "validating"
             ? <Text color="cyan"><Spinner type="dots" /> validating…</Text>
             : step === "repo-error"
-            ? <Text color="red">✗ {error}</Text>
+            ? <Text color="#c0392b">✗ {error}</Text>
             : <Text dimColor>Enter to validate · Esc to cancel</Text>}
         </Box>
       </Box>
@@ -152,7 +152,7 @@ export function OnboardWizard({
         {repoInfo ? (
           <Box marginBottom={1}>
             <Text>
-              <Text color="green">✓</Text>
+              <Text color="#3b7a57">✓</Text>
               {` ${repoInfo.fullName} `}
               <Text color={repoInfo.private ? "yellow" : "green"}>
                 ({repoInfo.private ? "private" : "public"})
@@ -269,7 +269,7 @@ export function OnboardWizard({
   if (step === "done") {
     return (
       <Box flexDirection="column">
-        <Text color="green">✓ config/apps/{appName}.yaml created</Text>
+        <Text color="#3b7a57">✓ config/apps/{appName}.yaml created</Text>
         <Box marginTop={1}>
           <Text>Enter → run first QA · Esc → exit</Text>
         </Box>
@@ -280,7 +280,7 @@ export function OnboardWizard({
   if (step === "write-error") {
     return (
       <Box flexDirection="column">
-        <Text color="red">✗ Failed to write config: {error}</Text>
+        <Text color="#c0392b">✗ Failed to write config: {error}</Text>
         <Box marginTop={1}>
           <Text dimColor>Esc to go back</Text>
         </Box>
