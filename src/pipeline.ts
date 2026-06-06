@@ -181,8 +181,8 @@ export async function runPipeline(
     log(`[qa] continuation of ${opts.parentRunId ?? "?"}: fixing ${opts.fixCases!.length} case(s) with human guidance.`);
   }
 
+  onStep?.("classify");
   if (mode === "diff") {
-    onStep?.("classify");
     const cls = classifyCommit(message, diff);
     log(`[qa] commit '${cls.type}' → ${cls.action}${cls.contradiction ? " (message/diff contradiction)" : ""}: ${cls.reason}`);
     if (cls.action === "skip" && !isContinuation) {
