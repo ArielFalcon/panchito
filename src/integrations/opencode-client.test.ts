@@ -57,7 +57,7 @@ test("buildPrompt includes repo, sha, namespace, e2e folder and the diff", () =>
   assert.match(p, /qa-bot-abc123/);
   assert.match(p, /e2e\//);
   assert.match(p, /const x = 1;/);
-  assert.match(p, /invoke the qa-reviewer subagent/);
+  assert.match(p, /independent reviewer/i);
   assert.match(p, /project="demo-app"/);
 });
 
@@ -75,9 +75,10 @@ test("buildPrompt sanitizes the diff (defense in depth)", () => {
   assert.match(p, /\[REDACTED_SECRET\]/);
 });
 
-test("buildPrompt without review instructs not to invoke the reviewer", () => {
+test("buildPrompt without review omits the reviewer instruction", () => {
   const p = buildPrompt({ ...input, needsReview: false });
-  assert.match(p, /do not invoke qa-reviewer/);
+  assert.match(p, /Review disabled for this run/);
+  assert.doesNotMatch(p, /independent reviewer/i);
 });
 
 test("buildPrompt includes the OpenAPI hint and the no-direct-call rule when configured", () => {
@@ -203,6 +204,12 @@ test("parsePlan reads objectives, drops malformed entries, and de-dups by flow",
 test("parsePlan returns [] when there is no objectives object", () => {
   assert.deepEqual(parsePlan("no json here"), []);
   assert.deepEqual(parsePlan('{"approved":true}'), []);
+});
+
+test("parsePlan de-dups by resulting filename (distinct strings, same spec file)", () => {
+  const out = parsePlan('{"objectives":[{"flow":"Check Out","objective":"a"},{"flow":"check-out","objective":"b"}]}');
+  assert.equal(out.length, 1, "both normalize to flows/check-out.spec.ts → only one survives");
+  assert.equal(out[0]!.flow, "Check Out");
 });
 
 test("specFileForFlow produces a safe path under flows/", () => {

@@ -39,11 +39,13 @@ produce reliable end-to-end tests for the change you are given.
 
 ## Skills (on-demand craft knowledge)
 
-- **`playwright-authoring`** — how to write robust, deterministic specs, and how
-  to handle THIS app's capabilities: two-layer login (the environment's HTTP Basic
-  gate + **Keycloak** with an external redirect), **geolocation**, **mobile/offline**
-  modes, **cookies/cache**, and **photo upload**. Consult it whenever you generate
-  or fix a spec.
+- **`playwright-authoring`** — how to write robust, deterministic specs (locators,
+  waiting, fixtures, auth, browser conditions, storage/uploads). The capability
+  patterns it shows are **generic EXAMPLES**. The specifics of the app under test
+  (its real login, which capabilities it has, selectors) live in **that repo's own
+  `e2e/`** — its `fixtures.ts` and README, plus the live DOM via the Playwright MCP.
+  Read those; never assume a capability exists just because this guide mentions it.
+  Consult it whenever you generate or fix a spec.
 - **`test-value-review`** — a catalog of false positives and how to catch them.
   Used by the reviewer.
 

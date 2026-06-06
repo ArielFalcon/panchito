@@ -28,17 +28,20 @@ adapted from [TestDino playwright-skill](https://github.com/testdino-hq/playwrig
 
 ## When to read each reference (progressive disclosure)
 
-Read the specific file only when the test needs it:
+These references are **generic patterns with illustrative examples**. Whether the app
+under test actually has a given capability — and its real selectors/flow — comes from
+**the repo's own `e2e/` (`fixtures.ts`, README) and the live DOM (Playwright MCP)**, not
+from here. Read the specific file only when the test needs that pattern:
 
-- **`auth.md`** — app login. This app has TWO layers: the DEV environment's HTTP
-  Basic gate and the **Keycloak** login (redirect outside the domain). Also how to
-  cache the session with storageState and how to test public pages.
-- **`browser-conditions.md`** — **geolocation**, **mobile** mode and **offline**
-  mode, and browser permissions.
-- **`storage-and-uploads.md`** — reading **cookies/cache/localStorage** for
-  assertions, and **uploading photos** using the assets and their metadata.
-- **`locators-and-waiting.md`** — fine-grained locator and waiting patterns, and
-  how to diagnose flakiness (trace viewer).
+- **`auth.md`** — patterns for app login: an environment HTTP Basic gate, a redirect-based
+  IdP login (e.g. Keycloak/OAuth), caching the session with storageState, and testing
+  public pages. Use whichever the app actually uses (public pages need no login at all).
+- **`browser-conditions.md`** — geolocation, mobile/offline modes, and browser permissions —
+  for apps that use them.
+- **`storage-and-uploads.md`** — reading cookies/cache/localStorage for assertions, and
+  file uploads — for apps that use them.
+- **`locators-and-waiting.md`** — fine-grained locator and waiting patterns, and how to
+  diagnose flakiness (trace viewer). Applies to every app.
 
 ## Structure of a spec
 

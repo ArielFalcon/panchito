@@ -84,11 +84,14 @@ For each test, add/update its entry in `e2e/.qa/manifest.json` with
 `{ id, objective, flow, targets, changeRef }`. One objective = one test.
 If updating an existing test, edit its entry — do not duplicate.
 
-### 6. Review (qa-reviewer subagent)
+### 6. Self-review (an independent reviewer judges you afterwards)
 
-Invoke the `qa-reviewer` subagent with the specs you wrote. Apply its
-corrections without rewriting what was correct. Repeat at most **2 rounds**;
-if it does not converge, note this in your verdict.
+Before finishing, self-review every spec against the **`test-value-review`** criteria:
+the central test is *"could this feature break and this spec still pass?"* — if yes, fix it.
+After you finish, the orchestrator runs a **separate, independent `qa-reviewer`** whose
+verdict is authoritative; if it rejects, you receive its concrete corrections in a
+follow-up turn — apply ONLY those, without rewriting what was correct. Do not rely on
+spawning a subagent yourself.
 
 ### 7. Learn (engram)
 

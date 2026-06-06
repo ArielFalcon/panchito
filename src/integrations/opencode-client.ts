@@ -364,9 +364,13 @@ export function parsePlan(text: string): PlanObjective[] {
     const symbols = Array.isArray(r.symbols) ? r.symbols.filter((s): s is string => typeof s === "string") : [];
     out.push({ flow, objective, symbols });
   }
-  // De-duplicate by flow (the filename/id key) so two objectives never collide on one file.
+  // De-duplicate by the RESULTING spec filename, so two distinct flow strings that normalize to
+  // the same file (e.g. "Check Out" and "check-out") never have two workers write the same file.
   const seen = new Set<string>();
-  return out.filter((o) => (seen.has(o.flow) ? false : (seen.add(o.flow), true)));
+  return out.filter((o) => {
+    const key = specFileForFlow(o.flow);
+    return seen.has(key) ? false : (seen.add(key), true);
+  });
 }
 
 // A spec filename derived from a flow, safe for the filesystem and Playwright's testMatch.
@@ -692,8 +696,8 @@ export function buildPrompt(input: OpencodeRunInput): string {
         ],
     `- engram memory: scoped per app AND per mode (e2e or code). Use project="${input.appName}" on ALL mem_save, mem_search, mem_context, and mem_session_summary calls. Prefix every topic_key with "${input.target}/" so each mode's memory lives in its own namespace (e.g. topic_key="e2e/checkout-flow" or "code/order-total", not "checkout-flow"). When searching, include "${input.target}" in the query text to filter results to this mode. Never save or search without the mode prefix.`,
     input.needsReview
-      ? `- Review required: invoke the qa-reviewer subagent and apply its corrections.`
-      : `- Review disabled for this run: do not invoke qa-reviewer.`,
+      ? `- An INDEPENDENT reviewer judges your specs after you finish and may return corrections for a follow-up turn. Self-review against the test-value-review criteria BEFORE finishing (every spec must fail if its feature breaks); do not rely on spawning a subagent.`
+      : `- Review disabled for this run.`,
   ].join("\n");
 }
 
