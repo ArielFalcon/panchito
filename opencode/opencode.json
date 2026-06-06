@@ -69,15 +69,12 @@
     "serena": {
       "type": "local",
       "command": [
-        "uvx",
-        "--from",
-        "git+https://github.com/oraios/serena",
         "serena",
         "start-mcp-server",
-        "--context",
-        "ide-assistant",
         "--transport",
-        "stdio"
+        "stdio",
+        "--context",
+        "ide-assistant"
       ],
       "enabled": true
     },

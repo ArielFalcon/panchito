@@ -23,6 +23,11 @@ export interface SwapMarker {
   at: string;
   attempt: number;
   prUrl?: string;
+  // "Promote-after-canary": the swapped-in code is a fix branch that has NOT yet been merged
+  // to main. Once it boots healthy in production (the canary), index.ts merges this PR — so
+  // main only ever receives code already proven to run. Absent for a plain (already-merged)
+  // swap. If the canary fails, the boot-guard rolls back and the PR is simply never merged.
+  promote?: { repo: string; prNumber: number };
 }
 
 export interface SwapFs {
@@ -59,7 +64,7 @@ export function performSwap(
   appDir: string,
   sourceDir: string,
   dataDir: string,
-  opts: { at: string; prUrl?: string },
+  opts: { at: string; prUrl?: string; promote?: { repo: string; prNumber: number } },
   fs: SwapFs = realSwapFs,
 ): void {
   const liveSrc = join(appDir, "src");
@@ -80,7 +85,7 @@ export function performSwap(
   if (fs.exists(join(sourceDir, lock))) fs.cp(join(sourceDir, lock), join(appDir, lock));
 
   // 3. Arm the boot-guard.
-  fs.writeMarker(join(dataDir, SWAP_MARKER_FILE), { at: opts.at, attempt: 0, prUrl: opts.prUrl });
+  fs.writeMarker(join(dataDir, SWAP_MARKER_FILE), { at: opts.at, attempt: 0, prUrl: opts.prUrl, promote: opts.promote });
 }
 
 // Clear swap state once the new code is confirmed healthy after restart (removes marker

@@ -10,7 +10,8 @@ import { handleMaintainerApi, recordIncident, setMaintainerStatus, getMaintainer
 import { getRecord, listRecords, currentRun, updateRecord, interruptedRecords } from "./server/history";
 import { testDataNamespace } from "./qa/test-data";
 import { enqueueTrackedRun } from "./server/runner";
-import { performSwap, confirmSwapHealthy, realSwapFs, SWAP_MARKER_FILE } from "./server/self-update";
+import { performSwap, confirmSwapHealthy, rollback, realSwapFs, SWAP_MARKER_FILE } from "./server/self-update";
+import { assessChange, assessRate, parseNumstat, readDeployHistory, recordDeploy } from "./server/merge-guard";
 import { resolveRef, defaultMirrorDeps, authHeaderArgs, type MirrorDeps } from "./integrations/repo-mirror";
 import { defaultOpencodeDeps, askAssistant, OpencodeDeps, startEventStream } from "./integrations/opencode-client";
 import { appendLog } from "./server/history";
@@ -23,6 +24,9 @@ const TOKEN_FILE = join(ROOT, "config", ".api_token");
 // The maintainer's autonomous merge+hot-swap is ON by default but can be disabled by
 // ops (then a maintainer fix stops at an open PR for a human to review and merge).
 const AUTONOMOUS_MAINTAINER = process.env.SELF_MAINTAINER_AUTOMERGE !== "false";
+// Persisted ledger of autonomous deploys (timestamps), used by the rate/loop guard. It lives
+// on the data volume so it survives the restart a hot-swap triggers (see merge-guard.ts).
+const DEPLOY_LEDGER = join(ROOT, "data", "maintainer-deploys.json");
 
 const port = Number(process.env.PORT ?? 8080);
 const MAX_BODY = 1_000_000;
@@ -210,9 +214,15 @@ async function triggerMaintainer(): Promise<void> {
         "Do NOT run git, do NOT clone, do NOT open a PR — the orchestrator owns all git",
         "operations and will commit, push and merge your changes for you.",
         "",
-        "This fix will be AUTO-MERGED to main and HOT-SWAPPED into the running service, so",
-        "you must PROVE it is necessary, minimal and safe. Output a summary in this format",
-        "(the `justification` is mandatory — without all three fields the fix is NOT deployed):",
+        "This fix is AUTO-DEPLOYED: it is hot-swapped into the running service, verified",
+        "healthy (the canary), and only then merged to main. So it must be NECESSARY, MINIMAL",
+        "and SAFE. Hard constraints (a fix that breaks them is blocked and left for a human):",
+        "  - Keep it small: at most 15 files / 400 changed lines.",
+        "  - Do NOT modify the recovery/build files: boot-guard.mjs, src/server/self-update.ts,",
+        "    src/server/merge-guard.ts, any Dockerfile, docker-compose.yml, or .github/ — these",
+        "    are the safety net and image build; changing them requires a human.",
+        "Output a summary in this format (the `justification` is mandatory — without all three",
+        "fields the fix is NOT deployed):",
         "```",
         "<!--MAINTAINER_SUMMARY",
         JSON.stringify({
@@ -295,29 +305,40 @@ async function triggerMaintainer(): Promise<void> {
         ].join("\n"),
       });
 
-      // Step 6: NO auto-merge. A self-modifying agent must never merge its own code
-      // into the branch it then deploys to itself — a human reviews and merges the PR.
-      console.log(`[maintainer] fix PR opened — awaiting human review and merge: ${pr.url}`);
-
       for (const inc of pending) updateIncident(inc.id, { status: "fixed", prUrl: pr.url });
       console.log(`[maintainer] fix PR opened: ${pr.url}`);
 
-      // Step 6: Safety gates BEFORE any autonomous merge + hot-swap.
-      //  (a) A valid necessity/optimality justification is MANDATORY (the requirement to
-      //      "prove the change is necessary and the solution optimal and safe").
-      if (!summary.justification) {
+      // The fix is now an OPEN PR. It is auto-deployed only after passing EVERY safety layer
+      // below. The deploy is a "canary before promote": the fix is hot-swapped into the
+      // RUNNING service first and proven healthy; main is merged only afterwards (in
+      // confirmSwapAfterBoot), so main — what a fresh container clones — is never poisoned by
+      // an unverified self-fix. Any layer that blocks leaves the PR open for a human.
+      const leaveForHuman = (why: string, severity: "warn" | "critical" = "warn") => {
         setMaintainerStatus("idle");
-        console.warn(`[maintainer] fix lacks a valid justification - PR left for a human, NOT auto-merging: ${pr.url}`);
-        return;
-      }
-      //  (b) Ops can disable autonomous merge entirely (then it stays a PR for a human).
-      if (!AUTONOMOUS_MAINTAINER) {
-        setMaintainerStatus("idle");
-        console.log(`[maintainer] autonomous merge disabled (SELF_MAINTAINER_AUTOMERGE=false) - PR left for a human: ${pr.url}`);
-        return;
-      }
-      //  (c) PRE-MERGE self-test gate: install + typecheck + tests on the fix branch HEAD.
-      //      A fix that fails its OWN gate is never merged.
+        if (severity === "critical") {
+          recordIncident({ source: "health-check", severity, summary: `maintainer fix NOT auto-deployed: ${why}`, detail: pr.url });
+        }
+        console.warn(`[maintainer] NOT auto-deploying (${why}) — PR left for a human: ${pr.url}`);
+      };
+
+      // Layer 1 — a valid necessity/minimality justification is MANDATORY.
+      if (!summary.justification) return leaveForHuman("fix lacks a valid justification");
+      // Layer 2 — ops kill-switch (default ON). When off, every fix stops at an open PR.
+      if (!AUTONOMOUS_MAINTAINER) return leaveForHuman("autonomous deploy disabled (SELF_MAINTAINER_AUTOMERGE=false)");
+
+      // Layer 3 — scope guard: the fix must be minimal and must NOT touch the recovery net or
+      // build/topology the canary cannot verify (boot-guard, self-update, merge-guard, …).
+      const numstat = await mirrorDeps.git(["diff", "--numstat", "origin/main...HEAD"], maintainerWorkDir);
+      const scope = assessChange(parseNumstat(numstat));
+      if (!scope.ok) return leaveForHuman(scope.reasons.join("; "), "critical");
+
+      // Layer 4 — rate / loop guard: cap autonomous deploys per window + cooldown, so a fix
+      // that doesn't fix cannot loop the system into endless self-modification.
+      const rate = assessRate(readDeployHistory(DEPLOY_LEDGER), Date.now());
+      if (!rate.ok) return leaveForHuman(rate.reasons.join("; "), "critical");
+
+      // Layer 5 — pre-deploy self-test gate: install + typecheck + tests on the fix branch.
+      // A fix that fails its OWN gate is never deployed.
       const { execSync } = await import("node:child_process");
       try {
         execSync("npm install --no-audit --no-fund", { cwd: maintainerWorkDir, stdio: "inherit" });
@@ -327,36 +348,32 @@ async function triggerMaintainer(): Promise<void> {
         recordIncident({
           source: "health-check",
           severity: "critical",
-          summary: "maintainer fix FAILED its pre-merge self-test gate - NOT merging",
+          summary: "maintainer fix FAILED its pre-deploy self-test gate — NOT deploying",
           detail: gateErr instanceof Error ? gateErr.message : String(gateErr),
         });
-        setMaintainerStatus("idle");
-        console.error(`[maintainer] pre-merge gate failed - refusing to merge. PR left for a human: ${pr.url}`);
-        return;
+        return leaveForHuman("failed its pre-deploy self-test gate");
       }
 
-      // Step 7: Gate green -> merge deterministically (independent of branch protection).
-      await github.mergePullRequest(SELF_REPO, pr.number);
-      console.log(`[maintainer] gate green - merged ${pr.url}`);
-
-      // Step 8: Adopt the merged code and HOT-SWAP with rollback safety.
-      await mirrorDeps.git(["fetch", "origin"], maintainerWorkDir);
-      await mirrorDeps.git(["checkout", "-f", "main"], maintainerWorkDir);
-      await mirrorDeps.git(["reset", "--hard", "origin/main"], maintainerWorkDir);
-
-      // Never kill an in-flight QA run: wait for the queue to drain before swapping.
-      console.log("[maintainer] waiting for the queue to drain before hot-swap...");
+      // All gates green → CANARY DEPLOY. Never kill an in-flight QA run: drain the queue first.
+      console.log("[maintainer] all safety gates green — waiting for the queue to drain before canary swap...");
       await queue.drain();
 
-      // Atomic-ish swap: back up the running tree, stage the new code, arm the boot-guard
-      // marker. boot-guard.mjs (root, never swapped) restores the backup if the new code
-      // fails to boot healthy - so a bad fix can never brick the service.
+      // Record the deploy in the persisted ledger BEFORE swapping, so the rate guard counts it
+      // even though the swap restarts the process (it must survive the restart).
+      recordDeploy(DEPLOY_LEDGER, Date.now());
+
+      // Swap the fix-branch code into the running tree (with backup + boot-guard marker) and
+      // attach the PR so the post-restart health check PROMOTES it (merges to main) only once
+      // the canary is healthy. boot-guard.mjs (never swapped) restores the backup if the new
+      // code fails to boot — and because the PR is unmerged at this point, a rollback leaves
+      // main pristine, so the service can never reach an unrecoverable state.
       performSwap(process.cwd(), maintainerWorkDir, join(ROOT, "data"), {
         at: new Date().toISOString(),
         prUrl: pr.url,
+        promote: { repo: SELF_REPO, prNumber: pr.number },
       });
       execSync("npm install --no-audit --no-fund", { cwd: process.cwd(), stdio: "inherit" });
-      console.log("[maintainer] swap staged with rollback guard - restarting to apply.");
+      console.log("[maintainer] canary swap staged with rollback guard — restarting to verify, then promote.");
       process.exit(0);
 
     } finally {
@@ -434,25 +451,77 @@ function recoverMaintainerState(): void {
   }
 }
 
-// After a maintainer hot-swap restart, the boot-guard armed a marker. If this (the new)
-// code comes up and answers a health check, the swap is GOOD → clear the marker + backups
-// so the boot-guard stops counting attempts. If it never gets here (crash), the boot-guard
-// rolls back after MAX_BOOT_ATTEMPTS.
+// After a maintainer canary swap restart, the boot-guard armed a marker. This is the
+// PROMOTE-OR-ROLLBACK decision point: if this (the new) code comes up and answers the health
+// check, the canary is GOOD → merge the PR to main (promote) and clear the marker + backups.
+// If the deep check fails, roll back to the backed-up code immediately and restart — the PR is
+// never merged, so main stays known-good. (A hard crash that never reaches here is caught by
+// boot-guard.mjs, which rolls back after MAX_BOOT_ATTEMPTS — same end state: main untouched.)
 function confirmSwapAfterBoot(): void {
-  const marker = realSwapFs.readMarker(join(ROOT, "data", SWAP_MARKER_FILE));
+  const dataDir = join(ROOT, "data");
+  const marker = realSwapFs.readMarker(join(dataDir, SWAP_MARKER_FILE));
   if (!marker) return;
-  console.log(`[maintainer] a swap is pending verification (attempt ${marker.attempt}) — checking health...`);
+  console.log(`[maintainer] a canary swap is pending verification (attempt ${marker.attempt}) — checking health...`);
   setTimeout(async () => {
+    const healthy = await canaryHealthy();
+    if (!healthy) {
+      // Functionally broken canary (booted but not serving): roll back to the backup now and
+      // restart into it. The PR is unmerged → main is still the last known-good code.
+      recordIncident({
+        source: "health-check",
+        severity: "critical",
+        summary: "maintainer canary failed its post-deploy health check — rolling back",
+        detail: marker.prUrl,
+      });
+      const rolled = rollback(process.cwd(), dataDir);
+      console.error(`[maintainer] canary unhealthy — ${rolled ? "rolled back to previous code" : "NO backup to roll back to"}; PR left unmerged: ${marker.prUrl ?? ""}`);
+      if (rolled) {
+        try {
+          (await import("node:child_process")).execSync("npm install --no-audit --no-fund", { cwd: process.cwd(), stdio: "inherit" });
+        } catch {
+          /* best effort; boot-guard remains as the backstop */
+        }
+        process.exit(1); // restart into the restored, known-good code
+      }
+      return;
+    }
+    // Canary healthy → PROMOTE: merge the PR so main adopts the now-proven fix. main therefore
+    // only ever receives code that has already run healthy here.
+    if (marker.promote) {
+      try {
+        await github.mergePullRequest(marker.promote.repo, marker.promote.prNumber);
+        console.log(`[maintainer] canary healthy — promoted (merged) ${marker.prUrl ?? `PR #${marker.promote.prNumber}`} to main.`);
+      } catch (err) {
+        // The running service is healthy on the fix; only main lagged. Surface it for a human
+        // to merge — do NOT roll back a healthy service.
+        recordIncident({
+          source: "health-check",
+          severity: "warn",
+          summary: "maintainer canary healthy but promoting (merging) the PR failed — merge it manually",
+          detail: `${marker.prUrl ?? ""} ${err instanceof Error ? err.message : String(err)}`.trim(),
+        });
+        console.warn(`[maintainer] canary healthy but merge failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    confirmSwapHealthy(process.cwd(), dataDir);
+    console.log(`[maintainer] swap verified healthy — cleared rollback marker.${marker.prUrl ? ` (${marker.prUrl})` : ""}`);
+  }, 20_000);
+}
+
+// Canary health probe: two health checks a few seconds apart must both succeed, so a
+// momentary boot blip doesn't pass as healthy. The full test suite already ran in the
+// pre-deploy gate; this confirms the code actually boots and serves in the real container.
+async function canaryHealthy(): Promise<boolean> {
+  for (let i = 0; i < 2; i++) {
     try {
       const res = await fetch(`http://localhost:${port}/api/health`);
-      if (res.ok) {
-        confirmSwapHealthy(process.cwd(), join(ROOT, "data"));
-        console.log(`[maintainer] swap verified healthy — cleared rollback marker.${marker.prUrl ? ` (${marker.prUrl})` : ""}`);
-      }
+      if (!res.ok) return false;
     } catch {
-      /* unhealthy → leave the marker so the boot-guard rolls back on the next restart */
+      return false;
     }
-  }, 20_000);
+    if (i === 0) await new Promise((r) => setTimeout(r, 3_000));
+  }
+  return true;
 }
 
 function finalizeInterruptedRuns(): void {

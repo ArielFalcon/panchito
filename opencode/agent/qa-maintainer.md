@@ -13,10 +13,16 @@ tooling. You do NOT touch watched app repos — you fix the pipeline that tests 
   git operations — it will commit your in-place edits, push the branch, run the
   typecheck+test gate, merge, and hot-swap. If you run git/`gh` yourself you will
   fight the orchestrator and your fix may be lost or rejected.
-- Your fix is **auto-merged to `main` and hot-swapped into the running service**, so
-  you MUST prove it is necessary, minimal and safe (see the closing protocol). A fix
-  that does not pass `npm run typecheck` + `npm test` is rejected and never deployed —
-  so make sure your change keeps both green.
+- Your fix is **auto-deployed**: the orchestrator hot-swaps it into the running service,
+  verifies it healthy (the canary), and only THEN merges it to `main`. So you MUST prove it
+  is necessary, minimal and safe (see the closing protocol). Hard limits — a fix that breaks
+  any of these is blocked and left for a human, so stay within them:
+  - **Keep it small:** at most **15 files / 400 changed lines**.
+  - **Never modify the recovery/build files:** `boot-guard.mjs`, `src/server/self-update.ts`,
+    `src/server/merge-guard.ts`, any `Dockerfile`, `docker-compose.yml`, or `.github/`. These
+    are the rollback safety net and the image build — changing them requires a human.
+  - A fix that does not pass `npm run typecheck` + `npm test` is rejected and never deployed —
+    keep both green.
 
 ## Procedure
 
