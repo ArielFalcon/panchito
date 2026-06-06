@@ -18,7 +18,7 @@ const TARGETS: TestTarget[] = ["e2e", "code"];
 
 export interface ApiDeps {
   queue: { readonly size: number };
-  enqueue(app: string, sha: string, target: TestTarget, mode: RunMode, guidance?: string): string;
+  enqueue(app: string, sha: string, target: TestTarget, mode: RunMode, guidance?: string, shadow?: boolean): string;
   loadApp(name: string): AppConfig; // throws if the app is not configured
   listApps(): AppConfig[];
   resolveRef(repo: string, ref: string): Promise<string>;
@@ -124,6 +124,7 @@ async function handleCreateRun(req: IncomingMessage, res: ServerResponse, deps: 
   const mode: RunMode =
     typeof body.mode === "string" && (MODES as string[]).includes(body.mode) ? (body.mode as RunMode) : "diff";
   const guidance = typeof body.guidance === "string" ? body.guidance : undefined;
+  const shadow = typeof body.shadow === "boolean" ? body.shadow : undefined;
 
   let sha: string;
   if (typeof body.sha === "string" && /^[0-9a-f]{7,40}$/i.test(body.sha)) {
@@ -143,7 +144,7 @@ async function handleCreateRun(req: IncomingMessage, res: ServerResponse, deps: 
     return true;
   }
 
-  const id = deps.enqueue(appConfig.name, sha, target, mode, guidance);
+  const id = deps.enqueue(appConfig.name, sha, target, mode, guidance, shadow);
   json(res, 202, { id, app: appConfig.name, sha, target, mode, status: "enqueued" });
   return true;
 }

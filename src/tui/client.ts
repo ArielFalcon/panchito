@@ -36,6 +36,7 @@ export interface CreateRunInput {
   sha?: string;
   ref?: string;
   guidance?: string;
+  shadow?: boolean;
 }
 
 export class QaApiError extends Error {

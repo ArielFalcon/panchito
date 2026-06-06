@@ -27,6 +27,10 @@ const NAMED_SECRET_PATTERNS: Array<{ name: string; p: RegExp }> = [
   { name: "aws-access-key", p: /\bAKIA[0-9A-Z]{16}\b/g },
   // GitHub tokens: ghp_, gho_, ghu_, ghs_, ghr_ with 36+ chars
   { name: "github-token", p: /\bgh[pousr]_[A-Za-z0-9]{36,}\b/g },
+  // GitHub fine-grained tokens: github_pat_ with 36+ chars
+  { name: "github-token-fg", p: /\bgithub_pat_[A-Za-z0-9_]{36,}\b/g },
+  // Bearer tokens leaking in command output (git http.extraHeader, curl -H, etc.)
+  { name: "bearer-token", p: /(?:Authorization|auth)\s*[:=]\s*Bearer\s+\S+/gi },
   // JWT: three base64url segments separated by dots
   { name: "jwt", p: /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g },
   // PEM private key blocks — multi‑line with lazy match

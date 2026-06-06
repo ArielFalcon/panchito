@@ -19,6 +19,7 @@ export interface RunRequest {
   target: TestTarget;
   mode: RunMode;
   guidance?: string;
+  shadow?: boolean;
   source?: TriggerSource; // "webhook" (default) | "manual"
   fixCases?: QaCase[]; // continuation: failed cases to fix in the first generation
   parentRunId?: string; // continuation: the run this continues
@@ -48,6 +49,10 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
       }
       updateRecord(record.id, { status: "running" });
       const appConfig = loadApp(req.app);
+      // Runtime shadow override from the TUI/API takes precedence over the YAML config.
+      if (req.shadow !== undefined) {
+        appConfig.qa.shadow = req.shadow;
+      }
       const pipeline = deps.pipeline ?? defaultPipelineDeps();
       const run = await runPipeline(
         appConfig,

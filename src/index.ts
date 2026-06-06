@@ -86,7 +86,7 @@ process.on("SIGINT", () => {
   process.exit(0);
 });
 
-function enqueueApiRun(app: string, sha: string, target: string, mode: RunMode, guidance?: string): string {
+function enqueueApiRun(app: string, sha: string, target: string, mode: RunMode, guidance?: string, shadow?: boolean): string {
   if (shuttingDown) {
     console.warn(`[qa] rejecting run ${app}@${sha} — shutting down`);
     return "";
@@ -100,7 +100,7 @@ function enqueueApiRun(app: string, sha: string, target: string, mode: RunMode, 
   if (wasInterrupted) {
     previousNamespace = testDataNamespace("qa-bot", prev.sha);
   }
-  return enqueueTrackedRun(queue, { app, sha, target: target as TestTarget, mode, guidance, source: "webhook", previousNamespace });
+  return enqueueTrackedRun(queue, { app, sha, target: target as TestTarget, mode, guidance, shadow, source: "webhook", previousNamespace });
 }
 
 // ── Self-maintenance: clone ai-pipeline into a persistent working copy ───────

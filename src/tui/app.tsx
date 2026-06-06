@@ -82,10 +82,12 @@ export function Watch({ client, id }: { client: QaClient; id: string }): React.R
   );
 }
 
-export function Launcher({ apps, defaultGuidance, onLaunch, onOnboard }: { apps: string[]; defaultGuidance?: string; onLaunch: (app: string, target: TestTarget, mode: RunMode, guidance?: string) => void; onOnboard: () => void }): React.ReactElement {
+export function Launcher({ apps, defaultGuidance, onLaunch, onOnboard }: { apps: string[]; defaultGuidance?: string; onLaunch: (app: string, target: TestTarget, mode: RunMode, guidance?: string, shadow?: boolean) => void; onOnboard: () => void }): React.ReactElement {
   const [app, setApp] = useState<string | null>(null);
   const [target, setTarget] = useState<TestTarget | null>(null);
   const [mode, setMode] = useState<RunMode | null>(null);
+  const [shadow, setShadow] = useState<boolean | null>(null);
+  const [manualGuidance, setManualGuidance] = useState<string | undefined>(undefined);
 
   if (app === null) {
     const items: SelectItem[] = [
@@ -115,14 +117,33 @@ export function Launcher({ apps, defaultGuidance, onLaunch, onOnboard }: { apps:
   }
 
   // Manual mode: the user must write a guidance prompt before the run starts.
-  if (mode === "manual") {
+  if (mode === "manual" && manualGuidance === undefined && shadow === null) {
     return (
       <GuidancePrompt
         app={app}
-        target={target}
-        onSubmit={(guidance) => onLaunch(app, target, "manual", guidance)}
+        target={target!}
+        onSubmit={(guidance) => setManualGuidance(guidance)}
         onCancel={() => setMode(null)}
       />
+    );
+  }
+
+  // Shadow mode toggle — shown after mode (and optionally guidance) is chosen.
+  if (mode !== null && shadow === null) {
+    const items: SelectItem[] = [
+      { label: "No  — publish PRs and open Issues (normal mode)", value: "false" },
+      { label: "Yes — run silently, no PRs or Issues (shadow mode)", value: "true" },
+    ];
+    return (
+      <Box flexDirection="column">
+        <Text bold>{`Shadow mode for ${app} · ${target} · ${mode}`}</Text>
+        <Text dimColor>Shadow mode runs the full pipeline but does not publish PRs or open Issues.</Text>
+        <SelectInput items={items} onSelect={(i) => {
+          const s = i.value === "true";
+          setShadow(s);
+          onLaunch(app!, target!, mode!, mode === "manual" ? manualGuidance : defaultGuidance, s);
+        }} />
+      </Box>
     );
   }
 
@@ -135,11 +156,7 @@ export function Launcher({ apps, defaultGuidance, onLaunch, onOnboard }: { apps:
       <Text bold>{`Mode for ${app} · ${target}`}</Text>
       <SelectInput items={items} onSelect={(i) => {
         const m = i.value as RunMode;
-        if (m === "manual" && !defaultGuidance) {
-          setMode(m);
-        } else {
-          onLaunch(app, target, m, defaultGuidance);
-        }
+        setMode(m);
       }} />
     </Box>
   );
@@ -162,9 +179,9 @@ export function RunFlow({
   const [err, setErr] = useState<string | null>(null);
   const [onboarding, setOnboarding] = useState(false);
 
-  const launch = async (app: string, target: TestTarget, mode: RunMode, g?: string): Promise<void> => {
+  const launch = async (app: string, target: TestTarget, mode: RunMode, g?: string, shadow?: boolean): Promise<void> => {
     try {
-      const res = await client.createRun({ app, target, mode, sha, ref: sha ? undefined : refName ?? "main", guidance: g ?? guidance });
+      const res = await client.createRun({ app, target, mode, sha, ref: sha ? undefined : refName ?? "main", guidance: g ?? guidance, shadow });
       setRunId(res.id);
     } catch (e) {
       setErr(e instanceof QaApiError ? e.message : String(e));
@@ -174,5 +191,5 @@ export function RunFlow({
   if (err) return <Text color="red">{`qa: ${err}`}</Text>;
   if (runId) return <Watch client={client} id={runId} />;
   if (onboarding) return <OnboardWizard onDone={() => setOnboarding(false)} onCancel={() => setOnboarding(false)} />;
-  return <Launcher apps={apps} defaultGuidance={guidance} onLaunch={(a, t, m, g) => void launch(a, t, m, g)} onOnboard={() => setOnboarding(true)} />;
+  return <Launcher apps={apps} defaultGuidance={guidance} onLaunch={(a, t, m, g, s) => void launch(a, t, m, g, s)} onOnboard={() => setOnboarding(true)} />;
 }
