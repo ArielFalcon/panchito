@@ -10,6 +10,19 @@ export interface PullRequest {
   number: number;
 }
 
+export interface PrState {
+  merged: boolean;
+  state: string; // "open" | "closed"
+}
+
+export interface RepoInfo {
+  name: string;
+  fullName: string;
+  private: boolean;
+  defaultBranch: string;
+  description: string | null;
+}
+
 function ghHeaders(): Record<string, string> {
   return {
     Authorization: `Bearer ${requireEnv("GITHUB_TOKEN")}`,
@@ -69,5 +82,47 @@ export const github = {
     if (!res.ok || data.errors?.length) {
       throw new Error(`GitHub auto-merge: ${data.errors?.[0]?.message ?? res.status}`);
     }
+  },
+
+  // Deterministically merge a PR via the REST API (used by the maintainer self-update
+  // AFTER the orchestrator's own typecheck+test gate passes — so the merge does not
+  // depend on the repo having branch protection / "Allow auto-merge" configured).
+  async mergePullRequest(repo: string, number: number, mergeMethod = "squash"): Promise<void> {
+    const res = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}/merge`, {
+      method: "PUT",
+      headers: ghHeaders(),
+      body: JSON.stringify({ merge_method: mergeMethod }),
+    });
+    if (!res.ok) throw new Error(`GitHub merge error ${res.status}: ${await res.text()}`);
+  },
+
+  async getPullRequest(repo: string, number: number): Promise<PrState> {
+    const res = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, {
+      headers: ghHeaders(),
+    });
+    if (!res.ok) throw new Error(`GitHub get PR error ${res.status}: ${await res.text()}`);
+    const data = (await res.json()) as { merged: boolean; state: string };
+    return { merged: data.merged, state: data.state };
+  },
+
+  async getRepo(repo: string): Promise<RepoInfo> {
+    const res = await fetch(`https://api.github.com/repos/${repo}`, {
+      headers: ghHeaders(),
+    });
+    if (res.status === 404) {
+      throw new Error(`repo '${repo}' not found or token lacks access (private repo needs GITHUB_TOKEN with 'repo' scope)`);
+    }
+    if (!res.ok) throw new Error(`GitHub get repo error ${res.status}: ${await res.text()}`);
+    const data = (await res.json()) as {
+      name: string; full_name: string; private: boolean;
+      default_branch: string; description: string | null;
+    };
+    return {
+      name: data.name,
+      fullName: data.full_name,
+      private: data.private,
+      defaultBranch: data.default_branch,
+      description: data.description,
+    };
   },
 };

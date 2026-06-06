@@ -1,0 +1,18 @@
+# The pipeline tests ITSELF. ai-pipeline is a Node/TS project, so it uses code mode
+# (run its own `npm test`, no web environment). A failing self-run is what surfaces
+# incidents that the qa-maintainer then diagnoses and fixes (see opencode/agent/qa-maintainer.md).
+# Starts in shadow mode (runs, but does not open PRs/Issues) — flip shadow to false to let
+# self-QA publish.
+name: "ai-pipeline"
+repo: "ArielFalcon/ai-pipeline"
+baseBranch: "main"
+
+code: true
+
+qa:
+  needsReview: true
+  shadow: true
+  testDataPrefix: "qa-bot"
+
+report:
+  onFailure: "github-issue"

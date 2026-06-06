@@ -6,17 +6,26 @@
   "description": "App-agnostic AI-assisted E2E QA engine. Template: a watched app is onboarded via config/ + .env only.",
   "scripts": {
     "qa": "tsx src/cli.ts",
-    "start": "tsx src/index.ts",
-    "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "start": "node boot-guard.mjs && tsx src/index.ts",
+    "test": "node --import tsx --test \"src/**/*.test.ts\" \"src/**/*.test.tsx\"",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@opencode-ai/sdk": "^1.15.13",
+    "better-sqlite3": "12.10.0",
+    "ink": "^7.0.5",
+    "ink-select-input": "^6.2.0",
+    "ink-spinner": "^5.0.0",
+    "react": "^19.2.7",
     "undici": "^8.3.0",
-    "yaml": "^2.5.0"
+    "yaml": "^2.5.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
+    "@types/react": "^19.2.17",
+    "ink-testing-library": "^4.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
   }
