@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runPipeline, PipelineDeps, GenerateInput } from "./pipeline";
+import { ReviewResult } from "./integrations/opencode-client";
 import { AppConfig } from "./orchestrator/config-loader";
 import { AgentResult, QaRunResult, RunMode } from "./types";
 
@@ -29,6 +30,7 @@ interface Harness extends PipelineDeps {
   published: boolean;
   genMode?: RunMode;
   genGuidance?: string;
+  genInputs: GenerateInput[]; // every generate() call's input, to inspect reinjected corrections
 }
 
 function deps(
@@ -38,14 +40,18 @@ function deps(
     validation?: { ok: boolean; errors: string[] };
     prUrl?: string | null;
     agent?: AgentResult;
+    agents?: AgentResult[]; // a sequence of agent results, one per generate() call
+    review?: ReviewResult[]; // a sequence of independent-review verdicts, one per review() call
     healthy?: boolean | boolean[]; // a single value, or a sequence per call
     message?: string; // commit message (classification)
     diff?: string;
   } = {},
 ): Harness {
   const issues: string[] = [];
-  const h = { issues, published: false } as Harness;
+  const h = { issues, published: false, genInputs: [] } as unknown as Harness;
   const healthSeq = Array.isArray(opts.healthy) ? [...opts.healthy] : null;
+  const agentSeq = opts.agents ? [...opts.agents] : null;
+  const reviewSeq = opts.review ? [...opts.review] : null;
   Object.assign(h, {
     waitForDeploy: async () => {
       calls.push("gate");
@@ -58,8 +64,18 @@ function deps(
       calls.push("generate");
       h.genMode = input.mode;
       h.genGuidance = input.guidance;
+      h.genInputs.push(input);
+      if (agentSeq) return agentSeq.shift() ?? opts.agent ?? generated;
       return opts.agent ?? generated;
     },
+    ...(opts.review
+      ? {
+          review: async () => {
+            calls.push("review");
+            return reviewSeq!.shift() ?? { approved: true, corrections: [] };
+          },
+        }
+      : {}),
     setupE2e: async () => {
       calls.push("setup");
     },
@@ -185,6 +201,58 @@ test("green but the reviewer did NOT approve: does not publish, opens a review I
   assert.equal(d.published, false);
   assert.equal(d.issues.length, 1);
   assert.match(d.issues[0]!, /did not approve/);
+});
+
+test("reviewer rejects then approves: reinjects corrections, regenerates, and publishes", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, {
+    agents: [generated, generated], // round 0 + the regenerated round
+    review: [
+      { approved: false, corrections: ["a.spec.ts: assert the outcome, not just the click"] },
+      { approved: true, corrections: [] },
+    ],
+  });
+  await runPipeline(app, "abc123", d);
+  // generate ran twice (initial + after corrections); review ran twice
+  assert.equal(calls.filter((c) => c === "generate").length, 2);
+  assert.equal(calls.filter((c) => c === "review").length, 2);
+  // the second generate received the reviewer's corrections
+  assert.deepEqual(d.genInputs[1]!.reviewCorrections, ["a.spec.ts: assert the outcome, not just the click"]);
+  assert.equal(d.published, true);
+  assert.equal(d.issues.length, 0);
+});
+
+test("reviewer never converges: bounded at MAX_REVIEW_ROUNDS, no publish, opens a review Issue", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, {
+    agents: [generated, generated, generated],
+    review: [
+      { approved: false, corrections: ["x"] },
+      { approved: false, corrections: ["y"] },
+      { approved: false, corrections: ["z"] },
+    ],
+  });
+  await runPipeline(app, "abc123", d);
+  // 2 rounds: generate(initial) → review(reject) → generate(fix) → review(reject) → stop
+  assert.equal(calls.filter((c) => c === "generate").length, 2);
+  assert.equal(calls.filter((c) => c === "review").length, 2);
+  assert.equal(d.published, false);
+  assert.equal(d.issues.length, 1);
+  assert.match(d.issues[0]!, /did not approve/);
+});
+
+test("reviewer error fails open: trusts the generator and publishes", async () => {
+  const calls: string[] = [];
+  const h = deps(passing(), calls, {});
+  // a review() that throws → fail open
+  (h as PipelineDeps).review = async () => {
+    calls.push("review");
+    throw new Error("reviewer crashed");
+  };
+  await runPipeline(app, "abc123", h);
+  assert.equal(calls.filter((c) => c === "generate").length, 1);
+  assert.equal(h.published, true);
+  assert.equal(h.issues.length, 0);
 });
 
 test("DEV unhealthy before execution: infra-error, neither executes nor reports as a bug", async () => {

@@ -60,7 +60,7 @@
       "model": "opencode-go/deepseek-v4-flash",
       "prompt": "{file:./agent/qa-worker.md}",
       "tools": { "write": true, "edit": false, "read": true, "bash": false },
-      "mcp": ["serena"],
+      "mcp": ["serena", "playwright"],
       "steps": 25,
       "temperature": 0.3
     }

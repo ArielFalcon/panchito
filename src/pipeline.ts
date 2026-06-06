@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { AppConfig } from "./orchestrator/config-loader";
 import { DeployTarget, waitForDeploy } from "./env/deploy-gate";
 import { ensureMirror, getCommitDiff, getCommitMessage, defaultMirrorDeps } from "./integrations/repo-mirror";
-import { runOpencode, defaultOpencodeDeps, reviewIndependently } from "./integrations/opencode-client";
+import { runOpencode, runOpencodeParallel, defaultOpencodeDeps, reviewIndependently } from "./integrations/opencode-client";
 import { classifyCommit, CommitIntent } from "./qa/commit-classify";
 import { setupE2eProject, defaultSetupDeps } from "./qa/setup";
 import { validateSpecs, defaultValidateDeps } from "./qa/validate";
@@ -41,6 +41,7 @@ export interface GenerateInput {
   guidance?: string; // manual mode: user instructions on what to test
   openapi?: string | string[]; // optional hint: where the repo's OpenAPI contract(s) live
   fixCases?: QaCase[]; // re-generation: failed cases from a previous execution to fix
+  reviewCorrections?: string[]; // re-generation: corrections from a reviewer rejection
   runId?: string; // for SSE live activity: maps the OpenCode session to this run record
 }
 
@@ -73,29 +74,39 @@ export function defaultPipelineDeps(): PipelineDeps {
       const message = await getCommitMessage(mirrorDir, sha, defaultMirrorDeps);
       return { mirrorDir, diff, message };
     },
-    generate: async (input, signal, onProgress) =>
-      runOpencode(
-        {
-          repo: input.repo,
-          sha: input.sha,
-          diff: input.diff,
-          mirrorDir: input.mirrorDir,
-          e2eRelDir: E2E_DIR,
-          namespace: input.namespace,
-          needsReview: input.needsReview,
-          target: input.target ?? "e2e",
-          mode: input.mode,
-          appName: input.appName,
-          baseUrl: input.baseUrl,
-          intent: input.intent,
-          guidance: input.guidance,
-          openapi: input.openapi,
-          fixCases: input.fixCases,
-          runId: input.runId,
-        },
-        await defaultOpencodeDeps(),
-        { signal, onProgress },
-      ),
+    generate: async (input, signal, onProgress) => {
+      const ocInput = {
+        repo: input.repo,
+        sha: input.sha,
+        diff: input.diff,
+        mirrorDir: input.mirrorDir,
+        e2eRelDir: E2E_DIR,
+        namespace: input.namespace,
+        needsReview: input.needsReview,
+        target: input.target ?? "e2e",
+        mode: input.mode,
+        appName: input.appName,
+        baseUrl: input.baseUrl,
+        intent: input.intent,
+        guidance: input.guidance,
+        openapi: input.openapi,
+        fixCases: input.fixCases,
+        reviewCorrections: input.reviewCorrections,
+        runId: input.runId,
+      };
+      const oc = await defaultOpencodeDeps();
+      // complete/exhaustive fan out to parallel workers (plan → workers → consolidate); the other
+      // modes (diff/manual) and any fix/review re-generation use the single-agent path. Code mode
+      // always uses the single agent (no web fan-out).
+      const useParallel =
+        (input.target ?? "e2e") === "e2e" &&
+        (input.mode === "complete" || input.mode === "exhaustive") &&
+        !input.fixCases?.length &&
+        !input.reviewCorrections?.length;
+      return useParallel
+        ? runOpencodeParallel(ocInput, oc, { signal, onProgress })
+        : runOpencode(ocInput, oc, { signal, onProgress });
+    },
     setupE2e: (e2eDir) => setupE2eProject(e2eDir, defaultSetupDeps),
     validate: (e2eDir) => validateSpecs(e2eDir, defaultValidateDeps),
     execute: (e2eDir, opts) => runE2E(e2eDir, opts, defaultExecuteDeps),
@@ -217,55 +228,62 @@ export async function runPipeline(
     });
   }
 
+  // Generate, then run the INDEPENDENT reviewer as a bounded feedback loop. The reviewer is a
+  // SEPARATE qa-reviewer session (not the generator's subagent), so its verdict is genuinely
+  // independent and AUTHORITATIVE — it breaks the circular quality loop documented in AGENTS.md.
+  // On rejection, the reviewer's actionable corrections are reinjected and the agent regenerates
+  // (up to MAX_REVIEW_ROUNDS) BEFORE giving up; only then is the result marked not-approved
+  // (→ Issue). A reviewer error fails open (trust the generator) and stops the loop.
+  const MAX_REVIEW_ROUNDS = 2;
+  const generateAndReview = async (genInput: GenerateInput): Promise<AgentResult> => {
+    let r = await deps.generate(genInput, signal, log);
+    if (!(app.qa.needsReview && deps.review)) return r;
+    for (let round = 0; round < MAX_REVIEW_ROUNDS; round++) {
+      if (r.specs.length === 0) return r; // nothing to review (a no-op or no fixes produced)
+      let review: ReviewResult;
+      try {
+        review = await deps.review(
+          { diff, specs: r.specs, mirrorDir, e2eRelDir: E2E_DIR, baseUrl: app.dev?.baseUrl, intent, appName: app.name, mode },
+          signal,
+        );
+      } catch (err) {
+        log(`[qa] independent reviewer failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+        return r; // fail open: trust the generator's own verdict
+      }
+      log(`[qa] independent reviewer round ${round + 1}/${MAX_REVIEW_ROUNDS}: approved=${review.approved} corrections=${review.corrections.length}`);
+      if (review.approved) return { ...r, approved: true, note: undefined };
+      if (round === MAX_REVIEW_ROUNDS - 1) return { ...r, approved: false, note: review.corrections.join("; ") };
+      log(`[qa] applying ${review.corrections.length} reviewer correction(s) and regenerating...`);
+      onStep?.("retry");
+      r = await deps.generate({ ...genInput, reviewCorrections: review.corrections }, signal, log);
+    }
+    return r;
+  };
+
+  const baseGenInput = (extra: Partial<GenerateInput>): GenerateInput => ({
+    repo: app.repo,
+    sha,
+    diff,
+    mirrorDir,
+    namespace: ns,
+    needsReview: app.qa.needsReview,
+    target: opts.target,
+    mode,
+    appName: app.name,
+    baseUrl: app.dev?.baseUrl,
+    intent,
+    guidance: opts.guidance,
+    openapi: app.openapi,
+    ...extra,
+  });
+
   // 5. Generate (only when applicable): the agent writes/improves `e2e/`.
   let result: AgentResult | null = null;
   if (generating) {
     checkSignal();
     onStep?.("generate");
     log("[qa] generating E2E tests with OpenCode...");
-    result = await deps.generate({
-      repo: app.repo,
-      sha,
-      diff,
-      mirrorDir,
-      namespace: ns,
-      needsReview: app.qa.needsReview,
-      target: opts.target,
-      mode,
-      appName: app.name,
-      baseUrl: app.dev?.baseUrl,
-      intent,
-      guidance: opts.guidance,
-      fixCases: opts.fixCases,
-      openapi: app.openapi,
-    }, signal, log);
-
-    // Independent review: when review is enabled, the orchestrator opens a SEPARATE
-    // qa-reviewer session (not the generator's subagent) so the verdict is genuinely
-    // independent. The independent verdict OVERRIDES the generator's self-reported
-    // approval — this breaks the circular quality loop documented in AGENTS.md.
-    if (result.specs.length > 0 && app.qa.needsReview && deps.review) {
-      log("[qa] invoking independent reviewer (separate session)...");
-      try {
-        const review = await deps.review({
-          diff,
-          specs: result.specs,
-          mirrorDir,
-          e2eRelDir: E2E_DIR,
-          baseUrl: app.dev?.baseUrl,
-          intent,
-          appName: app.name,
-          mode,
-        }, signal);
-        log(`[qa] independent reviewer: approved=${review.approved} corrections=${review.corrections.length}`);
-        if (!review.approved) {
-          result = { ...result, approved: false, note: review.corrections.join("; ") };
-        }
-      } catch (err) {
-        log(`[qa] independent reviewer failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
-        // Fail open: if the reviewer crashes, trust the generator's verdict.
-      }
-    }
+    result = await generateAndReview(baseGenInput({ fixCases: opts.fixCases }));
 
     log(
       `[qa] agent: approved=${result.approved} specs=[${result.specs.join(", ")}]` +
@@ -341,42 +359,11 @@ export async function runPipeline(
 
     log("[qa] re-generating with failure feedback...");
     onStep?.("retry");
-    result = await deps.generate({
-      repo: app.repo,
-      sha,
-      diff,
-      mirrorDir,
-      namespace: ns,
-      needsReview: app.qa.needsReview,
-      target: opts.target,
-      mode,
-      appName: app.name,
-      baseUrl: app.dev?.baseUrl,
-      intent,
-      guidance: opts.guidance,
-      openapi: app.openapi,
-      fixCases: failed,
-    }, signal, log);
+    result = await generateAndReview(baseGenInput({ fixCases: failed }));
     log(
       `[qa] agent (retry): approved=${result.approved} specs=[${result.specs.join(", ")}]` +
         (result.note ? ` note=${result.note}` : ""),
     );
-
-    if (result.specs.length > 0 && app.qa.needsReview && deps.review) {
-      log("[qa] independent review of retry specs...");
-      try {
-        const retryReview = await deps.review({
-          diff, specs: result.specs, mirrorDir,
-          e2eRelDir: E2E_DIR, baseUrl: app.dev?.baseUrl,
-          intent, appName: app.name, mode,
-        }, signal);
-        if (!retryReview.approved) {
-          result = { ...result, approved: false, note: retryReview.corrections.join("; ") };
-        }
-      } catch (err) {
-        log(`[qa] independent reviewer failed on retry (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
 
     if (result.specs.length === 0) {
       log("[qa] retry agent produced no fixes; keeping original verdict.");

@@ -9,6 +9,8 @@
 // verdict parsing, orchestration) is tested with stubs; the real connection to
 // `opencode serve` is the boundary not covered by unit tests.
 
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { AgentResult, QaCase, RunMode, TestTarget } from "../types";
 import { CommitIntent } from "../qa/commit-classify";
 import { sanitizeText } from "../orchestrator/sanitizer";
@@ -171,6 +173,7 @@ export interface OpencodeRunInput {
   guidance?: string; // manual mode: user instructions
   openapi?: string | string[]; // optional hint (from app config): where the repo's OpenAPI contract(s) live
   fixCases?: QaCase[]; // re-generation: failed cases from a previous execution to fix
+  reviewCorrections?: string[]; // re-generation: actionable corrections from a reviewer rejection
   runId?: string; // maps the session to a RunRecord for SSE live activity
 }
 
@@ -313,15 +316,14 @@ export async function reviewIndependently(
     ].join("\n");
 
     const output = await session.prompt(prompt);
-    try {
-      const json = JSON.parse(output.slice(output.lastIndexOf("{")));
+    const json = lastJsonMatching(output, (x) => typeof x.approved === "boolean");
+    if (json) {
       return {
         approved: json.approved === true,
-        corrections: Array.isArray(json.corrections) ? json.corrections : [],
+        corrections: Array.isArray(json.corrections) ? (json.corrections as string[]) : [],
       };
-    } catch {
-      return { approved: false, corrections: ["the independent reviewer produced no parseable verdict"] };
     }
+    return { approved: false, corrections: ["the independent reviewer produced no parseable verdict"] };
   } finally {
     await session.dispose().catch((err) => {
       console.warn(`[qa] reviewer session dispose failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -329,87 +331,292 @@ export async function reviewIndependently(
   }
 }
 
-// Parallel generation for complete/exhaustive modes. The primary agent analyzes the
-// repo and produces a list of test objectives. Each objective is dispatched to a
-// SEPARATE qa-worker session (flash model, cheaper) running concurrently, so N flows
-// are tested in the time of one. The orchestrator then consolidates with the strong
-// model.
+// ── complete/exhaustive: two-phase plan → fan-out ────────────────────────────
+//
+// A single agent cannot analyze a whole repo AND author every spec within one context window
+// and step budget. So complete/exhaustive run in two phases (runOpencodeParallel):
+//   1. PLAN  — one qa-generator (strong model) builds the coverage/importance map, persists
+//              analysis.json, and returns a STRUCTURED list of objectives (no specs yet).
+//   2. FAN-OUT — the orchestrator dispatches each objective to a SEPARATE qa-worker (cheap
+//              flash model) that writes exactly ONE spec, with surgical per-flow context.
+// The orchestrator then writes the manifest deterministically (workers never touch it → no
+// concurrent-write race), and the normal Filter B/C run over all the specs.
+
+export interface PlanObjective {
+  flow: string; // user flow → spec filename + manifest id
+  objective: string; // concrete acceptance criterion (given/when/then)
+  symbols: string[]; // code symbols the spec should exercise (serena blast radius)
+}
+
+// Parse the planner's output: the LAST balanced object carrying an `objectives` array. Each
+// objective needs at least a flow + objective; symbols are optional. Malformed entries are dropped.
+export function parsePlan(text: string): PlanObjective[] {
+  const o = lastJsonMatching(text, (x) => Array.isArray((x as Record<string, unknown>).objectives));
+  if (!o) return [];
+  const raw = (o.objectives as unknown[]) ?? [];
+  const out: PlanObjective[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const r = item as Record<string, unknown>;
+    const flow = typeof r.flow === "string" ? r.flow.trim() : "";
+    const objective = typeof r.objective === "string" ? r.objective.trim() : "";
+    if (!flow || !objective) continue;
+    const symbols = Array.isArray(r.symbols) ? r.symbols.filter((s): s is string => typeof s === "string") : [];
+    out.push({ flow, objective, symbols });
+  }
+  // De-duplicate by flow (the filename/id key) so two objectives never collide on one file.
+  const seen = new Set<string>();
+  return out.filter((o) => (seen.has(o.flow) ? false : (seen.add(o.flow), true)));
+}
+
+// A spec filename derived from a flow, safe for the filesystem and Playwright's testMatch.
+export function specFileForFlow(flow: string): string {
+  const safe = flow.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "flow";
+  return `flows/${safe}.spec.ts`;
+}
+
+interface ManifestEntry {
+  id: string;
+  objective: string;
+  flow: string;
+  targets: string[];
+  changeRef: { sha: string; type: string };
+}
+
+// Injected fs for the manifest (the orchestrator owns this file; tested with stubs).
+export interface ManifestFs {
+  read(path: string): string | null;
+  write(path: string, content: string): void;
+}
+export const realManifestFs: ManifestFs = {
+  read: (p) => {
+    try {
+      return existsSync(p) ? readFileSync(p, "utf8") : null;
+    } catch {
+      return null;
+    }
+  },
+  write: (p, c) => {
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, c);
+  },
+};
+
+// Upsert (by id) manifest entries for the worker-written specs. Pure given the fs; preserves
+// unrelated existing entries and any measured fields already on an upserted entry.
+export function upsertManifest(fs: ManifestFs, manifestPath: string, entries: ManifestEntry[]): void {
+  if (entries.length === 0) return;
+  let arr: Array<Record<string, unknown>> = [];
+  const raw = fs.read(manifestPath);
+  if (raw) {
+    try {
+      const p = JSON.parse(raw);
+      if (Array.isArray(p)) arr = p;
+    } catch {
+      /* corrupt manifest → rebuild from the entries we have */
+    }
+  }
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const e of arr) if (e && typeof e.id === "string") byId.set(e.id, e);
+  for (const e of entries) byId.set(e.id, { ...byId.get(e.id), ...e });
+  fs.write(manifestPath, JSON.stringify([...byId.values()], null, 2));
+}
+
 export interface ParallelWorkerInput {
-  objective: string; // the test objective (derived from code analysis)
-  flow: string; // the user flow name (for the spec filename and manifest)
-  symbols: string[]; // affected symbols the test should exercise
+  objective: string;
+  flow: string;
+  symbols: string[];
+  specFile: string; // orchestrator-assigned path under e2eRelDir (e.g. "flows/checkout.spec.ts")
   repo: string;
   mirrorDir: string;
-  e2eRelDir: string; // where to write the spec (e.g. "e2e/complete")
+  e2eRelDir: string;
   namespace: string;
   baseUrl?: string;
   appName: string;
   mode: RunMode;
 }
 
+// Dispatch each worker objective to a SEPARATE qa-worker session, bounded concurrency. Each
+// worker writes ONE spec; failures are isolated per worker (one bad worker never aborts the
+// batch). Returns the flow→spec mapping (for the manifest) plus per-flow errors.
 export async function generateParallel(
   workers: ParallelWorkerInput[],
   deps: OpencodeDeps,
   opts?: { signal?: AbortSignal; concurrency?: number },
-): Promise<{ specs: string[]; errors: string[] }> {
-  if (workers.length === 0) return { specs: [], errors: [] };
+): Promise<{ results: Array<{ flow: string; spec: string }>; errors: string[] }> {
+  if (workers.length === 0) return { results: [], errors: [] };
   const concurrency = opts?.concurrency ?? Math.min(workers.length, 5);
-  const specs: string[] = [];
+  const results: Array<{ flow: string; spec: string }> = [];
   const errors: string[] = [];
 
-  // Process in batches to limit concurrent sessions (avoid overwhelming the API).
   for (let i = 0; i < workers.length; i += concurrency) {
     const batch = workers.slice(i, i + concurrency);
-    const results = await Promise.all(
+    await Promise.all(
       batch.map(async (w) => {
         try {
           const session = await deps.open("qa-worker", w.mirrorDir, { signal: opts?.signal });
           try {
-            const prompt = [
-              `Write ONE E2E Playwright spec for this test objective:`,
-              ``,
-              `## Objective`,
-              w.objective,
-              ``,
-              `## Context`,
-              `- Flow: ${w.flow}`,
-              `- Affected symbols (serena): ${w.symbols.join(", ")}`,
-              `- Namespace prefix: ${w.namespace}`,
-              `- LIVE DEV URL: ${w.baseUrl ?? "(not provided)"}`,
-              `- Write the spec to: ${w.e2eRelDir}/${w.flow.replace(/[^a-z0-9-]/gi, "-")}.spec.ts`,
-              `- Import: import { test, expect } from "../fixtures"`,
-              ``,
-              `## Rules`,
-              `- Write EXACTLY ONE spec file and ONE manifest entry in ${w.e2eRelDir}/.qa/manifest.json`,
-              `- Use selectors from ${w.baseUrl ? "Playwright MCP (browser_snapshot the DEV URL first)" : "the code analysis (DEV URL unavailable)"}`,
-              `- End with JSON: {"spec":"filename.spec.ts"}`,
-            ].join("\n");
-            const output = await session.prompt(prompt);
-            try {
-              const json = JSON.parse(output.slice(output.lastIndexOf("{")));
-              if (json.spec) specs.push(json.spec);
-            } catch {
-              errors.push(`${w.flow}: worker produced no parseable spec name`);
-            }
+            const output = await session.prompt(buildWorkerPrompt(w));
+            const json = lastJsonMatching(output, (x) => typeof x.spec === "string");
+            if (json?.spec) results.push({ flow: w.flow, spec: json.spec as string });
+            else errors.push(`${w.flow}: worker produced no parseable spec name`);
           } finally {
             await session.dispose().catch(() => {});
           }
         } catch (err) {
           errors.push(`${w.flow}: ${err instanceof Error ? err.message : String(err)}`);
         }
-        return null; // results collected via side effects
       }),
     );
-    void results;
+  }
+  return { results, errors };
+}
+
+// Surgical, self-contained instructions for ONE worker. The worker has serena + Playwright MCP
+// and writes exactly its assigned file; it must NOT touch the manifest or other specs.
+export function buildWorkerPrompt(w: ParallelWorkerInput): string {
+  return [
+    `Write ONE Playwright E2E spec for this objective. Write ONLY your assigned file.`,
+    ``,
+    `## Objective`,
+    sanitizeText(w.objective).text,
+    ``,
+    `## Context`,
+    `- Flow: ${w.flow}`,
+    `- Affected code symbols (read them with serena): ${w.symbols.join(", ") || "(none specified)"}`,
+    `- Namespace prefix for any data you create: ${w.namespace}`,
+    `- LIVE DEV URL: ${w.baseUrl ?? "(not provided)"}`,
+    `- Write EXACTLY this file: ${w.e2eRelDir}/${w.specFile}  — do not create or edit any other file.`,
+    `- Import the shared harness: import { test, expect } from "../fixtures"`,
+    ``,
+    `## Rules`,
+    w.baseUrl
+      ? `- Explore YOUR flow FIRST with the Playwright MCP: browser_navigate to the LIVE DEV URL, browser_snapshot, and use ONLY selectors verified against the real DOM. Never invent selectors.`
+      : `- No LIVE DEV URL: derive selectors from the code (serena) and note this limitation in a spec comment.`,
+    `- Prefer getByRole/getByLabel/getByTestId; scope to a section; no waitForTimeout; no network mocks.`,
+    `- At least ONE real assertion on the observable OUTCOME (not just a click). Clean up created data via cleanup().`,
+    `- Do NOT write to the manifest — the orchestrator records metadata. Do NOT read or edit other workers' files.`,
+    `- End your reply with ONLY this JSON: {"spec":"${w.specFile}"}`,
+  ].join("\n");
+}
+
+// Two-phase complete/exhaustive entry point (see the block comment above). Returns an AgentResult
+// shaped like runOpencode's, so the pipeline reviews/validates/executes it identically.
+export async function runOpencodeParallel(
+  input: OpencodeRunInput,
+  deps: OpencodeDeps,
+  opts?: { signal?: AbortSignal; onProgress?: (msg: string) => void; concurrency?: number },
+  fs: ManifestFs = realManifestFs,
+): Promise<AgentResult> {
+  const timeoutMs = agentTimeout(input.mode);
+
+  // Phase 1 — PLAN (strong model). Heartbeat while it analyses the whole repo.
+  const planSession = await deps.open("qa-generator", input.mirrorDir, { signal: opts?.signal, timeoutMs });
+  if (input.runId) registerRunSession(planSession.id, input.runId);
+  const startedAt = Date.now();
+  const heartbeat = opts?.onProgress
+    ? setInterval(() => opts.onProgress?.(`[qa] planner is analysing the repo... (${Math.round((Date.now() - startedAt) / 1000)}s elapsed)`), 15_000)
+    : undefined;
+  let planText: string;
+  try {
+    planText = await planSession.prompt(buildPlanPrompt(input));
+  } finally {
+    if (heartbeat) clearInterval(heartbeat);
+    if (input.runId) unregisterRunSession(planSession.id);
+    await planSession.dispose().catch(() => {});
   }
 
-  return { specs, errors };
+  const objectives = parsePlan(planText);
+  opts?.onProgress?.(`[qa] plan: ${objectives.length} objective(s) to generate`);
+  if (objectives.length === 0) {
+    // A valid no-op: nothing important is uncovered (honored as `skipped` upstream).
+    return { output: planText, specs: [], reviewed: false, approved: true, note: "planner found no important uncovered flows" };
+  }
+
+  // Phase 2 — FAN-OUT to workers (one spec each).
+  const changeType = input.intent?.type ?? input.mode;
+  const workers: ParallelWorkerInput[] = objectives.map((o) => ({
+    objective: o.objective,
+    flow: o.flow,
+    symbols: o.symbols,
+    specFile: specFileForFlow(o.flow),
+    repo: input.repo,
+    mirrorDir: input.mirrorDir,
+    e2eRelDir: input.e2eRelDir,
+    namespace: input.namespace,
+    baseUrl: input.baseUrl,
+    appName: input.appName,
+    mode: input.mode,
+  }));
+  const { results, errors } = await generateParallel(workers, deps, { signal: opts?.signal, concurrency: opts?.concurrency });
+  opts?.onProgress?.(`[qa] workers: ${results.length} spec(s) written, ${errors.length} error(s)`);
+
+  // Phase 3 — CONSOLIDATE: the orchestrator writes the manifest from the plan (no worker race).
+  const written = new Set(results.map((r) => r.flow));
+  const entries: ManifestEntry[] = objectives
+    .filter((o) => written.has(o.flow))
+    .map((o) => ({ id: o.flow, objective: o.objective, flow: o.flow, targets: o.symbols, changeRef: { sha: input.sha, type: changeType } }));
+  upsertManifest(fs, join(input.mirrorDir, input.e2eRelDir, ".qa", "manifest.json"), entries);
+
+  const specs = results.map((r) => r.spec);
+  return {
+    output: planText,
+    specs,
+    reviewed: false,
+    approved: specs.length > 0, // overridden by the orchestrator's independent reviewer when enabled
+    note: errors.length ? `worker errors: ${errors.join("; ")}` : undefined,
+  };
+}
+
+// Phase-1 planning prompt: analyse the whole repo, persist the coverage/importance map, and
+// return STRUCTURED objectives (no spec files). It must question its own list (drop naive flows,
+// keep main use cases + MVP happy paths + relevant edge cases).
+export function buildPlanPrompt(input: OpencodeRunInput): string {
+  const exhaustive = input.mode === "exhaustive";
+  return [
+    exhaustive
+      ? `Audit the ENTIRE E2E suite of ${input.repo} and plan a full regeneration.`
+      : `Analyze the WHOLE repository ${input.repo} and plan where to GROW the E2E suite.`,
+    ``,
+    `## Phase 1 of 2 — PLANNING ONLY. Do NOT write any .spec.ts in this phase.`,
+    `1. Activate serena (activate_project) and build a COVERAGE + IMPORTANCE map: read the existing`,
+    `   specs in ${input.e2eRelDir}/ and the app code (get_symbols_overview, find_symbol,`,
+    `   find_referencing_symbols) to find the important user flows and which are NOT covered.`,
+    `2. Persist this map to ${input.e2eRelDir}/.qa/analysis.json (flows, covered vs uncovered,`,
+    `   importance, lastSha:"${input.sha}"); update it incrementally if it already exists.`,
+    exhaustive
+      ? `3. Plan objectives for EVERY important flow (the suite is regenerated from scratch).`
+      : `3. Plan objectives ONLY for the important UNCOVERED flows (the delta over the existing suite).`,
+    `   QUESTION your own list before finalizing: drop trivial/naive items (a single button, static`,
+    `   content); KEEP the main use cases, the MVP happy paths, AND the relevant edge cases`,
+    `   (boundaries, error paths, negative/invalid input). Each objective is a concrete acceptance`,
+    `   criterion in given/when/then form, with the code symbols it exercises.`,
+    ``,
+    `## Output — end with ONLY this JSON (no spec files):`,
+    `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","symbols":["CheckoutService.pay"]}]}`,
+    `If every important flow is already well covered, output {"objectives":[]}.`,
+  ].join("\n");
 }
 
 // Assembles the dynamic message for the agent. The "how" lives in
 // opencode/agent/qa-generator.md and the skills; only the task + context go here.
 // The diff/guidance are sanitized (cheap defense in depth).
 export function buildPrompt(input: OpencodeRunInput): string {
+  // Review-fix mode: prepend the reviewer's actionable corrections before anything else, so
+  // the agent's first priority is to resolve them (the reviewer→generator feedback loop).
+  const reviewBlock = input.reviewCorrections?.length
+    ? [
+        `## Apply reviewer corrections (HIGHEST priority)`,
+        ``,
+        `An independent reviewer REJECTED the previous specs. Fix EACH item below precisely;`,
+        `do NOT rewrite specs that were not flagged. Where a fix concerns a selector or an`,
+        `assertion, re-verify it against the live DOM with the Playwright MCP before editing.`,
+        ``,
+        ...input.reviewCorrections.map((c) => `- ${c}`),
+        ``,
+      ]
+    : [];
+
   // Fix mode: prepend failure feedback before the original task.
   const fixBlock = input.fixCases?.length
     ? [
@@ -442,6 +649,7 @@ export function buildPrompt(input: OpencodeRunInput): string {
   const openapiHint = Array.isArray(input.openapi) ? input.openapi.join(", ") : input.openapi;
   const isCode = input.target === "code";
   return [
+    ...reviewBlock,
     ...fixBlock,
     ...(fixBlock.length ? [``] : []),
     buildTask(input),
@@ -540,25 +748,67 @@ function buildTask(input: OpencodeRunInput): string {
   ].join("\n");
 }
 
-// Extracts the agent's closing JSON. Tolerant: looks for the LAST JSON object
-// with `approved` (whether or not it sits in a ```json block). If none is valid,
-// it assumes not approved (fail-closed) so nothing is published by accident.
-export function parseVerdict(text: string): FinalVerdict {
-  const candidates = text.match(/\{[\s\S]*?\}/g) ?? [];
-  for (let i = candidates.length - 1; i >= 0; i--) {
-    try {
-      const parsed = JSON.parse(candidates[i]!);
-      if (typeof parsed.approved === "boolean") {
-        return {
-          approved: parsed.approved,
-          specs: Array.isArray(parsed.specs) ? parsed.specs : [],
-          note: typeof parsed.note === "string" ? parsed.note : undefined,
-          parsed: true,
-        };
-      }
-    } catch {
-      /* not parseable JSON; keep trying earlier candidates */
+// Extracts every BALANCED top-level JSON object from free-form agent text, respecting
+// string literals and escapes (so a `}` inside a string, or nested objects, never mis-split
+// the span). Returns them in document order; callers take the last one matching their shape.
+// This replaces brittle regex/lastIndexOf scanning of the agent's closing JSON.
+export function extractJsonObjects(text: string): unknown[] {
+  const objs: unknown[] = [];
+  let depth = 0;
+  let start = -1;
+  let inStr = false;
+  let esc = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
     }
+    if (ch === '"') inStr = true;
+    else if (ch === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === "}") {
+      if (depth > 0) {
+        depth--;
+        if (depth === 0 && start >= 0) {
+          try {
+            objs.push(JSON.parse(text.slice(start, i + 1)));
+          } catch {
+            /* not valid JSON; ignore this span */
+          }
+          start = -1;
+        }
+      }
+    }
+  }
+  return objs;
+}
+
+// Returns the LAST extracted JSON object for which `pred` holds, or undefined.
+function lastJsonMatching<T = Record<string, unknown>>(text: string, pred: (o: Record<string, unknown>) => boolean): T | undefined {
+  const objs = extractJsonObjects(text);
+  for (let i = objs.length - 1; i >= 0; i--) {
+    const o = objs[i];
+    if (o && typeof o === "object" && pred(o as Record<string, unknown>)) return o as T;
+  }
+  return undefined;
+}
+
+// Extracts the agent's closing verdict JSON: the LAST balanced object carrying a boolean
+// `approved`. If none is valid, assumes not approved (fail-closed) so nothing publishes by
+// accident, and flags `parsed:false` so callers can tell a parse miss from a real rejection.
+export function parseVerdict(text: string): FinalVerdict {
+  const o = lastJsonMatching(text, (x) => typeof x.approved === "boolean");
+  if (o) {
+    return {
+      approved: o.approved as boolean,
+      specs: Array.isArray(o.specs) ? (o.specs as string[]) : [],
+      note: typeof o.note === "string" ? o.note : undefined,
+      parsed: true,
+    };
   }
   return { approved: false, specs: [], note: "the agent emitted no parseable verdict", parsed: false };
 }
