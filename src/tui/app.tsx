@@ -10,6 +10,7 @@ import SelectInput from "ink-select-input";
 import { Dashboard } from "./components/Dashboard";
 import { ChatInput } from "./components/ChatInput";
 import { OnboardWizard } from "./components/OnboardWizard";
+import { GuidancePrompt } from "./components/GuidancePrompt";
 import { QaClient, QaApiError } from "./client";
 import { RunRecord, RunMode, TestTarget } from "../types";
 import { MODE_INFO, TARGET_INFO } from "./format";
@@ -81,9 +82,10 @@ export function Watch({ client, id }: { client: QaClient; id: string }): React.R
   );
 }
 
-export function Launcher({ apps, onLaunch, onOnboard }: { apps: string[]; onLaunch: (app: string, target: TestTarget, mode: RunMode) => void; onOnboard: () => void }): React.ReactElement {
+export function Launcher({ apps, defaultGuidance, onLaunch, onOnboard }: { apps: string[]; defaultGuidance?: string; onLaunch: (app: string, target: TestTarget, mode: RunMode, guidance?: string) => void; onOnboard: () => void }): React.ReactElement {
   const [app, setApp] = useState<string | null>(null);
   const [target, setTarget] = useState<TestTarget | null>(null);
+  const [mode, setMode] = useState<RunMode | null>(null);
 
   if (app === null) {
     const items: SelectItem[] = [
@@ -112,6 +114,18 @@ export function Launcher({ apps, onLaunch, onOnboard }: { apps: string[]; onLaun
     );
   }
 
+  // Manual mode: the user must write a guidance prompt before the run starts.
+  if (mode === "manual") {
+    return (
+      <GuidancePrompt
+        app={app}
+        target={target}
+        onSubmit={(guidance) => onLaunch(app, target, "manual", guidance)}
+        onCancel={() => setMode(null)}
+      />
+    );
+  }
+
   const items: SelectItem[] = MODES.map((m) => ({
     label: `${m}  — ${MODE_INFO[m]}`,
     value: m,
@@ -119,7 +133,14 @@ export function Launcher({ apps, onLaunch, onOnboard }: { apps: string[]; onLaun
   return (
     <Box flexDirection="column">
       <Text bold>{`Mode for ${app} · ${target}`}</Text>
-      <SelectInput items={items} onSelect={(i) => onLaunch(app, target, i.value as RunMode)} />
+      <SelectInput items={items} onSelect={(i) => {
+        const m = i.value as RunMode;
+        if (m === "manual" && !defaultGuidance) {
+          setMode(m);
+        } else {
+          onLaunch(app, target, m, defaultGuidance);
+        }
+      }} />
     </Box>
   );
 }
@@ -141,9 +162,9 @@ export function RunFlow({
   const [err, setErr] = useState<string | null>(null);
   const [onboarding, setOnboarding] = useState(false);
 
-  const launch = async (app: string, target: TestTarget, mode: RunMode): Promise<void> => {
+  const launch = async (app: string, target: TestTarget, mode: RunMode, g?: string): Promise<void> => {
     try {
-      const res = await client.createRun({ app, target, mode, sha, ref: sha ? undefined : refName ?? "main", guidance });
+      const res = await client.createRun({ app, target, mode, sha, ref: sha ? undefined : refName ?? "main", guidance: g ?? guidance });
       setRunId(res.id);
     } catch (e) {
       setErr(e instanceof QaApiError ? e.message : String(e));
@@ -153,5 +174,5 @@ export function RunFlow({
   if (err) return <Text color="red">{`qa: ${err}`}</Text>;
   if (runId) return <Watch client={client} id={runId} />;
   if (onboarding) return <OnboardWizard onDone={() => setOnboarding(false)} onCancel={() => setOnboarding(false)} />;
-  return <Launcher apps={apps} onLaunch={(a, t, m) => void launch(a, t, m)} onOnboard={() => setOnboarding(true)} />;
+  return <Launcher apps={apps} defaultGuidance={guidance} onLaunch={(a, t, m, g) => void launch(a, t, m, g)} onOnboard={() => setOnboarding(true)} />;
 }
