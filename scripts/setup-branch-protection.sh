@@ -25,12 +25,17 @@ api() {
     "https://api.github.com/${path}" "$@"
 }
 
-echo "→ enabling 'Allow auto-merge' on ${REPO}"
-api PATCH "repos/${REPO}" -d '{"allow_auto_merge":true}' >/dev/null
+# Allow auto-merge, and guarantee squash merges are enabled (the promote path merges with the
+# SQUASH method — both the native auto-merge and the fallback — so this keeps it deterministic).
+echo "→ enabling 'Allow auto-merge' + squash merges on ${REPO}"
+api PATCH "repos/${REPO}" -d '{"allow_auto_merge":true,"allow_squash_merge":true}' >/dev/null
 
-echo "→ requiring the 'ci' status check on ${REPO}@main (strict, enforced on admins)"
+# strict:false on purpose — "strict" requires a PR to be up to date with main before merging,
+# which an autonomous bot cannot satisfy (it does not rebase its own PR), so it would deadlock if
+# main advanced during CI. The `ci` check still runs on the PR head, which is the guarantee we want.
+echo "→ requiring the 'ci' status check on ${REPO}@main (enforced on admins)"
 api PUT "repos/${REPO}/branches/main/protection" -d '{
-  "required_status_checks": { "strict": true, "contexts": ["ci"] },
+  "required_status_checks": { "strict": false, "contexts": ["ci"] },
   "enforce_admins": true,
   "required_pull_request_reviews": null,
   "restrictions": null

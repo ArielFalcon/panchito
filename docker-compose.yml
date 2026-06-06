@@ -8,6 +8,14 @@
 #
 # Doppler injects the secrets (`doppler run -- docker compose up`); the env_file
 # .env is only for running locally without Doppler.
+#
+# This base file is the PRODUCTION definition: the orchestrator runs the src/ baked into the
+# image (COPY in the Dockerfile), so the maintainer hot-swap (which rewrites src/ + package
+# files) works on a normal filesystem. docker-compose.override.yml — auto-loaded by plain
+# `docker compose up` for local dev — bind-mounts the host source for live editing; those bind
+# mounts make src/ a mountpoint and the package files bind-files, which the swap canNOT rewrite
+# (EBUSY), so hot-swap is intentionally a no-op in dev. For production run WITHOUT the override:
+#   docker compose -f docker-compose.yml up --build
 
 services:
   orchestrator:
@@ -29,13 +37,12 @@ services:
       OPENCODE_SERVE_URL: http://opencode:4096
       MIRROR_DIR: /app/.mirrors
     volumes:
-      - ./config:/app/config # config (includes the config/e2e seed), hot-reloaded
-      - ./src:/app/src # source code hot-reload: maintainer fixes take effect on restart
-      - ./package.json:/app/package.json
-      - ./package-lock.json:/app/package-lock.json
+      - ./config:/app/config # app configs + the config/e2e seed (read-mostly; not hot-swapped)
+      # NOTE: src/ and package files are NOT bind-mounted here on purpose — the hot-swap must be
+      # able to rewrite them (a bind mount → EBUSY). They ship baked in the image. The dev
+      # override re-adds them for live editing. The E2E suite is NOT in a volume: it lives in git.
       - mirrors:/app/.mirrors # local working copies (shared with opencode); the harness runs over <repo>/e2e here
-      - qa-data:/app/data # run history (SQLite) — persists across restarts; without this it is wiped each boot
-      # The E2E suite is NOT persisted in a volume: it lives in git (the app repo's e2e/ folder).
+      - qa-data:/app/data # run history + maintainer state (markers/ledger/failure memory) — persists across restarts
 
   opencode:
     build: ./opencode # official opencode + uv/JDK (Serena) + engram (see opencode/Dockerfile)

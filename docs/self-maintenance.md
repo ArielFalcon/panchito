@@ -101,6 +101,22 @@ The crash-loop case is bridged from `boot-guard.mjs` (which can’t use the app�
 rollback it drops `data/last-rollback.json`, and the restored, healthy app folds it into the
 failure memory on its next boot (`recoverRollbackRecord`).
 
+## Deployment (so the hot-swap actually works)
+The hot-swap rewrites `src/` + the package files in place. A **bind-mounted** `src/` is a
+mountpoint (and the package files are bind-files), which `rmSync`/`cpSync` cannot replace
+(`EBUSY`) — so the swap only works when those paths come from the **baked image**:
+
+- **Production:** `docker compose -f docker-compose.yml up --build` — runs the image's baked
+  `src/`; hot-swap + rollback work.
+- **Local dev:** `docker compose up` — auto-loads `docker-compose.override.yml`, which
+  bind-mounts the host source for live editing. Hot-swap is a deliberate **no-op** here (it
+  fails safe: no swap, no restart); dev doesn't self-update.
+
+The hot-swap is **ephemeral** (it writes the container's writable layer; a *recreate* without a
+rebuild reverts to the image's `src/`). `main` is the durable source of truth — rebuild the image
+from `main` (CI/CD) to bake in merged fixes. This is consistent with canary-before-promote: a
+fresh container always clones/builds a known-good `main`.
+
 ## Networking notes
 - **DNS:** both containers pin public resolvers (`dns: [1.1.1.1, 8.8.8.8]` in
   `docker-compose.yml`) so egress to `github.com` / the model gateway / the DEV site is

@@ -58,6 +58,15 @@ test("parseNumstat handles text and binary rows", () => {
   assert.equal(stat.deletions, 1);
 });
 
+test("a renamed protected file (delete row under --no-renames) is still caught", () => {
+  // With --no-renames, renaming boot-guard.mjs surfaces as a delete of the protected path
+  // plus an add of the new one. assessChange must block on the delete row.
+  const out = ["0\t40\tboot-guard.mjs", "40\t0\tboot-guard-x.mjs"].join("\n");
+  const r = assessChange(parseNumstat(out));
+  assert.equal(r.ok, false);
+  assert.ok(r.reasons.some((x) => x.includes("protected")));
+});
+
 test("assessRate blocks a burst (window) and back-to-back deploys (cooldown)", () => {
   const now = 1_000_000_000_000;
   // three deploys within the last hour → at the window limit

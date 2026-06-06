@@ -1,0 +1,17 @@
+# LOCAL DEV override — auto-loaded by plain `docker compose up`.
+#
+# It bind-mounts the host source into the orchestrator so your edits are live without a rebuild.
+# Trade-off: a bind-mounted src/ is a mountpoint and the package files are bind-files, which the
+# maintainer hot-swap canNOT rewrite (rmSync/cpSync → EBUSY). So with this override the self-update
+# hot-swap is a deliberate no-op (it fails safe: no swap, no restart) — which is fine for dev,
+# where you edit code on the host directly.
+#
+# For PRODUCTION (hot-swap working, code from the baked image) run WITHOUT this file:
+#   docker compose -f docker-compose.yml up --build
+
+services:
+  orchestrator:
+    volumes:
+      - ./src:/app/src
+      - ./package.json:/app/package.json
+      - ./package-lock.json:/app/package-lock.json

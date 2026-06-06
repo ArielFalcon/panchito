@@ -340,7 +340,9 @@ async function triggerMaintainer(): Promise<void> {
 
       // Layer 3 — scope guard: the fix must be minimal and must NOT touch the recovery net or
       // build/topology the canary cannot verify (boot-guard, self-update, merge-guard, …).
-      const numstat = await mirrorDeps.git(["diff", "--numstat", "origin/main...HEAD"], maintainerWorkDir);
+      // --no-renames so a renamed protected file surfaces as a delete of its (protected) path
+      // rather than a single "old => new" entry that would slip past isProtectedPath.
+      const numstat = await mirrorDeps.git(["diff", "--numstat", "--no-renames", "origin/main...HEAD"], maintainerWorkDir);
       const scope = assessChange(parseNumstat(numstat));
       if (!scope.ok) return leaveForHuman(scope.reasons.join("; "), "critical");
 
@@ -380,22 +382,29 @@ async function triggerMaintainer(): Promise<void> {
       console.log("[maintainer] all safety gates green — waiting for the queue to drain before canary swap...");
       await queue.drain();
 
-      // Record the deploy in the persisted ledger BEFORE swapping, so the rate guard counts it
-      // even though the swap restarts the process (it must survive the restart).
-      recordDeploy(DEPLOY_LEDGER, Date.now());
-
       // Swap the fix-branch code into the running tree (with backup + boot-guard marker) and
       // attach the PR so the post-restart health check PROMOTES it (merges to main) only once
       // the canary is healthy. boot-guard.mjs (never swapped) restores the backup if the new
       // code fails to boot — and because the PR is unmerged at this point, a rollback leaves
-      // main pristine, so the service can never reach an unrecoverable state.
+      // main pristine, so the service can never reach an unrecoverable state. If performSwap
+      // throws (e.g. a bind-mounted src/ in dev → EBUSY), the outer catch leaves the PR for a
+      // human and nothing is deployed — it fails safe.
       performSwap(process.cwd(), maintainerWorkDir, join(ROOT, "data"), {
         at: new Date().toISOString(),
         prUrl: pr.url,
         promote: { repo: SELF_REPO, prNumber: pr.number, nodeId: pr.nodeId },
         fix: { prTitle: summary.prTitle, changes: summary.changes, rootCause: summary.justification.rootCause },
       });
-      execSync("npm install --no-audit --no-fund", { cwd: process.cwd(), stdio: "inherit" });
+      // The swap is staged → count the deploy in the persisted ledger (survives the restart) so
+      // the rate guard sees it. Only counted once the swap actually succeeded.
+      recordDeploy(DEPLOY_LEDGER, Date.now());
+      // Best-effort dep sync for the new code. If it fails we still restart: the swapped code's
+      // boot will fail and the boot-guard rolls back — never leave a staged swap unapplied.
+      try {
+        execSync("npm install --no-audit --no-fund", { cwd: process.cwd(), stdio: "inherit" });
+      } catch (installErr) {
+        console.error(`[maintainer] post-swap npm install failed (${installErr instanceof Error ? installErr.message : String(installErr)}) — restarting anyway; boot-guard is the backstop.`);
+      }
       console.log("[maintainer] canary swap staged with rollback guard — restarting to verify, then promote.");
       process.exit(0);
 
@@ -528,12 +537,14 @@ function confirmSwapAfterBoot(): void {
   }, 20_000);
 }
 
-// Promote a canary-verified fix to main, respecting the OUTER GUARD (the required CI status
-// check on main). Preference order:
-//   1. GitHub-native auto-merge — GitHub itself merges once the required check passes, so the
-//      guard is enforced server-side even if this process's own gates were ever weakened.
-//   2. Fallback (no branch protection / auto-merge configured): self-enforce the guard by
-//      polling CI and merging only on green. A failed/stuck CI leaves the PR open + an incident.
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Promote a canary-verified fix to main, respecting the OUTER GUARD (the required CI check on
+// main). It (1) enables GitHub-native auto-merge so the guard is enforced server-side even if
+// this process dies, and (2) ALWAYS observes the outcome by polling — so it merges itself when
+// there is no branch protection, and records a failure into the maintainer memory whenever CI
+// goes red, for BOTH paths. The running service already has the fix, so a promote failure never
+// rolls anything back; it only leaves the PR open and flags a human.
 async function promote(
   p: { repo: string; prNumber: number; nodeId: string },
   prUrl?: string,
@@ -542,25 +553,55 @@ async function promote(
   const ref = prUrl ?? `PR #${p.prNumber}`;
   const noteFailure = (reason: "ci-failed" | "ci-timeout", detail: string) =>
     recordFixFailure(FAILURE_MEMORY, { at: new Date().toISOString(), reason, prTitle: fix?.prTitle, prUrl, changes: fix?.changes, rootCause: fix?.rootCause, detail });
+  const mergeNow = async (why: string): Promise<void> => {
+    try {
+      await github.mergePullRequest(p.repo, p.prNumber);
+      console.log(`[maintainer] ${why} — promoted (merged) ${ref} to main.`);
+    } catch (err) {
+      recordIncident({
+        source: "health-check",
+        severity: "warn",
+        summary: "maintainer canary healthy and CI green but the merge call failed — merge it manually",
+        detail: `${ref} ${err instanceof Error ? err.message : String(err)}`.trim(),
+      });
+      console.warn(`[maintainer] merge failed for ${ref}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  // 1. Prefer GitHub-native auto-merge (server-side enforcement; survives our death). Unavailable
+  //    without branch protection — then we self-enforce by polling below.
+  let autoMerge = false;
   try {
     await github.enableAutoMerge(p.nodeId);
-    console.log(`[maintainer] auto-merge enabled — GitHub will merge ${ref} once the required CI check passes.`);
-    return;
+    autoMerge = true;
+    console.log(`[maintainer] auto-merge enabled for ${ref} — GitHub will merge once the required CI check passes.`);
   } catch (err) {
-    console.warn(`[maintainer] native auto-merge unavailable (${err instanceof Error ? err.message : String(err)}) — falling back to CI-gated merge.`);
+    console.warn(`[maintainer] native auto-merge unavailable (${err instanceof Error ? err.message : String(err)}) — self-enforcing the CI gate.`);
   }
 
-  const deadline = Date.now() + 10 * 60 * 1000; // give CI up to 10 minutes
+  // 2. Observe the outcome so we both finish the merge when appropriate and LEARN on CI failure.
+  const start = Date.now();
+  const deadline = start + 10 * 60 * 1000; // up to 10 min for CI to complete / auto-merge to land
+  const graceMs = 90 * 1000; // give CI time to register before trusting a "no checks" reading
   while (Date.now() < deadline) {
-    let status: "pending" | "success" | "failure";
+    let s: { merged: boolean; state: string; checks: "pending" | "success" | "failure" | "none" };
     try {
-      status = await github.getChecksStatus(p.repo, p.prNumber);
+      s = await github.getPrStatus(p.repo, p.prNumber);
     } catch (err) {
-      console.warn(`[maintainer] could not read CI status for ${ref}: ${err instanceof Error ? err.message : String(err)}`);
-      await new Promise((r) => setTimeout(r, 15_000));
+      console.warn(`[maintainer] could not read PR status for ${ref}: ${err instanceof Error ? err.message : String(err)}`);
+      await sleep(15_000);
       continue;
     }
-    if (status === "failure") {
+    if (s.merged) {
+      console.log(`[maintainer] promoted (merged) ${ref} to main.`);
+      return;
+    }
+    if (s.state === "closed") {
+      noteFailure("ci-failed", "the PR was closed without merging");
+      console.warn(`[maintainer] ${ref} was closed without merging — not promoted.`);
+      return;
+    }
+    if (s.checks === "failure") {
       recordIncident({
         source: "health-check",
         severity: "warn",
@@ -571,31 +612,27 @@ async function promote(
       console.warn(`[maintainer] CI failed for ${ref} — leaving the PR open (main untouched).`);
       return;
     }
-    if (status === "success") {
-      try {
-        await github.mergePullRequest(p.repo, p.prNumber);
-        console.log(`[maintainer] CI green — promoted (merged) ${ref} to main.`);
-      } catch (err) {
-        recordIncident({
-          source: "health-check",
-          severity: "warn",
-          summary: "maintainer canary healthy and CI green but the merge call failed — merge it manually",
-          detail: `${ref} ${err instanceof Error ? err.message : String(err)}`.trim(),
-        });
-        console.warn(`[maintainer] merge failed for ${ref}: ${err instanceof Error ? err.message : String(err)}`);
-      }
+    if (!autoMerge && s.checks === "success") {
+      // No branch protection: CI is green, merge it ourselves.
+      await mergeNow("CI green");
       return;
     }
-    await new Promise((r) => setTimeout(r, 15_000)); // pending → wait and re-check
+    if (!autoMerge && s.checks === "none" && Date.now() - start > graceMs) {
+      // No CI configured and no protection: nothing to wait on → merge directly.
+      await mergeNow("no CI configured");
+      return;
+    }
+    // pending; or (autoMerge waiting for GitHub to land the merge); or (none still within grace).
+    await sleep(15_000);
   }
   recordIncident({
     source: "health-check",
     severity: "warn",
-    summary: "maintainer canary healthy but its PR's CI did not complete in time — merge it manually once green",
+    summary: "maintainer canary healthy but its PR did not merge in time (CI slow/stuck) — finish it manually",
     detail: ref,
   });
-  noteFailure("ci-timeout", "the required CI check did not complete within the promote window");
-  console.warn(`[maintainer] CI did not complete in time for ${ref} — PR left open.`);
+  noteFailure("ci-timeout", "the required CI check did not complete (or auto-merge did not land) within the promote window");
+  console.warn(`[maintainer] promote timed out for ${ref} — PR left open.`);
 }
 
 // Canary health probe: two health checks a few seconds apart must both succeed, so a
