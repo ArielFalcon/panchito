@@ -15,12 +15,28 @@ export interface ContextLimits {
 
 const DEFAULT_LIMITS: ContextLimits = { maxCases: 20, caseDetailChars: 300, logTailChars: 4000 };
 
-export function buildRunContext(record: RunRecord, limits: ContextLimits = DEFAULT_LIMITS): string {
+export function buildRunContext(record: RunRecord, limits: ContextLimits = DEFAULT_LIMITS, appInfo?: { repo: string; baseUrl?: string }): string {
   const lines: string[] = [];
-  lines.push(`App: ${record.app}   Commit: ${record.sha.slice(0, 12)}   Mode: ${record.mode}`);
+
+  // Pipeline phase reference so the assistant can interpret the step field.
   lines.push(
-    `Status: ${record.status}   Verdict: ${record.verdict ?? "running"}   Passed: ${record.passed ?? 0}   Failed: ${record.failed ?? 0}`,
+    "Pipeline phases: classify (reads commit diff + message, decides to skip/generate/regress),",
+    "generate (AI agent analyzes code, explores DEV with Playwright, writes E2E specs),",
+    "validate (typecheck + lint + test discovery + metadata check),",
+    "execute (runs Playwright tests against the live DEV environment),",
+    "retry (tests failed — agent is re-generating with failure feedback).",
+    "",
   );
+
+  lines.push(`App: ${record.app}   Commit: ${record.sha.slice(0, 12)}   Target: ${record.target ?? "e2e"}   Mode: ${record.mode}`);
+  if (appInfo) {
+    lines.push(`Repository: ${appInfo.repo}${appInfo.baseUrl ? `   DEV URL: ${appInfo.baseUrl}` : ""}`);
+  }
+  lines.push(
+    `Status: ${record.status}   Step: ${record.step ?? "enqueued"}   Verdict: ${record.verdict ?? "running"}   Passed: ${record.passed ?? 0}   Failed: ${record.failed ?? 0}`,
+  );
+  if (record.stepDetail) lines.push(`Step detail: ${record.stepDetail}`);
+  if (record.retrying) lines.push("Currently RETRYING after a test failure — re-generating with failure feedback.");
   if (record.note) lines.push(`Note: ${record.note}`);
 
   const cases = record.cases.slice(0, limits.maxCases);

@@ -257,8 +257,15 @@ async function handleAsk(req: IncomingMessage, res: ServerResponse, deps: ApiDep
   }
 
   try {
+    // Load app config so the assistant knows what repo is being tested and where.
+    let appInfo: { repo: string; baseUrl?: string } | undefined;
+    try {
+      const cfg = deps.loadApp(record.app);
+      appInfo = { repo: cfg.repo, baseUrl: cfg.dev?.baseUrl };
+    } catch { /* app not configured — proceed without */ }
+
     // Context is bounded (cases + logs capped) and sanitized on ingress (secrets redacted).
-    const context = buildRunContext(record);
+    const context = buildRunContext(record, undefined, appInfo);
     const answer = await deps.ask({ context, question });
     // Sanitize on egress (logs→chat is a new egress path).
     json(res, 200, { answer: sanitizeText(answer).text });
