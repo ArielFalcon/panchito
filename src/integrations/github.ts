@@ -105,6 +105,40 @@ export const github = {
     return { merged: data.merged, state: data.state };
   },
 
+  // The OUTER GUARD's read side: the aggregate CI state of a PR's head commit, combining the
+  // modern Checks API and the legacy commit-status API. The maintainer promote path only merges
+  // to main on "success", so a fix that fails CI never lands — independently of the in-process
+  // safety gates. "success" when there are no checks at all (nothing to wait on).
+  async getChecksStatus(repo: string, number: number): Promise<"pending" | "success" | "failure"> {
+    const prRes = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, { headers: ghHeaders() });
+    if (!prRes.ok) throw new Error(`GitHub get PR error ${prRes.status}: ${await prRes.text()}`);
+    const pr = (await prRes.json()) as { head: { sha: string } };
+    const sha = pr.head.sha;
+
+    const [crRes, stRes] = await Promise.all([
+      fetch(`https://api.github.com/repos/${repo}/commits/${sha}/check-runs`, { headers: ghHeaders() }),
+      fetch(`https://api.github.com/repos/${repo}/commits/${sha}/status`, { headers: ghHeaders() }),
+    ]);
+    if (!crRes.ok) throw new Error(`GitHub check-runs error ${crRes.status}: ${await crRes.text()}`);
+    if (!stRes.ok) throw new Error(`GitHub status error ${stRes.status}: ${await stRes.text()}`);
+    const cr = (await crRes.json()) as { check_runs?: Array<{ status: string; conclusion: string | null }> };
+    const st = (await stRes.json()) as { state: string; total_count: number };
+
+    let pending = false;
+    let failure = false;
+    for (const run of cr.check_runs ?? []) {
+      if (run.status !== "completed") pending = true;
+      else if (run.conclusion && !["success", "neutral", "skipped"].includes(run.conclusion)) failure = true;
+    }
+    if (st.total_count > 0) {
+      if (st.state === "pending") pending = true;
+      if (st.state === "failure" || st.state === "error") failure = true;
+    }
+    if (failure) return "failure";
+    if (pending) return "pending";
+    return "success";
+  },
+
   async getRepo(repo: string): Promise<RepoInfo> {
     const res = await fetch(`https://api.github.com/repos/${repo}`, {
       headers: ghHeaders(),

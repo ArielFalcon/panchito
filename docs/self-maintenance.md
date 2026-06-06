@@ -1,0 +1,103 @@
+# Self-maintenance & autonomous self-merge — safety architecture
+
+ai-pipeline can diagnose and fix incidents in **its own** codebase, then deploy the fix to
+the running service **without a human in the loop**. That is a powerful but dangerous
+capability: a self-modifying service must never ship a change that breaks itself *and*
+removes its own ability to recover (an irrecoverable state). This document describes the
+defense-in-depth that makes autonomous self-merge safe enough to run **on by default**.
+
+> Toggle: `SELF_MAINTAINER_AUTOMERGE` (default `true`). Set to `false` to stop every fix at
+> an open PR for a human to review and merge.
+
+## The flow at a glance
+
+```
+incident detected (health poller / log scraper / report API)
+        │
+        ▼
+qa-maintainer agent edits files IN PLACE on a fix branch  (read-only on watched repos;
+        │                                                  the orchestrator owns all git)
+        ▼
+orchestrator: commit → push → open PR
+        │
+        ▼  ── pre-deploy SAFETY GATES (all must pass; any failure ⇒ leave PR for a human) ──
+        │   1. justification mandatory   (rootCause / whyNecessary / whyMinimal)
+        │   2. ops kill-switch           (SELF_MAINTAINER_AUTOMERGE)
+        │   3. scope / protected-path    (cannot touch the recovery net or build/topology)
+        │   4. change-size               (≤ 15 files / 400 lines)
+        │   5. rate / loop               (≤ 3 deploys/hour, 5-min cooldown; persisted)
+        │   6. self-test                 (npm install + typecheck + test on the fix branch)
+        ▼
+CANARY: hot-swap the fix into the RUNNING service (backup + boot-guard armed) → restart
+        │
+        ▼
+post-restart health check  ──unhealthy──▶  rollback to backup, restart; PR stays unmerged
+        │ healthy                                     (main never touched)
+        ▼
+PROMOTE: merge the PR to main, gated by the OUTER GUARD (required `ci` check)
+```
+
+The keystone is **canary before promote**: `main` — the source of truth a fresh,
+ephemeral container clones — is only ever updated *after* the fix has booted healthy in
+production. An unverified fix can never poison `main`, so the system can always recover by
+re-cloning the last known-good `main`.
+
+## The layers
+
+### 1–6. In-process pre-deploy gates (`src/server/merge-guard.ts`)
+Pure, unit-tested decisions; the irreversible actions are taken in `src/index.ts` only after
+all of them pass.
+
+- **Scope / protected-path guard.** A fix may **never** modify the recovery net
+  (`boot-guard.mjs`, `src/server/self-update.ts`, `src/server/merge-guard.ts`) or
+  build/topology the in-process canary cannot verify (`Dockerfile`s, `docker-compose.yml`,
+  `.github/`). This is what guarantees the rollback machinery itself stays immutable to the
+  agent — the core *“can always recover”* property.
+- **Change-size guard.** A maintainer fix is a small, targeted repair; anything larger is by
+  definition not minimal and is left for a human.
+- **Rate / loop guard.** A persisted ledger (`data/maintainer-deploys.json`, survives the
+  hot-swap restart) caps self-deploys per window and enforces a cooldown, so a fix that
+  doesn’t actually fix cannot loop the system into endless self-modification.
+- **Self-test gate.** `npm install + typecheck + test` on the fix branch HEAD.
+
+### 7. Canary + boot-guard rollback (`src/server/self-update.ts`, `boot-guard.mjs`)
+`performSwap` backs up the live tree (`src.bak` + `package*.bak`) and arms a marker before
+staging the new code. On restart:
+
+- **Boots & serves** → `confirmSwapAfterBoot` clears the marker/backups and promotes (below).
+- **Boots but not serving** → `confirmSwapAfterBoot` rolls back to the backup and restarts.
+- **Crash-loops** (never reaches the app) → `boot-guard.mjs` (repo-root, **never swapped**, so
+  it always runs intact) restores the backup after `MAX_BOOT_ATTEMPTS`.
+
+In every failure case the PR is still **unmerged**, so `main` stays known-good.
+
+### 8. Outer guard — required `ci` check on `main`
+The gates above run *inside* the orchestrator (the very process that is self-modifying). The
+**outer guard** is a GitHub-side, independent check so that even if those in-process gates
+were ever weakened by a bad self-edit, GitHub itself refuses a bad merge:
+
+- `.github/workflows/ci.yml` runs the same gate (typecheck + tests) on every PR and push.
+- Branch protection makes the `ci` check **required** on `main`.
+- Promotion (`promote()` in `index.ts`) prefers **GitHub-native auto-merge**, so GitHub
+  merges only once the required check passes. Without branch protection it falls back to
+  self-enforcing the guard (poll CI, merge only on green).
+
+#### One-time setup
+```bash
+GITHUB_TOKEN=<admin-token> ./scripts/setup-branch-protection.sh ArielFalcon/ai-pipeline
+```
+This enables “Allow auto-merge” and requires the `ci` check on `main` (strict, enforced on
+admins, no human-review requirement — the gate is CI + the layered safety gates, since the
+point is autonomous repair).
+
+## Threat model — why this can’t reach an irrecoverable state
+| Failure | Caught by | End state |
+|---|---|---|
+| Fix breaks tests/typecheck | self-test gate (6) **and** outer `ci` (8) | not deployed / not merged |
+| Fix boots but doesn’t serve | canary check (7) | rolled back; `main` untouched |
+| Fix crash-loops | boot-guard (7) | rolled back; `main` untouched |
+| Fix that doesn’t fix → retries forever | rate/loop guard (5) | stops; human asked |
+| Over-large rewrite | size guard (4) | left for a human |
+| Fix that disables the rollback net | protected-path guard (3) | left for a human |
+| In-process gates weakened by a self-edit | outer `ci` check (8) | GitHub refuses the merge |
+| Bad code already on `main` (it never gets there) | canary-before-promote | fresh clone is good |

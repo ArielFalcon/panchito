@@ -370,7 +370,7 @@ async function triggerMaintainer(): Promise<void> {
       performSwap(process.cwd(), maintainerWorkDir, join(ROOT, "data"), {
         at: new Date().toISOString(),
         prUrl: pr.url,
-        promote: { repo: SELF_REPO, prNumber: pr.number },
+        promote: { repo: SELF_REPO, prNumber: pr.number, nodeId: pr.nodeId },
       });
       execSync("npm install --no-audit --no-fund", { cwd: process.cwd(), stdio: "inherit" });
       console.log("[maintainer] canary swap staged with rollback guard — restarting to verify, then promote.");
@@ -485,27 +485,77 @@ function confirmSwapAfterBoot(): void {
       }
       return;
     }
-    // Canary healthy → PROMOTE: merge the PR so main adopts the now-proven fix. main therefore
-    // only ever receives code that has already run healthy here.
-    if (marker.promote) {
+    // Canary healthy → clear the rollback marker FIRST, so a slow promotion can never cause the
+    // boot-guard to roll back an already-healthy service on a later restart.
+    confirmSwapHealthy(process.cwd(), dataDir);
+    console.log(`[maintainer] canary verified healthy — cleared rollback marker.${marker.prUrl ? ` (${marker.prUrl})` : ""}`);
+    // Then PROMOTE: merge the PR so main adopts the now-proven fix. Promotion is gated by the
+    // OUTER GUARD (the required CI check on main) and is best-effort — the running service
+    // already has the fix, so a promotion failure never rolls it back, only flags a human.
+    if (marker.promote) await promote(marker.promote, marker.prUrl);
+  }, 20_000);
+}
+
+// Promote a canary-verified fix to main, respecting the OUTER GUARD (the required CI status
+// check on main). Preference order:
+//   1. GitHub-native auto-merge — GitHub itself merges once the required check passes, so the
+//      guard is enforced server-side even if this process's own gates were ever weakened.
+//   2. Fallback (no branch protection / auto-merge configured): self-enforce the guard by
+//      polling CI and merging only on green. A failed/stuck CI leaves the PR open + an incident.
+async function promote(p: { repo: string; prNumber: number; nodeId: string }, prUrl?: string): Promise<void> {
+  const ref = prUrl ?? `PR #${p.prNumber}`;
+  try {
+    await github.enableAutoMerge(p.nodeId);
+    console.log(`[maintainer] auto-merge enabled — GitHub will merge ${ref} once the required CI check passes.`);
+    return;
+  } catch (err) {
+    console.warn(`[maintainer] native auto-merge unavailable (${err instanceof Error ? err.message : String(err)}) — falling back to CI-gated merge.`);
+  }
+
+  const deadline = Date.now() + 10 * 60 * 1000; // give CI up to 10 minutes
+  while (Date.now() < deadline) {
+    let status: "pending" | "success" | "failure";
+    try {
+      status = await github.getChecksStatus(p.repo, p.prNumber);
+    } catch (err) {
+      console.warn(`[maintainer] could not read CI status for ${ref}: ${err instanceof Error ? err.message : String(err)}`);
+      await new Promise((r) => setTimeout(r, 15_000));
+      continue;
+    }
+    if (status === "failure") {
+      recordIncident({
+        source: "health-check",
+        severity: "warn",
+        summary: "maintainer canary healthy but its PR FAILED the required CI check — NOT merged to main",
+        detail: ref,
+      });
+      console.warn(`[maintainer] CI failed for ${ref} — leaving the PR open (main untouched).`);
+      return;
+    }
+    if (status === "success") {
       try {
-        await github.mergePullRequest(marker.promote.repo, marker.promote.prNumber);
-        console.log(`[maintainer] canary healthy — promoted (merged) ${marker.prUrl ?? `PR #${marker.promote.prNumber}`} to main.`);
+        await github.mergePullRequest(p.repo, p.prNumber);
+        console.log(`[maintainer] CI green — promoted (merged) ${ref} to main.`);
       } catch (err) {
-        // The running service is healthy on the fix; only main lagged. Surface it for a human
-        // to merge — do NOT roll back a healthy service.
         recordIncident({
           source: "health-check",
           severity: "warn",
-          summary: "maintainer canary healthy but promoting (merging) the PR failed — merge it manually",
-          detail: `${marker.prUrl ?? ""} ${err instanceof Error ? err.message : String(err)}`.trim(),
+          summary: "maintainer canary healthy and CI green but the merge call failed — merge it manually",
+          detail: `${ref} ${err instanceof Error ? err.message : String(err)}`.trim(),
         });
-        console.warn(`[maintainer] canary healthy but merge failed: ${err instanceof Error ? err.message : String(err)}`);
+        console.warn(`[maintainer] merge failed for ${ref}: ${err instanceof Error ? err.message : String(err)}`);
       }
+      return;
     }
-    confirmSwapHealthy(process.cwd(), dataDir);
-    console.log(`[maintainer] swap verified healthy — cleared rollback marker.${marker.prUrl ? ` (${marker.prUrl})` : ""}`);
-  }, 20_000);
+    await new Promise((r) => setTimeout(r, 15_000)); // pending → wait and re-check
+  }
+  recordIncident({
+    source: "health-check",
+    severity: "warn",
+    summary: "maintainer canary healthy but its PR's CI did not complete in time — merge it manually once green",
+    detail: ref,
+  });
+  console.warn(`[maintainer] CI did not complete in time for ${ref} — PR left open.`);
 }
 
 // Canary health probe: two health checks a few seconds apart must both succeed, so a

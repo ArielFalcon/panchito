@@ -1,0 +1,24 @@
+# The OUTER GUARD for the autonomous self-maintainer: a GitHub-side check that runs the same
+# gate as the orchestrator (typecheck + tests) on every PR and push to main. Configured as a
+# REQUIRED status check on main (see scripts/setup-branch-protection.sh), it ensures that even
+# if the orchestrator's own in-process gates were ever weakened by a bad self-edit, GitHub
+# itself refuses to merge a fix whose CI is red. The job id `ci` is the required-check name.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test

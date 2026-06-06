@@ -51,8 +51,8 @@ test("performSwap backs up the live tree before overwriting it, then arms the ma
 
 test("performSwap records promote info for the canary-before-merge flow", () => {
   const fs = fakeFs(new Set(["/app/src", "/app/package.json", "/work/src", "/work/package.json"]));
-  performSwap("/app", "/work", "/data", { at: "t2", prUrl: "u2", promote: { repo: "o/r", prNumber: 7 } }, fs);
-  assert.deepEqual(fs.marker, { at: "t2", attempt: 0, prUrl: "u2", promote: { repo: "o/r", prNumber: 7 } });
+  performSwap("/app", "/work", "/data", { at: "t2", prUrl: "u2", promote: { repo: "o/r", prNumber: 7, nodeId: "PR_node" } }, fs);
+  assert.deepEqual(fs.marker, { at: "t2", attempt: 0, prUrl: "u2", promote: { repo: "o/r", prNumber: 7, nodeId: "PR_node" } });
 });
 
 test("bootGuardDecision: none/increment/rollback by attempt count", () => {

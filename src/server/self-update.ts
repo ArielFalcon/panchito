@@ -27,7 +27,7 @@ export interface SwapMarker {
   // to main. Once it boots healthy in production (the canary), index.ts merges this PR — so
   // main only ever receives code already proven to run. Absent for a plain (already-merged)
   // swap. If the canary fails, the boot-guard rolls back and the PR is simply never merged.
-  promote?: { repo: string; prNumber: number };
+  promote?: { repo: string; prNumber: number; nodeId: string };
 }
 
 export interface SwapFs {
@@ -64,7 +64,7 @@ export function performSwap(
   appDir: string,
   sourceDir: string,
   dataDir: string,
-  opts: { at: string; prUrl?: string; promote?: { repo: string; prNumber: number } },
+  opts: { at: string; prUrl?: string; promote?: { repo: string; prNumber: number; nodeId: string } },
   fs: SwapFs = realSwapFs,
 ): void {
   const liveSrc = join(appDir, "src");
