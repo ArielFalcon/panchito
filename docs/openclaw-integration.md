@@ -6,7 +6,7 @@
 
 > No `openclaw` service, plugins, or gateway exist in the codebase. The interactive
 > surface that **was** built is the control API (`src/server/api.ts`) + the Ink TUI
-> (`src/tui/`, launched via `bin/qa-tui`) + the read-only run assistant. This doc is
+> (`src/tui/`, launched via `bin/panchito`) + the read-only run assistant. This doc is
 > an aspirational roadmap, not a description of the current system.
 
 ---

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# qa-tui — the Ink terminal UI for the ai-pipeline control API.
+# panchito — the Ink terminal UI for the ai-pipeline control API.
 # Talks HTTP to a RUNNING orchestrator (docker compose up). Host-only (Node + tsx).
 # Env: QA_HOST (default localhost:8080) · QA_API_TOKEN (if the service requires auth).
 set -euo pipefail

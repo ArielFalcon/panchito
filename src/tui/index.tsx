@@ -1,4 +1,4 @@
-// TUI entry point. `qa-tui <command>` talks to a RUNNING orchestrator over the
+// TUI entry point. `panchito <command>` talks to a RUNNING orchestrator over the
 // control API. The live `run --watch` view is rendered with Ink (Dashboard); the
 // list commands print plainly and exit. Two `qa`s on purpose: `npm run qa`
 // (src/cli.ts) runs the pipeline in-process; this talks to the service.
@@ -41,9 +41,9 @@ function flag(args: string[], name: string): string | undefined {
 }
 
 function usage(): void {
-  console.log(`qa-tui — launch and watch QA runs (needs the service: docker compose up)
+  console.log(`panchito — launch and watch QA runs (needs the service: docker compose up)
 
-Usage: qa-tui <command> [options]
+Usage: panchito <command> [options]
   run [<app>]   Trigger a run (interactive launcher if <app> is omitted on a TTY)
     --target <t> | --ref <r> | --latest | --sha <s> | --mode <m> | --guidance ".." | -w/--watch
   status [app]  Queue status, or the last run for an app
@@ -79,9 +79,9 @@ async function cmdRun(client: QaClient, args: string[]): Promise<void> {
   }
 
   if (!app) {
-    if (!process.stdout.isTTY) fail("<app> is required (e.g. 'qa-tui run portfolio --watch')");
+    if (!process.stdout.isTTY) fail("<app> is required (e.g. 'panchito run portfolio --watch')");
     const apps = (await client.listApps()).map((x) => x.name);
-    if (apps.length === 0) fail("no apps configured — run 'qa-tui onboard' to add a project");
+    if (apps.length === 0) fail("no apps configured — run 'panchito onboard' to add a project");
     // Default: pre-select the self-repo (ai-pipeline) if configured, so the user can
     // immediately run QA on the tool itself without picking from the list.
     const selfIdx = apps.indexOf("ai-pipeline");
@@ -147,7 +147,7 @@ async function cmdContinue(client: QaClient, args: string[]): Promise<void> {
   const casesArg = flag(args, "--cases");
   const guidance = flag(args, "--guidance");
   const watch = args.includes("-w") || args.includes("--watch");
-  if (!id || !casesArg) fail('usage: qa-tui continue <runId> --cases "name1,name2" [--guidance ".."] [-w]');
+  if (!id || !casesArg) fail('usage: panchito continue <runId> --cases "name1,name2" [--guidance ".."] [-w]');
   const cases = casesArg.split(",").map((s) => s.trim()).filter(Boolean);
   // Validate case names exist in the parent run before sending to the API.
   const parent = await client.getRun(id);
@@ -166,7 +166,7 @@ async function cmdContinue(client: QaClient, args: string[]): Promise<void> {
 async function cmdAsk(client: QaClient, args: string[]): Promise<void> {
   const id = args[0];
   const question = args.slice(1).join(" ").trim();
-  if (!id || !question) fail('usage: qa-tui ask <runId> "<question>"');
+  if (!id || !question) fail('usage: panchito ask <runId> "<question>"');
   const { answer } = await client.ask(id, question);
   console.log(answer);
   process.exit(0);

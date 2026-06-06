@@ -124,7 +124,7 @@ A read-only OpenCode agent **`qa-assistant`** (cheap flash/lite model, confirmed
 | Phase | Status | Ships | Risk |
 |---|---|---|---|
 | **0. Single-funnel + spike** | ✅ done | `cli.ts` through the queue (`src/server/runner.ts`); SDK pinned exact; static spike (§10) | Low |
-| **1. Ink TUI (poll)** | ✅ done | Host-only Ink TUI (`src/tui/`, `bin/qa-tui`) over the existing API + polling; `bin/qa` kept | Low |
+| **1. Ink TUI (poll)** | ✅ done | Host-only Ink TUI (`src/tui/`, `bin/panchito`) over the existing API + polling; `bin/qa` kept | Low |
 | **2. Lite chat** | ✅ done | `qa-assistant` agent + `POST /api/runs/:id/ask`; ingress+egress sanitization (`src/server/chat.ts`) | Low-med |
 | **3. Continuation** | ✅ done | `POST /api/runs/:id/continue`; new queued run, same-sha checkout, `fixCases` reuse, anti-coercion prompt rail | Med-high |
 | **4. SSE live activity** | ⏳ scaffold | Pure, tested, OFF-by-default router (`src/integrations/agent-activity.ts`); live subscription gated on the live spike | High |
