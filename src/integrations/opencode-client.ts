@@ -92,7 +92,7 @@ export async function startEventStream(
       });
 
       if (activity) {
-        // Concise prefix: file events show just basename, tool events trim args.
+        // Concise display: file → basename, tool → first 3 args, todo → strip prefix.
         let display = activity.text;
         if (activity.kind === "file") {
           display = display.replace(/^edited /, "").split("/").pop() ?? display;
@@ -104,7 +104,8 @@ export async function startEventStream(
         } else if (activity.text.startsWith("todo [")) {
           display = activity.text.replace(/^todo \[.*?\] /, "");
         }
-        const prefix = activity.kind === "message" ? "💬" : activity.kind === "file" ? "📝" : activity.kind === "tool" ? "🔧" : activity.text.includes("error") ? "⚠️" : "▶";
+        // Match the TUI's visual identity: ✓/✗/·/⚠/⚙/⊘ — no emoji.
+        const prefix = activity.kind === "message" ? "✎" : activity.kind === "file" ? "✎" : activity.kind === "tool" ? "⚙" : activity.text.includes("error") ? "⚠" : "▸";
         onActivity(activity.runId, `[qa] ${prefix} ${display}`);
       }
     }
