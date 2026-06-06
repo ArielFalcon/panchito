@@ -57,7 +57,7 @@ export async function startEventStream(
     return;
   }
 
-  const abortHandler = () => { /* stream is cancelled by breaking the loop */ };
+  const abortHandler = () => { /* handled by `if (signal?.aborted) break` below */ };
   signal?.addEventListener("abort", abortHandler, { once: true });
 
   try {
@@ -83,6 +83,7 @@ export async function startEventStream(
     }
   } finally {
     signal?.removeEventListener("abort", abortHandler);
+    console.log("[qa] SSE event stream closed");
   }
 }
 
@@ -211,6 +212,7 @@ export async function runOpencode(
     };
   } finally {
     if (heartbeat) clearInterval(heartbeat);
+    if (input.runId) unregisterRunSession(session.id);
     await session.dispose().catch((err) => {
       console.warn(`[qa] session dispose failed: ${err instanceof Error ? err.message : String(err)}`);
     });

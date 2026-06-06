@@ -12,7 +12,7 @@ import { testDataNamespace } from "./qa/test-data";
 import { enqueueTrackedRun } from "./server/runner";
 import { performSwap, confirmSwapHealthy, realSwapFs, SWAP_MARKER_FILE } from "./server/self-update";
 import { resolveRef, defaultMirrorDeps, authHeaderArgs, type MirrorDeps } from "./integrations/repo-mirror";
-import { defaultOpencodeDeps, askAssistant, OpencodeDeps, startEventStream } from "./integrations/opencode-client";
+import { defaultOpencodeDeps, askAssistant, OpencodeDeps, startEventStream, getOpenSessions } from "./integrations/opencode-client";
 import { appendLog } from "./server/history";
 import { type RunMode, type TestTarget } from "./types";
 import { github } from "./integrations/github";
@@ -65,10 +65,12 @@ const queue = new JobQueue((e) => {
 
 let shuttingDown = false;
 const SHUTDOWN_TIMEOUT_MS = 25_000;
+const eventStreamController = new AbortController();
 
 process.on("SIGTERM", () => {
   console.log("[qa] SIGTERM received — shutting down (new runs rejected)");
   shuttingDown = true;
+  eventStreamController.abort();
   setTimeout(() => {
     console.log("[qa] shutdown timeout — forcing exit");
     process.exit(1);
@@ -78,6 +80,7 @@ process.on("SIGTERM", () => {
 process.on("SIGINT", () => {
   console.log("[qa] SIGINT received — shutting down");
   shuttingDown = true;
+  eventStreamController.abort();
   process.exit(0);
 });
 
@@ -612,6 +615,7 @@ server.listen(port, () => {
   // file edits, streaming text) is routed to RunRecord logs in real time.
   startEventStream(
     (runId, text) => appendLog(runId, text),
+    eventStreamController.signal,
   ).catch((err) => console.warn(`[qa] event stream failed: ${err instanceof Error ? err.message : String(err)}`));
   confirmSwapAfterBoot();
   finalizeInterruptedRuns();
