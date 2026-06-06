@@ -86,17 +86,21 @@ export function routeEvent(
   return { activity: { runId, kind, text: text.slice(0, 500) } };
 }
 
-// Stateful registry over routeEvent that COUNTS drops (logged+counted, never swallowed).
+// Stateful registry that routes events AND tracks per-session context for
+// enriched heartbeat messages (current task, last file edited).
 export class ActivityRouter {
   private readonly sessions = new Map<string, string>();
+  private readonly context = new Map<string, SessionContext>();
   readonly drops: Record<DropReason, number> = { "no-session": 0, "unknown-session": 0, "unknown-kind": 0 };
 
   register(sessionId: string, runId: string): void {
     this.sessions.set(sessionId, runId);
+    this.context.set(sessionId, { deltas: "", lastFile: undefined, lastTodo: undefined });
   }
 
   unregister(sessionId: string): void {
     this.sessions.delete(sessionId);
+    this.context.delete(sessionId);
   }
 
   route(event: RawEvent): AgentActivity | null {
@@ -105,6 +109,41 @@ export class ActivityRouter {
       this.drops[r.dropped]++;
       return null;
     }
-    return r.activity ?? null;
+    const a = r.activity;
+    if (!a) return null;
+
+    // Track context for heartbeat enrichment — keep the last file and last todo.
+    const sid = [...this.sessions.entries()].find(([, rid]) => rid === a.runId)?.[0];
+    const ctx = sid ? this.context.get(sid) : undefined;
+    if (ctx) {
+      if (a.kind === "file") ctx.lastFile = a.text;
+      else if (event.type === "todo.updated") ctx.lastTodo = a.text;
+    }
+    return a;
   }
+
+  // Returns a short contextual summary for heartbeat enrichment: what the agent
+  // is currently working on, based on the last observed todo and file edit.
+  getContext(sessionId: string): string {
+    const ctx = this.context.get(sessionId);
+    if (!ctx) return "";
+    const parts: string[] = [];
+    if (ctx.lastTodo) parts.push(ctx.lastTodo);
+    if (ctx.lastFile) parts.push(ctx.lastFile);
+    return parts.join(" — ");
+  }
+
+  // Same as getContext but resolves by runId (finds the session for that run).
+  contextForRun(runId: string): string {
+    for (const [sid, rid] of this.sessions) {
+      if (rid === runId) return this.getContext(sid);
+    }
+    return "";
+  }
+}
+
+interface SessionContext {
+  deltas: string;
+  lastFile?: string;
+  lastTodo?: string;
 }

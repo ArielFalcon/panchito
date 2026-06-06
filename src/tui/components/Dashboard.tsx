@@ -27,7 +27,7 @@ export function Dashboard({ record }: { record: RunRecord }): React.ReactElement
         {` · ${shortSha(sha)} · `}
         <Text color={isCode ? "magenta" : "cyan"}>{target}</Text>
         {`/${mode}`}
-        {record.retrying ? <Text color="yellow">{"  ↻ retrying"}</Text> : null}
+        {record.retrying ? <Text color="#c2891b">{"  ↻ retrying"}</Text> : null}
       </Text>
 
       {/* Pipeline sections */}
@@ -47,36 +47,31 @@ export function Dashboard({ record }: { record: RunRecord }): React.ReactElement
               caseCount={s === "execute" ? cc : undefined}
               specCount={s === "generate" ? specs?.length : undefined}
             >
-              {/* Execute: immutable case history */}
+              {/* Execute: case history with pending specs */}
               {s === "execute" && total > 0 ? (
                 <Box flexDirection="column">
                   <HistoryList items={toHistoryItems(cases)} />
                   <Text>
                     {"  "}
-                    <Text color={failed > 0 ? "red" : "green"}>
+                    <Text color={failed > 0 ? "#c0392b" : "#3b7a57"}>
                       {progressBar(passed, total)}
                     </Text>
                     {`  ${passed}/${total}`}
                   </Text>
                 </Box>
               ) : null}
+              {/* Execute: pending specs (not yet run), shown only when execute is active/pending */}
+              {s === "execute" && total === 0 && st !== "done" && specs?.length ? (
+                <Box flexDirection="column" marginLeft={3}>
+                  {specs.map((sp) => (
+                    <Text key={sp.name} dimColor>{`· ${sp.name}`}</Text>
+                  ))}
+                </Box>
+              ) : null}
             </Section>
           );
         })}
       </Box>
-
-      {/* Specs: always visible when present, not hidden when generate completes */}
-      {specs?.length ? (
-        <Box flexDirection="column" marginTop={1} paddingLeft={3}>
-          {specs.map((sp) => (
-            <Box key={sp.name} flexDirection="column">
-              <Text dimColor>{sp.name}</Text>
-              {sp.objective ? <Text dimColor>{`  objective: ${sp.objective}`}</Text> : null}
-              {sp.flow ? <Text dimColor>{`  flow: ${sp.flow}`}</Text> : null}
-            </Box>
-          ))}
-        </Box>
-      ) : null}
 
       {/* Code target: binary result */}
       {isCode && total === 0 && verdict ? (

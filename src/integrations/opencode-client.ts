@@ -92,8 +92,20 @@ export async function startEventStream(
       });
 
       if (activity) {
-        const prefix = activity.kind === "message" ? "💬" : activity.kind === "file" ? "📝" : activity.kind === "tool" ? "🔧" : activity.text.includes("error") ? "⚠️" : "•";
-        onActivity(activity.runId, `[qa] ${prefix} ${activity.text}`);
+        // Concise prefix: file events show just basename, tool events trim args.
+        let display = activity.text;
+        if (activity.kind === "file") {
+          display = display.replace(/^edited /, "").split("/").pop() ?? display;
+          display = `wrote ${display}`;
+        } else if (activity.kind === "tool") {
+          display = display.replace(/^ran: /, "");
+          const parts = display.split(" ");
+          if (parts.length > 3) display = parts.slice(0, 3).join(" ") + " …";
+        } else if (activity.text.startsWith("todo [")) {
+          display = activity.text.replace(/^todo \[.*?\] /, "");
+        }
+        const prefix = activity.kind === "message" ? "💬" : activity.kind === "file" ? "📝" : activity.kind === "tool" ? "🔧" : activity.text.includes("error") ? "⚠️" : "▶";
+        onActivity(activity.runId, `[qa] ${prefix} ${display}`);
       }
     }
   } catch (err) {
@@ -116,17 +128,19 @@ export function getOpenSessionCount(): number {
 
 // Read-only Q&A about a run. Opens a short-lived qa-assistant session.
 export async function askAssistant(
-  input: { context: string; question: string },
+  input: { context: string; question: string; instruction?: string },
   deps: OpencodeDeps,
   cwd: string,
 ): Promise<string> {
+  const instruction = input.instruction ??
+    `Answer the operator's question about this QA run using ONLY the run context below.`;
   const session = await deps.open("qa-assistant", cwd);
   try {
     return await session.prompt([
-      `Answer the operator's question about this QA run using ONLY the run context below.`,
+      instruction,
       `Do not use any tools. If the context does not contain the answer, say so plainly.`,
       ``,
-      `## Run context`,
+      `## Context`,
       input.context,
       ``,
       `## Question`,

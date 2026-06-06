@@ -11,6 +11,7 @@ import { loadAppConfig, AppConfig } from "../orchestrator/config-loader";
 import { createRecord, updateRecord, addCase, getRecord, appendLog } from "./history";
 import { recordIncident } from "./maintainer";
 import { RunMode, TestTarget, TriggerSource, QaCase } from "../types";
+import { activityRouter } from "../integrations/opencode-client";
 
 export interface RunRequest {
   app: string;
@@ -66,7 +67,18 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
               console.log(msg);
               appendLog(record.id, msg);
             };
-            return pipeline.generate({ ...input, runId: record.id }, signal, onProgress);
+            return pipeline.generate({ ...input, runId: record.id }, signal, (msg) => {
+              // Enrich heartbeat messages with live agent context.
+              const m = msg.match(/agent is working... \((\d+)s elapsed\)/);
+              if (m) {
+                const ctx = activityRouter.contextForRun(record.id);
+                const parts = [`agent active (${m[1]}s)`];
+                if (ctx) parts.push(`— ${ctx}`);
+                onProgress(`[qa] ${parts.join(" ")}`);
+                return;
+              }
+              onProgress(msg);
+            });
           },
         },
         req.source ?? "webhook",
