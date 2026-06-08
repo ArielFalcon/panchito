@@ -46,8 +46,10 @@ export async function validateSpecs(
   ];
   const errors: string[] = [];
   let allFailuresAreInfra = true;
-  for (const [name, run] of checks) {
-    const res = await run(specDir);
+  const results = await Promise.all(
+    checks.map(async ([name, run]) => ({ name, res: await run(specDir) })),
+  );
+  for (const { name, res } of results) {
     if (!res.ok) {
       errors.push(`[${name}] ${res.output.trim()}`);
       if (!res.infra) allFailuresAreInfra = false;

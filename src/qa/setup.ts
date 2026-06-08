@@ -7,7 +7,8 @@
 // copy / `npm ci` are the boundary not covered by unit tests.
 
 import { spawn } from "node:child_process";
-import { cpSync, existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { scrubEnv } from "./code-runner";
 
@@ -19,7 +20,40 @@ export interface SetupDeps {
 
 export async function setupE2eProject(e2eDir: string, deps: SetupDeps): Promise<void> {
   if (!deps.hasProject(e2eDir)) deps.bootstrap(e2eDir); // first time: seed it
+  if (isInstallCurrent(e2eDir)) return;
   await deps.install(e2eDir);
+  markInstallCurrent(e2eDir);
+}
+
+// ── install caching ─────────────────────────────────────────────────────────
+// ensureMirror preserves node_modules across runs (git clean -e node_modules),
+// but npm ci unconditionally removes and reinstalls them. We skip the install
+// when node_modules exists and the lockfile hasn't changed since the last
+// successful install — the same intent the -e flag already expresses.
+function getLockHash(e2eDir: string): string | null {
+  const lockPath = join(e2eDir, "package-lock.json");
+  if (!existsSync(lockPath)) return null;
+  return createHash("sha256").update(readFileSync(lockPath)).digest("hex");
+}
+
+function isInstallCurrent(e2eDir: string): boolean {
+  const nodeModules = join(e2eDir, "node_modules");
+  const markerPath = join(nodeModules, ".install-hash");
+  if (!existsSync(nodeModules) || !existsSync(markerPath)) return false;
+  const currentHash = getLockHash(e2eDir);
+  if (!currentHash) return false;
+  try {
+    return readFileSync(markerPath, "utf8").trim() === currentHash;
+  } catch {
+    return false;
+  }
+}
+
+function markInstallCurrent(e2eDir: string): void {
+  const hash = getLockHash(e2eDir);
+  if (!hash) return;
+  mkdirSync(join(e2eDir, "node_modules"), { recursive: true });
+  writeFileSync(join(e2eDir, "node_modules", ".install-hash"), hash);
 }
 
 function seedDir(): string {
