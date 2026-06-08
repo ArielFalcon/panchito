@@ -1,16 +1,26 @@
 // Phase 4 (SSE live activity) — pure, advisory-only routing. Now WIRED.
 //
 // OpenCode's /global/event is a SERVER-GLOBAL firehose: every event carries a
-// directory (not sessionID directly). Session-scoped events (message.part.updated,
-// file.edited) have the sessionID in their properties. The router demuxes by
-// sessionID → runId and stays ADVISORY-ONLY.
+// directory (not sessionID directly). Session-scoped events (file.edited,
+// command.executed, todo.updated) have the sessionID in their properties. The
+// router demuxes by sessionID → runId and stays ADVISORY-ONLY.
+//
+// Design note — why model prose is dropped: streaming `message.part.updated`
+// deltas are arbitrary fragments of the model's output (often mid-word or
+// mid-JSON). Rendering them produced broken status lines like `"file": "s`. We
+// keep ONLY events whose payload carries clean, structured fields (the file it
+// wrote, the command it ran, the todo it is on). The agent's reasoning text is
+// never surfaced.
 
-export type ActivityKind = "tool" | "file" | "step" | "review" | "message";
+import { ActivityKind } from "../types";
 
-export interface AgentActivity {
+// The router's output for one event: the semantic fields plus the run it belongs
+// to. The persisted/TUI `AgentActivity` (types.ts) adds a `ts` stamped at write.
+export interface RoutedActivity {
   runId: string;
   kind: ActivityKind;
   text: string;
+  status?: "pending" | "in_progress" | "completed";
 }
 
 // The minimal view of an incoming OpenCode event the router needs.
@@ -21,21 +31,31 @@ export interface RawEvent {
 
 export type DropReason = "no-session" | "unknown-session" | "unknown-kind";
 
-// Allowlist of real OpenCode event types worth surfacing. Anything else is dropped.
+// Allowlist of OpenCode event types worth surfacing — every one carries a clean
+// structured field. `message.*` is intentionally absent (raw stream prose).
 const DEFAULT_ALLOW: Record<string, ActivityKind> = {
-  "message.part.updated": "message",  // streaming delta — the most valuable
-  "message.updated": "message",       // full message update
-  "message.part.removed": "message",  // agent retracted text
-  "file.edited": "file",              // agent wrote a file
-  "command.executed": "tool",         // agent ran a command
-  "session.status": "step",           // session lifecycle
-  "session.error": "step",            // session error (critical for debugging)
-  "todo.updated": "step",             // agent task progress
+  "file.edited": "file",          // agent wrote a file
+  "command.executed": "command",  // agent ran a command
+  "todo.updated": "todo",         // agent task progress (carries status)
+  "session.status": "phase",      // session lifecycle (display layer may ignore)
+  "session.error": "error",       // session error (critical for debugging)
 };
 
 export interface RouteResult {
-  activity?: AgentActivity;
+  activity?: RoutedActivity;
   dropped?: DropReason;
+}
+
+// Normalizes the many status spellings OpenCode may emit into our three states.
+function normalizeStatus(raw: unknown): RoutedActivity["status"] {
+  const s = String(raw ?? "").toLowerCase();
+  if (s === "completed" || s === "done" || s === "complete") return "completed";
+  if (s === "in_progress" || s === "in-progress" || s === "active" || s === "running") return "in_progress";
+  return "pending";
+}
+
+function basename(path: string): string {
+  return path.split("/").pop() || path;
 }
 
 // Routes ONE event to a run, or drops it with a reason.
@@ -51,45 +71,33 @@ export function routeEvent(
   const runId = sessions.get(sessionID);
   if (!runId) return { dropped: "unknown-session" };
 
-  // Build a human-readable text from the event properties.
+  const p = event.properties ?? {};
   let text = "";
-  if (kind === "message" && event.properties) {
-    // Streaming delta (incremental text) — the most common and useful case.
-    const delta = event.properties.delta as string | undefined;
-    if (delta?.trim()) {
-      text = delta;
-    } else {
-      // No delta → extract from the full Part object.
-      const part = event.properties.part as { type?: string; text?: string; tool?: string; title?: string } | undefined;
-      if (part?.type === "text" && part.text) {
-        text = part.text;
-      } else if (part?.type === "tool") {
-        text = `ran tool: ${part.tool ?? "?"}`;
-      } else if (part?.type === "reasoning") {
-        text = "(thinking…)";
-      } else if (part?.type === "subtask") {
-        text = `subtask: ${part.title ?? "?"}`;
-      }
-    }
-  } else if (kind === "file" && event.properties?.file) {
-    text = `edited ${String(event.properties.file)}`;
-  } else if (kind === "tool" && event.properties?.command) {
-    text = `ran: ${String(event.properties.command)}`;
-  } else if (event.type === "session.error" && event.properties?.error) {
-    text = `error: ${String(event.properties.error)}`;
-  } else if (event.type === "todo.updated" && event.properties?.todo) {
-    const todo = event.properties.todo as { content?: string; status?: string };
-    text = `todo [${todo.status ?? "?"}] ${todo.content ?? ""}`;
-  }
-  // Drop message events with no useful content (empty delta/part). Step events
-  // (session lifecycle) and errors are kept even with minimal text — they signal
-  // state changes the operator needs to see.
-  if (!text) {
-    if (kind === "message") return { dropped: "unknown-kind" };
-    text = event.type;
+  let status: RoutedActivity["status"] | undefined;
+
+  if (kind === "file" && p.file) {
+    text = basename(String(p.file));
+  } else if (kind === "command" && p.command) {
+    text = String(p.command).trim();
+  } else if (kind === "todo" && p.todo) {
+    const todo = p.todo as { content?: string; status?: string };
+    text = (todo.content ?? "").trim();
+    status = normalizeStatus(todo.status);
+  } else if (kind === "error") {
+    text = `error: ${String(p.error ?? event.type)}`;
+  } else if (kind === "phase") {
+    // Session lifecycle — keep a terse, structured signal (e.g. "idle"/"working").
+    text = String(p.status ?? p.state ?? event.type);
   }
 
-  return { activity: { runId, kind, text: text.slice(0, 500) } };
+  // No usable content → drop (e.g. a todo with no content). Errors/phases keep a
+  // minimal text because they signal a state change the operator must see.
+  if (!text) {
+    if (kind === "error" || kind === "phase") text = event.type;
+    else return { dropped: "unknown-kind" };
+  }
+
+  return { activity: { runId, kind, text: text.slice(0, 500), ...(status ? { status } : {}) } };
 }
 
 // Stateful registry that routes events AND tracks per-session context for
@@ -101,7 +109,7 @@ export class ActivityRouter {
 
   register(sessionId: string, runId: string): void {
     this.sessions.set(sessionId, runId);
-    this.context.set(sessionId, { deltas: "", lastFile: undefined, lastTodo: undefined, fileCount: 0 });
+    this.context.set(sessionId, { lastFile: undefined, lastTodo: undefined, fileCount: 0 });
   }
 
   unregister(sessionId: string): void {
@@ -109,7 +117,7 @@ export class ActivityRouter {
     this.context.delete(sessionId);
   }
 
-  route(event: RawEvent): AgentActivity | null {
+  route(event: RawEvent): RoutedActivity | null {
     const r = routeEvent(event, this.sessions);
     if (r.dropped) {
       this.drops[r.dropped]++;
@@ -123,7 +131,7 @@ export class ActivityRouter {
     const ctx = sid ? this.context.get(sid) : undefined;
     if (ctx) {
       if (a.kind === "file") { ctx.lastFile = a.text; ctx.fileCount++; }
-      else if (event.type === "todo.updated") ctx.lastTodo = a.text;
+      else if (a.kind === "todo") ctx.lastTodo = a.text;
     }
     return a;
   }
@@ -150,7 +158,6 @@ export class ActivityRouter {
 }
 
 interface SessionContext {
-  deltas: string;
   lastFile?: string;
   lastTodo?: string;
   fileCount: number;

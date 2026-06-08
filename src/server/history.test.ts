@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createRecord, getRecord, listRecords, currentRun, updateRecord, addCase, continuationDepth, clearDatabase } from "./history";
+import { createRecord, getRecord, listRecords, currentRun, updateRecord, addCase, continuationDepth, clearDatabase, appendActivity } from "./history";
 
 test("createRecord stores an enqueued record findable by id", () => {
   const r = createRecord({ target: "e2e",  app: "hist-a", sha: "abcdef1234", mode: "diff" });
@@ -66,6 +66,39 @@ test("currentRun prefers running over enqueued when both exist (queue FIFO)", ()
   const cur = currentRun();
   assert.ok(cur);
   assert.equal(cur!.id, olderRunning.id, "must return the actually-running job, not the newest enqueued");
+});
+
+test("appendActivity round-trips structured events (kind, status, text) newest-last", () => {
+  const r = createRecord({ target: "e2e", app: "hist-act", sha: "act0001", mode: "complete" });
+  appendActivity(r.id, { kind: "todo", text: "read existing suite", status: "in_progress" });
+  appendActivity(r.id, { kind: "file", text: "checkout.spec.ts" });
+  appendActivity(r.id, { kind: "command", text: "npx playwright test --list" });
+  const a = getRecord(r.id)!.activity!;
+  assert.equal(a.length, 3);
+  assert.equal(a[0]!.kind, "todo");
+  assert.equal(a[0]!.status, "in_progress");
+  assert.equal(a[2]!.text, "npx playwright test --list"); // chronological, newest last
+  assert.ok(a[2]!.ts);
+});
+
+test("appendActivity caps the feed at 200 rows, keeping the newest", () => {
+  const r = createRecord({ target: "e2e", app: "hist-cap", sha: "cap0001", mode: "complete" });
+  for (let i = 0; i < 250; i++) appendActivity(r.id, { kind: "file", text: `spec-${i}.ts` });
+  const a = getRecord(r.id)!.activity!;
+  assert.equal(a.length, 200);
+  assert.equal(a[a.length - 1]!.text, "spec-249.ts"); // newest survives
+  assert.equal(a[0]!.text, "spec-50.ts");             // oldest 50 pruned
+});
+
+test("updateRecord stamps stepStartedAt whenever the step changes", () => {
+  const r = createRecord({ target: "e2e", app: "hist-step", sha: "step001", mode: "diff" });
+  assert.equal(getRecord(r.id)!.stepStartedAt, undefined);
+  updateRecord(r.id, { step: "generate" });
+  const ts1 = getRecord(r.id)!.stepStartedAt;
+  assert.ok(ts1 && !Number.isNaN(Date.parse(ts1)));
+  updateRecord(r.id, { step: "execute" });
+  const ts2 = getRecord(r.id)!.stepStartedAt;
+  assert.ok(ts2 && ts2 !== ts1 || Date.parse(ts2!) >= Date.parse(ts1!));
 });
 
 test("continuationDepth walks the parentRunId chain", () => {

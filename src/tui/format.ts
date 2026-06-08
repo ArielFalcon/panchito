@@ -1,7 +1,7 @@
 // Pure presentation helpers — no Ink, no React. These hold the formatting logic so
 // it is unit-testable in isolation; the components only place these strings/colors.
 
-import { RunVerdict, CaseStatus, TestTarget, RunMode } from "../types";
+import { RunVerdict, CaseStatus, TestTarget, RunMode, AgentActivity } from "../types";
 
 // The visible pipeline (the OpenCode-internal generate↔review loop stays opaque).
 export const PIPELINE_STEPS = ["classify", "generate", "validate", "execute"] as const;
@@ -112,4 +112,108 @@ export function caseIcon(status: CaseStatus): string {
 
 export function shortSha(sha: string): string {
   return sha.slice(0, 7);
+}
+
+// ── Live activity aggregation ────────────────────────────────────────────────
+// Pure: turns the flat, chronological AgentActivity[] into the shape the live
+// panel renders. No Ink, no time side effects except an injectable `now`.
+
+export type TodoStatus = "pending" | "in_progress" | "completed";
+export interface TodoView { text: string; status: TodoStatus; }
+
+// The highlighted "what is happening right now" card. `title` is the in-progress
+// todo when there is one, else the last action (quiet state keeps the last action
+// visible alongside the ticking clock instead of inventing data).
+export interface FocusItem {
+  title: string;
+  progress?: string;     // e.g. "3/5" of todos
+  lastFile?: string;
+  lastCommand?: string;
+}
+
+export interface ActivityView {
+  todos: TodoView[];
+  filesWritten: string[];
+  fileCount: number;
+  commands: string[];
+  focus: FocusItem | null;
+  elapsedMs: number;
+  lastText: string | null;
+}
+
+export function deriveActivityView(
+  activity: AgentActivity[] | undefined,
+  opts: { stepStartedAt?: string; now?: number } = {},
+): ActivityView {
+  const now = opts.now ?? Date.now();
+  const startMs = opts.stepStartedAt ? Date.parse(opts.stepStartedAt) : NaN;
+  const elapsedMs = Number.isNaN(startMs) ? 0 : Math.max(0, now - startMs);
+
+  // Scope the feed to the CURRENT phase: events stamped before this phase began
+  // (e.g. generate's todos while we are now in execute) would otherwise leak into
+  // the focus card. Unparseable timestamps are kept (fail-open, never hide signal).
+  const all = activity ?? [];
+  const events = Number.isNaN(startMs)
+    ? all
+    : all.filter((a) => { const t = Date.parse(a.ts); return Number.isNaN(t) || t >= startMs; });
+  // Insertion-ordered maps: updating a key keeps its position, latest value wins.
+  const todoMap = new Map<string, TodoStatus>();
+  const files = new Map<string, true>();
+  const commands: string[] = [];
+  let lastText: string | null = null;
+
+  for (const a of events) {
+    if (!a.text) continue;
+    lastText = a.text;
+    if (a.kind === "todo") {
+      todoMap.set(a.text, (a.status as TodoStatus) ?? "pending");
+    } else if (a.kind === "file") {
+      files.set(a.text, true);
+    } else if (a.kind === "command") {
+      commands.push(a.text);
+    }
+  }
+
+  const todos: TodoView[] = [...todoMap.entries()].map(([text, status]) => ({ text, status }));
+  const filesWritten = [...files.keys()];
+  const completed = todos.filter((t) => t.status === "completed").length;
+  const inProgress = todos.find((t) => t.status === "in_progress");
+
+  const focusTitle = inProgress?.text ?? lastText;
+  const focus: FocusItem | null = focusTitle
+    ? {
+        title: focusTitle,
+        ...(todos.length > 0 ? { progress: `${completed}/${todos.length}` } : {}),
+        ...(filesWritten.length > 0 ? { lastFile: filesWritten[filesWritten.length - 1] } : {}),
+        ...(commands.length > 0 ? { lastCommand: commands[commands.length - 1] } : {}),
+      }
+    : null;
+
+  return {
+    todos,
+    filesWritten,
+    fileCount: filesWritten.length,
+    commands,
+    focus,
+    elapsedMs,
+    lastText,
+  };
+}
+
+// Single-line truncation with an ellipsis. Display-only; the stored value is never
+// cut (the broken `"file": "s` came from slicing a raw stream fragment — gone now).
+export function truncate(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return s.slice(0, Math.max(0, max - 1)).trimEnd() + "…";
+}
+
+// Compact "8m 21s" / "47s" elapsed label from milliseconds.
+export function formatElapsed(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  if (m < 60) return `${m}m ${rem}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
 }

@@ -4,49 +4,67 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { RunRecord } from "../../types";
-import { PIPELINE_STEPS, stepState, progressBar, verdictColor, verdictIcon, shortSha } from "../format";
+import {
+  PIPELINE_STEPS, stepState, progressBar, verdictColor, verdictIcon, shortSha,
+  deriveActivityView, formatElapsed, ActivityView,
+} from "../format";
 import { Section } from "./Section";
 import { HistoryList, toHistoryItems } from "./HistoryList";
+import { FocusCard } from "./FocusCard";
+import { LiveActivity } from "./LiveActivity";
+import { listLearningRules, loadCurriculum } from "../../server/history";
 
-function stepDetail(record: RunRecord, step: string, isActive: boolean): string | undefined {
-  const { passed = 0, failed = 0, cases, specs, stepDetail: sd, note, retrying, target, logs } = record;
+function learningSummary(app: string): string | null {
+  try {
+    const rules = listLearningRules(app, 50);
+    const curriculum = loadCurriculum(app);
+    const activeRules = rules.filter((r) => r.status === "active" || r.status === "candidate");
+    const proven = curriculum?.archetypes.filter((a) => a.caughtRealBug).length ?? 0;
+    const total = curriculum?.archetypes.length ?? 10;
+    if (activeRules.length === 0 && proven === 0) return null;
+    const parts: string[] = [];
+    if (activeRules.length > 0) parts.push(`${activeRules.length} rules`);
+    if (proven > 0) parts.push(`${proven}/${total} archetypes`);
+    return `📊 learning: ${parts.join(", ")}`;
+  } catch {
+    return null;
+  }
+}
+
+function stepDetail(record: RunRecord, step: string, isActive: boolean, view: ActivityView): string | undefined {
+  const { passed = 0, failed = 0, cases, specs, stepDetail: sd, note, retrying, target } = record;
   const total = cases.length;
 
   if (!isActive) return undefined;
   if (retrying && step === "execute") return note || sd || "re-generating with failure feedback...";
 
+  const elapsed = view.elapsedMs > 0 ? ` · ${formatElapsed(view.elapsedMs)}` : "";
+
   switch (step) {
-    case "generate":
-      if (specs?.length) return `${specs.length} spec(s) written so far`;
-      if (sd) return sd;
-      // Fallback: show the last meaningful SSE event (file write, tool run, todo)
-      return lastMeaningfulLog(logs) || undefined;
+    case "generate": {
+      // specs is populated only when the agent finishes; until then, files written
+      // are the live proxy for "how much has it produced".
+      const n = specs?.length ?? view.fileCount;
+      const head = n > 0 ? `${n} spec${n !== 1 ? "s" : ""}` : "working";
+      return `${head}${elapsed}`;
+    }
     case "execute":
       if (total > 0) return `${total} case(s) — ${passed} passed, ${failed} failed`;
-      if (target === "code") return "running test suite...";
-      return sd || undefined;
+      if (target === "code") return `running test suite...${elapsed}`;
+      return (sd || "running") + elapsed;
     default:
       return sd || undefined;
   }
-}
-
-// Returns the last log line that carries actionable information — file writes,
-// tool executions, or todo updates. Skips heartbeats and empty/whitespace lines.
-function lastMeaningfulLog(logs: string[]): string | null {
-  for (let i = logs.length - 1; i >= 0; i--) {
-    const line = logs[i]!.replace(/^\[qa\] /, "");
-    if (!line.trim()) continue;
-    if (line.startsWith("agent active")) continue;
-    if (line.startsWith("agent is working")) continue;
-    return line.slice(0, 80);
-  }
-  return null;
 }
 
 export function Dashboard({ record }: { record: RunRecord }): React.ReactElement {
   const { app, sha, target, mode, step, verdict, passed = 0, failed = 0, cases, specs } = record;
   const total = cases.length;
   const isCode = target === "code";
+
+  // Aggregate the structured activity feed once per render (re-derived each poll,
+  // so the elapsed clock ticks ~every 1.2s).
+  const view = deriveActivityView(record.activity, { stepStartedAt: record.stepStartedAt });
 
   return (
     <Box flexDirection="column" paddingX={1}>
@@ -69,11 +87,22 @@ export function Dashboard({ record }: { record: RunRecord }): React.ReactElement
               key={s}
               step={s}
               state={st}
-              detail={stepDetail(record, s, isActive)}
+              detail={stepDetail(record, s, isActive, view)}
               caseCount={s === "execute" ? cc : undefined}
               specCount={s === "generate" ? specs?.length : undefined}
             >
-              {/* Execute: case history with pending specs */}
+              {/* Generate: the live panel — focus card + plan/wrote/ran feed */}
+              {s === "generate" && isActive ? (
+                <Box flexDirection="column">
+                  {view.focus ? <FocusCard focus={view.focus} elapsed={formatElapsed(view.elapsedMs)} /> : null}
+                  <LiveActivity view={view} />
+                </Box>
+              ) : null}
+              {/* Execute (live): the test running right now (in-progress activity todo) */}
+              {s === "execute" && isActive && !verdict && view.focus ? (
+                <FocusCard focus={view.focus} label="running" elapsed={formatElapsed(view.elapsedMs)} />
+              ) : null}
+              {/* Execute: case history with the pass/fail bar */}
               {s === "execute" && total > 0 ? (
                 <Box flexDirection="column">
                   <HistoryList items={toHistoryItems(cases)} />
@@ -117,6 +146,9 @@ export function Dashboard({ record }: { record: RunRecord }): React.ReactElement
           {record.note ? <Text dimColor>{` — ${record.note}`}</Text> : null}
         </Box>
       ) : null}
+
+      {/* Learning state summary */}
+      {verdict ? (() => { const ls = learningSummary(app); return ls ? <Box marginTop={0}><Text dimColor>{ls}</Text></Box> : null; })() : null}
     </Box>
   );
 }

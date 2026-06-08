@@ -82,3 +82,48 @@ test("shows the code-mode binary result line for a code target", () => {
   assert.match(lastFrame() ?? "", /code tests: all passed/);
   unmount();
 });
+
+test("generate phase: renders the live panel (focus card + todo checklist + files + commands)", () => {
+  const { lastFrame, unmount } = render(
+    <Dashboard
+      record={rec({
+        step: "generate",
+        cases: [],
+        activity: [
+          { kind: "todo", text: "map repo structure", status: "completed", ts: "t1" },
+          { kind: "todo", text: "generate checkout specs", status: "in_progress", ts: "t2" },
+          { kind: "file", text: "checkout.spec.ts", ts: "t3" },
+          { kind: "command", text: "npx playwright test --list", ts: "t4" },
+        ],
+      })}
+    />,
+  );
+  const f = lastFrame() ?? "";
+  assert.match(f, /generate checkout specs/); // focus card + checklist
+  assert.match(f, /map repo structure/);      // completed todo
+  assert.match(f, /checkout\.spec\.ts/);       // wrote line
+  assert.match(f, /npx playwright test/);      // ran line
+  unmount();
+});
+
+test("execute phase: renders the running-test focus card from in-progress activity", () => {
+  const { lastFrame, unmount } = render(
+    <Dashboard
+      record={rec({
+        step: "execute",
+        verdict: undefined,
+        passed: 1,
+        failed: 0,
+        cases: [{ name: "home › hero", status: "pass" }],
+        activity: [
+          { kind: "todo", text: "home › hero", status: "completed", ts: "t1" },
+          { kind: "todo", text: "cart › updates total", status: "in_progress", ts: "t2" },
+        ],
+      })}
+    />,
+  );
+  const f = lastFrame() ?? "";
+  assert.match(f, /running/);              // focus card label
+  assert.match(f, /cart › updates total/); // the test running right now
+  unmount();
+});

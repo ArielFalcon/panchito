@@ -15,7 +15,7 @@ import { recordFixFailure, readFixFailures, renderFailureMemory, realMemoryFs } 
 import { installHttpDispatcher } from "./util/net";
 import { resolveRef, defaultMirrorDeps, authHeaderArgs, type MirrorDeps } from "./integrations/repo-mirror";
 import { defaultOpencodeDeps, askAssistant, OpencodeDeps, startEventStream } from "./integrations/opencode-client";
-import { appendLog } from "./server/history";
+import { appendLog, appendActivity } from "./server/history";
 import { type RunMode, type TestTarget } from "./types";
 import { github } from "./integrations/github";
 import { scrubEnv } from "./qa/code-runner";
@@ -891,7 +891,11 @@ server.listen(port, () => {
   // Start the SSE event stream from OpenCode so agent activity (tool calls,
   // file edits, streaming text) is routed to RunRecord logs in real time.
   startEventStream(
-    (runId, text) => appendLog(runId, text),
+    (a) => {
+      // Structured event → the live TUI panel; display line → the human log feed.
+      appendActivity(a.runId, { kind: a.kind, text: a.text, status: a.status });
+      appendLog(a.runId, a.display);
+    },
     eventStreamController.signal,
   ).catch((err) => console.warn(`[qa] event stream failed: ${err instanceof Error ? err.message : String(err)}`));
   recoverRollbackRecord();

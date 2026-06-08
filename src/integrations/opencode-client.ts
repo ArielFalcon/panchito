@@ -11,7 +11,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { AgentResult, QaCase, RunMode, TestTarget, SpecMeta } from "../types";
+import { AgentResult, QaCase, RunMode, TestTarget, SpecMeta, ActivityKind } from "../types";
 import { CommitIntent } from "../qa/commit-classify";
 import type { ArchitectureContext } from "../qa/context";
 import { sanitizeText } from "../orchestrator/sanitizer";
@@ -62,11 +62,22 @@ export function unregisterRunSession(sessionId: string): void {
   activityRouter.unregister(sessionId);
 }
 
+// One routed, display-ready activity handed to the SSE consumer: the structured
+// fields (for the live panel) plus a human-readable `display` line (for the log
+// feed the chat assistant reads).
+export interface LiveActivity {
+  runId: string;
+  kind: ActivityKind;
+  text: string;
+  status?: "pending" | "in_progress" | "completed";
+  display: string;
+}
+
 // Subscribes to OpenCode's global SSE event stream and routes every event through
 // the activityRouter. `onActivity` is called for each successfully routed event
-// with the runId and human-readable text. Runs until aborted.
+// with the structured activity and a display line. Runs until aborted.
 export async function startEventStream(
-  onActivity: (runId: string, text: string) => void,
+  onActivity: (a: LiveActivity) => void,
   signal?: AbortSignal,
 ): Promise<void> {
   const client = await getSharedClient();
@@ -96,24 +107,25 @@ export async function startEventStream(
       });
 
       if (activity) {
-        // Skip internal reasoning and step lifecycle events — they add visual noise
-        // without actionable information for the operator.
-        if (activity.text === "(thinking…)" || activity.kind === "step") continue;
-        // Concise display: file → basename, tool → first 3 args, todo → strip prefix.
-        let display = activity.text;
-        if (activity.kind === "file") {
-          display = display.replace(/^edited /, "").split("/").pop() ?? display;
-          display = `wrote ${display}`;
-        } else if (activity.kind === "tool") {
-          display = display.replace(/^ran: /, "");
-          const parts = display.split(" ");
-          if (parts.length > 3) display = parts.slice(0, 3).join(" ") + " …";
-        } else if (activity.text.startsWith("todo [")) {
-          display = activity.text.replace(/^todo \[.*?\] /, "");
+        // Session lifecycle events carry no operator value — don't surface them.
+        if (activity.kind === "phase") continue;
+        // Build a concise display line for the human log feed (chat-assistant context).
+        // The structured fields below feed the live TUI panel; the text is already clean.
+        let shown = activity.text;
+        if (activity.kind === "command") {
+          const parts = shown.split(/\s+/);
+          if (parts.length > 4) shown = parts.slice(0, 4).join(" ") + " …";
         }
-        // Match the TUI's visual identity: ✓/✗/·/⚠/⚙/⊘ — no emoji.
-        const prefix = activity.kind === "message" ? "✎" : activity.kind === "file" ? "✎" : activity.kind === "tool" ? "⚙" : activity.text.includes("error") ? "⚠" : "▸";
-        onActivity(activity.runId, `[qa] ${prefix} ${display}`);
+        // Match the TUI's visual identity: ✓/✗/·/⚠/⚙ — no emoji.
+        const icon = activity.kind === "file" ? "✎" : activity.kind === "command" ? "⚙" : activity.kind === "error" ? "⚠" : "▸";
+        const label = activity.kind === "file" ? `wrote ${shown}` : shown;
+        onActivity({
+          runId: activity.runId,
+          kind: activity.kind,
+          text: activity.text,
+          ...(activity.status ? { status: activity.status } : {}),
+          display: `[qa] ${icon} ${label}`,
+        });
       }
     }
   } catch (err) {

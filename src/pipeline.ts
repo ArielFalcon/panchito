@@ -87,7 +87,7 @@ export interface PipelineDeps {
   listChangedSpecs?(mirrorDir: string, e2eRelDir: string): Promise<string[]>;
   setupE2e(e2eDir: string): Promise<void>; // installs the e2e project's dependencies
   validate(e2eDir: string): Promise<{ ok: boolean; errors: string[]; infra: boolean }>;
-  execute(e2eDir: string, opts: { baseUrl: string; namespace: string; onCase?: (c: QaCase) => void }): Promise<QaRunResult>;
+  execute(e2eDir: string, opts: { baseUrl: string; namespace: string; onCase?: (c: QaCase) => void; onRunning?: (title: string) => void }): Promise<QaRunResult>;
   cleanup(e2eDir: string, opts: { baseUrl: string; namespace: string }): Promise<void>; // orphan-data cleanup (best-effort)
   isHealthy(versionUrl: string): Promise<boolean>; // is DEV healthy right now? (infra vs quality)
   review?(input: ReviewInput, signal?: AbortSignal): Promise<ReviewResult>; // independent reviewer (null = disabled)
@@ -292,6 +292,7 @@ export async function runPipeline(
   onCase?: (c: QaCase) => void,
   onSpecs?: (specs: Array<{ name: string; objective?: string; flow?: string }>) => void,
   signal?: AbortSignal,
+  onRunningTest?: (title: string) => void,
 ): Promise<QaRunResult> {
   const checkSignal = () => {
     if (signal?.aborted) throw new Error("run cancelled by operator");
@@ -720,7 +721,7 @@ export async function runPipeline(
     onStep?.("execute");
     log(`[qa] running E2E (namespace ${ns}) against ${app.dev.baseUrl}...`);
     deps.clearCoverage?.(e2eDir, ns); // fresh dumps only: never union a prior run's coverage
-    run = await deps.execute(e2eDir, { baseUrl: app.dev.baseUrl, namespace: ns, onCase });
+    run = await deps.execute(e2eDir, { baseUrl: app.dev.baseUrl, namespace: ns, onCase, onRunning: onRunningTest });
     // Infra vs quality: failures with an unhealthy DEV are infrastructure, not code.
     if (run.verdict === "fail" && !(await devHealthy())) {
       run = resultOf(ns, "infra-error", "failures with an unhealthy DEV: treated as infrastructure");
@@ -773,7 +774,7 @@ export async function runPipeline(
       }
       log("[qa] re-running E2E with fixed tests...");
       deps.clearCoverage?.(e2eDir, ns);
-      const retryRun = await deps.execute(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: ns, onCase });
+      const retryRun = await deps.execute(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: ns, onCase, onRunning: onRunningTest });
       if (retryRun.verdict === "fail" && !(await devHealthy())) {
         run = resultOf(ns, "infra-error", "failures with an unhealthy DEV: treated as infrastructure");
         break;
@@ -818,7 +819,7 @@ export async function runPipeline(
             if (!isCode) deps.clearCoverage?.(e2eDir, ns); // re-measure only the improved suite's dumps
             const reRun = isCode
               ? await deps.executeCode(mirrorDir, { namespace: ns, onCase, signal })
-              : await deps.execute(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: ns, onCase });
+              : await deps.execute(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: ns, onCase, onRunning: onRunningTest });
             if (reRun.verdict === "pass") {
               run = reRun;
               result = improved;

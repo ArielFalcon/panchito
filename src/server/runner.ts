@@ -8,7 +8,7 @@
 import { JobQueue } from "./queue";
 import { runPipeline, defaultPipelineDeps, PipelineDeps } from "../pipeline";
 import { loadAppConfig, AppConfig } from "../orchestrator/config-loader";
-import { createRecord, updateRecord, addCase, getRecord, appendLog, listRecords } from "./history";
+import { createRecord, updateRecord, addCase, getRecord, appendLog, appendActivity, listRecords } from "./history";
 import { recordIncident } from "./maintainer";
 import { testDataNamespace } from "../qa/test-data";
 import { RunMode, TestTarget, TriggerSource, QaCase } from "../types";
@@ -107,9 +107,13 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
         req.source ?? "webhook",
         { mode: req.mode, target: req.target, guidance: req.guidance, fixCases: req.fixCases, parentRunId: req.parentRunId, previousNamespace, runId: record.id },
         (step, detail) => updateRecord(record.id, { step, stepDetail: detail, retrying: step === "retry" }),
-        (c) => addCase(record.id, c),
+        // A test finished → persist the case (live bar/history) AND mark its activity
+        // todo completed so it stops being the "running" focus.
+        (c) => { addCase(record.id, c); appendActivity(record.id, { kind: "todo", text: c.name, status: "completed" }); },
         (specs) => updateRecord(record.id, { specs }),
         signal,
+        // A test started → it becomes the in-progress focus card during execute.
+        (title) => appendActivity(record.id, { kind: "todo", text: title, status: "in_progress" }),
       );
       updateRecord(record.id, {
         status: "done",

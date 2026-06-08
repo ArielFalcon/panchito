@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runE2E, ExecuteDeps } from "./execute";
+import { runE2E, ExecuteDeps, parseStreamEvent, streamStatusToCase } from "./execute";
+import { QaCase } from "../types";
 
 test("runs, maps cases and SANITIZES the logs", async () => {
   const deps: ExecuteDeps = {
@@ -76,6 +77,48 @@ test("a ran-but-empty report ({}) is infra-error, not a false pass", async () =>
   const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-empty" }, deps);
   assert.equal(run.verdict, "infra-error");
   assert.equal(run.passed, false);
+});
+
+test("parseStreamEvent parses the NDJSON reporter lines and ignores noise", () => {
+  assert.deepEqual(parseStreamEvent('{"e":"begin","total":3}'), { phase: "begin", total: 3 });
+  assert.deepEqual(parseStreamEvent('{"e":"testbegin","title":"checkout › buys","file":"c.spec.ts"}'), { phase: "testbegin", title: "checkout › buys", file: "c.spec.ts" });
+  assert.deepEqual(parseStreamEvent('{"e":"testend","title":"checkout › buys","status":"passed"}'), { phase: "testend", title: "checkout › buys", status: "passed" });
+  assert.equal(parseStreamEvent(""), null);
+  assert.equal(parseStreamEvent("not json"), null);
+  assert.equal(parseStreamEvent('{"e":"other"}'), null);
+});
+
+test("streamStatusToCase maps green to pass, skipped to null, everything else fail-closed", () => {
+  assert.equal(streamStatusToCase("passed"), "pass");
+  assert.equal(streamStatusToCase("expected"), "pass");
+  assert.equal(streamStatusToCase("skipped"), null);
+  assert.equal(streamStatusToCase("failed"), "fail");
+  assert.equal(streamStatusToCase("timedOut"), "fail");
+});
+
+test("runE2E streams testbegin → onRunning and testend → onCase incrementally", async () => {
+  const running: string[] = [];
+  const cases: QaCase[] = [];
+  const deps: ExecuteDeps = {
+    runSuite: async ({ onEvent }) => {
+      onEvent?.({ phase: "begin", total: 2 });
+      onEvent?.({ phase: "testbegin", title: "home › hero" });
+      onEvent?.({ phase: "testend", title: "home › hero", status: "passed" });
+      onEvent?.({ phase: "testbegin", title: "cart › total" });
+      onEvent?.({ phase: "testend", title: "cart › total", status: "failed" });
+      onEvent?.({ phase: "testend", title: "skip › me", status: "skipped" }); // not a case
+      return { report: { stats: { expected: 1, unexpected: 1 } }, logs: "ok", ran: true };
+    },
+  };
+  await runE2E("/dir", {
+    baseUrl: "https://dev",
+    namespace: "qa-bot-stream",
+    onRunning: (t) => running.push(t),
+    onCase: (c) => cases.push(c),
+  }, deps);
+
+  assert.deepEqual(running, ["home › hero", "cart › total"]);
+  assert.deepEqual(cases.map((c) => `${c.name}:${c.status}`), ["home › hero:pass", "cart › total:fail"]);
 });
 
 test("a ran report that executed zero tests is infra-error, not a false pass", async () => {
