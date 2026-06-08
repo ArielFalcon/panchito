@@ -131,10 +131,11 @@ export async function getCommitsBehind(
   // the rest of this module defends (the context map's builtAtSha is repo-controlled).
   assertHexSha(fromSha);
   assertHexSha(headSha);
-  try {
-    const stdout = await deps.git(["rev-list", "--count", `${fromSha}..${headSha}`], mirrorDir);
-    return parseInt(stdout.trim(), 10) || 0;
-  } catch {
-    return 0; // SHAs may not share history (force-push, different branch) — treat as 0
-  }
+  // Do NOT swallow a git error into 0: an orphaned/force-pushed fromSha makes `rev-list`
+  // fail, and reporting "0 behind" would silently claim the map is fresh. Let it throw so
+  // the caller can warn "could not verify" (fail-loud) instead of pretending freshness.
+  const stdout = await deps.git(["rev-list", "--count", `${fromSha}..${headSha}`], mirrorDir);
+  const n = parseInt(stdout.trim(), 10);
+  if (!Number.isFinite(n)) throw new Error(`unexpected rev-list output: ${JSON.stringify(stdout.trim().slice(0, 40))}`);
+  return n;
 }

@@ -90,6 +90,11 @@ test("getCommitsBehind returns the commit count for valid hex shas", async () =>
   assert.equal(await getCommitsBehind("/dir", "abc1234def", "def5678abc", d), 12);
 });
 
+test("getCommitsBehind propagates a git error (can't determine — orphaned/force-pushed sha)", async () => {
+  const d = gitStub(() => { throw new Error("fatal: unknown revision"); });
+  await assert.rejects(() => getCommitsBehind("/dir", "abc1234def", "def5678abc", d), /unknown revision/);
+});
+
 test("rejects a non-hex sha (git argument-injection defense) before spawning git", async () => {
   const d = recorder(true);
   await assert.rejects(() => ensureMirror("org/app", "--output=/etc/passwd", d), /invalid commit sha/);

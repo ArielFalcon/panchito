@@ -167,14 +167,21 @@ export function defaultPipelineDeps(): PipelineDeps {
     checkContextStaleness: async (mirrorDir, sha) => {
       const ctxPath = join(mirrorDir, E2E_DIR, ".qa", "context.json");
       if (!existsSync(ctxPath)) return "";
+      let ctx: { builtAtSha?: string };
       try {
-        const ctx = JSON.parse(readFileSync(ctxPath, "utf8"));
-        if (!ctx.builtAtSha || ctx.builtAtSha === sha) return "";
+        ctx = JSON.parse(readFileSync(ctxPath, "utf8"));
+      } catch {
+        return "[qa] WARNING: e2e/.qa/context.json is present but unparseable — the FE↔BE map may be wrong; regenerate it (context mode).";
+      }
+      if (!ctx.builtAtSha || ctx.builtAtSha === sha) return "";
+      try {
         const commitsBehind = await getCommitsBehind(mirrorDir, ctx.builtAtSha, sha, defaultMirrorDeps);
         const r = isContextStale({ builtAtSha: ctx.builtAtSha, headSha: sha, commitsBehind });
         return r.stale ? r.reason : "";
-      } catch {
-        return "";
+      } catch (err) {
+        // Fail-loud: an orphaned/invalid builtAtSha (force-push/rebase) means we CANNOT verify
+        // freshness — say so, instead of silently treating the map as up to date.
+        return `[qa] WARNING: could not verify context map freshness (builtAtSha=${String(ctx.builtAtSha).slice(0, 12)}): ${err instanceof Error ? err.message : String(err)}`;
       }
     },
     isHealthy: async (versionUrl) => {
@@ -321,12 +328,21 @@ export async function runPipeline(
     log(`[qa] context agent: approved=${ctxResult.approved} specs=[${ctxResult.specs.join(", ")}]`);
 
     const ctxPath = join(e2eDir, ".qa", "context.json");
-    const raw = existsSync(ctxPath) ? JSON.parse(readFileSync(ctxPath, "utf8")) : null;
-    const validated = deps.validateContextFn
-      ? deps.validateContextFn(raw ?? {})
-      : raw
-        ? validateContext(raw)
-        : { ok: false, errors: ["context.json was not produced by the agent"] };
+    let raw: unknown = null;
+    let parseError: string | null = null;
+    if (existsSync(ctxPath)) {
+      // A malformed context.json from the agent must yield a clean `invalid` verdict + Issue,
+      // not an unhandled exception that crashes the run.
+      try { raw = JSON.parse(readFileSync(ctxPath, "utf8")); }
+      catch (err) { parseError = `context.json is not valid JSON: ${err instanceof Error ? err.message : String(err)}`; }
+    }
+    const validated = parseError
+      ? { ok: false, errors: [parseError] }
+      : deps.validateContextFn
+        ? deps.validateContextFn(raw ?? {})
+        : raw
+          ? validateContext(raw)
+          : { ok: false, errors: ["context.json was not produced by the agent"] };
 
     if (!validated.ok) {
       log(`[qa] context validation failed:\n${validated.errors.join("\n")}`);
