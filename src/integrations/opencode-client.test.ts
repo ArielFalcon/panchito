@@ -150,6 +150,48 @@ test("parseVerdict ignores a brace inside a string and a non-verdict trailing ob
   assert.equal(v.note, "use the } char");
 });
 
+test("parseVerdict extracts specMetas with flow, objective, and targets", () => {
+  const v = parseVerdict(`{
+    "approved": true,
+    "specs": ["login.spec.ts", "checkout.spec.ts"],
+    "specMetas": [
+      {"file": "login.spec.ts", "flow": "login", "objective": "given valid credentials, when login, then redirect to dashboard", "targets": ["LoginComponent", "/api/auth"]},
+      {"file": "checkout.spec.ts", "flow": "checkout", "objective": "given items in cart, when checkout, then order is created", "targets": ["CheckoutPage", "createOrder"]}
+    ]
+  }`);
+  assert.equal(v.approved, true);
+  assert.equal(v.specs.length, 2);
+  assert.ok(v.specMetas);
+  assert.equal(v.specMetas!.length, 2);
+  assert.deepEqual(v.specMetas![0], {
+    file: "login.spec.ts",
+    flow: "login",
+    objective: "given valid credentials, when login, then redirect to dashboard",
+    targets: ["LoginComponent", "/api/auth"],
+  });
+});
+
+test("parseVerdict drops specMetas entries missing required fields", () => {
+  const v = parseVerdict(`{
+    "approved": true,
+    "specMetas": [
+      {"file": "ok.spec.ts", "flow": "ok", "objective": "test something", "targets": ["X"]},
+      {"file": "", "flow": "bad", "objective": "nope", "targets": []},
+      {"flow": "no-file", "objective": "nothing"},
+      "not-an-object"
+    ]
+  }`);
+  assert.ok(v.specMetas);
+  assert.equal(v.specMetas!.length, 1);
+  assert.equal(v.specMetas![0]!.file, "ok.spec.ts");
+});
+
+test("parseVerdict returns undefined specMetas when absent or empty", () => {
+  assert.equal(parseVerdict('{"approved": true, "specs": ["a.spec.ts"]}').specMetas, undefined);
+  assert.equal(parseVerdict('{"approved": true, "specMetas": "not-array"}').specMetas, undefined);
+  assert.equal(parseVerdict('{"approved": true, "specMetas": []}').specMetas, undefined);
+});
+
 test("extractJsonObjects returns balanced top-level objects in order, skipping invalid spans", () => {
   const objs = extractJsonObjects('noise {"a":1} mid {"b":{"c":2}} tail {not json}');
   assert.deepEqual(objs, [{ a: 1 }, { b: { c: 2 } }]);

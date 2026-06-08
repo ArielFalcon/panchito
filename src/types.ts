@@ -4,6 +4,16 @@
 export type TriggerSource = "webhook" | "manual";
 export type TestTarget = "e2e" | "code";
 
+// Structured metadata the agent emits per spec — the day-one fields (objective, flow,
+// targets) the orchestrator uses for deterministic manifest upsert. Complements the
+// flat `specs: string[]` in AgentResult for backward compatibility.
+export interface SpecMeta {
+  file: string;    // spec file name, e.g. "login.spec.ts"
+  flow: string;    // user flow, e.g. "login"
+  objective: string; // acceptance criterion
+  targets: string[];  // symbols/routes the spec exercises
+}
+
 // Execution mode for a run (taken from the POST body; defaults to "diff").
 //   diff       → test the change of the given commit (its blast radius). The
 //                commit is classified (Conventional Commits) to decide whether to
@@ -15,7 +25,9 @@ export type TestTarget = "e2e" | "code";
 //                (audit every existing test for correctness/value/necessity and
 //                regenerate), not just the delta.
 //   manual     → generation focused by user-provided `guidance`.
-export type RunMode = "diff" | "complete" | "exhaustive" | "manual";
+//   context    → build or refresh the FE↔BE architecture map (e2e/.qa/context.json)
+//                from structured sources (routing, OpenAPI, generated clients).
+export type RunMode = "diff" | "complete" | "exhaustive" | "manual" | "context";
 
 export interface RunOptions {
   target?: TestTarget; // defaults to "e2e" when omitted
@@ -36,6 +48,7 @@ export interface RunOptions {
 export interface AgentResult {
   output: string; // the agent's final text, including its closing verdict
   specs: string[]; // names of the specs it reported writing/updating
+  specMetas?: SpecMeta[]; // structured metadata per spec (flow, objective, targets)
   reviewed: boolean; // whether review was enabled
   approved: boolean; // reviewer verdict (true when not reviewed)
   note?: string; // reason when not approved (e.g. did not converge)

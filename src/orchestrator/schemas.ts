@@ -109,9 +109,17 @@ export type ValidatedWebhookPayload = z.infer<typeof WebhookPayloadSchema>;
 
 // ── Final verdict schema ──────────────────────────────────────────────────────
 // Extracted from the AI agent's closing JSON. Used in parseVerdict.
+export const SpecMetaSchema = z.object({
+  file: z.string().min(1),
+  flow: z.string().min(1),
+  objective: z.string().min(1),
+  targets: z.array(z.string()),
+});
+
 export const FinalVerdictSchema = z.object({
   approved: z.boolean(),
   specs: z.array(z.string()),
+  specMetas: z.array(SpecMetaSchema).optional(),
   note: z.string().optional(),
 });
 

@@ -11,7 +11,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { AgentResult, QaCase, RunMode, TestTarget } from "../types";
+import { AgentResult, QaCase, RunMode, TestTarget, SpecMeta } from "../types";
 import { CommitIntent } from "../qa/commit-classify";
 import { sanitizeText } from "../orchestrator/sanitizer";
 import { ActivityRouter } from "./agent-activity";
@@ -196,6 +196,7 @@ export interface OpencodeDeps {
 interface FinalVerdict {
   approved: boolean;
   specs: string[];
+  specMetas?: SpecMeta[];
   note?: string;
   parsed: boolean; // false when NO verdict JSON was found (fail-closed default), so
                    // callers can distinguish "agent rejected" from "we couldn't parse it".
@@ -245,6 +246,7 @@ export async function runOpencode(
     return {
       output: finalText,
       specs: verdict.specs,
+      specMetas: verdict.specMetas,
       reviewed: input.needsReview,
       approved,
       note: approved ? undefined : verdict.note ?? "the reviewer did not approve the E2E tests",
@@ -614,9 +616,11 @@ export function buildPlanPrompt(input: OpencodeRunInput): string {
 // opencode/agent/qa-generator.md and the skills; only the task + context go here.
 // The diff/guidance are sanitized (cheap defense in depth).
 export function buildPrompt(input: OpencodeRunInput): string {
+  const isGenerationMode = input.mode !== "context";
+
   // Review-fix mode: prepend the reviewer's actionable corrections before anything else, so
   // the agent's first priority is to resolve them (the reviewer→generator feedback loop).
-  const reviewBlock = input.reviewCorrections?.length
+  const reviewBlock = input.reviewCorrections?.length && isGenerationMode
     ? [
         `## Apply reviewer corrections (HIGHEST priority)`,
         ``,
@@ -631,7 +635,7 @@ export function buildPrompt(input: OpencodeRunInput): string {
 
   // Coverage-improvement mode: the executed tests did not exercise some changed lines. Tell the
   // agent exactly which, so it extends/adds tests to cover the change (the change-coverage loop).
-  const coverageBlock = input.coverageGap
+  const coverageBlock = input.coverageGap && isGenerationMode
     ? [
         `## Cover the change (HIGH priority)`,
         ``,
@@ -645,7 +649,7 @@ export function buildPrompt(input: OpencodeRunInput): string {
     : [];
 
   // Fix mode: prepend failure feedback before the original task.
-  const fixBlock = input.fixCases?.length
+  const fixBlock = input.fixCases?.length && isGenerationMode
     ? [
         `## Fix failing tests`,
         ``,
@@ -675,6 +679,7 @@ export function buildPrompt(input: OpencodeRunInput): string {
   const changeType = input.intent?.type ?? input.mode;
   const openapiHint = Array.isArray(input.openapi) ? input.openapi.join(", ") : input.openapi;
   const isCode = input.target === "code";
+  const memTarget = input.mode === "context" ? "context" : input.target;
   return [
     ...reviewBlock,
     ...coverageBlock,
@@ -683,7 +688,16 @@ export function buildPrompt(input: OpencodeRunInput): string {
     buildTask(input),
     ``,
     `## Working rules`,
-    isCode
+    input.mode === "context"
+      ? [
+          `- This is a CONTEXT mode run: you are building the FE↔BE architecture map, not writing tests.`,
+          `- Your ONLY output is ${input.e2eRelDir}/.qa/context.json — do not create or modify any .spec.ts files.`,
+          `- Use ONLY serena to read code (activate_project, find_symbol, get_symbols_overview) — no Playwright MCP.`,
+          `- Extract from STRUCTURED sources: every route from a routing file, every operation from an OpenAPI spec.`,
+          `- Consult the architecture-mapping skill for detailed extraction patterns per source type.`,
+          `- The task block above has the complete procedure. Follow it precisely.`,
+        ]
+      : isCode
       ? [
           `- This is a CODE mode run: you are testing source-code logic, not a deployed web app.`,
           `- Detect the test framework from the repo's dependencies. Read 2-3 existing test files for conventions. Match them exactly.`,
@@ -718,10 +732,72 @@ export function buildPrompt(input: OpencodeRunInput): string {
               ]
             : []),
         ],
-    `- engram memory: scoped per app AND per mode (e2e or code). Use project="${input.appName}" on ALL mem_save, mem_search, mem_context, and mem_session_summary calls. Prefix every topic_key with "${input.target}/" so each mode's memory lives in its own namespace (e.g. topic_key="e2e/checkout-flow" or "code/order-total", not "checkout-flow"). When searching, include "${input.target}" in the query text to filter results to this mode. Never save or search without the mode prefix.`,
+    `- engram memory: scoped per app AND per mode (e2e, code, or context). Use project="${input.appName}" on ALL mem_save, mem_search, mem_context, and mem_session_summary calls. Prefix every topic_key with "${memTarget}/" so each mode's memory lives in its own namespace (e.g. topic_key="context/angular-routes" or "e2e/checkout-flow"). When searching, include "${memTarget}" in the query text to filter results to this mode. Never save or search without the mode prefix.`,
     input.needsReview
       ? `- An INDEPENDENT reviewer judges your specs after you finish and may return corrections for a follow-up turn. Self-review against the test-value-review criteria BEFORE finishing (every spec must fail if its feature breaks); do not rely on spawning a subagent.`
       : `- Review disabled for this run.`,
+  ].join("\n");
+}
+
+// ── context mode: build the FE↔BE architecture map ──────────────────────────
+//
+// The agent extracts routes from Angular routing, API operations from OpenAPI specs,
+// and joins them via the generated API clients' operationIds. The result is written
+// to e2e/.qa/context.json and validated deterministically by the orchestrator.
+// This map is then consumed by diff-mode runs to cross the FE→BE boundary without
+// re-deriving the architecture from raw code on every run.
+
+export function buildContextTask(input: OpencodeRunInput): string {
+  const openapiHint = Array.isArray(input.openapi) ? input.openapi.join(", ") : input.openapi;
+  return [
+    `Build or refresh the FE↔BE architecture map for ${input.repo}.`,
+    ``,
+    `## Goal`,
+    `Produce a distilled map of the app's architecture so future QA runs can cross the`,
+    `frontend→backend boundary without re-deriving it from raw code.`,
+    ``,
+    `## What to produce`,
+    `Write a single JSON file at ${input.e2eRelDir}/.qa/context.json with these sections:`,
+    ``,
+    `1. **routes** — every frontend entry URL (the unit an E2E targets) + the component it renders.`,
+    `   Extract FROM the Angular routing files (e.g. app.routes.ts, *.routes.ts).`,
+    `   Required per entry: path (e.g. "/checkout"). Optional: name, component, source.`,
+    ``,
+    `2. **api** — every backend operation the app calls.`,
+    `   Extract FROM the OpenAPI specs${openapiHint ? ` (hint: ${openapiHint})` : " (search with serena/glob for openapi or swagger files)"}.`,
+    `   Required per entry: operationId, method (GET/POST/...), path. Optional: service, spec.`,
+    ``,
+    `3. **feBe** — the JOIN between frontend routes and backend operations: which route calls which operation.`,
+    `   Derive BY following each generated API client method to its operationId.`,
+    `   Required per entry: route (a path from routes), operationId (from api). Optional: via (the client method).`,
+    `   THE JOIN IS THE WHOLE POINT: every link must resolve to a known route AND a known operation.`,
+    ``,
+    `4. **flows** (optional) — named user flows grouping routes + operations for readability.`,
+    ``,
+    `## Procedure`,
+    `1. Activate serena (activate_project) on the working directory.`,
+    `2. Find ALL Angular routing files (serena glob: **/*routes*.ts, **/app-routing*.ts).`,
+    `   For each route definition (path + component), add an entry to routes.`,
+    `3. Find ALL OpenAPI spec files${openapiHint ? ` (start with ${openapiHint})` : ""}.`,
+    `   For each operation (operationId + method + path), add an entry to api.`,
+    `4. Find the generated API client files (typically src/app/generated/ or similar).`,
+    `   For each client method that calls a backend operation, map its call site to a route`,
+    `   and add the link to feBe. The operationId in the client MUST match an api entry.`,
+    `5. Self-validate: every feBe route exists in routes AND every feBe operationId exists in api.`,
+    `   Remove any dangling link BEFORE writing.`,
+    `6. Write ${input.e2eRelDir}/.qa/context.json with the four sections + "builtAtSha":"${input.sha}".`,
+    ``,
+    `## Rules`,
+    `- Extract from STRUCTURED sources, never invent. Every route comes from a routing file;`,
+    `  every operation from an OpenAPI spec; every link from a generated client.`,
+    `- If no OpenAPI spec is found, leave api and feBe empty (a repo with no backend).`,
+    `- If routing is file-based (not a central Routes array), enumerate the route files.`,
+    `- Do NOT guess or hallucinate paths/operationIds. If a source is missing, leave that section empty.`,
+    `- Keep the map small: this is an E2E authoring aid, not exhaustive documentation.`,
+    ``,
+    `## Output`,
+    `End with ONLY this JSON (no other text):`,
+    `{"approved":true,"specs":["${input.e2eRelDir}/.qa/context.json"],"note":"built architecture map with X routes, Y api operations, Z links"}`,
   ].join("\n");
 }
 
@@ -756,6 +832,8 @@ function buildTask(input: OpencodeRunInput): string {
       `Stay focused on the guidance; do not generate unrelated tests.`,
     ].join("\n");
   }
+  if (input.mode === "context") return buildContextTask(input);
+
   // diff (default)
   const intent = input.intent;
   return [
@@ -773,6 +851,13 @@ function buildTask(input: OpencodeRunInput): string {
     "```diff",
     sanitizeText(input.diff).text,
     "```",
+    ``,
+    `## Architecture context`,
+    `If ${input.e2eRelDir}/.qa/context.json exists, READ it to understand which routes and`,
+    `API operations the changed files belong to. Use the feBe links to widen the blast`,
+    `radius across the frontend→backend boundary: a frontend change may affect the`,
+    `backend behaviour and vice-versa. If the map is missing or stale, note the`,
+    `limitation explicitly in your verdict note.`,
   ].join("\n");
 }
 
@@ -834,11 +919,31 @@ export function parseVerdict(text: string): FinalVerdict {
     return {
       approved: o.approved as boolean,
       specs: Array.isArray(o.specs) ? (o.specs as string[]) : [],
+      specMetas: parseSpecMetas(o.specMetas),
       note: typeof o.note === "string" ? o.note : undefined,
       parsed: true,
     };
   }
   return { approved: false, specs: [], note: "the agent emitted no parseable verdict", parsed: false };
+}
+
+function parseSpecMetas(raw: unknown): SpecMeta[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const metas: SpecMeta[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const e = entry as Record<string, unknown>;
+    const file = typeof e.file === "string" ? e.file.trim() : "";
+    const flow = typeof e.flow === "string" ? e.flow.trim() : "";
+    const objective = typeof e.objective === "string" ? e.objective.trim() : "";
+    const targets = Array.isArray(e.targets)
+      ? e.targets.filter((t): t is string => typeof t === "string")
+      : [];
+    if (file && flow && objective) {
+      metas.push({ file, flow, objective, targets });
+    }
+  }
+  return metas.length > 0 ? metas : undefined;
 }
 
 // Timeout wrapper for a promise: rejects if it elapses. Prevents a hung agent run
@@ -865,6 +970,7 @@ const TIMEOUT_BY_MODE: Record<RunMode, number> = {
   complete: 15 * 60 * 1000,
   exhaustive: 25 * 60 * 1000,
   manual: 10 * 60 * 1000,
+  context: 10 * 60 * 1000,
 };
 
 export function agentTimeout(mode: RunMode): number {
