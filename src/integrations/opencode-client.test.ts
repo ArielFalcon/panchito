@@ -268,8 +268,8 @@ test("parsePlan reads objectives, drops malformed entries, and de-dups by flow",
       "]}",
   );
   assert.deepEqual(out, [
-    { flow: "checkout", objective: "pay with >10 items", symbols: ["pay"] },
-    { flow: "login", objective: "valid", symbols: [] },
+    { flow: "checkout", objective: "pay with >10 items", symbols: ["pay"], needsUi: true },
+    { flow: "login", objective: "valid", symbols: [], needsUi: true },
   ]);
 });
 
@@ -329,8 +329,8 @@ function fanoutDeps(planText: string, workerText: (cwd: string, prompt: string) 
 
 test("generateParallel isolates worker failures and maps flow→spec", async () => {
   const workers: ParallelWorkerInput[] = [
-    { objective: "o1", flow: "checkout", symbols: [], specFile: "flows/checkout.spec.ts", repo: "r", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "ns", appName: "a", mode: "complete" },
-    { objective: "o2", flow: "login", symbols: [], specFile: "flows/login.spec.ts", repo: "r", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "ns", appName: "a", mode: "complete" },
+    { objective: "o1", flow: "checkout", symbols: [], needsUi: true, specFile: "flows/checkout.spec.ts", repo: "r", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "ns", appName: "a", mode: "complete" },
+    { objective: "o2", flow: "login", symbols: [], needsUi: true, specFile: "flows/login.spec.ts", repo: "r", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "ns", appName: "a", mode: "complete" },
   ];
   const deps: OpencodeDeps = {
     open: async () => ({
@@ -382,7 +382,7 @@ test("runOpencodeParallel: empty plan is a clean no-op (approved, no specs, no m
 });
 
 test("buildWorkerPrompt is surgical: exact file, explore-first, no manifest writes", () => {
-  const w: ParallelWorkerInput = { objective: "pay", flow: "checkout", symbols: ["pay"], specFile: "flows/checkout.spec.ts", repo: "r", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "ns", baseUrl: "https://dev", appName: "a", mode: "complete" };
+  const w: ParallelWorkerInput = { objective: "pay", flow: "checkout", symbols: ["pay"], needsUi: true, specFile: "flows/checkout.spec.ts", repo: "r", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "ns", baseUrl: "https://dev", appName: "a", mode: "complete" };
   const p = buildWorkerPrompt(w);
   assert.match(p, /Write EXACTLY this file: e2e\/flows\/checkout\.spec\.ts/);
   assert.match(p, /Explore YOUR flow FIRST with the Playwright MCP/);
