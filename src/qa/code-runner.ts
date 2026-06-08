@@ -168,6 +168,36 @@ export interface CodeExecuteOptions {
   onCase?: (c: QaCase) => void;
 }
 
+// High-confidence "the suite executed ZERO tests" detection, per ecosystem/command.
+// Exit code 0 is NOT proof of a real pass: `node --test`, `go test ./...` and others
+// exit 0 when they collected nothing, and pytest exits 5 ("no tests collected") which
+// the bare exit-code classifier would read as a FAIL on the watched repo. This is
+// deliberately CONSERVATIVE — it only fires on unambiguous "nothing ran" signals, so a
+// genuine pass/fail is never misclassified. The residual (e.g. a no-op npm "test"
+// script that exits 0) is left to upstream spec-vs-disk reconciliation.
+export function ranZeroTests(project: CodeProject, out: CodeRunOutput): boolean {
+  const log = out.logs;
+  const cmd = `${project.test.cmd} ${project.test.args.join(" ")}`;
+
+  // pytest: exit code 5 is the documented "no tests collected".
+  if (project.ecosystem === "python" && out.exitCode === 5) return true;
+
+  // go test ./...: packages without _test.go print "[no test files]"; if NO package
+  // reported "ok" (a package that actually ran tests), the suite executed nothing.
+  if (project.ecosystem === "go" && out.exitCode === 0 && /no test files/.test(log) && !/^ok\s/m.test(log)) return true;
+
+  // node --test: the TAP/summary line reports the executed count.
+  if (cmd.includes("node --test") && /(?:#|ℹ)\s*tests\s+0\b/.test(log)) return true;
+
+  // jest / vitest: explicit "no tests" message (robust to --passWithNoTests configured).
+  if (/\bnpx (?:jest|vitest)\b/.test(cmd) && /No tests? (?:found|files? found)/i.test(log)) return true;
+
+  // mocha: prints "0 passing" and exits 0 when it ran nothing.
+  if (cmd.includes("npx mocha") && out.exitCode === 0 && /\b0 passing\b/.test(log)) return true;
+
+  return false;
+}
+
 export async function runCodeTests(
   repoDir: string,
   opts: CodeExecuteOptions,
@@ -193,6 +223,19 @@ export async function runCodeTests(
       passed: false,
       cases: [],
       logs: `${project.ecosystem} runtime unavailable: ${out.spawnError}\n\n${sanitized.text}`,
+    };
+  }
+
+  // A run that collected zero tests proves nothing: never a pass, and never a FAIL
+  // that blames the watched repo. Inconclusive infrastructure (mirrors the e2e
+  // "ran but executed zero tests" guard and the spawn-error case above).
+  if (ranZeroTests(project, out)) {
+    return {
+      sha: opts.namespace,
+      verdict: "infra-error",
+      passed: false,
+      cases: [],
+      logs: `${label} executed zero tests (no tests were collected) — inconclusive, not a pass\n\n${sanitized.text}`,
     };
   }
 
