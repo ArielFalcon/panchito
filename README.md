@@ -1,5 +1,4 @@
-# ai-pipeline
-
+# panchito
 <div align="center">
 
 [![Node.js 22+](https://img.shields.io/badge/node-22%2B-brightgreen)](https://nodejs.org)
@@ -38,7 +37,7 @@ It is app-agnostic: onboard any repo by adding a single YAML file. No app code l
 
 ## 1. Overview
 
-ai-pipeline turns every deploy into a QA checkpoint, automatically.
+panchito turns every deploy into a QA checkpoint, automatically.
 
 | Capability | What it means |
 |---|---|
@@ -163,7 +162,7 @@ Three layers prevent low-quality tests from entering the suite:
 
 ```bash
 git clone <this-repo>
-cd ai-pipeline
+cd panchito
 npm install
 npm test           # unit tests (network and AI calls are stubbed)
 npm run typecheck  # strict TypeScript validation
