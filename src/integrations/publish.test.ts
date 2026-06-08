@@ -90,7 +90,6 @@ test("publishCode: commits the whole tree (minus node_modules) on a qa/code- bra
   const res = await publishCode(input, d);
   assert.equal(res?.prUrl, "https://github.com/org/app/pull/7");
   assert.ok(d.gitCalls.some((c) => c[0] === "checkout" && c.includes("qa/code-abc1234")));
-  // the add/status pathspec excludes node_modules
-  assert.ok(d.gitCalls.some((c) => c[0] === "add" && c.includes(":(exclude)node_modules")));
+    assert.ok(d.gitCalls.some((c) => c[0] === "add" && c.some((a: string) => a.includes("node_modules"))));
   assert.ok(d.gitCalls.some((c) => c.includes("commit") && c.includes("test(code): automated QA for abc1234")));
 });

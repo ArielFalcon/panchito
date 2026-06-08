@@ -19,6 +19,9 @@ import { runE2E, defaultExecuteDeps, defaultCleanupDeps } from "./qa/execute";
 import { setupCodeProject, defaultCodeSetupDeps, runCodeTests, defaultCodeExecuteDeps } from "./qa/code-runner";
 import { publishE2e, publishCode, publishContext, defaultPublishDeps } from "./integrations/publish";
 import { testDataNamespace } from "./qa/test-data";
+import { labelRunOutcome } from "./qa/learning/labeler";
+import { runMutationOracle } from "./qa/learning/mutation-code";
+import type { OracleInput, ValueOracleResult } from "./qa/learning/oracle-types";
 import { validateContext, isContextStale } from "./qa/context";
 import type { ArchitectureContext } from "./qa/context";
 import { readMeasured, writeMeasured, recordStability, recordCoverage, MeasuredFs } from "./qa/measured";
@@ -39,7 +42,7 @@ import {
 } from "./qa/change-coverage";
 import { github } from "./integrations/github";
 import { renderIssue } from "./report/reporter";
-import { AgentResult, QaCase, QaRunResult, TriggerSource, RunMode, RunOptions, TestTarget } from "./types";
+import { AgentResult, QaCase, QaRunResult, TriggerSource, RunMode, RunOptions, TestTarget, RunOutcome } from "./types";
 import type { ReviewInput, ReviewResult } from "./integrations/opencode-client";
 
 // Tests live in this folder inside the repo (git is the source of truth).
@@ -103,6 +106,8 @@ export interface PipelineDeps {
   publishCode(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string; parentRunId?: string }): Promise<{ prUrl: string; merged: boolean } | null>;
   publishContext(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string }): Promise<{ prUrl: string; merged: boolean } | null>;
   openIssue(repo: string, title: string, body: string): Promise<{ url: string }>;
+  saveOutcome?(outcome: RunOutcome): Promise<void>; // learning layer: persist RunOutcome (off-path, never blocks)
+  runOracle?(input: OracleInput): Promise<ValueOracleResult>; // Phase 1: mutation testing / benchmark replay (off-path, never blocks)
   log?(msg: string): void;
   // Context mode: validates the produced context.json. Injected so tests can bypass file I/O.
   validateContextFn?(content: unknown): { ok: boolean; errors: string[] };
@@ -211,6 +216,11 @@ export function defaultPipelineDeps(): PipelineDeps {
     },
     publish: (input) => publishE2e(input, defaultPublishDeps),
     openIssue: (repo, title, body) => github.openIssue(repo, title, body),
+    saveOutcome: async (outcome) => {
+      const { saveRunOutcome } = await import("./server/history");
+      saveRunOutcome(outcome);
+    },
+    runOracle: async (input) => runMutationOracle(input),
     log: (m) => console.log(m),
   };
 }
@@ -233,6 +243,33 @@ export async function runPipeline(
   const shadow = app.qa.shadow ?? false;
   const mode = opts.mode;
   const isCode = (opts.target ?? "e2e") === "code";
+  const reviewerCorrections: string[] = []; // accumulated across review rounds (for RunOutcome)
+  let retries = 0; // total regeneration attempts (review loop + failure retries)
+
+  const persistOutcome = (verdict: QaRunResult, overrides?: { staticOk?: boolean; coverageRatio?: number | null; valueScore?: number | null }) => {
+    if (!deps.saveOutcome || !opts.runId) return;
+    const outcome = labelRunOutcome({
+      runId: opts.runId,
+      app: app.name,
+      sha,
+      mode,
+      target: opts.target ?? "e2e",
+      verdict: verdict.verdict,
+      staticOk: overrides?.staticOk ?? false,
+      coverageRatio: overrides?.coverageRatio ?? null,
+      minCoverageRatio: app.qa.changeCoverage?.minRatio ?? DEFAULT_COVERAGE_POLICY.minRatio,
+      reviewerCorrections,
+      flaky: verdict.verdict === "flaky",
+      retries,
+    });
+    if (overrides?.valueScore !== undefined) {
+      outcome.gateSignals.valueScore = overrides.valueScore;
+    }
+    deps.saveOutcome(outcome).catch((err) => {
+      log(`[qa] WARNING: failed to persist RunOutcome (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+    });
+  };
+
   log(
     `[qa] app=${app.name}  sha=${sha}  mode=${mode}  target=${isCode ? "code" : "e2e"}  (${source})` +
       (shadow ? "  [SHADOW MODE]" : ""),
@@ -461,10 +498,12 @@ export async function runPipeline(
         return { ...r, note: "published without independent review (unparseable reviewer verdict)" };
       }
       log(`[qa] independent reviewer round ${round + 1}/${MAX_REVIEW_ROUNDS}: approved=${review.approved} corrections=${review.corrections.length}`);
+      if (!review.approved) reviewerCorrections.push(...review.corrections);
       if (review.approved) return { ...r, approved: true, note: undefined };
       if (round === MAX_REVIEW_ROUNDS - 1) return { ...r, approved: false, note: review.corrections.join("; ") };
       log(`[qa] applying ${review.corrections.length} reviewer correction(s) and regenerating...`);
       onStep?.("retry");
+      retries++;
       r = await reconcileSpecs(await deps.generate({ ...genInput, reviewCorrections: review.corrections }, signal, log));
     }
     return r;
@@ -504,6 +543,16 @@ export async function runPipeline(
     log("[qa] generating E2E tests with OpenCode...");
     result = await generateAndReview(baseGenInput({ fixCases: opts.fixCases }));
 
+    // Wire the specs into the RunRecord so the TUI shows what was generated.
+    // specMetas carries structured data (flow, objective); specs[] is the flat fallback.
+    if (result.specs.length > 0) {
+      const entries = result.specMetas?.length
+        ? result.specMetas.map((m) => ({ name: m.file, flow: m.flow, objective: m.objective }))
+        : result.specs.map((s) => ({ name: s }));
+      onSpecs?.(entries);
+      onStep?.("generate", `${entries.length} spec(s) generated`);
+    }
+
     log(
       `[qa] agent: approved=${result.approved} specs=[${result.specs.join(", ")}]` +
         (result.note ? ` note=${result.note}` : "") +
@@ -535,10 +584,12 @@ export async function runPipeline(
       // don't open an Issue on the watched repo for a missing binary or OOM.
       if (validation.infra) {
         const infra = resultOf(ns, "infra-error", validation.errors.join("\n\n"));
+        persistOutcome(infra);
         await report(app, sha, infra, deps, log, shadow, isCode);
         return infra;
       }
       const invalid = resultOf(ns, "invalid", validation.errors.join("\n\n"));
+      persistOutcome(invalid, { staticOk: false });
       await report(app, sha, invalid, deps, log, shadow, isCode, "the E2E tests did not pass the static gate");
       return invalid;
     }
@@ -547,6 +598,7 @@ export async function runPipeline(
     // healthy the run is inconclusive → infra error, not reported as a bug.
     if (!(await devHealthy())) {
       const infra = resultOf(ns, "infra-error", "DEV is not healthy before execution");
+      persistOutcome(infra);
       await report(app, sha, infra, deps, log, shadow, isCode);
       return infra;
     }
@@ -562,6 +614,7 @@ export async function runPipeline(
   } else if (!app.dev) {
     // Defensive: an e2e run on an app with no dev environment is inconclusive.
     run = resultOf(ns, "infra-error", "e2e run requested but no dev environment is configured");
+    persistOutcome(run);
     await report(app, sha, run, deps, log, shadow, isCode);
     return run;
   } else {
@@ -587,7 +640,14 @@ export async function runPipeline(
 
     log("[qa] re-generating with failure feedback...");
     onStep?.("retry");
+    retries++;
     result = await generateAndReview(baseGenInput({ fixCases: failed }));
+    if (result.specs.length > 0) {
+      const entries = result.specMetas?.length
+        ? result.specMetas.map((m) => ({ name: m.file, flow: m.flow, objective: m.objective }))
+        : result.specs.map((s) => ({ name: s }));
+      onSpecs?.(entries);
+    }
     log(
       `[qa] agent (retry): approved=${result.approved} specs=[${result.specs.join(", ")}]` +
         (result.note ? ` note=${result.note}` : ""),
@@ -709,6 +769,28 @@ export async function runPipeline(
     deps.recordMeasured(e2eDir, { cases: run.cases, coveredFiles });
   }
 
+  let valueScore: number | null = null;
+
+  if (deps.runOracle && isCode && generating && run.verdict === "pass") {
+    try {
+      log("[qa] oracle: running mutation testing...");
+      const oracleResult = await deps.runOracle({
+        target: "code",
+        repoDir: mirrorDir,
+        namespace: ns,
+        signal,
+      });
+      valueScore = oracleResult.valueScore;
+      if (valueScore !== null) {
+        log(`[qa] oracle: valueScore=${(valueScore * 100).toFixed(0)}% (${oracleResult.details})`);
+      } else {
+        log(`[qa] oracle: no value score — ${oracleResult.details}`);
+      }
+    } catch (err) {
+      log(`[qa] WARNING: oracle failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   // 9. Final decision.
   const kind = isCode ? "code" : "E2E";
   if (run.verdict !== "pass") {
@@ -754,6 +836,10 @@ export async function runPipeline(
   // Surface the agent's note (reviewer rejection, generation summary) in the
   // result so the TUI/chat can show why a retry or skip happened.
   if (result?.note && !run.note) run.note = result.note;
+
+  const ratio = ccForPersistence?.overall.ratio ?? null;
+  persistOutcome(run, { staticOk: !isCode && generating, coverageRatio: ratio, valueScore });
+
   return run;
 }
 

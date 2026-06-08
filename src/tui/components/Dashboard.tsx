@@ -3,14 +3,13 @@
 
 import React from "react";
 import { Box, Text } from "ink";
-import Spinner from "ink-spinner";
 import { RunRecord } from "../../types";
 import { PIPELINE_STEPS, stepState, progressBar, verdictColor, verdictIcon, shortSha } from "../format";
 import { Section } from "./Section";
 import { HistoryList, toHistoryItems } from "./HistoryList";
 
 function stepDetail(record: RunRecord, step: string, isActive: boolean): string | undefined {
-  const { passed = 0, failed = 0, cases, specs, stepDetail: sd, note, retrying, target } = record;
+  const { passed = 0, failed = 0, cases, specs, stepDetail: sd, note, retrying, target, logs } = record;
   const total = cases.length;
 
   if (!isActive) return undefined;
@@ -19,7 +18,9 @@ function stepDetail(record: RunRecord, step: string, isActive: boolean): string 
   switch (step) {
     case "generate":
       if (specs?.length) return `${specs.length} spec(s) written so far`;
-      return sd || undefined;
+      if (sd) return sd;
+      // Fallback: show the last meaningful SSE event (file write, tool run, todo)
+      return lastMeaningfulLog(logs) || undefined;
     case "execute":
       if (total > 0) return `${total} case(s) — ${passed} passed, ${failed} failed`;
       if (target === "code") return "running test suite...";
@@ -27,6 +28,19 @@ function stepDetail(record: RunRecord, step: string, isActive: boolean): string 
     default:
       return sd || undefined;
   }
+}
+
+// Returns the last log line that carries actionable information — file writes,
+// tool executions, or todo updates. Skips heartbeats and empty/whitespace lines.
+function lastMeaningfulLog(logs: string[]): string | null {
+  for (let i = logs.length - 1; i >= 0; i--) {
+    const line = logs[i]!.replace(/^\[qa\] /, "");
+    if (!line.trim()) continue;
+    if (line.startsWith("agent active")) continue;
+    if (line.startsWith("agent is working")) continue;
+    return line.slice(0, 80);
+  }
+  return null;
 }
 
 export function Dashboard({ record }: { record: RunRecord }): React.ReactElement {
@@ -102,14 +116,7 @@ export function Dashboard({ record }: { record: RunRecord }): React.ReactElement
           </Text>
           {record.note ? <Text dimColor>{` — ${record.note}`}</Text> : null}
         </Box>
-      ) : (
-        <Box marginTop={1}>
-          <Text color="cyan">
-            <Spinner type="dots" />
-            {" running…"}
-          </Text>
-        </Box>
-      )}
+      ) : null}
     </Box>
   );
 }

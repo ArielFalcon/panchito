@@ -42,7 +42,10 @@ export function RunSummary({ record, client, onBack, onContinue }: {
   }, []);
 
   useInput((_char, key) => {
-    if (showChat) return;
+    if (showChat) {
+      if (_char === "c" || _char === "C" || key.escape) { setShowChat(false); return; }
+      return;
+    }
     if (key.upArrow) { setFocusIdx((p) => (p - 1 + sectionCount) % sectionCount); return; }
     if (key.downArrow) { setFocusIdx((p) => (p + 1) % sectionCount); return; }
     if (key.return) { const s = visible[focusIdx]; if (s) toggle(s.id); return; }
@@ -68,9 +71,9 @@ export function RunSummary({ record, client, onBack, onContinue }: {
       case "results":
         return (
           <Box flexDirection="column">
-            {total === 0 ? (
-              <Text dimColor>  No test cases recorded.</Text>
-            ) : (
+            {total === 0 && (!specs || specs.length === 0) ? (
+              <Text dimColor>  No test results available for this run.</Text>
+            ) : total > 0 ? (
               cases.map((c, i) => (
                 <Box key={i} flexDirection="column">
                   <Text>{"  "}<Text color={caseColor(c.status)}>{caseIcon(c.status)}</Text>{" "}{c.flow ?? c.name.slice(0, 70)}</Text>
@@ -78,7 +81,7 @@ export function RunSummary({ record, client, onBack, onContinue }: {
                   {c.status === "fail" && c.detail ? <Text color="#c0392b">    {c.detail.slice(0, 200)}</Text> : null}
                 </Box>
               ))
-            )}
+            ) : null}
             {specs && specs.length > 0 ? (
               <Box flexDirection="column" marginTop={1}>
                 <Text dimColor>  Specs generated ({specs.length}):</Text>
@@ -87,6 +90,9 @@ export function RunSummary({ record, client, onBack, onContinue }: {
                 ))}
                 {specs.length > 15 ? <Text dimColor>    … and {specs.length - 15} more</Text> : null}
               </Box>
+            ) : null}
+            {verdict === "infra-error" && note ? (
+              <Box marginTop={1}><Text color="#4a6877">  {note}</Text></Box>
             ) : null}
           </Box>
         );
