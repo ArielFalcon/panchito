@@ -22,7 +22,10 @@ function workdirRoot(): string {
 
 function remoteUrl(repo: string): string {
   const base = process.env.GIT_REMOTE_BASE ?? "https://github.com";
-  return `${base}/${repo}.git`;
+  const token = process.env.GITHUB_TOKEN;
+  return token
+    ? `https://x-access-token:${token}@github.com/${repo}.git`
+    : `${base}/${repo}.git`;
 }
 
 // A commit SHA passed to git as a positional arg MUST be a hex id. A hex 7–40 string
@@ -33,14 +36,13 @@ export function assertHexSha(sha: string): void {
   if (!HEX_SHA.test(sha)) throw new Error(`invalid commit sha (must be 7–40 hex chars): ${JSON.stringify(sha)}`);
 }
 
-// Ephemeral header auth (-c http.extraHeader) with credential helper disabled.
-// -c credential.helper= prevents macOS osxkeychain from intercepting auth and
-// prompting for a username (no terminal → crash). The token lives in argv (not
-// persisted in .git/config), which is acceptable for ephemeral commands.
+// Token-in-URL auth via -c url.insteadOf. When GITHUB_TOKEN is set, all https://github.com
+// URLs are transparently rewritten to https://x-access-token:TOKEN@github.com — no credential
+// helper involved, no token in .git/config, works on every OS.
 export function authHeaderArgs(): string[] {
   const token = process.env.GITHUB_TOKEN;
   return token
-    ? ["-c", `http.extraHeader=Authorization: Bearer ${token}`, "-c", "credential.helper="]
+    ? ["-c", `url.https://x-access-token:${token}@github.com/.insteadOf=https://github.com/`]
     : [];
 }
 
@@ -54,7 +56,7 @@ export async function ensureMirror(repo: string, sha: string, deps: MirrorDeps):
   const root = deps.root ?? workdirRoot();
   const dir = join(root, repo.replaceAll("/", "__"));
   if (!deps.exists(dir)) {
-    await deps.git([...authHeaderArgs(), "clone", remoteUrl(repo), dir]);
+    await deps.git(["clone", remoteUrl(repo), dir]);
   } else {
     await deps.git([...authHeaderArgs(), "fetch", "origin"], dir);
   }
