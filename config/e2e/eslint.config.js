@@ -22,4 +22,28 @@ export default tseslint.config(
       "playwright/expect-expect": "error",
     },
   },
+  {
+    // Specs MUST get `test` from ./fixtures (not @playwright/test directly): the fixtures'
+    // `test` carries the change-coverage instrumentation (the V8 `_coverage` fixture).
+    // Importing `test` from @playwright/test silently disables coverage — turning the value
+    // keystone into a no-op while everything still reports green. `expect`/types are fine.
+    // fixtures.ts itself is excluded (it IS the base that wraps @playwright/test).
+    files: ["**/*.spec.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "@playwright/test",
+              importNames: ["test"],
+              message:
+                'Import { test } from "./fixtures" (relative), not "@playwright/test" — the fixtures'
+                + " test carries the change-coverage instrumentation; importing it directly disables coverage.",
+            },
+          ],
+        },
+      ],
+    },
+  },
 );
