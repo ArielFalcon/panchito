@@ -70,6 +70,19 @@ export async function runE2E(
 
   const parsed = parsePlaywrightReport(report);
 
+  // The inverse of the crashed-runner guard above: a report that PARSED but
+  // executed zero tests (testMatch matched nothing, or every spec was skipped)
+  // ran nothing and must never surface as green. Inconclusive infrastructure.
+  if (parsed.executed === 0) {
+    return {
+      sha: opts.namespace,
+      verdict: "infra-error",
+      passed: false,
+      cases: parsed.cases,
+      logs: sanitized.text || "the E2E suite ran but executed zero tests (no tests matched, or all were skipped)",
+    };
+  }
+
   return {
     sha: opts.namespace,
     verdict: parsed.verdict,

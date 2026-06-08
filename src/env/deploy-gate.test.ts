@@ -2,11 +2,38 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   waitForDeploy,
+  shaMatches,
   DeployTimeoutError,
   DeployTarget,
   GateDeps,
   VersionInfo,
 } from "./deploy-gate";
+
+const FULL = "abc1234def5678abc1234def5678abc1234def56"; // 40-char SHA
+const SHORT = "abc1234"; // the 7-char short form many /version endpoints emit
+
+test("shaMatches: equal, and short-vs-full prefix either way (case-insensitive)", () => {
+  assert.equal(shaMatches(FULL, FULL), true);
+  assert.equal(shaMatches(SHORT, FULL), true); // /version short vs full trigger
+  assert.equal(shaMatches(FULL, SHORT), true); // full /version vs short trigger
+  assert.equal(shaMatches(FULL.toUpperCase(), SHORT), true);
+});
+
+test("shaMatches: different SHAs and too-short prefixes never match", () => {
+  assert.equal(shaMatches("def5678abc", FULL), false); // different
+  assert.equal(shaMatches("abc", FULL), false); // 3-char prefix is below the 7-char floor
+  assert.equal(shaMatches("", FULL), false);
+  assert.equal(shaMatches(undefined, FULL), false);
+});
+
+test("resolves when DEV reports a SHORT SHA against a full target SHA", async () => {
+  const deps: GateDeps = {
+    fetchVersion: async () => ({ sha: SHORT, healthy: true }),
+    sleep: async () => {},
+    now: clock(50),
+  };
+  await assert.doesNotReject(waitForDeploy(target, FULL, deps));
+});
 
 const target: DeployTarget = {
   name: "demo",

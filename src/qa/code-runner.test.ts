@@ -123,6 +123,40 @@ test("a missing runtime (spawnError) is infra-error, NEVER fail or pass", async 
   assert.match(run.logs, /runtime unavailable/);
 });
 
+// Code-mode false-green guard: exit-code 0 is NOT enough — a runner that collected
+// ZERO tests (no tests matched, empty suite) exits 0 and would otherwise pass. And
+// pytest's exit 5 ("no tests collected") must not be a false FAIL on the watched repo.
+test("node --test that executed zero tests is infra-error, not a false pass", async () => {
+  const project: CodeProject = { ecosystem: "node", install: null, test: { cmd: "node", args: ["--test"] } };
+  const deps: CodeExecuteDeps = { detect: () => project, runTests: async () => ({ exitCode: 0, logs: "ℹ tests 0\nℹ pass 0\nℹ fail 0" }) };
+  const run = await runCodeTests("/r", { namespace: "qa-bot-n0" }, deps);
+  assert.equal(run.verdict, "infra-error");
+  assert.equal(run.passed, false);
+});
+
+test("pytest exit 5 (no tests collected) is infra-error, not a false fail", async () => {
+  const project: CodeProject = { ecosystem: "python", install: null, test: { cmd: "python", args: ["-m", "pytest", "-q"] } };
+  const deps: CodeExecuteDeps = { detect: () => project, runTests: async () => ({ exitCode: 5, logs: "no tests ran in 0.01s" }) };
+  const run = await runCodeTests("/r", { namespace: "qa-bot-p5" }, deps);
+  assert.equal(run.verdict, "infra-error");
+  assert.equal(run.passed, false);
+});
+
+test("go test with only [no test files] is infra-error, not a false pass", async () => {
+  const project: CodeProject = { ecosystem: "go", install: null, test: { cmd: "go", args: ["test", "./..."] } };
+  const deps: CodeExecuteDeps = { detect: () => project, runTests: async () => ({ exitCode: 0, logs: "?   example/gt   [no test files]" }) };
+  const run = await runCodeTests("/r", { namespace: "qa-bot-g0" }, deps);
+  assert.equal(run.verdict, "infra-error");
+  assert.equal(run.passed, false);
+});
+
+test("go test that actually ran tests stays a pass (not over-flagged)", async () => {
+  const project: CodeProject = { ecosystem: "go", install: null, test: { cmd: "go", args: ["test", "./..."] } };
+  const deps: CodeExecuteDeps = { detect: () => project, runTests: async () => ({ exitCode: 0, logs: "ok   example/gt   0.42s\n?   example/util   [no test files]" }) };
+  const run = await runCodeTests("/r", { namespace: "qa-bot-gok" }, deps);
+  assert.equal(run.verdict, "pass");
+});
+
 test("logs are sanitized before returning", async () => {
   const deps: CodeExecuteDeps = {
     detect: () => nodeProject,

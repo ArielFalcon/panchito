@@ -9,7 +9,7 @@
 import { join } from "node:path";
 import { AppConfig } from "./orchestrator/config-loader";
 import { DeployTarget, waitForDeploy } from "./env/deploy-gate";
-import { ensureMirror, getCommitDiff, getCommitMessage, defaultMirrorDeps } from "./integrations/repo-mirror";
+import { ensureMirror, getCommitDiff, getCommitMessage, listChangedSpecs as gitListChangedSpecs, defaultMirrorDeps } from "./integrations/repo-mirror";
 import { runOpencode, runOpencodeParallel, defaultOpencodeDeps, reviewIndependently } from "./integrations/opencode-client";
 import { classifyCommit, CommitIntent } from "./qa/commit-classify";
 import { setupE2eProject, defaultSetupDeps } from "./qa/setup";
@@ -25,6 +25,8 @@ import {
   blocksPublish,
   renderUncovered,
   defaultCollectCoverage,
+  clearBrowserCoverage,
+  hasBrowserCoverageDumps,
   DEFAULT_COVERAGE_POLICY,
   type CoveredLines,
   type CoverageCollectInput,
@@ -62,6 +64,11 @@ export interface PipelineDeps {
   waitForDeploy(target: DeployTarget, sha: string): Promise<void>;
   prepare(repo: string, sha: string): Promise<{ mirrorDir: string; diff: string; message: string }>;
   generate(input: GenerateInput, signal?: AbortSignal, onProgress?: (msg: string) => void): Promise<AgentResult>;
+  // The *.spec.ts the agent actually wrote on disk (git status over e2e/), e2e-relative.
+  // The authoritative spec set for the no-op decision and the reviewer's file list — the
+  // orchestrator trusts the working copy, not the agent's self-report. Absent ⇒ no
+  // reconciliation (the agent's reported specs are used, as before).
+  listChangedSpecs?(mirrorDir: string, e2eRelDir: string): Promise<string[]>;
   setupE2e(e2eDir: string): Promise<void>; // installs the e2e project's dependencies
   validate(e2eDir: string): Promise<{ ok: boolean; errors: string[] }>;
   execute(e2eDir: string, opts: { baseUrl: string; namespace: string; onCase?: (c: QaCase) => void }): Promise<QaRunResult>;
@@ -72,12 +79,19 @@ export interface PipelineDeps {
   // run, repo-relative, or null when no usable coverage was produced (→ "unknown", never blocks).
   // Absent (undefined) ⇒ the change-coverage step is skipped entirely.
   collectCoverage?(input: CoverageCollectInput): Promise<CoveredLines | null>;
-  publish(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string }): Promise<{ prUrl: string } | null>;
+  // Clears the run's V8 coverage dumps before a measured execute, so a measurement
+  // reflects ONLY the execute that just ran (never a prior same-sha run's stale dumps,
+  // nor an earlier enforce round). Absent ⇒ no clear (the unit tests stub execute).
+  clearCoverage?(e2eDir: string, namespace: string): void;
+  // Did this run produce any V8 coverage dumps? Used only to make a "structural no-op"
+  // (dumps existed but matched zero changed files) observable, distinct from "no data".
+  hasCoverageDumps?(e2eDir: string, namespace: string): boolean;
+  publish(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string }): Promise<{ prUrl: string; merged: boolean } | null>;
   // Code mode (target "code"): no web env, no Playwright. Install the repo's deps,
   // run its own test suite, classify by exit code, and publish the new tests.
   setupCode(repoDir: string): Promise<void>;
   executeCode(repoDir: string, opts: { namespace: string; onCase?: (c: QaCase) => void }): Promise<QaRunResult>;
-  publishCode(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string }): Promise<{ prUrl: string } | null>;
+  publishCode(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string }): Promise<{ prUrl: string; merged: boolean } | null>;
   openIssue(repo: string, title: string, body: string): Promise<{ url: string }>;
   log?(msg: string): void;
 }
@@ -91,6 +105,7 @@ export function defaultPipelineDeps(): PipelineDeps {
       const message = await getCommitMessage(mirrorDir, sha, defaultMirrorDeps);
       return { mirrorDir, diff, message };
     },
+    listChangedSpecs: (mirrorDir, e2eRelDir) => gitListChangedSpecs(mirrorDir, e2eRelDir, defaultMirrorDeps),
     generate: async (input, signal, onProgress) => {
       const ocInput = {
         repo: input.repo,
@@ -144,6 +159,8 @@ export function defaultPipelineDeps(): PipelineDeps {
     review: async (input, signal) =>
       reviewIndependently(input, await defaultOpencodeDeps(), { signal }),
     collectCoverage: async (input) => defaultCollectCoverage(input),
+    clearCoverage: (e2eDir, ns) => clearBrowserCoverage(e2eDir, ns),
+    hasCoverageDumps: (e2eDir, ns) => hasBrowserCoverageDumps(e2eDir, ns),
     publish: (input) => publishE2e(input, defaultPublishDeps),
     openIssue: (repo, title, body) => github.openIssue(repo, title, body),
     log: (m) => console.log(m),
@@ -196,7 +213,7 @@ export async function runPipeline(
   log("[qa] preparing working copy and diff...");
   const { mirrorDir, diff, message } = await deps.prepare(app.repo, sha);
   const e2eDir = join(mirrorDir, E2E_DIR);
-  const ns = testDataNamespace(app.qa.testDataPrefix, sha);
+  const ns = testDataNamespace(app.qa.testDataPrefix, sha, opts.runId);
 
   checkSignal();
 
@@ -253,12 +270,39 @@ export async function runPipeline(
   // On rejection, the reviewer's actionable corrections are reinjected and the agent regenerates
   // (up to MAX_REVIEW_ROUNDS) BEFORE giving up; only then is the result marked not-approved
   // (→ Issue). A reviewer error fails open (trust the generator) and stops the loop.
+  // Disk over the agent's word (CLAUDE.md: never trust the LLM's self-report over the
+  // working copy). The no-op decision and the reviewer's file list both key off `specs`,
+  // so they must reflect the *.spec.ts actually on disk, not what the agent printed in its
+  // verdict JSON. e2e-only; a non-blocking failure falls back to the agent's report.
+  const reconcileSpecs = async (r: AgentResult): Promise<AgentResult> => {
+    if (isCode || !deps.listChangedSpecs) return r;
+    let onDisk: string[];
+    try {
+      onDisk = await deps.listChangedSpecs(mirrorDir, E2E_DIR);
+    } catch (err) {
+      log(`[qa] spec reconciliation failed (non-blocking, trusting the agent): ${err instanceof Error ? err.message : String(err)}`);
+      return r;
+    }
+    const onDiskSet = new Set(onDisk);
+    const reportedSet = new Set(r.specs);
+    const phantom = r.specs.filter((s) => !onDiskSet.has(s));
+    const unreported = onDisk.filter((s) => !reportedSet.has(s));
+    if (phantom.length) log(`[qa] WARNING: the agent reported ${phantom.length} spec(s) not on disk (${phantom.join(", ")}); using the on-disk set.`);
+    if (unreported.length) log(`[qa] note: ${unreported.length} on-disk spec(s) the agent did not report (${unreported.join(", ")}); including them.`);
+    return { ...r, specs: onDisk };
+  };
+
   const MAX_REVIEW_ROUNDS = 2;
   const generateAndReview = async (genInput: GenerateInput): Promise<AgentResult> => {
-    let r = await deps.generate(genInput, signal, log);
+    let r = await reconcileSpecs(await deps.generate(genInput, signal, log));
     if (!(app.qa.needsReview && deps.review)) return r;
     for (let round = 0; round < MAX_REVIEW_ROUNDS; round++) {
-      if (r.specs.length === 0) return r; // nothing to review (a no-op or no fixes produced)
+      if (r.specs.length === 0) {
+        // A FIRST-round empty result is a legitimate no-op. A LATER (post-rejection)
+        // regeneration with no specs was never judged by the reviewer — it must NOT inherit
+        // the generator's self-approval, or unreviewed work could skip green.
+        return round === 0 ? r : { ...r, approved: false, note: "regeneration produced no reviewable specs" };
+      }
       let review: ReviewResult;
       try {
         review = await deps.review(
@@ -266,15 +310,24 @@ export async function runPipeline(
           signal,
         );
       } catch (err) {
-        log(`[qa] independent reviewer failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
-        return r; // fail open: trust the generator's own verdict
+        // Fail open for a transient error, but make it OBSERVABLE: the reviewer is the only
+        // independent gate against the circular self-approval loop, so a persistent outage
+        // silently degrading every run to generator-self-approval must be visible.
+        log(`[qa] WARNING: independent reviewer FAILED — publishing on the generator's verdict WITHOUT independent review (${err instanceof Error ? err.message : String(err)}).`);
+        return { ...r, note: "published without independent review (reviewer error)" };
+      }
+      // A parse miss is NOT an actionable rejection: feeding the synthetic correction back
+      // just burns a round and re-hits the same miss. Treat it like a reviewer error.
+      if (review.parsed === false) {
+        log(`[qa] WARNING: independent reviewer produced NO parseable verdict — publishing WITHOUT independent review (not burning a regeneration round).`);
+        return { ...r, note: "published without independent review (unparseable reviewer verdict)" };
       }
       log(`[qa] independent reviewer round ${round + 1}/${MAX_REVIEW_ROUNDS}: approved=${review.approved} corrections=${review.corrections.length}`);
       if (review.approved) return { ...r, approved: true, note: undefined };
       if (round === MAX_REVIEW_ROUNDS - 1) return { ...r, approved: false, note: review.corrections.join("; ") };
       log(`[qa] applying ${review.corrections.length} reviewer correction(s) and regenerating...`);
       onStep?.("retry");
-      r = await deps.generate({ ...genInput, reviewCorrections: review.corrections }, signal, log);
+      r = await reconcileSpecs(await deps.generate({ ...genInput, reviewCorrections: review.corrections }, signal, log));
     }
     return r;
   };
@@ -359,6 +412,7 @@ export async function runPipeline(
   } else {
     onStep?.("execute");
     log(`[qa] running E2E (namespace ${ns}) against ${app.dev.baseUrl}...`);
+    deps.clearCoverage?.(e2eDir, ns); // fresh dumps only: never union a prior run's coverage
     run = await deps.execute(e2eDir, { baseUrl: app.dev.baseUrl, namespace: ns, onCase });
     // Infra vs quality: failures with an unhealthy DEV are infrastructure, not code.
     if (run.verdict === "fail" && !(await devHealthy())) {
@@ -404,6 +458,7 @@ export async function runPipeline(
         break;
       }
       log("[qa] re-running E2E with fixed tests...");
+      deps.clearCoverage?.(e2eDir, ns);
       const retryRun = await deps.execute(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: ns, onCase });
       if (retryRun.verdict === "fail" && !(await devHealthy())) {
         run = resultOf(ns, "infra-error", "failures with an unhealthy DEV: treated as infrastructure");
@@ -444,6 +499,7 @@ export async function runPipeline(
         if (improved.specs.length > 0 && improved.approved) {
           const okStatic = isCode ? { ok: true, errors: [] } : await deps.validate(e2eDir);
           if (okStatic.ok && (isCode || (await devHealthy()))) {
+            if (!isCode) deps.clearCoverage?.(e2eDir, ns); // re-measure only the improved suite's dumps
             const reRun = isCode
               ? await deps.executeCode(mirrorDir, { namespace: ns, onCase })
               : await deps.execute(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: ns, onCase });
@@ -458,6 +514,19 @@ export async function runPipeline(
         }
       }
       if (coverageStatus === "fail") coverageSummary = renderUncovered(cc);
+
+      // Observability: "unknown" because the suite produced V8 dumps that mapped to NONE
+      // of the changed files is a STRUCTURAL NO-OP (a bundled/minified deploy whose asset
+      // URLs don't resolve to repo source, or specs not importing ./fixtures) — the keystone
+      // is silently protecting nothing. Surface it loudly instead of the benign "unknown".
+      if (coverageStatus === "unknown" && !isCode && deps.hasCoverageDumps?.(e2eDir, ns)) {
+        log(
+          `[qa] WARNING: change-coverage is UNKNOWN but the suite produced V8 dumps that matched ` +
+            `NONE of the ${changedFiles.length} changed file(s) — the keystone is a structural no-op ` +
+            `for this run (likely a bundled/minified deploy whose asset URLs don't map to repo source, ` +
+            `or specs not importing ./fixtures). Coverage is NOT protecting this change.`,
+        );
+      }
     }
   }
 
@@ -495,7 +564,13 @@ export async function runPipeline(
   } else {
     const prInput = { repo: app.repo, sha, mirrorDir, baseBranch: app.baseBranch ?? "main" };
     const pr = isCode ? await deps.publishCode(prInput) : await deps.publish(prInput);
-    log(pr ? `[qa] OK — ${kind} green; suite PR: ${pr.prUrl}` : `[qa] OK — ${kind} green (no new tests to publish).`);
+    log(
+      pr
+        ? pr.merged
+          ? `[qa] OK — ${kind} green; suite PR merged: ${pr.prUrl}`
+          : `[qa] OK — ${kind} green; suite PR opened but NOT merged (merge it manually): ${pr.prUrl}`
+        : `[qa] OK — ${kind} green (no new tests to publish).`,
+    );
   }
   return run;
 }

@@ -118,13 +118,13 @@ function deps(
       calls.push("publishCode");
       assert.equal(input.baseBranch, "main");
       h.published = true;
-      return opts.prUrl === undefined ? { prUrl: "https://github.com/org/demo/pull/9" } : opts.prUrl === null ? null : { prUrl: opts.prUrl };
+      return opts.prUrl === undefined ? { prUrl: "https://github.com/org/demo/pull/9", merged: true } : opts.prUrl === null ? null : { prUrl: opts.prUrl, merged: true };
     },
     publish: async (input: { baseBranch: string }) => {
       calls.push("publish");
       assert.equal(input.baseBranch, "main");
       h.published = true;
-      return opts.prUrl === undefined ? { prUrl: "https://github.com/org/demo/pull/1" } : opts.prUrl === null ? null : { prUrl: opts.prUrl };
+      return opts.prUrl === undefined ? { prUrl: "https://github.com/org/demo/pull/1", merged: true } : opts.prUrl === null ? null : { prUrl: opts.prUrl, merged: true };
     },
     openIssue: async (_repo: string, title: string) => {
       issues.push(title);
@@ -137,6 +137,126 @@ function deps(
 function passing(): QaRunResult {
   return { sha: "s", verdict: "pass", passed: true, cases: [], logs: "" };
 }
+
+// Coverage determinism: the run-scoped V8 dump dir must be cleared BEFORE the execute
+// whose dumps will be measured, so a measurement never unions stale dumps (a prior
+// same-sha run, or an earlier round of the enforce loop) into this run's coverage.
+test("clears the coverage dir before each measured execute (deterministic coverage)", async () => {
+  const calls: string[] = [];
+  const h = deps(passing(), calls, { coverage: [cov([1, 2, 3, 4])], diff: DIFF_4, message: "feat: x" });
+  const clearArgs: Array<{ dir: string; ns: string }> = [];
+  h.clearCoverage = (dir: string, ns: string) => {
+    calls.push("clearCoverage");
+    clearArgs.push({ dir, ns });
+  };
+  await runPipeline(app, "abc1234def", h, "manual", { mode: "diff" });
+  const firstClear = calls.indexOf("clearCoverage");
+  const firstExecute = calls.indexOf("execute");
+  assert.ok(firstClear >= 0, `clearCoverage was never called: ${calls.join(",")}`);
+  assert.ok(firstClear < firstExecute, `clearCoverage must precede execute: ${calls.join(",")}`);
+  assert.match(clearArgs[0]!.ns, /qa-bot-abc1234/);
+});
+
+// Keystone observability: "unknown" coverage because dumps existed but matched ZERO
+// changed files (the bundled-deploy structural no-op) must be a LOUD warning, not the
+// same benign "unknown" logged when there is simply no coverage data.
+test("warns loudly when coverage is UNKNOWN but the suite produced dumps (keystone no-op)", async () => {
+  const logs: string[] = [];
+  const h = deps(passing(), [], { coverage: [null], diff: DIFF_4, message: "feat: x" });
+  h.log = (m: string) => logs.push(m);
+  h.hasCoverageDumps = () => true;
+  await runPipeline(app, "abc1234def", h, "manual", { mode: "diff" });
+  assert.ok(
+    logs.some((l) => /structural no-op|matched NONE/i.test(l)),
+    `expected a keystone no-op warning, got:\n${logs.join("\n")}`,
+  );
+});
+
+test("does NOT warn about a keystone no-op when there are simply no dumps", async () => {
+  const logs: string[] = [];
+  const h = deps(passing(), [], { coverage: [null], diff: DIFF_4, message: "feat: x" });
+  h.log = (m: string) => logs.push(m);
+  h.hasCoverageDumps = () => false;
+  await runPipeline(app, "abc1234def", h, "manual", { mode: "diff" });
+  assert.ok(!logs.some((l) => /structural no-op/i.test(l)));
+});
+
+// Disk-over-LLM-word (root theme T1): the authoritative spec set is what is on disk
+// (git status over e2e/), never what the agent printed in its verdict JSON.
+test("a no-op is decided by what is on disk, not the agent's reported specs", async () => {
+  const calls: string[] = [];
+  const h = deps(passing(), calls, { agent: { output: "x", specs: ["a.spec.ts"], reviewed: true, approved: true } });
+  h.listChangedSpecs = async () => []; // agent PRINTED a spec but wrote NONE to disk
+  const run = await runPipeline(app, "abc1234def", h, "manual", { mode: "diff" });
+  assert.equal(run.verdict, "skipped"); // approved + zero specs ON DISK = legit no-op
+  assert.ok(!calls.includes("execute")); // never ran
+});
+
+test("on-disk specs the agent failed to report still drive the run (not a false no-op)", async () => {
+  const calls: string[] = [];
+  const h = deps(passing(), calls, { agent: { output: "x", specs: [], reviewed: true, approved: true } });
+  h.listChangedSpecs = async () => ["flows/real.spec.ts"]; // agent under-reported; disk has a spec
+  const run = await runPipeline(app, "abc1234def", h, "manual", { mode: "diff" });
+  assert.ok(calls.includes("execute")); // disk has a spec → not a no-op → it runs
+  assert.equal(run.verdict, "pass");
+});
+
+test("the independent reviewer is given the ON-DISK spec list, not the agent's", async () => {
+  const reviewInputs: string[][] = [];
+  const h = deps(passing(), [], {
+    agent: { output: "x", specs: ["ghost.spec.ts"], reviewed: true, approved: true },
+    review: [{ approved: true, corrections: [] }],
+  });
+  h.listChangedSpecs = async () => ["flows/real.spec.ts"];
+  const origReview = h.review!;
+  h.review = async (input, signal) => {
+    reviewInputs.push(input.specs);
+    return origReview(input, signal);
+  };
+  await runPipeline(app, "abc1234def", h, "manual", { mode: "diff" });
+  assert.deepEqual(reviewInputs[0], ["flows/real.spec.ts"]); // disk truth, not "ghost.spec.ts"
+});
+
+// Reviewer fail-open must be bounded and observable: an UNPARSEABLE verdict is not an
+// actionable rejection — feeding a fake correction just burns a round and re-hits the
+// same miss. Treat it like a reviewer error: publish on the generator's verdict, loudly.
+test("an unparseable reviewer verdict publishes without review and does NOT burn a regeneration round", async () => {
+  const logs: string[] = [];
+  const h = deps(passing(), [], {
+    agent: { output: "x", specs: ["a.spec.ts"], reviewed: true, approved: true },
+    review: [{ approved: false, corrections: ["the independent reviewer produced no parseable verdict"], parsed: false }],
+  });
+  h.log = (m: string) => logs.push(m);
+  await runPipeline(app, "abc1234def", h, "manual", { mode: "diff" });
+  assert.equal(h.genInputs.length, 1, "must not regenerate on a parse miss");
+  assert.ok(logs.some((l) => /without independent review/i.test(l)));
+});
+
+// A post-rejection regeneration that writes NO specs must not be treated as an approved
+// no-op (the reviewer never judged it) — that would let unreviewed work skip green.
+test("a post-rejection regeneration with no specs is not treated as an approved no-op", async () => {
+  const h = deps(passing(), [], {
+    agents: [
+      { output: "x", specs: ["a.spec.ts"], reviewed: true, approved: true }, // round 0
+      { output: "y", specs: [], reviewed: true, approved: true }, // round 1: regenerated nothing
+    ],
+    review: [{ approved: false, corrections: ["fix it"], parsed: true }], // rejects round 0
+  });
+  const run = await runPipeline(app, "abc1234def", h, "manual", { mode: "diff" });
+  assert.notEqual(run.verdict, "skipped"); // not a green no-op
+  assert.ok(h.issues.length > 0); // surfaced: the reviewer did not approve
+});
+
+// Determinism: the DEV-data / coverage namespace is scoped to the runId, so two runs of
+// the SAME sha never share a namespace (no entity-name collisions, no stale-dump merge).
+test("the run namespace is scoped to the runId when one is provided", async () => {
+  const nsSeen: string[] = [];
+  const h = deps(passing(), [], { coverage: [cov([1, 2, 3, 4])], diff: DIFF_4, message: "feat: x" });
+  h.clearCoverage = (_dir: string, ns: string) => nsSeen.push(ns);
+  await runPipeline(app, "abc1234def", h, "manual", { mode: "diff", runId: "run-abc1234-zzz111" });
+  assert.match(nsSeen[0]!, /^qa-bot-abc1234-/); // per-run token appended to prefix+sha
+  assert.notEqual(nsSeen[0], "qa-bot-abc1234"); // not the bare sha-only form
+});
 
 test("green: orchestrates gate → prepare → setup → generate → validate → health → execute → publish", async () => {
   const calls: string[] = [];

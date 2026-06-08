@@ -87,7 +87,7 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
           },
         },
         req.source ?? "webhook",
-        { mode: req.mode, target: req.target, guidance: req.guidance, fixCases: req.fixCases, parentRunId: req.parentRunId, previousNamespace: req.previousNamespace },
+        { mode: req.mode, target: req.target, guidance: req.guidance, fixCases: req.fixCases, parentRunId: req.parentRunId, previousNamespace: req.previousNamespace, runId: record.id },
         (step, detail) => updateRecord(record.id, { step, stepDetail: detail, retrying: step === "retry" }),
         (c) => addCase(record.id, c),
         (specs) => updateRecord(record.id, { specs }),

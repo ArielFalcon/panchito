@@ -50,7 +50,7 @@ test("classifies flaky when there are unstable cases and none fail", async () =>
 
 test("all green => verdict pass", async () => {
   const deps: ExecuteDeps = {
-    runSuite: async () => ({ report: { stats: { unexpected: 0 } }, logs: "ok", ran: true }),
+    runSuite: async () => ({ report: { stats: { expected: 2, unexpected: 0 } }, logs: "ok", ran: true }),
   };
   const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-zzz" }, deps);
   assert.equal(run.passed, true);
@@ -74,6 +74,17 @@ test("a ran-but-empty report ({}) is infra-error, not a false pass", async () =>
     runSuite: async () => ({ report: {}, logs: "weird", ran: true }),
   };
   const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-empty" }, deps);
+  assert.equal(run.verdict, "infra-error");
+  assert.equal(run.passed, false);
+});
+
+test("a ran report that executed zero tests is infra-error, not a false pass", async () => {
+  // A shaped report (suites present) but with no executed test — e.g. testMatch
+  // matched nothing, or every spec was filtered/skipped. Ran, but proved nothing.
+  const deps: ExecuteDeps = {
+    runSuite: async () => ({ report: { suites: [], stats: { expected: 0, unexpected: 0, flaky: 0, skipped: 0 } }, logs: "Error: No tests found", ran: true }),
+  };
+  const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-zero" }, deps);
   assert.equal(run.verdict, "infra-error");
   assert.equal(run.passed, false);
 });

@@ -14,7 +14,7 @@
 //  - The POLICY (off | signal | enforce) decides what a low ratio DOES: signal records + feeds
 //    the reviewer; enforce additionally blocks publishing. Default is signal.
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { join, isAbsolute, relative } from "node:path";
 import { TestTarget } from "../types";
 
@@ -237,14 +237,34 @@ export function parseV8Coverage(entries: V8Entry[], changedFiles: string[]): Cov
     if (!entry?.source || !entry.url) continue;
     const file = resolveUrlToRepoFile(entry.url, changedFiles);
     if (!file) continue;
-    const lineStarts = lineStartOffsets(entry.source);
-    const set = out.get(file) ?? new Set<number>();
+    const source = entry.source;
+
+    // Resolve NESTED ranges to per-byte coverage. V8 emits ranges parent-before-child,
+    // so applying each range's count over its span in order leaves every byte with its
+    // INNERMOST range's count: a count==0 child carves an uncovered hole out of a covered
+    // parent. (The old code unioned only count>0 ranges, so a function-wrapper range marked
+    // an unexercised branch covered — over-reporting that could flip a real gap to a pass.)
+    const covered = new Uint8Array(source.length);
     for (const fn of entry.functions ?? []) {
       for (const r of fn.ranges ?? []) {
-        if (r.count <= 0) continue;
-        const from = offsetToLine(lineStarts, r.startOffset);
-        const to = offsetToLine(lineStarts, Math.max(r.startOffset, r.endOffset - 1));
-        for (let l = from; l <= to; l++) set.add(l);
+        const start = Math.max(0, r.startOffset);
+        const end = Math.min(source.length, r.endOffset);
+        const val = r.count > 0 ? 1 : 0;
+        for (let i = start; i < end; i++) covered[i] = val;
+      }
+    }
+
+    // A line is covered if ANY of its bytes ended up covered.
+    const lineStarts = lineStartOffsets(source);
+    const set = out.get(file) ?? new Set<number>();
+    for (let ln = 0; ln < lineStarts.length; ln++) {
+      const from = lineStarts[ln]!;
+      const to = ln + 1 < lineStarts.length ? lineStarts[ln + 1]! : source.length;
+      for (let i = from; i < to; i++) {
+        if (covered[i]) {
+          set.add(ln + 1);
+          break;
+        }
       }
     }
     if (set.size) out.set(file, set);
@@ -333,9 +353,37 @@ function collectNativeCoverage(repoDir: string): CoveredLines | null {
   return null;
 }
 
+// The run's V8 dump directory. Single source of truth for the path so the collector
+// and the cleaner (clearBrowserCoverage) can never drift apart.
+function browserCoverageDir(e2eDir: string, namespace: string): string {
+  return join(e2eDir, ".qa", "coverage", namespace);
+}
+
+// Remove a run's V8 dumps so a measurement reflects ONLY the execute that just ran.
+// Called before each measured execute: stale dumps from a prior same-sha run survive
+// `git clean -fd` (the dir is gitignored), and an enforce re-run would otherwise union
+// round-1 and round-2 dumps. force:true makes it idempotent when the dir is absent.
+export function clearBrowserCoverage(e2eDir: string, namespace: string): void {
+  rmSync(browserCoverageDir(e2eDir, namespace), { recursive: true, force: true });
+}
+
+// Did the suite emit ANY V8 dumps this run? Lets the orchestrator distinguish a benign
+// "no coverage data" (legitimately "unknown") from a STRUCTURAL NO-OP — dumps were
+// produced but none mapped to a changed file (a bundled/minified deploy whose asset URLs
+// never match repo source paths, or specs not importing ./fixtures). The latter is worth
+// a loud warning because the keystone is silently protecting nothing.
+export function hasBrowserCoverageDumps(e2eDir: string, namespace: string): boolean {
+  try {
+    const dir = browserCoverageDir(e2eDir, namespace);
+    return existsSync(dir) && readdirSync(dir).some((f) => f.endsWith(".json"));
+  } catch {
+    return false;
+  }
+}
+
 function collectBrowserCoverage(e2eDir: string, changedFiles: string[], namespace: string): CoveredLines | null {
   // Per-namespace subdir so a previous commit's dumps can never pollute this run's measurement.
-  const dir = join(e2eDir, ".qa", "coverage", namespace);
+  const dir = browserCoverageDir(e2eDir, namespace);
   if (!existsSync(dir)) return null;
   const merged: CoveredLines = new Map();
   let any = false;

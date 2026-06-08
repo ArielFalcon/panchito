@@ -61,9 +61,37 @@ export async function ensureMirror(repo: string, sha: string, deps: MirrorDeps):
 }
 
 // Diff of commit `sha` against its parent (content only, without the header).
+// A MERGE commit has 2+ parents, and `git show` emits an EMPTY diff for it by default —
+// which would blind both commit classification and change-coverage to the merge's blast
+// radius. Merging a PR into the default branch is the canonical "commit deployed to DEV"
+// event, so this case is the rule, not the exception: diff against the FIRST parent so
+// the net change the merge introduced is visible.
 export async function getCommitDiff(dir: string, sha: string, deps: MirrorDeps): Promise<string> {
   assertHexSha(sha);
+  const parents = (await deps.git(["show", "-s", "--format=%P", sha], dir)).trim().split(/\s+/).filter(Boolean);
+  if (parents.length > 1) {
+    return deps.git(["show", "--format=", "-m", "--first-parent", sha], dir);
+  }
   return deps.git(["show", "--format=", sha], dir);
+}
+
+// The *.spec.ts files the agent actually wrote/modified this run, derived from `git
+// status` over e2eRelDir (added, modified, untracked). Returned e2e-relative (e.g.
+// "flows/login.spec.ts"), excluding the seed `cleanup.spec.ts`. This is the
+// AUTHORITATIVE spec set: the orchestrator trusts the working copy, never the agent's
+// self-reported list (which can name files it did not write, or omit files it did).
+export async function listChangedSpecs(dir: string, e2eRelDir: string, deps: MirrorDeps): Promise<string[]> {
+  const out = await deps.git(["status", "--porcelain", "--", e2eRelDir], dir);
+  return out
+    .split("\n")
+    .filter((l) => l.length > 3) // "XY path" — 2 status chars + a space + the path
+    .map((l) => l.slice(3))
+    .map((p) => {
+      const i = p.indexOf(" -> "); // a rename reports "old -> new"; take the new path
+      return i >= 0 ? p.slice(i + 4) : p;
+    })
+    .filter((p) => p.endsWith(".spec.ts") && !p.endsWith("cleanup.spec.ts"))
+    .map((p) => (p.startsWith(e2eRelDir + "/") ? p.slice(e2eRelDir.length + 1) : p));
 }
 
 // Commit message (subject + body): provides the INTENT used to classify the change.

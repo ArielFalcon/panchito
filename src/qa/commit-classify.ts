@@ -47,7 +47,7 @@ export function classifyCommit(message: string, diff: string): CommitClassificat
   const { type, breaking } = parseHeader(message);
   const firstLine = (message.split("\n")[0] ?? "").trim();
   const changedFiles = parseChangedFiles(diff);
-  const hasLogicChange = netLogicAdded(diff) > 0;
+  const hasLogicChange = genuinelyAddedLogic(diff) > 0;
 
   let action: CommitAction = breaking ? "generate" : DEFAULT_ACTION[type];
   let contradiction = false;
@@ -98,13 +98,16 @@ function isSourceFile(path: string): boolean {
   return SOURCE_EXT.has(ext);
 }
 
-// Net added logic = (added logic lines) − (removed logic lines), counting source
-// files only. The net distinguishes "adds logic" (positive) from "moves a line"
-// (≈0), so a `style` commit that only relocates code is not escalated by mistake.
-function netLogicAdded(diff: string): number {
+// GENUINELY-added logic = added logic lines MINUS those that have an identical removed
+// counterpart (a relocation, not new behavior). Counted across source files only.
+// Using added-minus-relocations instead of a single repo-wide NET is what stops a NEW
+// branch in one file from being silently cancelled by an UNRELATED removal in another
+// (which would let a behavior change go untested), while still not escalating a pure
+// move (the relocated line is matched and subtracted).
+function genuinelyAddedLogic(diff: string): number {
   let currentSource = false;
-  let added = 0;
-  let removed = 0;
+  const added: string[] = [];
+  const removed: string[] = [];
   for (const line of diff.split("\n")) {
     if (line.startsWith("+++ ")) {
       currentSource = isSourceFile(line.replace(/^\+\+\+ (?:b\/)?/, ""));
@@ -116,12 +119,22 @@ function netLogicAdded(diff: string): number {
     }
     if (!currentSource) continue;
     if (line.startsWith("+")) {
-      if (looksLikeLogic(line.slice(1))) added++;
+      if (looksLikeLogic(line.slice(1))) added.push(line.slice(1).trim());
     } else if (line.startsWith("-")) {
-      if (looksLikeLogic(line.slice(1))) removed++;
+      if (looksLikeLogic(line.slice(1))) removed.push(line.slice(1).trim());
     }
   }
-  return added - removed;
+  // Subtract relocations by content: an added logic line with a matching removed line is
+  // a move, not new logic. Each removal can cancel at most one addition.
+  const removedCounts = new Map<string, number>();
+  for (const r of removed) removedCounts.set(r, (removedCounts.get(r) ?? 0) + 1);
+  let net = 0;
+  for (const a of added) {
+    const c = removedCounts.get(a) ?? 0;
+    if (c > 0) removedCounts.set(a, c - 1);
+    else net++;
+  }
+  return net;
 }
 
 const LOGIC = /\b(if|else|for|while|switch|case|return|function|class|interface|enum|def|func|await|async|throw|try|catch|yield)\b|=>|\b\w+\s*\(/;
@@ -130,5 +143,13 @@ function looksLikeLogic(content: string): boolean {
   const t = content.trim();
   if (!t) return false;
   if (/^(\/\/|\*|\/\*|\*\/|#|<!--|-->)/.test(t)) return false; // comment line
-  return LOGIC.test(t);
+  // Strip string/template-literal CONTENTS first, so code-like words or parens inside a
+  // string (prose, CSS, a phone number) are not mistaken for logic — a copy change in a
+  // `style`/`refactor` commit must not be force-escalated to generate.
+  return LOGIC.test(stripStrings(t));
+}
+
+// Replaces the contents of "..." / '...' / `...` with empty strings (handles escapes).
+function stripStrings(s: string): string {
+  return s.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`/g, '""');
 }
