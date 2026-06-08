@@ -115,12 +115,14 @@ export function detectCodeProject(repoDir: string, deps: DetectDeps = realDetect
     deps.exists(at("pytest.ini")) ||
     deps.exists(at("tox.ini"))
   ) {
+    // Use `python3`/`python3 -m pip` — the binaries the orchestrator image actually provides
+    // (it installs python3/python3-pip, not the `python`/`pip` symlinks).
     const install: Command | null = deps.exists(at("requirements.txt"))
-      ? { cmd: "pip", args: ["install", "-r", "requirements.txt"] }
+      ? { cmd: "python3", args: ["-m", "pip", "install", "-r", "requirements.txt"] }
       : deps.exists(at("pyproject.toml")) || deps.exists(at("setup.py"))
-        ? { cmd: "pip", args: ["install", "-e", "."] }
+        ? { cmd: "python3", args: ["-m", "pip", "install", "-e", "."] }
         : null;
-    return { ecosystem: "python", install, test: { cmd: "python", args: ["-m", "pytest", "-q"] } };
+    return { ecosystem: "python", install, test: { cmd: "python3", args: ["-m", "pytest", "-q"] } };
   }
 
   // Go
@@ -168,23 +170,58 @@ function nodeTestCommand(pm: "npm" | "pnpm" | "yarn", pkg: Record<string, unknow
 
 export interface CodeSetupDeps {
   detect(repoDir: string): CodeProject;
-  install(project: CodeProject, repoDir: string): Promise<void>;
+  install(project: CodeProject, repoDir: string, opts?: { signal?: AbortSignal; timeoutMs?: number }): Promise<void>;
 }
 
-export async function setupCodeProject(repoDir: string, deps: CodeSetupDeps): Promise<void> {
+export async function setupCodeProject(
+  repoDir: string,
+  deps: CodeSetupDeps,
+  opts?: { signal?: AbortSignal; timeoutMs?: number },
+): Promise<void> {
   const project = deps.detect(repoDir);
-  if (project.install) await deps.install(project, repoDir);
+  if (!project.install) return;
+  if (opts?.signal?.aborted) throw new Error("code-mode install aborted by operator cancel");
+
+  // Race install against a timeout at the orchestration level (defense in depth: the real
+  // spawn below also SIGKILLs the child). A hung `npm ci`/`mvn`/`gradle` must not block the
+  // sequential queue forever — on timeout we reject, which the pipeline maps to infra-error.
+  const timeoutMs = opts?.timeoutMs ?? DEFAULT_CODE_MODE_TIMEOUT_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`code-mode install timeout after ${timeoutMs}ms`)), timeoutMs);
+  });
+  try {
+    await Promise.race([deps.install(project, repoDir, opts), timeoutPromise]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export const defaultCodeSetupDeps: CodeSetupDeps = {
   detect: (repoDir) => detectCodeProject(repoDir),
-  install: (project, repoDir) =>
+  install: (project, repoDir, opts) =>
     new Promise((resolve, reject) => {
       const { cmd, args } = project.install!;
       const child = spawn(cmd, args, { cwd: repoDir, env: scrubEnv() });
-      child.on("error", reject);
+      let settled = false;
+      const settle = (err?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        err ? reject(err) : resolve();
+      };
+      const timeoutMs = opts?.timeoutMs ?? DEFAULT_CODE_MODE_TIMEOUT_MS;
+      const timer = setTimeout(() => {
+        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+        settle(new Error(`code-mode install timeout after ${timeoutMs}ms`));
+      }, timeoutMs);
+      opts?.signal?.addEventListener("abort", () => {
+        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+        settle(new Error("code-mode install aborted by operator cancel"));
+      }, { once: true });
+      child.on("error", (err) => settle(err instanceof Error ? err : new Error(String(err))));
       child.on("close", (code) =>
-        code === 0 ? resolve() : reject(new Error(`code-mode install failed (${cmd} ${args.join(" ")}, exit ${code})`)),
+        settle(code === 0 ? undefined : new Error(`code-mode install failed (${cmd} ${args.join(" ")}, exit ${code})`)),
       );
     }),
 };

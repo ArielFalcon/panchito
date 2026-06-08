@@ -52,11 +52,12 @@ test("Node with no test script and no known runner uses node --test", () => {
   assert.deepEqual(p.test, { cmd: "node", args: ["--test"] });
 });
 
-test("detects Python (pytest)", () => {
+test("detects Python (pytest) using python3 (the binary the image actually provides)", () => {
   const p = detectCodeProject("/r", fs(["pyproject.toml"]));
   assert.equal(p.ecosystem, "python");
-  assert.deepEqual(p.install, { cmd: "pip", args: ["install", "-e", "."] });
-  assert.deepEqual(p.test, { cmd: "python", args: ["-m", "pytest", "-q"] });
+  // The orchestrator image installs `python3`/`python3-pip`, NOT `python`/`pip` symlinks.
+  assert.deepEqual(p.install, { cmd: "python3", args: ["-m", "pip", "install", "-e", "."] });
+  assert.deepEqual(p.test, { cmd: "python3", args: ["-m", "pytest", "-q"] });
 });
 
 test("detects Go", () => {
@@ -69,6 +70,14 @@ test("unknown ecosystem falls back to npm test (no install)", () => {
   const p = detectCodeProject("/r", fs([]));
   assert.equal(p.ecosystem, "unknown");
   assert.equal(p.install, null);
+});
+
+// A hung `npm ci`/`mvn`/`gradle` install must NOT block the sequential queue forever.
+// The install path needs the same timeout the test path has.
+test("code-mode install that hangs is killed by timeout (does not block the queue)", { timeout: 3000 }, async () => {
+  const project: CodeProject = { ecosystem: "node", install: { cmd: "npm", args: ["ci"] }, test: { cmd: "npm", args: ["test"] } };
+  const deps: CodeSetupDeps = { detect: () => project, install: () => new Promise(() => {}) }; // never resolves
+  await assert.rejects(() => setupCodeProject("/r", deps, { timeoutMs: 100 }), /timeout/i);
 });
 
 test("setupCodeProject runs install only when there is an install command", async () => {

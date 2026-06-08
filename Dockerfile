@@ -12,6 +12,7 @@ FROM mcr.microsoft.com/playwright:v1.50.0-jammy
 # in the orchestrator process, NOT in the opencode container — see code-runner.ts.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
+    build-essential \
     python3 python3-pip python3-venv \
     golang \
     cargo rustc \
