@@ -21,7 +21,7 @@
 ## 2. What already exists (do not rebuild)
 
 - **Control API** (`src/server/api.ts`, DI via `ApiDeps`, unit-tested): `POST /api/runs`, `GET /api/runs/:id`, `GET /api/runs?app`, `GET /api/apps`, `GET /api/queue`, `GET /api/health`. Optional bearer auth.
-- **In-memory run history** (`src/server/history.ts`): `RunRecord` with `step/stepDetail/cases/verdict/passed/failed/note/retrying/logs`. `addCase` upserts by name. Ephemeral (lost on restart); **source of truth for outcomes is Issues/PRs**.
+- **Persistent run history** (`src/server/history.ts`): `RunRecord` with `step/stepDetail/cases/verdict/passed/failed/note/retrying/logs`. `addCase` upserts by name. Durable SQLite (survives restarts via `better-sqlite3` at `HISTORY_DB_PATH`); pruned at 30 days.
 - **Progress callbacks**: `runPipeline(onStep, onCase)` fire at coarse boundaries (classify/generate/validate/execute/retry/done), wired into the record by `enqueueApiRun` (`src/index.ts`).
 - **bin/qa**: a bash TUI (curl+jq) that already renders a live-ish dashboard over polling — the proof that polling suffices for objectives 1 and most of 2.
 - **fixCases re-generation**: `pipeline.ts` already feeds failed cases back into `deps.generate` on auto-retry (`MAX_RETRIES=1`); `buildPrompt` has a `fixCases` block. The continuation reuses this.
@@ -56,7 +56,7 @@ When SSE is added (Phase 4, gated on a spike): wrap it behind a **narrow, `src`-
 
 ### 3.4 The EventBus and RunRecord projection (deferred, and strictly read-side if ever built)
 
-- Keep `RunRecord` as a **directly-mutated** projection of `onStep/onCase`. Do **not** rewrite it as `reduce(events)→RunRecord`: with no DB (by this doc's persistence boundary), an event log is event-sourcing cosplay — full reducer/ordering/idempotency cost, none of the replay/audit/recovery payoff — and the just-fixed "zombie running" finalizer should not be re-architected. Prevent illegal states with a discriminated `RunStatus` type + a couple of transition guards if needed.
+- Keep `RunRecord` as a **directly-mutated** projection of `onStep/onCase`. With SQLite persistence, an event-sourcing layer would still be over-engineering for the current scale — the DB already provides durability and the finalizer handles restart recovery. Prevent illegal states with a discriminated `RunStatus` type + a couple of transition guards if needed.
 - **If** a typed `EventBus<RunEvent>` is ever introduced (the SSE-replay endpoint is the first plausible *second* consumer), it is a **strictly read-side fan-out**: `pipeline.ts` callbacks are the **only** producer of lifecycle events; consumers (history projection, SSE replay) **never** feed state back. This is what makes the bus **orthogonal** to the lifecycle authority — zero edges from consumers back to the producer. Human feedback and maintainer incidents enter only via the **command side** (API verbs that enqueue jobs), never as events into a machine.
 
 ### 3.5 The continuation model (objective 3)
@@ -80,7 +80,7 @@ A continuation is a **new, first-class, queued run**, not a resurrection of a mu
 A read-only OpenCode agent **`qa-assistant`** (cheap flash/lite model, confirmed via `opencode models`; **no** write/edit/bash; **no** repo tools in v1) answers questions about the **current** run via `POST /api/runs/:id/ask { question }`.
 
 - **Read-only is infra-enforced, not prompt-trusted:** `src/` assembles a **bounded** context blob (recent N cases + truncated logs + verdict), passes it through `sanitizer.ts` on **ingress**, gives the assistant **no** session `cwd` into a watched working copy, and sanitizes the answer on **egress** (`logs→chat` is a **new** egress that must be added to sanitizer coverage). A missing model **throws/logs loudly**, never degrades.
-- **Scope seam vs OpenClaw:** the lite chat is bounded to runs still in the in-memory history; it structurally **cannot** answer "why did checkout fail last Tuesday" (RunRecord is ephemeral). Those historical questions are OpenClaw's job and need the **future deterministic ledger**, not RunRecord.
+- **Scope seam vs OpenClaw:** the lite chat is bounded to recent runs in the persistent history (30-day SQLite retention); historical questions beyond that window are OpenClaw's job and need the **future deterministic ledger**.
 
 ---
 
@@ -102,8 +102,8 @@ A read-only OpenCode agent **`qa-assistant`** (cheap flash/lite model, confirmed
 
 ## 5. Persistence boundary
 
-- **Durable:** git (the suite, in the app repo's `e2e/`), engram (**distilled, per-app lessons only** — never a decision/metrics system-of-record), and the **future deterministic queryable ledger** (its own scoped initiative; not built here).
-- **Ephemeral, no persistence:** `RunRecord`, the JobQueue, any future event bus, the derived state label. A restart abandons the in-flight run; the operator re-triggers. (If restart-recovery is later wanted, finalize non-terminal runs as `infra-error` on boot from a *minimal* durable run log — a small append-only file / SQLite — mirroring `recoverMaintainerState`; **never** engram.)
+- **Durable:** git (the suite, in the app repo's `e2e/`), engram (**distilled, per-app lessons only** — never a decision/metrics system-of-record), SQLite `RunRecord` history (30-day retention), and the **future deterministic queryable ledger** (its own scoped initiative; not built here).
+- **Ephemeral, no persistence:** the JobQueue, any future event bus, the derived state label. A restart abandons the in-flight run; the operator re-triggers. (The `finalizeInterruptedRuns` boot-time recovery already marks non-terminal rows `infra-error` on restart — mirroring `recoverMaintainerState`; **never** engram for this.)
 - **Explicitly cut:** the Spring-Batch-style job/step/step-execution store and "decisions in engram like a hash table" — it duplicates the future ledger and violates the engram-is-distilled-lessons invariant. ("No persistence needed" and "add Spring-Batch persistence" cannot both stand.)
 
 ---
