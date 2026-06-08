@@ -189,3 +189,22 @@ cubre el cambio" — hasta que la cobertura esté activa.
 15. Durabilidad de `measured.json` (decisión de diseño).
 
 **Tanda D — re-certificación:** re-auditar las Fases 0/1 sobre el código refactorizado (lo que esta revisión NO cubrió).
+
+---
+
+## ESTADO DE CIERRE (re-certificado)
+
+**Gate:** 344/344 tests, typecheck limpio, árbol commiteado.
+
+**Re-certificación (3 revisores adversariales en paralelo):**
+- **Fases 0/1 — INTACTAS** tras el refactor (ejecución fail-closed, keystone V8 anidamiento, commit-classify, validate, generación/review, merge-back, determinismo runId, deploy-gate). Sin regresiones.
+- **Self-test code-only — CORRECTO y VALIOSO**: corre los 344 tests reales, clasifica por exit-code honesto, sin falso-verde/falso-rojo, sin crash/hang, sin escribir nada bajo shadow.
+- **Integración — SÓLIDA**: egress sanitizado, determinismo cross-run, propagación de errores sin swallow, matriz de veredictos exhaustiva.
+
+**Defectos de la re-cert — TODOS arreglados:** D1 (manifest fantasma en code-mode), egress crudo de `/api/runs` (sanitizeRecord), exclusión de `measured.json` del pathspec, CLI deriva target de `app.code` (D3), cleanup de huérfanos en el funnel único, poda de dirs de cobertura, comentarios/código muerto.
+
+**Defectos de la revisión Fase 2/3 — TODOS arreglados:** H1, H2, H3, H5, M1-M11 (ver tabla de plan arriba).
+
+**Única limitación conocida (decisión de producto aceptada):** el keystone de change-coverage es no-op **observable** (WARN) contra deploys bundleados (Vercel/Astro) porque las URLs hasheadas no resuelven a fuente; funciona contra un DEV sin bundlear. Resolverlo requiere source-maps (`v8-to-istanbul`) + spike de deploy en vivo — iniciativa dedicada, no un quick-fix (hand-rollear un decoder en el keystone de valor es la peor fuente de segunda ola). No afecta code-mode (usa lcov) ni el self-test.
+
+**Conclusión:** todos los flujos funcionan con calidad. El proyecto está listo para levantarse y correr en code-only contra sí mismo dando resultados valiosos y verdaderos.
