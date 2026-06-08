@@ -68,7 +68,8 @@ export function ChatInput({ client, runId }: ChatInputProps): React.ReactElement
     setStreamingId(aId);
 
     try {
-      const { answer } = await client.ask(runId, question);
+      const history = entries.map((e) => ({ role: e.role, text: e.text }));
+      const { answer } = await client.ask(runId, question, history);
       setStreamingText(answer);
     } catch (e) {
       setStreamingId(null);

@@ -280,6 +280,15 @@ async function handleAsk(req: IncomingMessage, res: ServerResponse, deps: ApiDep
     return true;
   }
 
+  const historyLines: string[] = [];
+  if (Array.isArray(body.history)) {
+    for (const entry of body.history) {
+      if (typeof entry === "object" && entry !== null && "role" in entry && "text" in entry) {
+        historyLines.push(`${entry.role === "q" ? "Operator" : "Assistant"}: ${String((entry as { text: unknown }).text)}`);
+      }
+    }
+  }
+
   try {
     // Load app config so the assistant knows what repo is being tested and where.
     let appInfo: { repo: string; baseUrl?: string } | undefined;
@@ -291,7 +300,8 @@ async function handleAsk(req: IncomingMessage, res: ServerResponse, deps: ApiDep
     // Context is bounded (cases + logs capped) and sanitized on ingress (secrets redacted).
     const activityCtx = activityRouter.contextForRun(record.id);
     const context = buildRunContext(record, undefined, appInfo, activityCtx || undefined);
-    const answer = await deps.ask({ context, question });
+    const historyCtx = historyLines.length > 0 ? `\n\nRecent conversation:\n${historyLines.slice(-6).join("\n")}` : "";
+    const answer = await deps.ask({ context: context + historyCtx, question });
     // Sanitize on egress (logs→chat is a new egress path).
     json(res, 200, { answer: sanitizeText(answer).text });
   } catch (err) {

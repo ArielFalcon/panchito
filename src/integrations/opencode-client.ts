@@ -141,18 +141,32 @@ export async function askAssistant(
   cwd: string,
 ): Promise<string> {
   const instruction = input.instruction ??
-    `Answer the operator's question about this QA run using ONLY the run context below.`;
+    [
+      `Answer the operator's question about this QA run using ONLY the run context below.`,
+      ``,
+      `CRITICAL RULES:`,
+      `- Respond in the SAME language as the question (Spanish → Spanish, English → English).`,
+      `  Use neutral, standard language — no regional slang, no colloquialisms.`,
+      `- NO markdown formatting. This text renders in a terminal TUI. Use plain text only.`,
+      `  No **bold**, no \`code\`, no bullet lists with -, no headings with #.`,
+      `- Translate internal terms to user-friendly language:`,
+      `  * "agent is working" → "el agente está generando pruebas" (no mencionar heartbeats)`,
+      `  * "pipeline phase" → speak about what's HAPPENING (testing, generating, validating)`,
+      `  * "step/status/verdict" → describe the outcome in plain words`,
+      `  * "classify/generate/validate/execute" → explain what the system is doing, not the phase name`,
+      `  * Never refer to panchito, the TUI, or pipeline internals. Focus on the user's tests.`,
+      `- Be concise. Avoid walls of text. Use line breaks to separate ideas.`,
+      `- If the context lacks the answer, say: "No tengo suficiente información para responder eso."`,
+    ].join("\n");
   const session = await deps.open("qa-assistant", cwd);
   try {
     return await session.prompt([
       instruction,
-      `Do not use any tools. If the context does not contain the answer, say so plainly.`,
-      ``,
-      `## Context`,
+      `Do not use any tools.`,
+      `---`,
       input.context,
-      ``,
-      `## Question`,
-      input.question,
+      `---`,
+      `Question: ${input.question}`,
     ].join("\n"));
   } finally {
     await session.dispose().catch((err) => {

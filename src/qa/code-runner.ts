@@ -298,6 +298,19 @@ export function ranZeroTests(project: CodeProject, out: CodeRunOutput): boolean 
   return false;
 }
 
+// Extracts pass/fail/total counts from common test runner output formats.
+export function parseTestCounts(logs: string): { pass: number; fail: number; total: number } | null {
+  const nodeMatch = logs.match(/(?:[ℹ#])\s*tests\s+(\d+)[\s\S]*?(?:[ℹ#])\s*pass\s+(\d+)[\s\S]*?(?:[ℹ#])\s*fail\s+(\d+)/);
+  if (nodeMatch) return { pass: Number(nodeMatch[2]), fail: Number(nodeMatch[3]), total: Number(nodeMatch[1]) };
+  const jestMatch = logs.match(/Tests:\s*(\d+)\s+passed?,\s*(\d+)\s+failed?,\s*(\d+)\s+total/i);
+  if (jestMatch) return { pass: Number(jestMatch[1]), fail: Number(jestMatch[2]), total: Number(jestMatch[3]) };
+  const pyMatch = logs.match(/(\d+)\s+passed?,\s*(\d+)\s+failed/i);
+  if (pyMatch) { const p=Number(pyMatch[1]), f=Number(pyMatch[2]); return { pass: p, fail: f, total: p+f }; }
+  const mochaMatch = logs.match(/(\d+)\s+passing/i);
+  if (mochaMatch) { const p=Number(mochaMatch[1]); return { pass: p, fail: 0, total: p }; }
+  return null;
+}
+
 export async function runCodeTests(
   repoDir: string,
   opts: CodeExecuteOptions,
@@ -375,7 +388,8 @@ export async function runCodeTests(
   const ok = out.exitCode === 0;
   const status = ok ? "pass" : "fail";
   const detail = ok ? undefined : tail(sanitized.text, 1500);
-  const kase: QaCase = { name: label, status, detail, objective: "code test suite" };
+  const counts = parseTestCounts(sanitized.text);
+  const kase: QaCase = { name: label, status, detail, objective: "code test suite", flow: counts ? `${counts.pass} pass / ${counts.fail} fail / ${counts.total} total` : undefined };
   opts.onCase?.(kase);
 
   return {
