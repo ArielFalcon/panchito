@@ -95,7 +95,7 @@ export interface PipelineDeps {
   publish(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string; parentRunId?: string }): Promise<{ prUrl: string; merged: boolean } | null>;
   // Code mode (target "code"): no web env, no Playwright. Install the repo's deps,
   // run its own test suite, classify by exit code, and publish the new tests.
-  setupCode(repoDir: string): Promise<void>;
+  setupCode(repoDir: string, opts?: { signal?: AbortSignal; timeoutMs?: number }): Promise<void>;
   executeCode(repoDir: string, opts: { namespace: string; onCase?: (c: QaCase) => void; signal?: AbortSignal; timeoutMs?: number }): Promise<QaRunResult>;
   publishCode(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string; parentRunId?: string }): Promise<{ prUrl: string; merged: boolean } | null>;
   publishContext(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string }): Promise<{ prUrl: string; merged: boolean } | null>;
@@ -157,7 +157,7 @@ export function defaultPipelineDeps(): PipelineDeps {
     validate: (e2eDir) => validateSpecs(e2eDir, defaultValidateDeps),
     execute: (e2eDir, opts) => runE2E(e2eDir, opts, defaultExecuteDeps),
     cleanup: (e2eDir, opts) => defaultCleanupDeps.runCleanup({ dir: e2eDir, ...opts }),
-    setupCode: (repoDir) => setupCodeProject(repoDir, defaultCodeSetupDeps),
+    setupCode: (repoDir, opts) => setupCodeProject(repoDir, defaultCodeSetupDeps, opts),
     executeCode: (repoDir, opts) => runCodeTests(repoDir, opts, defaultCodeExecuteDeps),
     publishCode: (input) => publishCode(input, defaultPublishDeps),
     publishContext: (input) => publishContext(input, defaultPublishDeps),
@@ -277,7 +277,7 @@ export async function runPipeline(
   //    so its test suite can run. context: same as e2e (the agent writes into e2e/.qa/).
   if (isCode) {
     log("[qa] code mode: installing the repo's dependencies...");
-    await deps.setupCode(mirrorDir);
+    await deps.setupCode(mirrorDir, { signal });
   } else {
     await deps.setupE2e(e2eDir);
   }
