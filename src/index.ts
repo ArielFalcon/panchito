@@ -19,13 +19,14 @@ import { defaultOpencodeDeps, askAssistant, OpencodeDeps, startEventStream } fro
 import { appendLog } from "./server/history";
 import { type RunMode, type TestTarget } from "./types";
 import { github } from "./integrations/github";
+import { scrubEnv } from "./qa/code-runner";
 
 const SELF_REPO = process.env.AI_PIPELINE_REPO ?? "ArielFalcon/ai-pipeline";
 const ROOT = process.env.AI_PIPELINE_ROOT ?? process.cwd();
 const TOKEN_FILE = join(ROOT, "config", ".api_token");
-// The maintainer's autonomous merge+hot-swap is ON by default but can be disabled by
-// ops (then a maintainer fix stops at an open PR for a human to review and merge).
-const AUTONOMOUS_MAINTAINER = process.env.SELF_MAINTAINER_AUTOMERGE !== "false";
+// The maintainer's autonomous merge+hot-swap is OFF by default. Opt-in with
+// SELF_MAINTAINER_AUTOMERGE=true (requires branch protection on the self-repo).
+const AUTONOMOUS_MAINTAINER = process.env.SELF_MAINTAINER_AUTOMERGE === "true";
 // Persisted ledger of autonomous deploys (timestamps), used by the rate/loop guard. It lives
 // on the data volume so it survives the restart a hot-swap triggers (see merge-guard.ts).
 const DEPLOY_LEDGER = join(ROOT, "data", "maintainer-deploys.json");
@@ -72,7 +73,9 @@ if (!secret && !ALLOW_UNSIGNED_WEBHOOK) {
 const queue = new JobQueue((e) => {
   const msg = e instanceof Error ? e.message : String(e);
   console.error("[qa] run failed:", e);
-  recordIncident({ source: "qa-generator", severity: "error", summary: `pipeline crash: ${msg}` });
+  // Incidents are recorded by the runner (with infra-vs-code classification).
+  // This handler only fires for truly unhandled rejections that escape the job's
+  // own catch — duplicates there would create maintainer noise for infra blips.
 });
 
 let shuttingDown = false;
@@ -80,22 +83,47 @@ const SHUTDOWN_TIMEOUT_MS = 25_000;
 const eventStreamController = new AbortController();
 
 process.on("SIGTERM", () => {
-  console.log("[qa] SIGTERM received — shutting down (new runs rejected)");
+  console.log("[qa] SIGTERM received — cancelling in-flight run and draining");
   shuttingDown = true;
   eventStreamController.abort();
-  // Best-effort: cancel SSE stream. OpenCode sessions are disposed by their
-  // own AbortSignals (wired through the queue → pipeline → opencode-client).
-  setTimeout(() => {
+
+  // Cancel the in-flight job: abort its signal so the pipeline's checkSignal()
+  // unwinds deterministically, letting teardown/cleanup run before exit.
+  queue.cancel();
+
+  // Drain: wait for the cancelled job's finally block. If it takes too long,
+  // force-exit so the orchestrator doesn't hang the host process indefinitely.
+  const drainTimer = setTimeout(() => {
     console.log("[qa] shutdown timeout — forcing exit");
     process.exit(1);
   }, SHUTDOWN_TIMEOUT_MS);
+  queue.drain().finally(() => {
+    clearTimeout(drainTimer);
+    console.log("[qa] drained — exiting");
+    process.exit(0);
+  });
 });
 
 process.on("SIGINT", () => {
-  console.log("[qa] SIGINT received — shutting down");
+  console.log("[qa] SIGINT received — cancelling in-flight run and draining");
   shuttingDown = true;
   eventStreamController.abort();
-  process.exit(0);
+  queue.cancel();
+  const drainTimer = setTimeout(() => {
+    console.log("[qa] shutdown timeout — forcing exit");
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS);
+  queue.drain().finally(() => {
+    clearTimeout(drainTimer);
+    console.log("[qa] drained — exiting");
+    process.exit(0);
+  });
+});
+
+process.on("unhandledRejection", (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  console.error("[qa] unhandled rejection:", reason instanceof Error ? reason.stack ?? msg : msg);
+  recordIncident({ source: "qa-generator", severity: "error", summary: `unhandled rejection: ${msg}` });
 });
 
 function enqueueApiRun(app: string, sha: string, target: string, mode: RunMode, guidance?: string, shadow?: boolean): string {
@@ -359,12 +387,14 @@ async function triggerMaintainer(): Promise<void> {
       if (!rate.ok) return leaveForHuman(rate.reasons.join("; "), "critical");
 
       // Layer 5 — pre-deploy self-test gate: install + typecheck + tests on the fix branch.
-      // A fix that fails its OWN gate is never deployed.
+      // A fix that fails its OWN gate is never deployed. Run with a scrubbed env so
+      // agent-authored code (tests, package.json scripts) cannot access secrets.
       const { execSync } = await import("node:child_process");
+      const scrubbed = scrubEnv();
       try {
-        execSync("npm install --no-audit --no-fund", { cwd: maintainerWorkDir, stdio: "inherit" });
-        execSync("npm run typecheck", { cwd: maintainerWorkDir, stdio: "inherit" });
-        execSync("npm test", { cwd: maintainerWorkDir, stdio: "inherit" });
+        execSync("npm install --no-audit --no-fund", { cwd: maintainerWorkDir, stdio: "inherit", env: scrubbed });
+        execSync("npm run typecheck", { cwd: maintainerWorkDir, stdio: "inherit", env: scrubbed });
+        execSync("npm test", { cwd: maintainerWorkDir, stdio: "inherit", env: scrubbed });
       } catch (gateErr) {
         const detail = gateErr instanceof Error ? gateErr.message : String(gateErr);
         recordIncident({
@@ -619,17 +649,22 @@ async function promote(
       console.warn(`[maintainer] CI failed for ${ref} — leaving the PR open (main untouched).`);
       return;
     }
-    if (!autoMerge && s.checks === "success") {
-      // No branch protection: CI is green, merge it ourselves.
-      await mergeNow("CI green");
+    if (!autoMerge) {
+      // No branch protection + no native auto-merge: the PR must be merged by a human.
+      // Self-merging in-process reads check state and merges its own code — a single
+      // point of failure that collapses the outer guard. The doc's guarantee that
+      // "GitHub itself refuses a bad merge" requires branch protection, which code
+      // can't enforce — so we refuse the self-merge fallback entirely.
+      recordIncident({
+        source: "health-check",
+        severity: "warn",
+        summary: "maintainer canary healthy but branch protection/auto-merge is not configured — PR left for a human to review and merge",
+        detail: ref,
+      });
+      console.warn(`[maintainer] ${ref}: no branch protection — PR left open for human review.`);
       return;
     }
-    if (!autoMerge && s.checks === "none" && Date.now() - start > graceMs) {
-      // No CI configured and no protection: nothing to wait on → merge directly.
-      await mergeNow("no CI configured");
-      return;
-    }
-    // pending; or (autoMerge waiting for GitHub to land the merge); or (none still within grace).
+    // pending; or (autoMerge waiting for GitHub to land the merge).
     await sleep(15_000);
   }
   recordIncident({
@@ -831,8 +866,16 @@ const server = createServer(async (req, res) => {
         const { repo, sha, mode, guidance } = result.payload;
         const app = loadAppConfigByRepo(repo);
         if (!app) console.warn(`[qa] no config/apps entry for ${repo}; event ignored`);
-        // A code-mode app (code: true) runs code tests on its webhooks; e2e otherwise.
-        else enqueueApiRun(app.name, sha, app.code ? "code" : "e2e", mode, guidance);
+        else {
+          try {
+            enqueueApiRun(app.name, sha, app.code ? "code" : "e2e", mode, guidance);
+          } catch (err) {
+            console.error("[qa] webhook enqueue failed:", err instanceof Error ? err.message : String(err));
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ message: "internal error — run could not be enqueued" }));
+            return;
+          }
+        }
       }
       res.writeHead(result.status, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ message: result.message }));

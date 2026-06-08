@@ -8,6 +8,26 @@ test("createRecord stores an enqueued record findable by id", () => {
   assert.equal(getRecord(r.id)?.app, "hist-a");
 });
 
+// Two triggers for the same SHA in the same millisecond (webhook re-delivery,
+// double-submit) must never collide on the PRIMARY KEY. With a ms-resolution
+// timestamp alone, two createRecord calls produce byte-identical ids → UNIQUE
+// constraint → the second throw escapes unhandled and drops the trigger.
+test("two rapid createRecord calls for the same sha produce different ids", () => {
+  const sha = "abcdef1234567";
+  const frozenNow = Date.now();
+  const originalNow = Date.now;
+  Date.now = () => frozenNow;
+  try {
+    const a = createRecord({ target: "e2e", app: "hist-colid", sha, mode: "diff" });
+    const b = createRecord({ target: "e2e", app: "hist-colid", sha, mode: "diff" });
+    assert.notEqual(a.id, b.id);
+    assert.ok(getRecord(a.id));
+    assert.ok(getRecord(b.id));
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
 test("listRecords returns newest-first and respects the limit", () => {
   const app = "hist-b";
   const a = createRecord({ target: "e2e",  app, sha: "1111111", mode: "diff" });

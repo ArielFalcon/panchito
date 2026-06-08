@@ -8,15 +8,39 @@
 // injected so the orchestration is unit-testable and the real process is the only
 // uncovered boundary (mirroring the rest of src/qa/*).
 //
-// Runtime note: the orchestrator image ships Node. A non-Node ecosystem only runs
-// if its runtime is present in the image (see Dockerfile) — otherwise the spawn
-// fails with ENOENT and is reported as infra-error (NOT a code bug), never a pass.
+// Runtime note: the orchestrator image ships Node plus Python, Go, Rust, Maven
+// and Gradle (see the root Dockerfile). A missing runtime (e.g. image built without
+// a language) fails with ENOENT and is reported as infra-error, never a pass.
+// The runtimes live in the ORCHESTRATOR image, not the opencode container — the
+// orchestrator spawns the test commands directly.
 
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { QaCase, QaRunResult } from "../types";
 import { sanitizeText, containsSecrets, recordAudit } from "../orchestrator/sanitizer";
+
+// ── Environment scrubbing for untrusted code execution ─────────────────────────
+// The watched repo's install and test commands run in the orchestrator process.
+// Passing the full process.env would give untrusted code GITHUB_TOKEN (push access
+// to the repo) and other secrets. This function strips credentials while preserving
+// the OS and language vars that package managers and test runners need to function.
+
+const BLOCKED_ENV_RE = /^(?:GITHUB_TOKEN|OPENCODE_API_KEY|WEBHOOK_SECRET|QA_API_TOKEN|DOPPLER_|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AZURE_|GOOGLE_APPLICATION_CREDENTIALS)$/;
+
+const ALLOWED_ENV_RE = /^(?:PATH|HOME|USER|SHELL|TERM|LANG|LC_|TMPDIR?|TEMPDIR|TMP$|NODE_ENV|CI|npm_config_|PIP_|PYTHON|VIRTUAL_ENV|GOPATH|GOROOT|GOPRIVATE|GOPROXY|GONOSUMCHECK|GOFLAGS|CGO_|CARGO_|RUSTUP_|RUST_|JAVA_HOME|GRADLE_|MAVEN_|NVM_DIR|NODE_PATH|NODE_OPTIONS|PNPM_|YARN_|COREPACK_|DISPLAY|SSH_AUTH_SOCK|COLORTERM|NO_COLOR|FORCE_COLOR|DEBUG|PKG_CONFIG_PATH|LD_LIBRARY_PATH|DYLD_LIBRARY_PATH)$/;
+
+export function scrubEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined) continue;
+    if (BLOCKED_ENV_RE.test(key)) continue;
+    if (ALLOWED_ENV_RE.test(key)) {
+      env[key] = value;
+    }
+  }
+  return env;
+}
 
 export type Ecosystem = "node" | "python" | "go" | "rust" | "maven" | "gradle" | "unknown";
 
@@ -142,7 +166,7 @@ export const defaultCodeSetupDeps: CodeSetupDeps = {
   install: (project, repoDir) =>
     new Promise((resolve, reject) => {
       const { cmd, args } = project.install!;
-      const child = spawn(cmd, args, { cwd: repoDir, env: { ...process.env } });
+      const child = spawn(cmd, args, { cwd: repoDir, env: scrubEnv() });
       child.on("error", reject);
       child.on("close", (code) =>
         code === 0 ? resolve() : reject(new Error(`code-mode install failed (${cmd} ${args.join(" ")}, exit ${code})`)),
@@ -160,13 +184,17 @@ export interface CodeRunOutput {
 
 export interface CodeExecuteDeps {
   detect(repoDir: string): CodeProject;
-  runTests(project: CodeProject, repoDir: string): Promise<CodeRunOutput>;
+  runTests(project: CodeProject, repoDir: string, opts?: { signal?: AbortSignal; timeoutMs?: number }): Promise<CodeRunOutput>;
 }
 
 export interface CodeExecuteOptions {
   namespace: string;
   onCase?: (c: QaCase) => void;
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }
+
+export const DEFAULT_CODE_MODE_TIMEOUT_MS = 600_000; // 10 min — prevents a hung suite from blocking the queue forever
 
 // High-confidence "the suite executed ZERO tests" detection, per ecosystem/command.
 // Exit code 0 is NOT proof of a real pass: `node --test`, `go test ./...` and others
@@ -204,7 +232,40 @@ export async function runCodeTests(
   deps: CodeExecuteDeps,
 ): Promise<QaRunResult> {
   const project = deps.detect(repoDir);
-  const out = await deps.runTests(project, repoDir);
+
+  // Already-aborted signal: don't even start the spawn.
+  if (opts.signal?.aborted) {
+    return {
+      sha: opts.namespace,
+      verdict: "infra-error",
+      passed: false,
+      cases: [],
+      logs: "code-mode run aborted by operator cancel",
+    };
+  }
+
+  // Race the suite against a timeout. The timeout is enforced at the orchestrator
+  // level (defense in depth: the spawn in defaultCodeExecuteDeps also SIGKILLs the
+  // child on timeout, but this catch-all handles stubbed tests and edge cases).
+  const runPromise = deps.runTests(project, repoDir, { signal: opts.signal, timeoutMs: opts.timeoutMs });
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_CODE_MODE_TIMEOUT_MS;
+  const timeoutResult: CodeRunOutput = {
+    exitCode: null,
+    logs: "",
+    spawnError: `code-mode timeout after ${timeoutMs}ms`,
+  };
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<CodeRunOutput>((resolve) => {
+    timer = setTimeout(() => resolve(timeoutResult), timeoutMs);
+  });
+
+  let out: CodeRunOutput;
+  try {
+    out = await Promise.race([runPromise, timeoutPromise]);
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (containsSecrets(out.logs)) {
     console.warn("[sanitizer] Secrets detected in code-test logs — redacting before publish");
@@ -260,16 +321,40 @@ function tail(s: string, n: number): string {
 
 export const defaultCodeExecuteDeps: CodeExecuteDeps = {
   detect: (repoDir) => detectCodeProject(repoDir),
-  runTests: (project, repoDir) =>
+  runTests: (project, repoDir, opts) =>
     new Promise((resolve) => {
       const { cmd, args } = project.test;
-      const child = spawn(cmd, args, { cwd: repoDir, env: { ...process.env } });
+      const child = spawn(cmd, args, { cwd: repoDir, env: scrubEnv() });
       let stdout = "";
       let stderr = "";
+      let resolved = false;
+
+      const finish = (result: CodeRunOutput) => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timer);
+        resolve(result);
+      };
+
+      // Timeout guard: a hung suite must not block the sequential queue forever.
+      // SIGKILL the process tree and resolve as inconclusive infra, not a pass.
+      const timeoutMs = opts?.timeoutMs ?? DEFAULT_CODE_MODE_TIMEOUT_MS;
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        finish({ exitCode: null, logs: `${stdout}\n${stderr}`, spawnError: `code-mode timeout after ${timeoutMs}ms` });
+      }, timeoutMs);
+
+      // Operator cancel: the pipeline's AbortSignal fires → kill the suite immediately.
+      if (opts?.signal) {
+        opts.signal.addEventListener("abort", () => {
+          child.kill("SIGKILL");
+          finish({ exitCode: null, logs: `${stdout}\n${stderr}`, spawnError: "aborted by operator cancel" });
+        }, { once: true });
+      }
+
       child.stdout.on("data", (d) => (stdout += d));
       child.stderr.on("data", (d) => (stderr += d));
-      // A missing runtime (ENOENT) is infra, not a test failure — surface it distinctly.
-      child.on("error", (err) => resolve({ exitCode: null, logs: `${stderr}${stdout}`, spawnError: String(err) }));
-      child.on("close", (code) => resolve({ exitCode: code, logs: `${stdout}\n${stderr}`.trim() }));
+      child.on("error", (err) => finish({ exitCode: null, logs: `${stderr}${stdout}`, spawnError: String(err) }));
+      child.on("close", (code) => finish({ exitCode: code, logs: `${stdout}\n${stderr}`.trim() }));
     }),
 };

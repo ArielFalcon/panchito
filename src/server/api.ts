@@ -144,7 +144,13 @@ async function handleCreateRun(req: IncomingMessage, res: ServerResponse, deps: 
     return true;
   }
 
-  const id = deps.enqueue(appConfig.name, sha, target, mode, guidance, shadow);
+  let id: string;
+  try {
+    id = deps.enqueue(appConfig.name, sha, target, mode, guidance, shadow);
+  } catch (err) {
+    json(res, 500, { error: `failed to enqueue run: ${err instanceof Error ? err.message : String(err)}` });
+    return true;
+  }
   json(res, 202, { id, app: appConfig.name, sha, target, mode, status: "enqueued" });
   return true;
 }

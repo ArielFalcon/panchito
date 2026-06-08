@@ -4,6 +4,7 @@ import {
   detectCodeProject,
   setupCodeProject,
   runCodeTests,
+  scrubEnv,
   DetectDeps,
   CodeProject,
   CodeExecuteDeps,
@@ -164,4 +165,77 @@ test("logs are sanitized before returning", async () => {
   };
   const run = await runCodeTests("/r", { namespace: "qa-bot-s" }, deps);
   assert.doesNotMatch(run.logs, /ghp_aaaa/);
+});
+
+// Security: untrusted code (the watched repo's install and test commands) must never
+// receive secrets. GITHUB_TOKEN in the spawn env would let a malicious/compromised
+// repo push to itself — breaking the read-only security boundary.
+test("scrubEnv strips secrets but preserves language vars and OS essentials", () => {
+  const saved = { ...process.env };
+  try {
+    // Plant secrets that the watched repo must never see.
+    process.env.GITHUB_TOKEN = "ghp_fakeSecretValue123456";
+    process.env.OPENCODE_API_KEY = "opencode-go-fakeKeyValue12345";
+    process.env.WEBHOOK_SECRET = "whsec_fakeWebhookSecret";
+    process.env.QA_API_TOKEN = "qa_fakeApiTokenValue12345";
+    process.env.DOPPLER_TOKEN = "dp_fakeDopplerToken";
+    // Plant harmless vars that code-mode tools need.
+    process.env.PATH = "/custom/bin";
+    process.env.HOME = "/home/testuser";
+    process.env.GOPATH = "/home/testuser/go";
+    process.env.NODE_ENV = "test";
+    process.env.CI = "true";
+
+    const env = scrubEnv();
+
+    // Secrets MUST be absent.
+    assert.ok(!("GITHUB_TOKEN" in env), "GITHUB_TOKEN must not leak to untrusted code");
+    assert.ok(!("OPENCODE_API_KEY" in env), "OPENCODE_API_KEY must not leak to untrusted code");
+    assert.ok(!("WEBHOOK_SECRET" in env), "WEBHOOK_SECRET must not leak to untrusted code");
+    assert.ok(!("QA_API_TOKEN" in env), "QA_API_TOKEN must not leak to untrusted code");
+    assert.ok(!("DOPPLER_TOKEN" in env), "DOPPLER_TOKEN must not leak to untrusted code");
+
+    // Essential vars for package managers / test runners MUST be present.
+    assert.equal(env.PATH, "/custom/bin", "PATH must be preserved");
+    assert.equal(env.HOME, "/home/testuser", "HOME must be preserved");
+    assert.equal(env.GOPATH, "/home/testuser/go", "GOPATH must be preserved");
+    assert.equal(env.NODE_ENV, "test", "NODE_ENV must be preserved");
+    assert.equal(env.CI, "true", "CI must be preserved");
+  } finally {
+    // Restore original env so no side effects leak to other tests.
+    for (const key of Object.keys(process.env)) {
+      if (!(key in saved)) delete process.env[key];
+    }
+    Object.assign(process.env, saved);
+  }
+});
+
+// A hanging test suite (infinite loop, hung network call, OOM) blocks the sequential
+// queue forever. Timeout must kill the process tree and resolve as infra-error.
+test("code-mode spawn that never completes is killed by timeout → infra-error", async () => {
+  const project: CodeProject = { ecosystem: "node", install: null, test: { cmd: "node", args: ["--test"] } };
+  const deps: CodeExecuteDeps = {
+    detect: () => project,
+    // Return a promise that never resolves — the orchestrator's timeout must win.
+    runTests: () => new Promise(() => {}),
+  };
+  const run = await runCodeTests("/r", { namespace: "qa-bot-t", timeoutMs: 100 }, deps);
+  assert.equal(run.verdict, "infra-error");
+  assert.match(run.logs, /timeout/i);
+});
+
+// An operator cancel mid-execute must stop the run and NOT publish. The AbortSignal
+// must kill the spawned process and resolve as infra-error.
+test("code-mode spawn aborted via AbortSignal → infra-error", async () => {
+  const controller = new AbortController();
+  const project: CodeProject = { ecosystem: "node", install: null, test: { cmd: "node", args: ["--test"] } };
+  const deps: CodeExecuteDeps = {
+    detect: () => project,
+    // Return a promise that never resolves — the abort signal must win.
+    runTests: () => new Promise(() => {}),
+  };
+  controller.abort();
+  const run = await runCodeTests("/r", { namespace: "qa-bot-ab", signal: controller.signal }, deps);
+  assert.equal(run.verdict, "infra-error");
+  assert.match(run.logs, /aborted/i);
 });

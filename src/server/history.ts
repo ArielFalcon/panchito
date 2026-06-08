@@ -10,6 +10,7 @@
 import Database from "better-sqlite3";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { RunRecord, RunMode, TestTarget, QaCase, RunVerdict, SpecRecord } from "../types";
 
 const DELETE_MAX_AGE_DAYS = 30;
@@ -147,7 +148,7 @@ export function createRecord(opts: {
   app: string; sha: string; ref?: string; target: TestTarget; mode: RunMode; parentRunId?: string;
 }): RunRecord {
   ensureDb();
-  const id = `run-${opts.sha.slice(0, 7)}-${Date.now().toString(36)}`;
+  const id = `run-${opts.sha.slice(0, 7)}-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
   const at = new Date().toISOString();
 
   insertRun.run({
