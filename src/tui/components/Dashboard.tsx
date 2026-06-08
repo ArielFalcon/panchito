@@ -12,24 +12,6 @@ import { Section } from "./Section";
 import { HistoryList, toHistoryItems } from "./HistoryList";
 import { FocusCard } from "./FocusCard";
 import { LiveActivity } from "./LiveActivity";
-import { listLearningRules, loadCurriculum } from "../../server/history";
-
-function learningSummary(app: string): string | null {
-  try {
-    const rules = listLearningRules(app, 50);
-    const curriculum = loadCurriculum(app);
-    const activeRules = rules.filter((r) => r.status === "active" || r.status === "candidate");
-    const proven = curriculum?.archetypes.filter((a) => a.caughtRealBug).length ?? 0;
-    const total = curriculum?.archetypes.length ?? 10;
-    if (activeRules.length === 0 && proven === 0) return null;
-    const parts: string[] = [];
-    if (activeRules.length > 0) parts.push(`${activeRules.length} rules`);
-    if (proven > 0) parts.push(`${proven}/${total} archetypes`);
-    return `📊 learning: ${parts.join(", ")}`;
-  } catch {
-    return null;
-  }
-}
 
 function stepDetail(record: RunRecord, step: string, isActive: boolean, view: ActivityView): string | undefined {
   const { passed = 0, failed = 0, cases, specs, stepDetail: sd, note, retrying, target } = record;
@@ -146,9 +128,6 @@ export function Dashboard({ record }: { record: RunRecord }): React.ReactElement
           {record.note ? <Text dimColor>{` — ${record.note}`}</Text> : null}
         </Box>
       ) : null}
-
-      {/* Learning state summary */}
-      {verdict ? (() => { const ls = learningSummary(app); return ls ? <Box marginTop={0}><Text dimColor>{ls}</Text></Box> : null; })() : null}
     </Box>
   );
 }
