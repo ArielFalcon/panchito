@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createRecord, getRecord, listRecords, currentRun, updateRecord, addCase } from "./history";
+import { createRecord, getRecord, listRecords, currentRun, updateRecord, addCase, continuationDepth, clearDatabase } from "./history";
 
 test("createRecord stores an enqueued record findable by id", () => {
   const r = createRecord({ target: "e2e",  app: "hist-a", sha: "abcdef1234", mode: "diff" });
@@ -56,4 +56,23 @@ test("currentRun returns a running/enqueued record and skips finished ones", () 
   assert.ok(currentRun());
   updateRecord(r.id, { status: "done", verdict: "pass" });
   assert.equal(getRecord(r.id)?.status, "done");
+});
+
+test("currentRun prefers running over enqueued when both exist (queue FIFO)", () => {
+  clearDatabase();
+  const olderRunning = createRecord({ target: "e2e", app: "hist-e-fifo", sha: "5555555", mode: "diff" });
+  const newerEnqueued = createRecord({ target: "e2e", app: "hist-e-fifo", sha: "6666666", mode: "diff" });
+  updateRecord(olderRunning.id, { status: "running" });
+  const cur = currentRun();
+  assert.ok(cur);
+  assert.equal(cur!.id, olderRunning.id, "must return the actually-running job, not the newest enqueued");
+});
+
+test("continuationDepth walks the parentRunId chain", () => {
+  const grandparent = createRecord({ target: "e2e", app: "hist-f", sha: "aaa0001", mode: "diff" });
+  const parent = createRecord({ target: "e2e", app: "hist-f", sha: "aaa0001", mode: "diff", parentRunId: grandparent.id });
+  const child = createRecord({ target: "e2e", app: "hist-f", sha: "aaa0001", mode: "diff", parentRunId: parent.id });
+  assert.equal(continuationDepth(grandparent), 0);
+  assert.equal(continuationDepth(parent), 1);
+  assert.equal(continuationDepth(child), 2);
 });

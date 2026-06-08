@@ -16,6 +16,7 @@ export interface PublishInput {
   sha: string;
   mirrorDir: string; // working copy of the repo (where `e2e/` lives)
   baseBranch: string;
+  parentRunId?: string; // continuation provenance: stamps the PR body so a coerced-green chain is traceable
 }
 
 export interface PublishDeps {
@@ -96,13 +97,14 @@ async function publishChanges(input: PublishInput, deps: PublishDeps, shape: Pub
 
 export async function publishE2e(input: PublishInput, deps: PublishDeps): Promise<PublishResult | null> {
   const short = shortSha(input.sha);
+  const provenance = input.parentRunId ? `\n\n> ⛓️ Continuation of ${input.parentRunId}` : "";
   return publishChanges(input, deps, {
     statusPathspec: E2E_PATHSPEC,
     addPathspec: E2E_PATHSPEC,
     branch: `qa/e2e-${short}`,
     commitMsg: `test(e2e): automated QA for ${short}`,
     title: `QA E2E for ${short}`,
-    body: `E2E tests generated/updated by ai-pipeline for \`${input.sha}\`. Harness green (typecheck + lint + stable run against DEV).`,
+    body: `E2E tests generated/updated by ai-pipeline for \`${input.sha}\`. Harness green (typecheck + lint + stable run against DEV).${provenance}`,
     noChangeLog: "[qa] no changes in e2e/ — the suite already covers the change, no PR opened.",
   });
 }
@@ -111,13 +113,14 @@ export async function publishE2e(input: PublishInput, deps: PublishDeps): Promis
 // e2e/.qa manifest). The whole tree minus node_modules is committed.
 export async function publishCode(input: PublishInput, deps: PublishDeps): Promise<PublishResult | null> {
   const short = shortSha(input.sha);
+  const provenance = input.parentRunId ? `\n\n> ⛓️ Continuation of ${input.parentRunId}` : "";
   return publishChanges(input, deps, {
     statusPathspec: CODE_PATHSPEC,
     addPathspec: CODE_PATHSPEC,
     branch: `qa/code-${short}`,
     commitMsg: `test(code): automated QA for ${short}`,
     title: `QA code tests for ${short}`,
-    body: `Source-code tests generated/updated by ai-pipeline for \`${input.sha}\`. Harness green (the repo's own test suite passed, exit code 0).`,
+    body: `Source-code tests generated/updated by ai-pipeline for \`${input.sha}\`. Harness green (the repo's own test suite passed, exit code 0).${provenance}`,
     noChangeLog: "[qa] no test changes in the repo — nothing new to cover, no PR opened.",
   });
 }

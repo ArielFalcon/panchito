@@ -74,8 +74,17 @@ fail-closed) necesita estado en el historial; anotar "publicado sin review" en e
 del PR necesita threading a `publish`. La observabilidad por-corrida (WARNING + nota) sí
 quedó.
 
-**Pendiente:** Fase 2 (seguridad/infra), Fase 3 (robustez/docs), y la **iniciativa
-keystone** (ítems 8/9 + source-maps). Detalle abajo.
+**Pendiente:** la **iniciativa keystone** (ítems 8/9 + source-maps). Detalle abajo.
+
+> **Fase 3 — COMPLETA** (5/5 ítems), gate al cierre: **319/319 tests, typecheck limpio**.
+
+| # | Ítem | Archivos clave |
+|---|---|---|
+| 24 | currentRun() prioriza running | `history.ts` (ORDER BY status DESC, at ASC) |
+| 21 | Sanitizer redacta credenciales JSON | `sanitizer.ts` ([\\"']? antes del separador) |
+| 22 | Config throw ante ${VAR} no resuelta | `config-loader.ts` |
+| 23 | Continuación depth cap + provenance | `history.ts` (continuationDepth), `index.ts`, `publish.ts` |
+| 25 | Corregir documentos | `CLAUDE.md` (319 tests) |
 
 > **Fase 2 — COMPLETA** (7/7 ítems), TDD, gate al cierre: **316/316 tests, typecheck limpio** (partió de 310).
 

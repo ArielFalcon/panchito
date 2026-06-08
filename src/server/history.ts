@@ -89,7 +89,7 @@ function ensureDb(): void {
   `);
   getRunStmt = db.prepare("SELECT * FROM runs WHERE id = ?");
   listRunsStmt = db.prepare("SELECT * FROM runs WHERE app = ? ORDER BY at DESC, rowid DESC LIMIT ?");
-  currentRunStmt = db.prepare("SELECT * FROM runs WHERE status IN ('running', 'enqueued') ORDER BY at DESC, rowid DESC LIMIT 1");
+  currentRunStmt = db.prepare("SELECT * FROM runs WHERE status IN ('running', 'enqueued') ORDER BY (status='running') DESC, at ASC, rowid ASC LIMIT 1");
   interruptedStmt = db.prepare("SELECT * FROM runs WHERE status IN ('running', 'enqueued')");
   deleteCaseByName = db.prepare("DELETE FROM cases WHERE run_id = ? AND name = ?");
   insertCase = db.prepare("INSERT INTO cases (run_id, name, status, detail) VALUES (@runId, @name, @status, @detail)");
@@ -265,6 +265,18 @@ export function interruptedRecords(): RunRecord[] {
 export function clearDatabase(): void {
   ensureDb();
   db.exec("DELETE FROM specs; DELETE FROM cases; DELETE FROM runs;");
+}
+
+export const MAX_CONTINUATION_DEPTH = 5;
+
+export function continuationDepth(record: RunRecord): number {
+  let depth = 0;
+  let current: RunRecord | undefined = record;
+  while (current?.parentRunId) {
+    depth++;
+    current = getRecord(current.parentRunId);
+  }
+  return depth;
 }
 
 process.on("exit", () => {

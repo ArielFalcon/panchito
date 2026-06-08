@@ -37,16 +37,18 @@ const NAMED_SECRET_PATTERNS: Array<{ name: string; p: RegExp }> = [
   { name: "private-key-pem", p: /-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]+?-----END [A-Z ]+PRIVATE KEY-----/g },
   // API keys in query strings: ?token=xxx, &key=yyy, etc.
   { name: "api-key-query", p: /\b[?&](?:token|key|api_key|api-key|apiKey|secret)=[^&\s]+/gi },
-  // Generic credential assignments: credential/auth_token/access_key = value
-  { name: "generic-credential", p: /(?:credential|auth_token|access_key)\s*[:=]\s*\S+/gi },
+  // Generic credential assignments: credential/auth_token/access_key = value.
+  // The [\"']? before the separator handles JSON formatting where a closing quote
+  // separates the key from the colon: "password": "hunter2" (previously leaked).
+  { name: "generic-credential", p: /(?:credential|auth_token|access_key)[\"']?\s*[:=]\s*\S+/gi },
   // ENV-VAR style credential names (UPPER_SNAKE ending in a credential word), e.g.
   // DEV_TEST_PASS=..., DEV_ENV_PASS=..., GITHUB_TOKEN=..., OPENCODE_API_KEY=... The
   // bare-keyword pattern below misses "PASS"/"KEY" as a suffix, so this covers the
   // system's own env credentials. Case-sensitive (UPPER) to limit false positives.
-  { name: "env-credential", p: /\b[A-Z][A-Z0-9_]*(?:PASS|PASSWORD|SECRET|TOKEN|KEY|PWD|CRED|CREDENTIAL)[A-Z0-9_]*\s*[:=]\s*\S+/g },
+  { name: "env-credential", p: /\b[A-Z][A-Z0-9_]*(?:PASS|PASSWORD|SECRET|TOKEN|KEY|PWD|CRED|CREDENTIAL)[A-Z0-9_]*[\"']?\s*[:=]\s*\S+/g },
   // api_key/token/secret/password assignments — catch‑all; keep LAST among
-  // assignment patterns so the more specific ones fire first
-  { name: "api-key-assignment", p: /(?:api[_-]?key|token|secret|password|passwd|pwd)\s*[:=]\s*\S+/gi },
+  // assignment patterns so the more specific ones fire first.
+  { name: "api-key-assignment", p: /(?:api[_-]?key|token|secret|password|passwd|pwd)[\"']?\s*[:=]\s*\S+/gi },
   // base64‑encoded secrets (>40 chars of base64 chars), with data‑URI filter
   { name: "base64-secret", p: /\b[A-Za-z0-9+/=]{40,}\b/g },
 ];

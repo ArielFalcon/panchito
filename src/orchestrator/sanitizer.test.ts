@@ -152,3 +152,16 @@ test("does NOT redact non-credential UPPER_SNAKE assignments (no false positive)
     assert.equal(containsSecrets(ok), false, `should NOT flag: ${ok}`);
   }
 });
+
+test("redacts credentials in JSON form (quoted keys with colon)", () => {
+  for (const json of [
+    `{"password": "hunter2plaintext"}`,
+    `{"token": "abc123secretvalue"}`,
+    `{"secret": "mysupersecret"}`,
+    `{"apiKey": "plainsecret123"}`,
+    `"password": "hunter2"`,
+  ]) {
+    const { detection } = sanitizeText(json);
+    assert.equal(detection.redacted, true, `must redact: ${json}`);
+  }
+});

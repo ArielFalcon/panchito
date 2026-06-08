@@ -86,12 +86,12 @@ export interface PipelineDeps {
   // Did this run produce any V8 coverage dumps? Used only to make a "structural no-op"
   // (dumps existed but matched zero changed files) observable, distinct from "no data".
   hasCoverageDumps?(e2eDir: string, namespace: string): boolean;
-  publish(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string }): Promise<{ prUrl: string; merged: boolean } | null>;
+  publish(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string; parentRunId?: string }): Promise<{ prUrl: string; merged: boolean } | null>;
   // Code mode (target "code"): no web env, no Playwright. Install the repo's deps,
   // run its own test suite, classify by exit code, and publish the new tests.
   setupCode(repoDir: string): Promise<void>;
   executeCode(repoDir: string, opts: { namespace: string; onCase?: (c: QaCase) => void; signal?: AbortSignal; timeoutMs?: number }): Promise<QaRunResult>;
-  publishCode(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string }): Promise<{ prUrl: string; merged: boolean } | null>;
+  publishCode(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string; parentRunId?: string }): Promise<{ prUrl: string; merged: boolean } | null>;
   openIssue(repo: string, title: string, body: string): Promise<{ url: string }>;
   log?(msg: string): void;
 }
@@ -570,7 +570,7 @@ export async function runPipeline(
   } else if (shadow) {
     log(`[qa] (shadow) ${kind} green; a suite PR would have been opened.`);
   } else {
-    const prInput = { repo: app.repo, sha, mirrorDir, baseBranch: app.baseBranch ?? "main" };
+    const prInput = { repo: app.repo, sha, mirrorDir, baseBranch: app.baseBranch ?? "main", parentRunId: opts.parentRunId };
     const pr = isCode ? await deps.publishCode(prInput) : await deps.publish(prInput);
     log(
       pr

@@ -50,5 +50,9 @@ export function listAppConfigs(root = ROOT): AppConfig[] {
 }
 
 function expandEnv(s: string): string {
-  return s.replace(/\$\{([A-Z0-9_]+)\}/g, (_, key) => process.env[key] ?? "");
+  return s.replace(/\$\{([A-Z0-9_]+)\}/g, (_, key) => {
+    const val = process.env[key];
+    if (val === undefined) throw new Error(`config references unset env var \${${key}}`);
+    return val;
+  });
 }

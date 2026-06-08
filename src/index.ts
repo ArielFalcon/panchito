@@ -7,7 +7,7 @@ import { handleWebhook } from "./server/webhook";
 import { loadAppConfig, loadAppConfigByRepo, listAppConfigs } from "./orchestrator/config-loader";
 import { handleApi, ApiDeps } from "./server/api";
 import { handleMaintainerApi, recordIncident, setMaintainerStatus, getMaintainerStatus, getIncidents, updateIncident } from "./server/maintainer";
-import { getRecord, listRecords, currentRun, updateRecord, interruptedRecords } from "./server/history";
+import { getRecord, listRecords, currentRun, updateRecord, interruptedRecords, continuationDepth, MAX_CONTINUATION_DEPTH } from "./server/history";
 import { testDataNamespace } from "./qa/test-data";
 import { enqueueTrackedRun } from "./server/runner";
 import { performSwap, confirmSwapHealthy, rollback, realSwapFs, SWAP_MARKER_FILE } from "./server/self-update";
@@ -787,6 +787,14 @@ const apiDeps: ApiDeps = {
     if (shuttingDown) return "";
     const parent = getRecord(parentId);
     if (!parent) return "";
+    // Cap the continuation chain: an operator can chain continue→continue→continue
+    // indefinitely, each carrying fresh guidance to nudge the suite toward green.
+    // After MAX_CONTINUATION_DEPTH rounds, refuse — the suite needs a fresh run.
+    const depth = continuationDepth(parent);
+    if (depth >= MAX_CONTINUATION_DEPTH) {
+      console.warn(`[qa] rejecting continuation of ${parentId}: depth ${depth} >= ${MAX_CONTINUATION_DEPTH} (max)`);
+      return "";
+    }
     let failed = parent.cases.filter((c) => c.status === "fail");
     if (cases && cases.length > 0) {
       const want = new Set(cases);
