@@ -45,6 +45,20 @@ const defaultDeps: GateDeps = {
   now: () => Date.now(),
 };
 
+// DEV's /version may report a SHORT SHA (the 7-char form from Vercel/`git
+// rev-parse --short`/`$GITHUB_SHA`) while the trigger carries the full 40-char SHA
+// (or vice versa). Match when equal, or when one is a >=7-char prefix of the other,
+// case-insensitive. The 7-char floor avoids accidental weak matches on tiny prefixes.
+export function shaMatches(a: string | undefined, b: string | undefined): boolean {
+  const x = (a ?? "").toLowerCase();
+  const y = (b ?? "").toLowerCase();
+  if (!x || !y) return false;
+  if (x === y) return true;
+  if (x.length >= 7 && y.startsWith(x)) return true;
+  if (y.length >= 7 && x.startsWith(y)) return true;
+  return false;
+}
+
 export async function waitForDeploy(
   app: DeployTarget,
   sha: string,
@@ -53,7 +67,7 @@ export async function waitForDeploy(
   const deadline = deps.now() + app.deployTimeoutMs;
   while (deps.now() < deadline) {
     const v = await deps.fetchVersion(app.versionUrl);
-    if (v?.sha === sha && v.healthy === true) return;
+    if (shaMatches(v?.sha, sha) && v?.healthy === true) return;
     await deps.sleep(app.pollIntervalMs);
   }
   throw new DeployTimeoutError(app.name, sha);
