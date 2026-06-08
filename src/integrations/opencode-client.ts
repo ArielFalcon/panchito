@@ -783,38 +783,47 @@ export function buildPrompt(input: OpencodeRunInput): string {
 // For diff mode, it filters to only the routes/operations touched by the changed
 // files. For other modes (complete/exhaustive/manual), it renders the full map.
 
+// context.json is read from the WATCHED repo (and committed by this system's own PRs), so
+// it is attacker-influenceable. Every field is sanitized before it reaches the test-writing
+// agent (prompt-injection / secret-exfil defense), and the map is BOUNDED so a huge file
+// cannot blow the token budget. `s()` redacts; MAX_ITEMS caps each section.
 export function renderArchitectureContext(
   ctx: ArchitectureContext,
   changedFiles?: string[],
 ): string | null {
   if (!ctx.routes?.length && !ctx.api?.length) return null;
 
-  const relevantLinks = changedFiles?.length
+  const s = (x: unknown): string => sanitizeText(String(x ?? "")).text;
+  const MAX_ITEMS = 200;
+  const MAX_LEN = 20_000;
+
+  const relevantLinks = (changedFiles?.length
     ? ctx.feBe?.filter((link) => {
-        // A link is relevant if any changed file path contains the route path
-        // or the via symbol. Crude but effective for scoping.
-        const terms = [link.route, link.via ?? "", link.operationId].filter(Boolean);
+        // Scope by terms specific enough to be meaningful: a route of "/" (or any 1-2 char
+        // term) is a substring of EVERY file path and would defeat the scoping entirely.
+        const terms = [link.route, link.via ?? "", link.operationId].filter((t) => t && t.length >= 3);
         return changedFiles.some((f) => terms.some((t) => f.includes(t)));
       }) ?? ctx.feBe ?? []
-    : ctx.feBe ?? [];
+    : ctx.feBe ?? []
+  ).slice(0, MAX_ITEMS);
 
   const lines: string[] = [];
   lines.push("## Architecture context (from e2e/.qa/context.json)");
-  lines.push(`Built at ${ctx.builtAtSha.slice(0, 7)} — the FE↔BE map this app's QA uses to cross the frontend→backend boundary.`);
+  lines.push(`Built at ${s(ctx.builtAtSha).slice(0, 7)} — the FE↔BE map this app's QA uses to cross the frontend→backend boundary.`);
   lines.push("");
 
   if (ctx.routes.length) {
     lines.push(`### Routes (${ctx.routes.length} entry points)`);
-    for (const r of ctx.routes) {
-      lines.push(`- \`${r.path}\` → ${r.component ?? "(unknown component)"}${r.name ? ` ("${r.name}")` : ""}`);
+    for (const r of ctx.routes.slice(0, MAX_ITEMS)) {
+      lines.push(`- \`${s(r.path)}\` → ${s(r.component ?? "(unknown component)")}${r.name ? ` ("${s(r.name)}")` : ""}`);
     }
     lines.push("");
   }
 
   if (ctx.api.length) {
     lines.push(`### API operations (${ctx.api.length} endpoints)`);
-    for (const o of ctx.api) {
-      lines.push(`- \`${o.operationId}\`: ${o.method} ${o.path}${o.service ? ` (${o.service})` : ""}`);
+    for (const o of ctx.api.slice(0, MAX_ITEMS)) {
+      lines.push(`- \`${s(o.operationId)}\`: ${s(o.method)} ${s(o.path)}${o.service ? ` (${s(o.service)})` : ""}`);
     }
     lines.push("");
   }
@@ -823,16 +832,16 @@ export function renderArchitectureContext(
     lines.push(`### FE↔BE links (${relevantLinks.length} of ${ctx.feBe?.length ?? 0} total)`);
     lines.push("Each link tells you which frontend route calls which backend operation — use this to widen the blast radius:");
     for (const l of relevantLinks) {
-      lines.push(`- Route \`${l.route}\` → \`${l.operationId}\`${l.via ? ` (via ${l.via})` : ""}`);
+      lines.push(`- Route \`${s(l.route)}\` → \`${s(l.operationId)}\`${l.via ? ` (via ${s(l.via)})` : ""}`);
     }
     lines.push("");
   }
 
   if (ctx.flows?.length) {
     lines.push("### Named flows");
-    for (const f of ctx.flows) {
-      const opList = f.operations?.length ? ` → ${f.operations.join(", ")}` : "";
-      lines.push(`- **${f.id}**: ${f.routes.join(", ")}${opList}`);
+    for (const f of ctx.flows.slice(0, MAX_ITEMS)) {
+      const opList = f.operations?.length ? ` → ${f.operations.slice(0, MAX_ITEMS).map(s).join(", ")}` : "";
+      lines.push(`- **${s(f.id)}**: ${f.routes.slice(0, MAX_ITEMS).map(s).join(", ")}${opList}`);
     }
     lines.push("");
   }
@@ -840,7 +849,8 @@ export function renderArchitectureContext(
   lines.push("When the blast radius from the diff touches a route, use its FE↔BE links");
   lines.push("to also consider the backend operations — a frontend change can break backend");
   lines.push("behaviour and vice-versa.");
-  return lines.join("\n");
+  const out = lines.join("\n");
+  return out.length > MAX_LEN ? out.slice(0, MAX_LEN) + "\n…(context truncated)" : out;
 }
 
 // ── context mode: build the FE↔BE architecture map ──────────────────────────

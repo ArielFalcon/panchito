@@ -13,11 +13,41 @@ import {
   runOpencodeParallel,
   buildWorkerPrompt,
   buildPlanPrompt,
+  renderArchitectureContext,
   ManifestFs,
   ParallelWorkerInput,
   OpencodeDeps,
   OpencodeRunInput,
 } from "./opencode-client";
+import type { ArchitectureContext } from "../qa/context";
+
+// context.json is read from the WATCHED repo and committed by this system's own PRs, so it
+// is attacker-influenceable. It must be sanitized before reaching the test-writing agent.
+test("renderArchitectureContext sanitizes injected fields (no prompt-injection / secret leak)", () => {
+  const ctx: ArchitectureContext = {
+    builtAtSha: "abc1234def",
+    routes: [{ path: "/x", name: "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" }],
+    api: [],
+    feBe: [],
+  };
+  const out = renderArchitectureContext(ctx) ?? "";
+  assert.doesNotMatch(out, /ghp_AAAA/, "a token in context.json must be redacted before the prompt");
+});
+
+test("renderArchitectureContext: a root route '/' does not scope-match every changed file (M9)", () => {
+  const ctx: ArchitectureContext = {
+    builtAtSha: "abc1234def",
+    routes: [{ path: "/" }, { path: "/checkout" }],
+    api: [{ operationId: "pay", method: "POST", path: "/pay" }],
+    feBe: [
+      { route: "/", operationId: "pay" }, // route "/" would match any file path via includes()
+      { route: "/checkout", operationId: "pay" },
+    ],
+  };
+  const out = renderArchitectureContext(ctx, ["src/unrelated.ts"]) ?? "";
+  // The "/" link must NOT be pulled in as "relevant" just because every path contains "/".
+  assert.doesNotMatch(out, /Route `\/` →/, "root-route link must not match every changed file");
+});
 
 const input: OpencodeRunInput = {
   repo: "org/demo",

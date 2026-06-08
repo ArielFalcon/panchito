@@ -115,11 +115,14 @@ cd e2e && npx playwright test --list 2>&1
 ```
 to verify the tests are discoverable. Fix any errors immediately.
 
-### 5. Record metadata
+### 5. Declare metadata in your verdict — do NOT edit manifest.json
 
-For each test, add/update its entry in `e2e/.qa/manifest.json` with
-`{ id, objective, flow, targets, changeRef }`. One objective = one test.
-If updating an existing test, edit its entry — do not duplicate.
+Do **NOT** write or edit `e2e/.qa/manifest.json`: the orchestrator owns it and records each
+test's entry **deterministically** from the `specMetas` you return in your closing verdict
+JSON. Editing the file yourself creates a second, non-deterministic writer that the
+orchestrator's write then has to reconcile (and a corrupt edit silently discards prior
+metadata). Instead, for every spec you wrote/updated, include one entry in `specMetas`:
+`{ file, flow, objective, targets }` (one objective = one test).
 
 ### 6. Self-review (an independent reviewer judges you afterwards)
 
