@@ -151,7 +151,22 @@ export function RunFlow({ client, apps, refName, sha, guidance }: {
 
 function SummaryScreen({ client, id, onBack }: { client: QaClient; id: string; onBack: () => void }): React.ReactElement {
   const [record, setRecord] = useState<RunRecord | null>(null);
-  useEffect(() => { let alive = true; client.getRun(id).then((r) => { if (alive) setRecord(r); }).catch(() => {}); return () => { alive = false; }; }, [client, id]);
+  const [continueId, setContinueId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    client.getRun(id).then((r) => { if (alive) setRecord(r); }).catch(() => {});
+    return () => { alive = false; };
+  }, [client, id]);
+
+  const handleContinue = async (cases: string[]) => {
+    try {
+      const res = await client.continueRun(id, cases);
+      if (res?.id) setContinueId(res.id);
+    } catch { /* continue failed — stay on summary */ }
+  };
+
+  if (continueId) return <Watch client={client} id={continueId} onDone={() => {}} />;
   if (!record) return <Text color="cyan"><Spinner type="dots" />{" loading result…"}</Text>;
-  return <RunSummary record={record} client={client} onBack={onBack} />;
+  return <RunSummary record={record} client={client} onBack={onBack} onContinue={handleContinue} />;
 }

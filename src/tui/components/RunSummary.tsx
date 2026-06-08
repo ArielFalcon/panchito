@@ -1,121 +1,96 @@
-// Post-execution summary screen. Shown after a run reaches a verdict.
-// Interactive: keyboard navigation (↑↓ expand sections, C/R/B actions).
-// Sections: Pipeline steps, Test results, Coverage, Shadow feedback, Agent note.
+// Post-execution summary screen. Interactive: keyboard navigation (↑↓ expand,
+// ↩ toggle detail, C/R/B/F actions). Sections collapse/expand one at a time.
 
-import React, { useState } from "react";
+import React, { useCallback, useState } from "react";
 import { Box, Text } from "ink";
 import { useInput } from "ink";
 import { RunRecord } from "../../types";
-import { PIPELINE_STEPS, stepState, sectionLabel, progressBar, verdictColor, verdictIcon, shortSha, caseColor, caseIcon } from "../format";
-import type { PipelineStep, StepState } from "../format";
+import { PIPELINE_STEPS, stepState, sectionLabel, verdictColor, verdictIcon, shortSha, caseColor, caseIcon } from "../format";
 import { ChatInput } from "./ChatInput";
 import type { QaClient } from "../client";
 
-interface SectionDef {
-  id: string;
-  label: string;
-  render(open: boolean): React.ReactElement;
-  defaultOpen?: boolean;
-}
-
-export function RunSummary({ record, client, onBack }: {
+export function RunSummary({ record, client, onBack, onContinue }: {
   record: RunRecord;
   client: QaClient;
   onBack: () => void;
+  onContinue?: (cases: string[]) => void;
 }): React.ReactElement {
   const [openSection, setOpenSection] = useState<string | null>("results");
   const [focusIdx, setFocusIdx] = useState(0);
-  const [selectedCase, setSelectedCase] = useState<number | null>(null);
   const [showChat, setShowChat] = useState(false);
 
   const { app, sha, target, mode, verdict, passed = 0, failed = 0, cases, specs, logs, note, retrying } = record;
   const total = cases.length;
   const isCode = target === "code";
+  const failedCases = cases.filter((c: { status: string }) => c.status === "fail");
+  // Detect shadow mode from the first pipeline log line: "[SHADOW MODE]"
+  const isShadow = logs.some((l: string) => l.includes("[SHADOW MODE]"));
 
-  const sections: SectionDef[] = [
-    {
-      id: "pipeline",
-      label: "Pipeline",
-      defaultOpen: false,
-      render: (open) => (
-        <Box flexDirection="column">
-          {PIPELINE_STEPS.map((s) => {
-            const st = stepState(record.step, s);
-            const icon = st === "done" ? "✓" : st === "active" ? "·" : " ";
-            const color = st === "done" ? "#3b7a57" : st === "active" ? "cyan" : undefined;
-            const lbl = sectionLabel(s, st, { passed, failed, total: cases.length }, specs?.length);
-            return (
-              <Text key={s}>
-                {"  "}<Text color={color}>{icon}</Text>{"  "}<Text dimColor={st === "pending"}>{lbl}</Text>
-              </Text>
-            );
-          })}
-        </Box>
-      ),
-    },
-    {
-      id: "results",
-      label: "Test results",
-      defaultOpen: true,
-      render: (open) => (
-        <Box flexDirection="column">
-          {cases.length === 0 ? (
-            <Text dimColor>  No test cases recorded for this run.</Text>
-          ) : (
-            cases.map((c, i) => (
-              <Box key={i} flexDirection="column">
-                <Text>
-                  {"  "}
-                  <Text color={caseColor(c.status)}>{caseIcon(c.status)}</Text>
-                  {" "}{c.flow ?? c.name}
-                </Text>
-                {c.flow && isCode ? (
-                  <Text dimColor>    {c.flow}</Text>
-                ) : null}
-                {c.detail && c.status === "fail" && (selectedCase === i || selectedCase === null) ? (
-                  <Text color="#c0392b">    {c.detail.slice(0, 200)}</Text>
-                ) : null}
-                {c.status === "fail" && c.detail && (selectedCase !== i) ? (
-                  <Text dimColor>    [↩] ver detalle</Text>
-                ) : null}
+  const sections: Array<{ id: string; label: string; always?: boolean }> = [
+    { id: "pipeline", label: "Pipeline" },
+    { id: "results", label: "Test results", always: true },
+    { id: "coverage", label: "Coverage" },
+    ...(isShadow ? [{ id: "shadow", label: "Shadow mode feedback", always: true }] : []),
+    ...(note ? [{ id: "note", label: "Agent note" }] : []),
+  ];
+
+  const visible = sections.filter(() => true);
+  const sectionCount = visible.length;
+
+  const toggle = useCallback((id: string) => {
+    setOpenSection((p) => p === id ? null : id);
+  }, []);
+
+  useInput((_char, key) => {
+    if (showChat) return;
+    if (key.upArrow) { setFocusIdx((p) => (p - 1 + sectionCount) % sectionCount); return; }
+    if (key.downArrow) { setFocusIdx((p) => (p + 1) % sectionCount); return; }
+    if (key.return) { const s = visible[focusIdx]; if (s) toggle(s.id); return; }
+    if (_char === "c" || _char === "C") { setShowChat((p) => !p); return; }
+    if (_char === "f" || _char === "F") { if (failedCases.length && onContinue) onContinue(failedCases.map((c: { name: string }) => c.name)); return; }
+    if (_char === "b" || _char === "B" || key.escape) { onBack(); return; }
+  });
+
+  const renderSection = (id: string): React.ReactElement => {
+    switch (id) {
+      case "pipeline":
+        return (
+          <Box flexDirection="column">
+            {PIPELINE_STEPS.map((s) => {
+              const st = stepState(record.step, s);
+              const icon = st === "done" ? "✓" : st === "active" ? "·" : " ";
+              const color = st === "done" ? "#3b7a57" : st === "active" ? "cyan" : undefined;
+              const lbl = sectionLabel(s, st, { passed, failed, total }, specs?.length);
+              return <Text key={s}>{"  "}<Text color={color}>{icon}</Text>{"  "}<Text dimColor={st === "pending"}>{lbl}</Text></Text>;
+            })}
+          </Box>
+        );
+      case "results":
+        return (
+          <Box flexDirection="column">
+            {total === 0 ? (
+              <Text dimColor>  No test cases recorded.</Text>
+            ) : (
+              cases.map((c, i) => (
+                <Box key={i} flexDirection="column">
+                  <Text>{"  "}<Text color={caseColor(c.status)}>{caseIcon(c.status)}</Text>{" "}{c.flow ?? c.name.slice(0, 70)}</Text>
+                  {c.flow && isCode ? <Text dimColor>    {c.flow}</Text> : null}
+                  {c.status === "fail" && c.detail ? <Text color="#c0392b">    {c.detail.slice(0, 200)}</Text> : null}
+                </Box>
+              ))
+            )}
+            {specs && specs.length > 0 ? (
+              <Box flexDirection="column" marginTop={1}>
+                <Text dimColor>  Specs generated ({specs.length}):</Text>
+                {specs.slice(0, 15).map((s: { name: string; objective?: string }, i: number) => (
+                  <Text key={i} dimColor>    · {s.name}{s.objective ? ` — ${s.objective.slice(0, 70)}` : ""}</Text>
+                ))}
+                {specs.length > 15 ? <Text dimColor>    … and {specs.length - 15} more</Text> : null}
               </Box>
-            ))
-          )}
-          {specs && specs.length > 0 ? (
-            <Box flexDirection="column" marginTop={1}>
-              <Text dimColor>  Specs generated ({specs.length}):</Text>
-              {specs.slice(0, 12).map((s: { name: string; objective?: string }) => (
-                <Text key={s.name} dimColor>    · {s.name}{s.objective ? ` — ${s.objective.slice(0, 80)}` : ""}</Text>
-              ))}
-              {specs.length > 12 ? <Text dimColor>    … and {specs.length - 12} more</Text> : null}
-            </Box>
-          ) : null}
-        </Box>
-      ),
-    },
-    {
-      id: "shadow",
-      label: isCode ? "What would happen (shadow mode)" : "Shadow mode",
-      render: () => (
-        <Box flexDirection="column">
-          {record.note && record.note.includes("shadow") ? (
-            <Text dimColor>  {record.note}</Text>
-          ) : verdict === "pass" ? (
-            <Text dimColor>  Si no estuviera en shadow mode, se habría abierto un PR{'\n'}  en {app} con los tests generados. El reviewer {'\n'}  {specs?.length ? `aprobó ${specs.length} specs.` : "aprobó los tests."}</Text>
-          ) : verdict === "fail" ? (
-            <Text dimColor>  Si no estuviera en shadow mode, se habría abierto un{'\n'}  GitHub Issue en {app} con los logs de error.</Text>
-          ) : verdict === "flaky" ? (
-            <Text dimColor>  Tests inestables — se habrían puesto en cuarentena.{'\n'}  No se habría abierto PR ni Issue.</Text>
-          ) : (
-            <Text dimColor>  Shadow mode activo — no se publicaron PRs ni Issues.</Text>
-          )}
-        </Box>
-      ),
-    },
-    {
-      id: "coverage",
-      label: "Coverage",
-      render: () => {
+            ) : null}
+          </Box>
+        );
+      case "coverage": {
         const covLog = logs.find((l: string) => l.includes("change-coverage:"));
         const covWarn = logs.find((l: string) => l.includes("CHANGE-COVERAGE INACTIVE"));
         return (
@@ -124,47 +99,36 @@ export function RunSummary({ record, client, onBack }: {
               <Text dimColor>  {covLog.replace("[qa] change-coverage: ", "")}</Text>
             ) : covWarn ? (
               <Box flexDirection="column">
-                <Text color="#c2891b">  ⚠ No se pudo medir cobertura.</Text>
-                <Text dimColor>  {covWarn.replace("[qa] ", "").slice(0, 100)}</Text>
+                <Text color="#c2891b">  ⚠ Coverage measurement inactive.</Text>
+                <Text dimColor>  {covWarn.replace("[qa] ", "").slice(0, 120)}</Text>
               </Box>
             ) : (
-              <Text dimColor>  No se midió cobertura en este run.</Text>
+              <Text dimColor>  Coverage was not measured in this run.</Text>
             )}
           </Box>
         );
-      },
-    },
-    ...(note ? [{
-      id: "note",
-      label: "Agent note",
-      render: () => <Text dimColor>  {note}</Text>,
-    }] : []),
-  ];
-
-  // Keyboard navigation
-  useInput((_char, key) => {
-    if (showChat) return;
-    if (key.upArrow) { setFocusIdx((p) => Math.max(0, p - 1)); return; }
-    if (key.downArrow) { setFocusIdx((p) => Math.min(sections.length - 1, p + 1)); return; }
-    if (key.return) {
-      const id = sections[focusIdx]?.id;
-      if (id) setOpenSection((p) => p === id ? null : id);
-      else if (focusIdx === sections.length) setSelectedCase((p) => p === null ? 0 : null);
-      return;
+      }
+      case "shadow":
+        return (
+          <Box flexDirection="column">
+            <Text dimColor>  Shadow mode is ON — no PRs or Issues were published.</Text>
+            {verdict === "pass" ? (
+              <Text dimColor>  If shadow were off: a PR with {specs?.length ?? 0} spec(s){'\n'}  would have been opened in {app}. The reviewer{'\n'}  {specs?.length ? 'approved.' : 'did not review.'}</Text>
+            ) : verdict === "fail" ? (
+              <Text dimColor>  If shadow were off: a GitHub Issue with sanitized{'\n'}  error logs would have been opened in {app}.</Text>
+            ) : verdict === "flaky" ? (
+              <Text dimColor>  If shadow were off: flaky tests would have been{'\n'}  quarantined without PR or Issue.</Text>
+            ) : (
+              <Text dimColor>  Shadow mode prevents publication to {app}.</Text>
+            )}
+          </Box>
+        );
+      case "note":
+        return <Text dimColor>  {note}</Text>;
+      default:
+        return <Text dimColor>  —</Text>;
     }
-    if (_char === "c" || _char === "C") { setShowChat(true); return; }
-    if (_char === "b" || _char === "B" || key.escape) { onBack(); return; }
-  });
-
-  // Filter sections for display
-  const visible = sections.filter((s) => {
-    if (s.id === "shadow" && (!record.note || !record.note.includes("shadow"))) return true; // always show when shadow is relevant
-    if (s.id === "shadow") return record.verdict !== undefined; // show shadow info for any completed run
-    return true;
-  });
-
-  // Focus includes case items for drill-down
-  const caseFocusStart = visible.length;
+  };
 
   return (
     <Box flexDirection="column" paddingX={1}>
@@ -176,14 +140,13 @@ export function RunSummary({ record, client, onBack }: {
           <Text color={isCode ? "magenta" : "cyan"}>{target}</Text>
           {`/${mode}`}
           {retrying ? <Text color="#c2891b">{"  ↻ retrying"}</Text> : null}
+          {isShadow ? <Text dimColor>{"  [shadow]"}</Text> : null}
         </Text>
         <Box marginTop={1}>
           <Text color={verdictColor(verdict)} bold>
             {`${verdictIcon(verdict)} verdict: ${verdict ?? "running"}`}
           </Text>
-          {passed !== undefined && failed !== undefined && total > 0 ? (
-            <Text dimColor>{` — ${passed} passed, ${failed} failed`}</Text>
-          ) : null}
+          {total > 0 ? <Text dimColor>{` — ${passed} passed, ${failed} failed`}</Text> : null}
         </Box>
       </Box>
 
@@ -195,28 +158,13 @@ export function RunSummary({ record, client, onBack }: {
           return (
             <Box key={s.id} flexDirection="column">
               <Text>
-                <Text color={isFocused ? "cyan" : undefined}>
-                  {isOpen ? "▾" : "▸"}
-                </Text>
-                {" "}{s.label}
+                <Text color={isFocused ? "cyan" : undefined}>{isOpen ? "▾" : "▸"}</Text>
+                {" "}<Text color={isFocused ? "cyan" : undefined}>{s.label}</Text>
               </Text>
-              {isOpen ? (
-                <Box flexDirection="column" marginLeft={2}>
-                  {s.render(true)}
-                </Box>
-              ) : null}
+              {isOpen ? <Box flexDirection="column" marginLeft={2}>{renderSection(s.id)}</Box> : null}
             </Box>
           );
         })}
-
-        {/* Case detail drill-down */}
-        {cases.filter((c: { status: string }) => c.status === "fail").length > 0 && openSection === "results" ? (
-          <Box marginTop={1}>
-            <Text dimColor>
-              [↩] on a failed case to toggle detail
-            </Text>
-          </Box>
-        ) : null}
       </Box>
 
       {/* Footer */}
@@ -226,13 +174,9 @@ export function RunSummary({ record, client, onBack }: {
           <ChatInput client={client} runId={record.id} />
         ) : (
           <Box flexDirection="column">
-            <Text dimColor>
-              {"[↑↓] navegar  [↩] expandir  [C]hat  [B]ack  [Esc] salir"}
-            </Text>
-            {cases.some((c: { status: string }) => c.status === "fail") ? (
-              <Text dimColor>
-                {"[F]ix failed cases"}
-              </Text>
+            <Text dimColor>[↑↓] navigate  [↩] expand  [C]hat  [B]ack  [Esc] quit</Text>
+            {failedCases.length > 0 && onContinue ? (
+              <Text dimColor>[F] continue — fix {failedCases.length} failed case(s)</Text>
             ) : null}
           </Box>
         )}
