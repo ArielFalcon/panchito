@@ -43,7 +43,7 @@ export function RunSummary({ record, client, onBack, onContinue }: {
 
   useInput((_char, key) => {
     if (showChat) {
-      if (_char === "c" || _char === "C" || key.escape) { setShowChat(false); return; }
+      if (key.escape) { setShowChat(false); return; }
       return;
     }
     if (key.upArrow) { setFocusIdx((p) => (p - 1 + sectionCount) % sectionCount); return; }
