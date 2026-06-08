@@ -68,34 +68,104 @@ export function RunSummary({ record, client, onBack, onContinue }: {
             })}
           </Box>
         );
-      case "results":
-        return (
-          <Box flexDirection="column">
-            {total === 0 && (!specs || specs.length === 0) ? (
-              <Text dimColor>  No test results available for this run.</Text>
-            ) : total > 0 ? (
-              cases.map((c, i) => (
-                <Box key={i} flexDirection="column">
-                  <Text>{"  "}<Text color={caseColor(c.status)}>{caseIcon(c.status)}</Text>{" "}{c.flow ?? c.name.slice(0, 70)}</Text>
-                  {c.flow && isCode ? <Text dimColor>    {c.flow}</Text> : null}
-                  {c.status === "fail" && c.detail ? <Text color="#c0392b">    {c.detail.slice(0, 200)}</Text> : null}
-                </Box>
-              ))
-            ) : null}
-            {specs && specs.length > 0 ? (
-              <Box flexDirection="column" marginTop={1}>
+      case "results": {
+        // Correlate execution cases with generation specs by matching the spec
+        // file name (or flow prefix) to the case name. For e2e, each Playwright
+        // test carries its spec file. For code, the agent's specs are listed
+        // alongside the parsed test counts.
+        const specMap = new Map<string, { name: string; flow?: string; objective?: string }>();
+        if (specs) {
+          for (const s of specs) {
+            const key = s.flow || s.name;
+            if (key && !specMap.has(key)) specMap.set(key, s);
+          }
+        }
+
+        // Group cases by their flow prefix (first word or text before " › ").
+        const casesByFlow = new Map<string, typeof cases>();
+        for (const c of cases) {
+          const flowFromName = c.name.split(" › ")[0]?.trim() || c.name;
+          const key = c.flow || flowFromName;
+          const existing = casesByFlow.get(key) || [];
+          existing.push(c);
+          casesByFlow.set(key, existing);
+        }
+
+        // Build display: for each spec, show its cases. For unmatched cases, show separately.
+        const displayed: Array<{ label: string; flow: string; cases: typeof cases; isSpec: boolean }> = [];
+
+        // First: specs with their cases
+        for (const [flow, spec] of specMap) {
+          const flowCases = casesByFlow.get(flow) || [];
+          casesByFlow.delete(flow);
+          const pass = flowCases.filter((c: { status: string }) => c.status !== "fail").length;
+          displayed.push({
+            label: spec.objective || spec.name,
+            flow,
+            cases: flowCases,
+            isSpec: true,
+          });
+        }
+
+        // Then: unmatched cases
+        for (const [flow, flowCases] of casesByFlow) {
+          const pass = flowCases.filter((c: { status: string }) => c.status !== "fail").length;
+          displayed.push({ label: flow, flow, cases: flowCases, isSpec: false });
+        }
+
+        // If nothing to show, fall back to simple output
+        if (displayed.length === 0) {
+          if (total > 0) {
+            return (
+              <Box flexDirection="column">
+                {cases.map((c, i) => (
+                  <Box key={i} flexDirection="column">
+                    <Text>{"  "}<Text color={caseColor(c.status)}>{caseIcon(c.status)}</Text>{" "}{c.flow ?? c.name.slice(0, 70)}</Text>
+                    {c.status === "fail" && c.detail ? <Text color="#c0392b">     {c.detail.slice(0, 200)}</Text> : null}
+                  </Box>
+                ))}
+              </Box>
+            );
+          }
+          if (specs && specs.length > 0) {
+            return (
+              <Box flexDirection="column">
                 <Text dimColor>  Specs generated ({specs.length}):</Text>
                 {specs.slice(0, 15).map((s: { name: string; objective?: string }, i: number) => (
                   <Text key={i} dimColor>    · {s.name}{s.objective ? ` — ${s.objective.slice(0, 70)}` : ""}</Text>
                 ))}
-                {specs.length > 15 ? <Text dimColor>    … and {specs.length - 15} more</Text> : null}
               </Box>
-            ) : null}
+            );
+          }
+          return <Text dimColor>  No test results available for this run.</Text>;
+        }
+
+        return (
+          <Box flexDirection="column">
+            {displayed.map((d) => {
+              const failCount = d.cases.filter((c: { status: string }) => c.status === "fail").length;
+              const passCount = d.cases.length - failCount;
+              const allPass = failCount === 0 && d.cases.length > 0;
+              const icon = d.cases.length === 0 ? "·" : allPass ? "✓" : "✗";
+              const color = d.cases.length === 0 ? undefined : allPass ? "#3b7a57" : "#c0392b";
+              return (
+                <Box key={d.flow} flexDirection="column">
+                  <Text>{"  "}<Text color={color}>{icon}</Text>{" "}{d.label}{d.cases.length > 0 ? ` — ${passCount}/${d.cases.length} passed` : " — not executed"}</Text>
+                  {d.cases.filter((c: { status: string }) => c.status === "fail").map((c, i) => (
+                    <Box key={i} flexDirection="column" marginLeft={4}>
+                      <Text color="#c0392b">✗ {c.name.slice(0, 80)}</Text>
+                      {c.detail ? <Text color="#c0392b">  {c.detail.slice(0, 200)}</Text> : null}
+                    </Box>
+                  ))}
+                </Box>
+              );
+            })}
             {verdict === "infra-error" && note ? (
               <Box marginTop={1}><Text color="#4a6877">  {note}</Text></Box>
             ) : null}
           </Box>
         );
+      }
       case "coverage": {
         const covLog = logs.find((l: string) => l.includes("change-coverage:"));
         const covWarn = logs.find((l: string) => l.includes("CHANGE-COVERAGE INACTIVE"));
