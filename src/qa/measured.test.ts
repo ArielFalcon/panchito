@@ -5,10 +5,10 @@ import {
   writeMeasured,
   recordStability,
   recordCoverage,
+  SUITE_KEY,
   MeasuredStore,
   MeasuredFs,
 } from "./measured";
-import type { QaCase } from "../types";
 
 function stubFs(initial?: MeasuredStore): MeasuredFs & { written(): string | null } {
   let stored = initial ? JSON.stringify(initial) : null;
@@ -37,46 +37,33 @@ test("readMeasured and writeMeasured round-trip", () => {
   assert.deepEqual(readMeasured(fs, "/m.json"), store);
 });
 
-test("recordStability increments runs for each flow that had cases", () => {
-  const store: MeasuredStore = {};
-  const flowCases = new Map<string, QaCase[]>();
-  flowCases.set("login", [{ name: "login › works", status: "pass" }]);
-  flowCases.set("checkout", [
-    { name: "checkout › with items", status: "pass" },
+// Measured data is recorded at SUITE scope, not per-flow: per-flow attribution would need
+// per-test coverage + a case→flow map (neither exists), and crediting aggregate data to every
+// flow was misleading. Suite-level is honest: "the suite ran N times, was flaky M times".
+test("recordStability accumulates SUITE runs and flaky-run counts", () => {
+  let store = recordStability({}, [
+    { name: "login › works", status: "pass" },
     { name: "checkout › empty cart", status: "flaky" },
   ]);
-
-  const next = recordStability(store, flowCases);
-
-  assert.equal(next.login!.stability!.runs, 1);
-  assert.equal(next.login!.stability!.flakyRuns, undefined);
-  assert.equal(next.checkout!.stability!.runs, 1);
-  assert.equal(next.checkout!.stability!.flakyRuns, 1);
+  assert.equal(store[SUITE_KEY]!.stability!.runs, 1);
+  assert.equal(store[SUITE_KEY]!.stability!.flakyRuns, 1); // this run was flaky
+  store = recordStability(store, [{ name: "login › works", status: "pass" }]);
+  assert.equal(store[SUITE_KEY]!.stability!.runs, 2);
+  assert.equal(store[SUITE_KEY]!.stability!.flakyRuns, 1); // unchanged: this run was stable
 });
 
-test("recordStability accumulates on existing data across runs", () => {
-  const store: MeasuredStore = {
-    login: { stability: { runs: 4, flakyRuns: 2 } },
-  };
-  const flowCases = new Map<string, QaCase[]>();
-  flowCases.set("login", [{ name: "login › works", status: "pass" }]);
-
-  const next = recordStability(store, flowCases);
-
-  assert.equal(next.login!.stability!.runs, 5);
-  assert.equal(next.login!.stability!.flakyRuns, 2); // unchanged, no flaky this run
+test("recordStability omits flakyRuns until a run is actually flaky", () => {
+  const store = recordStability({}, [{ name: "a", status: "pass" }]);
+  assert.equal(store[SUITE_KEY]!.stability!.runs, 1);
+  assert.equal(store[SUITE_KEY]!.stability!.flakyRuns, undefined);
 });
 
-test("recordCoverage records covered files per flow", () => {
-  const store: MeasuredStore = {};
-  const next = recordCoverage(store, ["login", "checkout"], ["src/Login.tsx", "src/Checkout.tsx"]);
-
-  assert.deepEqual(next.login!.coverage!.files, ["src/Login.tsx", "src/Checkout.tsx"]);
-  assert.deepEqual(next.checkout!.coverage!.files, ["src/Login.tsx", "src/Checkout.tsx"]);
+test("recordCoverage records the covered files at suite level", () => {
+  const store = recordCoverage({}, ["src/Login.tsx", "src/Checkout.tsx"]);
+  assert.deepEqual(store[SUITE_KEY]!.coverage!.files, ["src/Login.tsx", "src/Checkout.tsx"]);
 });
 
 test("recordCoverage is a no-op when there are no covered files", () => {
-  const store: MeasuredStore = { login: { stability: { runs: 1 } } };
-  const next = recordCoverage(store, ["login"], []);
-  assert.deepEqual(next, store); // unchanged
+  const store: MeasuredStore = { [SUITE_KEY]: { stability: { runs: 1 } } };
+  assert.deepEqual(recordCoverage(store, []), store); // unchanged
 });

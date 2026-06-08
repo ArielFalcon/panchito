@@ -37,33 +37,23 @@ export function writeMeasured(fs: MeasuredFs, path: string, store: MeasuredStore
   fs.write(path, JSON.stringify(store, null, 2));
 }
 
-export function recordStability(
-  store: MeasuredStore,
-  flowCases: Map<string, QaCase[]>,
-): MeasuredStore {
-  const next = { ...store };
-  for (const [flow, cases] of flowCases) {
-    const prev = next[flow] ?? {};
-    const stability = { ...prev.stability, runs: (prev.stability?.runs ?? 0) + 1 };
-    const flakyCount = cases.filter((c) => c.status === "flaky").length;
-    if (flakyCount > 0) {
-      stability.flakyRuns = (prev.stability?.flakyRuns ?? 0) + flakyCount;
-    }
-    next[flow] = { ...prev, stability };
-  }
-  return next;
+// Measured data is recorded at SUITE scope (one entry), NOT per-flow. Honest per-flow
+// attribution would require per-test coverage AND a case→flow map — neither exists today —
+// so crediting aggregate coverage/flaky data to every flow id was misleading. Suite-level is
+// truthful: "this suite ran N times, was flaky in M of them, last covered these files."
+export const SUITE_KEY = "__suite";
+
+export function recordStability(store: MeasuredStore, cases: QaCase[]): MeasuredStore {
+  const prev = store[SUITE_KEY] ?? {};
+  const wasFlaky = cases.some((c) => c.status === "flaky");
+  const flakyRuns = (prev.stability?.flakyRuns ?? 0) + (wasFlaky ? 1 : 0);
+  const stability: { runs: number; flakyRuns?: number } = { runs: (prev.stability?.runs ?? 0) + 1 };
+  if (flakyRuns > 0) stability.flakyRuns = flakyRuns;
+  return { ...store, [SUITE_KEY]: { ...prev, stability } };
 }
 
-export function recordCoverage(
-  store: MeasuredStore,
-  flowIds: string[],
-  coveredFiles: string[],
-): MeasuredStore {
+export function recordCoverage(store: MeasuredStore, coveredFiles: string[]): MeasuredStore {
   if (coveredFiles.length === 0) return store;
-  const next = { ...store };
-  for (const flow of flowIds) {
-    const prev = next[flow] ?? {};
-    next[flow] = { ...prev, coverage: { files: coveredFiles } };
-  }
-  return next;
+  const prev = store[SUITE_KEY] ?? {};
+  return { ...store, [SUITE_KEY]: { ...prev, coverage: { files: coveredFiles } } };
 }

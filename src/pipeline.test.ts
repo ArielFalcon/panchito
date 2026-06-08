@@ -223,6 +223,27 @@ test("the independent reviewer is given the ON-DISK spec list, not the agent's",
   assert.deepEqual(reviewInputs[0], ["flows/real.spec.ts"]); // disk truth, not "ghost.spec.ts"
 });
 
+// Measured persistence (H3/M1): suite-level learning is recorded for e2e with the run's
+// cases + the actually-covered files, and is SKIPPED in code mode (it would pollute the
+// watched repo and there is no per-test coverage there).
+test("records measured data for e2e but NOT in code mode", async () => {
+  const agentWithMeta: AgentResult = {
+    output: "x", specs: ["a.spec.ts"], reviewed: true, approved: true,
+    specMetas: [{ file: "a.spec.ts", flow: "checkout", objective: "o", targets: ["src/x.ts"] }],
+  };
+  const recorded: Array<{ cases: number; covered: string[] }> = [];
+  const h = deps(passing(), [], { coverage: [cov([1, 2, 3, 4])], diff: DIFF_4, message: "feat: x", agent: agentWithMeta });
+  h.recordMeasured = (_e2eDir, input) => recorded.push({ cases: input.cases.length, covered: input.coveredFiles });
+  await runPipeline(app, "abc1234def", h, "manual", { mode: "diff" });
+  assert.equal(recorded.length, 1, "e2e run must persist measured data");
+
+  let codeCalls = 0;
+  const h2 = deps(passing(), [], { agent: agentWithMeta });
+  h2.recordMeasured = () => { codeCalls++; };
+  await runPipeline(app, "abc1234def", h2, "manual", { mode: "diff", target: "code" });
+  assert.equal(codeCalls, 0, "code mode must NOT persist measured (would pollute the repo)");
+});
+
 // Reviewer fail-open must be bounded and observable: an UNPARSEABLE verdict is not an
 // actionable rejection — feeding a fake correction just burns a round and re-hits the
 // same miss. Treat it like a reviewer error: publish on the generator's verdict, loudly.

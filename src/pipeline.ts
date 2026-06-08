@@ -92,6 +92,9 @@ export interface PipelineDeps {
   // Did this run produce any V8 coverage dumps? Used only to make a "structural no-op"
   // (dumps existed but matched zero changed files) observable, distinct from "no data".
   hasCoverageDumps?(e2eDir: string, namespace: string): boolean;
+  // Persists suite-level learning (stability + covered files) to the run's measured.json.
+  // e2e-only; absent ⇒ no persistence (unit tests stub it). Injected so it is stubbable.
+  recordMeasured?(e2eDir: string, input: { cases: QaCase[]; coveredFiles: string[] }): void;
   publish(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string; parentRunId?: string }): Promise<{ prUrl: string; merged: boolean } | null>;
   // Code mode (target "code"): no web env, no Playwright. Install the repo's deps,
   // run its own test suite, classify by exit code, and publish the new tests.
@@ -188,6 +191,17 @@ export function defaultPipelineDeps(): PipelineDeps {
     collectCoverage: async (input) => defaultCollectCoverage(input),
     clearCoverage: (e2eDir, ns) => clearBrowserCoverage(e2eDir, ns),
     hasCoverageDumps: (e2eDir, ns) => hasBrowserCoverageDumps(e2eDir, ns),
+    recordMeasured: (e2eDir, input) => {
+      const measuredPath = join(e2eDir, ".qa", "measured.json");
+      const mfs: MeasuredFs = {
+        read: (p) => { try { return readFileSync(p, "utf8"); } catch { return null; } },
+        write: (p, c) => { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, c); },
+      };
+      let store = readMeasured(mfs, measuredPath);
+      store = recordStability(store, input.cases);
+      if (input.coveredFiles.length) store = recordCoverage(store, input.coveredFiles);
+      writeMeasured(mfs, measuredPath, store);
+    },
     publish: (input) => publishE2e(input, defaultPublishDeps),
     openIssue: (repo, title, body) => github.openIssue(repo, title, body),
     log: (m) => console.log(m),
@@ -665,29 +679,18 @@ export async function runPipeline(
     }
   }
 
-  // ── Measured persistence (keystone: close the learning loop) ────────────────
-  // After execute/coverage, persist stability (runs/flakyRuns) and coverage
-  // (covered files) to e2e/.qa/measured.json — gitignored, so writes do NOT
-  // trigger PR-spam. Stability always updates; coverage only when Filter D
-  // actually measured it (not "unknown").
-  if (result?.specMetas && result.specMetas.length > 0) {
-    const measuredPath = join(e2eDir, ".qa", "measured.json");
-    const fs: MeasuredFs = {
-      read: (p) => { try { return readFileSync(p, "utf8"); } catch { return null; } },
-      write: (p, c) => { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, c); },
-    };
-    let store = readMeasured(fs, measuredPath);
-
-    const flowIds = result.specMetas.map((m) => m.flow);
-    const flowCases = new Map(flowIds.map((f) => [f, run.cases]));
-    store = recordStability(store, flowCases);
-
-    if (ccForPersistence) {
-      const coveredFiles = ccForPersistence.perFile.map((f) => f.file);
-      store = recordCoverage(store, flowIds, coveredFiles);
-    }
-
-    writeMeasured(fs, measuredPath, store);
+  // ── Measured persistence (suite-level learning) ─────────────────────────────
+  // Record suite stability + the actually-covered files to e2e/.qa/measured.json
+  // (gitignored — no PR-spam). e2e-ONLY: code mode has no e2e/ dir and CODE_PATHSPEC would
+  // commit the file into the watched repo (M1), and has no per-test coverage anyway.
+  // Suite-level (not per-flow) because per-flow attribution is not measurable today (H3).
+  // Best-effort: the file lives in the regenerable mirror, so this learning is not yet
+  // durable across host loss (a separate decision).
+  if (!isCode && result?.specMetas && result.specMetas.length > 0 && deps.recordMeasured) {
+    const coveredFiles = ccForPersistence
+      ? ccForPersistence.perFile.filter((f) => f.covered > 0).map((f) => f.file)
+      : [];
+    deps.recordMeasured(e2eDir, { cases: run.cases, coveredFiles });
   }
 
   // 9. Final decision.
