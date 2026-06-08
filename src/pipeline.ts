@@ -6,21 +6,26 @@
 // that touch the network or have side effects are injected via PipelineDeps, so
 // ordering and branches are verifiable with stubs.
 
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { AppConfig } from "./orchestrator/config-loader";
 import { DeployTarget, waitForDeploy } from "./env/deploy-gate";
-import { ensureMirror, getCommitDiff, getCommitMessage, listChangedSpecs as gitListChangedSpecs, defaultMirrorDeps } from "./integrations/repo-mirror";
+import { ensureMirror, getCommitDiff, getCommitMessage, listChangedSpecs as gitListChangedSpecs, getCommitsBehind, defaultMirrorDeps } from "./integrations/repo-mirror";
 import { runOpencode, runOpencodeParallel, defaultOpencodeDeps, reviewIndependently } from "./integrations/opencode-client";
 import { classifyCommit, CommitIntent } from "./qa/commit-classify";
 import { setupE2eProject, defaultSetupDeps } from "./qa/setup";
 import { validateSpecs, defaultValidateDeps } from "./qa/validate";
 import { runE2E, defaultExecuteDeps, defaultCleanupDeps } from "./qa/execute";
 import { setupCodeProject, defaultCodeSetupDeps, runCodeTests, defaultCodeExecuteDeps } from "./qa/code-runner";
-import { publishE2e, publishCode, defaultPublishDeps } from "./integrations/publish";
+import { publishE2e, publishCode, publishContext, defaultPublishDeps } from "./integrations/publish";
 import { testDataNamespace } from "./qa/test-data";
+import { validateContext, isContextStale } from "./qa/context";
+import type { ArchitectureContext } from "./qa/context";
+import { readMeasured, writeMeasured, recordStability, recordCoverage, MeasuredFs } from "./qa/measured";
 import {
   parseDiffHunks,
   computeChangeCoverage,
+  type ChangeCoverage,
   decideCoverage,
   blocksPublish,
   renderUncovered,
@@ -58,6 +63,7 @@ export interface GenerateInput {
   reviewCorrections?: string[]; // re-generation: corrections from a reviewer rejection
   coverageGap?: string; // re-generation: changed lines not yet exercised (change-coverage)
   runId?: string; // for SSE live activity: maps the OpenCode session to this run record
+  contextMap?: ArchitectureContext; // cross-cutting: the FE↔BE map loaded from e2e/.qa/context.json
 }
 
 export interface PipelineDeps {
@@ -92,8 +98,14 @@ export interface PipelineDeps {
   setupCode(repoDir: string): Promise<void>;
   executeCode(repoDir: string, opts: { namespace: string; onCase?: (c: QaCase) => void; signal?: AbortSignal; timeoutMs?: number }): Promise<QaRunResult>;
   publishCode(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string; parentRunId?: string }): Promise<{ prUrl: string; merged: boolean } | null>;
+  publishContext(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string }): Promise<{ prUrl: string; merged: boolean } | null>;
   openIssue(repo: string, title: string, body: string): Promise<{ url: string }>;
   log?(msg: string): void;
+  // Context mode: validates the produced context.json. Injected so tests can bypass file I/O.
+  validateContextFn?(content: unknown): { ok: boolean; errors: string[] };
+  // Diff mode: checks whether the deployed context.json is stale vs the current HEAD.
+  // Returns a warning string if stale, empty string if fresh or no map exists.
+  checkContextStaleness?(mirrorDir: string, sha: string): Promise<string>;
 }
 
 export function defaultPipelineDeps(): PipelineDeps {
@@ -126,6 +138,7 @@ export function defaultPipelineDeps(): PipelineDeps {
         reviewCorrections: input.reviewCorrections,
         coverageGap: input.coverageGap,
         runId: input.runId,
+        contextMap: input.contextMap,
       };
       const oc = await defaultOpencodeDeps();
       // complete/exhaustive fan out to parallel workers (plan → workers → consolidate); the other
@@ -147,6 +160,20 @@ export function defaultPipelineDeps(): PipelineDeps {
     setupCode: (repoDir) => setupCodeProject(repoDir, defaultCodeSetupDeps),
     executeCode: (repoDir, opts) => runCodeTests(repoDir, opts, defaultCodeExecuteDeps),
     publishCode: (input) => publishCode(input, defaultPublishDeps),
+    publishContext: (input) => publishContext(input, defaultPublishDeps),
+    checkContextStaleness: async (mirrorDir, sha) => {
+      const ctxPath = join(mirrorDir, E2E_DIR, ".qa", "context.json");
+      if (!existsSync(ctxPath)) return "";
+      try {
+        const ctx = JSON.parse(readFileSync(ctxPath, "utf8"));
+        if (!ctx.builtAtSha || ctx.builtAtSha === sha) return "";
+        const commitsBehind = await getCommitsBehind(mirrorDir, ctx.builtAtSha, sha, defaultMirrorDeps);
+        const r = isContextStale({ builtAtSha: ctx.builtAtSha, headSha: sha, commitsBehind });
+        return r.stale ? r.reason : "";
+      } catch {
+        return "";
+      }
+    },
     isHealthy: async (versionUrl) => {
       try {
         const res = await fetch(versionUrl);
@@ -191,8 +218,9 @@ export async function runPipeline(
   );
 
   // 1. Gate: wait until DEV runs this SHA and is healthy. Skipped for code mode (no
-  //    web environment) and when no version endpoint is configured (already deployed).
-  const versionUrl = isCode ? undefined : app.dev?.versionUrl;
+  //    web environment), context mode (builds from source only), and when no version
+  //    endpoint is configured (already deployed).
+  const versionUrl = (isCode || mode === "context") ? undefined : app.dev?.versionUrl;
   const devHealthy = () => (versionUrl ? deps.isHealthy(versionUrl) : Promise.resolve(true));
   if (isCode) {
     log("[qa] code mode: no web environment; skipping the deploy gate and health checks.");
@@ -218,7 +246,7 @@ export async function runPipeline(
   checkSignal();
 
   // 3. Classify the commit (Conventional Commits, cross-checked against the diff)
-  //    — ONLY in "diff" mode. Other modes (complete/exhaustive/manual) are
+  //    — ONLY in "diff" mode. Other modes (complete/exhaustive/manual/context) are
   //    whole-repo or guided tasks, so they always generate.
   let generating = true;
   let intent: CommitIntent | undefined;
@@ -230,8 +258,8 @@ export async function runPipeline(
     log(`[qa] continuation of ${opts.parentRunId ?? "?"}: fixing ${opts.fixCases!.length} case(s) with human guidance.`);
   }
 
-  onStep?.("classify");
   if (mode === "diff") {
+    onStep?.("classify");
     const cls = classifyCommit(message, diff);
     log(`[qa] commit '${cls.type}' → ${cls.action}${cls.contradiction ? " (message/diff contradiction)" : ""}: ${cls.reason}`);
     if (cls.action === "skip" && !isContinuation) {
@@ -246,12 +274,70 @@ export async function runPipeline(
 
   // 4. Set up the project so the agent has what it needs to build on. e2e: bootstrap
   //    the seed if missing + install the e2e deps. code: install the repo's own deps
-  //    so its test suite can run.
+  //    so its test suite can run. context: same as e2e (the agent writes into e2e/.qa/).
   if (isCode) {
     log("[qa] code mode: installing the repo's dependencies...");
     await deps.setupCode(mirrorDir);
   } else {
     await deps.setupE2e(e2eDir);
+  }
+
+  // ── context mode: build the FE↔BE architecture map ──────────────────────────
+  // Diverges early: the agent builds context.json from structured sources (routing,
+  // OpenAPI, generated clients), we validate it deterministically, and publish via PR.
+  // No tests are generated or executed — this is a maintenance task.
+  if (mode === "context") {
+    log("[qa] context mode: building the FE↔BE architecture map...");
+    onStep?.("generate");
+
+    const genInput: GenerateInput = {
+      repo: app.repo,
+      sha,
+      diff,
+      mirrorDir,
+      namespace: ns,
+      needsReview: false,
+      mode,
+      appName: app.name,
+      baseUrl: app.dev?.baseUrl,
+      openapi: app.openapi,
+    };
+    const ctxResult = await deps.generate(genInput, signal, log);
+
+    log(`[qa] context agent: approved=${ctxResult.approved} specs=[${ctxResult.specs.join(", ")}]`);
+
+    const ctxPath = join(e2eDir, ".qa", "context.json");
+    const raw = existsSync(ctxPath) ? JSON.parse(readFileSync(ctxPath, "utf8")) : null;
+    const validated = deps.validateContextFn
+      ? deps.validateContextFn(raw ?? {})
+      : raw
+        ? validateContext(raw)
+        : { ok: false, errors: ["context.json was not produced by the agent"] };
+
+    if (!validated.ok) {
+      log(`[qa] context validation failed:\n${validated.errors.join("\n")}`);
+      await issueOrShadow(
+        shadow, deps, log, app.repo,
+        `QA context map for ${sha} is invalid`,
+        renderIssue(resultOf(ns, "invalid", validated.errors.join("\n\n")), validated.errors.join("\n")),
+      );
+      return resultOf(ns, "invalid", validated.errors.join("\n\n"));
+    }
+
+    log(`[qa] context map validated: OK`);
+
+    if (shadow) {
+      log("[qa] (shadow) context map built; a PR would have been opened.");
+    } else {
+      const pr = await deps.publishContext({ repo: app.repo, sha, mirrorDir, baseBranch: app.baseBranch ?? "main" });
+      log(pr
+        ? pr.merged
+          ? `[qa] OK — context map merged: ${pr.prUrl}`
+          : `[qa] OK — context map PR opened (merge it manually): ${pr.prUrl}`
+        : "[qa] OK — context map built (no changes to publish).");
+    }
+
+    return resultOf(ns, "pass", "context map built and validated");
   }
 
   // 4a. Clean up orphaned test data from a previous INTERRUPTED run (crash, SIGKILL,
@@ -262,6 +348,28 @@ export async function runPipeline(
     await deps.cleanup(e2eDir, { baseUrl: app.dev.baseUrl, namespace: opts.previousNamespace }).catch((err) => {
       log(`[qa] cleanup warning (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
     });
+  }
+
+  // Load the FE↔BE architecture map if it exists. This cross-cutting context is
+  // injected into the agent prompt for ALL generation modes (diff, complete,
+  // exhaustive, manual) so the agent crosses the frontend→backend boundary without
+  // re-deriving the architecture from raw code on every run. Context mode is the
+  // producer of this map; all other modes are consumers.
+  let contextMap: ArchitectureContext | undefined;
+  const ctxJsonPath = join(e2eDir, ".qa", "context.json");
+  if (existsSync(ctxJsonPath)) {
+    try {
+      const raw = JSON.parse(readFileSync(ctxJsonPath, "utf8"));
+      const v = validateContext(raw);
+      if (v.ok) {
+        contextMap = raw as ArchitectureContext;
+        log(`[qa] loaded architecture map: ${contextMap.routes.length} routes, ${contextMap.api.length} api ops, ${contextMap.feBe?.length ?? 0} links`);
+      } else {
+        log(`[qa] WARNING: context.json exists but is invalid (${v.errors.join("; ")}); the agent will not receive architecture context.`);
+      }
+    } catch {
+      log("[qa] WARNING: could not parse context.json; the agent will not receive architecture context.");
+    }
   }
 
   // Generate, then run the INDEPENDENT reviewer as a bounded feedback loop. The reviewer is a
@@ -346,6 +454,7 @@ export async function runPipeline(
     intent,
     guidance: opts.guidance,
     openapi: app.openapi,
+    contextMap,
     ...extra,
   });
 
@@ -354,6 +463,14 @@ export async function runPipeline(
   if (generating) {
     checkSignal();
     onStep?.("generate");
+
+    // Staleness check: if context.json exists but is too far behind HEAD, warn
+    // so the agent knows the map may be outdated and should verify before trusting.
+    if (mode === "diff" && deps.checkContextStaleness) {
+      const staleWarn = await deps.checkContextStaleness(mirrorDir, sha);
+      if (staleWarn) log(`[qa] ${staleWarn}`);
+    }
+
     log("[qa] generating E2E tests with OpenCode...");
     result = await generateAndReview(baseGenInput({ fixCases: opts.fixCases }));
 
@@ -488,6 +605,7 @@ export async function runPipeline(
   };
   let coverageStatus: "pass" | "fail" | "unknown" = "unknown";
   let coverageSummary = "";
+  let ccForPersistence: ChangeCoverage | undefined;
   if (deps.collectCoverage && generating && mode === "diff" && run.verdict === "pass" && covPolicy.mode !== "off") {
     const changed = parseDiffHunks(diff);
     if (changed.size > 0) {
@@ -496,6 +614,7 @@ export async function runPipeline(
       const collect = (): Promise<CoveredLines | null> =>
         deps.collectCoverage!({ target: isCode ? "code" : "e2e", repoDir: mirrorDir, e2eDir, changedFiles, namespace: ns });
       let cc = computeChangeCoverage(changed, (await collect()) ?? new Map());
+      ccForPersistence = cc;
       coverageStatus = decideCoverage(cc, covPolicy);
       log(`[qa] change-coverage: ${coverageStatus} — ${cc.overall.coveredChanged}/${cc.overall.changedLines} changed lines (${(cc.overall.ratio * 100).toFixed(0)}%, policy=${covPolicy.mode}, min=${Math.round(covPolicy.minRatio * 100)}%)`);
 
@@ -544,6 +663,31 @@ export async function runPipeline(
         );
       }
     }
+  }
+
+  // ── Measured persistence (keystone: close the learning loop) ────────────────
+  // After execute/coverage, persist stability (runs/flakyRuns) and coverage
+  // (covered files) to e2e/.qa/measured.json — gitignored, so writes do NOT
+  // trigger PR-spam. Stability always updates; coverage only when Filter D
+  // actually measured it (not "unknown").
+  if (result?.specMetas && result.specMetas.length > 0) {
+    const measuredPath = join(e2eDir, ".qa", "measured.json");
+    const fs: MeasuredFs = {
+      read: (p) => { try { return readFileSync(p, "utf8"); } catch { return null; } },
+      write: (p, c) => { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, c); },
+    };
+    let store = readMeasured(fs, measuredPath);
+
+    const flowIds = result.specMetas.map((m) => m.flow);
+    const flowCases = new Map(flowIds.map((f) => [f, run.cases]));
+    store = recordStability(store, flowCases);
+
+    if (ccForPersistence) {
+      const coveredFiles = ccForPersistence.perFile.map((f) => f.file);
+      store = recordCoverage(store, flowIds, coveredFiles);
+    }
+
+    writeMeasured(fs, measuredPath, store);
   }
 
   // 9. Final decision.
