@@ -116,3 +116,20 @@ export async function resolveRef(repo: string, ref: string, deps: MirrorDeps): P
   if (!sha || sha.length < 40) throw new Error(`no SHA resolved for ${ref}`);
   return sha;
 }
+
+// How many commits is `headSha` ahead of `fromSha`? Returns 0 when fromSha is not
+// an ancestor (history diverged) or when the SHAs are equal. Used by staleness
+// detection for the context map.
+export async function getCommitsBehind(
+  mirrorDir: string,
+  fromSha: string,
+  headSha: string,
+  deps: MirrorDeps,
+): Promise<number> {
+  try {
+    const stdout = await deps.git(["rev-list", "--count", `${fromSha}..${headSha}`], mirrorDir);
+    return parseInt(stdout.trim(), 10) || 0;
+  } catch {
+    return 0; // SHAs may not share history (force-push, different branch) — treat as 0
+  }
+}

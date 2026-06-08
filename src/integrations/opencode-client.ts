@@ -13,6 +13,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { AgentResult, QaCase, RunMode, TestTarget, SpecMeta } from "../types";
 import { CommitIntent } from "../qa/commit-classify";
+import type { ArchitectureContext } from "../qa/context";
 import { sanitizeText } from "../orchestrator/sanitizer";
 import { ActivityRouter } from "./agent-activity";
 import { appendLog } from "../server/history";
@@ -176,6 +177,7 @@ export interface OpencodeRunInput {
   reviewCorrections?: string[]; // re-generation: actionable corrections from a reviewer rejection
   coverageGap?: string; // re-generation: changed lines not yet exercised (change-coverage gap)
   runId?: string; // maps the session to a RunRecord for SSE live activity
+  contextMap?: ArchitectureContext; // cross-cutting: the FE↔BE map, injected by the orchestrator
 }
 
 // A session opened against `opencode serve`. prompt() sends the message to the
@@ -712,6 +714,15 @@ export function buildPrompt(input: OpencodeRunInput): string {
     ...(fixBlock.length ? [``] : []),
     buildTask(input),
     ``,
+    ...(input.contextMap
+      ? [
+          renderArchitectureContext(
+            input.contextMap,
+            input.mode === "diff" ? input.intent?.changedFiles : undefined,
+          ) ?? "",
+          ``,
+        ]
+      : []),
     `## Working rules`,
     input.mode === "context"
       ? [
@@ -762,6 +773,74 @@ export function buildPrompt(input: OpencodeRunInput): string {
       ? `- An INDEPENDENT reviewer judges your specs after you finish and may return corrections for a follow-up turn. Self-review against the test-value-review criteria BEFORE finishing (every spec must fail if its feature breaks); do not rely on spawning a subagent.`
       : `- Review disabled for this run.`,
   ].join("\n");
+}
+
+// ── Architecture context injection ──────────────────────────────────────────
+//
+// The orchestrator loads e2e/.qa/context.json and passes it via contextMap. This
+// function renders the relevant slice as a prompt section so the agent receives
+// the FE↔BE map as a FIRST-CLASS input — no "read it if it exists" ambiguity.
+// For diff mode, it filters to only the routes/operations touched by the changed
+// files. For other modes (complete/exhaustive/manual), it renders the full map.
+
+export function renderArchitectureContext(
+  ctx: ArchitectureContext,
+  changedFiles?: string[],
+): string | null {
+  if (!ctx.routes?.length && !ctx.api?.length) return null;
+
+  const relevantLinks = changedFiles?.length
+    ? ctx.feBe?.filter((link) => {
+        // A link is relevant if any changed file path contains the route path
+        // or the via symbol. Crude but effective for scoping.
+        const terms = [link.route, link.via ?? "", link.operationId].filter(Boolean);
+        return changedFiles.some((f) => terms.some((t) => f.includes(t)));
+      }) ?? ctx.feBe ?? []
+    : ctx.feBe ?? [];
+
+  const lines: string[] = [];
+  lines.push("## Architecture context (from e2e/.qa/context.json)");
+  lines.push(`Built at ${ctx.builtAtSha.slice(0, 7)} — the FE↔BE map this app's QA uses to cross the frontend→backend boundary.`);
+  lines.push("");
+
+  if (ctx.routes.length) {
+    lines.push(`### Routes (${ctx.routes.length} entry points)`);
+    for (const r of ctx.routes) {
+      lines.push(`- \`${r.path}\` → ${r.component ?? "(unknown component)"}${r.name ? ` ("${r.name}")` : ""}`);
+    }
+    lines.push("");
+  }
+
+  if (ctx.api.length) {
+    lines.push(`### API operations (${ctx.api.length} endpoints)`);
+    for (const o of ctx.api) {
+      lines.push(`- \`${o.operationId}\`: ${o.method} ${o.path}${o.service ? ` (${o.service})` : ""}`);
+    }
+    lines.push("");
+  }
+
+  if (relevantLinks.length) {
+    lines.push(`### FE↔BE links (${relevantLinks.length} of ${ctx.feBe?.length ?? 0} total)`);
+    lines.push("Each link tells you which frontend route calls which backend operation — use this to widen the blast radius:");
+    for (const l of relevantLinks) {
+      lines.push(`- Route \`${l.route}\` → \`${l.operationId}\`${l.via ? ` (via ${l.via})` : ""}`);
+    }
+    lines.push("");
+  }
+
+  if (ctx.flows?.length) {
+    lines.push("### Named flows");
+    for (const f of ctx.flows) {
+      const opList = f.operations?.length ? ` → ${f.operations.join(", ")}` : "";
+      lines.push(`- **${f.id}**: ${f.routes.join(", ")}${opList}`);
+    }
+    lines.push("");
+  }
+
+  lines.push("When the blast radius from the diff touches a route, use its FE↔BE links");
+  lines.push("to also consider the backend operations — a frontend change can break backend");
+  lines.push("behaviour and vice-versa.");
+  return lines.join("\n");
 }
 
 // ── context mode: build the FE↔BE architecture map ──────────────────────────

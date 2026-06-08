@@ -21,6 +21,7 @@ export const MODE_INFO: Record<RunMode, string> = {
   complete:    "Analyze the whole repo, estimate coverage, and test uncovered important flows.",
   exhaustive:  "Audit every existing test and regenerate the entire suite from scratch.",
   manual:      "Focused generation guided by a natural-language prompt.",
+  context:     "Build or refresh the FE↔BE architecture map (context.json) from routing, OpenAPI, and generated clients.",
 };
 
 // Section label for each pipeline step, with a summary when complete.

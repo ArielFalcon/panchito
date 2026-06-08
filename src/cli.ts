@@ -28,7 +28,7 @@ async function main(): Promise<void> {
   process.exit(ok ? 0 : 1);
 }
 
-const MODES: RunMode[] = ["diff", "complete", "exhaustive", "manual"];
+const MODES: RunMode[] = ["diff", "complete", "exhaustive", "manual", "context"];
 const TARGETS: TestTarget[] = ["e2e", "code"];
 
 function parseArgs(argv: string[]): { app: string; sha: string; mode: RunMode; target: TestTarget; guidance?: string } {

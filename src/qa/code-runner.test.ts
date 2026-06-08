@@ -135,6 +135,23 @@ test("node --test that executed zero tests is infra-error, not a false pass", as
   assert.equal(run.passed, false);
 });
 
+test("npm test wrapping node:test that executed ZERO tests is infra-error (the real self-test case)", async () => {
+  // ai-pipeline's own test command is `npm test`, which wraps `node --test`. The node:test
+  // summary still reports the count, so a zero-test run MUST be caught even though cmd is `npm`.
+  const project: CodeProject = { ecosystem: "node", install: null, test: { cmd: "npm", args: ["test"] } };
+  const deps: CodeExecuteDeps = { detect: () => project, runTests: async () => ({ exitCode: 0, logs: "ℹ tests 0\nℹ pass 0\nℹ fail 0" }) };
+  const run = await runCodeTests("/r", { namespace: "qa-bot-npm0" }, deps);
+  assert.equal(run.verdict, "infra-error"); // not a false pass over zero executed tests
+  assert.equal(run.passed, false);
+});
+
+test("npm test wrapping node:test with real tests passing stays pass (no over-firing)", async () => {
+  const project: CodeProject = { ecosystem: "node", install: null, test: { cmd: "npm", args: ["test"] } };
+  const deps: CodeExecuteDeps = { detect: () => project, runTests: async () => ({ exitCode: 0, logs: "ℹ tests 331\nℹ pass 331\nℹ fail 0" }) };
+  const run = await runCodeTests("/r", { namespace: "qa-bot-npmN" }, deps);
+  assert.equal(run.verdict, "pass");
+});
+
 test("pytest exit 5 (no tests collected) is infra-error, not a false fail", async () => {
   const project: CodeProject = { ecosystem: "python", install: null, test: { cmd: "python", args: ["-m", "pytest", "-q"] } };
   const deps: CodeExecuteDeps = { detect: () => project, runTests: async () => ({ exitCode: 5, logs: "no tests ran in 0.01s" }) };
@@ -203,6 +220,33 @@ test("scrubEnv strips secrets but preserves language vars and OS essentials", ()
     assert.equal(env.CI, "true", "CI must be preserved");
   } finally {
     // Restore original env so no side effects leak to other tests.
+    for (const key of Object.keys(process.env)) {
+      if (!(key in saved)) delete process.env[key];
+    }
+    Object.assign(process.env, saved);
+  }
+});
+
+// The allowlist must keep whole FAMILIES of package-manager/locale vars (npm_config_*,
+// CARGO_*, LC_*, GRADLE_*), not just the bare prefix string — otherwise `npm ci` loses its
+// registry/cache/proxy config and Cargo/Gradle lose their home dirs.
+test("scrubEnv preserves prefix-family language vars (npm_config_*, CARGO_*, LC_*, GRADLE_*)", () => {
+  const saved = { ...process.env };
+  try {
+    process.env.npm_config_cache = "/cache";
+    process.env.npm_config_registry = "https://registry.local";
+    process.env.CARGO_HOME = "/home/u/.cargo";
+    process.env.LC_ALL = "C.UTF-8";
+    process.env.GRADLE_USER_HOME = "/home/u/.gradle";
+    process.env.DOPPLER_TOKEN = "dp_fakeSecret"; // a secret family → must STILL be dropped
+    const env = scrubEnv();
+    assert.equal(env.npm_config_cache, "/cache", "npm_config_* must be preserved (npm ci needs it)");
+    assert.equal(env.npm_config_registry, "https://registry.local");
+    assert.equal(env.CARGO_HOME, "/home/u/.cargo");
+    assert.equal(env.LC_ALL, "C.UTF-8");
+    assert.equal(env.GRADLE_USER_HOME, "/home/u/.gradle");
+    assert.ok(!("DOPPLER_TOKEN" in env), "DOPPLER_ secrets must still be blocked");
+  } finally {
     for (const key of Object.keys(process.env)) {
       if (!(key in saved)) delete process.env[key];
     }

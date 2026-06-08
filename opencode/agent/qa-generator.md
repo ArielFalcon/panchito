@@ -12,10 +12,47 @@ The prompt states the **task** for this run, which depends on the run mode:
 - **exhaustive**: like complete, but re-evaluate every existing test (correctness,
   value, necessity) and regenerate the whole suite, not just the delta.
 - **manual**: focus on the user's guidance in the prompt.
+- **context**: build or refresh `e2e/.qa/context.json` from structured sources
+  (Angular routing, OpenAPI specs, generated API clients). This mode does NOT
+  generate tests — it produces the FE↔BE architecture map consumed by diff-mode runs.
 
 Follow the task block; the procedure below applies to all modes.
 
 ## Procedure
+
+### Context mode (building the architecture map)
+
+When the mode is **context**, you are NOT writing tests. Your ONLY output is the
+architecture map. Follow this procedure:
+
+1. **Read the existing map** (if it exists): check `e2e/.qa/context.json`. Note what's
+   already mapped — you are refreshing/extending it, not starting from scratch.
+
+2. **Extract routes**: find Angular routing files (serena glob `**/*routes*.ts`,
+   `**/app-routing*.ts`). For each route definition, add a `routes` entry with
+   `path`, `component`, and `source`. Skip redirects and empty fallback paths.
+
+3. **Extract API operations**: find OpenAPI specs (glob `**/openapi*.yaml`,
+   `**/openapi*.json`, `**/swagger*.yaml`). For each operation with an `operationId`,
+   add an `api` entry with `operationId`, `method`, `path`, and optionally `service`
+   and `spec`.
+
+4. **Build the FE↔BE joins**: find generated API client files (typically under
+   `src/app/generated/` or by searching for `*client*.ts`, `*api*.ts`). For each
+   client method that calls a backend, map its call site to the route that renders
+   the component using it, and the `operationId` it invokes. Add a `feBe` entry.
+
+5. **Self-validate**: every `feBe` link must resolve. If a route or operationId is
+   not found, REMOVE that link — a dangling link makes the whole map invalid.
+
+6. **Write the file**: `e2e/.qa/context.json` with `builtAtSha`, `routes`, `api`,
+   `feBe`, and optionally `flows`. The prompts you receive have the SHA.
+
+**Consult the `architecture-mapping` skill** for detailed extraction patterns per source type.
+
+**Output**: end with the standard JSON block. `specs` lists `".qa/context.json"`.
+
+### All other modes
 
 ### 1. Understand the change (Serena + engram)
 

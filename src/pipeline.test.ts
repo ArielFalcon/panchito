@@ -120,6 +120,12 @@ function deps(
       h.published = true;
       return opts.prUrl === undefined ? { prUrl: "https://github.com/org/demo/pull/9", merged: true } : opts.prUrl === null ? null : { prUrl: opts.prUrl, merged: true };
     },
+    publishContext: async (input: { baseBranch: string }) => {
+      calls.push("publishContext");
+      assert.equal(input.baseBranch, "main");
+      h.published = true;
+      return opts.prUrl === undefined ? { prUrl: "https://github.com/org/demo/pull/2", merged: true } : opts.prUrl === null ? null : { prUrl: opts.prUrl, merged: true };
+    },
     publish: async (input: { baseBranch: string }) => {
       calls.push("publish");
       assert.equal(input.baseBranch, "main");
@@ -579,4 +585,52 @@ test("code mode skip (no logic commit): does not generate or execute", async () 
   assert.equal(run.verdict, "skipped");
   assert.ok(!calls.includes("generate"));
   assert.ok(!calls.includes("executeCode"));
+});
+
+test("context mode: generates context.json, validates it, publishes, skips validate/execute/review", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, {
+    agent: { output: "context map built", specs: [".qa/context.json"], reviewed: false, approved: true, note: "built map with 3 routes, 2 api ops, 2 links" },
+  });
+  let validateCalled = false;
+  d.validateContextFn = () => {
+    validateCalled = true;
+    return { ok: true, errors: [] };
+  };
+  const run = await runPipeline(app, "abc123", d, "manual", { mode: "context" });
+  assert.equal(run.verdict, "pass");
+  assert.ok(calls.includes("generate"));
+  assert.ok(validateCalled);
+  assert.ok(!calls.includes("validate"));
+  assert.ok(!calls.includes("execute"));
+  assert.ok(!calls.includes("review"));
+  assert.ok(calls.includes("publishContext"));
+  assert.equal(d.published, true);
+  assert.equal(d.genMode, "context");
+});
+
+test("context mode: invalid context.json returns 'invalid' verdict and opens an Issue", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, {
+    agent: { output: "tried", specs: [".qa/context.json"], reviewed: false, approved: true },
+  });
+  d.validateContextFn = () => ({ ok: false, errors: ["feBe[0]: route '/ghost' is not declared in 'routes'"] });
+  const run = await runPipeline(app, "abc123", d, "manual", { mode: "context" });
+  assert.equal(run.verdict, "invalid");
+  assert.equal(d.issues.length, 1);
+  assert.match(d.issues[0]!, /context map.*invalid/);
+});
+
+test("context mode (shadow): builds map but does not publish or open Issues", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, {
+    agent: { output: "map built", specs: [".qa/context.json"], reviewed: false, approved: true },
+  });
+  d.validateContextFn = () => ({ ok: true, errors: [] });
+  const shadowApp = { ...app, qa: { ...app.qa, shadow: true } };
+  const run = await runPipeline(shadowApp, "abc123", d, "manual", { mode: "context" });
+  assert.equal(run.verdict, "pass");
+  // Shadow mode: no publish, no issue.
+  assert.equal(d.published, false);
+  assert.equal(d.issues.length, 0);
 });

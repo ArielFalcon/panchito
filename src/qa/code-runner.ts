@@ -26,16 +26,31 @@ import { sanitizeText, containsSecrets, recordAudit } from "../orchestrator/sani
 // to the repo) and other secrets. This function strips credentials while preserving
 // the OS and language vars that package managers and test runners need to function.
 
-const BLOCKED_ENV_RE = /^(?:GITHUB_TOKEN|OPENCODE_API_KEY|WEBHOOK_SECRET|QA_API_TOKEN|DOPPLER_|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AZURE_|GOOGLE_APPLICATION_CREDENTIALS)$/;
+// Secret FAMILIES that must never reach untrusted code (prefix match — DOPPLER_TOKEN,
+// AWS_*, AZURE_* are all blocked). Defense-in-depth: the allowlist below is the real gate
+// (anything not allowed is dropped), but blocking secrets explicitly guards against an
+// allowlist entry accidentally widening to cover one.
+const BLOCKED_ENV_PREFIX = /^(?:GITHUB_TOKEN|GH_TOKEN|OPENCODE_API_KEY|WEBHOOK_SECRET|QA_API_TOKEN|DOPPLER_|AWS_|AZURE_|GCP_|GOOGLE_APPLICATION_CREDENTIALS|NPM_TOKEN|NODE_AUTH_TOKEN)/;
 
-const ALLOWED_ENV_RE = /^(?:PATH|HOME|USER|SHELL|TERM|LANG|LC_|TMPDIR?|TEMPDIR|TMP$|NODE_ENV|CI|npm_config_|PIP_|PYTHON|VIRTUAL_ENV|GOPATH|GOROOT|GOPRIVATE|GOPROXY|GONOSUMCHECK|GOFLAGS|CGO_|CARGO_|RUSTUP_|RUST_|JAVA_HOME|GRADLE_|MAVEN_|NVM_DIR|NODE_PATH|NODE_OPTIONS|PNPM_|YARN_|COREPACK_|DISPLAY|SSH_AUTH_SOCK|COLORTERM|NO_COLOR|FORCE_COLOR|DEBUG|PKG_CONFIG_PATH|LD_LIBRARY_PATH|DYLD_LIBRARY_PATH)$/;
+// Allowed exact var names (OS + language essentials that are single vars, not families).
+const ALLOWED_ENV_EXACT = new Set([
+  "PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "TMPDIR", "TEMPDIR", "TMP", "TEMP",
+  "NODE_ENV", "CI", "PYTHON", "VIRTUAL_ENV", "GOPATH", "GOROOT", "GOPRIVATE", "GOPROXY",
+  "GONOSUMCHECK", "GOFLAGS", "GOCACHE", "JAVA_HOME", "NVM_DIR", "NODE_PATH", "NODE_OPTIONS",
+  "DISPLAY", "SSH_AUTH_SOCK", "COLORTERM", "NO_COLOR", "FORCE_COLOR", "DEBUG",
+  "PKG_CONFIG_PATH", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH",
+]);
+
+// Allowed var FAMILIES (prefix match — each token genuinely names a family of vars the
+// toolchain needs: npm registry/cache/proxy config, Cargo/Rust/Gradle/Maven homes, locale).
+const ALLOWED_ENV_PREFIX = /^(?:LC_|npm_config_|PIP_|CGO_|CARGO_|RUSTUP_|RUST_|GRADLE_|MAVEN_|PNPM_|YARN_|COREPACK_)/;
 
 export function scrubEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (value === undefined) continue;
-    if (BLOCKED_ENV_RE.test(key)) continue;
-    if (ALLOWED_ENV_RE.test(key)) {
+    if (BLOCKED_ENV_PREFIX.test(key)) continue;
+    if (ALLOWED_ENV_EXACT.has(key) || ALLOWED_ENV_PREFIX.test(key)) {
       env[key] = value;
     }
   }
@@ -214,8 +229,11 @@ export function ranZeroTests(project: CodeProject, out: CodeRunOutput): boolean 
   // reported "ok" (a package that actually ran tests), the suite executed nothing.
   if (project.ecosystem === "go" && out.exitCode === 0 && /no test files/.test(log) && !/^ok\s/m.test(log)) return true;
 
-  // node --test: the TAP/summary line reports the executed count.
-  if (cmd.includes("node --test") && /(?:#|ℹ)\s*tests\s+0\b/.test(log)) return true;
+  // node:test: the TAP/summary line reports the executed count. Check it for the WHOLE
+  // node ecosystem (not only a literal `node --test` cmd) because the project's test
+  // script almost always wraps it as `npm test` — the case that ships in practice. The
+  // `# tests N` / `ℹ tests N` line is node:test-specific, so this never matches jest/vitest.
+  if (project.ecosystem === "node" && /(?:#|ℹ)\s*tests\s+0\b/.test(log)) return true;
 
   // jest / vitest: explicit "no tests" message (robust to --passWithNoTests configured).
   if (/\bnpx (?:jest|vitest)\b/.test(cmd) && /No tests? (?:found|files? found)/i.test(log)) return true;

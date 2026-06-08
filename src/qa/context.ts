@@ -135,3 +135,37 @@ export function validateContext(raw: unknown): ContextValidation {
 function nonEmpty(s: unknown): boolean {
   return typeof s === "string" && s.trim().length > 0;
 }
+
+// ── Staleness detection ────────────────────────────────────────────────────
+// The map carries a `builtAtSha` for provenance. When the HEAD has moved past it
+// by more than `maxCommitsBehind`, the map is considered stale — useful for
+// triggering automatic regeneration (e.g. via cron or on a routing/OpenAPI change).
+// The threshold is permissive by default (20 commits) because the map changes only
+// when routing or API contracts change, not on every commit.
+
+export interface StalenessInput {
+  builtAtSha: string; // the SHA the map was built from (from context.builtAtSha)
+  headSha: string; // the current HEAD of the branch
+  commitsBehind: number; // how many commits HEAD is ahead of builtAtSha
+}
+
+export function isContextStale(
+  input: StalenessInput,
+  maxCommitsBehind = 20,
+): { stale: boolean; commitsBehind: number; reason: string } {
+  if (input.commitsBehind <= 0) {
+    return { stale: false, commitsBehind: 0, reason: "map is at or ahead of HEAD" };
+  }
+  if (input.commitsBehind > maxCommitsBehind) {
+    return {
+      stale: true,
+      commitsBehind: input.commitsBehind,
+      reason: `map built at ${input.builtAtSha.slice(0, 7)} is ${input.commitsBehind} commits behind HEAD (${input.headSha.slice(0, 7)}), threshold is ${maxCommitsBehind}`,
+    };
+  }
+  return {
+    stale: false,
+    commitsBehind: input.commitsBehind,
+    reason: `map is ${input.commitsBehind} commits behind HEAD (threshold: ${maxCommitsBehind})`,
+  };
+}

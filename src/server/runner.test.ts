@@ -32,6 +32,7 @@ function stubDeps(over: Partial<PipelineDeps> = {}): PipelineDeps {
     },
     isHealthy: async () => true,
     publish: async () => null,
+    publishContext: async () => null,
     setupCode: async () => {},
     executeCode: async (_dir, opts) => ({ sha: opts.namespace ?? "ns", verdict: "pass", passed: true, cases: [], logs: "" }),
     publishCode: async () => null,
