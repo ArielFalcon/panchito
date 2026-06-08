@@ -81,7 +81,13 @@ export function routeEvent(
     const todo = event.properties.todo as { content?: string; status?: string };
     text = `todo [${todo.status ?? "?"}] ${todo.content ?? ""}`;
   }
-  if (!text) text = event.type;
+  // Drop message events with no useful content (empty delta/part). Step events
+  // (session lifecycle) and errors are kept even with minimal text — they signal
+  // state changes the operator needs to see.
+  if (!text) {
+    if (kind === "message") return { dropped: "unknown-kind" };
+    text = event.type;
+  }
 
   return { activity: { runId, kind, text: text.slice(0, 500) } };
 }

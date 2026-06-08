@@ -96,6 +96,9 @@ export async function startEventStream(
       });
 
       if (activity) {
+        // Skip internal reasoning and step lifecycle events — they add visual noise
+        // without actionable information for the operator.
+        if (activity.text === "(thinking…)" || activity.kind === "step") continue;
         // Concise display: file → basename, tool → first 3 args, todo → strip prefix.
         let display = activity.text;
         if (activity.kind === "file") {

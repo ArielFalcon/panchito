@@ -2,7 +2,7 @@
 // Each case shows flow as title, objective/reason as context, and colored status.
 
 import React from "react";
-import { Static, Text, Box } from "ink";
+import { Text, Box } from "ink";
 import { QaCase } from "../../types";
 import { caseColor, caseIcon } from "../format";
 
@@ -27,27 +27,24 @@ export function toHistoryItems(cases: QaCase[]): HistoryItem[] {
 }
 
 export function HistoryList({ items }: { items: HistoryItem[] }): React.ReactElement {
+  // Only show the LAST item — during execution, the current test is the only
+  // relevant one. When done, the Section label already summarizes totals.
+  const last = items.length > 0 ? [items[items.length - 1]!] : [];
   return (
-    <Static items={items}>
-      {(item) => (
+    <Box flexDirection="column">
+      {last.map((item) => (
         <Box key={item.name} flexDirection="column">
           <Text>
             {"  "}
             <Text color={caseColor(item.status)}>{caseIcon(item.status)}</Text>
             {" "}
-            <Text>{item.flow ?? item.name}</Text>
+            <Text>{(item.flow ?? item.name).slice(0, 60)}</Text>
           </Text>
-          {item.objective ? (
-            <Text dimColor>{`     objective: ${item.objective}`}</Text>
-          ) : null}
-          {item.reason ? (
-            <Text dimColor>{`     ${item.reason}`}</Text>
-          ) : null}
           {item.detail && item.status === "fail" ? (
             <Text color="#c0392b">{`     ${item.detail.slice(0, 120)}`}</Text>
           ) : null}
         </Box>
-      )}
-    </Static>
+      ))}
+    </Box>
   );
 }
