@@ -249,7 +249,10 @@ export async function runOpencode(
     // objective, targets per spec), the orchestrator writes the manifest — not
     // the agent. This closes the non-determinism gap where the agent could
     // forget, write corrupted entries, or use different ids across runs.
-    if (verdict.specMetas && verdict.specMetas.length > 0) {
+    // e2e-only: the manifest is an e2e-suite artifact under e2e/.qa/. In code mode the repo
+    // has no e2e/ dir and publishCode would commit a phantom e2e/.qa/manifest.json into the
+    // watched repo (same reason measured.json is gated to e2e — M1/D1).
+    if (input.target !== "code" && verdict.specMetas && verdict.specMetas.length > 0) {
       const changeType = input.intent?.type ?? "unknown";
       const entries: ManifestEntry[] = verdict.specMetas.map((m) => ({
         id: m.flow,

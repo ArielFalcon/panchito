@@ -302,17 +302,6 @@ function lineStartOffsets(source: string): number[] {
   for (let i = 0; i < source.length; i++) if (source[i] === "\n") starts.push(i + 1);
   return starts;
 }
-// Binary search: 1-based line number containing the byte offset.
-function offsetToLine(lineStarts: number[], offset: number): number {
-  let lo = 0;
-  let hi = lineStarts.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi + 1) >> 1;
-    if (lineStarts[mid]! <= offset) lo = mid;
-    else hi = mid - 1;
-  }
-  return lo + 1;
-}
 
 // ── Default provider (the injected boundary) ─────────────────────────────────
 // Reads coverage produced by the run from conventional locations — NON-invasively (it never
@@ -363,8 +352,12 @@ function browserCoverageDir(e2eDir: string, namespace: string): string {
 // Called before each measured execute: stale dumps from a prior same-sha run survive
 // `git clean -fd` (the dir is gitignored), and an enforce re-run would otherwise union
 // round-1 and round-2 dumps. force:true makes it idempotent when the dir is absent.
-export function clearBrowserCoverage(e2eDir: string, namespace: string): void {
-  rmSync(browserCoverageDir(e2eDir, namespace), { recursive: true, force: true });
+export function clearBrowserCoverage(e2eDir: string, _namespace?: string): void {
+  // Remove the WHOLE per-run coverage tree (every namespace), not just one: each run uses a
+  // fresh runId-scoped namespace, so old sibling dirs would otherwise accumulate forever in
+  // the gitignored mirror (they survive `git clean -fd`). The sequential queue guarantees no
+  // concurrent run's dumps live here; the current run repopulates coverage/<ns> during execute.
+  rmSync(join(e2eDir, ".qa", "coverage"), { recursive: true, force: true });
 }
 
 // Did the suite emit ANY V8 dumps this run? Lets the orchestrator distinguish a benign

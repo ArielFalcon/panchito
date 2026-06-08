@@ -34,10 +34,13 @@ export type PublishResult = { prUrl: string; merged: boolean };
 
 // Commit e2e/ EXCEPT the volatile change-coverage dumps (e2e/.qa/coverage/*): committing them
 // would bloat PRs and, worse, make the "did anything change?" check think every run has changes.
-const E2E_PATHSPEC = ["e2e", ":(exclude)e2e/.qa/coverage", ":(exclude)e2e/.qa/coverage/**"];
+// Exclude the VOLATILE, system-owned files (coverage dumps + measured.json) explicitly, so
+// exclusion never depends on a seed .gitignore that a legacy/edited repo might be missing —
+// otherwise measured.json (which changes every run) would open spurious PRs.
+const E2E_PATHSPEC = ["e2e", ":(exclude)e2e/.qa/coverage", ":(exclude)e2e/.qa/coverage/**", ":(exclude)e2e/.qa/measured.json"];
 // Code-mode tests can live anywhere in the repo (the agent matches the repo's
 // conventions) — commit the whole tree, but never the installed dependencies.
-const CODE_PATHSPEC = [".", ":(exclude)node_modules", ":(exclude)**/node_modules", ":(exclude)e2e/.qa/coverage/**"];
+const CODE_PATHSPEC = [".", ":(exclude)node_modules", ":(exclude)**/node_modules", ":(exclude)e2e/.qa/coverage/**", ":(exclude)**/.qa/measured.json"];
 
 interface PublishShape {
   statusPathspec: string[]; // pathspec for the "did anything change?" check

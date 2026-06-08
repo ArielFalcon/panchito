@@ -8,15 +8,19 @@
 import { JobQueue } from "./server/queue";
 import { enqueueTrackedRun } from "./server/runner";
 import { getRecord } from "./server/history";
+import { loadAppConfig } from "./orchestrator/config-loader";
 import { RunMode, TestTarget } from "./types";
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const queue = new JobQueue();
+  // When --target is not given, derive it from the app config: a `code: true` app must run
+  // code mode (running e2e against it would hit the no-dev defensive infra-error).
+  const target = args.target ?? (loadAppConfig(args.app).code ? "code" : "e2e");
   const id = enqueueTrackedRun(queue, {
     app: args.app,
     sha: args.sha,
-    target: args.target,
+    target,
     mode: args.mode,
     guidance: args.guidance,
     source: "manual",
@@ -31,7 +35,7 @@ async function main(): Promise<void> {
 const MODES: RunMode[] = ["diff", "complete", "exhaustive", "manual", "context"];
 const TARGETS: TestTarget[] = ["e2e", "code"];
 
-function parseArgs(argv: string[]): { app: string; sha: string; mode: RunMode; target: TestTarget; guidance?: string } {
+function parseArgs(argv: string[]): { app: string; sha: string; mode: RunMode; target?: TestTarget; guidance?: string } {
   const out: Record<string, string> = {};
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i]?.replace(/^--/, "");
@@ -44,7 +48,8 @@ function parseArgs(argv: string[]): { app: string; sha: string; mode: RunMode; t
     process.exit(2);
   }
   const mode = (MODES as string[]).includes(out.mode ?? "") ? (out.mode as RunMode) : "diff";
-  const target = (TARGETS as string[]).includes(out.target ?? "") ? (out.target as TestTarget) : "e2e";
+  // Undefined when not passed → the caller derives it from the app config (code vs e2e).
+  const target = (TARGETS as string[]).includes(out.target ?? "") ? (out.target as TestTarget) : undefined;
   return { app: out.app, sha: out.sha, mode, target, guidance: out.guidance };
 }
 

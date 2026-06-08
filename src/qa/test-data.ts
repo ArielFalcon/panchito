@@ -21,6 +21,9 @@ export function testDataNamespace(prefix: string, sha: string, runId?: string): 
 
 // A short, entity-name-safe token unique to a run, taken from the unique tail of the
 // runId (run-<sha7>-<ts36> → <ts36>).
+// A short, entity-name-safe token unique to a run, taken from the random tail of the runId
+// (format `run-<sha7>-<ts36>-<hex8>` → the `<hex8>` random suffix, which is what guarantees
+// uniqueness even for two same-sha runs in the same millisecond).
 function runToken(runId: string): string {
   const tail = runId.split("-").pop() ?? runId;
   return tail.replace(/[^a-z0-9]/gi, "").slice(0, 12) || "run";

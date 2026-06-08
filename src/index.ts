@@ -8,7 +8,6 @@ import { loadAppConfig, loadAppConfigByRepo, listAppConfigs } from "./orchestrat
 import { handleApi, ApiDeps } from "./server/api";
 import { handleMaintainerApi, recordIncident, setMaintainerStatus, getMaintainerStatus, getIncidents, updateIncident } from "./server/maintainer";
 import { getRecord, listRecords, currentRun, updateRecord, interruptedRecords, continuationDepth, MAX_CONTINUATION_DEPTH } from "./server/history";
-import { testDataNamespace } from "./qa/test-data";
 import { enqueueTrackedRun } from "./server/runner";
 import { performSwap, confirmSwapHealthy, rollback, realSwapFs, SWAP_MARKER_FILE } from "./server/self-update";
 import { assessChange, assessRate, parseNumstat, readDeployHistory, recordDeploy } from "./server/merge-guard";
@@ -131,23 +130,9 @@ function enqueueApiRun(app: string, sha: string, target: string, mode: RunMode, 
     console.warn(`[qa] rejecting run ${app}@${sha} — shutting down`);
     return "";
   }
-  let previousNamespace: string | undefined;
-  const prev = listRecords(app, 1)[0];
-  const wasInterrupted = prev && (
-    prev.status === "running" || prev.status === "enqueued" ||
-    prev.verdict === "infra-error"
-  );
-  if (wasInterrupted) {
-    // Reconstruct the interrupted run's EXACT namespace from its record (same prefix,
-    // sha and runId it used) via the same function, so orphan cleanup targets the data
-    // it actually created. Uses the app's configured prefix, not a hardcoded one.
-    try {
-      previousNamespace = testDataNamespace(loadAppConfig(app).qa.testDataPrefix, prev.sha, prev.id);
-    } catch {
-      // best-effort: if the config can't be loaded, skip orphan cleanup for this run
-    }
-  }
-  return enqueueTrackedRun(queue, { app, sha, target: target as TestTarget, mode, guidance, shadow, source: "webhook", previousNamespace });
+  // Orphan-data cleanup is reconstructed inside enqueueTrackedRun (the single funnel), so
+  // every trigger gets it — not just this webhook path.
+  return enqueueTrackedRun(queue, { app, sha, target: target as TestTarget, mode, guidance, shadow, source: "webhook" });
 }
 
 // ── Self-maintenance: clone ai-pipeline into a persistent working copy ───────

@@ -8,8 +8,9 @@
 import { JobQueue } from "./queue";
 import { runPipeline, defaultPipelineDeps, PipelineDeps } from "../pipeline";
 import { loadAppConfig, AppConfig } from "../orchestrator/config-loader";
-import { createRecord, updateRecord, addCase, getRecord, appendLog } from "./history";
+import { createRecord, updateRecord, addCase, getRecord, appendLog, listRecords } from "./history";
 import { recordIncident } from "./maintainer";
+import { testDataNamespace } from "../qa/test-data";
 import { RunMode, TestTarget, TriggerSource, QaCase } from "../types";
 import { activityRouter } from "../integrations/opencode-client";
 
@@ -36,6 +37,23 @@ export interface RunnerDeps {
 // Returns the record id immediately (the run executes asynchronously, one at a time).
 export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: RunnerDeps = {}): string {
   const loadApp = deps.loadApp ?? loadAppConfig;
+
+  // Orphan-data cleanup runs through the SINGLE funnel so EVERY trigger (webhook, CLI,
+  // continuation) cleans an interrupted prior run's DEV data — not only the webhook. The
+  // prior run's exact namespace is reconstructed from its record (same prefix/sha/runId).
+  let previousNamespace = req.previousNamespace;
+  if (previousNamespace === undefined) {
+    try {
+      const prev = listRecords(req.app, 1)[0];
+      const wasInterrupted = prev && (prev.status === "running" || prev.status === "enqueued" || prev.verdict === "infra-error");
+      if (wasInterrupted) {
+        previousNamespace = testDataNamespace(loadApp(req.app).qa.testDataPrefix, prev.sha, prev.id);
+      }
+    } catch {
+      /* best-effort: skip cleanup if the prior record/config is unavailable */
+    }
+  }
+
   const record = createRecord({ app: req.app, sha: req.sha, target: req.target, mode: req.mode, parentRunId: req.parentRunId });
   console.log(`[qa] enqueued ${req.app}@${req.sha} mode=${req.mode}${req.parentRunId ? ` (continue of ${req.parentRunId})` : ""} (queue: ${queue.size + 1})`);
 
@@ -87,7 +105,7 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
           },
         },
         req.source ?? "webhook",
-        { mode: req.mode, target: req.target, guidance: req.guidance, fixCases: req.fixCases, parentRunId: req.parentRunId, previousNamespace: req.previousNamespace, runId: record.id },
+        { mode: req.mode, target: req.target, guidance: req.guidance, fixCases: req.fixCases, parentRunId: req.parentRunId, previousNamespace, runId: record.id },
         (step, detail) => updateRecord(record.id, { step, stepDetail: detail, retrying: step === "retry" }),
         (c) => addCase(record.id, c),
         (specs) => updateRecord(record.id, { specs }),

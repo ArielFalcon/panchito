@@ -155,13 +155,25 @@ async function handleCreateRun(req: IncomingMessage, res: ServerResponse, deps: 
   return true;
 }
 
+// Sanitize a RunRecord before it leaves the system: logs, case details and the note can
+// carry DEV data or a secret the agent echoed. Same egress invariant the chat/Issue paths
+// already honor (CLAUDE.md "Sanitize data leaving the system").
+function sanitizeRecord(record: RunRecord): RunRecord {
+  return {
+    ...record,
+    note: record.note ? sanitizeText(record.note).text : record.note,
+    logs: record.logs.map((l) => sanitizeText(l).text),
+    cases: record.cases.map((c) => (c.detail ? { ...c, detail: sanitizeText(c.detail).text } : c)),
+  };
+}
+
 function handleGetRun(res: ServerResponse, deps: ApiDeps, id: string): boolean {
   const record = deps.getRecord(id);
   if (!record) {
     json(res, 404, { error: `run not found: ${id}` });
     return true;
   }
-  json(res, 200, record);
+  json(res, 200, sanitizeRecord(record));
   return true;
 }
 
@@ -196,7 +208,7 @@ function handleListRuns(res: ServerResponse, deps: ApiDeps, app: string | null |
     json(res, 400, { error: "?app=<name> query parameter is required" });
     return true;
   }
-  json(res, 200, deps.listRecords(app, limit));
+  json(res, 200, deps.listRecords(app, limit).map(sanitizeRecord));
   return true;
 }
 

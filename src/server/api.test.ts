@@ -60,6 +60,20 @@ const parentRec: RunRecord = {
   at: "t",
 };
 
+test("GET /api/runs/:id sanitizes logs/cases/note before egress", async () => {
+  const leaky: RunRecord = {
+    id: "r1", app: "demo", sha: "abc", target: "e2e", mode: "diff", status: "done", verdict: "fail",
+    cases: [{ name: "x", status: "fail", detail: "boom token: ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" }],
+    logs: ["running... token: ghp_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB end"],
+    note: "failed; secret ghp_CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+    at: "t",
+  };
+  const res = mkRes();
+  await handleApi(mkReq("GET", "/api/runs/r1"), res, deps({ getRecord: () => leaky }));
+  assert.equal(res.status, 200);
+  assert.doesNotMatch(res.body, /ghp_AAAA|ghp_BBBB|ghp_CCCC/, "logs/cases/note must be redacted on egress");
+});
+
 test("POST /api/runs with a sha enqueues and returns 202", async () => {
   const res = mkRes();
   const ok = await handleApi(mkReq("POST", "/api/runs", JSON.stringify({ app: "demo", sha: "abc1234", mode: "diff" })), res, deps());
