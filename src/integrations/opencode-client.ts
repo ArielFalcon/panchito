@@ -243,6 +243,26 @@ export async function runOpencode(
     // When review is disabled, the subagent verdict does not apply: approve.
     const approved = input.needsReview ? verdict.approved : true;
 
+    // Deterministic manifest upsert: when the agent provides specMetas (flow,
+    // objective, targets per spec), the orchestrator writes the manifest — not
+    // the agent. This closes the non-determinism gap where the agent could
+    // forget, write corrupted entries, or use different ids across runs.
+    if (verdict.specMetas && verdict.specMetas.length > 0) {
+      const changeType = input.intent?.type ?? "unknown";
+      const entries: ManifestEntry[] = verdict.specMetas.map((m) => ({
+        id: m.flow,
+        objective: m.objective,
+        flow: m.flow,
+        targets: m.targets,
+        changeRef: { sha: input.sha, type: changeType },
+      }));
+      upsertManifest(
+        realManifestFs,
+        join(input.mirrorDir, input.e2eRelDir, ".qa", "manifest.json"),
+        entries,
+      );
+    }
+
     return {
       output: finalText,
       specs: verdict.specs,
@@ -576,6 +596,12 @@ export async function runOpencodeParallel(
   return {
     output: planText,
     specs,
+    specMetas: entries.map((e) => ({
+      file: specFileForFlow(e.flow),
+      flow: e.flow,
+      objective: e.objective,
+      targets: e.targets,
+    })),
     reviewed: false,
     approved: specs.length > 0, // overridden by the orchestrator's independent reviewer when enabled
     note: errors.length ? `worker errors: ${errors.join("; ")}` : undefined,
@@ -672,7 +698,6 @@ export function buildPrompt(input: OpencodeRunInput): string {
         `   - "NS_ERROR_…" / network error → the URL or route is wrong; verify with browser_navigate`,
         `   - "locator resolved to N elements" → use .first() ONLY as last resort; prefer scoping`,
         `4. PRESERVE each test's objective and assertions — fix only what's broken`,
-        `5. Update the manifest if the test id or targets changed`,
       ]
     : [];
 
@@ -702,7 +727,7 @@ export function buildPrompt(input: OpencodeRunInput): string {
           `- This is a CODE mode run: you are testing source-code logic, not a deployed web app.`,
           `- Detect the test framework from the repo's dependencies. Read 2-3 existing test files for conventions. Match them exactly.`,
           `- Place generated tests alongside existing ones. Use the repo's existing test command. Do not install new dependencies.`,
-          `- For each test, record metadata in ${input.e2eRelDir}/.qa/manifest.json with { id, objective, targets, changeRef:{sha:"${input.sha}",type:"${changeType}"} }.`,
+          `- In your closing verdict JSON, include specMetas with {file, flow, objective, targets} for each spec so the orchestrator can write the manifest deterministically.`,
           `- Classify each affected symbol:`,
           `  * Pure function → unit test: call with inputs, assert outputs`,
           `  * Module with deps → integration test: real module + test doubles`,
@@ -714,7 +739,7 @@ export function buildPrompt(input: OpencodeRunInput): string {
         ]
       : [
           `- Work in the repo's tests folder: ${input.e2eRelDir}/ (source of truth in git). Reuse and improve existing fixtures/specs; do not duplicate.`,
-          `- For each test, add/update its entry in ${input.e2eRelDir}/.qa/manifest.json with { id, objective, flow, targets, changeRef:{sha:"${input.sha}",type:"${changeType}"} }.`,
+          `- In your closing verdict JSON, include specMetas with {file, flow, objective, targets} for each spec. The orchestrator writes the manifest deterministically from these.`,
           `- Test-data prefix: ${input.namespace}`,
           `- LIVE DEV URL: ${input.baseUrl ?? "(not provided — ABORT and report infra-error: no base URL)"}`,
           `  In the SPEC files, reach the app via the PW_BASE_URL env var (the orchestrator sets it at run time).`,

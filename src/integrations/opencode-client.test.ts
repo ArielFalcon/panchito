@@ -61,12 +61,12 @@ test("buildPrompt includes repo, sha, namespace, e2e folder and the diff", () =>
   assert.match(p, /project="demo-app"/);
 });
 
-test("buildPrompt includes the commit intent and asks to update the manifest", () => {
+test("buildPrompt includes the commit intent and specMetas instruction for deterministic manifest", () => {
   const p = buildPrompt(input);
   assert.match(p, /Type: feat/);
   assert.match(p, /feat: new screen/);
   assert.match(p, /src\/x\.ts/); // changed files (scope)
-  assert.match(p, /manifest\.json/);
+  assert.match(p, /specMetas/); // instructs agent to include structured metadata in verdict
 });
 
 test("buildPrompt sanitizes the diff (defense in depth)", () => {
