@@ -26,16 +26,15 @@ export function RunSummary({ record, client, onBack, onContinue }: {
   // Detect shadow mode from the first pipeline log line: "[SHADOW MODE]"
   const isShadow = logs.some((l: string) => l.includes("[SHADOW MODE]"));
 
-  const sections: Array<{ id: string; label: string; always?: boolean }> = [
+  const sections: Array<{ id: string; label: string }> = [
     { id: "pipeline", label: "Pipeline" },
-    { id: "results", label: "Test results", always: true },
+    { id: "results", label: "Test results" },
     { id: "coverage", label: "Coverage" },
-    ...(isShadow ? [{ id: "shadow", label: "Shadow mode feedback", always: true }] : []),
+    ...(isShadow ? [{ id: "shadow", label: "Shadow mode feedback" }] : []),
     ...(note ? [{ id: "note", label: "Agent note" }] : []),
   ];
 
-  const visible = sections.filter(() => true);
-  const sectionCount = visible.length;
+  const sectionCount = sections.length;
 
   const toggle = useCallback((id: string) => {
     setOpenSection((p) => p === id ? null : id);
@@ -48,7 +47,7 @@ export function RunSummary({ record, client, onBack, onContinue }: {
     }
     if (key.upArrow) { setFocusIdx((p) => (p - 1 + sectionCount) % sectionCount); return; }
     if (key.downArrow) { setFocusIdx((p) => (p + 1) % sectionCount); return; }
-    if (key.return) { const s = visible[focusIdx]; if (s) toggle(s.id); return; }
+    if (key.return) { const s = sections[focusIdx]; if (s) toggle(s.id); return; }
     if (_char === "c" || _char === "C") { setShowChat((p) => !p); return; }
     if (_char === "f" || _char === "F") { if (failedCases.length && onContinue) onContinue(failedCases.map((c: { name: string }) => c.name)); return; }
     if (_char === "b" || _char === "B" || key.escape) { onBack(); return; }
@@ -92,25 +91,18 @@ export function RunSummary({ record, client, onBack, onContinue }: {
         }
 
         // Build display: for each spec, show its cases. For unmatched cases, show separately.
-        const displayed: Array<{ label: string; flow: string; cases: typeof cases; isSpec: boolean }> = [];
+        const displayed: Array<{ label: string; flow: string; cases: typeof cases }> = [];
 
         // First: specs with their cases
         for (const [flow, spec] of specMap) {
           const flowCases = casesByFlow.get(flow) || [];
           casesByFlow.delete(flow);
-          const pass = flowCases.filter((c: { status: string }) => c.status !== "fail").length;
-          displayed.push({
-            label: spec.objective || spec.name,
-            flow,
-            cases: flowCases,
-            isSpec: true,
-          });
+          displayed.push({ label: spec.objective || spec.name, flow, cases: flowCases });
         }
 
         // Then: unmatched cases
         for (const [flow, flowCases] of casesByFlow) {
-          const pass = flowCases.filter((c: { status: string }) => c.status !== "fail").length;
-          displayed.push({ label: flow, flow, cases: flowCases, isSpec: false });
+          displayed.push({ label: flow, flow, cases: flowCases });
         }
 
         // If nothing to show, fall back to simple output
@@ -148,9 +140,14 @@ export function RunSummary({ record, client, onBack, onContinue }: {
               const allPass = failCount === 0 && d.cases.length > 0;
               const icon = d.cases.length === 0 ? "·" : allPass ? "✓" : "✗";
               const color = d.cases.length === 0 ? undefined : allPass ? "#3b7a57" : "#c0392b";
+              const label = d.cases.length > 0
+                ? ` — ${passCount}/${d.cases.length} passed`
+                : total > 0
+                  ? " — ran as part of suite"
+                  : " — not executed";
               return (
                 <Box key={d.flow} flexDirection="column">
-                  <Text>{"  "}<Text color={color}>{icon}</Text>{" "}{d.label}{d.cases.length > 0 ? ` — ${passCount}/${d.cases.length} passed` : " — not executed"}</Text>
+                  <Text>{"  "}<Text color={color}>{icon}</Text>{" "}{d.label}{label}</Text>
                   {d.cases.filter((c: { status: string }) => c.status === "fail").map((c, i) => (
                     <Box key={i} flexDirection="column" marginLeft={4}>
                       <Text color="#c0392b">✗ {c.name.slice(0, 80)}</Text>
@@ -228,7 +225,7 @@ export function RunSummary({ record, client, onBack, onContinue }: {
 
       {/* Sections */}
       <Box flexDirection="column" marginTop={1}>
-        {visible.map((s, i) => {
+        {sections.map((s, i) => {
           const isOpen = openSection === s.id;
           const isFocused = focusIdx === i;
           return (
