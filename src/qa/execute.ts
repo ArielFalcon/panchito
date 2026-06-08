@@ -6,6 +6,7 @@
 
 import { spawn } from "node:child_process";
 import { QaRunResult } from "../types";
+import { scrubEnv } from "./code-runner";
 import { parsePlaywrightReport } from "./playwright-report";
 import { sanitizeText, containsSecrets, recordAudit } from "../orchestrator/sanitizer";
 
@@ -109,7 +110,9 @@ export const defaultCleanupDeps: CleanupDeps = {
     new Promise((resolve) => {
       const child = spawn("npx", ["playwright", "test", "cleanup.spec.ts", "--reporter=line"], {
         cwd: dir,
-        env: { ...process.env, PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PW_CLEANUP: "1" },
+        // Agent-written specs run here: scrub the orchestrator's secrets (GITHUB_TOKEN etc.)
+        // while keeping the app's DEV_* login creds the fixtures need.
+        env: { ...scrubEnv(/^DEV_/), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PW_CLEANUP: "1" },
       });
       child.on("error", () => resolve()); // best-effort
       child.on("close", () => resolve());
@@ -121,7 +124,8 @@ export const defaultExecuteDeps: ExecuteDeps = {
     new Promise((resolve, reject) => {
       const child = spawn("npx", ["playwright", "test", "--reporter=json"], {
         cwd: dir,
-        env: { ...process.env, PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace },
+        // Agent-written specs are untrusted code: scrub orchestrator secrets, keep DEV_* creds.
+        env: { ...scrubEnv(/^DEV_/), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace },
       });
       let stdout = "";
       let stderr = "";

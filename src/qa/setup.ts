@@ -9,6 +9,7 @@
 import { spawn } from "node:child_process";
 import { cpSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { scrubEnv } from "./code-runner";
 
 export interface SetupDeps {
   hasProject(e2eDir: string): boolean; // does the e2e project already exist?
@@ -36,7 +37,8 @@ export const defaultSetupDeps: SetupDeps = {
     new Promise((resolve, reject) => {
       // `npm ci` when there is a lockfile; otherwise `npm install`.
       const useCi = existsSync(join(e2eDir, "package-lock.json"));
-      const child = spawn("npm", [useCi ? "ci" : "install"], { cwd: e2eDir, env: { ...process.env } });
+      // The e2e install runs the seed + repo lifecycle scripts: scrub orchestrator secrets.
+      const child = spawn("npm", [useCi ? "ci" : "install"], { cwd: e2eDir, env: scrubEnv(/^DEV_/) });
       child.on("error", reject);
       child.on("close", (code) =>
         code === 0 ? resolve() : reject(new Error(`npm ${useCi ? "ci" : "install"} in e2e failed (code ${code})`)),

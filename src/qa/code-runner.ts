@@ -14,7 +14,7 @@
 // The runtimes live in the ORCHESTRATOR image, not the opencode container — the
 // orchestrator spawns the test commands directly.
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { QaCase, QaRunResult } from "../types";
@@ -45,12 +45,29 @@ const ALLOWED_ENV_EXACT = new Set([
 // toolchain needs: npm registry/cache/proxy config, Cargo/Rust/Gradle/Maven homes, locale).
 const ALLOWED_ENV_PREFIX = /^(?:LC_|npm_config_|PIP_|CGO_|CARGO_|RUSTUP_|RUST_|GRADLE_|MAVEN_|PNPM_|YARN_|COREPACK_)/;
 
-export function scrubEnv(): Record<string, string> {
+// Builds a scrubbed environment for an UNTRUSTED spawn (the watched repo's own test/install
+// commands, or agent-written specs). Drops the orchestrator's secrets, keeps OS + language
+// vars. `extraAllowed` lets a caller widen the allowlist by prefix without ever overriding
+// the secret block — e2e passes /^DEV_/ to keep the app's login creds the specs need.
+// Kills the spawned process AND its descendants. Spawns are `detached: true` so the child
+// is its own process-group leader; `process.kill(-pid)` signals the whole group (npm/mvn/
+// gradle fork grandchildren that a plain `child.kill()` would orphan). Falls back to a direct
+// kill if the group send fails (e.g. the child already exited).
+function killTree(child: ChildProcess): void {
+  try {
+    if (child.pid) process.kill(-child.pid, "SIGKILL");
+    else child.kill("SIGKILL");
+  } catch {
+    try { child.kill("SIGKILL"); } catch { /* already gone */ }
+  }
+}
+
+export function scrubEnv(extraAllowed?: RegExp): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (value === undefined) continue;
-    if (BLOCKED_ENV_PREFIX.test(key)) continue;
-    if (ALLOWED_ENV_EXACT.has(key) || ALLOWED_ENV_PREFIX.test(key)) {
+    if (BLOCKED_ENV_PREFIX.test(key)) continue; // secrets are blocked even if extraAllowed matches
+    if (ALLOWED_ENV_EXACT.has(key) || ALLOWED_ENV_PREFIX.test(key) || (extraAllowed?.test(key) ?? false)) {
       env[key] = value;
     }
   }
@@ -202,7 +219,7 @@ export const defaultCodeSetupDeps: CodeSetupDeps = {
   install: (project, repoDir, opts) =>
     new Promise((resolve, reject) => {
       const { cmd, args } = project.install!;
-      const child = spawn(cmd, args, { cwd: repoDir, env: scrubEnv() });
+      const child = spawn(cmd, args, { cwd: repoDir, env: scrubEnv(), detached: true });
       let settled = false;
       const settle = (err?: Error) => {
         if (settled) return;
@@ -212,11 +229,11 @@ export const defaultCodeSetupDeps: CodeSetupDeps = {
       };
       const timeoutMs = opts?.timeoutMs ?? DEFAULT_CODE_MODE_TIMEOUT_MS;
       const timer = setTimeout(() => {
-        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+        killTree(child);
         settle(new Error(`code-mode install timeout after ${timeoutMs}ms`));
       }, timeoutMs);
       opts?.signal?.addEventListener("abort", () => {
-        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+        killTree(child);
         settle(new Error("code-mode install aborted by operator cancel"));
       }, { once: true });
       child.on("error", (err) => settle(err instanceof Error ? err : new Error(String(err))));
@@ -379,7 +396,7 @@ export const defaultCodeExecuteDeps: CodeExecuteDeps = {
   runTests: (project, repoDir, opts) =>
     new Promise((resolve) => {
       const { cmd, args } = project.test;
-      const child = spawn(cmd, args, { cwd: repoDir, env: scrubEnv() });
+      const child = spawn(cmd, args, { cwd: repoDir, env: scrubEnv(), detached: true });
       let stdout = "";
       let stderr = "";
       let resolved = false;
@@ -392,17 +409,18 @@ export const defaultCodeExecuteDeps: CodeExecuteDeps = {
       };
 
       // Timeout guard: a hung suite must not block the sequential queue forever.
-      // SIGKILL the process tree and resolve as inconclusive infra, not a pass.
+      // Kill the whole PROCESS TREE (npm/mvn/gradle fork grandchildren) and resolve as
+      // inconclusive infra, not a pass.
       const timeoutMs = opts?.timeoutMs ?? DEFAULT_CODE_MODE_TIMEOUT_MS;
       const timer = setTimeout(() => {
-        child.kill("SIGKILL");
+        killTree(child);
         finish({ exitCode: null, logs: `${stdout}\n${stderr}`, spawnError: `code-mode timeout after ${timeoutMs}ms` });
       }, timeoutMs);
 
       // Operator cancel: the pipeline's AbortSignal fires → kill the suite immediately.
       if (opts?.signal) {
         opts.signal.addEventListener("abort", () => {
-          child.kill("SIGKILL");
+          killTree(child);
           finish({ exitCode: null, logs: `${stdout}\n${stderr}`, spawnError: "aborted by operator cancel" });
         }, { once: true });
       }

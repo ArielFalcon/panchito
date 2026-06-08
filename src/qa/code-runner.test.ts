@@ -236,6 +236,26 @@ test("scrubEnv strips secrets but preserves language vars and OS essentials", ()
   }
 });
 
+// e2e spawns need the app's DEV_* login creds (fixtures read DEV_TEST_USER/PASS) but must
+// still drop the orchestrator's own secrets. scrubEnv takes an extra-allowed prefix for this.
+test("scrubEnv with an extra-allowed prefix keeps DEV_* creds but still drops orchestrator secrets", () => {
+  const saved = { ...process.env };
+  try {
+    process.env.DEV_TEST_USER = "qauser";
+    process.env.DEV_TEST_PASS = "qapass";
+    process.env.GITHUB_TOKEN = "ghp_fakeSecretValue1234567890";
+    const env = scrubEnv(/^DEV_/);
+    assert.equal(env.DEV_TEST_USER, "qauser", "DEV_* must be kept for e2e login");
+    assert.equal(env.DEV_TEST_PASS, "qapass");
+    assert.ok(!("GITHUB_TOKEN" in env), "orchestrator secrets must still be dropped");
+  } finally {
+    for (const key of Object.keys(process.env)) {
+      if (!(key in saved)) delete process.env[key];
+    }
+    Object.assign(process.env, saved);
+  }
+});
+
 // The allowlist must keep whole FAMILIES of package-manager/locale vars (npm_config_*,
 // CARGO_*, LC_*, GRADLE_*), not just the bare prefix string — otherwise `npm ci` loses its
 // registry/cache/proxy config and Cargo/Gradle lose their home dirs.

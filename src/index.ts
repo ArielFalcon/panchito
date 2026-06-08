@@ -438,7 +438,9 @@ async function triggerMaintainer(): Promise<void> {
       // Best-effort dep sync for the new code. If it fails we still restart: the swapped code's
       // boot will fail and the boot-guard rolls back — never leave a staged swap unapplied.
       try {
-        execSync("npm install --no-audit --no-fund", { cwd: process.cwd(), stdio: "inherit" });
+        // Scrub orchestrator secrets: this runs the just-swapped (agent-authored) package.json's
+        // install lifecycle, consistent with the scrubbed pre-deploy gate.
+        execSync("npm install --no-audit --no-fund", { cwd: process.cwd(), stdio: "inherit", env: scrubEnv() });
       } catch (installErr) {
         console.error(`[maintainer] post-swap npm install failed (${installErr instanceof Error ? installErr.message : String(installErr)}) — restarting anyway; boot-guard is the backstop.`);
       }
@@ -555,7 +557,7 @@ function confirmSwapAfterBoot(): void {
       console.error(`[maintainer] canary unhealthy — ${rolled ? "rolled back to previous code" : "NO backup to roll back to"}; PR left unmerged: ${marker.prUrl ?? ""}`);
       if (rolled) {
         try {
-          (await import("node:child_process")).execSync("npm install --no-audit --no-fund", { cwd: process.cwd(), stdio: "inherit" });
+          (await import("node:child_process")).execSync("npm install --no-audit --no-fund", { cwd: process.cwd(), stdio: "inherit", env: scrubEnv() });
         } catch {
           /* best effort; boot-guard remains as the backstop */
         }
