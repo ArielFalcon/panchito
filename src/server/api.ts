@@ -299,9 +299,10 @@ async function handleAsk(req: IncomingMessage, res: ServerResponse, deps: ApiDep
 
     // Context is bounded (cases + logs capped) and sanitized on ingress (secrets redacted).
     const activityCtx = activityRouter.contextForRun(record.id);
-    const context = buildRunContext(record, undefined, appInfo, activityCtx || undefined);
+    const runCtx = buildRunContext(record, undefined, appInfo, activityCtx || undefined);
+    const productCtx = buildHelpContext();
     const historyCtx = historyLines.length > 0 ? `\n\nRecent conversation:\n${historyLines.slice(-6).join("\n")}` : "";
-    const answer = await deps.ask({ context: context + historyCtx, question });
+    const answer = await deps.ask({ context: `${productCtx}\n\n---\n\n${runCtx}${historyCtx}`, question });
     // Sanitize on egress (logs→chat is a new egress path).
     json(res, 200, { answer: sanitizeText(answer).text });
   } catch (err) {
