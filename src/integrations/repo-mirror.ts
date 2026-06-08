@@ -102,7 +102,7 @@ export async function getCommitMessage(dir: string, sha: string, deps: MirrorDep
 
 export const realGit: Git = (args, cwd) =>
   new Promise((resolve, reject) => {
-    execFile("git", args, { cwd, maxBuffer: 64 * 1024 * 1024 }, (err, stdout) =>
+    execFile("git", args, { cwd, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }, (err, stdout) =>
       err ? reject(err) : resolve(stdout.toString()),
     );
   });
@@ -110,8 +110,12 @@ export const realGit: Git = (args, cwd) =>
 export const defaultMirrorDeps: MirrorDeps = { git: realGit, exists: existsSync };
 
 // Resolves a symbolic ref (branch/tag) to a concrete SHA via git ls-remote.
+// Embeds GITHUB_TOKEN directly in the URL to bypass credential helpers that would
+// otherwise intercept auth and prompt for a username (no terminal → crash).
 export async function resolveRef(repo: string, ref: string, deps: MirrorDeps): Promise<string> {
-  const stdout = await deps.git([...authHeaderArgs(), "ls-remote", remoteUrl(repo), ref]);
+  const token = process.env.GITHUB_TOKEN;
+  const url = token ? `https://x-access-token:${token}@github.com/${repo}.git` : remoteUrl(repo);
+  const stdout = await deps.git(["ls-remote", url, ref]);
   const sha = stdout.split(/\s/)[0];
   if (!sha || sha.length < 40) throw new Error(`no SHA resolved for ${ref}`);
   return sha;
