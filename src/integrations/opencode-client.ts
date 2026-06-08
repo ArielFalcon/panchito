@@ -193,6 +193,7 @@ export interface OpencodeRunInput {
   fixCases?: QaCase[]; // re-generation: failed cases from a previous execution to fix
   reviewCorrections?: string[]; // re-generation: actionable corrections from a reviewer rejection
   coverageGap?: string; // re-generation: changed lines not yet exercised (change-coverage gap)
+  learnedRules?: string; // retrieval: rules from past runs injected into the agent prompt
   runId?: string; // maps the session to a RunRecord for SSE live activity
   contextMap?: ArchitectureContext; // cross-cutting: the FE↔BE map, injected by the orchestrator
 }
@@ -335,6 +336,7 @@ export async function reviewIndependently(
   const session = await deps.open("qa-reviewer", input.mirrorDir, { signal: opts?.signal });
   try {
     const changeType = input.intent?.type ?? input.mode;
+    const specBlock = renderReviewSpecs(input);
     const prompt = [
       `## Independent review — judge these E2E tests WITHOUT the generator's reasoning`,
       ``,
@@ -351,11 +353,10 @@ export async function reviewIndependently(
       sanitizeText(input.diff).text,
       "```",
       ``,
-      `## Specs to review`,
-      ...input.specs.map((s, i) => `${i + 1}. ${input.e2eRelDir}/${s}`),
+      specBlock,
       ``,
       `## Instructions`,
-      `1. Read each spec file listed above (they are in ${input.e2eRelDir}/).`,
+      `1. The spec contents are provided above — no need to read files.`,
       `2. Apply the test-value-review skill from BOTH perspectives (value + robustness).`,
       `3. Answer: could the changed feature be BROKEN and these tests STILL be green?`,
       `4. Be strict — a single anti-pattern in any spec means rejection.`,
@@ -383,6 +384,29 @@ export async function reviewIndependently(
   }
 }
 
+const REVIEW_SPECS_MAX_BYTES = 40_000;
+
+function renderReviewSpecs(input: ReviewInput): string {
+  const contents: string[] = [];
+  let totalBytes = 0;
+  for (const s of input.specs) {
+    let content: string;
+    try {
+      content = readFileSync(join(input.mirrorDir, input.e2eRelDir, s), "utf8");
+    } catch {
+      contents.push(`### ${input.e2eRelDir}/${s}\n( could not read file — review skipped for this spec )`);
+      continue;
+    }
+    const block = `### ${input.e2eRelDir}/${s}\n\`\`\`typescript\n${content}\n\`\`\``;
+    totalBytes += Buffer.byteLength(block, "utf8");
+    if (totalBytes > REVIEW_SPECS_MAX_BYTES) {
+      return `## Specs to review\n\n${input.specs.map((n, i) => `${i + 1}. ${input.e2eRelDir}/${n}`).join("\n")}\n\n( spec contents exceed ${REVIEW_SPECS_MAX_BYTES} bytes — read each file with the read tool )`;
+    }
+    contents.push(block);
+  }
+  return `## Specs to review (${contents.length} file(s) — contents provided inline)\n\n${contents.join("\n\n")}`;
+}
+
 // ── complete/exhaustive: two-phase plan → fan-out ────────────────────────────
 //
 // A single agent cannot analyze a whole repo AND author every spec within one context window
@@ -398,6 +422,7 @@ export interface PlanObjective {
   flow: string; // user flow → spec filename + manifest id
   objective: string; // concrete acceptance criterion (given/when/then)
   symbols: string[]; // code symbols the spec should exercise (serena blast radius)
+  needsUi: boolean; // true when the flow involves page navigation or DOM interaction
 }
 
 // Parse the planner's output: the LAST balanced object carrying an `objectives` array. Each
@@ -414,7 +439,8 @@ export function parsePlan(text: string): PlanObjective[] {
     const objective = typeof r.objective === "string" ? r.objective.trim() : "";
     if (!flow || !objective) continue;
     const symbols = Array.isArray(r.symbols) ? r.symbols.filter((s): s is string => typeof s === "string") : [];
-    out.push({ flow, objective, symbols });
+    const needsUi = typeof r.needsUi === "boolean" ? r.needsUi : true; // default true: safe fallback
+    out.push({ flow, objective, symbols, needsUi });
   }
   // De-duplicate by the RESULTING spec filename, so two distinct flow strings that normalize to
   // the same file (e.g. "Check Out" and "check-out") never have two workers write the same file.
@@ -482,6 +508,7 @@ export interface ParallelWorkerInput {
   objective: string;
   flow: string;
   symbols: string[];
+  needsUi: boolean; // selects qa-worker (with Playwright MCP) vs qa-worker-code (serena only)
   specFile: string; // orchestrator-assigned path under e2eRelDir (e.g. "flows/checkout.spec.ts")
   repo: string;
   mirrorDir: string;
@@ -492,9 +519,10 @@ export interface ParallelWorkerInput {
   mode: RunMode;
 }
 
-// Dispatch each worker objective to a SEPARATE qa-worker session, bounded concurrency. Each
-// worker writes ONE spec; failures are isolated per worker (one bad worker never aborts the
-// batch). Returns the flow→spec mapping (for the manifest) plus per-flow errors.
+// Dispatch each worker objective to a SEPARATE qa-worker session, bounded concurrency.
+// Uses a racing pool: when one worker finishes the next starts immediately — no batch
+// blocked by the slowest member. Selects qa-worker-code (serena only, no Playwright MCP)
+// for objectives that don't need UI navigation, reducing DEV pressure and browser overhead.
 export async function generateParallel(
   workers: ParallelWorkerInput[],
   deps: OpencodeDeps,
@@ -505,34 +533,53 @@ export async function generateParallel(
   const results: Array<{ flow: string; spec: string }> = [];
   const errors: string[] = [];
 
-  for (let i = 0; i < workers.length; i += concurrency) {
-    const batch = workers.slice(i, i + concurrency);
-    await Promise.all(
-      batch.map(async (w) => {
-        try {
-          const session = await deps.open("qa-worker", w.mirrorDir, { signal: opts?.signal });
-          try {
-            const output = await session.prompt(buildWorkerPrompt(w));
-            const json = lastJsonMatching(output, (x) => typeof x.spec === "string");
-            if (json?.spec) results.push({ flow: w.flow, spec: json.spec as string });
-            else errors.push(`${w.flow}: worker produced no parseable spec name`);
-          } finally {
-            await session.dispose().catch(() => {});
-          }
-        } catch (err) {
-          errors.push(`${w.flow}: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }),
-    );
+  const runOne = async (w: ParallelWorkerInput) => {
+    try {
+      const agent = w.needsUi ? "qa-worker" : "qa-worker-code";
+      const session = await deps.open(agent, w.mirrorDir, { signal: opts?.signal });
+      try {
+        const output = await session.prompt(buildWorkerPrompt(w));
+        const json = lastJsonMatching(output, (x) => typeof x.spec === "string");
+        if (json?.spec) results.push({ flow: w.flow, spec: json.spec as string });
+        else errors.push(`${w.flow}: worker produced no parseable spec name`);
+      } finally {
+        await session.dispose().catch(() => {});
+      }
+    } catch (err) {
+      errors.push(`${w.flow}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const inflight = new Set<Promise<void>>();
+  for (const w of workers) {
+    const p = runOne(w);
+    const tracker = p.then(() => { inflight.delete(tracker); });
+    inflight.add(tracker);
+    if (inflight.size >= concurrency) await Promise.race(inflight);
   }
+  await Promise.all(inflight);
   return { results, errors };
 }
 
-// Surgical, self-contained instructions for ONE worker. The worker has serena + Playwright MCP
-// and writes exactly its assigned file; it must NOT touch the manifest or other specs.
+// Surgical, self-contained instructions for ONE worker. Adapts based on needsUi:
+// UI workers get the Playwright MCP and explore-before-write instructions; code-only
+// workers use serena exclusively to derive tests from the affected symbols.
 export function buildWorkerPrompt(w: ParallelWorkerInput): string {
+  const rules = w.needsUi
+    ? [
+        w.baseUrl
+          ? `- Explore YOUR flow FIRST with the Playwright MCP: browser_navigate to the LIVE DEV URL, browser_snapshot, and use ONLY selectors verified against the real DOM. Never invent selectors.`
+          : `- No LIVE DEV URL: derive selectors from the code (serena) and note this limitation in a spec comment.`,
+        `- Prefer getByRole/getByLabel/getByTestId; scope to a section; no waitForTimeout; no network mocks.`,
+        `- At least ONE real assertion on the observable OUTCOME (not just a click). Clean up created data via cleanup().`,
+      ]
+    : [
+        `- This is a CODE-ONLY objective (no UI). Read the affected symbols with serena, write unit/integration tests using the repo's test framework.`,
+        `- Assert on BEHAVIOR (the correct output for given inputs), not implementation details. Include edge cases from the objective.`,
+        `- Do NOT attempt to navigate or use browser tools — you have no Playwright MCP.`,
+      ];
   return [
-    `Write ONE Playwright E2E spec for this objective. Write ONLY your assigned file.`,
+    `Write ONE test for this objective. Write ONLY your assigned file.`,
     ``,
     `## Objective`,
     sanitizeText(w.objective).text,
@@ -541,19 +588,15 @@ export function buildWorkerPrompt(w: ParallelWorkerInput): string {
     `- Flow: ${w.flow}`,
     `- Affected code symbols (read them with serena): ${w.symbols.join(", ") || "(none specified)"}`,
     `- Namespace prefix for any data you create: ${w.namespace}`,
-    `- LIVE DEV URL: ${w.baseUrl ?? "(not provided)"}`,
+    w.needsUi ? `- LIVE DEV URL: ${w.baseUrl ?? "(not provided)"}` : null,
     `- Write EXACTLY this file: ${w.e2eRelDir}/${w.specFile}  — do not create or edit any other file.`,
-    `- Import the shared harness: import { test, expect } from "../fixtures"`,
+    w.needsUi ? `- Import the shared harness: import { test, expect } from "../fixtures"` : null,
     ``,
     `## Rules`,
-    w.baseUrl
-      ? `- Explore YOUR flow FIRST with the Playwright MCP: browser_navigate to the LIVE DEV URL, browser_snapshot, and use ONLY selectors verified against the real DOM. Never invent selectors.`
-      : `- No LIVE DEV URL: derive selectors from the code (serena) and note this limitation in a spec comment.`,
-    `- Prefer getByRole/getByLabel/getByTestId; scope to a section; no waitForTimeout; no network mocks.`,
-    `- At least ONE real assertion on the observable OUTCOME (not just a click). Clean up created data via cleanup().`,
+    ...rules,
     `- Do NOT write to the manifest — the orchestrator records metadata. Do NOT read or edit other workers' files.`,
     `- End your reply with ONLY this JSON: {"spec":"${w.specFile}"}`,
-  ].join("\n");
+  ].filter((l): l is string => l !== null).join("\n");
 }
 
 // Two-phase complete/exhaustive entry point (see the block comment above). Returns an AgentResult
@@ -589,12 +632,30 @@ export async function runOpencodeParallel(
     return { output: planText, specs: [], reviewed: false, approved: true, note: "planner found no important uncovered flows" };
   }
 
+  // Pre-index Serena when the flag is set, so every worker inherits a warm index
+  // instead of paying activate_project from scratch (15-60s each). Controlled by
+  // env PRE_INDEX_SERENA so it can be toggled without redeploy.
+  if (process.env.PRE_INDEX_SERENA === "1") {
+    opts?.onProgress?.(`[qa] pre-indexing serena for ${objectives.length} workers...`);
+    try {
+      const idxSession = await deps.open("qa-worker-code", input.mirrorDir, { timeoutMs: 120_000 });
+      try {
+        await idxSession.prompt("Activate serena (activate_project) on the current directory. Do nothing else. End with {\"spec\":\"\"}.");
+      } finally {
+        await idxSession.dispose().catch(() => {});
+      }
+    } catch {
+      // Best-effort: if pre-indexing fails, workers will each activate serena themselves
+    }
+  }
+
   // Phase 2 — FAN-OUT to workers (one spec each).
   const changeType = input.intent?.type ?? input.mode;
   const workers: ParallelWorkerInput[] = objectives.map((o) => ({
     objective: o.objective,
     flow: o.flow,
     symbols: o.symbols,
+    needsUi: o.needsUi,
     specFile: specFileForFlow(o.flow),
     repo: input.repo,
     mirrorDir: input.mirrorDir,
@@ -653,9 +714,11 @@ export function buildPlanPrompt(input: OpencodeRunInput): string {
     `   content); KEEP the main use cases, the MVP happy paths, AND the relevant edge cases`,
     `   (boundaries, error paths, negative/invalid input). Each objective is a concrete acceptance`,
     `   criterion in given/when/then form, with the code symbols it exercises.`,
+    `   For each objective, set "needsUi": true when the flow involves page navigation or DOM`,
+    `   interaction, and "needsUi": false for pure logic (validation, calculation, data transformation).`,
     ``,
     `## Output — end with ONLY this JSON (no spec files):`,
-    `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","symbols":["CheckoutService.pay"]}]}`,
+    `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","symbols":["CheckoutService.pay"],"needsUi":true}]}`,
     `If every important flow is already well covered, output {"objectives":[]}.`,
   ].join("\n");
 }
@@ -696,6 +759,10 @@ export function buildPrompt(input: OpencodeRunInput): string {
       ]
     : [];
 
+  const learnedRulesBlock = input.learnedRules && isGenerationMode
+    ? [input.learnedRules, ``]
+    : [];
+
   // Fix mode: prepend failure feedback before the original task.
   const fixBlock = input.fixCases?.length && isGenerationMode
     ? [
@@ -730,6 +797,7 @@ export function buildPrompt(input: OpencodeRunInput): string {
   return [
     ...reviewBlock,
     ...coverageBlock,
+    ...learnedRulesBlock,
     ...fixBlock,
     ...(fixBlock.length ? [``] : []),
     buildTask(input),

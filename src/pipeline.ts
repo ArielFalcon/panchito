@@ -11,7 +11,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { AppConfig } from "./orchestrator/config-loader";
 import { DeployTarget, waitForDeploy } from "./env/deploy-gate";
 import { ensureMirror, getCommitDiff, getCommitMessage, listChangedSpecs as gitListChangedSpecs, getCommitsBehind, defaultMirrorDeps } from "./integrations/repo-mirror";
-import { runOpencode, runOpencodeParallel, defaultOpencodeDeps, reviewIndependently } from "./integrations/opencode-client";
+import { runOpencode, runOpencodeParallel, defaultOpencodeDeps, reviewIndependently, getOpenSessionCount } from "./integrations/opencode-client";
 import { classifyCommit, CommitIntent } from "./qa/commit-classify";
 import { setupE2eProject, defaultSetupDeps } from "./qa/setup";
 import { validateSpecs, defaultValidateDeps } from "./qa/validate";
@@ -22,6 +22,12 @@ import { testDataNamespace } from "./qa/test-data";
 import { labelRunOutcome } from "./qa/learning/labeler";
 import { runMutationOracle } from "./qa/learning/mutation-code";
 import type { OracleInput, ValueOracleResult } from "./qa/learning/oracle-types";
+import { retrieveRules, type RetrievalResult } from "./qa/learning/retrieval";
+import { distillReflection } from "./qa/learning/distiller";
+import { detectStructuralPatterns } from "./qa/learning/structural-pattern";
+import { matchExemplars, renderExemplarsForPrompt } from "./qa/learning/skill-exemplar";
+import { initCurriculum, selectActiveArchetypesCached, renderArchetypesForPrompt, recordArchetypeHit, clearActiveArchetypesCache } from "./qa/learning/curriculum";
+import type { StructuredReflection } from "./types";
 import { validateContext, isContextStale } from "./qa/context";
 import type { ArchitectureContext } from "./qa/context";
 import { readMeasured, writeMeasured, recordStability, recordCoverage, MeasuredFs } from "./qa/measured";
@@ -65,6 +71,7 @@ export interface GenerateInput {
   fixCases?: QaCase[]; // re-generation: failed cases from a previous execution to fix
   reviewCorrections?: string[]; // re-generation: corrections from a reviewer rejection
   coverageGap?: string; // re-generation: changed lines not yet exercised (change-coverage)
+  learnedRules?: string; // retrieval: rules from past runs injected into the agent prompt
   runId?: string; // for SSE live activity: maps the OpenCode session to this run record
   contextMap?: ArchitectureContext; // cross-cutting: the FE↔BE map loaded from e2e/.qa/context.json
 }
@@ -108,6 +115,8 @@ export interface PipelineDeps {
   openIssue(repo: string, title: string, body: string): Promise<{ url: string }>;
   saveOutcome?(outcome: RunOutcome): Promise<void>; // learning layer: persist RunOutcome (off-path, never blocks)
   runOracle?(input: OracleInput): Promise<ValueOracleResult>; // Phase 1: mutation testing / benchmark replay (off-path, never blocks)
+  retrieveRules?(app: string, errorClass?: string | null): RetrievalResult; // Phase 2: retrieval for agent prompt
+  reflectAndDistill?(input: { app: string; runId: string; outcome: RunOutcome }): Promise<StructuredReflection | null>; // Phase 2: reflect + distill (off-path, never blocks)
   log?(msg: string): void;
   // Context mode: validates the produced context.json. Injected so tests can bypass file I/O.
   validateContextFn?(content: unknown): { ok: boolean; errors: string[] };
@@ -145,6 +154,7 @@ export function defaultPipelineDeps(): PipelineDeps {
         fixCases: input.fixCases,
         reviewCorrections: input.reviewCorrections,
         coverageGap: input.coverageGap,
+        learnedRules: input.learnedRules,
         runId: input.runId,
         contextMap: input.contextMap,
       };
@@ -221,6 +231,53 @@ export function defaultPipelineDeps(): PipelineDeps {
       saveRunOutcome(outcome);
     },
     runOracle: async (input) => runMutationOracle(input),
+    retrieveRules: (app, errorClass) => retrieveRules({ app, errorClass: errorClass as import("./qa/learning/taxonomy").ErrorClass | null }),
+    reflectAndDistill: async (input) => {
+      // Defer: skip the reflection when the system is already busy with another
+      // run. Opening a qa-assistant session would contend for the OpenCode server
+      // and the LLM API — the reflection is best-effort, never worth delaying the
+      // next queued run.
+      if (getOpenSessionCount() > 0) return null;
+      const { buildReflectionPrompt } = await import("./qa/learning/reflector");
+      const prompt = buildReflectionPrompt({
+        errorClass: input.outcome.errorClass!,
+        gateSignals: input.outcome.gateSignals,
+        verdict: input.outcome.verdict,
+        sha: input.outcome.sha,
+        mode: input.outcome.mode,
+      });
+      const { askAssistant } = await import("./integrations/opencode-client");
+      const { defaultOpencodeDeps } = await import("./integrations/opencode-client");
+      const deps = await defaultOpencodeDeps();
+      try {
+        const raw = await askAssistant(
+          { context: prompt, question: "Produce the StructuredReflection JSON.", instruction: "Output ONLY the JSON object. No markdown, no explanation." },
+          deps,
+          "/tmp",
+        );
+        const json = JSON.parse(raw);
+        const valid =
+          json &&
+          typeof json.goal === "string" &&
+          typeof json.decision === "string" &&
+          typeof json.assumption === "string" &&
+          typeof json.errorClass === "string" &&
+          typeof json.gateSignal === "string" &&
+          typeof json.evidence === "string" &&
+          typeof json.rootCause === "string" &&
+          json.preventiveRule &&
+          typeof json.preventiveRule === "object" &&
+          typeof (json.preventiveRule as Record<string, unknown>).trigger === "string" &&
+          typeof (json.preventiveRule as Record<string, unknown>).action === "string";
+        if (valid) {
+          distillReflection({ app: input.app, runId: input.runId, reflection: json as StructuredReflection });
+          return json as StructuredReflection;
+        }
+        return null;
+      } catch {
+        return null;
+      }
+    },
     log: (m) => console.log(m),
   };
 }
@@ -245,8 +302,10 @@ export async function runPipeline(
   const isCode = (opts.target ?? "e2e") === "code";
   const reviewerCorrections: string[] = []; // accumulated across review rounds (for RunOutcome)
   let retries = 0; // total regeneration attempts (review loop + failure retries)
+  let retrievedRuleIds: string[] = []; // rule IDs retrieved for this run (for RunOutcome)
+  let curriculum: ReturnType<typeof initCurriculum> | null = null; // persisted across runs
 
-  const persistOutcome = (verdict: QaRunResult, overrides?: { staticOk?: boolean; coverageRatio?: number | null; valueScore?: number | null }) => {
+  const persistOutcome = (verdict: QaRunResult, overrides?: { staticOk?: boolean; coverageRatio?: number | null; valueScore?: number | null; rulesRetrieved?: string[] }) => {
     if (!deps.saveOutcome || !opts.runId) return;
     const outcome = labelRunOutcome({
       runId: opts.runId,
@@ -261,9 +320,13 @@ export async function runPipeline(
       reviewerCorrections,
       flaky: verdict.verdict === "flaky",
       retries,
+      valueScore: overrides?.valueScore ?? null,
     });
     if (overrides?.valueScore !== undefined) {
       outcome.gateSignals.valueScore = overrides.valueScore;
+    }
+    if (overrides?.rulesRetrieved) {
+      outcome.rulesRetrieved = overrides.rulesRetrieved;
     }
     deps.saveOutcome(outcome).catch((err) => {
       log(`[qa] WARNING: failed to persist RunOutcome (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
@@ -529,6 +592,13 @@ export async function runPipeline(
 
   // 5. Generate (only when applicable): the agent writes/improves `e2e/`.
   let result: AgentResult | null = null;
+
+  // Load persisted curriculum (survives across runs — archetypes that caught real bugs)
+  if (!curriculum) {
+    const { loadCurriculum } = await import("./server/history");
+    curriculum = loadCurriculum(app.name) ?? initCurriculum(app.name);
+  }
+
   if (generating) {
     checkSignal();
     onStep?.("generate");
@@ -540,8 +610,37 @@ export async function runPipeline(
       if (staleWarn) log(`[qa] ${staleWarn}`);
     }
 
+    let learnedRules: string | undefined;
+    if (deps.retrieveRules && generating) {
+      const retrieval = deps.retrieveRules(app.name, null);
+      if (retrieval.promptSection) {
+        learnedRules = retrieval.promptSection;
+        retrievedRuleIds = retrieval.rules.map((r) => r.id);
+        log(`[qa] retrieval: injected ${retrievedRuleIds.length} learning rule(s) into the agent prompt`);
+      }
+    }
+
+    let allPromptSections = learnedRules ?? "";
+
+    if (generating && intent) {
+      const patterns = detectStructuralPatterns(diff, intent.changedFiles);
+      const exemplars = patterns.flatMap((p) => matchExemplars(p));
+      if (exemplars.length > 0) {
+        const exemplarText = renderExemplarsForPrompt(exemplars);
+        allPromptSections = (allPromptSections ? allPromptSections + "\n" : "") + exemplarText;
+        log(`[qa] patterns: detected ${patterns.map((p) => p.kind).join(", ")} → ${exemplars.length} exemplar(s)`);
+      }
+    }
+
+    // Inject curriculum archetypes into agent prompt
+    const activeArchetypes = selectActiveArchetypesCached(curriculum!);
+    if (activeArchetypes.length > 0) {
+      const archetypeText = renderArchetypesForPrompt(activeArchetypes);
+      allPromptSections = (allPromptSections ? allPromptSections + "\n" : "") + archetypeText;
+    }
+
     log("[qa] generating E2E tests with OpenCode...");
-    result = await generateAndReview(baseGenInput({ fixCases: opts.fixCases }));
+    result = await generateAndReview(baseGenInput({ fixCases: opts.fixCases, learnedRules: allPromptSections || undefined }));
 
     // Wire the specs into the RunRecord so the TUI shows what was generated.
     // specMetas carries structured data (flow, objective); specs[] is the flat fallback.
@@ -791,6 +890,29 @@ export async function runPipeline(
     }
   }
 
+  // Attribución: update rule successRate based on this run's valueScore
+  if (retrievedRuleIds.length > 0 && valueScore !== null) {
+    const { updateRuleSuccessRate } = await import("./server/history");
+    try {
+      for (const ruleId of retrievedRuleIds) {
+        updateRuleSuccessRate(ruleId, valueScore);
+      }
+      log(`[qa] attribution: updated successRate for ${retrievedRuleIds.length} rule(s) with valueScore=${(valueScore * 100).toFixed(0)}%`);
+    } catch (err) {
+      log(`[qa] WARNING: attribution update failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // Record archetype hits when valueScore proves the run's scenarios
+  if (curriculum && valueScore !== null && valueScore > 0) {
+    const patterns = detectStructuralPatterns(diff, intent?.changedFiles ?? []);
+    const exemplars = patterns.flatMap((p) => matchExemplars(p));
+    for (const ex of exemplars) {
+      curriculum = recordArchetypeHit(curriculum, ex.archetype);
+    }
+    clearActiveArchetypesCache(app.name);
+  }
+
   // 9. Final decision.
   const kind = isCode ? "code" : "E2E";
   if (run.verdict !== "pass") {
@@ -838,7 +960,32 @@ export async function runPipeline(
   if (result?.note && !run.note) run.note = result.note;
 
   const ratio = ccForPersistence?.overall.ratio ?? null;
-  persistOutcome(run, { staticOk: !isCode && generating, coverageRatio: ratio, valueScore });
+  persistOutcome(run, { staticOk: !isCode && generating, coverageRatio: ratio, valueScore, rulesRetrieved: retrievedRuleIds });
+
+  if (deps.reflectAndDistill && opts.runId) {
+    const labeled = labelRunOutcome({
+      runId: opts.runId, app: app.name, sha, mode, target: opts.target ?? "e2e",
+      verdict: run.verdict, staticOk: !isCode && generating,
+      coverageRatio: ratio,
+      minCoverageRatio: app.qa.changeCoverage?.minRatio ?? DEFAULT_COVERAGE_POLICY.minRatio,
+      reviewerCorrections, flaky: run.verdict === "flaky", retries,
+      valueScore,
+    });
+    if (labeled.errorClass && labeled.errorClass !== "E-INFRA" && labeled.errorClass !== "E-FLAKY") {
+      const outcome: RunOutcome = { ...labeled, gateSignals: { ...labeled.gateSignals, valueScore: valueScore ?? null }, rulesRetrieved: retrievedRuleIds, at: labeled.at };
+      deps.reflectAndDistill({ app: app.name, runId: opts.runId, outcome }).catch(() => {});
+    }
+  }
+
+  // Persist curriculum (archetypes that caught real bugs survive across runs)
+  if (curriculum) {
+    const { saveCurriculum } = await import("./server/history");
+    try {
+      saveCurriculum(curriculum);
+    } catch {
+      // fail-open
+    }
+  }
 
   return run;
 }
