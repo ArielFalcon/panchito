@@ -71,3 +71,47 @@ test("logic counts only in source files (a .md with an if does not count)", () =
   const mdDiff = ["diff --git a/README.md b/README.md", "+++ b/README.md", "+if you want to..."].join("\n");
   assert.equal(classifyCommit("docs: update readme", mdDiff).hasLogicChange, false);
 });
+
+// A NEW branch in one file must not be cancelled out by an UNRELATED removal in another
+// (the dangerous "net-zero masks a new branch" bug: a behavior change going untested).
+test("a new branch is not masked by an unrelated removal elsewhere (escalates)", () => {
+  const maskedDiff = [
+    "diff --git a/src/a.ts b/src/a.ts",
+    "+++ b/src/a.ts",
+    "+if (user.isAdmin) { grantAccess(); }",
+    "diff --git a/src/b.ts b/src/b.ts",
+    "+++ b/src/b.ts",
+    "-if (legacyFlag) { doOld(); }",
+  ].join("\n");
+  const c = classifyCommit("refactor: cleanup", maskedDiff);
+  assert.equal(c.hasLogicChange, true); // genuinely-added logic, not net
+  assert.equal(c.action, "generate");
+  assert.equal(c.contradiction, true);
+});
+
+// A genuine relocation (identical line removed and re-added) is still NOT new logic,
+// even when added in one place and removed in another within the diff.
+test("a relocated logic line across files is not counted as new logic", () => {
+  const relocateDiff = [
+    "diff --git a/src/a.ts b/src/a.ts",
+    "+++ b/src/a.ts",
+    "-  return compute(x);",
+    "diff --git a/src/b.ts b/src/b.ts",
+    "+++ b/src/b.ts",
+    "+  return compute(x);",
+  ].join("\n");
+  assert.equal(classifyCommit("refactor: move helper", relocateDiff).hasLogicChange, false);
+});
+
+// A string literal that happens to contain code-like words (if/return/parens) is copy,
+// not logic — a `style` commit tweaking it must not be force-escalated to generate.
+test("code-like words inside a string literal do not look like logic", () => {
+  const stringDiff = [
+    "diff --git a/src/x.ts b/src/x.ts",
+    "+++ b/src/x.ts",
+    '+const msg = "please return the item if it is broken";',
+  ].join("\n");
+  const c = classifyCommit("style: copy tweak", stringDiff);
+  assert.equal(c.hasLogicChange, false);
+  assert.equal(c.action, "skip");
+});
