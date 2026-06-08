@@ -15,7 +15,12 @@ export interface ContextLimits {
 
 const DEFAULT_LIMITS: ContextLimits = { maxCases: 20, caseDetailChars: 300, logTailChars: 4000 };
 
-export function buildRunContext(record: RunRecord, limits: ContextLimits = DEFAULT_LIMITS, appInfo?: { repo: string; baseUrl?: string }): string {
+export function buildRunContext(
+  record: RunRecord,
+  limits: ContextLimits = DEFAULT_LIMITS,
+  appInfo?: { repo: string; baseUrl?: string },
+  activityContext?: string,
+): string {
   const lines: string[] = [];
 
   // Pipeline phase reference so the assistant can interpret the step field.
@@ -56,6 +61,7 @@ export function buildRunContext(record: RunRecord, limits: ContextLimits = DEFAU
   if (record.stepDetail) lines.push(`Step detail: ${record.stepDetail}`);
   if (record.retrying) lines.push("Currently RETRYING after a test failure — re-generating with failure feedback.");
   if (record.note) lines.push(`Note: ${record.note}`);
+  if (activityContext) lines.push("", `Agent activity: ${activityContext}`);
 
   const cases = record.cases.slice(0, limits.maxCases);
   if (cases.length > 0) {

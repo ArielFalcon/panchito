@@ -95,7 +95,7 @@ export class ActivityRouter {
 
   register(sessionId: string, runId: string): void {
     this.sessions.set(sessionId, runId);
-    this.context.set(sessionId, { deltas: "", lastFile: undefined, lastTodo: undefined });
+    this.context.set(sessionId, { deltas: "", lastFile: undefined, lastTodo: undefined, fileCount: 0 });
   }
 
   unregister(sessionId: string): void {
@@ -116,7 +116,7 @@ export class ActivityRouter {
     const sid = [...this.sessions.entries()].find(([, rid]) => rid === a.runId)?.[0];
     const ctx = sid ? this.context.get(sid) : undefined;
     if (ctx) {
-      if (a.kind === "file") ctx.lastFile = a.text;
+      if (a.kind === "file") { ctx.lastFile = a.text; ctx.fileCount++; }
       else if (event.type === "todo.updated") ctx.lastTodo = a.text;
     }
     return a;
@@ -129,6 +129,7 @@ export class ActivityRouter {
     if (!ctx) return "";
     const parts: string[] = [];
     if (ctx.lastTodo) parts.push(ctx.lastTodo);
+    if (ctx.fileCount > 0) parts.push(`files edited: ${ctx.fileCount}`);
     if (ctx.lastFile) parts.push(ctx.lastFile);
     return parts.join(" — ");
   }
@@ -146,4 +147,5 @@ interface SessionContext {
   deltas: string;
   lastFile?: string;
   lastTodo?: string;
+  fileCount: number;
 }

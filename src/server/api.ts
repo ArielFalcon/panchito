@@ -11,7 +11,7 @@ import { sanitizeText } from "../orchestrator/sanitizer";
 import { buildRunContext } from "./chat";
 import { buildHelpContext } from "./help";
 import { json, readBody } from "./helpers";
-import { getOpenSessionCount } from "../integrations/opencode-client";
+import { getOpenSessionCount, activityRouter } from "../integrations/opencode-client";
 
 const MODES: RunMode[] = ["diff", "complete", "exhaustive", "manual"];
 const TARGETS: TestTarget[] = ["e2e", "code"];
@@ -289,7 +289,8 @@ async function handleAsk(req: IncomingMessage, res: ServerResponse, deps: ApiDep
     } catch { /* app not configured — proceed without */ }
 
     // Context is bounded (cases + logs capped) and sanitized on ingress (secrets redacted).
-    const context = buildRunContext(record, undefined, appInfo);
+    const activityCtx = activityRouter.contextForRun(record.id);
+    const context = buildRunContext(record, undefined, appInfo, activityCtx || undefined);
     const answer = await deps.ask({ context, question });
     // Sanitize on egress (logs→chat is a new egress path).
     json(res, 200, { answer: sanitizeText(answer).text });

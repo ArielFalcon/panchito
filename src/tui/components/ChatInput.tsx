@@ -101,10 +101,11 @@ export function ChatInput({ client, runId }: ChatInputProps): React.ReactElement
   const rendered = entries.map((e) =>
     e.id === streamingId ? { ...e, text: displayed } : e,
   );
+  const last = rendered.slice(-2); // only the most recent Q+A pair
 
   return (
     <Box flexDirection="column" marginTop={1}>
-      {rendered.map((entry) => (
+      {last.map((entry) => (
         <Box key={entry.id} flexDirection="column">
           {entry.role === "q" ? (
             <Text dimColor>{"▶ "}{entry.text}</Text>
