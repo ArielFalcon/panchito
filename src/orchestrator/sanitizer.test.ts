@@ -51,6 +51,13 @@ test("containsSecrets returns true on secret", () => {
   assert.equal(containsSecrets("apiKey: sk-abc123"), true);
 });
 
+test("containsSecrets is stable across repeated calls (no global-regex lastIndex flip)", () => {
+  const s = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789";
+  // A shared /g regex's lastIndex would make repeated .test() alternate true/false and
+  // silently miss the secret every other call. The detector must be deterministic.
+  for (let i = 0; i < 6; i++) assert.equal(containsSecrets(s), true, `call ${i} flipped`);
+});
+
 test("containsSecrets returns false on clean text", () => {
   assert.equal(containsSecrets("function hello() { return 1; }"), false);
 });

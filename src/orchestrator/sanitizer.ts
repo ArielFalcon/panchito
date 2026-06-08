@@ -108,6 +108,9 @@ export function containsSecrets(text: string): boolean {
   if (!text) return false;
   let masked = text.replace(/data:[^;]+;base64,[A-Za-z0-9+/=]+/gi, "");
   for (const { p } of NAMED_SECRET_PATTERNS) {
+    // These are module-level /g regexes; .test() advances and persists lastIndex, which
+    // would make repeated calls alternate true/false. Reset it so detection is deterministic.
+    p.lastIndex = 0;
     if (p.test(masked)) return true;
   }
   return false;
