@@ -11,6 +11,7 @@ import { Dashboard } from "./components/Dashboard";
 import { ChatInput } from "./components/ChatInput";
 import { OnboardWizard } from "./components/OnboardWizard";
 import { GuidancePrompt } from "./components/GuidancePrompt";
+import { RunSummary } from "./components/RunSummary";
 import { QaClient, QaApiError } from "./client";
 import { RunRecord, RunMode, TestTarget } from "../types";
 import { MODE_INFO, TARGET_INFO } from "./format";
@@ -20,7 +21,7 @@ const TARGETS: TestTarget[] = ["e2e", "code"];
 
 interface SelectItem { label: string; value: string }
 
-export function Watch({ client, id }: { client: QaClient; id: string }): React.ReactElement {
+export function Watch({ client, id, onDone }: { client: QaClient; id: string; onDone?: () => void }): React.ReactElement {
   const [record, setRecord] = useState<RunRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { exit } = useApp();
@@ -31,6 +32,7 @@ export function Watch({ client, id }: { client: QaClient; id: string }): React.R
     let misses = 0;
 
     const finish = (code: number): void => {
+      if (onDone && code !== 99) { onDone(); return; }
       process.exitCode = code;
       timer = setTimeout(() => exit(), 80);
     };
@@ -42,6 +44,7 @@ export function Watch({ client, id }: { client: QaClient; id: string }): React.R
         misses = 0;
         setRecord(r);
         if (r.verdict) {
+          if (onDone) { timer = setTimeout(() => onDone(), 600); return; }
           finish(r.verdict === "pass" || r.verdict === "skipped" ? 0 : 1);
           return;
         }
@@ -57,26 +60,15 @@ export function Watch({ client, id }: { client: QaClient; id: string }): React.R
     };
 
     void tick();
-    return () => {
-      alive = false;
-      if (timer) clearTimeout(timer);
-    };
-  }, [client, id, exit]);
+    return () => { alive = false; if (timer) clearTimeout(timer); };
+  }, [client, id, exit, onDone]);
 
   if (error) return <Text color="red">{`qa: ${error}`}</Text>;
-  if (!record)
-    return (
-      <Text color="cyan">
-        <Spinner type="dots" />
-        {" starting…"}
-      </Text>
-    );
+  if (!record) return <Text color="cyan"><Spinner type="dots" />{" starting…"}</Text>;
   return (
     <Box flexDirection="column">
       <Dashboard record={record} />
-      <Box marginTop={1}>
-        <Text dimColor>{"─".repeat(60)}</Text>
-      </Box>
+      <Box marginTop={1}><Text dimColor>{"─".repeat(60)}</Text></Box>
       <ChatInput client={client} runId={id} />
     </Box>
   );
@@ -90,10 +82,7 @@ export function Launcher({ apps, defaultGuidance, onLaunch, onOnboard }: { apps:
   const [manualGuidance, setManualGuidance] = useState<string | undefined>(undefined);
 
   if (app === null) {
-    const items: SelectItem[] = [
-      ...apps.map((a) => ({ label: a, value: a })),
-      { label: "+ onboard new project", value: "__onboard__" },
-    ];
+    const items: SelectItem[] = [...apps.map((a) => ({ label: a, value: a })), { label: "+ onboard new project", value: "__onboard__" }];
     return (
       <Box flexDirection="column">
         <Text bold>Select an app</Text>
@@ -101,12 +90,8 @@ export function Launcher({ apps, defaultGuidance, onLaunch, onOnboard }: { apps:
       </Box>
     );
   }
-
   if (target === null) {
-    const items: SelectItem[] = TARGETS.map((t) => ({
-      label: `${t}  (${TARGET_INFO[t]})`,
-      value: t,
-    }));
+    const items: SelectItem[] = TARGETS.map((t) => ({ label: `${t}  (${TARGET_INFO[t]})`, value: t }));
     return (
       <Box flexDirection="column">
         <Text bold>{`Test target for ${app}`}</Text>
@@ -115,20 +100,9 @@ export function Launcher({ apps, defaultGuidance, onLaunch, onOnboard }: { apps:
       </Box>
     );
   }
-
-  // Manual mode: the user must write a guidance prompt before the run starts.
   if (mode === "manual" && manualGuidance === undefined && shadow === null) {
-    return (
-      <GuidancePrompt
-        app={app}
-        target={target!}
-        onSubmit={(guidance) => setManualGuidance(guidance)}
-        onCancel={() => setMode(null)}
-      />
-    );
+    return <GuidancePrompt app={app} target={target!} onSubmit={(guidance) => setManualGuidance(guidance)} onCancel={() => setMode(null)} />;
   }
-
-  // Shadow mode toggle — shown after mode (and optionally guidance) is chosen.
   if (mode !== null && shadow === null) {
     const items: SelectItem[] = [
       { label: "No  — publish PRs and open Issues (normal mode)", value: "false" },
@@ -146,50 +120,38 @@ export function Launcher({ apps, defaultGuidance, onLaunch, onOnboard }: { apps:
       </Box>
     );
   }
-
-  const items: SelectItem[] = MODES.map((m) => ({
-    label: `${m}  — ${MODE_INFO[m]}`,
-    value: m,
-  }));
+  const items: SelectItem[] = MODES.map((m) => ({ label: `${m}  — ${MODE_INFO[m]}`, value: m }));
   return (
     <Box flexDirection="column">
       <Text bold>{`Mode for ${app} · ${target}`}</Text>
-      <SelectInput items={items} onSelect={(i) => {
-        const m = i.value as RunMode;
-        setMode(m);
-      }} />
+      <SelectInput items={items} onSelect={(i) => { const m = i.value as RunMode; setMode(m); }} />
     </Box>
   );
 }
 
-export function RunFlow({
-  client,
-  apps,
-  refName,
-  sha,
-  guidance,
-}: {
-  client: QaClient;
-  apps: string[];
-  refName?: string;
-  sha?: string;
-  guidance?: string;
+export function RunFlow({ client, apps, refName, sha, guidance }: {
+  client: QaClient; apps: string[]; refName?: string; sha?: string; guidance?: string;
 }): React.ReactElement {
   const [runId, setRunId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [onboarding, setOnboarding] = useState(false);
+  const [done, setDone] = useState(false);
 
   const launch = async (app: string, target: TestTarget, mode: RunMode, g?: string, shadow?: boolean): Promise<void> => {
-    try {
-      const res = await client.createRun({ app, target, mode, sha, ref: sha ? undefined : refName ?? "main", guidance: g ?? guidance, shadow });
-      setRunId(res.id);
-    } catch (e) {
-      setErr(e instanceof QaApiError ? e.message : String(e));
-    }
+    try { setDone(false); const res = await client.createRun({ app, target, mode, sha, ref: sha ? undefined : refName ?? "main", guidance: g ?? guidance, shadow }); setRunId(res.id); }
+    catch (e) { setErr(e instanceof QaApiError ? e.message : String(e)); }
   };
 
   if (err) return <Text color="red">{`qa: ${err}`}</Text>;
-  if (runId) return <Watch client={client} id={runId} />;
+  if (runId && !done) return <Watch client={client} id={runId} onDone={() => setDone(true)} />;
+  if (runId && done) return <SummaryScreen client={client} id={runId} onBack={() => { setRunId(null); setDone(false); }} />;
   if (onboarding) return <OnboardWizard onDone={() => setOnboarding(false)} onCancel={() => setOnboarding(false)} />;
   return <Launcher apps={apps} defaultGuidance={guidance} onLaunch={(a, t, m, g, s) => void launch(a, t, m, g, s)} onOnboard={() => setOnboarding(true)} />;
+}
+
+function SummaryScreen({ client, id, onBack }: { client: QaClient; id: string; onBack: () => void }): React.ReactElement {
+  const [record, setRecord] = useState<RunRecord | null>(null);
+  useEffect(() => { let alive = true; client.getRun(id).then((r) => { if (alive) setRecord(r); }).catch(() => {}); return () => { alive = false; }; }, [client, id]);
+  if (!record) return <Text color="cyan"><Spinner type="dots" />{" loading result…"}</Text>;
+  return <RunSummary record={record} client={client} onBack={onBack} />;
 }
