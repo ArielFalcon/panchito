@@ -77,6 +77,18 @@ quedó.
 **Pendiente:** Fase 2 (seguridad/infra), Fase 3 (robustez/docs), y la **iniciativa
 keystone** (ítems 8/9 + source-maps). Detalle abajo.
 
+> **Fase 2 — COMPLETA** (7/7 ítems), TDD, gate al cierre: **316/316 tests, typecheck limpio** (partió de 310).
+
+| # | Ítem | Estado | Ciclo | Archivos clave |
+|---|---|---|---|---|
+| 14 | Scrub de entorno en spawns de código no confiable | ✅ Hecho | 13 | `code-runner.ts` (scrubEnv, 2 spawns), `code-runner.test.ts` |
+| 20 | IDs de run a prueba de colisión + try/catch HTTP + unhandledRejection | ✅ Hecho | 13 | `history.ts` (+randomBytes), `history.test.ts`, `index.ts`, `api.ts` |
+| 15 | Timeout + AbortSignal en code-mode | ✅ Hecho | 14 | `code-runner.ts` (Promise.race+clearTimeout, SIGKILL), `pipeline.ts` (3 calls) |
+| 19 | Apagado limpio (SIGTERM/SIGINT → cancel + drain) | ✅ Hecho | 14 | `index.ts` (queue.cancel + queue.drain en ambos handlers) |
+| 16 | Runtimes no-Node en la imagen del ORQUESTADOR | ✅ Hecho | 15 | `Dockerfile` (+python3,go,cargo,maven,gradle), `code-runner.ts`, `CLAUDE.md` |
+| 18 | Clasificador infra-vs-calidad (validate + runner) | ✅ Hecho | 15 | `validate.ts` (CheckResult.infra, sh() sentinel, ValidationResult.infra), `pipeline.ts`, `runner.ts` (isInfra), `index.ts` (drop duplicate recordIncident) |
+| 17 | Maintainer seguro por defecto (4 sub-ítems) | ✅ Hecho | 15 | `index.ts` (SELF_MAINTAINER_AUTOMERGE default OFF, no self-merge fallback, scrubEnv self-test), `self-update.ts` (marker before rm) |
+
 ---
 
 ## Parte A — Resumen ejecutivo

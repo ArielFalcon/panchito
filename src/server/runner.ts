@@ -108,7 +108,16 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
       const msg = err instanceof Error ? err.message : String(err);
       updateRecord(record.id, { status: "done", step: "done", verdict: "infra-error", note: msg });
       console.error(`[qa] run crashed ${req.app}@${req.sha}: ${msg}`);
-      recordIncident({ source: "qa-generator", severity: "error", summary: `pipeline crash for ${req.app}: ${msg}` });
+
+      // Infrastructure errors (DEV deploy timeout, operator cancel, network) are
+      // transient conditions — they must NOT create maintainer-eligible incidents
+      // that could trigger an autonomous self-modification for a non-code fault.
+      const isInfra =
+        (err instanceof Error && err.name === "DeployTimeoutError") ||
+        (msg.includes("run cancelled by operator"));
+      if (!isInfra) {
+        recordIncident({ source: "qa-generator", severity: "error", summary: `pipeline crash for ${req.app}: ${msg}` });
+      }
     }
   });
 

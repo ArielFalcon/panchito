@@ -121,8 +121,8 @@ tests in the repo's own framework, then the orchestrator installs the repo's dep
 runs its own test suite, classifying by **exit code** (binary pass/fail — no flaky, no
 deploy gate, no static gate). Code-mode apps set `code: true` in their config and omit
 the `dev:` block. The runner auto-detects the ecosystem (node/python/go/…) in
-`src/qa/code-runner.ts`; only Node is guaranteed by the orchestrator image — add other
-runtimes to the `Dockerfile` like the Serena languages. Publish commits the new tests
+`src/qa/code-runner.ts`; the orchestrator image ships Node, Python, Go, Rust, Maven
+and Gradle (see root `Dockerfile`). Publish commits the new tests
 anywhere in the repo (`publishCode`), not just `e2e/`.
 
 ### Dependency injection is the testing strategy

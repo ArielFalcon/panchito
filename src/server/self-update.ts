@@ -80,20 +80,24 @@ export function performSwap(
   const pkg = "package.json";
   const lock = "package-lock.json";
 
-  // 1. Backup the currently-running (known-good) tree.
+  // 1. Arm the boot-guard BEFORE any destructive operation. If the process crashes
+  //    mid-swap, the marker exists → boot-guard.mjs detects it and can roll back.
+  //    Without this, a crash after `rm(src)` but before the marker leaves src/ absent
+  //    with no recovery armed → unbootable loop.
+  const marker: SwapMarker = { at: opts.at, attempt: 0, prUrl: opts.prUrl, promote: opts.promote, fix: opts.fix };
+  fs.writeMarker(join(dataDir, SWAP_MARKER_FILE), marker);
+
+  // 2. Backup the currently-running (known-good) tree.
   if (fs.exists(srcBak)) fs.rm(srcBak);
   fs.cp(liveSrc, srcBak);
   fs.cp(join(appDir, pkg), join(appDir, `${pkg}.bak`));
   if (fs.exists(join(appDir, lock))) fs.cp(join(appDir, lock), join(appDir, `${lock}.bak`));
 
-  // 2. Swap in the new code.
+  // 3. Swap in the new code.
   fs.rm(liveSrc);
   fs.cp(join(sourceDir, "src"), liveSrc);
   fs.cp(join(sourceDir, pkg), join(appDir, pkg));
   if (fs.exists(join(sourceDir, lock))) fs.cp(join(sourceDir, lock), join(appDir, lock));
-
-  // 3. Arm the boot-guard.
-  fs.writeMarker(join(dataDir, SWAP_MARKER_FILE), { at: opts.at, attempt: 0, prUrl: opts.prUrl, promote: opts.promote, fix: opts.fix });
 }
 
 // Clear swap state once the new code is confirmed healthy after restart (removes marker

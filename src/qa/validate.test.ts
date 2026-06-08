@@ -25,6 +25,35 @@ test("accumulates ALL failures (does not stop at the first) with their label", a
   assert.match(res.errors[1]!, /\[list\] no spec files/);
 });
 
+test("infra failures (spawn ENOENT, signal-kill) are flagged separately from real lint errors", async () => {
+  // The typecheck check failed because tsc is missing (ENOENT) — infrastructure, NOT bad code.
+  // The lint check found a real error — code quality.
+  const deps: ValidateDeps = {
+    typecheck: async () => ({ ok: false, output: "Error: spawn tsc ENOENT", infra: true }),
+    lint: async () => ({ ok: false, output: "expect-expect: Test has no assertions" }),
+    listTests: async () => ({ ok: true, output: "" }),
+    checkManifest: async () => ({ ok: true, output: "" }),
+  };
+  const res = await validateSpecs("/dir", deps);
+  assert.equal(res.ok, false);
+  // There are non-infra errors → not a pure infra failure.
+  assert.equal(res.infra, false);  // lint error makes it a real validation failure
+});
+
+test("a pure-infra validation failure is flagged as infra, not invalid", async () => {
+  // ALL checks failed with infrastructure errors (e.g. npx not installed, ENOMEM).
+  const deps: ValidateDeps = {
+    typecheck: async () => ({ ok: false, output: "spawn npx ENOENT", infra: true }),
+    lint: async () => ({ ok: false, output: "spawn npx ENOENT", infra: true }),
+    listTests: async () => ({ ok: false, output: "spawn npx ENOENT", infra: true }),
+    checkManifest: async () => ({ ok: true, output: "" }),
+  };
+  const res = await validateSpecs("/dir", deps);
+  assert.equal(res.ok, false);
+  // Pure infra: the gate itself couldn't run. Should be infra-error, not invalid.
+  assert.equal(res.infra, true);
+});
+
 test("invalid metadata makes the run invalid", async () => {
   const deps: ValidateDeps = {
     typecheck: ok,

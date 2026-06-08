@@ -17,6 +17,7 @@ import { validateManifest } from "./metadata";
 export interface CheckResult {
   ok: boolean;
   output: string;
+  infra?: boolean; // true when the check itself failed (ENOENT, signal-kill), not the code
 }
 
 export interface ValidateDeps {
@@ -29,6 +30,7 @@ export interface ValidateDeps {
 export interface ValidationResult {
   ok: boolean;
   errors: string[]; // one error per failed check, with its output (for the agent)
+  infra: boolean; // ALL failures are infrastructure (missing tools, OOM) — not code quality
 }
 
 export async function validateSpecs(
@@ -43,11 +45,15 @@ export async function validateSpecs(
     ["manifest", deps.checkManifest],
   ];
   const errors: string[] = [];
+  let allFailuresAreInfra = true;
   for (const [name, run] of checks) {
     const res = await run(specDir);
-    if (!res.ok) errors.push(`[${name}] ${res.output.trim()}`);
+    if (!res.ok) {
+      errors.push(`[${name}] ${res.output.trim()}`);
+      if (!res.infra) allFailuresAreInfra = false;
+    }
   }
-  return { ok: errors.length === 0, errors };
+  return { ok: errors.length === 0, errors, infra: errors.length > 0 && allFailuresAreInfra };
 }
 
 // Default runners: run the tools INSIDE the repo's `e2e/` project (its own
@@ -59,8 +65,11 @@ function sh(cmd: string, args: string[], e2eDir: string): Promise<CheckResult> {
     let out = "";
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (out += d));
-    child.on("error", (e) => resolve({ ok: false, output: String(e) }));
-    child.on("close", (code) => resolve({ ok: code === 0, output: out }));
+    // ENOENT (missing binary) or any spawn-level failure is infrastructure, not a
+    // code-quality verdict — it means the static gate itself couldn't run.
+    child.on("error", (e) => resolve({ ok: false, output: String(e), infra: true }));
+    // Signal-kill (code === null) is also infrastructure (OOM, host pressure).
+    child.on("close", (code) => resolve({ ok: code === 0, output: out, infra: code === null ? true : undefined }));
   });
 }
 
