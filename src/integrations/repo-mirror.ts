@@ -33,12 +33,15 @@ export function assertHexSha(sha: string): void {
   if (!HEX_SHA.test(sha)) throw new Error(`invalid commit sha (must be 7–40 hex chars): ${JSON.stringify(sha)}`);
 }
 
-// Ephemeral header auth (-c http.extraHeader): does NOT persist the token in
-// .git/config the way embedding it in the remote URL would. Exported so the
-// publisher (publish.ts) reuses the same auth when pushing.
+// Ephemeral header auth (-c http.extraHeader) with credential helper disabled.
+// -c credential.helper= prevents macOS osxkeychain from intercepting auth and
+// prompting for a username (no terminal → crash). The token lives in argv (not
+// persisted in .git/config), which is acceptable for ephemeral commands.
 export function authHeaderArgs(): string[] {
   const token = process.env.GITHUB_TOKEN;
-  return token ? ["-c", `http.extraHeader=Authorization: Bearer ${token}`] : [];
+  return token
+    ? ["-c", `http.extraHeader=Authorization: Bearer ${token}`, "-c", "credential.helper="]
+    : [];
 }
 
 // Leaves the working copy PRISTINE at the SHA. `checkout -f` discards changes to
