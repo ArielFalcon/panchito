@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ensureMirror, getCommitDiff, listChangedSpecs, MirrorDeps } from "./repo-mirror";
+import { ensureMirror, getCommitDiff, listChangedSpecs, getCommitsBehind, MirrorDeps } from "./repo-mirror";
 
 // authHeaderArgs() depends on GITHUB_TOKEN; clear it to isolate the logic.
 delete process.env.GITHUB_TOKEN;
@@ -76,6 +76,18 @@ test("listChangedSpecs returns e2e-relative spec paths from git status, excludin
 test("listChangedSpecs follows a rename to the new path", async () => {
   const d = gitStub(() => "R  e2e/flows/old.spec.ts -> e2e/flows/new.spec.ts\n");
   assert.deepEqual(await listChangedSpecs("/dir", "e2e", d), ["flows/new.spec.ts"]);
+});
+
+test("getCommitsBehind rejects a non-hex sha before spawning git (injection defense)", async () => {
+  const d = gitStub(() => "5");
+  await assert.rejects(() => getCommitsBehind("/dir", "--output=/etc/passwd", "abc1234def", d), /invalid commit sha/);
+  await assert.rejects(() => getCommitsBehind("/dir", "abc1234def", "$(rm -rf)", d), /invalid commit sha/);
+  assert.equal(d.calls.length, 0); // never reached git
+});
+
+test("getCommitsBehind returns the commit count for valid hex shas", async () => {
+  const d = gitStub(() => "12\n");
+  assert.equal(await getCommitsBehind("/dir", "abc1234def", "def5678abc", d), 12);
 });
 
 test("rejects a non-hex sha (git argument-injection defense) before spawning git", async () => {

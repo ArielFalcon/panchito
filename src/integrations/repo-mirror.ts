@@ -126,6 +126,11 @@ export async function getCommitsBehind(
   headSha: string,
   deps: MirrorDeps,
 ): Promise<number> {
+  // Both SHAs are interpolated into a git revspec (`fromSha..headSha`). assertHexSha
+  // guarantees they cannot be parsed as git options — closing the same injection surface
+  // the rest of this module defends (the context map's builtAtSha is repo-controlled).
+  assertHexSha(fromSha);
+  assertHexSha(headSha);
   try {
     const stdout = await deps.git(["rev-list", "--count", `${fromSha}..${headSha}`], mirrorDir);
     return parseInt(stdout.trim(), 10) || 0;
