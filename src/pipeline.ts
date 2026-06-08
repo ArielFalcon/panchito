@@ -70,7 +70,7 @@ export interface PipelineDeps {
   // reconciliation (the agent's reported specs are used, as before).
   listChangedSpecs?(mirrorDir: string, e2eRelDir: string): Promise<string[]>;
   setupE2e(e2eDir: string): Promise<void>; // installs the e2e project's dependencies
-  validate(e2eDir: string): Promise<{ ok: boolean; errors: string[] }>;
+  validate(e2eDir: string): Promise<{ ok: boolean; errors: string[]; infra: boolean }>;
   execute(e2eDir: string, opts: { baseUrl: string; namespace: string; onCase?: (c: QaCase) => void }): Promise<QaRunResult>;
   cleanup(e2eDir: string, opts: { baseUrl: string; namespace: string }): Promise<void>; // orphan-data cleanup (best-effort)
   isHealthy(versionUrl: string): Promise<boolean>; // is DEV healthy right now? (infra vs quality)
@@ -90,7 +90,7 @@ export interface PipelineDeps {
   // Code mode (target "code"): no web env, no Playwright. Install the repo's deps,
   // run its own test suite, classify by exit code, and publish the new tests.
   setupCode(repoDir: string): Promise<void>;
-  executeCode(repoDir: string, opts: { namespace: string; onCase?: (c: QaCase) => void }): Promise<QaRunResult>;
+  executeCode(repoDir: string, opts: { namespace: string; onCase?: (c: QaCase) => void; signal?: AbortSignal; timeoutMs?: number }): Promise<QaRunResult>;
   publishCode(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string }): Promise<{ prUrl: string; merged: boolean } | null>;
   openIssue(repo: string, title: string, body: string): Promise<{ url: string }>;
   log?(msg: string): void;
@@ -383,6 +383,14 @@ export async function runPipeline(
     const validation = await deps.validate(e2eDir);
     if (!validation.ok) {
       log(`[qa] static gate failed:\n${validation.errors.join("\n")}`);
+      // When every failure is infrastructure (ENOENT, signal-kill), the gate itself
+      // couldn't run — it's inconclusive, not a code-quality verdict. Log it, but
+      // don't open an Issue on the watched repo for a missing binary or OOM.
+      if (validation.infra) {
+        const infra = resultOf(ns, "infra-error", validation.errors.join("\n\n"));
+        await report(app, sha, infra, deps, log, shadow, isCode);
+        return infra;
+      }
       const invalid = resultOf(ns, "invalid", validation.errors.join("\n\n"));
       await report(app, sha, invalid, deps, log, shadow, isCode, "the E2E tests did not pass the static gate");
       return invalid;
@@ -403,7 +411,7 @@ export async function runPipeline(
   let run: QaRunResult;
   if (isCode) {
     log("[qa] running the repo's own test suite (code mode)...");
-    run = await deps.executeCode(mirrorDir, { namespace: ns, onCase });
+    run = await deps.executeCode(mirrorDir, { namespace: ns, onCase, signal });
   } else if (!app.dev) {
     // Defensive: an e2e run on an app with no dev environment is inconclusive.
     run = resultOf(ns, "infra-error", "e2e run requested but no dev environment is configured");
@@ -445,7 +453,7 @@ export async function runPipeline(
 
     if (isCode) {
       log("[qa] re-running the repo's test suite with the fixed tests...");
-      run = await deps.executeCode(mirrorDir, { namespace: ns, onCase });
+      run = await deps.executeCode(mirrorDir, { namespace: ns, onCase, signal });
     } else {
       // Re-validate the fixed specs and, if they pass, re-execute against DEV.
       const reValidation = await deps.validate(e2eDir);
@@ -501,7 +509,7 @@ export async function runPipeline(
           if (okStatic.ok && (isCode || (await devHealthy()))) {
             if (!isCode) deps.clearCoverage?.(e2eDir, ns); // re-measure only the improved suite's dumps
             const reRun = isCode
-              ? await deps.executeCode(mirrorDir, { namespace: ns, onCase })
+              ? await deps.executeCode(mirrorDir, { namespace: ns, onCase, signal })
               : await deps.execute(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: ns, onCase });
             if (reRun.verdict === "pass") {
               run = reRun;

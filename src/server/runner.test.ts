@@ -21,7 +21,7 @@ function stubDeps(over: Partial<PipelineDeps> = {}): PipelineDeps {
     prepare: async () => ({ mirrorDir: "/m", diff: "", message: "feat: x" }),
     generate: async (_input, _signal) => ({ output: "", specs: ["a.spec.ts"], reviewed: false, approved: true }),
     setupE2e: async () => {},
-    validate: async () => ({ ok: true, errors: [] }),
+    validate: async () => ({ ok: true, errors: [], infra: false }),
     execute: async (_dir, opts) => {
       const cases: QaCase[] = [
         { name: "t1", status: "pass" },

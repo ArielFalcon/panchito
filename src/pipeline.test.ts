@@ -42,7 +42,7 @@ function deps(
   run: QaRunResult,
   calls: string[],
   opts: {
-    validation?: { ok: boolean; errors: string[] };
+    validation?: { ok: boolean; errors: string[]; infra: boolean };
     prUrl?: string | null;
     agent?: AgentResult;
     agents?: AgentResult[]; // a sequence of agent results, one per generate() call
@@ -96,7 +96,7 @@ function deps(
     },
     validate: async () => {
       calls.push("validate");
-      return opts.validation ?? { ok: true, errors: [] };
+      return opts.validation ?? { ok: true, errors: [], infra: false };
     },
     isHealthy: async () => {
       calls.push("health");
@@ -319,7 +319,7 @@ test("flaky: neither PR nor Issue (quarantine)", async () => {
 
 test("invalid specs: does NOT execute or publish, opens a validation Issue", async () => {
   const calls: string[] = [];
-  const d = deps(passing(), calls, { validation: { ok: false, errors: ["[lint] no-wait-for-timeout"] } });
+  const d = deps(passing(), calls, { validation: { ok: false, errors: ["[lint] no-wait-for-timeout"], infra: false } });
   const run = await runPipeline(app, "abc123", d);
   assert.equal(run.verdict, "invalid");
   assert.ok(!calls.includes("execute"));
