@@ -751,11 +751,14 @@ export async function runPipeline(
         : `[qa] OK — ${kind} green (no new tests to publish).`,
     );
   }
+  // Surface the agent's note (reviewer rejection, generation summary) in the
+  // result so the TUI/chat can show why a retry or skip happened.
+  if (result?.note && !run.note) run.note = result.note;
   return run;
 }
 
-function resultOf(ns: string, verdict: QaRunResult["verdict"], logs: string): QaRunResult {
-  return { sha: ns, verdict, passed: false, cases: [], logs };
+function resultOf(ns: string, verdict: QaRunResult["verdict"], logs: string, note?: string): QaRunResult {
+  return { sha: ns, verdict, passed: false, cases: [], logs, note };
 }
 
 // Open an Issue only for a real failure or invalid specs. Flaky → quarantine.

@@ -116,6 +116,7 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
         verdict: run.verdict,
         step: "done",
         retrying: false,
+        note: run.note || undefined,
         passed: run.cases.filter((x) => x.status === "pass").length,
         failed: run.cases.filter((x) => x.status === "fail").length,
       });

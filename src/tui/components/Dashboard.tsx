@@ -1,5 +1,5 @@
 // The live run dashboard. Uses Section for collapsible pipeline steps and HistoryList
-// for immutable case rendering. Specs are always visible (not hidden when step completes).
+// for immutable case rendering.
 
 import React from "react";
 import { Box, Text } from "ink";
@@ -9,19 +9,33 @@ import { PIPELINE_STEPS, stepState, progressBar, verdictColor, verdictIcon, shor
 import { Section } from "./Section";
 import { HistoryList, toHistoryItems } from "./HistoryList";
 
+function stepDetail(record: RunRecord, step: string, isActive: boolean): string | undefined {
+  const { passed = 0, failed = 0, cases, specs, stepDetail: sd, note, retrying, target } = record;
+  const total = cases.length;
+
+  if (!isActive) return undefined;
+  if (retrying && step === "execute") return note || sd || "re-generating with failure feedback...";
+
+  switch (step) {
+    case "generate":
+      if (specs?.length) return `${specs.length} spec(s) written so far`;
+      return sd || undefined;
+    case "execute":
+      if (total > 0) return `${total} case(s) — ${passed} passed, ${failed} failed`;
+      if (target === "code") return "running test suite...";
+      return sd || undefined;
+    default:
+      return sd || undefined;
+  }
+}
+
 export function Dashboard({ record }: { record: RunRecord }): React.ReactElement {
-  const { app, sha, target, mode, step, verdict, passed = 0, failed = 0, cases, specs, logs } = record;
+  const { app, sha, target, mode, step, verdict, passed = 0, failed = 0, cases, specs } = record;
   const total = cases.length;
   const isCode = target === "code";
 
-  // When a step is active, surface the latest pipeline log as live feedback so the
-  // operator can see what the pipeline is doing right now (e.g. "agent exploring
-  // page with Playwright MCP...").
-  const lastLog = logs.length > 0 ? logs[logs.length - 1]!.replace(/^\[qa\] /, "") : undefined;
-
   return (
     <Box flexDirection="column" paddingX={1}>
-      {/* Header */}
       <Text>
         <Text bold>{app}</Text>
         {` · ${shortSha(sha)} · `}
@@ -30,20 +44,18 @@ export function Dashboard({ record }: { record: RunRecord }): React.ReactElement
         {record.retrying ? <Text color="#c2891b">{"  ↻ retrying"}</Text> : null}
       </Text>
 
-      {/* Pipeline sections */}
       <Box flexDirection="column" marginTop={1}>
         {PIPELINE_STEPS.map((s) => {
           const st = stepState(step, s);
           const cc = { passed, failed, total };
+          const isActive = s === step || (step === "retry" && s === "execute");
 
           return (
             <Section
               key={s}
               step={s}
               state={st}
-              // Show live detail on the active step. When retrying, "execute" is the active step
-              // (stepState maps "retry" → execute=active), so match that too.
-              detail={(s === step || (step === "retry" && s === "execute")) ? (record.stepDetail || lastLog) : undefined}
+              detail={stepDetail(record, s, isActive)}
               caseCount={s === "execute" ? cc : undefined}
               specCount={s === "generate" ? specs?.length : undefined}
             >

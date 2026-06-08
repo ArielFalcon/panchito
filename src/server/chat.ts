@@ -13,7 +13,7 @@ export interface ContextLimits {
   logTailChars: number;
 }
 
-const DEFAULT_LIMITS: ContextLimits = { maxCases: 20, caseDetailChars: 300, logTailChars: 4000 };
+const DEFAULT_LIMITS: ContextLimits = { maxCases: 20, caseDetailChars: 300, logTailChars: 8000 };
 
 export function buildRunContext(
   record: RunRecord,

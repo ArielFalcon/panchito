@@ -79,9 +79,10 @@ export interface QaCase {
 export interface QaRunResult {
   sha: string;
   verdict: RunVerdict;
-  passed: boolean; // shorthand for verdict === "pass"
+  passed: boolean;
   cases: QaCase[];
-  logs: string; // sanitized before any reuse by the LLM
+  logs: string;
+  note?: string; // human-readable summary of what happened (reviewer rejection, skip reason, etc.)
 }
 
 // A single spec produced by the AI agent with its objective and flow path.
