@@ -92,6 +92,20 @@ export interface SpecRecord {
   flow?: string;
 }
 
+// A structured, real-time activity event surfaced to the TUI while a run is live.
+// Replaces the old "flatten everything to one prefixed string" approach: keeping the
+// `kind` (and `status` for todos) lets the dashboard categorize, count, and render a
+// live panel instead of one cropped line. Raw model-stream prose is NEVER an activity
+// (it produced broken fragments like `"file": "s`); only clean structured events are.
+export type ActivityKind = "file" | "command" | "todo" | "phase" | "error";
+
+export interface AgentActivity {
+  kind: ActivityKind;
+  text: string;             // already clean: file basename, full command, or todo content
+  status?: "pending" | "in_progress" | "completed"; // todos only
+  ts: string;               // ISO timestamp — for ordering and elapsed
+}
+
 // Full run history record persisted in SQLite (src/server/history.ts).
 export interface RunRecord {
   id: string;
@@ -112,6 +126,8 @@ export interface RunRecord {
   cases: QaCase[];
   specs?: SpecRecord[];
   logs: string[];
+  activity?: AgentActivity[];  // structured live activity feed (newest last)
+  stepStartedAt?: string;      // ISO time the current `step` began — drives the elapsed clock
   at: string;
 }
 
@@ -127,4 +143,40 @@ export interface Incident {
   status: "pending" | "diagnosing" | "fixed" | "dismissed";
   at: string;
   prUrl?: string;
+}
+
+// ── Learning layer (Fase 0 — Marcador) ────────────────────────────────────────
+
+export type { ErrorClass } from "./qa/learning/taxonomy";
+
+export interface RunOutcome {
+  runId: string;
+  app: string;
+  sha: string;
+  mode: RunMode;
+  target: TestTarget;
+  verdict: RunVerdict;
+  errorClass: import("./qa/learning/taxonomy").ErrorClass | null;
+  gateSignals: {
+    static: boolean;
+    coverageRatio: number | null;
+    valueScore: number | null;
+    reviewerCorrections: string[];
+    flaky: boolean;
+    retries: number;
+  };
+  rulesRetrieved: string[];
+  reflection?: StructuredReflection;
+  at: string;
+}
+
+export interface StructuredReflection {
+  goal: string;
+  decision: string;
+  assumption: string;
+  errorClass: import("./qa/learning/taxonomy").ErrorClass;
+  gateSignal: string;
+  evidence: string;
+  rootCause: string;
+  preventiveRule: { trigger: string; action: string };
 }

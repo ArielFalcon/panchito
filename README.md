@@ -16,6 +16,7 @@
   - [Architecture](#architecture)
   - [The QA pipeline](#the-qa-pipeline)
   - [What happens at the end](#what-happens-at-the-end)
+  - [The learning layer](#the-learning-layer)
 - [3. Getting started](#3-getting-started)
   - [Prerequisites](#prerequisites)
   - [Install and verify](#install-and-verify)
@@ -27,7 +28,7 @@
 
 ---
 
-**Autonomous E2E QA that watches your repos and tests every deploy against DEV.**
+**Autonomous QA that watches your repos, tests every deploy, and learns from every failure.**
 
 When a commit lands on DEV, an AI agent reads the change, writes Playwright tests for what could break, runs them against the live environment, and either opens a PR against the app's repository with the new tests or files a GitHub Issue if something fails.
 
@@ -44,6 +45,7 @@ panchito turns every deploy into a QA checkpoint, automatically.
 | **Commit-aware testing** | Reads the diff and commit message to understand what changed. Skips style-only commits, writes targeted tests for features and fixes, runs regression-only for refactors. |
 | **Two-model review** | A different AI model reviews every generated test for value. Tests that click without asserting, use fragile selectors, or miss the actual change are rejected before they reach the suite. |
 | **Self-improving suite** | When tests pass and the reviewer approves, they are committed to the app's repository via PR with auto-merge. The suite grows with every deploy and never degrades into "green noise." |
+| **Learning from failures** | Every failed run is reflected on, distilled into a reusable rule, and injected into future runs. Mutation testing measures whether the tests actually catch bugs (valueScore). Rules that correlate with better outcomes are promoted; the rest decay. |
 | **Multi-app, single engine** | One centralized service watches all your team's repos. Each app gets its own namespace for test data and persistent memory. |
 | **Shadow mode** | Onboard a repo without touching it: the full pipeline runs, but PRs and Issues are only logged. Flip the switch when you are ready. |
 
@@ -71,6 +73,8 @@ flowchart LR
     OC -->|stores memory in| EN[Engram]
     O -->|runs Playwright| DEV[DEV Environment]
     O -->|publishes| PR[GitHub PR / Issue]
+    O -->|writes outcomes + rules| LD[(Learning Ledger)]
+    LD -->|retrieval injected into prompt| OC
 ```
 
 <table>
@@ -80,7 +84,7 @@ flowchart LR
 ### Orchestrator
 **Node.js** deterministic infrastructure.
 
-Receives webhooks, manages the sequential queue, clones repos, runs Playwright against DEV, publishes results. Every side-effecting step is dependency-injected and unit-tested with stubs.
+Receives webhooks, manages the sequential queue, clones repos, runs Playwright against DEV, publishes results. Runs mutation testing to measure test quality (valueScore). Maintains the learning ledger: labels errors, reflects on failures, distills rules, and injects learned knowledge into future runs. Every side-effecting step is dependency-injected and unit-tested with stubs.
 
 </td>
 <td width="50%" valign="top">
@@ -102,12 +106,15 @@ Every run follows the same sequence, whether triggered by a webhook or manually:
 
 | Step | What happens |
 |---|---|
-| **1. Deploy gate** | Waits until DEV reports the right commit SHA and is healthy. Skipped if no health endpoint is configured. |
+| **1. Deploy gate** | Waits until DEV reports the right commit SHA and is healthy. Skipped if no health endpoint is configured, or in code mode. |
 | **2. Classification** | Reads the commit message and diff. Conventional Commits like `style:` with no logic changes are skipped before spending a single token. |
-| **3. Generation** | The AI agent reads the blast radius of the change using semantic code navigation, writes Playwright specs into the repo's `e2e/` folder, and invokes the reviewer. |
-| **4. Static gate** | TypeScript compilation, ESLint, and Playwright's test list must pass. Invalid code is rejected before execution. |
-| **5. Execution** | Playwright runs the specs against the live DEV URL with namespaced test data. Results are classified as pass, fail, or flaky. |
-| **6. Decision** | Green and approved: PR with auto-merge. Failures: GitHub Issue. Flaky: quarantined. DEV down: infrastructure error. |
+| **3. Retrieval** | Loads learned rules, structural patterns, and proven scenario archetypes from past runs — injects them into the agent prompt. |
+| **4. Generation** | The AI agent reads the blast radius of the change using semantic code navigation, writes tests into the repo, and invokes the reviewer. |
+| **5. Static gate** | TypeScript compilation, ESLint, and Playwright's test list must pass. Invalid code is rejected before execution. |
+| **6. Execution** | Runs tests against the live DEV URL (e2e) or the repo's own test runner (code mode). Results are classified as pass, fail, or flaky. |
+| **7. Oracle** | For code mode green runs: mutation testing via Stryker measures how many injected bugs the tests actually catch (valueScore). |
+| **8. Reflection** | On failed runs, an LLM reflects on the error and produces a preventive rule. The rule is distilled and stored for future runs. |
+| **9. Decision** | Green and approved: PR with auto-merge. Failures: GitHub Issue. Flaky: quarantined. DEV down: infrastructure error. |
 
 > [!NOTE]
 > **Shadow mode** (`qa.shadow: true` in the app config) runs the full pipeline but does not publish PRs or open Issues. Use this when onboarding a repo for the first time.
@@ -122,6 +129,27 @@ Every run follows the same sequence, whether triggered by a webhook or manually:
 | Flaky tests | Quarantined, no Issue created |
 | DEV unhealthy | Marked as infrastructure error, not a code bug |
 
+### The learning layer
+
+Beyond deciding pass/fail, panchito learns from every run to improve future ones:
+
+| Component | What it does |
+|---|---|
+| **Labeler** | Classifies every run into an error class (E-STATIC, E-EXEC-FAIL, E-FALSE-POSITIVE…) — zero LLM, purely from the gates and reviewer. |
+| **Oracle** | Measures test quality objectively. For code repos: mutation testing via Stryker — mutates source code, runs the test suite, and scores how many mutants were killed. |
+| **Reflector** | On failed runs, an LLM analyzes the error and produces a structured reflection anchored to real artifacts (assert output, uncovered lines, reviewer corrections). |
+| **Distiller** | Converts reflections into reusable rules — deduplicated, stored, and injected into future agent prompts so the same mistake isn't made twice. |
+| **Curriculum** | Tracks which scenario archetypes (invalid input, re-query-after-mutation, empty state, …) have caught real bugs. Only proven archetypes are fed to the agent. |
+| **Attribution** | When a rule was retrieved for a run, the run's valueScore updates the rule's successRate. Rules that correlate with good outcomes are promoted. |
+
+Inspect the learning state at any time:
+
+```bash
+npm run qa -- --app my-app --learning
+```
+
+Or ask the TUI chat: *"¿qué reglas ha aprendido el sistema?"*
+
 <details>
 <summary>Execution modes</summary>
 
@@ -131,19 +159,21 @@ Every run follows the same sequence, whether triggered by a webhook or manually:
 | `complete` | Fill coverage gaps: analyzes the whole repo and tests uncovered flows |
 | `exhaustive` | Full audit: re-evaluates every existing test and regenerates the suite |
 | `manual` | Focused: generation guided by a natural language prompt |
+| `code` target | Source-code testing: runs the repo's own test suite, with mutation testing via Stryker (no browser, no DEV URL) |
 
 </details>
 
 <details>
 <summary>Quality gates</summary>
 
-Three layers prevent low-quality tests from entering the suite:
+Four layers prevent low-quality tests from entering the suite:
 
 | Layer | What it catches |
 |---|---|
 | **Static analysis** | Tests that do not compile, violate lint rules, or have missing metadata |
 | **AI reviewer** | Tests with trivial assertions, fragile selectors, or no real verification of the change |
-| **Flakiness detection** | Tests that pass only after retries are quarantined instead of accepted |
+| **Change-coverage** | Tests that pass but don't exercise the lines the commit changed — a green suite that proves nothing |
+| **Mutation testing** | Tests that pass but don't detect injected bugs — the deepest false positive |
 
 </details>
 
@@ -248,6 +278,9 @@ report:
 
 ```bash
 npm run qa -- --app my-app --sha <commit-sha>
+
+# Inspect what the system has learned across runs
+npm run qa -- --app my-app --learning
 ```
 
 <details>

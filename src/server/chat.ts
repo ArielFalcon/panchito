@@ -6,6 +6,56 @@
 
 import { RunRecord } from "../types";
 import { sanitizeText } from "../orchestrator/sanitizer";
+import { listRunOutcomes, listLearningRules, loadCurriculum } from "./history";
+
+export function buildLearningContext(app: string): string | null {
+  try {
+    const outcomes = listRunOutcomes(app, 10);
+    const rules = listLearningRules(app, 20);
+    const curriculum = loadCurriculum(app);
+
+    if (outcomes.length === 0 && rules.length === 0 && !curriculum) return null;
+
+    const lines: string[] = ["## Learning state for this app", ""];
+
+    if (outcomes.length > 0) {
+      lines.push(`### Recent outcomes (${outcomes.length}):`);
+      for (const o of outcomes.slice(0, 5)) {
+        const vs = o.gateSignals.valueScore !== null ? ` valueScore=${(o.gateSignals.valueScore * 100).toFixed(0)}%` : "";
+        const ec = o.errorClass ? ` ${o.errorClass}` : "";
+        lines.push(`- ${o.verdict}${ec}${vs} (${o.mode}/${o.target}, ${o.sha.slice(0, 7)})`);
+      }
+      lines.push("");
+    }
+
+    if (rules.length > 0) {
+      const active = rules.filter((r) => r.status === "active" || r.status === "candidate");
+      lines.push(`### Learned rules (${active.length} active/candidate):`);
+      for (const r of active.slice(0, 5)) {
+        const sr = r.successRate !== null ? ` successRate=${(r.successRate * 100).toFixed(0)}%` : "";
+        lines.push(`- [${r.status}] ${r.errorClass} (${r.confidence}${sr}, used ${r.usageCount}x)`);
+        lines.push(`  trigger: ${r.trigger.slice(0, 120)}`);
+        lines.push(`  action: ${r.action.slice(0, 120)}`);
+      }
+      lines.push("");
+    }
+
+    if (curriculum) {
+      const proven = curriculum.archetypes.filter((a) => a.caughtRealBug);
+      if (proven.length > 0) {
+        lines.push(`### Proven scenario archetypes (${proven.length}):`);
+        lines.push(proven.map((a) => `- ${a.archetype} (promoted ${a.promotionCount}x)`).join("\n"));
+        lines.push("");
+      }
+    }
+
+    // Cap to avoid blowing the context budget
+    const text = lines.join("\n");
+    return text.length > 3000 ? text.slice(0, 3000) + "\n…(truncated)" : text;
+  } catch {
+    return null;
+  }
+}
 
 export interface ContextLimits {
   maxCases: number;
@@ -20,6 +70,7 @@ export function buildRunContext(
   limits: ContextLimits = DEFAULT_LIMITS,
   appInfo?: { repo: string; baseUrl?: string },
   activityContext?: string,
+  learningContext?: string,
 ): string {
   const lines: string[] = [];
 
@@ -84,6 +135,10 @@ export function buildRunContext(
 
   if (logLines.length > 0) {
     lines.push("", "Logs (tail):", ...logLines);
+  }
+
+  if (learningContext) {
+    lines.push("", learningContext);
   }
 
   // Sanitize the whole blob on ingress (run data can carry DEV secrets/PII).

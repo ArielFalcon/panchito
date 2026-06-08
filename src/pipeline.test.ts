@@ -4,7 +4,9 @@ import { runPipeline, PipelineDeps, GenerateInput } from "./pipeline";
 import { ReviewResult } from "./integrations/opencode-client";
 import { CoveredLines } from "./qa/change-coverage";
 import { AppConfig } from "./orchestrator/config-loader";
-import { AgentResult, QaRunResult, RunMode } from "./types";
+import { AgentResult, QaRunResult, RunMode, RunOutcome } from "./types";
+import type { OracleInput, ValueOracleResult } from "./qa/learning/oracle-types";
+import type { RetrievalResult } from "./qa/learning/retrieval";
 
 // A unified diff with one file and 4 added lines (1-4), so parseDiffHunks yields changed lines.
 const DIFF_4 = ["diff --git a/src/x.ts b/src/x.ts", "+++ b/src/x.ts", "@@ -0,0 +1,4 @@", "+a", "+b", "+c", "+d"].join("\n");
@@ -35,7 +37,9 @@ interface Harness extends PipelineDeps {
   published: boolean;
   genMode?: RunMode;
   genGuidance?: string;
-  genInputs: GenerateInput[]; // every generate() call's input, to inspect reinjected corrections
+  genInputs: GenerateInput[];
+  savedOutcomes: RunOutcome[];
+  oracleCalls: OracleInput[];
 }
 
 function deps(
@@ -54,7 +58,9 @@ function deps(
   } = {},
 ): Harness {
   const issues: string[] = [];
-  const h = { issues, published: false, genInputs: [] } as unknown as Harness;
+  const savedOutcomes: RunOutcome[] = [];
+  const oracleCalls: OracleInput[] = [];
+  const h = { issues, published: false, genInputs: [], savedOutcomes, oracleCalls } as unknown as Harness;
   const healthSeq = Array.isArray(opts.healthy) ? [...opts.healthy] : null;
   const agentSeq = opts.agents ? [...opts.agents] : null;
   const reviewSeq = opts.review ? [...opts.review] : null;
@@ -135,6 +141,13 @@ function deps(
     openIssue: async (_repo: string, title: string) => {
       issues.push(title);
       return { url: "https://github.com/org/demo/issues/1" };
+    },
+    saveOutcome: async (outcome: RunOutcome) => {
+      savedOutcomes.push(outcome);
+    },
+    runOracle: async (input: OracleInput) => {
+      oracleCalls.push(input);
+      return { valueScore: 0.85, mutantCount: 100, killedCount: 85, details: "85/100 mutants killed (85.0%)" };
     },
   });
   return h;
@@ -654,4 +667,247 @@ test("context mode (shadow): builds map but does not publish or open Issues", as
   // Shadow mode: no publish, no issue.
   assert.equal(d.published, false);
   assert.equal(d.issues.length, 0);
+});
+
+test("learning layer: saveOutcome is called on green runs with the labeled outcome", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { diff: DIFF_4, coverage: [cov([1, 2, 3, 4])], message: "feat: add x" });
+  await runPipeline(app, "abc1234def", d, "manual", { mode: "diff", runId: "test-run-1" });
+
+  assert.equal(d.savedOutcomes.length, 1, "saveOutcome should be called once");
+  const o = d.savedOutcomes[0]!;
+  assert.equal(o.runId, "test-run-1");
+  assert.equal(o.app, "demo");
+  assert.equal(o.sha, "abc1234def");
+  assert.equal(o.mode, "diff");
+  assert.equal(o.verdict, "pass");
+  assert.equal(o.errorClass, null); // green with coverage → no error
+  assert.equal(o.gateSignals.static, true);
+  assert.ok(o.at);
+});
+
+test("learning layer: saveOutcome is called on failed runs with E-EXEC-FAIL", async () => {
+  const calls: string[] = [];
+  const failed = { sha: "s", verdict: "fail" as const, passed: false, cases: [{ name: "t", status: "fail" as const }], logs: "" };
+  const d = deps(failed, calls);
+  await runPipeline(app, "fail0001", d, "manual", { mode: "diff", runId: "run-fail-1" });
+
+  assert.equal(d.savedOutcomes.length, 1);
+  const o = d.savedOutcomes[0]!;
+  assert.equal(o.verdict, "fail");
+  assert.equal(o.errorClass, "E-EXEC-FAIL");
+});
+
+test("learning layer: saveOutcome is called on invalid runs with E-STATIC", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, {
+    validation: { ok: false, errors: ["lint failed"], infra: false },
+  });
+  await runPipeline(app, "inv00001", d, "manual", { mode: "diff", runId: "run-inv-1" });
+
+  const o = d.savedOutcomes[0]!;
+  assert.equal(o.verdict, "invalid");
+  assert.equal(o.errorClass, "E-STATIC");
+});
+
+test("learning layer: saveOutcome captures reviewer corrections", async () => {
+  const calls: string[] = [];
+  const review = { approved: false, corrections: ["test clicks without asserting anything — false positive"], parsed: true as const };
+  const d = deps(passing(), calls, { message: "feat: new form", review: [review] });
+  await runPipeline(app, "rev0001", d, "manual", { mode: "diff", runId: "run-rev-1" });
+
+  assert.ok(d.savedOutcomes.length >= 1);
+  const o = d.savedOutcomes[0]!;
+  assert.deepEqual(o.gateSignals.reviewerCorrections, review.corrections);
+});
+
+test("learning layer: saveOutcome tracks retries", async () => {
+  const calls: string[] = [];
+  const reviewSeq = [
+    { approved: false, corrections: ["fragile selector"], parsed: true as const },
+    { approved: true, corrections: [], parsed: true as const },
+  ];
+  const agents: AgentResult[] = [
+    { output: "v1", specs: ["a.spec.ts"], reviewed: true, approved: false },
+    { output: "v2", specs: ["a.spec.ts"], reviewed: true, approved: true },
+  ];
+  const d = deps(passing(), calls, { message: "feat: x", agents, review: reviewSeq, diff: DIFF_4, coverage: [cov([1, 2, 3, 4])] });
+  await runPipeline(app, "ret0001", d, "manual", { mode: "diff", runId: "run-ret-1" });
+
+  const o = d.savedOutcomes[0]!;
+  assert.equal(o.gateSignals.retries, 1);
+});
+
+test("learning layer: saveOutcome failure is non-blocking (outcome still returned)", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { diff: DIFF_4, coverage: [cov([1, 2, 3, 4])], message: "feat: x" });
+  let saveCalled = false;
+  d.saveOutcome = async () => {
+    saveCalled = true;
+    throw new Error("DB down");
+  };
+  await runPipeline(app, "flk0001", d, "manual", { mode: "diff", runId: "run-flk-1" });
+
+  assert.ok(saveCalled, "saveOutcome was invoked");
+  assert.equal(d.savedOutcomes.length, 0, "but persistence failed, nothing was saved");
+});
+
+test("learning layer: skipped runs are NOT persisted", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { message: "docs: update readme", diff: "diff --git a/readme.md b/readme.md\n+++ b/readme.md\n@@ -1 +1,2 @@\n+text" });
+  await runPipeline(app, "skip0001", d, "manual", { mode: "diff" });
+
+  assert.equal(d.savedOutcomes.length, 0, "skipped runs produce no outcomes");
+});
+
+test("learning layer: infra-error → E-INFRA", async () => {
+  const calls: string[] = [];
+  const infra = { sha: "s", verdict: "infra-error" as const, passed: false, cases: [], logs: "DEV down" };
+  const d = deps(infra, calls);
+  await runPipeline(app, "infra001", d, "manual", { mode: "diff", runId: "run-infra-1" });
+
+  const o = d.savedOutcomes[0]!;
+  assert.equal(o.verdict, "infra-error");
+  assert.equal(o.errorClass, "E-INFRA");
+});
+
+test("oracle: runOracle is called for code mode green runs", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls);
+  const codeApp = { ...app, dev: undefined as unknown as AppConfig["dev"] };
+  await runPipeline(codeApp, "code001", d, "manual", { target: "code", mode: "diff", runId: "run-orc-1" });
+
+  assert.equal(d.oracleCalls.length, 1, "oracle should be called once");
+  assert.equal(d.oracleCalls[0]!.target, "code");
+
+  const o = d.savedOutcomes[0]!;
+  assert.equal(o.gateSignals.valueScore, 0.85);
+});
+
+test("oracle: runOracle is NOT called for e2e mode", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { diff: DIFF_4, coverage: [cov([1, 2, 3, 4])], message: "feat: x" });
+  await runPipeline(app, "e2e0001", d, "manual", { mode: "diff", runId: "run-orc-2" });
+
+  assert.equal(d.oracleCalls.length, 0, "oracle should NOT be called for e2e");
+});
+
+test("oracle: runOracle is NOT called for failing runs", async () => {
+  const calls: string[] = [];
+  const failed = { sha: "s", verdict: "fail" as const, passed: false, cases: [{ name: "t", status: "fail" as const }], logs: "" };
+  const d = deps(failed, calls);
+  const codeApp = { ...app, dev: undefined as unknown as AppConfig["dev"] };
+  await runPipeline(codeApp, "fail001", d, "manual", { target: "code", mode: "diff", runId: "run-orc-3" });
+
+  assert.equal(d.oracleCalls.length, 0, "oracle should NOT be called on failures");
+});
+
+test("oracle: runOracle failure is non-blocking", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls);
+  d.runOracle = async () => { throw new Error("Stryker timeout"); };
+  const codeApp = { ...app, dev: undefined as unknown as AppConfig["dev"] };
+  await runPipeline(codeApp, "orcFail", d, "manual", { target: "code", mode: "diff", runId: "run-orc-4" });
+
+  const o = d.savedOutcomes[0]!;
+  assert.equal(o.gateSignals.valueScore, null, "valueScore remains null when oracle fails");
+  assert.equal(o.verdict, "pass", "oracle failure does not change verdict");
+});
+
+test("oracle: valueScore=null when oracle returns null", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls);
+  d.runOracle = async () => ({ valueScore: null, mutantCount: 0, killedCount: 0, details: "not available" });
+  const codeApp = { ...app, dev: undefined as unknown as AppConfig["dev"] };
+  await runPipeline(codeApp, "null001", d, "manual", { target: "code", mode: "diff", runId: "run-orc-5" });
+
+  const o = d.savedOutcomes[0]!;
+  assert.equal(o.gateSignals.valueScore, null);
+});
+
+test("learning layer: retrieveRules is called before generation in diff mode", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { diff: DIFF_4, coverage: [cov([1, 2, 3, 4])], message: "feat: add x" });
+  let retrieveCalled = false;
+  d.retrieveRules = () => {
+    retrieveCalled = true;
+    return { rules: [], promptSection: "" };
+  };
+  await runPipeline(app, "ret0001", d, "manual", { mode: "diff", runId: "run-lrn-1" });
+  assert.ok(retrieveCalled, "retrieveRules should be called");
+});
+
+test("learning layer: learned rules are injected into generation input", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { diff: DIFF_4, coverage: [cov([1, 2, 3, 4])], message: "feat: add x" });
+  d.retrieveRules = () => ({
+    rules: [{ id: "rule-1", trigger: "test", action: "assert", errorClass: "E-STATIC" as const, confidence: "low" as const, usageCount: 0, successRate: null, lastVerified: null, source: "run-1", status: "candidate" as const, at: "" }],
+    promptSection: "## Learned rules\n- Do X when Y",
+  });
+  await runPipeline(app, "ret0001", d, "manual", { mode: "diff", runId: "run-lrn-2" });
+
+  const genInput = d.genInputs[0];
+  assert.ok(genInput, "generate should be called");
+  assert.ok(genInput.learnedRules, "learnedRules should be set");
+  assert.match(genInput.learnedRules!, /Learned rules/);
+});
+
+test("learning layer: reflectAndDistill is NOT called on green passes", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { diff: DIFF_4, coverage: [cov([1, 2, 3, 4])], message: "feat: add x" });
+  let reflectCalled = false;
+  d.reflectAndDistill = async () => { reflectCalled = true; return null; };
+  await runPipeline(app, "pass001", d, "manual", { mode: "diff", runId: "run-ref-1" });
+  assert.equal(reflectCalled, false, "reflectAndDistill should NOT be called on green passes");
+});
+
+test("learning layer: reflectAndDistill IS called on failing runs with errorClass", async () => {
+  const calls: string[] = [];
+  const failed = { sha: "s", verdict: "fail" as const, passed: false, cases: [{ name: "t", status: "fail" as const }], logs: "error" };
+  const d = deps(failed, calls);
+  let reflectInput: { app: string; runId: string; outcome: RunOutcome } | null = null;
+  d.reflectAndDistill = async (input: { app: string; runId: string; outcome: RunOutcome }) => {
+    reflectInput = input;
+    return null;
+  };
+  await runPipeline(app, "refFail", d, "manual", { mode: "diff", runId: "run-ref-2" });
+
+  assert.ok(reflectInput, "reflectAndDistill should be called on failures");
+  const ri = reflectInput as { app: string; runId: string; outcome: RunOutcome };
+  assert.equal(ri.app, "demo");
+  assert.equal(ri.runId, "run-ref-2");
+  assert.equal(ri.outcome.verdict, "fail");
+  assert.equal(ri.outcome.errorClass, "E-EXEC-FAIL");
+});
+
+test("learning layer: reflectAndDistill failure is non-blocking", async () => {
+  const calls: string[] = [];
+  const failed = { sha: "s", verdict: "fail" as const, passed: false, cases: [{ name: "t", status: "fail" as const }], logs: "error" };
+  const d = deps(failed, calls);
+  d.reflectAndDistill = async () => { throw new Error("LLM timeout"); };
+  await runPipeline(app, "refCrash", d, "manual", { mode: "diff", runId: "run-ref-3" });
+
+  assert.equal(d.savedOutcomes[0]!.verdict, "fail", "run should still be recorded as fail despite reflector crash");
+});
+
+test("learning layer: reflectAndDistill skipped when errorClass is E-INFRA", async () => {
+  const calls: string[] = [];
+  const infra = { sha: "s", verdict: "infra-error" as const, passed: false, cases: [], logs: "DEV down" };
+  const d = deps(infra, calls);
+  let reflectCalled = false;
+  d.reflectAndDistill = async () => { reflectCalled = true; return null; };
+  await runPipeline(app, "refInfra", d, "manual", { mode: "diff", runId: "run-ref-4" });
+
+  assert.equal(reflectCalled, false, "E-INFRA should not trigger reflection");
+});
+
+test("learning layer: reflectAndDistill skipped when errorClass is E-FLAKY", async () => {
+  const calls: string[] = [];
+  const flaky = { sha: "s", verdict: "flaky" as const, passed: false, cases: [{ name: "t", status: "flaky" as const }], logs: "unstable" };
+  const d = deps(flaky, calls);
+  let reflectCalled = false;
+  d.reflectAndDistill = async () => { reflectCalled = true; return null; };
+  await runPipeline(app, "refFlaky", d, "manual", { mode: "diff", runId: "run-ref-5" });
+
+  assert.equal(reflectCalled, false, "E-FLAKY should not trigger reflection");
 });

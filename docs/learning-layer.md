@@ -28,11 +28,13 @@ De ahí la regla de secuencia, ya **decidida**:
 
 | Decisión | Elección | Implicancia |
 |---|---|---|
-| Backend del Learning Ledger (etapa [4]) | **Graphiti** (grafo temporal) | Sidecar con graph DB (Neo4j/FalkorDB), accedido por el agente vía MCP y escrito por el orquestador. engram pasa a memoria episódica cruda o se retira. |
+| Backend del Learning Ledger (etapa [4]) | **SQLite + modelo temporal** | Extiende la tabla `learning_rules` que ya existe con las semánticas de gobierno (success_rate estadístico, promoción/histéresis, supersede reversible vía `valid_until`+linaje). Cero infra nueva. |
+| Graphiti | **Diferido** | El hueco real era el *gobierno* (barato en SQLite), no el *motor*. Graphiti completo (servicio Python + graph DB) sólo si el grafo de reglas crece hasta justificar traversal/extracción. |
+| Oráculo de valor `e2e` | **Fault-injection de respuestas (nivel 1)** | Re-correr la suite verde corrompiendo las respuestas de red con Playwright `route()`, contra el DEV único. Agnóstico, sin redeploy, per-run. Nivel 2 (mutar el bundle de cliente) condicional. Redeploy-benchmark sólo como add-on opcional para apps con preview gratis. |
+| Oráculo de valor `code` | **Mutation real (Stryker), scopeada al diff** | Tiene la fuente y corre la suite del repo; sin problema de deploy. |
 | Secuencia de construcción | **Oráculo primero** (Fase 0+1 antes del Ledger) | Hacer el aprendizaje medible antes de construir la memoria. |
 | Robustez de producción | **Fail-open, aditiva, off-path** | La capa de learning nunca bloquea ni gatea; el pipeline pasa su suite con la capa entera stubbeada. |
 | Bloqueo por valor | **`valueScore` sólo en modo `signal`** | El oráculo de valor registra y enseña, pero NUNCA bloquea el publish; sólo los gates deterministas bloquean. |
-| Alcance de Graphiti | **Stack completo (no SQLite-first)** | Se asume el costo de infra (servicio Python + graph DB) por el gobierno temporal y el retrieval híbrido nativos. |
 
 ---
 
@@ -64,14 +66,14 @@ La capa de learning sólo se justifica si **no puede empeorar producción**. Por
 se diseña como un superset estricto que **degrada al sistema actual ante cualquier
 fallo**:
 
-- **Aditiva:** el único toque en el camino crítico (T1) es el *retrieval* — una
-  lectura que inyecta reglas o no. Sin reglas (o con Graphiti caído), el agente se
-  comporta exactamente como hoy.
+- **Aditiva:** el único toque en el camino crítico (tiempo T1) es el *retrieval* —
+  una lectura que inyecta reglas o no. Sin reglas (o con el Ledger inaccesible), el
+  agente se comporta exactamente como hoy.
 - **Off-path:** Labeler, Reflector, Distiller, atribución y benchmark corren en
   T2/T3/T4, **fuera del camino determinista**. Ninguno bloquea un run.
-- **Fail-open:** cualquier error de la capa (Graphiti no responde, OpenEvals falla,
-  el Reflector no parsea) se loguea y se sigue — nunca tumba el pipeline. Mismo
-  principio que el reviewer hoy.
+- **Fail-open:** cualquier error de la capa (el Ledger no responde, el oráculo
+  falla, el Reflector no parsea) se loguea y se sigue — nunca tumba el pipeline.
+  Mismo principio que el reviewer hoy.
 - **Nunca bloquea por señal blanda ni por valor:** sólo los gates deterministas ya
   entendidos (B/C/D en `enforce`) pueden bloquear el publish. El `valueScore`
   (mutation/benchmark) se queda en modo **`signal`**: registra y enseña, jamás
@@ -103,7 +105,7 @@ interface RunOutcome {
   gateSignals: {                             // la verdad objetiva del run
     static: boolean;                         // Filter B (validate.ts)
     coverageRatio: number | null;            // Filter D (change-coverage.ts) — ya existe
-    valueScore: number | null;               // Fase 1: mutation score / benchmark-replay (el oráculo)
+    valueScore: number | null;               // Fase 1: mutation (code) / fault-injection de respuestas (e2e)
     reviewerCorrections: string[];           // del qa-reviewer (HOY se descarta)
     flaky: boolean; retries: number;
   };
@@ -155,13 +157,13 @@ Para el lazo de auto-mantenimiento (path B) la taxonomía ya existe:
    │                                          │                                              │  │
    │                          ┌───────────────┼───────────────┐                             │  │
    │                          ▼               ▼               ▼                             │  │
-   │              [5] EVAL HARNESS      [3] DISTILLER     [4] LEARNING LEDGER                │  │
-   │              ├ OpenEvals (TS)      (Gen-Agents       = Graphiti (grafo temporal)        │  │
-   │              ├ MUTATION / replay    reflection-tree,  · confidence GANADA de outcomes   │  │
-   │              └ BENCHMARK congelado   disparado por     · invalidación temporal (anti    │  │
-   │                     │ scorecard      umbral)           ─poisoning) con linaje           │◄─┘
-   │                     ▼                     │            · retrieval híbrido (sem+BM25+    │
-   │              [meta] DSPy ◄── trainset ────┘              traversal) ──────────────────► │──► (al agente)
+   │              [5] EVAL HARNESS       [3] DISTILLER     [4] LEARNING LEDGER (SQLite)       │  │
+   │              ├ mutation (code)      (Gen-Agents       · confidence estadística          │  │
+   │              ├ fault-inject (e2e)    reflection-tree,   (no overwrite)                  │  │
+   │              └ scorecard            disparado por     · invalidación temporal           │  │
+   │                     │ versionado    umbral)            (valid_until + linaje)           │◄─┘
+   │                     ▼                     │           · retrieval por successRate ──────►│──► (al agente)
+   │              [meta] DSPy ◄── trainset ────┘             (Graphiti = futuro si escala)    │
    │              (Fase 3, offline)   = RunOutcomes del benchmark                            │
    └─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -199,25 +201,27 @@ No corre por cron fijo: se **dispara por umbral de importancia acumulada**
 reglas existentes → **upsert, no append**. Una regla nace
 `confidence=low, status=candidate, source=runId`.
 
-### [4] Learning Ledger — **Graphiti** (grafo temporal)
-El sistema de récord. Graphiti resuelve nativamente el gobierno que de otro modo
-habría que construir a mano:
+### [4] Learning Ledger — **SQLite + modelo temporal** (`learning_rules`)
+El sistema de récord. Vive en la misma SQLite que `history.ts` (cero infra nueva).
+El hueco real nunca fue el *motor* sino el *gobierno*; estas semánticas se modelan
+con un par de columnas y funciones puras unit-testeables:
 
-- **Anti memory-poisoning (#7):** cuando una regla nueva contradice una vieja,
-  Graphiti **invalida la vieja con una ventana de validez temporal** en vez de
-  borrarla — preserva linaje, no recomputa el grafo entero.
-- **Políticas, no recuerdos (#1):** reglas como entidades/aristas (trigger→action),
-  no transcripciones.
-- **Retrieval jerárquico (#8):** búsqueda híbrida (semántica + BM25 + traversal)
-  con reranking por distancia de grafo, gratis.
+- **Anti memory-poisoning (#7):** una regla nueva que contradice a una vieja **no la
+  sobrescribe** — marca la vieja `superseded` con `valid_until` y preserva linaje
+  (`supersedes`). Una regla degradada por un fluke se puede resucitar.
+- **Confianza GANADA, no auto-asignada:** `successRate` es un **estadístico corrido**
+  (Welford/Beta con conteo), **nunca un overwrite** por evento único. Promoción
+  `candidate→active` tras K éxitos; degradación tras K fallos (histéresis asimétrica).
+- **Políticas, no recuerdos (#1):** reglas como filas `{ trigger, action, errorClass,
+  confidence, usageCount, successRate, lastVerified, source, status, valid_until }`.
 
-Cada regla lleva: `{ trigger, action, errorClass, confidence, usageCount,
-successRate, lastVerified, source, status }`. **La confianza la escribe el
-orquestador** (ver [5]), nunca el agente.
+**La confianza la escribe el orquestador** (ver [5]), nunca el agente. **El retrieval
+sólo sirve `status=active` y rankea por `successRate`** (no por `usageCount`).
 
-Integración: Graphiti corre como **sidecar** (Python + graph DB), expuesto al
-agente como **MCP server** (retrieval) y al orquestador vía HTTP (escritura de
-outcomes). engram queda relegado a memoria episódica cruda o se retira.
+> **Graphiti = futuro condicional.** Si el grafo de reglas crece hasta que el
+> traversal regla↔regla o la extracción por LLM se ganen su costo, se migra a
+> Graphiti (servicio Python + graph DB, vía MCP) conservando el mismo modelo
+> temporal. Hoy no se justifica. engram queda relegado a episódico crudo o se retira.
 
 ### [5] Evaluation Harness — el oráculo de verdad
 Lo que convierte "acumular" en "aprender". Tres piezas:
@@ -230,18 +234,32 @@ Lo que convierte "acumular" en "aprender". Tres piezas:
 
 2. **El oráculo de valor (depende del target):**
    - **`code`**: **mutation testing** directo (Stryker para JS/TS, mutmut/cosmic-ray
-     para Python, PIT para Java…): mutar la fuente, correr la suite del repo, el
-     test **debe** ponerse rojo. `valueScore` = % de mutantes atrapados.
-   - **`e2e`**: mutation testing es difícil (la app está *desplegada*, no se
-     construye acá). El "mutante" es un **commit con regresión real conocida**: el
-     benchmark congelado es un set de pares `(sha_bueno, sha_malo)`; la métrica =
-     ¿la suite generada para `sha_bueno` se pone roja contra el deploy de
-     `sha_malo`? Es la versión operativa de "100 bugs históricos".
+     para Python, PIT para Java…), **scopeado al diff** (mutar sólo los archivos/líneas
+     cambiados, no todo el repo): mutar la fuente, correr la suite del repo, el test
+     **debe** ponerse rojo. `valueScore` = % de mutantes atrapados.
+   - **`e2e`**: **NO se redespliega** una segunda versión (inviable en productos con
+     microservicios). En su lugar, **fault-injection contra el DEV único**: se re-corre
+     la suite verde interceptando las respuestas de red con Playwright (`route()`) y
+     corrompiéndolas (flip valores, null campos, 200→500, truncar arrays). Si el test
+     **sigue verde** → oráculo débil (`E-VALUE-SURVIVED`). Corrupción genérica y ciega
+     → **agnóstica al stack**, per-run, sin infra. `valueScore` = % de corrupciones
+     detectadas (etiquetado **"response-oracle catch-rate"**, no "valor total").
 
-3. **Benchmark congelado** — replay de N commits pinneados → **scorecard
-   versionado** (mutation-catch-rate, FP-rate, flaky-rate, coverage). Es lo que
-   demuestra `v1→62%`, `v2→68%`… y lo que hace falsable el miedo a "acumular sin
-   aportar".
+   > **Alcance del oráculo `e2e` (honesto).** El nivel 1 (respuestas) atrapa la
+   > naivety **más común** (el test que confía en la respuesta) pero **no** los bugs de
+   > lógica de cliente (KDBush) ni los flujos sin red. Esa clase queda en señal blanda
+   > (reviewer + heurísticas) y, sobre todo, la cubre **otro eje**: el currículo de
+   > escenarios. El **nivel 2** (mutar el bundle de cliente vía interceptación —
+   > buildear sólo el front, sin redeploy) se suma **sólo si** los misses reales
+   > muestran que la clase cliente-computado es un punto ciego recurrente. El
+   > redeploy-benchmark de pares `(sha_bueno, sha_malo)` queda como **add-on opcional**
+   > para apps que ya generan preview-deploy por commit gratis — nunca un requisito.
+
+3. **Scorecard versionado** — el `valueScore` agregado por target → un **scorecard**
+   tagueado con el hash de (prompts + ruleset activo). Es lo que demuestra `v1→62%`,
+   `v2→68%`… y hace falsable el miedo a "acumular sin aportar". Dos ejes **separados**:
+   **fuerza de oráculo** (mutation/fault-injection) y **cobertura de escenarios**
+   (currículo) — no dejar que un eje se disfrace del total.
 
 4. **Atribución de outcomes** — cuando una regla aparece en `rulesRetrieved`, el
    `valueScore` del run escribe en su `successRate`. Las reglas que correlacionan
@@ -293,8 +311,8 @@ sistema tiene exactamente tres, y las reglas del Ledger empujan a usarlas:
 
 1. **El contrato OpenAPI** (ya se lee) — afirmar que la respuesta cumple
    forma/constraints, no sólo que hubo 200.
-2. **Un mutante/regresión** que define "incorrecto" por contraejemplo (mutation en
-   `code`, par `(sha_bueno, sha_malo)` en `e2e`).
+2. **Un mutante** que define "incorrecto" por contraejemplo (mutation de la fuente en
+   `code`; fault-injection de respuestas contra el DEV único en `e2e`).
 3. **Relaciones metamórficas agnósticas** — "el valor que envié debe aparecer
    transformado en la respuesta/UI".
 
@@ -307,10 +325,10 @@ enviado, no sólo el 200"* es **buena si y sólo si** los runs que la usaron
 atraparon más mutantes que los que no — medible en el benchmark. Ahí se promueve;
 si no aporta, decae.
 
-> **Límite honesto:** para un commit `e2e` nuevo no hay mutante en el momento → no
-> hay oráculo duro per-run; se depende del reviewer + heurísticas de
-> fuerza-de-oráculo + reglas ya aprendidas, y la verdad dura llega *después* en el
-> benchmark. El sistema **no es zero-shot**; es **monótonamente mejor** en las
+> **Límite honesto:** el fault-injection da un oráculo per-run para `e2e`, pero
+> **parcial** — cubre la clase "el test confía en la respuesta", no la lógica de
+> cliente (KDBush) ni los flujos sin red, que quedan en señal blanda + currículo. El
+> sistema **no es zero-shot** sobre clases nuevas; es **monótonamente mejor** en las
 > clases donde ya se quemó.
 
 ---
@@ -385,9 +403,9 @@ Seis defensas:
    mueve una regla de alta confianza. Es el margen de tolerancia.
 4. **Histéresis asimétrica.** Promoción tras K éxitos; degradación tras K fallos,
    con K mayor para reglas viejas y confiables. Un evento nunca voltea un estado.
-5. **Nada se sobrescribe — se supersede, reversible.** El modelo temporal de
-   Graphiti marca `valid_until` y preserva linaje; una regla degradada por un fluke
-   se **resucita** con evidencia posterior.
+5. **Nada se sobrescribe — se supersede, reversible.** El modelo temporal del Ledger
+   (SQLite: `valid_until` + `supersedes`) preserva linaje; una regla degradada por un
+   fluke se **resucita** con evidencia posterior.
 6. **Humano para alto blast-radius.** Reglas que afectan muchos runs, que deprecan
    una regla de alta confianza, o cambios de prompt de DSPy → pasan por review
    (primitivas HITL ya existen en la TUI).
@@ -402,10 +420,11 @@ Seis defensas:
 
 | Herramienta | Veredicto | Etapa | Notas de integración |
 |---|---|---|---|
+| **SQLite (`learning_rules`)** | ✅ Ledger (elegido) | [4][6] | El record vive en la SQLite existente, con modelo temporal (`valid_until`+supersede) y confianza estadística. Cero infra nueva. |
 | **OpenEvals** | 🟡 Opcional | [5] | Paquete TS, standalone, vive en `src/`. **Conveniencia, no indispensable**: el reviewer ya hace LLM-judging. Adoptar sólo si ahorra trabajo real; si no, hand-roll los 3-4 evaluadores que se usen. Sólo señales soft. |
-| **Graphiti** | ✅ Adoptar (Ledger) | [4][6] | Sidecar Python + graph DB, MCP al agente, HTTP al orquestador. |
+| **Graphiti** | 🟡 Diferido | [4][6] | El hueco era el gobierno (barato en SQLite), no el motor. Migrar sólo si el grafo de reglas crece hasta justificar traversal/extracción. |
 | **DSPy** | 🟡 Fase 3 | [meta] | Offline. Requiere el benchmark primero. Emite prompts versionados. |
-| **Mem0** | ⬜ Descartada | — | Alternativa más liviana a Graphiti; no se adopta tras elegir Graphiti. |
+| **Mem0** | ⬜ Descartada | — | Alternativa a Graphiti; innecesaria con el Ledger en SQLite. |
 | **LangGraph** | ❌ Rechazar | — | Duplica el orquestador determinista; fuerza Python. |
 | **Aider** | ❌ Rechazar | — | Viola read-only + orquestador-dueño-del-git; solapa OpenCode. |
 
@@ -424,9 +443,9 @@ Seis defensas:
 
 | Fase | Qué construís | Herramientas | Estado |
 |---|---|---|---|
-| **0 — Marcador** | `RunOutcome` append-only + Labeler + taxonomía (enum). Arregla el purge-30d. | — (TS puro) | siguiente |
-| **1 — Oráculo** | Mutation testing (`code`) + benchmark-replay (`e2e`) + scorecard versionado (OpenEvals opcional). | Stryker (OpenEvals opcional) | — |
-| **2 — Lazo cerrado** | Reflexión estructurada + Learning Ledger (Graphiti) + atribución de outcomes + retrieval jerárquico. | Graphiti | — |
+| **0 — Marcador** | `RunOutcome` append-only + Labeler + taxonomía (enum). Arregla el purge-30d. | — (TS puro) | ✅ hecho (ver review) |
+| **1 — Oráculo** | Mutation (`code`, scopeada al diff) + fault-injection de respuestas (`e2e`) + scorecard versionado. | Stryker, Playwright `route()` | parcial: code sin scopear, e2e pendiente |
+| **2 — Lazo cerrado** | Reflexión + Ledger SQLite con gobierno: `successRate` estadístico, promoción/histéresis, supersede, **retrieval por `successRate` y sólo `active`**. | SQLite | pendiente (gobierno) |
 | **3 — Skills + meta** | Skill library gateado por valor + DSPy contra el benchmark + currículo automático. | DSPy | — |
 
 ---
@@ -451,7 +470,11 @@ Seis defensas:
 
 ## Próximos pasos
 
-1. **Fase 0:** diseñar el esquema `RunOutcome` + tabla append-only + Labeler, y
-   enganchar la persistencia en `runner.ts`/`pipeline.ts` sin tocar el flujo.
-2. **Fase 1:** prototipar mutation testing en una app `code` y el benchmark-replay
-   en `portfolio` (e2e), con el primer scorecard.
+1. **Devolver el gate a verde:** arreglar el hang + el test del spinner en
+   `Dashboard.test.tsx`, y `git add` de los módulos `src/qa/learning/*` (hoy untracked).
+2. **Cerrar el lazo (Fase 2 gobierno):** `successRate` estadístico (no overwrite),
+   promoción `candidate→active` con histéresis, supersede reversible, y retrieval que
+   rankee por `successRate` sirviendo sólo `active`.
+3. **Oráculo `e2e` (Fase 1):** fault-injection de respuestas vía Playwright `route()`
+   en `portfolio`, en `signal`-mode, etiquetado "response-oracle catch-rate".
+4. **Scopear mutation al diff** en `code` (mutar sólo lo cambiado, no todo el repo).

@@ -8,7 +8,7 @@ import { IncomingMessage, ServerResponse } from "node:http";
 import { RunMode, TestTarget, RunRecord } from "../types";
 import { AppConfig } from "../orchestrator/config-loader";
 import { sanitizeText } from "../orchestrator/sanitizer";
-import { buildRunContext } from "./chat";
+import { buildRunContext, buildLearningContext } from "./chat";
 import { buildHelpContext } from "./help";
 import { json, readBody } from "./helpers";
 import { getOpenSessionCount, activityRouter } from "../integrations/opencode-client";
@@ -164,6 +164,7 @@ function sanitizeRecord(record: RunRecord): RunRecord {
     note: record.note ? sanitizeText(record.note).text : record.note,
     logs: record.logs.map((l) => sanitizeText(l).text),
     cases: record.cases.map((c) => (c.detail ? { ...c, detail: sanitizeText(c.detail).text } : c)),
+    activity: record.activity?.map((a) => ({ ...a, text: sanitizeText(a.text).text })),
   };
 }
 
@@ -299,7 +300,8 @@ async function handleAsk(req: IncomingMessage, res: ServerResponse, deps: ApiDep
 
     // Context is bounded (cases + logs capped) and sanitized on ingress (secrets redacted).
     const activityCtx = activityRouter.contextForRun(record.id);
-    const runCtx = buildRunContext(record, undefined, appInfo, activityCtx || undefined);
+    const learningCtx = buildLearningContext(record.app);
+    const runCtx = buildRunContext(record, undefined, appInfo, activityCtx || undefined, learningCtx || undefined);
     const productCtx = buildHelpContext();
     const historyCtx = historyLines.length > 0 ? `\n\nRecent conversation:\n${historyLines.slice(-6).join("\n")}` : "";
     const answer = await deps.ask({ context: `${productCtx}\n\n---\n\n${runCtx}${historyCtx}`, question });

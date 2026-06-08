@@ -11,7 +11,10 @@ import Database from "better-sqlite3";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { RunRecord, RunMode, TestTarget, QaCase, RunVerdict, SpecRecord } from "../types";
+import { RunRecord, RunMode, TestTarget, QaCase, RunVerdict, SpecRecord, RunOutcome, AgentActivity } from "../types";
+import type { LearningRule, RuleUpsert, Confidence, RuleStatus } from "../qa/learning/learning-rule";
+import type { ErrorClass } from "../qa/learning/taxonomy";
+import type { Curriculum } from "../qa/learning/curriculum";
 
 const DELETE_MAX_AGE_DAYS = 30;
 
@@ -27,6 +30,16 @@ let getCasesStmt!: Database.Statement;
 let countCasesStmt!: Database.Statement;
 let getSpecsStmt!: Database.Statement;
 let appendLogStmt!: Database.Statement;
+let insertActivityStmt!: Database.Statement;
+let getActivityStmt!: Database.Statement;
+let capActivityStmt!: Database.Statement;
+let insertOutcome!: Database.Statement;
+let listOutcomesStmt!: Database.Statement;
+let upsertRuleStmt!: Database.Statement;
+let listRulesStmt!: Database.Statement;
+let incrementRuleUsageStmt!: Database.Statement;
+let loadCurriculumStmt!: Database.Statement;
+let saveCurriculumStmt!: Database.Statement;
 let initialized = false;
 
 function ensureDb(): void {
@@ -58,6 +71,7 @@ function ensureDb(): void {
       retrying INTEGER DEFAULT 0,
       parent_run_id TEXT,
       at TEXT NOT NULL,
+      step_started_at TEXT,
       logs TEXT DEFAULT ''
     );
 
@@ -77,11 +91,68 @@ function ensureDb(): void {
       flow TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS run_activity (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+      ts TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      status TEXT,
+      text TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_runs_app ON runs(app);
     CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
     CREATE INDEX IF NOT EXISTS idx_cases_run_id ON cases(run_id);
     CREATE INDEX IF NOT EXISTS idx_specs_run_id ON specs(run_id);
+    CREATE INDEX IF NOT EXISTS idx_activity_run_id ON run_activity(run_id);
+
+    CREATE TABLE IF NOT EXISTS run_outcomes (
+      id TEXT PRIMARY KEY,
+      app TEXT NOT NULL,
+      sha TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      target TEXT NOT NULL DEFAULT 'e2e',
+      verdict TEXT NOT NULL,
+      error_class TEXT,
+      gate_signals TEXT NOT NULL DEFAULT '{}',
+      rules_retrieved TEXT NOT NULL DEFAULT '[]',
+      reflection TEXT,
+      at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_outcomes_app ON run_outcomes(app);
+    CREATE INDEX IF NOT EXISTS idx_outcomes_error_class ON run_outcomes(error_class);
+
+    CREATE TABLE IF NOT EXISTS learning_rules (
+      id TEXT PRIMARY KEY,
+      app TEXT NOT NULL,
+      trigger_text TEXT NOT NULL,
+      action_text TEXT NOT NULL,
+      error_class TEXT NOT NULL,
+      confidence TEXT NOT NULL DEFAULT 'low',
+      usage_count INTEGER NOT NULL DEFAULT 0,
+      success_rate REAL,
+      last_verified TEXT,
+      source TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'candidate',
+      at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_rules_app ON learning_rules(app);
+    CREATE INDEX IF NOT EXISTS idx_rules_status ON learning_rules(status);
+
+    CREATE TABLE IF NOT EXISTS curriculum (
+      app TEXT PRIMARY KEY,
+      data TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
+
+  // Migration: add columns introduced after the initial schema to DBs that already
+  // exist on the persisted volume (CREATE TABLE IF NOT EXISTS won't add a column).
+  if (!columnExists("runs", "step_started_at")) {
+    db.exec("ALTER TABLE runs ADD COLUMN step_started_at TEXT");
+  }
 
   insertRun = db.prepare(`
     INSERT INTO runs (id, app, sha, ref, target, mode, status, step, step_detail, verdict, passed, failed, note, retrying, parent_run_id, at, logs)
@@ -97,11 +168,44 @@ function ensureDb(): void {
   countCasesStmt = db.prepare("SELECT status, COUNT(*) AS cnt FROM cases WHERE run_id = ? GROUP BY status");
   getSpecsStmt = db.prepare("SELECT * FROM specs WHERE run_id = ?");
   appendLogStmt = db.prepare("UPDATE runs SET logs = logs || @log WHERE id = @id");
+  insertActivityStmt = db.prepare("INSERT INTO run_activity (run_id, ts, kind, status, text) VALUES (@runId, @ts, @kind, @status, @text)");
+  getActivityStmt = db.prepare("SELECT kind, status, text, ts FROM run_activity WHERE run_id = ? ORDER BY id ASC");
+  capActivityStmt = db.prepare(
+    "DELETE FROM run_activity WHERE run_id = @id AND id NOT IN (SELECT id FROM run_activity WHERE run_id = @id ORDER BY id DESC LIMIT @keep)",
+  );
+
+  // run_outcomes (learning layer — append-only, never purged)
+  insertOutcome = db.prepare(`
+    INSERT INTO run_outcomes (id, app, sha, mode, target, verdict, error_class, gate_signals, rules_retrieved, reflection, at)
+    VALUES (@id, @app, @sha, @mode, @target, @verdict, @errorClass, @gateSignals, @rulesRetrieved, @reflection, @at)
+  `);
+  listOutcomesStmt = db.prepare("SELECT * FROM run_outcomes WHERE app = ? ORDER BY at DESC, rowid DESC LIMIT ?");
+
+  // learning_rules (Phase 2 — placeholder for Graphiti)
+  upsertRuleStmt = db.prepare(`
+    INSERT INTO learning_rules (id, app, trigger_text, action_text, error_class, confidence, usage_count, success_rate, last_verified, source, status, at)
+    VALUES (@id, @app, @trigger, @action, @errorClass, @confidence, @usageCount, @successRate, @lastVerified, @source, @status, @at)
+    ON CONFLICT(id) DO UPDATE SET
+      confidence = excluded.confidence,
+      usage_count = excluded.usage_count,
+      success_rate = excluded.success_rate,
+      last_verified = excluded.last_verified,
+      status = excluded.status
+  `);
+  listRulesStmt = db.prepare("SELECT * FROM learning_rules WHERE app = ? AND status IN ('active', 'candidate') ORDER BY confidence DESC, usage_count DESC LIMIT ?");
+  incrementRuleUsageStmt = db.prepare("UPDATE learning_rules SET usage_count = usage_count + 1 WHERE id = ?");
+  loadCurriculumStmt = db.prepare("SELECT data, updated_at FROM curriculum WHERE app = ?");
+  saveCurriculumStmt = db.prepare("INSERT INTO curriculum (app, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(app) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at");
 
   // Prune old runs once on first use.
   db.prepare(`DELETE FROM runs WHERE at < datetime('now', '-${DELETE_MAX_AGE_DAYS} days')`).run();
 
   initialized = true;
+}
+
+function columnExists(table: string, column: string): boolean {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return cols.some((c) => c.name === column);
 }
 
 function recalcCounts(runId: string): { passed: number; failed: number } {
@@ -120,6 +224,7 @@ function rowToRecord(row: Record<string, unknown>): RunRecord {
   const cases = getCasesStmt.all(runId) as QaCase[];
   const specRows = getSpecsStmt.all(runId) as SpecRecord[];
   const logsText = (row.logs as string) || "";
+  const activityRows = getActivityStmt.all(runId) as Array<{ kind: string; status: string | null; text: string; ts: string }>;
 
   return {
     id: runId,
@@ -140,6 +245,15 @@ function rowToRecord(row: Record<string, unknown>): RunRecord {
     cases,
     specs: specRows.length > 0 ? specRows : undefined,
     logs: logsText ? logsText.split("\n").filter(Boolean) : [],
+    activity: activityRows.length > 0
+      ? activityRows.map((a) => ({
+          kind: a.kind as AgentActivity["kind"],
+          text: a.text,
+          ...(a.status ? { status: a.status as AgentActivity["status"] } : {}),
+          ts: a.ts,
+        }))
+      : undefined,
+    stepStartedAt: (row.step_started_at as string) || undefined,
     at: row.at as string,
   };
 }
@@ -215,7 +329,13 @@ export function updateRecord(id: string, patch: Partial<RunRecord>): void {
   };
 
   if (patch.status !== undefined) add("status", patch.status);
-  if (patch.step !== undefined) add("step", patch.step);
+  if (patch.step !== undefined) {
+    add("step", patch.step);
+    // Stamp when the phase began (drives the TUI's per-phase elapsed clock), but
+    // ONLY on an actual transition — never reset it on a same-step update.
+    const cur = (db.prepare("SELECT step FROM runs WHERE id = ?").get(id) as { step?: string } | undefined)?.step;
+    if (cur !== patch.step) add("step_started_at", new Date().toISOString());
+  }
   if (patch.stepDetail !== undefined) add("step_detail", patch.stepDetail);
   if (patch.verdict !== undefined) add("verdict", patch.verdict);
   if (patch.passed !== undefined) add("passed", patch.passed);
@@ -256,6 +376,17 @@ export function appendLog(id: string, msg: string): void {
   appendLogStmt.run({ id, log: msg + "\n" });
 }
 
+const ACTIVITY_CAP = 200;
+
+// Appends one structured activity event to a run's live feed and caps the feed to
+// the last ACTIVITY_CAP rows (advisory-only; never gates a verdict). Stamps `ts`
+// here so the router stays pure/time-free and unit-testable.
+export function appendActivity(id: string, a: { kind: AgentActivity["kind"]; text: string; status?: AgentActivity["status"] }): void {
+  ensureDb();
+  insertActivityStmt.run({ runId: id, ts: new Date().toISOString(), kind: a.kind, status: a.status ?? null, text: a.text });
+  capActivityStmt.run({ id, keep: ACTIVITY_CAP });
+}
+
 export function interruptedRecords(): RunRecord[] {
   ensureDb();
   const rows = interruptedStmt.all() as Record<string, unknown>[];
@@ -277,6 +408,115 @@ export function continuationDepth(record: RunRecord): number {
     current = getRecord(current.parentRunId);
   }
   return depth;
+}
+
+export function saveRunOutcome(outcome: RunOutcome): void {
+  ensureDb();
+  insertOutcome.run({
+    id: outcome.runId,
+    app: outcome.app,
+    sha: outcome.sha,
+    mode: outcome.mode,
+    target: outcome.target,
+    verdict: outcome.verdict,
+    errorClass: outcome.errorClass ?? null,
+    gateSignals: JSON.stringify(outcome.gateSignals),
+    rulesRetrieved: JSON.stringify(outcome.rulesRetrieved),
+    reflection: outcome.reflection ? JSON.stringify(outcome.reflection) : null,
+    at: outcome.at,
+  });
+}
+
+export function listRunOutcomes(app: string, limit = 50): RunOutcome[] {
+  ensureDb();
+  const rows = listOutcomesStmt.all(app, limit) as Array<Record<string, unknown>>;
+  return rows.map((row) => ({
+    runId: row.id as string,
+    app: row.app as string,
+    sha: row.sha as string,
+    mode: row.mode as RunMode,
+    target: row.target as TestTarget,
+    verdict: row.verdict as RunVerdict,
+    errorClass: (row.error_class as RunOutcome["errorClass"]) ?? null,
+    gateSignals: safeJsonParse(row.gate_signals as string, { static: false, coverageRatio: null, valueScore: null, reviewerCorrections: [], flaky: false, retries: 0 }),
+    rulesRetrieved: safeJsonParse(row.rules_retrieved as string, []),
+    reflection: row.reflection ? safeJsonParse(row.reflection as string, undefined) : undefined,
+    at: row.at as string,
+  }));
+}
+
+function safeJsonParse<T>(raw: string, fallback: T): T {
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+export function upsertLearningRule(rule: RuleUpsert & { app: string; id: string }): void {
+  ensureDb();
+  upsertRuleStmt.run({
+    id: rule.id,
+    app: rule.app,
+    trigger: rule.trigger,
+    action: rule.action,
+    errorClass: rule.errorClass,
+    confidence: "low" as Confidence,
+    usageCount: 0,
+    successRate: null,
+    lastVerified: null,
+    source: rule.source,
+    status: "candidate" as RuleStatus,
+    at: new Date().toISOString(),
+  });
+}
+
+export function listLearningRules(app: string, limit = 20): LearningRule[] {
+  ensureDb();
+  const rows = listRulesStmt.all(app, limit) as Array<Record<string, unknown>>;
+  return rows.map((row) => ({
+    id: row.id as string,
+    trigger: row.trigger_text as string,
+    action: row.action_text as string,
+    errorClass: row.error_class as ErrorClass,
+    confidence: row.confidence as Confidence,
+    usageCount: row.usage_count as number,
+    successRate: row.success_rate as number | null,
+    lastVerified: row.last_verified as string | null,
+    source: row.source as string,
+    status: row.status as RuleStatus,
+    at: row.at as string,
+  }));
+}
+
+export function incrementRuleUsage(ruleIds: string[]): void {
+  if (ruleIds.length === 0) return;
+  ensureDb();
+  for (const id of ruleIds) {
+    incrementRuleUsageStmt.run(id);
+  }
+}
+
+export function updateRuleSuccessRate(ruleId: string, successRate: number): void {
+  ensureDb();
+  const stmt = db.prepare("UPDATE learning_rules SET success_rate = ?, last_verified = ? WHERE id = ?");
+  stmt.run(successRate, new Date().toISOString(), ruleId);
+}
+
+export function loadCurriculum(app: string): Curriculum | null {
+  ensureDb();
+  const row = loadCurriculumStmt.get(app) as { data: string; updated_at: string } | undefined;
+  if (!row) return null;
+  try {
+    return JSON.parse(row.data) as Curriculum;
+  } catch {
+    return null;
+  }
+}
+
+export function saveCurriculum(curriculum: Curriculum): void {
+  ensureDb();
+  saveCurriculumStmt.run(curriculum.app, JSON.stringify(curriculum), curriculum.updatedAt);
 }
 
 process.on("exit", () => {

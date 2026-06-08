@@ -1,313 +1,472 @@
-# OpenClaw Integration: Architecture and Product Plan
+# OpenClaw Integration — Definitive Implementation Spec
 
-**Status**: ⚠️ NOT IMPLEMENTED — future product plan only.
-**Author**: Sisyphus (AI Architect)
-**Date**: 2026-06-05
-
-> No `openclaw` service, plugins, or gateway exist in the codebase. The interactive
-> surface that **was** built is the control API (`src/server/api.ts`) + the Ink TUI
-> (`src/tui/`, launched via `bin/panchito`) + the read-only run assistant. This doc is
-> an aspirational roadmap, not a description of the current system.
-
----
-
-## 1. Vision
-
-**ai-pipeline today** is a powerful engine that runs autonomously, but it only speaks two languages: webhooks and CLI flags. A developer who wants to trigger a QA run must know the exact app name, commit SHA, and mode syntax. A team lead who wants to understand why a test failed last Tuesday must grep through GitHub Issues. A new team member who wants to onboard their repo must read YAML documentation.
-
-**ai-pipeline with OpenClaw** speaks human language. The same engine, but accessible through conversation: "check the last deploy of dashboard," "why did the checkout tests fail yesterday," "onboard the new payments service." The engine does not change. The interface does.
-
-This is not a rewrite. It is a new access layer built on the existing system, respecting every invariant established in the project's architecture.
+**Status**: Spec — ready to implement. Supersedes the 2026-06-05 proposal.
+**Scope**: Add a conversational channel (Telegram first, others free) over the
+existing control API, powered by the same OpenCode Go subscription. **No change to
+the orchestrator's run lifecycle or to the opencode agents.** The engine does not
+change; a fourth interface is added.
+**Audience**: whoever implements this. It is grounded in the code as it exists
+today (see §2), not in the older `interactive-layer.md` description.
 
 ---
 
-## 2. Current State vs. Desired State
+## 1. Goal
 
-### Today: three narrow interfaces
+`ai-pipeline` already speaks webhook, CLI, and a TUI. This adds a **chat** interface
+("clawbot") so a human can drive and interrogate the engine in natural language. The
+definition of done is the four capabilities the owner asked for:
 
-| Interface | Audience | Friction |
+1. **Talk to it over Telegram** (and other channels out-of-the-box, no bespoke code).
+2. **Act on the engine on demand** — trigger and steer runs through a typed, detailed
+   mapping of the engine's own REST API.
+3. **Run test cycles, report and analyze current *and past* executions, and answer
+   questions** scoped to a specific app and (when needed) a specific execution.
+4. **Use the same OpenCode Go subscription** that already powers the test models as
+   the chatbot's model provider.
+
+Everything else in this document exists to make those four solid, safe, and
+deterministic — the project's stated priority order (**stable > reliable >
+deterministic > features**).
+
+---
+
+## 2. Ground truth — what already exists (do NOT rebuild)
+
+This is the single most important section: most of what the original proposal wanted
+to "add" is already built. The plan reuses it.
+
+| Building block | Where | Reused for |
 |---|---|---|
-| Webhook | CI/CD post-deploy | Fully automated, no human interaction |
-| CLI (`npm run qa`) | Developers at a terminal | Requires exact syntax, SHA knowledge, mode flags |
-| TUI (`bin/qa`) | Operators in a shell | Requires memorizing subcommands, polling manually |
+| **Control API** — `POST /api/runs` (accepts `app`, `sha`\|`ref`, `mode`, `target`, `guidance`), `GET /api/runs/:id`, `GET /api/runs?app=&limit=`, `GET /api/apps`, `GET /api/apps/:name`, `GET /api/queue`, `GET /api/health`, `POST /api/runs/:id/ask`, `POST /api/runs/:id/continue`. Bearer auth (`QA_API_TOKEN`); `/api/health` is unauthenticated. | `src/server/api.ts`, wired in `src/index.ts` | The sole contract OpenClaw calls |
+| **Single funnel** — `enqueueTrackedRun(queue, {app,sha,target,mode,guidance,source,...})`; every trigger (webhook/CLI/API) goes through it; one sequential run at a time. `source: "webhook" \| "manual"`. | `src/server/runner.ts` | Chat-triggered runs are normal queued jobs |
+| **Durable run history (SQLite, `better-sqlite3`)** — `runs`/`cases`/`specs`/`run_activity` tables at `HISTORY_DB_PATH` on the `qa-data` volume; **survives restarts**; 30-day retention. `createRecord/getRecord/listRecords/currentRun/updateRecord/addCase/appendLog/appendActivity`. | `src/server/history.ts` | **This is the "durable ledger"** the chat needs for past runs. **No new store is built.** |
+| **Learning layer (persisted)** — `run_outcomes` (verdict, `errorClass`, `gateSignals`: static/coverageRatio/valueScore/reviewerCorrections/flaky/retries), `learning_rules` (trigger/action/confidence/successRate), `curriculum` (archetypes proven by real bugs). `listRunOutcomes/listLearningRules/loadCurriculum`; CLI `npm run qa -- --app X --learning`. | `src/server/history.ts`, `src/qa/learning/*` | The **fragility/value analysis** for reports — reuse, don't reinvent |
+| **Read-only run Q&A** — `askAssistant({context,question})` opens a bounded, tool-less `qa-assistant` session; context is assembled + **sanitized on ingress** by `buildRunContext`, answer **sanitized on egress**. | `src/integrations/opencode-client.ts`, `src/server/chat.ts`, `opencode/agent/qa-assistant.md` | `qa_ask_run` reuses this; egress stays in `src/` |
+| **Ref resolution** — `resolveRef(repo, ref)` via `git ls-remote`; already used by `POST /api/runs` when `ref` is sent instead of `sha`. | `src/integrations/repo-mirror.ts` | Triggering by branch name needs no extra step |
+| **GitHub client** — `openIssue`, `createPullRequest`, `getPrStatus`, `getPullRequest`, `getRepo` (singleton `github`). | `src/integrations/github.ts` | Read-only Issue/PR context (needs a `list` helper added) |
+| **Egress sanitizer** — `sanitizeText()` redacts ~12 secret classes, private IPs, emails; `containsSecrets()` gate. | `src/orchestrator/sanitizer.ts` | All chat-bound data must pass it |
+| **Deploy topology** — two services (`orchestrator`, `opencode`) sharing `mirrors`; volumes `mirrors`/`qa-data`/`engram-data`/`serena-cache`/`opencode-data`; engram is a Go binary (`v1.16.1`) exposed as an MCP on `engram-data`; the single `OPENCODE_API_KEY` unlocks all OpenCode Go models. | `docker-compose.yml`, `Dockerfile`, `opencode/Dockerfile`, `opencode/opencode.json` | OpenClaw is a third service in the same shape |
 
-All three work. None of them invites exploration. A developer wondering "can this tool help me?" has no path to discover the answer without reading source code.
+**Implication:** the only `src/` work is a handful of small, additive, **unit-tested**
+API endpoints (§5). Everything conversational lives in the new service (§6).
 
-### Target: add a fourth interface that absorbs the other two for humans
+### 2.1 Gaps and one security finding (surfaced by the code read)
 
-| Interface | Audience | Experience |
+- **Security — chat is a new, less-trusted egress.** `GET /api/runs/:id` returns the
+  run record with **raw `logs`** (sanitization today is applied only to the `ask`
+  context and to Issue bodies). Acceptable for the localhost TUI/CLI; **not**
+  acceptable for a chat channel. The chat-facing read endpoints (§5) **must** sanitize
+  `logs`/`note`/`stepDetail` on egress.
+- **Issue/PR URL is not stored** on the run record — "link me the issue for that
+  failure" can't be answered from history yet. Persist it (§5).
+- **`TriggerSource` is `"webhook" | "manual"`** — add `"chat"` for provenance/audit.
+- **API `MODES` omits `context`** (`src/server/api.ts` lists only
+  `diff/complete/exhaustive/manual` while `RunMode`/CLI include `context`).
+- **`cancelRun` is wired in `apiDeps` but has no HTTP route** — expose one so chat can
+  abort a runaway run.
+- **`opencode-ai` is installed unpinned** in `opencode/Dockerfile`. The new service
+  must pin its gateway (and this is a good moment to pin opencode too).
+
+---
+
+## 3. Architecture decisions
+
+### D1 — OpenClaw is a third Docker service, never embedded in the orchestrator
+The orchestrator is deterministic and DI-tested; embedding an LLM agent would break
+that. A separate service that talks **only** over the REST API preserves the
+invariant boundary for free. (Unchanged from the original proposal.)
+
+### D2 — The REST API is the *sole* integration contract — including history
+OpenClaw calls HTTP endpoints and nothing else. Critically, even though the SQLite
+history file lives on a Docker volume, **OpenClaw must not read it directly** — that
+would create a second consumer coupled to the storage format and silently break "the
+API is the single contract." History and reports are reached through new read
+endpoints (§5). OpenClaw never mounts `mirrors` or `qa-data`, never runs git, never
+holds DEV credentials.
+
+### D3 — Three focused plugins, not one monolith
+`qa-pipeline-tools` (the bridge — required), `qa-guardian` (safety — recommended),
+`qa-copilot` (history/analysis/memory — advanced). Independent failure domains;
+enable what you need. (Unchanged in spirit; the per-plugin contracts in §4 are
+rewritten against the real API.)
+
+### D4 — Model provider = the existing OpenCode Go subscription *(req #4)*
+OpenCode Go is OpenAI-compatible at `https://opencode.ai/zen/go/v1`, authenticated by
+the **same `OPENCODE_API_KEY`** the test models use. OpenClaw declares it as a custom
+provider (§7). One subscription powers generation, review, the run-assistant, and now
+the chatbot — different models for different jobs, one key.
+
+### D5 — Reuse SQLite as the durable ledger; add reports, don't add storage
+The original proposal assumed run history was ephemeral and proposed a new ledger.
+The code moved on: history is already durable SQLite with a learning layer. The plan
+therefore **adds read/aggregation endpoints over the existing tables** and persists
+the Issue/PR URL — no parallel store, no event-sourcing rewrite.
+
+### D6 — Polling, not streaming
+The chat creates a run, then polls `GET /api/runs/:id` (status/step/cases/verdict).
+2-second-resolution updates are imperceptible in chat and require zero orchestrator
+change. (Unchanged.)
+
+### D7 — Approval gating for destructive operations (guardian)
+A chat channel is reachable by humans, so a policy layer is mandatory before runs hit
+the queue: identity→app authorization, confirmation for heavy modes
+(`exhaustive`/`complete`), rate limiting, and a **durable** audit trail. (§4.2.)
+
+### D8 — Copilot influences generation only through sanctioned channels
+The copilot is **read/synthesis** for the human (reports, "what did we learn about
+checkout"). Where it can usefully shape a run, it does so **only** by passing
+`guidance` to `qa_create_run` and by writing engram lessons the `qa-generator`
+already reads — **never** by reaching across the HTTP boundary into the generator's
+prompt (that would violate "agents/models live only in `opencode/`; app-specifics
+only in `config/`"). Per `CLAUDE.md`, the copilot is explicitly **not** the thing that
+breaks the circular-quality loop (change-coverage gating is); it is assistance and
+observability.
+
+### D9 — Two-key security model
+- **Model credential**: the shared `OPENCODE_API_KEY` (OpenCode Go) — req #4.
+- **Control-plane credential**: a dedicated `QA_API_TOKEN` bearer for the REST API.
+
+OpenClaw holds **only these two**. It has no `GITHUB_TOKEN`, no `WEBHOOK_SECRET`, no
+`DEV_*` credentials, no git remote. Its blast radius is "can call the QA API with the
+team's policy" — bounded by design. (This replaces the original proposal's vaguer
+"separate API key" note, which conflated the two axes.)
+
+### D10 — Shared engram, distinct namespace
+OpenClaw mounts the same `engram-data` volume and runs engram as an MCP, but writes
+its operational memories (audit, user preferences, conversation notes) under a
+distinct project/topic-key prefix, and only **reads** the per-app lessons the
+`qa-generator` writes. Two agents, one memory, no cross-contamination.
+
+---
+
+## 4. The three plugins
+
+OpenClaw native plugins are: an `openclaw.plugin.json` manifest (declares
+`id`/`name`/`contracts.tools`/`activation`/`configSchema`) plus a runtime module that
+`export default definePluginEntry({ id, name, register(api){ ... } })`. Tools are
+registered with `api.registerTool({ name, description, parameters: Type.Object({...}),
+async execute(_id, params){ return { content: [{type:"text", text}] } } })` (TypeBox
+schemas); lifecycle policy uses `api.on(...)`. Every runtime tool must also appear in
+the manifest's `contracts.tools`.
+
+> Pin `package.json` → `openclaw.compat.pluginApi` / `minGatewayVersion` to the
+> deployed gateway version (confirm with `openclaw plugins inspect`). Pinning the
+> execution path is a project invariant.
+
+### 4.1 `qa-pipeline-tools` — the bridge *(req #2, req #3-trigger)*
+
+Typed, validated tools mapping 1:1 to the **real** API. Each validates inputs, returns
+human-readable summaries (not raw JSON), and surfaces API errors verbatim (never
+swallows them — a project invariant).
+
+| Tool | Method + endpoint | Notes |
 |---|---|---|
-| Webhook | CI/CD post-deploy | Unchanged |
-| CLI (`npm run qa`) | Scripts, CI, power users | Unchanged |
-| TUI (`bin/qa`) | Shell operators | Retained as fallback |
-| **OpenClaw chat** | **Everyone else** | Natural language, guided discovery, multi-turn context |
+| `qa_list_apps` | `GET /api/apps` | name, repo, baseUrl, shadow |
+| `qa_get_app` | `GET /api/apps/:name` | config summary |
+| `qa_resolve_ref` | `POST /api/refs/resolve` *(new, §5)* | "latest SHA on main" |
+| `qa_create_run` | `POST /api/runs` | `{app, ref\|sha, mode: diff\|complete\|exhaustive\|manual\|context, target: e2e\|code, guidance?}`; tags `source:"chat"` + actor |
+| `qa_get_run` | `GET /api/runs/:id` *(sanitized, §5)* | live status/step/cases/verdict; the polling target |
+| `qa_list_runs` | `GET /api/runs?app=&limit=` | recent runs (now durable) |
+| `qa_get_queue` | `GET /api/queue` | what's running / pending |
+| `qa_continue_run` | `POST /api/runs/:id/continue` | `{cases, guidance}`; human-in-the-loop fix loop (depth-capped at 5) |
+| `qa_cancel_run` | `POST /api/runs/:id/cancel` *(new route, §5)* | abort a run |
+| `qa_ask_run` | `POST /api/runs/:id/ask` | delegates to `qa-assistant`; bounded + sanitized in `src/` |
 
-The chat layer does not replace the CLI. It complements it. The CLI remains the tool for automation; the chat becomes the tool for humans.
+**Why a product, not a wrapper:** validation with helpful errors ("`dashbord` is not a
+configured app — did you mean `dashboard`?"), `ref` defaulting (a bare "test main"
+resolves server-side), and target/mode guidance ("`exhaustive` regenerates the whole
+suite; did you mean `diff`?").
 
----
+### 4.2 `qa-guardian` — the safety net *(req #1 hardening)*
 
-## 3. Architecture Decisions
+Policy via `api.on` hooks; no new tools.
 
-### Decision 1: OpenClaw as a third service, not embedded in the orchestrator
-
-**Choice**: Add `openclaw` as a new Docker Compose service alongside `orchestrator` and `opencode`.
-
-**Rationale**: The orchestrator is deterministic by design. Every side-effecting step is dependency-injected and unit-tested with stubs. Embedding an LLM-powered agent inside it would break this property and make the orchestration logic untestable. The project's own invariant states: "Never give the agent direct write to a watched repo." A separate service that communicates only through the existing REST API preserves this boundary naturally.
-
-**What this enables**: The orchestrator does not know whether a run was triggered by a webhook, a CLI command, a TUI keystroke, or a chat message. It receives the same `{ app, sha, mode, guidance }` payload through the same queue. This is the definition of a clean abstraction.
-
-### Decision 2: Three native plugins, not a monolithic agent
-
-**Choice**: Build three focused OpenClaw plugins rather than one large agent.
-
-**Rationale**: OpenClaw's plugin architecture encourages single-responsibility extensions. Each plugin registers its own tools, hooks, and routes. This gives us:
-
-- **Independent development**: the pipeline tools plugin can ship before the security plugin is designed
-- **Independent failure domains**: a bug in the copilot plugin does not block runs from being created
-- **Composability**: teams can enable only the plugins they need. A small team might use only `qa-pipeline-tools`; an enterprise team enables all three
-
-**What this looks like**:
-
-```
-openclaw gateway
-  ├── qa-pipeline-tools   (required — the bridge to the REST API)
-  ├── qa-guardian          (recommended — security and audit)
-  └── qa-copilot           (advanced — predictive memory)
-```
-
-### Decision 3: REST API as the sole integration contract
-
-**Choice**: OpenClaw calls `GET /api/apps`, `POST /api/runs`, `GET /api/runs/:id` — and nothing else.
-
-**Rationale**: The REST API already handles validation, ref resolution, queue enqueuing, and status reporting. If OpenClaw imported the pipeline directly, it would need filesystem access to clone repos, read YAML configs, and resolve git refs — duplicating logic that already exists and is tested. The API is the published contract; every consumer (TUI, chat, future Slack bot, future IDE plugin) uses the same endpoints.
-
-**What this enables**: We can evolve the pipeline internals without touching OpenClaw. The API is the stable interface. This is the same principle that lets `bin/qa` work without knowing how `pipeline.ts` is implemented.
-
-### Decision 4: Shared engram, different namespaces
-
-**Choice**: OpenClaw and the qa-generator agent share the same engram instance but use different project namespaces for their own operational data.
-
-**Rationale**: The qa-generator writes memories about fragile flows and test patterns under `project=portfolio`. The qa-copilot plugin reads those same memories to inject context before runs. This is the virtuous cycle: the test generator learns from code, the chat layer learns from the test generator's learnings.
-
-But the chat layer also produces its own memories (user preferences, conversation context, audit logs) that the test generator should never see. These go under a separate scope or topic key prefix, preventing context pollution.
-
-**What this enables**: A developer can ask "what did we learn about the checkout flow last month?" and the chat layer retrieves memories written by both the qa-generator (test patterns) and previous chat sessions (user decisions). Two agents, one memory system, clean separation.
-
-### Decision 5: Approval gating for destructive operations
-
-**Choice**: The `qa-guardian` plugin intercepts every `qa_create_run` call and applies policy before the run reaches the queue.
-
-**Rationale**: The existing system has no approval layer because webhooks and CLI commands are assumed to come from trusted sources (CI/CD, authenticated developers). A chat interface changes this: anyone with access to the chat channel can trigger runs. Without gating, a casual "test everything" could enqueue an exhaustive run that blocks the queue for an hour.
-
-The guardian plugin enforces:
-- **Mode gating**: `exhaustive` mode requires explicit confirmation
-- **App scoping**: users can only trigger runs for apps they are authorized to access
-- **Rate limiting**: maximum N runs per app per hour
-- **Audit trail**: every run triggered through chat is logged with who, what, when, and why
-
-### Decision 6: No real-time streaming, polling with progressive detail
-
-**Choice**: The chat layer polls `GET /api/runs/:id` for status updates rather than implementing WebSocket push.
-
-**Rationale**: The orchestrator already exposes step-level progress through the run record (`status`, `step`, `stepDetail`, `cases`, `logs`). Polling every 2 seconds gives the chat layer enough resolution to report "generating tests...", "running 8 specs against DEV...", "3 passed, 1 failed" as it happens, without requiring changes to the orchestrator's HTTP server.
-
-WebSocket would be technically superior but architecturally invasive: it requires a persistent connection per run, state management on the server, and changes to the testable API surface. The cost outweighs the benefit for a chat interface where 2-second latency on status updates is imperceptible.
-
----
-
-## 4. The Three Plugins: Product Definition
-
-### Plugin 1: `qa-pipeline-tools` — The Bridge
-
-**Purpose**: Make every capability of the ai-pipeline REST API available as typed, documented tools that an LLM can reason about and invoke.
-
-**Capabilities exposed**:
-
-| Tool | Maps to | What the user says to trigger it |
+| Policy | Mechanism | Detail |
 |---|---|---|
-| `qa_create_run` | `POST /api/runs` | "test the last commit of dashboard" |
-| `qa_get_run` | `GET /api/runs/:id` | "how is that QA going?" |
-| `qa_list_runs` | `GET /api/runs?app=X` | "show me the last 5 runs of portfolio" |
-| `qa_list_apps` | `GET /api/apps` | "what apps are configured?" |
-| `qa_get_app` | `GET /api/apps/:name` | "tell me about the dashboard config" |
-| `qa_get_queue` | `GET /api/queue` | "is there anything running right now?" |
-| `qa_resolve_ref` | `POST /api/refs/resolve` | "what's the latest SHA on main?" |
+| App authorization (RBAC) | `before` tool-call hook on `qa_create_run`/`qa_continue_run`/`qa_cancel_run` | identity (e.g. Telegram numeric user id) → allowed apps, defined in **config**, never in `src/`. Deny with an explanation. |
+| Destructive-mode confirmation | same hook, when `mode ∈ {exhaustive, complete}` | requires an explicit "confirm" turn; explains cost/impact instead of just blocking |
+| Rate limiting | rolling per-identity/per-app window | prevents queue saturation from rapid commands |
+| Durable audit | `after` tool-call hook | append an immutable audit record. Write to engram (distilled) **and** a durable audit log so it survives restart — auditing only to volatile memory is not an audit trail |
+| Failure notification | run-finished check (poll result of chat-triggered runs) | push back to the originating chat on `fail`/`invalid` so the user need not poll |
 
-**What makes this a product, not a wrapper**: Each tool is more than an HTTP call. It includes parameter validation with helpful error messages ("dashboard is not a configured app. Did you mean dashboard-api or dashboard-web?"), automatic retry on transient failures, and response formatting that turns raw JSON into readable summaries. The LLM receives tools it can reason about, not raw API documentation.
+### 4.3 `qa-copilot` — history, analysis, memory *(req #3)*
 
-### Plugin 2: `qa-guardian` — The Safety Net
+Reads the durable history + learning layer + engram and **synthesizes** for the human.
+It does not dump rows; it answers "the checkout flow failed 3 of the last 8 runs;
+most common cause was selector ambiguity on the pay button (see Issue …)."
 
-**Purpose**: Ensure that adding a conversational interface does not introduce new failure modes, security gaps, or audit blind spots.
-
-**What it enforces**:
-
-| Policy | Mechanism | Why |
+| Tool | Source | Answers |
 |---|---|---|
-| Destructive mode confirmation | `before_tool_call` hook intercepts `qa_create_run` with `mode=exhaustive` | Exhaustive regenerates the entire suite. A casual "test everything" should not trigger this without confirmation |
-| App authorization | RBAC mapping: user identity to allowed apps | Different teams should not trigger runs on each other's apps |
-| Rate limiting | Rolling window counter per app per user | Prevents queue saturation from rapid-fire commands |
-| Audit logging | `after_tool_call` writes to engram with `type=audit` | Answers "who ran what and when" — critical for incident review |
-| Failure notification | `agent_end` hook pushes to Slack/Discord on `fail` or `invalid` verdicts | Closes the feedback loop without requiring the user to poll |
+| `qa_history` | `GET /api/runs?app=&limit=` | "show me the last 10 runs of dashboard" |
+| `qa_get_history_run` | `GET /api/runs/:id` *(sanitized)* | a specific past run incl. its Issue/PR link |
+| `qa_report` | `GET /api/reports?app=&window=` *(new, §5)* | pass-rate, verdict breakdown, flaky/fragility, trend — **computed deterministically in `src/`**; the LLM only narrates |
+| `qa_learning` | `GET /api/apps/:name/learning` *(new, §5)* | error-class distribution, value scores, rules, archetypes proven by real bugs |
+| `qa_lessons` | engram search (shared volume, read-only) | distilled per-app lessons (fragile flows, reliable selector patterns) |
+| `qa_github_context` | `GET /api/apps/:name/issues` *(new, §5)* | recent Issues/PRs the engine opened — proxied so OpenClaw holds no GitHub token |
 
-**What makes this a product, not a checklist**: The guardian does not just block operations. It explains why. When it denies an exhaustive run, it tells the user: "Exhaustive mode regenerates the entire test suite for dashboard. This will take approximately 45 minutes and block other QA runs. Reply 'confirm' to proceed or try `diff` mode for just the last commit." This is education, not obstruction.
-
-### Plugin 3: `qa-copilot` — The Memory
-
-**Purpose**: Transform engram from passive storage into an active assistant that helps the agent make better decisions by learning from every run.
-
-**What it does, phase by phase**:
-
-**Before a run** — context injection via `before_prompt_build` hook:
-- Retrieves the 3 most fragile flows for this app from engram
-- Retrieves selector patterns that have proven reliable for this codebase
-- Retrieves the last run result for the same or similar code paths
-- Injects this as structured context before the agent prompt
-
-**After a run** — pattern extraction:
-- Analyzes the run result against historical patterns
-- If the same test has failed 3 of the last 10 runs, flags it as a fragility hotspot
-- If a selector pattern (e.g., `getByTestId`) consistently produces stable tests while another (`getByText`) produces flakes, records this as an app-specific pattern
-- Updates the app's memory profile so the next run benefits
-
-**Cross-run correlation**:
-- When a new commit touches the same files as a commit from 2 weeks ago, retrieves the memory of that run: what was tested, what failed, what was learned
-- This is the mechanism that breaks the circular quality loop: the system learns from real outcomes, not just LLM self-review
-
-**What makes this a product, not a database query**: The copilot does not dump raw memory entries into the prompt. It synthesizes. Instead of "here are 47 engram observations about portfolio," it says: "The checkout flow has been fragile in 3 of the last 8 runs. The most common failure is a selector ambiguity on the payment button. Last fixed by commit abc123 which added `data-testid='pay-now'`. Consider verifying that selector is still present."
+**Pre-run assist (bounded):** before a run, the copilot may fold its synthesis into the
+`guidance` field of `qa_create_run` (sanctioned input), and may write a lesson to
+engram — never into the generator's prompt directly (D8).
 
 ---
 
-## 5. Integration Architecture
+## 5. Orchestrator changes (`src/`) — the only engine-side work
 
+All additive, all behind the existing DI + unit-test pattern (`ApiDeps`,
+`default*Deps`), all must keep `npm test` and `npm run typecheck` green.
+
+1. **Sanitize the chat egress.** Add a read path that returns a run record with
+   `logs`/`note`/`stepDetail`/case `detail` passed through `sanitizeText()`. Either a
+   query flag (`GET /api/runs/:id?sanitized=1`) or a header set by the OpenClaw client;
+   the chat tools (`qa_get_run`, `qa_get_history_run`) **must** use it. *(Security
+   finding §2.1.)*
+2. **Reports endpoint.** `GET /api/reports?app=&window=<e.g. 7d|30d|50runs>` → a
+   deterministic aggregate computed over `runs`/`cases`/`run_outcomes`: counts by
+   verdict, pass-rate, flaky list, top failing cases/flows, trend. New pure function in
+   `src/server/` (unit-tested over stub rows); no LLM involved.
+3. **Learning read endpoint.** `GET /api/apps/:name/learning?limit=` → wraps
+   `listRunOutcomes` + `listLearningRules` + `loadCurriculum` (read-only projection of
+   the existing learning layer).
+4. **Persist Issue/PR URL on the run.** Add `issueUrl`/`prUrl` to `RunRecord` + a
+   `runs` column (with the existing `columnExists` migration pattern); thread the URL
+   from `report()`/`publish()` in `pipeline.ts` into `updateRecord`. Returned by
+   `GET /api/runs/:id`.
+5. **Provenance.** Extend `TriggerSource` to `"webhook" | "manual" | "chat"`; thread an
+   optional actor (channel + identity) from `POST /api/runs` → `enqueueTrackedRun` →
+   record, so audit/observability show chat origin. (Keep it optional; default
+   behavior unchanged.)
+6. **Cancel route.** Expose `POST /api/runs/:id/cancel` over the already-wired
+   `cancelRun` dep.
+7. **`refs/resolve` route.** `POST /api/refs/resolve { app|repo, ref }` → `{ sha }`
+   (thin wrapper over the wired `resolveRef`). Optional but nice for Q&A.
+8. **GitHub read context.** Add `github.listIssues(repo, {state, limit})` /
+   `listPulls(...)` to the singleton + `GET /api/apps/:name/issues` (read-only). Keeps
+   the GitHub token inside the orchestrator.
+9. **API completeness.** Add `context` to the API `MODES` allowlist so chat can request
+   it (it is a maintenance/map-build mode; the guardian may gate it like the heavy
+   modes).
+
+> None of these touch the run lifecycle, the queue, the gates, or the agents. They are
+> read projections + two small write-throughs (URL persistence, provenance).
+
+---
+
+## 6. The OpenClaw service (deployment)
+
+A new top-level `openclaw/` directory mirrors `opencode/`: a `Dockerfile`, an
+`openclaw.json` (gateway config), and the three plugin packages. A new compose
+service:
+
+```yaml
+  openclaw:
+    build: ./openclaw           # pinned OpenClaw gateway (see openclaw/Dockerfile)
+    restart: always
+    dns: ["1.1.1.1", "8.8.8.8"] # same explicit resolvers as the others
+    depends_on:
+      orchestrator: { condition: service_started }
+    environment:
+      # req #4 — same subscription as the test models
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY}
+      # control-plane credential (the ONLY way it reaches the engine)
+      QA_API_URL: http://orchestrator:8080
+      QA_API_TOKEN: ${QA_API_TOKEN}
+      # channels
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      # shared memory, distinct namespace
+      ENGRAM_DATA_DIR: /data
+    volumes:
+      - ./openclaw:/root/.config/openclaw   # config + plugins
+      - engram-data:/data                   # READ shared lessons; write its own namespace
+      - openclaw-state:/root/.local/share/openclaw  # pairing/session state
+    # NO mirrors, NO qa-data, NO git, NO DEV creds. Telegram long-polls →
+    # no inbound port is exposed.
 ```
-                          ┌─────────────────────────────────┐
-  GitHub push to DEV      │         orchestrator             │
-  ──────────────────────▶ │                                 │
-                          │  POST /webhook  (unchanged)     │
-                          │  POST /api/runs (unchanged)     │
-                          │  GET  /api/runs/:id (unchanged) │
-                          │  GET  /api/queue    (unchanged) │
-                          │  GET  /api/apps     (unchanged) │
-                          └───────────┬─────────────────────┘
-                                      │
-                                      │ HTTP session
-                                      ▼
-                          ┌─────────────────────────────────┐
-                          │         opencode serve           │
-                          │  qa-generator (unchanged)       │
-                          │  qa-reviewer  (unchanged)       │
-                          │  serena MCP   (unchanged)       │
-                          │  engram MCP   (shared)          │
-                          └─────────────────────────────────┘
-                                      ▲
-                                      │ reads memories
-                                      │ written by qa-generator
-                                      │
-                          ┌───────────┴─────────────────────┐
-                          │         openclaw gateway         │
-                          │                                 │
-                          │  ┌─────────────────────────┐    │
-                          │  │ qa-pipeline-tools       │    │
-                          │  │ 7 typed tools → REST API│    │
-                          │  └─────────────────────────┘    │
-                          │  ┌─────────────────────────┐    │
-                          │  │ qa-guardian             │    │
-                          │  │ hooks → approval + audit│    │
-                          │  └─────────────────────────┘    │
-                          │  ┌─────────────────────────┐    │
-                          │  │ qa-copilot              │    │
-                          │  │ hooks → context + learn │    │
-                          │  └─────────────────────────┘    │
-                          │                                 │
-                          │  engram MCP (shared)            │
-                          └─────────────────────────────────┘
+
+Notes:
+- **No published port.** Telegram defaults to long polling, so the gateway only makes
+  outbound connections. (If you later want the browser control UI or webhook-mode
+  Telegram, expose a port and front it with auth — out of scope for v1.)
+- **`depends_on` is soft** (`service_started`): per the reliability requirement, if the
+  orchestrator is down the chat degrades gracefully ("the QA service is unavailable"),
+  it does not crash-loop.
+- **Pin the gateway** in `openclaw/Dockerfile` (and pin `opencode-ai` in
+  `opencode/Dockerfile` while here — current unpinned install is latent drift).
+- Add `openclaw-state` to the `volumes:` list; reuse `engram-data`.
+
+---
+
+## 7. Provider wiring *(req #4)* — concrete
+
+In `openclaw/openclaw.json`:
+
+```jsonc
+{
+  "models": {
+    "providers": {
+      "opencode-go": {
+        "baseUrl": "https://opencode.ai/zen/go/v1",
+        "apiKey": "${OPENCODE_API_KEY}",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "deepseek-v4-flash",
+            "name": "QA Chat",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 131072,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": { "primary": "opencode-go/deepseek-v4-flash" },
+      "models": { "opencode-go/deepseek-v4-flash": { "alias": "QA Chat" } }
+    }
+  }
+}
 ```
 
-**What changed**: One new service. Three new plugins. Zero changes to the orchestrator or opencode.
-
-**What is shared**: engram. Both the qa-generator and the chat layer read and write to the same persistent memory, with namespace isolation preventing cross-contamination.
-
-**What is separate**: Models. The qa-generator uses DeepSeek V4 Pro. The qa-reviewer uses Qwen 3.7 Max. OpenClaw uses whichever model the operator configures — ideally a fast, affordable model optimized for tool-calling rather than code generation. Different tasks, different models, no context pollution.
-
----
-
-## 6. Non-Functional Requirements
-
-### Security
-
-- The chat layer never accesses git repositories directly. All runs flow through the existing queue, where the orchestrator controls git operations.
-- The guardian plugin enforces that only authorized users can trigger runs on configured apps.
-- All chat-triggered actions are logged to engram with immutable audit records.
-- The API key for OpenClaw is separate from the OpenCode API key, limiting blast radius.
-
-### Reliability
-
-- If OpenClaw is down, webhooks and CLI continue to work. The pipeline has no dependency on the chat layer.
-- If the REST API is down, the chat layer degrades gracefully: "The QA service is currently unavailable. I will notify you when it is back."
-- All three plugins are independent. A failure in `qa-copilot` does not prevent `qa-pipeline-tools` from creating runs.
-
-### Observability
-
-- Every chat interaction that results in a pipeline run produces a run record with provenance: `triggered_by=chat`, `user=<identity>`.
-- The guardian's audit trail answers operational questions: who ran what, when, and with what parameters.
-- The copilot's memory profile for each app provides a dashboard of fragility hotspots and learned patterns.
-
-### User Experience
-
-- First interaction: "What can you do?" → agent lists configured apps and available actions
-- Discovery: "Show me the dashboard app" → agent describes config, last runs, current coverage
-- Action: "Test the last commit" → agent resolves ref, creates run, reports progress
-- Follow-up: "Why did that fail?" → agent retrieves run details and relevant memory
-- Learning: over time, the agent proactively suggests actions based on patterns
+**Hard requirement to verify before pinning:** the chosen Go model **must support
+function/tool-calling**, or the plugin tools will never be invoked. `deepseek-v4-flash`
+is the candidate (already used by `qa-assistant`); confirm tool-calling support and the
+exact id/context window against `models.dev/api.json` (`.opencode.models`) /
+`opencode models`. A wrong/unsupported id must fail loudly at boot, never silently
+degrade. The model must be both declared in `models.providers` **and** allow-listed in
+`agents.defaults.models`, or OpenClaw rejects it.
 
 ---
 
-## 7. Risks and Mitigations
+## 8. Channels *(req #1)*
+
+### Telegram (first-class)
+
+```jsonc
+{
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "botToken": "${TELEGRAM_BOT_TOKEN}",   // from @BotFather
+      "dmPolicy": "allowlist",                // pairing | allowlist | open | disabled
+      "allowFrom": ["<NUMERIC_USER_ID>"],     // numeric IDs, not @usernames
+      "groupPolicy": "allowlist",
+      "groups": { "-100xxxxxxxxxx": { "requireMention": true } }
+    }
+  }
+}
+```
+
+- Default transport is **long polling** (no inbound port; works behind NAT/Docker).
+- First DM under `pairing` emits a code approved with
+  `openclaw pairing approve telegram <CODE>`; for a known owner, `allowlist` +
+  `allowFrom` is simplest.
+- The guardian's RBAC sits **on top** of channel allowlists: the channel decides *who
+  may talk*; the guardian decides *what each identity may trigger, on which app*.
+
+### Other channels — out-of-the-box
+
+Slack, Discord, WhatsApp, WebChat, etc. are native OpenClaw channels: enabling them is
+**configuration only** (their `channels.<name>` block + the relevant token env var),
+no new plugin code. v1 ships Telegram enabled and documents the others as toggles, so
+"other modes" cost nothing.
+
+---
+
+## 9. Invariants — preserved, line by line
+
+| `CLAUDE.md` invariant | How this design honors it |
+|---|---|
+| LLM agent is **read-only on watched repos**; only the orchestrator does git writes | OpenClaw never mounts `mirrors`, has no `GITHUB_TOKEN`, no git. All writes happen inside the orchestrator, triggered by a queued job. |
+| App-specifics only in `config/`; agents/models only in their service; nothing app-specific in `src/` | RBAC/app maps live in OpenClaw config; the chatbot model lives in `openclaw/`; the `src/` additions are app-agnostic projections. |
+| **Sequential queue** — one run at a time against DEV | Chat runs are normal `enqueueTrackedRun` jobs on the same queue. |
+| **Surface integration errors loudly** | Plugin tools return API errors verbatim; a missing/incapable model fails at boot; nothing is swallowed into an empty result. |
+| **Sanitize data leaving the system** | The new chat-facing read path runs `sanitizeText()` on logs/notes; the `ask` path already sanitizes ingress+egress. Closes the raw-log gap (§2.1). |
+| **Honor the agent's no-op decision** | Untouched — verdicts are still the pipeline's; chat only reads them. |
+| Everything in English; comments describe final state | Plugin code and the new endpoints follow suit. |
+| The API is the single contract | OpenClaw reaches history/reports only via REST, never the SQLite file (D2). |
+
+---
+
+## 10. Non-functional requirements
+
+- **Reliability**: OpenClaw down ⇒ webhook/CLI/TUI unaffected. Orchestrator down ⇒ chat
+  degrades with a clear message. The three plugins are independent failure domains.
+- **Observability**: every chat-triggered run carries `source:"chat"` + actor; the
+  guardian's durable audit answers "who ran what, when, why"; reports/learning give a
+  fragility dashboard.
+- **Security**: two-key model (D9); no inbound port; sanitized egress; policy gate
+  before the queue.
+- **UX**: "what can you do?" → lists apps + actions; "test main of dashboard" →
+  resolves ref, gates policy, enqueues, polls, reports; "why did run X fail?" →
+  `qa_ask_run` / `qa_get_history_run`; "how healthy is checkout?" → `qa_report` +
+  `qa_learning` + `qa_lessons`.
+
+---
+
+## 11. Risks and mitigations
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| LLM hallucinates app names or SHAs | Medium | Low (API validates before enqueuing) | `qa_create_run` validates parameters server-side and returns clear errors |
-| Chat layer becomes a bottleneck for the queue | Low | Medium (blocks automated runs) | Rate limiting in guardian; separate queue priority for webhook vs chat triggers |
-| engram namespace collision between chat and generator | Low | Medium (context pollution) | Distinct scope/topic_key conventions; copilot reads but writes under separate prefix |
-| OpenClaw version upgrades break plugins | Medium | Low (plugins are versioned) | Pin plugin versions; integration tests that exercise each tool against the API |
-| Team over-relies on chat and stops writing CLI scripts | Low | Low (different use cases) | CLI remains documented and supported; chat is additive, not replacement |
+| Chosen Go model can't tool-call → tools never fire | Medium | High | Verify against `models.dev`/`opencode models` before pinning; fail loud at boot |
+| Raw logs leak secrets to a chat channel | Medium | High | §5.1 sanitized chat egress is a release blocker |
+| LLM hallucinates app/SHA | Medium | Low | API validates server-side; helpful errors |
+| Chat saturates the queue | Low | Medium | Guardian rate-limit + heavy-mode confirmation |
+| OpenClaw reads SQLite directly, coupling to storage | Low | Medium | D2 forbids it; history only via REST |
+| engram namespace collision | Low | Medium | Distinct project/topic-key prefix; copilot reads app lessons, writes its own |
+| Gateway/plugin version drift | Medium | Low | Pin gateway + `pluginApi`/`minGatewayVersion`; pin `opencode-ai` too |
 
 ---
 
-## 8. Rollout Plan
+## 12. Phased rollout (re-sequenced for the real codebase)
 
-### Phase 1: Foundation (week 1-2)
-- Deploy OpenClaw as a third Docker service
-- Ship `qa-pipeline-tools` plugin
-- Add missing `POST /api/refs/resolve` endpoint to the REST API
-- Internal testing: trigger runs through chat, verify against CLI results
+**Phase 0 — Orchestrator API (the only `src/` work).** Sanitized chat-read path;
+`GET /api/reports`; `GET /api/apps/:name/learning`; persist `issueUrl`/`prUrl`;
+`source:"chat"` + actor; `POST /api/runs/:id/cancel`; `POST /api/refs/resolve`;
+`GET /api/apps/:name/issues`; add `context` to `MODES`. Each unit-tested; gate green.
 
-### Phase 2: Safety (week 3)
-- Ship `qa-guardian` plugin
-- Define RBAC policies per app
-- Enable audit logging
-- Configure Slack/Discord failure notifications
+**Phase 1 — Service + bridge + Telegram (reqs #1, #2, #4).** `openclaw/` service,
+`opencode-go` provider, `qa-pipeline-tools`, Telegram channel. Done when a teammate
+triggers and tracks a run from their phone and it matches a CLI run.
 
-### Phase 3: Intelligence (week 4-5)
-- Ship `qa-copilot` plugin
-- Seed initial memory profiles from existing engram data
-- Validate that context injection improves agent decisions
-- Tune the synthesis prompts for quality over quantity
+**Phase 2 — Guardian (safety).** RBAC config, heavy-mode confirmation, rate limiting,
+durable audit, failure notifications.
 
-### Phase 4: Adoption (week 6+)
-- Expose chat interface to the development team
-- Monitor: run frequency, success rate, user satisfaction
-- Iterate on plugin behavior based on real usage patterns
-- Consider additional channels (Slack bot, IDE plugin) using the same REST API
+**Phase 3 — Copilot (req #3).** `qa_report`/`qa_learning`/`qa_history`/`qa_lessons`/
+`qa_github_context`; synthesis prompts tuned for quality over quantity; bounded
+pre-run `guidance` assist.
+
+**Phase 4 — More channels + polish.** Enable Slack/Discord/WebChat by config; iterate
+on prompts from real usage.
 
 ---
 
-## 9. Success Criteria
+## 13. Success criteria
 
-The integration is successful when:
+1. A newcomer triggers their first QA run from Telegram in <60s, no docs.
+2. Chat handles ≥90% of interactive triggers that today need `bin/qa`/`npm run qa`.
+3. No invariant is violated (queue stays sequential; orchestrator stays the sole git
+   writer; gates unchanged; no unsanitized data reaches chat).
+4. "Why did checkout fail last week?" is answerable from durable history + Issue/PR
+   links + learning layer — without opening GitHub.
+5. The audit trail answers "who triggered what, when, and why" after a restart.
 
-1. A developer who has never used ai-pipeline can trigger their first QA run within 60 seconds of opening the chat, without reading documentation.
-2. The chat layer handles 90% of interactive triggers that today require `bin/qa` or `npm run qa`.
-3. No pipeline invariant is violated: the queue remains sequential, the orchestrator remains the sole git writer, and the static and flakiness gates continue to operate unchanged.
-4. The copilot plugin demonstrates measurable improvement: tests generated with copilot context have fewer selector ambiguities and fewer reviewer rejections than tests generated without.
-5. The audit trail captures sufficient detail to answer any operational question about who triggered what run and why, without requiring access to chat logs.
+---
+
+## 14. Open questions / confirmations before/while building
+
+- **Model id + tool-calling**: confirm `opencode-go/deepseek-v4-flash` (or the chosen
+  Go model) supports function calling and its real context window (`models.dev`).
+- **OpenClaw image/version**: pick a pinned gateway version; confirm the
+  `definePluginEntry`/`api.registerTool`/`api.on` surface against that version's Plugin
+  SDK (`openclaw plugins inspect`).
+- **engram sharing mechanics**: confirm the OpenClaw gateway can run the engram MCP the
+  same way `opencode.json` does (`engram mcp --tools=agent`, `ENGRAM_DATA_DIR=/data`),
+  and settle the namespace/topic-key convention for chat-origin memories.
+- **Audit log location**: a small append-only file on a new `openclaw-state` volume vs.
+  reusing `qa-data` (kept orchestrator-owned). Default: `openclaw-state`, since the
+  audit is the chat layer's own record.
+- **Reports window semantics**: time-based (`7d`/`30d`) vs. count-based (`50runs`) — or
+  both. Default: support both, time-based primary.
