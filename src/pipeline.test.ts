@@ -167,7 +167,7 @@ test("warns loudly when coverage is UNKNOWN but the suite produced dumps (keysto
   h.hasCoverageDumps = () => true;
   await runPipeline(app, "abc1234def", h, "manual", { mode: "diff" });
   assert.ok(
-    logs.some((l) => /structural no-op|matched NONE/i.test(l)),
+    logs.some((l) => /CHANGE-COVERAGE INACTIVE|V8 script URLs/i.test(l)),
     `expected a keystone no-op warning, got:\n${logs.join("\n")}`,
   );
 });
@@ -178,7 +178,7 @@ test("does NOT warn about a keystone no-op when there are simply no dumps", asyn
   h.log = (m: string) => logs.push(m);
   h.hasCoverageDumps = () => false;
   await runPipeline(app, "abc1234def", h, "manual", { mode: "diff" });
-  assert.ok(!logs.some((l) => /structural no-op/i.test(l)));
+  assert.ok(!logs.some((l) => /CHANGE-COVERAGE INACTIVE/i.test(l)));
 });
 
 // Disk-over-LLM-word (root theme T1): the authoritative spec set is what is on disk

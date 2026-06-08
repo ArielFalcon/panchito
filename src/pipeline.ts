@@ -529,10 +529,18 @@ export async function runPipeline(
       // is silently protecting nothing. Surface it loudly instead of the benign "unknown".
       if (coverageStatus === "unknown" && !isCode && deps.hasCoverageDumps?.(e2eDir, ns)) {
         log(
-          `[qa] WARNING: change-coverage is UNKNOWN but the suite produced V8 dumps that matched ` +
-            `NONE of the ${changedFiles.length} changed file(s) — the keystone is a structural no-op ` +
-            `for this run (likely a bundled/minified deploy whose asset URLs don't map to repo source, ` +
-            `or specs not importing ./fixtures). Coverage is NOT protecting this change.`,
+          `[qa] ⚠️  CHANGE-COVERAGE INACTIVE — Playwright ran and produced coverage data, ` +
+            `but the V8 script URLs (hashed bundles like /assets/index-abc123.js) did not ` +
+            `match any of the ${changedFiles.length} changed source file(s).`,
+        );
+        log(
+          `[qa]    CAUSE: DEV is serving bundled/minified assets. The keystone cannot map ` +
+            `"bundle URL" → "repo source file", so coverage measurement is non-functional.`,
+        );
+        log(
+          `[qa]    FIX: Configure your DEV server to serve unbundled source files (e.g. ` +
+            `disable minification, use a dev server that emits original paths). This does ` +
+            `NOT block the run — tests are still generated and published.`,
         );
       }
     }
