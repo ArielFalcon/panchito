@@ -26,6 +26,7 @@ export interface RunOptions {
   fixCases?: QaCase[];
   parentRunId?: string;
   previousNamespace?: string; // cleanup: namespace from an interrupted previous run
+  runId?: string; // the tracked run id; scopes the data/coverage namespace per run
 }
 
 // Outcome of an OpenCode agent run. The agent writes the E2E tests directly into

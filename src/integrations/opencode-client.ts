@@ -277,6 +277,10 @@ export interface ReviewInput {
 export interface ReviewResult {
   approved: boolean;
   corrections: string[];
+  // false ONLY when NO verdict JSON could be parsed (a parse miss, not a real rejection).
+  // Absent/true ⇒ a genuine verdict. Lets the caller avoid burning a regeneration round on
+  // non-actionable feedback, and distinguish "reviewer is broken" from "tests rejected".
+  parsed?: boolean;
 }
 
 export async function reviewIndependently(
@@ -322,9 +326,12 @@ export async function reviewIndependently(
       return {
         approved: json.approved === true,
         corrections: Array.isArray(json.corrections) ? (json.corrections as string[]) : [],
+        parsed: true,
       };
     }
-    return { approved: false, corrections: ["the independent reviewer produced no parseable verdict"] };
+    // Fail-closed direction (no false green), but flagged as a PARSE MISS so the caller
+    // does not mistake it for an actionable rejection and burn a regeneration round.
+    return { approved: false, corrections: ["the independent reviewer produced no parseable verdict"], parsed: false };
   } finally {
     await session.dispose().catch((err) => {
       console.warn(`[qa] reviewer session dispose failed: ${err instanceof Error ? err.message : String(err)}`);

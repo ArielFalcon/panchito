@@ -22,8 +22,14 @@ export interface PublishDeps {
   git: Git;
   createPullRequest(repo: string, args: { title: string; head: string; base: string; body: string }): Promise<PullRequest>;
   enableAutoMerge(nodeId: string): Promise<void>;
+  mergePullRequest(repo: string, number: number): Promise<void>; // direct-merge fallback
   log?(msg: string): void;
 }
+
+// `merged` reports whether the tests will actually land: auto-merge enabled OR a direct
+// merge succeeded. false means the PR is open but unmerged — the "commit tests back"
+// promise is unmet for this run (surfaced loudly).
+export type PublishResult = { prUrl: string; merged: boolean };
 
 // Commit e2e/ EXCEPT the volatile change-coverage dumps (e2e/.qa/coverage/*): committing them
 // would bloat PRs and, worse, make the "did anything change?" check think every run has changes.
@@ -44,7 +50,7 @@ interface PublishShape {
 
 // Shared publish core: branch, commit the staged pathspec, push, open a PR with
 // best-effort auto-merge. Skips entirely when the relevant pathspec has no changes.
-async function publishChanges(input: PublishInput, deps: PublishDeps, shape: PublishShape): Promise<{ prUrl: string } | null> {
+async function publishChanges(input: PublishInput, deps: PublishDeps, shape: PublishShape): Promise<PublishResult | null> {
   const { mirrorDir, repo, baseBranch } = input;
 
   const status = await deps.git(["status", "--porcelain", "--", ...shape.statusPathspec], mirrorDir);
@@ -66,17 +72,29 @@ async function publishChanges(input: PublishInput, deps: PublishDeps, shape: Pub
 
   const pr = await deps.createPullRequest(repo, { title: shape.title, head: shape.branch, base: baseBranch, body: shape.body });
 
-  // Best-effort auto-merge: if the repo does not allow it, leave the PR open.
+  // Land the tests. Prefer native auto-merge; if the repo does not allow it (no branch
+  // protection / not enabled), fall back to a DIRECT merge — the harness already proved
+  // this green and the PR is test-only, so the central "commit tests back" promise must
+  // not silently fail. Only if BOTH fail do we leave the PR open, loudly.
+  let merged = false;
   try {
     await deps.enableAutoMerge(pr.nodeId);
+    merged = true;
     deps.log?.(`[qa] PR opened with auto-merge: ${pr.url}`);
   } catch (e) {
-    deps.log?.(`[qa] PR opened (auto-merge unavailable, merge it manually): ${pr.url} — ${String(e)}`);
+    deps.log?.(`[qa] auto-merge unavailable (${String(e)}); attempting a direct merge of ${pr.url}...`);
+    try {
+      await deps.mergePullRequest(repo, pr.number);
+      merged = true;
+      deps.log?.(`[qa] PR merged directly: ${pr.url}`);
+    } catch (e2) {
+      deps.log?.(`[qa] WARNING: ${pr.url} could NOT be merged (auto-merge and direct merge both failed: ${String(e2)}). The tests are NOT committed back — merge it manually.`);
+    }
   }
-  return { prUrl: pr.url };
+  return { prUrl: pr.url, merged };
 }
 
-export async function publishE2e(input: PublishInput, deps: PublishDeps): Promise<{ prUrl: string } | null> {
+export async function publishE2e(input: PublishInput, deps: PublishDeps): Promise<PublishResult | null> {
   const short = shortSha(input.sha);
   return publishChanges(input, deps, {
     statusPathspec: E2E_PATHSPEC,
@@ -91,7 +109,7 @@ export async function publishE2e(input: PublishInput, deps: PublishDeps): Promis
 
 // Code mode: publish whatever tests the agent wrote anywhere in the repo (plus the
 // e2e/.qa manifest). The whole tree minus node_modules is committed.
-export async function publishCode(input: PublishInput, deps: PublishDeps): Promise<{ prUrl: string } | null> {
+export async function publishCode(input: PublishInput, deps: PublishDeps): Promise<PublishResult | null> {
   const short = shortSha(input.sha);
   return publishChanges(input, deps, {
     statusPathspec: CODE_PATHSPEC,
@@ -108,5 +126,6 @@ export const defaultPublishDeps: PublishDeps = {
   git: realGit,
   createPullRequest: (repo, args) => github.createPullRequest(repo, args),
   enableAutoMerge: (nodeId) => github.enableAutoMerge(nodeId),
+  mergePullRequest: (repo, number) => github.mergePullRequest(repo, number),
   log: (m) => console.log(m),
 };

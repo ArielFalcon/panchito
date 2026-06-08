@@ -2,15 +2,18 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { publishE2e, publishCode, PublishDeps } from "./publish";
 
-function deps(status: string, opts: { autoMergeFails?: boolean } = {}): PublishDeps & {
+function deps(status: string, opts: { autoMergeFails?: boolean; mergeFails?: boolean } = {}): PublishDeps & {
   gitCalls: string[][];
-  pr: { created: boolean; autoMerged: boolean };
+  pr: { created: boolean; autoMerged: boolean; directMerged: boolean };
+  logs: string[];
 } {
   const gitCalls: string[][] = [];
-  const pr = { created: false, autoMerged: false };
+  const logs: string[] = [];
+  const pr = { created: false, autoMerged: false, directMerged: false };
   return {
     gitCalls,
     pr,
+    logs,
     git: async (args) => {
       gitCalls.push(args);
       if (args[0] === "status") return status;
@@ -24,7 +27,11 @@ function deps(status: string, opts: { autoMergeFails?: boolean } = {}): PublishD
       if (opts.autoMergeFails) throw new Error("auto-merge not allowed");
       pr.autoMerged = true;
     },
-    log: () => {},
+    mergePullRequest: async () => {
+      if (opts.mergeFails) throw new Error("merge blocked");
+      pr.directMerged = true;
+    },
+    log: (m) => logs.push(m),
   };
 }
 
@@ -43,6 +50,7 @@ test("with changes: branch, commit, push, PR and auto-merge", async () => {
   const d = deps(" M e2e/login.spec.ts");
   const res = await publishE2e(input, d);
   assert.equal(res?.prUrl, "https://github.com/org/app/pull/7");
+  assert.equal(res?.merged, true);
   assert.equal(d.pr.created, true);
   assert.equal(d.pr.autoMerged, true);
   // git operation sequence (the commit carries -c user.* flags up front)
@@ -53,12 +61,21 @@ test("with changes: branch, commit, push, PR and auto-merge", async () => {
   assert.ok(d.gitCalls.some((c) => c.includes("push")));
 });
 
-test("best-effort auto-merge: if it fails, the PR stays open anyway", async () => {
+test("when auto-merge is unavailable, falls back to a DIRECT merge (tests actually land)", async () => {
   const d = deps(" M e2e/x.spec.ts", { autoMergeFails: true });
   const res = await publishE2e(input, d);
   assert.equal(res?.prUrl, "https://github.com/org/app/pull/7");
-  assert.equal(d.pr.created, true);
-  assert.equal(d.pr.autoMerged, false); // does not break the run
+  assert.equal(d.pr.autoMerged, false); // auto-merge threw
+  assert.equal(d.pr.directMerged, true); // ...so we merged directly — the core "commit tests back" promise
+  assert.equal(res?.merged, true);
+});
+
+test("when BOTH auto-merge and direct merge fail: not merged, loud WARNING, run not broken", async () => {
+  const d = deps(" M e2e/x.spec.ts", { autoMergeFails: true, mergeFails: true });
+  const res = await publishE2e(input, d);
+  assert.equal(res?.prUrl, "https://github.com/org/app/pull/7"); // PR still opened
+  assert.equal(res?.merged, false); // observable: the tests did NOT land
+  assert.ok(d.logs.some((l) => /WARNING|not committed back|merge it manually/i.test(l)));
 });
 
 test("publishCode: no test changes → no PR", async () => {

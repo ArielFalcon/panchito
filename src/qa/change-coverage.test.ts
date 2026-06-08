@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   parseDiffHunks,
   computeChangeCoverage,
@@ -11,6 +14,7 @@ import {
   parseIstanbulJson,
   parseV8Coverage,
   resolveUrlToRepoFile,
+  clearBrowserCoverage,
   CoveredLines,
   DEFAULT_COVERAGE_POLICY,
 } from "./change-coverage";
@@ -20,6 +24,25 @@ function lines(m: CoveredLines): Record<string, number[]> {
   for (const [k, v] of m) o[k] = [...v].sort((a, b) => a - b);
   return o;
 }
+
+// Determinism keystone: stale V8 dumps from a prior same-SHA run (gitignored, so they
+// survive `git clean -fd`) must be removed before a new measurement — otherwise
+// collectBrowserCoverage would union them and credit coverage to tests that did not run
+// this time, flipping a genuinely-uncovered change to a false "pass".
+test("clearBrowserCoverage removes a prior run's stale dumps (idempotent)", () => {
+  const e2eDir = mkdtempSync(join(tmpdir(), "cc-clear-"));
+  const ns = "qa-bot-abc1234";
+  const dir = join(e2eDir, ".qa", "coverage", ns);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "stale-0-0.json"), "[]");
+  assert.equal(existsSync(dir), true);
+
+  clearBrowserCoverage(e2eDir, ns);
+  assert.equal(existsSync(dir), false); // stale dumps gone
+
+  assert.doesNotThrow(() => clearBrowserCoverage(e2eDir, ns)); // idempotent on an absent dir
+  rmSync(e2eDir, { recursive: true, force: true });
+});
 
 test("parseDiffHunks: added lines numbered on the new side, context advances, deletions don't", () => {
   const diff = [
@@ -145,4 +168,27 @@ test("parseV8Coverage maps covered byte ranges to source lines for matched files
     },
   ];
   assert.deepEqual(lines(parseV8Coverage(entries, ["src/a.ts"])), { "src/a.ts": [1] }); // line 3 had count 0
+});
+
+test("parseV8Coverage carves out a NESTED count==0 range (no over-reporting)", () => {
+  // 5 single-char lines. A whole-module range (count 1) with a nested count-0 hole over
+  // lines 3-4 — those lines never ran and must NOT be reported covered.
+  const source = "a\nb\nc\nd\ne\n"; // bytes: l1=[0,2) l2=[2,4) l3=[4,6) l4=[6,8) l5=[8,10)
+  const entries = [
+    {
+      url: "http://dev/src/x.ts",
+      source,
+      functions: [{ ranges: [
+        { startOffset: 0, endOffset: 10, count: 1 }, // outer: whole module executed
+        { startOffset: 4, endOffset: 8, count: 0 }, // inner hole: lines 3-4 did NOT run
+      ] }],
+    },
+  ];
+  assert.deepEqual(lines(parseV8Coverage(entries, ["src/x.ts"])), { "src/x.ts": [1, 2, 5] });
+});
+
+test("parseV8Coverage still reports every line of a fully-covered function", () => {
+  const source = "a\nb\nc\n";
+  const entries = [{ url: "http://dev/src/y.ts", source, functions: [{ ranges: [{ startOffset: 0, endOffset: 6, count: 1 }] }] }];
+  assert.deepEqual(lines(parseV8Coverage(entries, ["src/y.ts"])), { "src/y.ts": [1, 2, 3] });
 });

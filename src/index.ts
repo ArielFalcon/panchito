@@ -110,7 +110,14 @@ function enqueueApiRun(app: string, sha: string, target: string, mode: RunMode, 
     prev.verdict === "infra-error"
   );
   if (wasInterrupted) {
-    previousNamespace = testDataNamespace("qa-bot", prev.sha);
+    // Reconstruct the interrupted run's EXACT namespace from its record (same prefix,
+    // sha and runId it used) via the same function, so orphan cleanup targets the data
+    // it actually created. Uses the app's configured prefix, not a hardcoded one.
+    try {
+      previousNamespace = testDataNamespace(loadAppConfig(app).qa.testDataPrefix, prev.sha, prev.id);
+    } catch {
+      // best-effort: if the config can't be loaded, skip orphan cleanup for this run
+    }
   }
   return enqueueTrackedRun(queue, { app, sha, target: target as TestTarget, mode, guidance, shadow, source: "webhook", previousNamespace });
 }

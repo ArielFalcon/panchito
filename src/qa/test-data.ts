@@ -8,6 +8,20 @@ export function shortSha(sha: string): string {
   return sha.slice(0, 7);
 }
 
-export function testDataNamespace(prefix: string, sha: string): string {
-  return `${prefix}-${shortSha(sha)}`;
+// The run's data namespace. When a runId is given it appends a per-run token, so two
+// runs of the SAME sha (a re-trigger, a webhook redelivery) never share a namespace —
+// closing same-sha DEV-data collisions and stale coverage-dump merges. Without a runId
+// it returns the backward-compatible sha-only form. The SAME function is used by the
+// orchestrator (to create the namespace) and by the orphan-cleanup (to reconstruct a
+// prior run's namespace from its record), so they agree by construction.
+export function testDataNamespace(prefix: string, sha: string, runId?: string): string {
+  const base = `${prefix}-${shortSha(sha)}`;
+  return runId ? `${base}-${runToken(runId)}` : base;
+}
+
+// A short, entity-name-safe token unique to a run, taken from the unique tail of the
+// runId (run-<sha7>-<ts36> → <ts36>).
+function runToken(runId: string): string {
+  const tail = runId.split("-").pop() ?? runId;
+  return tail.replace(/[^a-z0-9]/gi, "").slice(0, 12) || "run";
 }
