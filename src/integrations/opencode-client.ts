@@ -206,6 +206,7 @@ export interface OpencodeRunInput {
   learnedRules?: string; // retrieval: rules from past runs injected into the agent prompt
   runId?: string; // maps the session to a RunRecord for SSE live activity
   contextMap?: ArchitectureContext; // cross-cutting: the FE↔BE map, injected by the orchestrator
+  service?: { repo: string; mirrorDir: string; openapi?: string | string[] }; // cross-repo: the triggering microservice (read-only working copy)
 }
 
 // A session opened against `opencode serve`. prompt() sends the message to the
@@ -1048,6 +1049,19 @@ function buildTask(input: OpencodeRunInput): string {
 
   // diff (default)
   const intent = input.intent;
+  const svcOpenapi = Array.isArray(input.service?.openapi) ? input.service.openapi.join(", ") : input.service?.openapi;
+  const serviceBlock = input.service
+    ? [
+        ``,
+        `## Cross-repo change (microservice)`,
+        `The commit under test belongs to the microservice ${input.service.repo}, NOT to this frontend repo.`,
+        `- The service's working copy (READ-ONLY) is at: ${input.service.mirrorDir}`,
+        ...(svcOpenapi ? [`- The service's OpenAPI contract(s): ${svcOpenapi} (paths relative to that working copy)`] : []),
+        `- Use the architecture context below (operations whose service matches this repo) plus the`,
+        `  service's code and contract to find which frontend routes and flows this change affects.`,
+        `- Exercise the backend ONLY through the frontend UI at the LIVE DEV URL — never call the service directly.`,
+      ]
+    : [];
   return [
     `Generate/update E2E tests for the flows affected by commit ${input.sha} of ${input.repo}.`,
     ``,
@@ -1063,6 +1077,7 @@ function buildTask(input: OpencodeRunInput): string {
     "```diff",
     sanitizeText(input.diff).text,
     "```",
+    ...serviceBlock,
     ``,
     `## Architecture context`,
     `If ${input.e2eRelDir}/.qa/context.json exists, READ it to understand which routes and`,

@@ -407,3 +407,33 @@ test("withTimeout rejects when the deadline elapses", async () => {
   const slow = new Promise((r) => setTimeout(() => r("late"), 50));
   await assert.rejects(() => withTimeout(slow, 5, "agent"), /timed out after 5ms/);
 });
+
+test("buildPrompt renders the cross-repo service section in diff mode", () => {
+  const text = buildPrompt({
+    repo: "org/shop-front",
+    sha: "a1b2c3d",
+    diff: "+ x",
+    mirrorDir: "/m/front",
+    e2eRelDir: "e2e",
+    namespace: "qa-1",
+    needsReview: false,
+    target: "e2e",
+    mode: "diff",
+    appName: "shop",
+    baseUrl: "https://dev.shop.io",
+    service: { repo: "org/orders-svc", mirrorDir: "/m/svc", openapi: "api/*.yaml" },
+  });
+  assert.match(text, /Cross-repo change \(microservice\)/);
+  assert.match(text, /org\/orders-svc/);
+  assert.match(text, /\/m\/svc/);
+  assert.match(text, /api\/\*\.yaml/);
+  assert.match(text, /ONLY through the frontend UI/);
+});
+
+test("buildPrompt has no cross-repo section without a service", () => {
+  const text = buildPrompt({
+    repo: "org/shop-front", sha: "a1b2c3d", diff: "+ x", mirrorDir: "/m", e2eRelDir: "e2e",
+    namespace: "qa-1", needsReview: false, target: "e2e", mode: "diff", appName: "shop",
+  });
+  assert.doesNotMatch(text, /Cross-repo change/);
+});
