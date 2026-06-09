@@ -724,6 +724,43 @@ export async function runOpencodeParallel(
 // return STRUCTURED objectives (no spec files). It must question its own list (drop naive flows,
 // keep main use cases + MVP happy paths + relevant edge cases).
 export function buildPlanPrompt(input: OpencodeRunInput): string {
+  if (input.mode === "diff") {
+    return [
+      `Plan E2E test objectives for the blast radius of commit ${input.sha} of ${input.repo}.`,
+      ``,
+      `## Phase 1 of 2 — PLANNING ONLY. Do NOT write any .spec.ts in this phase.`,
+      `1. Activate serena (activate_project). Read the commit intent and diff below; derive the`,
+      `   affected user flows (use find_referencing_symbols to widen from the changed symbols).`,
+      `2. Plan one objective per INDEPENDENT affected flow. Do NOT plan flows the commit does not`,
+      `   touch; if everything fits one flow, return a single objective.`,
+      `   Each objective is a concrete acceptance criterion in given/when/then form, with the code`,
+      `   symbols it exercises. Set "needsUi": true when the flow involves page navigation or DOM`,
+      `   interaction, and "needsUi": false for pure logic.`,
+      ``,
+      `## Change intent (Conventional Commits)`,
+      `- Type: ${input.intent?.type ?? "unknown"}${input.intent?.breaking ? " (BREAKING)" : ""}`,
+      `- Message: ${sanitizeText(input.intent?.message ?? "").text}`,
+      `- Changed files: ${input.intent?.changedFiles.join(", ") || "(unknown)"}`,
+      ``,
+      `## Commit diff`,
+      "```diff",
+      sanitizeText(input.diff).text,
+      "```",
+      ...(input.service
+        ? [
+            ``,
+            `## Cross-repo change (microservice)`,
+            `The commit belongs to the microservice ${input.service.repo} (read-only working copy at`,
+            `${input.service.mirrorDir}). Plan objectives for the FRONTEND flows that exercise the`,
+            `changed service behavior through the UI.`,
+          ]
+        : []),
+      ``,
+      `## Output — end with ONLY this JSON (no spec files):`,
+      `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","symbols":["CheckoutService.pay"],"needsUi":true}]}`,
+      `If the commit's change is not testable through a user flow, output {"objectives":[]}.`,
+    ].join("\n");
+  }
   const exhaustive = input.mode === "exhaustive";
   return [
     exhaustive

@@ -482,3 +482,26 @@ test("shouldFanOut: never for code target, re-generation passes, or context mode
   assert.equal(shouldFanOut({ target: "e2e", mode: "diff", parallelDiff: true, coverageGap: "lines 1-3" }), false);
   assert.equal(shouldFanOut({ target: "e2e", mode: "context" }), false);
 });
+
+const diffPlanInput = {
+  repo: "org/shop-front", sha: "a1b2c3d", diff: "diff --git a/cart.ts b/cart.ts\n+ bulkDiscount()",
+  mirrorDir: "/m/front", e2eRelDir: "e2e", namespace: "qa-1", needsReview: false,
+  target: "e2e" as const, mode: "diff" as const, appName: "shop",
+  intent: { type: "feat" as const, breaking: false, message: "feat: bulk discount", changedFiles: ["cart.ts"] },
+};
+
+test("buildPlanPrompt in diff mode plans ONLY the commit blast radius and includes the diff", () => {
+  const text = buildPlanPrompt(diffPlanInput);
+  assert.match(text, /blast radius of commit a1b2c3d/i);
+  assert.match(text, /bulkDiscount/);
+  assert.match(text, /feat: bulk discount/);
+  assert.doesNotMatch(text, /WHOLE repository/);
+  assert.match(text, /"objectives"/);
+});
+
+test("buildPlanPrompt complete/exhaustive variants are unchanged", () => {
+  const completeInput = { ...diffPlanInput, mode: "complete" as const };
+  const text = buildPlanPrompt(completeInput);
+  assert.match(text, /WHOLE repository/);
+  assert.doesNotMatch(text, /blast radius of commit/i);
+});
