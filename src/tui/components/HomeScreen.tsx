@@ -6,6 +6,7 @@ import Spinner from "ink-spinner";
 import { QaClient } from "../client";
 import { RunFlow } from "../app";
 import { OnboardWizard } from "./OnboardWizard";
+import { DeleteProjectDialog } from "./DeleteProjectDialog";
 import { HelpChat } from "./HelpChat";
 
 interface SelectItem {
@@ -13,7 +14,7 @@ interface SelectItem {
   value: string;
 }
 
-type View = "home" | "run" | "onboard" | "help" | "status";
+type View = "home" | "run" | "onboard" | "help" | "status" | "delete-list" | "delete";
 
 const W = 54;
 
@@ -44,10 +45,12 @@ export function HomeScreen({
   const [appsLoading, setAppsLoading] = useState(false);
   const [statusText, setStatusText] = useState<string | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
+  const [selectedApp, setSelectedApp] = useState<string | null>(null);
 
   const MENU_ITEMS: SelectItem[] = [
     { label: "▶  Run QA", value: "run" },
     { label: "+  Add New Project", value: "onboard" },
+    { label: "-  Delete Project", value: "delete" },
     { label: "?  Help", value: "help" },
     { label: "⊞  Status", value: "status" },
     { label: "✕  Exit", value: "exit" },
@@ -103,6 +106,10 @@ export function HomeScreen({
       case "onboard":
         setView("onboard");
         break;
+      case "delete":
+        void fetchApps();
+        setView("delete-list");
+        break;
       case "help":
         setView("help");
         break;
@@ -113,12 +120,16 @@ export function HomeScreen({
         onExit();
         break;
     }
-  }, [onExit]);
+  }, [onExit, fetchApps]);
 
   useInput(
     useCallback(
       (_char: string, key: { escape: boolean }) => {
-        if (key.escape && (view === "status" || view === "onboard" || view === "help")) {
+        if (
+          key.escape &&
+          (view === "status" || view === "onboard" || view === "help" || view === "delete-list" || view === "delete")
+        ) {
+          setSelectedApp(null);
           setView("home");
         }
       },
@@ -148,8 +159,64 @@ export function HomeScreen({
   if (view === "onboard") {
     return (
       <OnboardWizard
+        client={client}
         onDone={() => setView("home")}
         onCancel={() => setView("home")}
+      />
+    );
+  }
+
+  if (view === "delete-list") {
+    if (appsLoading) {
+      return (
+        <Box paddingX={1} paddingY={1}>
+          <Text color="cyan">
+            <Spinner type="dots" />
+            {" loading apps…"}
+          </Text>
+        </Box>
+      );
+    }
+    if (apps.length === 0) {
+      return (
+        <Box flexDirection="column" paddingX={1}>
+          <Text dimColor>No apps configured.</Text>
+          <Text dimColor>Esc → back to home</Text>
+        </Box>
+      );
+    }
+    const items: SelectItem[] = apps.map((a) => ({ label: a, value: a }));
+    return (
+      <Box flexDirection="column" paddingX={1}>
+        <Text bold>Select a project to delete</Text>
+        <SelectInput
+          items={items}
+          onSelect={(i) => {
+            setSelectedApp(i.value);
+            setView("delete");
+          }}
+        />
+        <Box marginTop={1}>
+          <Text dimColor>Esc → back to home</Text>
+        </Box>
+      </Box>
+    );
+  }
+
+  if (view === "delete" && selectedApp) {
+    return (
+      <DeleteProjectDialog
+        client={client}
+        appName={selectedApp}
+        onDone={() => {
+          setSelectedApp(null);
+          void fetchApps();
+          setView("home");
+        }}
+        onCancel={() => {
+          setSelectedApp(null);
+          setView("home");
+        }}
       />
     );
   }

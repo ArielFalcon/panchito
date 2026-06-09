@@ -151,7 +151,7 @@ export function RunFlow({ client, apps, refName, sha, guidance }: {
   if (err) return <Text color="red">{`qa: ${err}`}</Text>;
   if (runId && !done) return <Watch client={client} id={runId} onDone={() => setDone(true)} />;
   if (runId && done) return <SummaryScreen client={client} id={runId} onBack={() => { setRunId(null); setDone(false); }} />;
-  if (onboarding) return <OnboardWizard onDone={() => setOnboarding(false)} onCancel={() => setOnboarding(false)} />;
+  if (onboarding) return <OnboardWizard client={client} onDone={() => setOnboarding(false)} onCancel={() => setOnboarding(false)} />;
   return <Launcher apps={apps} defaultGuidance={guidance} onLaunch={(a, t, m, g, s) => void launch(a, t, m, g, s)} onOnboard={() => setOnboarding(true)} />;
 }
 
