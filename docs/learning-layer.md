@@ -227,6 +227,19 @@ exercitan→ nunca se promueven— hasta que exista el benchmark offline como ca
 > Graphiti (servicio Python + graph DB, vía MCP) conservando el mismo modelo
 > temporal. Hoy no se justifica. engram queda relegado a episódico crudo o se retira.
 
+### [4.b] Reviewer rejections as a rule source
+
+When the independent reviewer rejects a generation, each correction is distilled
+into a candidate `LearningRule` (`distillReviewerCorrections` in
+`src/qa/learning/distiller.ts`): the correction text is the rule's `action`,
+classified by the anti-pattern catalog (`errorClassFromCorrections`) with
+`E-REVIEWER-REJECTED` as fallback when no anti-pattern keyword matches. Candidates
+follow the SAME governance as oracle-born rules — they must EARN promotion through
+measured outcomes and are deduped against ALL statuses, so a rejected-and-demoted
+pattern cannot respawn. Off-path: the wiring lives in `runPipeline` right before
+the final `persistOutcome` and is wrapped in try/catch; a distillation failure
+logs a warning and never affects the verdict.
+
 ### [5] Evaluation Harness — el oráculo de verdad
 Lo que convierte "acumular" en "aprender". Tres piezas:
 
