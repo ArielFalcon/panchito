@@ -1,8 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, rmSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runMutationOracle, type MutationDeps } from "./mutation-code";
+import { runMutationOracle, selectMutateTargets, type MutationDeps } from "./mutation-code";
 import type { OracleInput } from "./oracle-types";
 import type { ChildProcess } from "node:child_process";
 
@@ -199,6 +200,60 @@ describe("runMutationOracle", () => {
       );
       assert.equal(existsSync(join(repo, "stryker.conf.json")), false);
       assert.equal(existsSync(join(repo, "reports")), false);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("selectMutateTargets (change-scoped mutation)", () => {
+  function tmpRepo(): string {
+    const repo = mkdtempSync(join(tmpdir(), "mut-scope-"));
+    mkdirSync(join(repo, "src"), { recursive: true });
+    return repo;
+  }
+
+  it("scopes mutation to the changed source files, not the whole repo", () => {
+    const repo = tmpRepo();
+    writeFileSync(join(repo, "src", "a.ts"), "export const a = 1;");
+    writeFileSync(join(repo, "src", "b.ts"), "export const b = 2;");
+    try {
+      assert.deepEqual(selectMutateTargets(repo, ["src/a.ts"]), ["src/a.ts"]);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores test/spec files and non-source changed paths", () => {
+    const repo = tmpRepo();
+    writeFileSync(join(repo, "src", "a.ts"), "export const a = 1;");
+    writeFileSync(join(repo, "src", "a.test.ts"), "// test");
+    try {
+      assert.deepEqual(
+        selectMutateTargets(repo, ["src/a.ts", "src/a.test.ts", "README.md"]),
+        ["src/a.ts"],
+      );
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to repo-wide globs when no changed source file exists", () => {
+    const repo = tmpRepo();
+    writeFileSync(join(repo, "src", "x.ts"), "export const x = 1;");
+    try {
+      const targets = selectMutateTargets(repo, ["docs/readme.md"]);
+      assert.ok(targets.includes("src/**/*.ts"), `expected fallback globs, got ${targets.join(",")}`);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to repo-wide globs when no diff is provided", () => {
+    const repo = tmpRepo();
+    writeFileSync(join(repo, "src", "x.ts"), "export const x = 1;");
+    try {
+      assert.ok(selectMutateTargets(repo, undefined).includes("src/**/*.ts"));
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }

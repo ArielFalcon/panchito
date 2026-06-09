@@ -32,6 +32,10 @@ export const AppConfigSchema = z
           minRatio: z.number().min(0).max(1).optional(),
         })
         .optional(),
+      // e2e value oracle (response fault-injection). off (default) = skip; signal = re-run the
+      // green suite with corrupted responses and record the catch-rate. NEVER blocks publish, and
+      // it DOUBLES the DEV run — so it is opt-in.
+      valueOracle: z.enum(["off", "signal"]).optional(),
     }),
     code: z.boolean().optional(),
     report: z.object({

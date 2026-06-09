@@ -17,6 +17,8 @@ export interface QaFixtures {
   cleanup: (undo: () => Promise<void>) => void; // registers undo steps (LIFO, automatic)
   // system-owned: do not edit — the orchestrator reads these dumps for change-coverage.
   _coverage: void;
+  // system-owned: do not edit — the orchestrator's response-oracle pass (QA_FAULT_INJECT).
+  _faultInject: void;
 }
 
 export const test = base.extend<QaFixtures>({
@@ -91,9 +93,56 @@ export const test = base.extend<QaFixtures>({
     },
     { auto: true },
   ],
+
+  // system-owned: do not edit. The orchestrator's RESPONSE-ORACLE pass sets QA_FAULT_INJECT=1 and
+  // re-runs the green suite with corrupted JSON response VALUES (numbers/booleans flipped; status,
+  // shape, strings/ids preserved so auth and refs survive). A spec that stays green under corrupted
+  // data has a weak oracle (it would accept a backend regression). No-op in a normal run.
+  _faultInject: [
+    async ({ page }, use) => {
+      if (process.env.QA_FAULT_INJECT === "1") {
+        await page.route("**", async (route) => {
+          const type = route.request().resourceType();
+          if (type !== "xhr" && type !== "fetch") return route.continue();
+          let res;
+          try {
+            res = await route.fetch();
+          } catch {
+            return route.continue();
+          }
+          const ct = res.headers()["content-type"] ?? "";
+          if (!ct.includes("json")) return route.fulfill({ response: res });
+          let body: unknown;
+          try {
+            body = await res.json();
+          } catch {
+            return route.fulfill({ response: res });
+          }
+          return route.fulfill({ response: res, json: corruptValues(body) });
+        });
+      }
+      await use();
+    },
+    { auto: true },
+  ],
 });
 
 export { expect };
+
+// Recursively corrupts JSON VALUES (numbers, booleans) while preserving structure, strings, nulls
+// and keys — so tokens/ids (usually strings) survive and the app keeps flowing, but any numeric or
+// boolean datum the UI shows is now wrong. Used only by the _faultInject response-oracle pass.
+function corruptValues(v: unknown): unknown {
+  if (typeof v === "number") return Number.isFinite(v) ? (v === 0 ? 1 : v + 1) : v;
+  if (typeof v === "boolean") return !v;
+  if (Array.isArray(v)) return v.map(corruptValues);
+  if (v && typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) out[k] = corruptValues(val);
+    return out;
+  }
+  return v;
+}
 
 // Names a test entity with the run's prefix: ns("qa-bot-x", "user").
 export function ns(namespace: string, name: string): string {

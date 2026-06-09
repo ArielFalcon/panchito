@@ -41,12 +41,28 @@ function sourceGlobs(repoDir: string): string[] {
   });
 }
 
-function writeStrykerConfig(repoDir: string, testCommand: string, testArgs: string[]): string {
+const SOURCE_EXT = /\.(ts|tsx|js|jsx)$/;
+const TEST_FILE = /\.(test|spec)\.[tj]sx?$/;
+
+// Prefer the diff: mutate ONLY the changed source files (change-scoped — fast, and it measures
+// whether THIS commit's tests catch THIS commit's faults, not the whole suite). Falls back to
+// repo-wide globs when there is no usable diff (e.g. complete/exhaustive runs).
+export function selectMutateTargets(repoDir: string, changedFiles?: string[]): string[] {
+  if (changedFiles && changedFiles.length > 0) {
+    const scoped = changedFiles.filter(
+      (f) => SOURCE_EXT.test(f) && !TEST_FILE.test(f) && existsSync(join(repoDir, f)),
+    );
+    if (scoped.length > 0) return scoped;
+  }
+  const globs = sourceGlobs(repoDir);
+  return globs.length > 0 ? globs : ["src/**/*.ts", "src/**/*.js"];
+}
+
+function writeStrykerConfig(repoDir: string, testCommand: string, testArgs: string[], mutate: string[]): string {
   const configPath = join(repoDir, "stryker.conf.json");
-  const sources = sourceGlobs(repoDir);
   const config = {
     $schema: "https://raw.githubusercontent.com/stryker-mutator/stryker-js/master/packages/core/schema/stryker-schema.json",
-    mutate: sources.length > 0 ? sources : ["src/**/*.ts", "src/**/*.js"],
+    mutate,
     testRunner: "command",
     commandRunner: {
       command: [testCommand, ...testArgs].join(" "),
@@ -117,7 +133,7 @@ export async function runMutationOracle(
 
   let configPath: string;
   try {
-    configPath = writeStrykerConfig(input.repoDir, testCmd, testArgs);
+    configPath = writeStrykerConfig(input.repoDir, testCmd, testArgs, selectMutateTargets(input.repoDir, input.changedFiles));
   } catch (err) {
     return {
       valueScore: null,

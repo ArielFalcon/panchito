@@ -18,6 +18,7 @@ export interface ExecuteOptions {
   namespace: string;
   onCase?: (c: QaCase) => void;        // called per test as it completes (live bar/history)
   onRunning?: (title: string) => void; // called when a test starts (focus card)
+  faultInject?: boolean;               // response-oracle pass: corrupt JSON response values (QA_FAULT_INJECT)
 }
 
 // One streamed test-lifecycle event, parsed from the custom NDJSON reporter's stdout.
@@ -59,7 +60,7 @@ export interface RunOutput {
 export interface ExecuteDeps {
   // onEvent streams test-lifecycle events as they happen (advisory: the verdict is
   // still decided from the final report). Absent in unit stubs.
-  runSuite(args: { dir: string; baseUrl: string; namespace: string; onEvent?: (ev: StreamEvent) => void }): Promise<RunOutput>;
+  runSuite(args: { dir: string; baseUrl: string; namespace: string; faultInject?: boolean; onEvent?: (ev: StreamEvent) => void }): Promise<RunOutput>;
 }
 
 // A Playwright JSON report always carries `suites` and/or `stats`. An empty `{}`
@@ -95,6 +96,7 @@ export async function runE2E(
     dir: specDir,
     baseUrl: opts.baseUrl,
     namespace: opts.namespace,
+    faultInject: opts.faultInject,
     onEvent,
   });
 
@@ -184,7 +186,7 @@ module.exports = QaStreamReporter;
 `;
 
 export const defaultExecuteDeps: ExecuteDeps = {
-  runSuite: ({ dir, baseUrl, namespace, onEvent }) =>
+  runSuite: ({ dir, baseUrl, namespace, faultInject, onEvent }) =>
     new Promise((resolve, reject) => {
       const work = mkdtempSync(join(tmpdir(), "qa-pw-"));
       const reporterPath = join(work, "qa-stream-reporter.cjs");
@@ -196,7 +198,7 @@ export const defaultExecuteDeps: ExecuteDeps = {
       const child = spawn("npx", ["playwright", "test", `--reporter=${reporterPath},json`], {
         cwd: dir,
         // Agent-written specs are untrusted code: scrub orchestrator secrets, keep DEV_* creds.
-        env: { ...scrubEnv(/^DEV_/), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonPath },
+        env: { ...scrubEnv(/^DEV_/), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonPath, ...(faultInject ? { QA_FAULT_INJECT: "1" } : {}) },
       });
 
       let stderr = "";

@@ -21,6 +21,7 @@ import { publishE2e, publishCode, publishContext, defaultPublishDeps } from "./i
 import { testDataNamespace } from "./qa/test-data";
 import { labelRunOutcome } from "./qa/learning/labeler";
 import { runMutationOracle } from "./qa/learning/mutation-code";
+import { runFaultInjectionOracle } from "./qa/learning/fault-injection-e2e";
 import type { OracleInput, ValueOracleResult } from "./qa/learning/oracle-types";
 import { retrieveRules, type RetrievalResult } from "./qa/learning/retrieval";
 import { distillReflection } from "./qa/learning/distiller";
@@ -230,7 +231,8 @@ export function defaultPipelineDeps(): PipelineDeps {
       const { saveRunOutcome } = await import("./server/history");
       saveRunOutcome(outcome);
     },
-    runOracle: async (input) => runMutationOracle(input),
+    runOracle: async (input) =>
+      input.target === "e2e" ? runFaultInjectionOracle(input) : runMutationOracle(input),
     retrieveRules: (app, errorClass) => retrieveRules({ app, errorClass: errorClass as import("./qa/learning/taxonomy").ErrorClass | null }),
     reflectAndDistill: async (input) => {
       // Defer: skip the reflection when the system is already busy with another
@@ -871,13 +873,25 @@ export async function runPipeline(
 
   let valueScore: number | null = null;
 
-  if (deps.runOracle && isCode && generating && run.verdict === "pass") {
+  // The value oracle — the ground-truth that makes attribution mean something. code: mutation
+  // testing scoped to the diff. e2e: response fault-injection against the SAME live DEV (opt-in,
+  // signal-only) — never a redeploy. Off-path and fail-open: any error is a non-blocking warning,
+  // and the score NEVER gates publish.
+  const valueOraclePolicy = app.qa.valueOracle ?? "off";
+  const runValueOracle =
+    !!deps.runOracle && generating && run.verdict === "pass" &&
+    (isCode || (mode === "diff" && valueOraclePolicy === "signal" && !!app.dev?.baseUrl));
+  if (runValueOracle) {
     try {
-      log("[qa] oracle: running mutation testing...");
-      const oracleResult = await deps.runOracle({
-        target: "code",
+      log(isCode ? "[qa] oracle: running mutation testing (diff-scoped)..." : "[qa] oracle: running response fault-injection (signal)...");
+      const oracleResult = await deps.runOracle!({
+        target: isCode ? "code" : "e2e",
         repoDir: mirrorDir,
+        e2eDir,
         namespace: ns,
+        changedFiles: mode === "diff" ? [...parseDiffHunks(diff).keys()] : undefined,
+        baseUrl: app.dev?.baseUrl,
+        baselineCases: run.cases.filter((c) => c.status === "pass").map((c) => c.name),
         signal,
       });
       valueScore = oracleResult.valueScore;

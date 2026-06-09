@@ -8,6 +8,9 @@ export interface OracleInput {
   ecosystem?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
+  changedFiles?: string[]; // code: scope mutation to the diff (not the whole repo)
+  baseUrl?: string; // e2e fault-injection: the live DEV URL to re-run the suite against
+  baselineCases?: string[]; // e2e fault-injection: spec names that passed at baseline (the green run)
 }
 
 export interface ValueOracleResult {
