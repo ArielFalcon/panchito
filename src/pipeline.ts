@@ -48,7 +48,7 @@ import {
   type ChangeCoveragePolicy,
 } from "./qa/change-coverage";
 import { github } from "./integrations/github";
-import { renderIssue } from "./report/reporter";
+import { renderIssue, type IssueContext, type TestedItem } from "./report/reporter";
 import { AgentResult, QaCase, QaRunResult, TriggerSource, RunMode, RunOptions, TestTarget, RunOutcome } from "./types";
 import type { ReviewInput, ReviewResult } from "./integrations/opencode-client";
 
@@ -452,7 +452,9 @@ export async function runPipeline(
       await issueOrShadow(
         shadow, deps, log, app.repo,
         `QA context map for ${sha} is invalid`,
-        renderIssue(resultOf(ns, "invalid", validated.errors.join("\n\n")), validated.errors.join("\n")),
+        renderIssue(resultOf(ns, "invalid", validated.errors.join("\n\n")), {
+          note: `The FE↔BE context map could not be validated.\n${validated.errors.join("\n")}`,
+        }),
       );
       return resultOf(ns, "invalid", validated.errors.join("\n\n"));
     }
@@ -692,7 +694,11 @@ export async function runPipeline(
       }
       const invalid = resultOf(ns, "invalid", validation.errors.join("\n\n"));
       persistOutcome(invalid, { staticOk: false });
-      await report(app, sha, invalid, deps, log, shadow, isCode, "the E2E tests did not pass the static gate");
+      await report(app, sha, invalid, deps, log, shadow, isCode, {
+        note: `The generated tests did not pass the static gate (typecheck + lint + Playwright list).\n${validation.errors.join("\n")}`,
+        tested: testedFrom(result),
+        intent,
+      });
       return invalid;
     }
 
@@ -953,7 +959,7 @@ export async function runPipeline(
   // 9. Final decision.
   const kind = isCode ? "code" : "E2E";
   if (run.verdict !== "pass") {
-    await report(app, sha, run, deps, log, shadow, isCode, result?.note);
+    await report(app, sha, run, deps, log, shadow, isCode, { note: result?.note, tested: testedFrom(result), intent });
   } else if (!generating) {
     // Regression passed: there are no new tests to publish.
     log(`[qa] OK — regression green for ${sha}.`);
@@ -966,7 +972,7 @@ export async function runPipeline(
       log,
       app.repo,
       `QA: the reviewer did not approve the ${kind} tests for ${sha}`,
-      renderIssue(run, result!.note),
+      renderIssue(run, { note: result!.note, tested: testedFrom(result), intent }),
     );
   } else if (blocksPublish(coverageStatus, covPolicy)) {
     // Green AND reviewer-approved, but the tests do not exercise enough of the change (enforce):
@@ -977,12 +983,12 @@ export async function runPipeline(
       log,
       app.repo,
       `QA: ${kind} tests for ${sha} are below the change-coverage threshold`,
-      renderIssue(run, coverageSummary || result?.note),
+      renderIssue(run, { note: coverageSummary || result?.note, tested: testedFrom(result), intent }),
     );
   } else if (shadow) {
     log(`[qa] (shadow) ${kind} green; a suite PR would have been opened.`);
   } else {
-    const prInput = { repo: app.repo, sha, mirrorDir, baseBranch: app.baseBranch ?? "main", parentRunId: opts.parentRunId };
+    const prInput = { repo: app.repo, sha, mirrorDir, baseBranch: app.baseBranch ?? "main", parentRunId: opts.parentRunId, tested: testedFrom(result) };
     const pr = isCode ? await deps.publishCode(prInput) : await deps.publish(prInput);
     log(
       pr
@@ -1033,6 +1039,12 @@ function resultOf(ns: string, verdict: QaRunResult["verdict"], logs: string, not
   return { sha: ns, verdict, passed: false, cases: [], logs, note };
 }
 
+// What the agent reported testing (flow + objective per spec) — the "what was tested"
+// section of the reviewer-facing Issue/PR body. undefined when no specs were produced.
+export function testedFrom(r: AgentResult | null | undefined): TestedItem[] | undefined {
+  return r?.specMetas?.map((m) => ({ flow: m.flow, objective: m.objective }));
+}
+
 // Open an Issue only for a real failure or invalid specs. Flaky → quarantine.
 // Infra errors → log only. In shadow mode no Issue is ever opened.
 async function report(
@@ -1043,16 +1055,16 @@ async function report(
   log: (m: string) => void,
   shadow: boolean,
   isCode: boolean,
-  note?: string,
+  ctx: IssueContext = {},
 ): Promise<void> {
   if (app.report.onFailure !== "github-issue") return;
   const kind = isCode ? "code" : "E2E";
   switch (run.verdict) {
     case "fail":
-      await issueOrShadow(shadow, deps, log, app.repo, `QA ${kind} tests failed at ${sha}`, renderIssue(run, note));
+      await issueOrShadow(shadow, deps, log, app.repo, `QA ${kind} tests failed at ${sha}`, renderIssue(run, ctx));
       break;
     case "invalid":
-      await issueOrShadow(shadow, deps, log, app.repo, `QA could not validate the generated ${kind} tests at ${sha}`, renderIssue(run, note));
+      await issueOrShadow(shadow, deps, log, app.repo, `QA could not validate the generated ${kind} tests at ${sha}`, renderIssue(run, ctx));
       break;
     case "infra-error":
       log(`[qa] INFRA — ${run.logs} — not reported as a bug.`);

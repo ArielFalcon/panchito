@@ -4,6 +4,26 @@
 
 import { requireEnv } from "../util/env";
 
+// GitHub's documented hard limits for Issue/PR fields. Exceeding either is a 422
+// ("title/body is too long"). This module is the single boundary every Issue/PR
+// passes through, so we clamp here UNCONDITIONALLY — no caller (reporter, publish,
+// maintainer, or any future one) can produce a rejected request. Callers should
+// still budget their content for graceful truncation; this is the last-ditch net
+// that closes the whole failure class.
+export const GITHUB_MAX_TITLE = 256;
+export const GITHUB_MAX_BODY = 65536;
+
+export function clampTitle(title: string): string {
+  if (title.length <= GITHUB_MAX_TITLE) return title;
+  return title.slice(0, GITHUB_MAX_TITLE - 1).trimEnd() + "…";
+}
+
+export function clampBody(body: string): string {
+  if (body.length <= GITHUB_MAX_BODY) return body;
+  const notice = "\n\n_…(truncated to fit GitHub's 65536-character limit)_";
+  return body.slice(0, GITHUB_MAX_BODY - notice.length) + notice;
+}
+
 export interface PullRequest {
   url: string;
   nodeId: string;
@@ -40,7 +60,7 @@ export const github = {
     const res = await fetch(`https://api.github.com/repos/${repo}/issues`, {
       method: "POST",
       headers: ghHeaders(),
-      body: JSON.stringify({ title, body }),
+      body: JSON.stringify({ title: clampTitle(title), body: clampBody(body) }),
     });
     if (!res.ok) throw new Error(`GitHub error ${res.status}: ${await res.text()}`);
     const data = (await res.json()) as { html_url: string };
@@ -54,7 +74,7 @@ export const github = {
     const res = await fetch(`https://api.github.com/repos/${repo}/pulls`, {
       method: "POST",
       headers: ghHeaders(),
-      body: JSON.stringify(args),
+      body: JSON.stringify({ ...args, title: clampTitle(args.title), body: clampBody(args.body) }),
     });
     if (!res.ok) throw new Error(`GitHub PR error ${res.status}: ${await res.text()}`);
     const data = (await res.json()) as { html_url: string; node_id: string; number: number };

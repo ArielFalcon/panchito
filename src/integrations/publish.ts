@@ -10,6 +10,7 @@
 import { Git, realGit, authHeaderArgs } from "./repo-mirror";
 import { github, PullRequest } from "./github";
 import { shortSha } from "../qa/test-data";
+import { renderPrBody, type TestedItem } from "../report/reporter";
 
 export interface PublishInput {
   repo: string;
@@ -17,6 +18,7 @@ export interface PublishInput {
   mirrorDir: string; // working copy of the repo (where `e2e/` lives)
   baseBranch: string;
   parentRunId?: string; // continuation provenance: stamps the PR body so a coerced-green chain is traceable
+  tested?: TestedItem[]; // what the agent reported testing (flow + objective) — documents the PR
 }
 
 export interface PublishDeps {
@@ -97,14 +99,13 @@ async function publishChanges(input: PublishInput, deps: PublishDeps, shape: Pub
 
 export async function publishE2e(input: PublishInput, deps: PublishDeps): Promise<PublishResult | null> {
   const short = shortSha(input.sha);
-  const provenance = input.parentRunId ? `\n\n> ⛓️ Continuation of ${input.parentRunId}` : "";
   return publishChanges(input, deps, {
     statusPathspec: E2E_PATHSPEC,
     addPathspec: E2E_PATHSPEC,
     branch: `qa/e2e-${short}`,
     commitMsg: `test(e2e): automated QA for ${short}`,
     title: `QA E2E for ${short}`,
-    body: `E2E tests generated/updated by ai-pipeline for \`${input.sha}\`. Harness green (typecheck + lint + stable run against DEV).${provenance}`,
+    body: renderPrBody({ sha: input.sha, isCode: false, tested: input.tested, parentRunId: input.parentRunId }),
     noChangeLog: "[qa] no changes in e2e/ — the suite already covers the change, no PR opened.",
   });
 }
@@ -130,14 +131,13 @@ export async function publishContext(input: PublishInput, deps: PublishDeps): Pr
 
 export async function publishCode(input: PublishInput, deps: PublishDeps): Promise<PublishResult | null> {
   const short = shortSha(input.sha);
-  const provenance = input.parentRunId ? `\n\n> ⛓️ Continuation of ${input.parentRunId}` : "";
   return publishChanges(input, deps, {
     statusPathspec: CODE_PATHSPEC,
     addPathspec: CODE_PATHSPEC,
     branch: `qa/code-${short}`,
     commitMsg: `test(code): automated QA for ${short}`,
     title: `QA code tests for ${short}`,
-    body: `Source-code tests generated/updated by ai-pipeline for \`${input.sha}\`. Harness green (the repo's own test suite passed, exit code 0).${provenance}`,
+    body: renderPrBody({ sha: input.sha, isCode: true, tested: input.tested, parentRunId: input.parentRunId }),
     noChangeLog: "[qa] no test changes in the repo — nothing new to cover, no PR opened.",
   });
 }
