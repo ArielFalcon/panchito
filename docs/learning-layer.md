@@ -216,7 +216,11 @@ con un par de columnas y funciones puras unit-testeables:
   confidence, usageCount, successRate, lastVerified, source, status, valid_until }`.
 
 **La confianza la escribe el orquestador** (ver [5]), nunca el agente. **El retrieval
-sólo sirve `status=active` y rankea por `successRate`** (no por `usageCount`).
+rankea por `successRate`** (la señal de atribución, no `usageCount`): las reglas `active`
+van primero (exploit) y las `candidate` llenan el resto como **cola de exploración acotada**
+para que acumulen los outcomes que ganan —o deniegan— la promoción. `deprecated`/`superseded`
+no se inyectan nunca. (Estricto-solo-`active` haría *deadlock* —las candidatas nunca se
+exercitan→ nunca se promueven— hasta que exista el benchmark offline como canal de validación.)
 
 > **Graphiti = futuro condicional.** Si el grafo de reglas crece hasta que el
 > traversal regla↔regla o la extracción por LLM se ganen su costo, se migra a
@@ -272,8 +276,9 @@ Lo que convierte "acumular" en "aprender". Tres piezas:
 > entra al camino crítico.
 
 ### [6] Retrieval jerárquico — al agente, honrando el context budget
-Inyecta sólo: catálogo global ∩ reglas de app ∩ reglas de flow ∩ reglas del
-`errorClass` previsto, `status=active`. Reusa el mismo canal de prompt que
+Inyecta: catálogo global ∩ reglas de app ∩ reglas de flow ∩ reglas del
+`errorClass` previsto — `active` primero (rankeadas por `successRate`), con una cola acotada
+de `candidate` para exploración. Reusa el mismo canal de prompt que
 `reviewCorrections`/`coverageGap` en
 [`opencode-client.ts`](../src/integrations/opencode-client.ts). Scoring ponderado
 (recencia × importancia × relevancia, à la Generative Agents), no cap crudo.
@@ -445,7 +450,7 @@ Seis defensas:
 |---|---|---|---|
 | **0 — Marcador** | `RunOutcome` append-only + Labeler + taxonomía (enum). Arregla el purge-30d. | — (TS puro) | ✅ hecho (ver review) |
 | **1 — Oráculo** | Mutation (`code`, scopeada al diff) + fault-injection de respuestas (`e2e`) + scorecard versionado. | Stryker, Playwright `route()` | parcial: code sin scopear, e2e pendiente |
-| **2 — Lazo cerrado** | Reflexión + Ledger SQLite con gobierno: `successRate` estadístico, promoción/histéresis, supersede, **retrieval por `successRate` y sólo `active`**. | SQLite | pendiente (gobierno) |
+| **2 — Lazo cerrado** | Reflexión + Ledger SQLite con gobierno: `successRate` estadístico, promoción/histéresis, deprecate-reversible, retrieval por `successRate` (active-first + exploración de candidatas). | SQLite | ✅ gobierno hecho (commit `b10da65`); Reflector ya existía |
 | **3 — Skills + meta** | Skill library gateado por valor + DSPy contra el benchmark + currículo automático. | DSPy | — |
 
 ---
@@ -470,11 +475,13 @@ Seis defensas:
 
 ## Próximos pasos
 
-1. **Devolver el gate a verde:** arreglar el hang + el test del spinner en
-   `Dashboard.test.tsx`, y `git add` de los módulos `src/qa/learning/*` (hoy untracked).
-2. **Cerrar el lazo (Fase 2 gobierno):** `successRate` estadístico (no overwrite),
-   promoción `candidate→active` con histéresis, supersede reversible, y retrieval que
-   rankee por `successRate` sirviendo sólo `active`.
+1. ✅ **Gate a verde** — `Dashboard` vuelto a vista pura (commit `defc3cd`); módulos
+   `src/qa/learning/*` ya commiteados; `npm test` 460/460 y sale limpio.
+2. ✅ **Lazo de gobierno cerrado** (commit `b10da65`) — `successRate` estadístico (no
+   overwrite), promoción/histéresis, deprecate-reversible, retrieval por `successRate`.
 3. **Oráculo `e2e` (Fase 1):** fault-injection de respuestas vía Playwright `route()`
    en `portfolio`, en `signal`-mode, etiquetado "response-oracle catch-rate".
 4. **Scopear mutation al diff** en `code` (mutar sólo lo cambiado, no todo el repo).
+5. **Disparar la atribución/promoción de verdad** depende de #3/#4: sin `valueScore`
+   (oráculo), las candidatas no acumulan outcomes → no se promueven. El gobierno está
+   listo y esperando la señal.
