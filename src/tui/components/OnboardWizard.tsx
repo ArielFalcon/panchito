@@ -5,7 +5,7 @@ import Spinner from "ink-spinner";
 import SelectInput from "ink-select-input";
 import { TestTarget } from "../../types";
 import { github, RepoInfo } from "../../integrations/github";
-import { buildYaml, writeConfig, configExists, suggestName, OnboardInput } from "../onboard";
+import { buildYaml, writeConfig, configExists, suggestName, OnboardInput } from "../../server/onboard";
 
 interface SelectItem {
   label: string;

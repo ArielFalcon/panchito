@@ -3,6 +3,12 @@ import { writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { TestTarget } from "../types";
 
+export interface OnboardServiceInput {
+  repo: string;
+  openapi?: string;
+  versionUrl?: string;
+}
+
 export interface OnboardInput {
   name: string;
   repo: string;
@@ -13,6 +19,7 @@ export interface OnboardInput {
   needsReview: boolean;
   shadow: boolean;
   testDataPrefix: string;
+  services?: OnboardServiceInput[];
 }
 
 export function buildYaml(input: OnboardInput): string {
@@ -37,6 +44,15 @@ export function buildYaml(input: OnboardInput): string {
 
   if (input.versionUrl && input.target !== "code") {
     lines.push(`  versionUrl: "${input.versionUrl}"`);
+  }
+
+  if (input.target !== "code" && input.services?.length) {
+    lines.push("", "services:");
+    for (const s of input.services) {
+      lines.push(`  - repo: "${s.repo}"`);
+      if (s.openapi) lines.push(`    openapi: "${s.openapi}"`);
+      if (s.versionUrl) lines.push(`    versionUrl: "${s.versionUrl}"`);
+    }
   }
 
   lines.push(

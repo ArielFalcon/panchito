@@ -82,3 +82,28 @@ test("buildYaml handles special characters in repo name", () => {
   assert.equal(suggestName("org/my-repo_v2"), "my-repo-v2");
   assert.equal(suggestName("org/UPPERCASE"), "uppercase");
 });
+
+test("buildYaml renders services[] for e2e apps", () => {
+  const yaml = buildYaml({
+    name: "shop", repo: "org/shop-front", baseBranch: "main",
+    baseUrl: "https://dev.shop.io", target: "e2e", needsReview: true, shadow: true,
+    testDataPrefix: "qa-shop",
+    services: [
+      { repo: "org/orders-svc", openapi: "api/*.yaml", versionUrl: "https://svc/version" },
+      { repo: "org/payments-svc" },
+    ],
+  });
+  assert.match(yaml, /services:/);
+  assert.match(yaml, /- repo: "org\/orders-svc"/);
+  assert.match(yaml, /openapi: "api\/\*\.yaml"/);
+  assert.match(yaml, /versionUrl: "https:\/\/svc\/version"/);
+  assert.match(yaml, /- repo: "org\/payments-svc"/);
+});
+
+test("buildYaml omits services when absent or in code mode", () => {
+  const none = buildYaml({ name: "a", repo: "o/a", baseBranch: "main", baseUrl: "https://x", target: "e2e", needsReview: true, shadow: true, testDataPrefix: "qa" });
+  assert.doesNotMatch(none, /services:/);
+  const code = buildYaml({ name: "b", repo: "o/b", baseBranch: "main", baseUrl: "https://x", target: "code", needsReview: true, shadow: true, testDataPrefix: "qa", services: [{ repo: "o/svc" }] });
+  // In code mode, services must not be rendered even if provided (the schema rejects them; YAML must match).
+  assert.doesNotMatch(code, /services:/);
+});
