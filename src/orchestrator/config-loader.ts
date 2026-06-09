@@ -20,16 +20,34 @@ export function loadAppConfig(name: string, root = ROOT): ValidatedAppConfig {
   return AppConfigSchema.parse(parse(raw));
 }
 
-// Resolves the config from the event's repo (the webhook carries repo + sha).
-export function loadAppConfigByRepo(repo: string, root = ROOT): AppConfig | null {
+export type RepoRole = "primary" | "service";
+
+export interface RepoMatch {
+  app: AppConfig;
+  role: RepoRole;
+}
+
+// Resolves EVERY app the event's repo participates in. A repo can be the primary
+// of one app AND a service of another (its own code-mode app + the front's e2e app):
+// the webhook enqueues one run per match. A malformed YAML is skipped (and logged),
+// never hiding the other apps.
+export function loadAppConfigsByRepo(repo: string, root = ROOT): RepoMatch[] {
   const dir = join(root, "config", "apps");
-  if (!existsSync(dir)) return null;
+  if (!existsSync(dir)) return [];
+  const out: RepoMatch[] = [];
   for (const file of readdirSync(dir)) {
-    if (!file.endsWith(".yaml")) continue;
-    const cfg = loadAppConfig(file.replace(/\.yaml$/, ""), root);
-    if (cfg.repo === repo) return cfg;
+    if (!file.endsWith(".yaml") || file.startsWith("example")) continue;
+    let cfg: AppConfig;
+    try {
+      cfg = loadAppConfig(file.replace(/\.yaml$/, ""), root);
+    } catch (err) {
+      console.warn(`[qa] skipping malformed config ${file}: ${err instanceof Error ? err.message : String(err)}`);
+      continue;
+    }
+    if (cfg.repo === repo) out.push({ app: cfg, role: "primary" });
+    else if (cfg.services?.some((s) => s.repo === repo)) out.push({ app: cfg, role: "service" });
   }
-  return null;
+  return out;
 }
 
 // Returns all configured apps (name, repo, baseUrl). A single malformed YAML

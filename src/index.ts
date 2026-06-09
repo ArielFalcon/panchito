@@ -4,7 +4,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { writeFileSync, readFileSync, chmodSync } from "node:fs";
 import { JobQueue } from "./server/queue";
 import { handleWebhook } from "./server/webhook";
-import { loadAppConfig, loadAppConfigByRepo, listAppConfigs } from "./orchestrator/config-loader";
+import { loadAppConfig, loadAppConfigsByRepo, listAppConfigs } from "./orchestrator/config-loader";
 import { handleApi, ApiDeps } from "./server/api";
 import { handleMaintainerApi, recordIncident, setMaintainerStatus, getMaintainerStatus, getIncidents, updateIncident } from "./server/maintainer";
 import { getRecord, listRecords, currentRun, updateRecord, interruptedRecords, continuationDepth, MAX_CONTINUATION_DEPTH } from "./server/history";
@@ -859,7 +859,7 @@ const server = createServer(async (req, res) => {
           return;
         }
         const { repo, sha, mode, guidance } = result.payload;
-        const app = loadAppConfigByRepo(repo);
+        const app = loadAppConfigsByRepo(repo)[0]?.app ?? null;
         if (!app) console.warn(`[qa] no config/apps entry for ${repo}; event ignored`);
         else {
           try {
