@@ -10,7 +10,7 @@ import { join, dirname } from "node:path";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { AppConfig } from "./orchestrator/config-loader";
 import { DeployTarget, waitForDeploy } from "./env/deploy-gate";
-import { ensureMirror, getCommitDiff, getCommitMessage, listChangedSpecs as gitListChangedSpecs, getCommitsBehind, defaultMirrorDeps } from "./integrations/repo-mirror";
+import { ensureMirror, ensureMirrorAtBranch, getCommitDiff, getCommitMessage, listChangedSpecs as gitListChangedSpecs, getCommitsBehind, defaultMirrorDeps } from "./integrations/repo-mirror";
 import { runOpencode, runOpencodeParallel, defaultOpencodeDeps, reviewIndependently, getOpenSessionCount } from "./integrations/opencode-client";
 import { classifyCommit, CommitIntent } from "./qa/commit-classify";
 import { setupE2eProject, defaultSetupDeps } from "./qa/setup";
@@ -75,11 +75,15 @@ export interface GenerateInput {
   learnedRules?: string; // retrieval: rules from past runs injected into the agent prompt
   runId?: string; // for SSE live activity: maps the OpenCode session to this run record
   contextMap?: ArchitectureContext; // cross-cutting: the FE↔BE map loaded from e2e/.qa/context.json
+  service?: { repo: string; mirrorDir: string; openapi?: string | string[] }; // cross-repo: the triggering microservice (read-only working copy)
 }
 
 export interface PipelineDeps {
   waitForDeploy(target: DeployTarget, sha: string): Promise<void>;
   prepare(repo: string, sha: string): Promise<{ mirrorDir: string; diff: string; message: string }>;
+  // Cross-repo runs: the PRIMARY repo at the HEAD of its base branch (the triggering
+  // SHA belongs to the service repo and does not exist in the primary).
+  prepareAtBranch(repo: string, branch: string): Promise<{ mirrorDir: string }>;
   generate(input: GenerateInput, signal?: AbortSignal, onProgress?: (msg: string) => void): Promise<AgentResult>;
   // The *.spec.ts the agent actually wrote on disk (git status over e2e/), e2e-relative.
   // The authoritative spec set for the no-op decision and the reviewer's file list — the
@@ -135,6 +139,7 @@ export function defaultPipelineDeps(): PipelineDeps {
       const message = await getCommitMessage(mirrorDir, sha, defaultMirrorDeps);
       return { mirrorDir, diff, message };
     },
+    prepareAtBranch: async (repo, branch) => ({ mirrorDir: await ensureMirrorAtBranch(repo, branch, defaultMirrorDeps) }),
     listChangedSpecs: (mirrorDir, e2eRelDir) => gitListChangedSpecs(mirrorDir, e2eRelDir, defaultMirrorDeps),
     generate: async (input, signal, onProgress) => {
       const ocInput = {
@@ -158,6 +163,7 @@ export function defaultPipelineDeps(): PipelineDeps {
         learnedRules: input.learnedRules,
         runId: input.runId,
         contextMap: input.contextMap,
+        service: input.service,
       };
       const oc = await defaultOpencodeDeps();
       // complete/exhaustive fan out to parallel workers (plan → workers → consolidate); the other
@@ -303,6 +309,17 @@ export async function runPipeline(
   const shadow = app.qa.shadow ?? false;
   const mode = opts.mode;
   const isCode = (opts.target ?? "e2e") === "code";
+  // Cross-repo: a run whose triggering commit belongs to a declared service repo, not
+  // to the primary. The service mirror provides diff/classify/gate; the primary mirror
+  // (at baseBranch HEAD) hosts the suite, the execution, and the publish.
+  const triggerService =
+    opts.triggerRepo && opts.triggerRepo !== app.repo
+      ? app.services?.find((s) => s.repo === opts.triggerRepo)
+      : undefined;
+  if (opts.triggerRepo && opts.triggerRepo !== app.repo && !triggerService) {
+    throw new Error(`trigger repo ${opts.triggerRepo} is not a declared service of app ${app.name}`);
+  }
+  const issueRepo = triggerService ? triggerService.repo : app.repo;
   const reviewerCorrections: string[] = []; // accumulated across review rounds (for RunOutcome)
   let retries = 0; // total regeneration attempts (review loop + failure retries)
   let retrievedRuleIds: string[] = []; // rule IDs retrieved for this run (for RunOutcome)
@@ -348,6 +365,21 @@ export async function runPipeline(
   const devHealthy = () => (versionUrl ? deps.isHealthy(versionUrl) : Promise.resolve(true));
   if (isCode) {
     log("[qa] code mode: no web environment; skipping the deploy gate and health checks.");
+  } else if (triggerService) {
+    if (triggerService.versionUrl) {
+      log(`[qa] waiting for ${triggerService.repo} to serve ${sha} on DEV...`);
+      await deps.waitForDeploy(
+        {
+          name: `${app.name}/${triggerService.repo}`,
+          versionUrl: triggerService.versionUrl,
+          pollIntervalMs: triggerService.pollIntervalMs ?? 10_000,
+          deployTimeoutMs: triggerService.deployTimeoutMs ?? 600_000,
+        },
+        sha,
+      );
+    } else {
+      log(`[qa] deploy-event trigger from ${triggerService.repo} without versionUrl; trusting the event (gate skipped).`);
+    }
   } else if (versionUrl && app.dev) {
     const target: DeployTarget = {
       name: app.name,
@@ -363,7 +395,19 @@ export async function runPipeline(
 
   // 2. Working copy of the repo at the SHA (the agent's cwd, holds `e2e/`) + diff + message.
   log("[qa] preparing working copy and diff...");
-  const { mirrorDir, diff, message } = await deps.prepare(app.repo, sha);
+  let mirrorDir: string;
+  let diff: string;
+  let message: string;
+  let serviceMirrorDir: string | undefined;
+  if (triggerService) {
+    const svc = await deps.prepare(triggerService.repo, sha);
+    serviceMirrorDir = svc.mirrorDir;
+    diff = svc.diff;
+    message = svc.message;
+    mirrorDir = (await deps.prepareAtBranch(app.repo, app.baseBranch ?? "main")).mirrorDir;
+  } else {
+    ({ mirrorDir, diff, message } = await deps.prepare(app.repo, sha));
+  }
   const e2eDir = join(mirrorDir, E2E_DIR);
   const ns = testDataNamespace(app.qa.testDataPrefix, sha, opts.runId);
 
@@ -592,6 +636,9 @@ export async function runPipeline(
     guidance: opts.guidance,
     openapi: app.openapi,
     contextMap,
+    service: triggerService
+      ? { repo: triggerService.repo, mirrorDir: serviceMirrorDir!, openapi: triggerService.openapi }
+      : undefined,
     ...extra,
   });
 
@@ -689,12 +736,12 @@ export async function runPipeline(
       if (validation.infra) {
         const infra = resultOf(ns, "infra-error", validation.errors.join("\n\n"));
         persistOutcome(infra);
-        await report(app, sha, infra, deps, log, shadow, isCode);
+        await report(app, issueRepo, sha, infra, deps, log, shadow, isCode);
         return infra;
       }
       const invalid = resultOf(ns, "invalid", validation.errors.join("\n\n"));
       persistOutcome(invalid, { staticOk: false });
-      await report(app, sha, invalid, deps, log, shadow, isCode, {
+      await report(app, issueRepo, sha, invalid, deps, log, shadow, isCode, {
         note: `The generated tests did not pass the static gate (typecheck + lint + Playwright list).\n${validation.errors.join("\n")}`,
         tested: testedFrom(result),
         intent,
@@ -707,7 +754,7 @@ export async function runPipeline(
     if (!(await devHealthy())) {
       const infra = resultOf(ns, "infra-error", "DEV is not healthy before execution");
       persistOutcome(infra);
-      await report(app, sha, infra, deps, log, shadow, isCode);
+      await report(app, issueRepo, sha, infra, deps, log, shadow, isCode);
       return infra;
     }
   }
@@ -723,7 +770,7 @@ export async function runPipeline(
     // Defensive: an e2e run on an app with no dev environment is inconclusive.
     run = resultOf(ns, "infra-error", "e2e run requested but no dev environment is configured");
     persistOutcome(run);
-    await report(app, sha, run, deps, log, shadow, isCode);
+    await report(app, issueRepo, sha, run, deps, log, shadow, isCode);
     return run;
   } else {
     onStep?.("execute");
@@ -804,7 +851,10 @@ export async function runPipeline(
   let coverageStatus: "pass" | "fail" | "unknown" = "unknown";
   let coverageSummary = "";
   let ccForPersistence: ChangeCoverage | undefined;
-  if (deps.collectCoverage && generating && mode === "diff" && run.verdict === "pass" && covPolicy.mode !== "off") {
+  if (triggerService && mode === "diff" && run.verdict === "pass") {
+    log(`[qa] change-coverage: skipped — the changed lines live in ${triggerService.repo}; browser coverage maps only the frontend (status=unknown).`);
+  }
+  if (deps.collectCoverage && generating && mode === "diff" && run.verdict === "pass" && covPolicy.mode !== "off" && !triggerService) {
     const changed = parseDiffHunks(diff);
     if (changed.size > 0) {
       onStep?.("coverage");
@@ -959,7 +1009,7 @@ export async function runPipeline(
   // 9. Final decision.
   const kind = isCode ? "code" : "E2E";
   if (run.verdict !== "pass") {
-    await report(app, sha, run, deps, log, shadow, isCode, { note: result?.note, tested: testedFrom(result), intent });
+    await report(app, issueRepo, sha, run, deps, log, shadow, isCode, { note: result?.note, tested: testedFrom(result), intent });
   } else if (!generating) {
     // Regression passed: there are no new tests to publish.
     log(`[qa] OK — regression green for ${sha}.`);
@@ -970,7 +1020,7 @@ export async function runPipeline(
       shadow,
       deps,
       log,
-      app.repo,
+      issueRepo,
       `QA: the reviewer did not approve the ${kind} tests for ${sha}`,
       renderIssue(run, { note: result!.note, tested: testedFrom(result), intent }),
     );
@@ -981,7 +1031,7 @@ export async function runPipeline(
       shadow,
       deps,
       log,
-      app.repo,
+      issueRepo,
       `QA: ${kind} tests for ${sha} are below the change-coverage threshold`,
       renderIssue(run, { note: coverageSummary || result?.note, tested: testedFrom(result), intent }),
     );
@@ -1049,6 +1099,7 @@ export function testedFrom(r: AgentResult | null | undefined): TestedItem[] | un
 // Infra errors → log only. In shadow mode no Issue is ever opened.
 async function report(
   app: AppConfig,
+  issueRepo: string,
   sha: string,
   run: QaRunResult,
   deps: PipelineDeps,
@@ -1061,10 +1112,10 @@ async function report(
   const kind = isCode ? "code" : "E2E";
   switch (run.verdict) {
     case "fail":
-      await issueOrShadow(shadow, deps, log, app.repo, `QA ${kind} tests failed at ${sha}`, renderIssue(run, ctx));
+      await issueOrShadow(shadow, deps, log, issueRepo, `QA ${kind} tests failed at ${sha}`, renderIssue(run, ctx));
       break;
     case "invalid":
-      await issueOrShadow(shadow, deps, log, app.repo, `QA could not validate the generated ${kind} tests at ${sha}`, renderIssue(run, ctx));
+      await issueOrShadow(shadow, deps, log, issueRepo, `QA could not validate the generated ${kind} tests at ${sha}`, renderIssue(run, ctx));
       break;
     case "infra-error":
       log(`[qa] INFRA — ${run.logs} — not reported as a bug.`);

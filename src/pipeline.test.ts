@@ -73,6 +73,10 @@ function deps(
       calls.push("prepare");
       return { mirrorDir: "/mirrors/org__demo", diff: opts.diff ?? "DIFF", message: opts.message ?? "feat: change" };
     },
+    prepareAtBranch: async (_repo: string, _branch: string) => {
+      calls.push("prepareAtBranch");
+      return { mirrorDir: "/mirrors/org__demo" };
+    },
     generate: async (input: GenerateInput) => {
       calls.push("generate");
       h.genMode = input.mode;
@@ -910,4 +914,69 @@ test("learning layer: reflectAndDistill skipped when errorClass is E-FLAKY", asy
   await runPipeline(app, "refFlaky", d, "manual", { mode: "diff", runId: "run-ref-5" });
 
   assert.equal(reflectCalled, false, "E-FLAKY should not trigger reflection");
+});
+
+// ── F1: cross-repo runs ─────────────────────────────────────────────────────
+// triggerRepo + services[]: the diff/classify/gate come from the SERVICE mirror at the
+// event SHA; the suite/publish use the PRIMARY mirror at baseBranch HEAD; the Issue (on
+// failure) targets the triggering service repo, not the primary.
+
+const crossApp: AppConfig = {
+  name: "shop",
+  repo: "org/shop-front",
+  baseBranch: "main",
+  dev: { baseUrl: "https://dev.shop.io" },
+  services: [{ repo: "org/orders-svc", versionUrl: "https://svc/version" }],
+  qa: { needsReview: false, testDataPrefix: "qa-shop", shadow: false },
+  report: { onFailure: "github-issue" },
+};
+
+test("cross-repo: service trigger prepares BOTH mirrors and gates on the service versionUrl", async () => {
+  const calls: string[] = [];
+  const prepared: string[] = [];
+  const gated: string[] = [];
+  const h = deps(passing(), calls, { diff: DIFF_4, message: "feat: svc" });
+  h.prepare = async (repo: string, sha: string) => { prepared.push(`${repo}@${sha}`); calls.push("prepare"); return { mirrorDir: "/m/svc", diff: DIFF_4, message: "feat: svc" }; };
+  h.prepareAtBranch = async (repo: string, branch: string) => { prepared.push(`${repo}#${branch}`); calls.push("prepareAtBranch"); return { mirrorDir: "/m/front" }; };
+  h.waitForDeploy = async (target: { versionUrl: string }) => { gated.push(target.versionUrl); calls.push("gate"); };
+  await runPipeline(crossApp, "a1b2c3d", h, "webhook", { mode: "diff", triggerRepo: "org/orders-svc", runId: "r1" });
+  assert.deepEqual(gated, ["https://svc/version"]);
+  assert.ok(prepared.includes("org/orders-svc@a1b2c3d"));
+  assert.ok(prepared.includes("org/shop-front#main"));
+});
+
+test("cross-repo: a fail opens the Issue in the TRIGGERING service repo", async () => {
+  const calls: string[] = [];
+  const failed: QaRunResult = { sha: "s", verdict: "fail", passed: false, cases: [{ name: "t", status: "fail" }], logs: "" };
+  const h = deps(failed, calls, { diff: DIFF_4, message: "feat: svc" });
+  h.prepare = async () => { calls.push("prepare"); return { mirrorDir: "/m/svc", diff: DIFF_4, message: "feat: svc" }; };
+  h.prepareAtBranch = async () => { calls.push("prepareAtBranch"); return { mirrorDir: "/m/front" }; };
+  const opened: Array<{ repo: string; title: string }> = [];
+  h.openIssue = async (repo: string, title: string) => { opened.push({ repo, title }); return { url: "http://issue" }; };
+  await runPipeline(crossApp, "a1b2c3d", h, "webhook", { mode: "diff", triggerRepo: "org/orders-svc", runId: "r1" });
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0]?.repo, "org/orders-svc");
+});
+
+test("cross-repo: triggerRepo not declared as a service throws (mis-routed event must be loud)", async () => {
+  const h = deps(passing(), []);
+  await assert.rejects(
+    () => runPipeline(crossApp, "a1b2c3d", h, "webhook", { mode: "diff", triggerRepo: "org/other-svc" }),
+    /not a declared service/,
+  );
+});
+
+test("cross-repo: generate receives service {repo, mirrorDir}; change-coverage is skipped", async () => {
+  const calls: string[] = [];
+  let coverageCalled = false;
+  const h = deps(passing(), calls, { diff: DIFF_4, message: "feat: svc" });
+  h.prepare = async () => { calls.push("prepare"); return { mirrorDir: "/m/svc", diff: DIFF_4, message: "feat: svc" }; };
+  h.prepareAtBranch = async () => { calls.push("prepareAtBranch"); return { mirrorDir: "/m/front" }; };
+  h.collectCoverage = async () => { coverageCalled = true; return new Map(); };
+  await runPipeline(crossApp, "a1b2c3d", h, "webhook", { mode: "diff", triggerRepo: "org/orders-svc", runId: "r1" });
+  const captured = h.genInputs.find((g) => g.service !== undefined);
+  assert.equal(captured?.service?.repo, "org/orders-svc");
+  assert.equal(captured?.service?.mirrorDir, "/m/svc");
+  assert.equal(captured?.mirrorDir, "/m/front");
+  assert.equal(coverageCalled, false);
 });

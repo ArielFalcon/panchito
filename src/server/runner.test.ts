@@ -19,6 +19,7 @@ function stubDeps(over: Partial<PipelineDeps> = {}): PipelineDeps {
   return {
     waitForDeploy: async () => {},
     prepare: async () => ({ mirrorDir: "/m", diff: "", message: "feat: x" }),
+    prepareAtBranch: async () => ({ mirrorDir: "/m" }),
     generate: async (_input, _signal) => ({ output: "", specs: ["a.spec.ts"], reviewed: false, approved: true }),
     setupE2e: async () => {},
     validate: async () => ({ ok: true, errors: [], infra: false }),
