@@ -1042,3 +1042,44 @@ test("context mode warns (does not fail) when a configured service has no mapped
   assert.equal(r.verdict, "pass");
   assert.ok(logs.some((l) => l.includes("no operations for service org/orders-svc")), logs.join("\n"));
 });
+
+// ── F4: reviewer corrections → learning rules ───────────────────────────────
+// When the reviewer rejects, the run accumulates `reviewerCorrections`. After the final
+// decide step, the pipeline distills them into candidate learning rules via the injected
+// `distillCorrections` dep. Off-path: a failure logs a warning and never blocks the run.
+
+test("reviewer rejection distills corrections into rules (off-path)", async () => {
+  const calls: string[] = [];
+  let distilled: { app: string; runId: string; corrections: string[] } | undefined;
+  const h = deps(passing(), calls, {
+    review: [{ approved: false, corrections: ["no real assertion on the outcome"] }, { approved: false, corrections: ["no real assertion on the outcome"] }],
+    diff: DIFF_4, message: "feat: x",
+  });
+  h.distillCorrections = (input: { app: string; runId: string; corrections: string[] }) => {
+    distilled = input;
+    return { inserted: ["rule-1"] };
+  };
+  const appWithReview: AppConfig = {
+    ...app,
+    qa: { ...app.qa, needsReview: true, shadow: true },
+  };
+  await runPipeline(appWithReview, "abc1234def", h, "webhook", { mode: "diff", runId: "r1" });
+  assert.equal(distilled?.app, appWithReview.name);
+  assert.equal(distilled?.runId, "r1");
+  assert.ok(distilled?.corrections.includes("no real assertion on the outcome"));
+});
+
+test("reviewer-corrections distillation: a thrown error never fails the run", async () => {
+  const calls: string[] = [];
+  const h = deps(passing(), calls, {
+    review: [{ approved: false, corrections: ["x"] }, { approved: false, corrections: ["x"] }],
+    diff: DIFF_4, message: "feat: x",
+  });
+  h.distillCorrections = () => { throw new Error("db locked"); };
+  const appWithReview: AppConfig = {
+    ...app,
+    qa: { ...app.qa, needsReview: true, shadow: true },
+  };
+  const r = await runPipeline(appWithReview, "abc1234def", h, "webhook", { mode: "diff", runId: "r1" });
+  assert.notEqual(r.verdict, "infra-error");
+});

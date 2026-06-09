@@ -24,7 +24,7 @@ import { runMutationOracle } from "./qa/learning/mutation-code";
 import { runFaultInjectionOracle } from "./qa/learning/fault-injection-e2e";
 import type { OracleInput, ValueOracleResult } from "./qa/learning/oracle-types";
 import { retrieveRules, type RetrievalResult } from "./qa/learning/retrieval";
-import { distillReflection } from "./qa/learning/distiller";
+import { distillReflection, distillReviewerCorrections } from "./qa/learning/distiller";
 import { detectStructuralPatterns } from "./qa/learning/structural-pattern";
 import { matchExemplars, renderExemplarsForPrompt } from "./qa/learning/skill-exemplar";
 import { initCurriculum, selectActiveArchetypesCached, renderArchetypesForPrompt, recordArchetypeHit, clearActiveArchetypesCache } from "./qa/learning/curriculum";
@@ -124,6 +124,9 @@ export interface PipelineDeps {
   runOracle?(input: OracleInput): Promise<ValueOracleResult>; // Phase 1: mutation testing / benchmark replay (off-path, never blocks)
   retrieveRules?(app: string, errorClass?: string | null): RetrievalResult; // Phase 2: retrieval for agent prompt
   reflectAndDistill?(input: { app: string; runId: string; outcome: RunOutcome }): Promise<StructuredReflection | null>; // Phase 2: reflect + distill (off-path, never blocks)
+  // Reviewer→learning: distill this run's reviewer corrections into candidate rules.
+  // Off-path: a failure is a warning, never a verdict change. Absent ⇒ skipped.
+  distillCorrections?(input: { app: string; runId: string; corrections: string[] }): { inserted: string[] };
   log?(msg: string): void;
   // Context mode: validates the produced context.json. Injected so tests can bypass file I/O.
   validateContextFn?(content: unknown): { ok: boolean; errors: string[] };
@@ -250,6 +253,7 @@ export function defaultPipelineDeps(): PipelineDeps {
     runOracle: async (input) =>
       input.target === "e2e" ? runFaultInjectionOracle(input) : runMutationOracle(input),
     retrieveRules: (app, errorClass) => retrieveRules({ app, errorClass: errorClass as import("./qa/learning/taxonomy").ErrorClass | null }),
+    distillCorrections: (input) => distillReviewerCorrections(input),
     reflectAndDistill: async (input) => {
       // Defer: skip the reflection when the system is already busy with another
       // run. Opening a qa-assistant session would contend for the OpenCode server
@@ -1088,6 +1092,19 @@ export async function runPipeline(
   // Surface the agent's note (reviewer rejection, generation summary) in the
   // result so the TUI/chat can show why a retry or skip happened.
   if (result?.note && !run.note) run.note = result.note;
+
+  // Reviewer→learning: rejections persist as candidate rules so the next run is
+  // born knowing what this reviewer already rejected. Off-path, never blocks.
+  if (reviewerCorrections.length > 0 && opts.runId && deps.distillCorrections) {
+    try {
+      const distilled = deps.distillCorrections({ app: app.name, runId: opts.runId, corrections: reviewerCorrections });
+      if (distilled.inserted.length > 0) {
+        log(`[qa] learning: distilled ${distilled.inserted.length} candidate rule(s) from reviewer corrections`);
+      }
+    } catch (err) {
+      log(`[qa] WARNING: reviewer-corrections distillation failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
   const ratio = ccForPersistence?.overall.ratio ?? null;
   persistOutcome(run, { staticOk: !isCode && generating, coverageRatio: ratio, valueScore, rulesRetrieved: retrievedRuleIds });
