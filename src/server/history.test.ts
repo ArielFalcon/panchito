@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createRecord, getRecord, listRecords, currentRun, updateRecord, addCase, continuationDepth, clearDatabase, appendActivity, upsertLearningRule, listLearningRules, recordRuleOutcome } from "./history";
+import { createRecord, getRecord, listRecords, currentRun, updateRecord, addCase, continuationDepth, clearDatabase, appendActivity, upsertLearningRule, listLearningRules, recordRuleOutcome, saveScorecardEntry, loadScorecard } from "./history";
 
 test("createRecord stores an enqueued record findable by id", () => {
   const r = createRecord({ target: "e2e",  app: "hist-a", sha: "abcdef1234", mode: "diff" });
@@ -121,4 +121,16 @@ test("recordRuleOutcome accumulates a running mean and earns promotion (never ov
   assert.equal(r!.outcomeCount, 3); // accumulated across outcomes, not overwritten
   assert.ok(Math.abs(r!.successRate! - 0.8) < 1e-9, `expected ~0.8, got ${r!.successRate}`);
   assert.equal(r!.status, "active"); // promotion earned from objective outcomes
+});
+
+test("scorecard persists oracle outcomes and aggregates valueScore across runs", () => {
+  const app = "hist-sc-1";
+  saveScorecardEntry({ runId: "r1", app, sha: "s1", target: "code", valueScore: 0.5, mutantCount: 10, killedCount: 5, at: "t1" });
+  saveScorecardEntry({ runId: "r2", app, sha: "s2", target: "code", valueScore: 0.7, mutantCount: 10, killedCount: 7, at: "t2" });
+  const sc = loadScorecard(app);
+  assert.ok(sc, "scorecard should exist");
+  assert.equal(sc!.entries.length, 2);
+  assert.equal(sc!.summary.measuredRuns, 2);
+  assert.ok(Math.abs(sc!.summary.avgValueScore! - 0.6) < 1e-9, `expected ~0.6, got ${sc!.summary.avgValueScore}`);
+  assert.equal(sc!.summary.lastValueScore, 0.7);
 });

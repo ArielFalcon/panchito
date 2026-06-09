@@ -900,6 +900,22 @@ export async function runPipeline(
       } else {
         log(`[qa] oracle: no value score — ${oracleResult.details}`);
       }
+      // Record the outcome in the app's versioned scorecard (proof-of-improvement over runs).
+      try {
+        const { saveScorecardEntry } = await import("./server/history");
+        saveScorecardEntry({
+          runId: opts.runId ?? sha,
+          app: app.name,
+          sha,
+          target: isCode ? "code" : "e2e",
+          valueScore: oracleResult.valueScore,
+          mutantCount: oracleResult.mutantCount,
+          killedCount: oracleResult.killedCount,
+          at: new Date().toISOString(),
+        });
+      } catch (err) {
+        log(`[qa] WARNING: scorecard persist failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+      }
     } catch (err) {
       log(`[qa] WARNING: oracle failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
     }

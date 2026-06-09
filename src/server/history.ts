@@ -15,6 +15,7 @@ import { RunRecord, RunMode, TestTarget, QaCase, RunVerdict, SpecRecord, RunOutc
 import { applyOutcome, type LearningRule, type RuleUpsert, type Confidence, type RuleStatus } from "../qa/learning/learning-rule";
 import type { ErrorClass } from "../qa/learning/taxonomy";
 import type { Curriculum } from "../qa/learning/curriculum";
+import { updateScorecard, type Scorecard, type ScorecardEntry } from "../qa/learning/oracle-types";
 
 const DELETE_MAX_AGE_DAYS = 30;
 
@@ -40,6 +41,8 @@ let listRulesStmt!: Database.Statement;
 let incrementRuleUsageStmt!: Database.Statement;
 let loadCurriculumStmt!: Database.Statement;
 let saveCurriculumStmt!: Database.Statement;
+let loadScorecardStmt!: Database.Statement;
+let saveScorecardStmt!: Database.Statement;
 let initialized = false;
 
 function ensureDb(): void {
@@ -147,6 +150,12 @@ function ensureDb(): void {
       data TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS scorecard (
+      app TEXT PRIMARY KEY,
+      data TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
 
   // Migration: add columns introduced after the initial schema to DBs that already
@@ -201,6 +210,8 @@ function ensureDb(): void {
   incrementRuleUsageStmt = db.prepare("UPDATE learning_rules SET usage_count = usage_count + 1 WHERE id = ?");
   loadCurriculumStmt = db.prepare("SELECT data, updated_at FROM curriculum WHERE app = ?");
   saveCurriculumStmt = db.prepare("INSERT INTO curriculum (app, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(app) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at");
+  loadScorecardStmt = db.prepare("SELECT data FROM scorecard WHERE app = ?");
+  saveScorecardStmt = db.prepare("INSERT INTO scorecard (app, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(app) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at");
 
   // Prune old runs once on first use.
   db.prepare(`DELETE FROM runs WHERE at < datetime('now', '-${DELETE_MAX_AGE_DAYS} days')`).run();
@@ -536,6 +547,25 @@ export function loadCurriculum(app: string): Curriculum | null {
 export function saveCurriculum(curriculum: Curriculum): void {
   ensureDb();
   saveCurriculumStmt.run(curriculum.app, JSON.stringify(curriculum), curriculum.updatedAt);
+}
+
+export function loadScorecard(app: string): Scorecard | null {
+  ensureDb();
+  const row = loadScorecardStmt.get(app) as { data: string } | undefined;
+  if (!row) return null;
+  try {
+    return JSON.parse(row.data) as Scorecard;
+  } catch {
+    return null;
+  }
+}
+
+// Append one oracle outcome to the app's versioned scorecard (the proof-of-improvement record:
+// avg/last valueScore over runs). Aggregation is the pure updateScorecard; this is the DB sink.
+export function saveScorecardEntry(entry: ScorecardEntry): void {
+  ensureDb();
+  const sc = updateScorecard(loadScorecard(entry.app), entry);
+  saveScorecardStmt.run(sc.app, JSON.stringify(sc), sc.updatedAt);
 }
 
 process.on("exit", () => {
