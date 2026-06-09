@@ -505,3 +505,56 @@ test("buildPlanPrompt complete/exhaustive variants are unchanged", () => {
   assert.match(text, /WHOLE repository/);
   assert.doesNotMatch(text, /blast radius of commit/i);
 });
+
+test("diff fan-out falls back to the single agent when the plan has <2 objectives", async () => {
+  const prompts: string[] = [];
+  const stubDeps: OpencodeDeps = {
+    open: async () => ({
+      id: "s1",
+      prompt: async (text: string) => {
+        prompts.push(text);
+        return prompts.length === 1
+          ? `{"objectives":[{"flow":"checkout","objective":"o","symbols":[],"needsUi":true}]}`
+          : `done {"approved":true,"specs":["flows/checkout.spec.ts"]}`;
+      },
+      dispose: async () => {},
+    }),
+  };
+  const result = await runOpencodeParallel(
+    {
+      repo: "r", sha: "a1b2c3d", diff: "+x", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "n",
+      needsReview: false, target: "e2e", mode: "diff", appName: "a",
+    },
+    stubDeps,
+  );
+  assert.equal(prompts.length, 2, `expected 2 prompts (planner + single-agent generation), got ${prompts.length}`);
+  assert.match(prompts[1]!, /Generate\/update E2E tests/);
+  assert.deepEqual(result.specs, ["flows/checkout.spec.ts"]);
+});
+
+test("diff fan-out with >=2 objectives dispatches workers (no fallback)", async () => {
+  const agents: string[] = [];
+  const stubDeps: OpencodeDeps = {
+    open: async (agent: string) => {
+      agents.push(agent);
+      return {
+        id: "s",
+        prompt: async (text: string) =>
+          agent === "qa-generator"
+            ? `{"objectives":[{"flow":"a","objective":"oa","symbols":[],"needsUi":true},{"flow":"b","objective":"ob","symbols":[],"needsUi":true}]}`
+            : `{"spec":"${text.includes("flows/a.spec.ts") ? "flows/a.spec.ts" : "flows/b.spec.ts"}"}`,
+        dispose: async () => {},
+      };
+    },
+  };
+  const fakeFs = { read: () => null, write: () => {} };
+  const result = await runOpencodeParallel(
+    {
+      repo: "r", sha: "a1b2c3d", diff: "+x", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "n",
+      needsReview: false, target: "e2e", mode: "diff", appName: "a",
+    },
+    stubDeps, undefined, fakeFs,
+  );
+  assert.deepEqual(agents.filter((a) => a.startsWith("qa-worker")), ["qa-worker", "qa-worker"]);
+  assert.equal(result.specs.length, 2);
+});

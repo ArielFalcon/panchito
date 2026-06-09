@@ -661,6 +661,13 @@ export async function runOpencodeParallel(
     return { output: planText, specs: [], reviewed: false, approved: true, note: "planner found no important uncovered flows" };
   }
 
+  // A diff plan with a single objective gains nothing from fan-out and would LOSE the
+  // single-agent prompt's full context (diff, fix/review blocks). Fall back.
+  if (input.mode === "diff" && objectives.length < 2) {
+    opts?.onProgress?.(`[qa] plan: ${objectives.length} objective(s) — falling back to the single-agent path`);
+    return runOpencode(input, deps, opts);
+  }
+
   // Pre-index Serena when the flag is set, so every worker inherits a warm index
   // instead of paying activate_project from scratch (15-60s each). Controlled by
   // env PRE_INDEX_SERENA so it can be toggled without redeploy.
