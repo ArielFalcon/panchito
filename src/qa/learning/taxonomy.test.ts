@@ -8,12 +8,16 @@ import {
 } from "./taxonomy";
 
 describe("ERROR_CLASSES", () => {
-  it("covers all 10 error classes", () => {
-    assert.equal(ERROR_CLASSES.length, 10);
+  it("covers all 11 error classes", () => {
+    assert.equal(ERROR_CLASSES.length, 11);
   });
 
   it("E-INFRA is present and excludable from learning", () => {
     assert(ERROR_CLASSES.includes("E-INFRA"));
+  });
+
+  it("E-REVIEWER-REJECTED is a valid ErrorClass", () => {
+    assert.ok((ERROR_CLASSES as readonly string[]).includes("E-REVIEWER-REJECTED"));
   });
 });
 

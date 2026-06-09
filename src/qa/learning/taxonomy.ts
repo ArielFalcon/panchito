@@ -4,6 +4,7 @@
 // Each ErrorClass maps to a specific, deterministic signal:
 //   - verdict + gate failures → structural classes (E-STATIC, E-EXEC-FAIL, …)
 //   - reviewer corrections → quality classes (E-FALSE-POSITIVE, E-WRONG-OBJECTIVE, …)
+//   - reviewer rejection with no recognizable anti-pattern → E-REVIEWER-REJECTED
 //   - change-coverage gap → E-COVERAGE-GAP
 //   - mutation/benchmark (Fase 1) → E-VALUE-SURVIVED
 //
@@ -18,6 +19,7 @@ export const ERROR_CLASSES = [
   "E-WRONG-OBJECTIVE",
   "E-FRAGILE-SELECTOR",
   "E-NO-CLEANUP",
+  "E-REVIEWER-REJECTED",
   "E-VALUE-SURVIVED",
   "E-INFRA",
 ] as const;
