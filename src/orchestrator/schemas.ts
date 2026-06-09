@@ -9,6 +9,22 @@ export const AppConfigSchema = z
     repo: z.string().min(1, { error: "repo is required (e.g. 'org/repo')" }),
     baseBranch: z.string().optional(),
     openapi: z.union([z.string(), z.array(z.string())]).optional(),
+    // `services` (e2e apps only): the microservice repos that participate in this
+    // app's flows. A deploy-event webhook from one of these repos triggers an e2e
+    // run of THIS app with the service's diff as blast radius. openapi is a glob
+    // INSIDE the service repo; versionUrl is an optional deploy-verification belt.
+    services: z
+      .array(
+        z.object({
+          repo: z.string().min(1, { error: "service repo is required (e.g. 'org/svc')" }),
+          baseBranch: z.string().optional(),
+          openapi: z.union([z.string(), z.array(z.string())]).optional(),
+          versionUrl: z.url().optional(),
+          pollIntervalMs: z.number().int().positive().optional(),
+          deployTimeoutMs: z.number().int().positive().optional(),
+        }),
+      )
+      .optional(),
     // `dev` is OPTIONAL: code-mode apps (code: true) test source-code logic with no
     // web environment, so they have no DEV URL. The refine below enforces presence
     // for e2e apps.
@@ -45,9 +61,21 @@ export const AppConfigSchema = z
   .refine((c) => c.code === true || c.dev !== undefined, {
     error: "dev is required unless code: true (code mode has no web environment)",
     path: ["dev"],
-  });
+  })
+  .refine((c) => !(c.code === true && (c.services?.length ?? 0) > 0), {
+    error: "services are only valid for e2e apps (code-mode apps have no E2E suite)",
+    path: ["services"],
+  })
+  .refine(
+    (c) => {
+      const repos = [c.repo, ...(c.services ?? []).map((s) => s.repo)];
+      return new Set(repos).size === repos.length;
+    },
+    { error: "service repos must be unique and different from the primary repo", path: ["services"] },
+  );
 
 export type ValidatedAppConfig = z.infer<typeof AppConfigSchema>;
+export type ServiceConfig = NonNullable<ValidatedAppConfig["services"]>[number];
 
 // ── Manifest entry schema ─────────────────────────────────────────────────────
 // Per-test metadata that lives in e2e/.qa/manifest.json. Validates the day-one
