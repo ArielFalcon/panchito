@@ -1,16 +1,20 @@
-// Phase 4 (SSE live activity) — pure, advisory-only routing. Now WIRED.
+// Phase 4 (SSE live activity) — advisory-only routing of OpenCode's global event
+// firehose to per-run structured activity. Now WIRED.
 //
-// OpenCode's /global/event is a SERVER-GLOBAL firehose: every event carries a
-// directory (not sessionID directly). Session-scoped events (file.edited,
-// command.executed, todo.updated) have the sessionID in their properties. The
-// router demuxes by sessionID → runId and stays ADVISORY-ONLY.
+// Authoritative event shapes (from @opencode-ai/sdk types):
+//   message.part.updated → { part: Part, delta? }      sessionID lives in part.sessionID
+//       part.type "tool"  → { tool, state:{ status, input, title } }  (write/edit/bash/…)
+//       part.type "patch" → { files: string[] }
+//       part.type "file"  → { filename }
+//       part.type text/reasoning/step → PROSE → dropped (this was the broken `"file": "s`)
+//   todo.updated      → { sessionID, todos: Todo[] }    (each: content, status, priority, id)
+//   command.executed  → { sessionID, name, arguments }
+//   file.edited       → { file }                        (no sessionID — cannot be run-scoped)
+//   session.error     → { sessionID?, error }
 //
-// Design note — why model prose is dropped: streaming `message.part.updated`
-// deltas are arbitrary fragments of the model's output (often mid-word or
-// mid-JSON). Rendering them produced broken status lines like `"file": "s`. We
-// keep ONLY events whose payload carries clean, structured fields (the file it
-// wrote, the command it ran, the todo it is on). The agent's reasoning text is
-// never surfaced.
+// The router demuxes by sessionID → runId and stays ADVISORY-ONLY. Raw model prose
+// is never surfaced — only clean structured fields (the file written, the command
+// run, the todo the agent is on).
 
 import { ActivityKind } from "../types";
 
@@ -31,22 +35,23 @@ export interface RawEvent {
 
 export type DropReason = "no-session" | "unknown-session" | "unknown-kind";
 
-// Allowlist of OpenCode event types worth surfacing — every one carries a clean
-// structured field. `message.*` is intentionally absent (raw stream prose).
-const DEFAULT_ALLOW: Record<string, ActivityKind> = {
-  "file.edited": "file",          // agent wrote a file
-  "command.executed": "command",  // agent ran a command
-  "todo.updated": "todo",         // agent task progress (carries status)
-  "session.status": "phase",      // session lifecycle (display layer may ignore)
-  "session.error": "error",       // session error (critical for debugging)
-};
-
 export interface RouteResult {
-  activity?: RoutedActivity;
-  dropped?: DropReason;
+  activities: RoutedActivity[]; // 0..N (todo.updated yields one per todo)
+  dropped?: DropReason;         // set only when nothing routed AND there is a reason worth counting
 }
 
-// Normalizes the many status spellings OpenCode may emit into our three states.
+// Tools whose completion means a file was written/changed.
+const FILE_TOOLS = /^(write|edit|multiedit|create|apply_patch|patch)$/i;
+const SHELL_TOOLS = /^(bash|shell|run)$/i;
+
+function basename(path: string): string {
+  return String(path).split(/[\\/]/).pop() || String(path);
+}
+
+function cap(s: string): string {
+  return s.length > 500 ? s.slice(0, 500) : s;
+}
+
 function normalizeStatus(raw: unknown): RoutedActivity["status"] {
   const s = String(raw ?? "").toLowerCase();
   if (s === "completed" || s === "done" || s === "complete") return "completed";
@@ -54,54 +59,91 @@ function normalizeStatus(raw: unknown): RoutedActivity["status"] {
   return "pending";
 }
 
-function basename(path: string): string {
-  return path.split("/").pop() || path;
+interface PartLike {
+  type?: string;
+  sessionID?: string;
+  tool?: string;
+  filename?: string;
+  files?: unknown;
+  state?: { status?: string; input?: Record<string, unknown>; title?: string };
 }
 
-// Routes ONE event to a run, or drops it with a reason.
-export function routeEvent(
-  event: RawEvent,
-  sessions: ReadonlyMap<string, string>,
-  allow: Record<string, ActivityKind> = DEFAULT_ALLOW,
-): RouteResult {
-  const kind = allow[event.type];
-  if (!kind) return { dropped: "unknown-kind" };
-  const sessionID = event.properties?.sessionID as string | undefined;
-  if (!sessionID) return { dropped: "no-session" };
-  const runId = sessions.get(sessionID);
-  if (!runId) return { dropped: "unknown-session" };
+// Extract structured activity from a message part. Returns 0..N activities.
+function fromPart(runId: string, part: PartLike | undefined): RoutedActivity[] {
+  if (!part || typeof part !== "object") return [];
 
+  if (part.type === "tool") {
+    const tool = String(part.tool ?? "");
+    const state = part.state ?? {};
+    // Only surface a tool once it has actually run (completed) — pending/running
+    // updates stream repeatedly and carry no definitive result yet.
+    if (state.status !== "completed") return [];
+    const input = (state.input ?? {}) as Record<string, unknown>;
+    if (FILE_TOOLS.test(tool)) {
+      const f = input.filePath ?? input.path ?? input.file ?? input.filename;
+      if (f) return [{ runId, kind: "file", text: basename(String(f)) }];
+    }
+    if (SHELL_TOOLS.test(tool)) {
+      const cmd = input.command ?? input.cmd ?? input.script;
+      if (cmd) return [{ runId, kind: "command", text: cap(String(cmd).trim()) }];
+    }
+    return [];
+  }
+
+  if (part.type === "patch" && Array.isArray(part.files)) {
+    return (part.files as unknown[])
+      .filter((f): f is string => typeof f === "string" && f.length > 0)
+      .map((f) => ({ runId, kind: "file" as const, text: basename(f) }));
+  }
+
+  if (part.type === "file" && part.filename) {
+    return [{ runId, kind: "file", text: basename(String(part.filename)) }];
+  }
+
+  // text / reasoning / step-start / step-finish / agent / … → prose or control → drop.
+  return [];
+}
+
+// Routes ONE event to 0..N activities, or reports a drop reason.
+export function routeEvent(event: RawEvent, sessions: ReadonlyMap<string, string>): RouteResult {
   const p = event.properties ?? {};
-  let text = "";
-  let status: RoutedActivity["status"] | undefined;
+  const part = p.part as PartLike | undefined;
+  // sessionID is top-level on most events, but inside the part for message.part.updated.
+  const sessionID = (p.sessionID as string | undefined) ?? part?.sessionID;
+  if (!sessionID) return { activities: [], dropped: "no-session" };
+  const runId = sessions.get(sessionID);
+  if (!runId) return { activities: [], dropped: "unknown-session" };
 
-  if (kind === "file" && p.file) {
-    text = basename(String(p.file));
-  } else if (kind === "command" && p.command) {
-    text = String(p.command).trim();
-  } else if (kind === "todo" && p.todo) {
-    const todo = p.todo as { content?: string; status?: string };
-    text = (todo.content ?? "").trim();
-    status = normalizeStatus(todo.status);
-  } else if (kind === "error") {
-    text = `error: ${String(p.error ?? event.type)}`;
-  } else if (kind === "phase") {
-    // Session lifecycle — keep a terse, structured signal (e.g. "idle"/"working").
-    text = String(p.status ?? p.state ?? event.type);
+  switch (event.type) {
+    case "message.part.updated":
+      return { activities: fromPart(runId, part) };
+
+    case "todo.updated": {
+      const todos = Array.isArray(p.todos) ? (p.todos as Array<{ content?: string; status?: string }>) : [];
+      const activities = todos
+        .filter((t) => (t.content ?? "").trim())
+        .map((t) => ({ runId, kind: "todo" as const, text: cap(t.content!.trim()), status: normalizeStatus(t.status) }));
+      return { activities };
+    }
+
+    case "command.executed": {
+      const cmd = [p.name, p.arguments].map((x) => String(x ?? "").trim()).filter(Boolean).join(" ");
+      return { activities: cmd ? [{ runId, kind: "command", text: cap(cmd) }] : [] };
+    }
+
+    case "file.edited":
+      return { activities: p.file ? [{ runId, kind: "file", text: basename(String(p.file)) }] : [] };
+
+    case "session.error":
+      return { activities: [{ runId, kind: "error", text: cap(`error: ${String(p.error ?? "unknown")}`) }] };
+
+    default:
+      return { activities: [], dropped: "unknown-kind" };
   }
-
-  // No usable content → drop (e.g. a todo with no content). Errors/phases keep a
-  // minimal text because they signal a state change the operator must see.
-  if (!text) {
-    if (kind === "error" || kind === "phase") text = event.type;
-    else return { dropped: "unknown-kind" };
-  }
-
-  return { activity: { runId, kind, text: text.slice(0, 500), ...(status ? { status } : {}) } };
 }
 
-// Stateful registry that routes events AND tracks per-session context for
-// enriched heartbeat messages (current task, last file edited).
+// Stateful registry: routes events, dedups repeats (tool parts stream many updates),
+// and tracks per-session context for the heartbeat enrichment.
 export class ActivityRouter {
   private readonly sessions = new Map<string, string>();
   private readonly context = new Map<string, SessionContext>();
@@ -109,7 +151,7 @@ export class ActivityRouter {
 
   register(sessionId: string, runId: string): void {
     this.sessions.set(sessionId, runId);
-    this.context.set(sessionId, { lastFile: undefined, lastTodo: undefined, fileCount: 0 });
+    this.context.set(sessionId, { lastFile: undefined, lastTodo: undefined, fileCount: 0, emitted: new Set() });
   }
 
   unregister(sessionId: string): void {
@@ -117,27 +159,34 @@ export class ActivityRouter {
     this.context.delete(sessionId);
   }
 
-  route(event: RawEvent): RoutedActivity | null {
+  // Returns the activities to surface for this event (already deduped). Empty when
+  // nothing new is worth showing.
+  route(event: RawEvent): RoutedActivity[] {
     const r = routeEvent(event, this.sessions);
-    if (r.dropped) {
-      this.drops[r.dropped]++;
-      return null;
-    }
-    const a = r.activity;
-    if (!a) return null;
+    if (r.dropped) this.drops[r.dropped]++;
+    if (r.activities.length === 0) return [];
 
-    // Track context for heartbeat enrichment — keep the last file and last todo.
-    const sid = [...this.sessions.entries()].find(([, rid]) => rid === a.runId)?.[0];
+    const sid = [...this.sessions.entries()].find(([, rid]) => rid === r.activities[0]!.runId)?.[0];
     const ctx = sid ? this.context.get(sid) : undefined;
-    if (ctx) {
-      if (a.kind === "file") { ctx.lastFile = a.text; ctx.fileCount++; }
-      else if (a.kind === "todo") ctx.lastTodo = a.text;
+
+    const out: RoutedActivity[] = [];
+    for (const a of r.activities) {
+      // Dedup repeated emissions (a tool part updates many times; a todo snapshot
+      // re-sends unchanged rows). Key by kind+text+status so a status progression
+      // (pending→in_progress→completed) still flows.
+      const key = `${a.kind}:${a.text}:${a.status ?? ""}`;
+      if (ctx) {
+        if (ctx.emitted.has(key)) continue;
+        ctx.emitted.add(key);
+        if (a.kind === "file") { ctx.lastFile = a.text; ctx.fileCount++; }
+        else if (a.kind === "todo") ctx.lastTodo = a.text;
+      }
+      out.push(a);
     }
-    return a;
+    return out;
   }
 
-  // Returns a short contextual summary for heartbeat enrichment: what the agent
-  // is currently working on, based on the last observed todo and file edit.
+  // Short contextual summary for heartbeat enrichment (last todo, files, last file).
   getContext(sessionId: string): string {
     const ctx = this.context.get(sessionId);
     if (!ctx) return "";
@@ -148,7 +197,6 @@ export class ActivityRouter {
     return parts.join(" — ");
   }
 
-  // Same as getContext but resolves by runId (finds the session for that run).
   contextForRun(runId: string): string {
     for (const [sid, rid] of this.sessions) {
       if (rid === runId) return this.getContext(sid);
@@ -161,4 +209,5 @@ interface SessionContext {
   lastFile?: string;
   lastTodo?: string;
   fileCount: number;
+  emitted: Set<string>;
 }

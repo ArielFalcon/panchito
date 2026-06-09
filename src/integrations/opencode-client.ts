@@ -101,14 +101,12 @@ export async function startEventStream(
       const payload = event.payload;
       if (!payload?.type) continue;
 
-      const activity = activityRouter.route({
+      const activities = activityRouter.route({
         type: payload.type,
         properties: payload.properties,
       });
 
-      if (activity) {
-        // Session lifecycle events carry no operator value — don't surface them.
-        if (activity.kind === "phase") continue;
+      for (const activity of activities) {
         // Build a concise display line for the human log feed (chat-assistant context).
         // The structured fields below feed the live TUI panel; the text is already clean.
         let shown = activity.text;
