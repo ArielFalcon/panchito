@@ -423,6 +423,20 @@ export function clearDatabase(): void {
   db.exec("DELETE FROM specs; DELETE FROM cases; DELETE FROM runs;");
 }
 
+// Deletes EVERYTHING history holds for an app: runs (cases/specs/activity cascade
+// via the schema's ON DELETE CASCADE), run outcomes, learning rules, curriculum and
+// scorecard. Used by DELETE /api/apps/:name?purge=1. Returns the number of run rows
+// removed (the other tables are not always populated).
+export function deleteAppHistory(app: string): number {
+  ensureDb();
+  const info = db.prepare("DELETE FROM runs WHERE app = ?").run(app);
+  db.prepare("DELETE FROM run_outcomes WHERE app = ?").run(app);
+  db.prepare("DELETE FROM learning_rules WHERE app = ?").run(app);
+  db.prepare("DELETE FROM curriculum WHERE app = ?").run(app);
+  db.prepare("DELETE FROM scorecard WHERE app = ?").run(app);
+  return info.changes;
+}
+
 export const MAX_CONTINUATION_DEPTH = 5;
 
 export function continuationDepth(record: RunRecord): number {

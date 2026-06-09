@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createRecord, getRecord, listRecords, currentRun, updateRecord, addCase, continuationDepth, clearDatabase, appendActivity, upsertLearningRule, listLearningRules, recordRuleOutcome, saveScorecardEntry, loadScorecard } from "./history";
+import { createRecord, getRecord, listRecords, currentRun, updateRecord, addCase, continuationDepth, clearDatabase, appendActivity, upsertLearningRule, listLearningRules, recordRuleOutcome, saveScorecardEntry, loadScorecard, deleteAppHistory } from "./history";
 
 test("createRecord stores an enqueued record findable by id", () => {
   const r = createRecord({ target: "e2e",  app: "hist-a", sha: "abcdef1234", mode: "diff" });
@@ -145,4 +145,16 @@ test("scorecard persists oracle outcomes and aggregates valueScore across runs",
   assert.equal(sc!.summary.measuredRuns, 2);
   assert.ok(Math.abs(sc!.summary.avgValueScore! - 0.6) < 1e-9, `expected ~0.6, got ${sc!.summary.avgValueScore}`);
   assert.equal(sc!.summary.lastValueScore, 0.7);
+});
+
+test("deleteAppHistory removes the app's runs (cascading cases/specs) but not other apps'", () => {
+  const doomed = `hist-del-${Date.now().toString(36)}`;
+  const alive = `hist-keep-${Date.now().toString(36)}`;
+  const mine = createRecord({ app: doomed, sha: "a1b2c3d", target: "e2e", mode: "diff" });
+  addCase(mine.id, { name: "t1", status: "pass" });
+  const other = createRecord({ app: alive, sha: "a1b2c3d", target: "e2e", mode: "diff" });
+  const removed = deleteAppHistory(doomed);
+  assert.ok(removed >= 1);
+  assert.equal(getRecord(mine.id), undefined);
+  assert.ok(getRecord(other.id));
 });
