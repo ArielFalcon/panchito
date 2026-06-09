@@ -20,7 +20,23 @@
 
 ## 2. What already exists (do not rebuild)
 
-- **Control API** (`src/server/api.ts`, DI via `ApiDeps`, unit-tested): `POST /api/runs`, `GET /api/runs/:id`, `GET /api/runs?app`, `GET /api/apps`, `GET /api/queue`, `GET /api/health`. Optional bearer auth.
+- **Control API** (`src/server/api.ts`, DI via `ApiDeps`, unit-tested): `POST /api/runs`, `GET /api/runs/:id`, `GET /api/runs?app`, `GET /api/apps`, `POST /api/apps` (server-side onboarding), `DELETE /api/apps/:name[?purge=1]` (config + optional mirror/history purge), `GET /api/queue`, `GET /api/health`. Optional bearer auth.
+
+  **Server-side onboarding** (`POST /api/apps`) validates the repo against GitHub
+  (the token lives in the orchestrator, NOT the TUI — this is what fixed the
+  "GITHUB_TOKEN not found" wizard error), validates the YAML against the schema,
+  writes `config/apps/<name>.yaml`. Body flags: `validateOnly` (repo check →
+  `repoInfo` only), `dryRun` (returns the YAML, writes nothing), `env`
+  (key→value map applied to the live `process.env` *and* persisted to `.env` — each var
+  on its own line; values are never echoed back, only the applied key names). With
+  Doppler, the response includes a warning: persist the vars there too or they die
+  with the container. `services[]` lets one e2e app declare its microservice repos
+  (a webhook from any service then triggers an e2e run of the app).
+
+  **App deletion** (`DELETE /api/apps/:name`) removes the YAML; with `?purge=1`,
+  also removes the PRIMARY repo mirror (service mirrors may be shared and are
+  regenerable caches anyway) and the app's run history. The watched repo is
+  never touched.
 - **Persistent run history** (`src/server/history.ts`): `RunRecord` with `step/stepDetail/cases/verdict/passed/failed/note/retrying/logs`. `addCase` upserts by name. Durable SQLite (survives restarts via `better-sqlite3` at `HISTORY_DB_PATH`); pruned at 30 days.
 - **Progress callbacks**: `runPipeline(onStep, onCase)` fire at coarse boundaries (classify/generate/validate/execute/retry/done), wired into the record by `enqueueApiRun` (`src/index.ts`).
 - **bin/qa**: a bash TUI (curl+jq) that already renders a live-ish dashboard over polling — the proof that polling suffices for objectives 1 and most of 2.

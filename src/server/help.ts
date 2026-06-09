@@ -51,7 +51,25 @@ The service must be running: \`docker compose up\` (or the orchestrator started 
 5. Choose test target: e2e (browser tests) or code (source tests)
 6. Enable/disable AI review and shadow mode
 7. Set a test data prefix (default: qa-bot)
-8. Review and confirm — a YAML config is written to config/apps/<name>.yaml
+8. (e2e only) Optionally add microservice repos (services[]). Each entry: the
+   service repo (org/name), an optional OpenAPI glob, and an optional versionUrl.
+   A webhook from a service repo triggers an e2e run of the app with the
+   service commit as the blast radius.
+9. Optionally add env vars (KEY=value). They land in process.env immediately AND
+   are persisted to .env on the orchestrator host (own line, no inline comments).
+   Doppler users must also add them in Doppler — .env only covers local boots.
+   The wizard masks values; they NEVER appear in API responses or the YAML preview.
+10. Review the server-rendered YAML preview and confirm — config is written to
+    config/apps/<name>.yaml by the orchestrator (the TUI does not touch the FS).
+
+## How to delete a project
+
+Select 'Delete Project' from the home screen. Two options:
+- **Config only:** removes config/apps/<name>.yaml, keeps the run history and the
+  repo mirror cache.
+- **Full purge:** also removes the PRIMARY repo mirror (regenerable cache) and the
+  app's run history (irreversible). Service-repo mirrors may be shared with other
+  apps and are left intact. The watched repo itself is NEVER touched.
 
 ## Configuration (config/apps/<name>.yaml)
 
