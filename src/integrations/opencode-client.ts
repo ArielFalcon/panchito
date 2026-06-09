@@ -207,6 +207,7 @@ export interface OpencodeRunInput {
   runId?: string; // maps the session to a RunRecord for SSE live activity
   contextMap?: ArchitectureContext; // cross-cutting: the FE↔BE map, injected by the orchestrator
   service?: { repo: string; mirrorDir: string; openapi?: string | string[] }; // cross-repo: the triggering microservice (read-only working copy)
+  services?: Array<{ repo: string; mirrorDir: string; openapi?: string | string[] }>; // context mode: every declared service, mirrored read-only
 }
 
 // A session opened against `opencode serve`. prompt() sends the message to the
@@ -962,6 +963,27 @@ export function renderArchitectureContext(
 
 export function buildContextTask(input: OpencodeRunInput): string {
   const openapiHint = Array.isArray(input.openapi) ? input.openapi.join(", ") : input.openapi;
+  const serviceLines = input.services?.length
+    ? [
+        ``,
+        `## Microservice repos (${input.services.length})`,
+        `This app's backend is split into microservices. Each repo below is mirrored READ-ONLY;`,
+        `extract its OpenAPI operations into the SAME context.json, setting each operation's`,
+        `"service" field to the repo name shown here:`,
+        ``,
+        ...input.services.flatMap((s) => {
+          const hint = Array.isArray(s.openapi) ? s.openapi.join(", ") : s.openapi;
+          return [
+            `- **${s.repo}** — working copy at: ${s.mirrorDir}`,
+            ...(hint ? [`  OpenAPI hint: ${hint} (relative to that working copy)`] : [`  No OpenAPI hint — search that working copy for openapi/swagger files.`]),
+          ];
+        }),
+        ``,
+        `The feBe JOIN is still derived from THIS frontend repo's API clients: a client method's`,
+        `operationId must match an operation extracted from one of the services above (or from`,
+        `this repo's own specs). Do not invent links for services the frontend never calls.`,
+      ]
+    : [];
   return [
     `Build or refresh the FE↔BE architecture map for ${input.repo}.`,
     ``,
@@ -986,12 +1008,13 @@ export function buildContextTask(input: OpencodeRunInput): string {
     `   THE JOIN IS THE WHOLE POINT: every link must resolve to a known route AND a known operation.`,
     ``,
     `4. **flows** (optional) — named user flows grouping routes + operations for readability.`,
+    ...serviceLines,
     ``,
     `## Procedure`,
     `1. Activate serena (activate_project) on the working directory.`,
     `2. Find ALL Angular routing files (serena glob: **/*routes*.ts, **/app-routing*.ts).`,
     `   For each route definition (path + component), add an entry to routes.`,
-    `3. Find ALL OpenAPI spec files${openapiHint ? ` (start with ${openapiHint})` : ""}.`,
+    `3. Find ALL OpenAPI spec files${openapiHint ? ` (start with ${openapiHint})` : ""}.${input.services?.length ? " Include every microservice repo listed above (their working copies are local paths you can read)." : ""}`,
     `   For each operation (operationId + method + path), add an entry to api.`,
     `4. Find the generated API client files (typically src/app/generated/ or similar).`,
     `   For each client method that calls a backend operation, map its call site to a route`,

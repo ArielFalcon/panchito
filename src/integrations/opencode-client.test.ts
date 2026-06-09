@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildPrompt,
+  buildContextTask,
   parseVerdict,
   extractJsonObjects,
   runOpencode,
@@ -436,4 +437,32 @@ test("buildPrompt has no cross-repo section without a service", () => {
     namespace: "qa-1", needsReview: false, target: "e2e", mode: "diff", appName: "shop",
   });
   assert.doesNotMatch(text, /Cross-repo change/);
+});
+
+test("buildContextTask renders one extraction section per service", () => {
+  const text = buildContextTask({
+    repo: "org/shop-front", sha: "a1b2c3d", diff: "", mirrorDir: "/m/front", e2eRelDir: "e2e",
+    namespace: "qa-1", needsReview: false, target: "e2e", mode: "context", appName: "shop",
+    services: [
+      { repo: "org/orders-svc", mirrorDir: "/m/orders", openapi: "api/*.yaml" },
+      { repo: "org/payments-svc", mirrorDir: "/m/payments" },
+    ],
+  });
+  assert.match(text, /Microservice repos \(2\)/);
+  assert.match(text, /org\/orders-svc/);
+  assert.match(text, /\/m\/orders/);
+  assert.match(text, /api\/\*\.yaml/);
+  assert.match(text, /"service" field/);
+  assert.match(text, /org\/payments-svc/);
+  assert.match(text, /\/m\/payments/);
+  // No-openapi entry should be present without the hint line
+  assert.match(text, /No OpenAPI hint/);
+});
+
+test("buildContextTask without services is unchanged (no microservice section)", () => {
+  const text = buildContextTask({
+    repo: "org/shop-front", sha: "a1b2c3d", diff: "", mirrorDir: "/m/front", e2eRelDir: "e2e",
+    namespace: "qa-1", needsReview: false, target: "e2e", mode: "context", appName: "shop",
+  });
+  assert.doesNotMatch(text, /Microservice repos/);
 });
