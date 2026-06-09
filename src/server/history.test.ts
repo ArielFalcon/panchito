@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createRecord, getRecord, listRecords, currentRun, updateRecord, addCase, continuationDepth, clearDatabase, appendActivity } from "./history";
+import { createRecord, getRecord, listRecords, currentRun, updateRecord, addCase, continuationDepth, clearDatabase, appendActivity, upsertLearningRule, listLearningRules, recordRuleOutcome } from "./history";
 
 test("createRecord stores an enqueued record findable by id", () => {
   const r = createRecord({ target: "e2e",  app: "hist-a", sha: "abcdef1234", mode: "diff" });
@@ -108,4 +108,17 @@ test("continuationDepth walks the parentRunId chain", () => {
   assert.equal(continuationDepth(grandparent), 0);
   assert.equal(continuationDepth(parent), 1);
   assert.equal(continuationDepth(child), 2);
+});
+
+test("recordRuleOutcome accumulates a running mean and earns promotion (never overwrites)", () => {
+  const app = "hist-learn-1";
+  upsertLearningRule({ id: "lr-1", app, trigger: "t", action: "a", errorClass: "E-FALSE-POSITIVE", source: "run-x" });
+  recordRuleOutcome("lr-1", 0.8);
+  recordRuleOutcome("lr-1", 0.8);
+  recordRuleOutcome("lr-1", 0.8);
+  const r = listLearningRules(app, 10).find((x) => x.id === "lr-1");
+  assert.ok(r, "rule should still exist");
+  assert.equal(r!.outcomeCount, 3); // accumulated across outcomes, not overwritten
+  assert.ok(Math.abs(r!.successRate! - 0.8) < 1e-9, `expected ~0.8, got ${r!.successRate}`);
+  assert.equal(r!.status, "active"); // promotion earned from objective outcomes
 });

@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { RunRecord, RunMode, TestTarget, QaCase, RunVerdict, SpecRecord, RunOutcome, AgentActivity } from "../types";
-import type { LearningRule, RuleUpsert, Confidence, RuleStatus } from "../qa/learning/learning-rule";
+import { applyOutcome, type LearningRule, type RuleUpsert, type Confidence, type RuleStatus } from "../qa/learning/learning-rule";
 import type { ErrorClass } from "../qa/learning/taxonomy";
 import type { Curriculum } from "../qa/learning/curriculum";
 
@@ -131,6 +131,7 @@ function ensureDb(): void {
       error_class TEXT NOT NULL,
       confidence TEXT NOT NULL DEFAULT 'low',
       usage_count INTEGER NOT NULL DEFAULT 0,
+      outcome_count INTEGER NOT NULL DEFAULT 0,
       success_rate REAL,
       last_verified TEXT,
       source TEXT NOT NULL,
@@ -152,6 +153,9 @@ function ensureDb(): void {
   // exist on the persisted volume (CREATE TABLE IF NOT EXISTS won't add a column).
   if (!columnExists("runs", "step_started_at")) {
     db.exec("ALTER TABLE runs ADD COLUMN step_started_at TEXT");
+  }
+  if (!columnExists("learning_rules", "outcome_count")) {
+    db.exec("ALTER TABLE learning_rules ADD COLUMN outcome_count INTEGER NOT NULL DEFAULT 0");
   }
 
   insertRun = db.prepare(`
@@ -183,16 +187,17 @@ function ensureDb(): void {
 
   // learning_rules (Phase 2 — placeholder for Graphiti)
   upsertRuleStmt = db.prepare(`
-    INSERT INTO learning_rules (id, app, trigger_text, action_text, error_class, confidence, usage_count, success_rate, last_verified, source, status, at)
-    VALUES (@id, @app, @trigger, @action, @errorClass, @confidence, @usageCount, @successRate, @lastVerified, @source, @status, @at)
+    INSERT INTO learning_rules (id, app, trigger_text, action_text, error_class, confidence, usage_count, outcome_count, success_rate, last_verified, source, status, at)
+    VALUES (@id, @app, @trigger, @action, @errorClass, @confidence, @usageCount, @outcomeCount, @successRate, @lastVerified, @source, @status, @at)
     ON CONFLICT(id) DO UPDATE SET
       confidence = excluded.confidence,
       usage_count = excluded.usage_count,
+      outcome_count = excluded.outcome_count,
       success_rate = excluded.success_rate,
       last_verified = excluded.last_verified,
       status = excluded.status
   `);
-  listRulesStmt = db.prepare("SELECT * FROM learning_rules WHERE app = ? AND status IN ('active', 'candidate') ORDER BY confidence DESC, usage_count DESC LIMIT ?");
+  listRulesStmt = db.prepare("SELECT * FROM learning_rules WHERE app = ? AND status IN ('active', 'candidate') ORDER BY (status = 'active') DESC, COALESCE(success_rate, 0) DESC, at DESC LIMIT ?");
   incrementRuleUsageStmt = db.prepare("UPDATE learning_rules SET usage_count = usage_count + 1 WHERE id = ?");
   loadCurriculumStmt = db.prepare("SELECT data, updated_at FROM curriculum WHERE app = ?");
   saveCurriculumStmt = db.prepare("INSERT INTO curriculum (app, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(app) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at");
@@ -463,6 +468,7 @@ export function upsertLearningRule(rule: RuleUpsert & { app: string; id: string 
     errorClass: rule.errorClass,
     confidence: "low" as Confidence,
     usageCount: 0,
+    outcomeCount: 0,
     successRate: null,
     lastVerified: null,
     source: rule.source,
@@ -471,22 +477,27 @@ export function upsertLearningRule(rule: RuleUpsert & { app: string; id: string 
   });
 }
 
-export function listLearningRules(app: string, limit = 20): LearningRule[] {
-  ensureDb();
-  const rows = listRulesStmt.all(app, limit) as Array<Record<string, unknown>>;
-  return rows.map((row) => ({
+function rowToRule(row: Record<string, unknown>): LearningRule {
+  return {
     id: row.id as string,
     trigger: row.trigger_text as string,
     action: row.action_text as string,
     errorClass: row.error_class as ErrorClass,
     confidence: row.confidence as Confidence,
     usageCount: row.usage_count as number,
+    outcomeCount: (row.outcome_count as number) ?? 0,
     successRate: row.success_rate as number | null,
     lastVerified: row.last_verified as string | null,
     source: row.source as string,
     status: row.status as RuleStatus,
     at: row.at as string,
-  }));
+  };
+}
+
+export function listLearningRules(app: string, limit = 20): LearningRule[] {
+  ensureDb();
+  const rows = listRulesStmt.all(app, limit) as Array<Record<string, unknown>>;
+  return rows.map(rowToRule);
 }
 
 export function incrementRuleUsage(ruleIds: string[]): void {
@@ -497,10 +508,18 @@ export function incrementRuleUsage(ruleIds: string[]): void {
   }
 }
 
-export function updateRuleSuccessRate(ruleId: string, successRate: number): void {
+// Fold one objective outcome (a valueScore in [0,1]) into a rule's running statistics:
+// successRate (running mean — NOT an overwrite), outcomeCount, confidence, and status
+// (promotion/demotion with hysteresis). The pure governance lives in applyOutcome; this is
+// only the read-modify-write boundary. No-op when the rule no longer exists.
+export function recordRuleOutcome(ruleId: string, score: number): void {
   ensureDb();
-  const stmt = db.prepare("UPDATE learning_rules SET success_rate = ?, last_verified = ? WHERE id = ?");
-  stmt.run(successRate, new Date().toISOString(), ruleId);
+  const row = db.prepare("SELECT * FROM learning_rules WHERE id = ?").get(ruleId) as Record<string, unknown> | undefined;
+  if (!row) return;
+  const updated = applyOutcome(rowToRule(row), score);
+  db.prepare(
+    "UPDATE learning_rules SET success_rate = ?, outcome_count = ?, confidence = ?, status = ?, last_verified = ? WHERE id = ?",
+  ).run(updated.successRate, updated.outcomeCount, updated.confidence, updated.status, new Date().toISOString(), ruleId);
 }
 
 export function loadCurriculum(app: string): Curriculum | null {

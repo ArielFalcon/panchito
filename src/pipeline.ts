@@ -891,14 +891,16 @@ export async function runPipeline(
     }
   }
 
-  // Attribución: update rule successRate based on this run's valueScore
+  // Attribution: fold this run's valueScore into each retrieved rule's running statistics
+  // (running mean, promotion/demotion with hysteresis). NEVER an overwrite — one outcome
+  // barely moves an established rule, so a fluke cannot poison the ledger.
   if (retrievedRuleIds.length > 0 && valueScore !== null) {
-    const { updateRuleSuccessRate } = await import("./server/history");
+    const { recordRuleOutcome } = await import("./server/history");
     try {
       for (const ruleId of retrievedRuleIds) {
-        updateRuleSuccessRate(ruleId, valueScore);
+        recordRuleOutcome(ruleId, valueScore);
       }
-      log(`[qa] attribution: updated successRate for ${retrievedRuleIds.length} rule(s) with valueScore=${(valueScore * 100).toFixed(0)}%`);
+      log(`[qa] attribution: recorded outcome (valueScore=${(valueScore * 100).toFixed(0)}%) for ${retrievedRuleIds.length} rule(s)`);
     } catch (err) {
       log(`[qa] WARNING: attribution update failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
     }

@@ -5,6 +5,7 @@ import {
   deduplicateRules,
   selectForRetrieval,
   renderRulesForPrompt,
+  applyOutcome,
   type LearningRule,
   type RuleUpsert,
 } from "./learning-rule";
@@ -17,6 +18,7 @@ function rule(overrides: Partial<LearningRule> = {}): LearningRule {
     errorClass: "E-FALSE-POSITIVE",
     confidence: "low",
     usageCount: 0,
+    outcomeCount: 0,
     successRate: null,
     lastVerified: null,
     source: "run-1",
@@ -93,6 +95,88 @@ describe("selectForRetrieval", () => {
     );
     const result = selectForRetrieval(rules, { app: "test", maxRules: 3 });
     assert.equal(result.length, 3);
+  });
+
+  it("ranks active rules by successRate (the attribution signal)", () => {
+    // listed worst-first to prove the ranking is by successRate, not input order.
+    const rules = [
+      rule({ id: "lo", status: "active", successRate: 0.2, outcomeCount: 5 }),
+      rule({ id: "hi", status: "active", successRate: 0.9, outcomeCount: 5 }),
+    ];
+    const result = selectForRetrieval(rules, { app: "test" });
+    assert.equal(result[0]!.id, "hi");
+  });
+
+  it("ranks any active rule above any candidate (exploit before explore)", () => {
+    const rules = [
+      rule({ id: "cand", status: "candidate", successRate: 0.95, outcomeCount: 1 }),
+      rule({ id: "act", status: "active", successRate: 0.3, outcomeCount: 5 }),
+    ];
+    const result = selectForRetrieval(rules, { app: "test" });
+    assert.equal(result[0]!.id, "act");
+  });
+});
+
+describe("applyOutcome", () => {
+  it("sets successRate to the score on the first outcome", () => {
+    const r = applyOutcome(rule({ outcomeCount: 0, successRate: null }), 0.8);
+    assert.equal(r.successRate, 0.8);
+    assert.equal(r.outcomeCount, 1);
+    assert.equal(r.status, "candidate"); // not enough outcomes to promote yet
+  });
+
+  it("accumulates as a running mean, never an overwrite", () => {
+    let r = rule({ outcomeCount: 0, successRate: null });
+    r = applyOutcome(r, 1.0);
+    r = applyOutcome(r, 0.0);
+    r = applyOutcome(r, 0.5);
+    assert.equal(r.outcomeCount, 3);
+    assert.ok(Math.abs(r.successRate! - 0.5) < 1e-9, `expected ~0.5, got ${r.successRate}`);
+  });
+
+  it("promotes a candidate to active after enough good outcomes", () => {
+    let r = rule({ status: "candidate" });
+    r = applyOutcome(r, 0.8);
+    r = applyOutcome(r, 0.8);
+    assert.equal(r.status, "candidate"); // only 2 outcomes
+    r = applyOutcome(r, 0.8);
+    assert.equal(r.status, "active"); // 3 outcomes, mean >= promote threshold
+  });
+
+  it("does NOT promote when the mean stays below the threshold", () => {
+    let r = rule({ status: "candidate" });
+    r = applyOutcome(r, 0.5);
+    r = applyOutcome(r, 0.5);
+    r = applyOutcome(r, 0.5);
+    assert.equal(r.status, "candidate");
+  });
+
+  it("demotes an active rule only after SUSTAINED low outcomes (tolerant, not trigger-happy)", () => {
+    let r = rule({ status: "active", successRate: 0.8, outcomeCount: 3 });
+    r = applyOutcome(r, 0.0);
+    r = applyOutcome(r, 0.0);
+    r = applyOutcome(r, 0.0);
+    assert.equal(r.status, "active"); // a few failures do NOT flip a trusted rule
+    for (let i = 0; i < 6; i++) r = applyOutcome(r, 0.0); // but sustained failure does
+    assert.equal(r.status, "deprecated");
+  });
+
+  it("hysteresis: an active rule in the dead band [0.3,0.6) is NOT demoted", () => {
+    let r = rule({ status: "active", successRate: 0.45, outcomeCount: 5 });
+    r = applyOutcome(r, 0.45);
+    r = applyOutcome(r, 0.45);
+    assert.equal(r.status, "active");
+  });
+
+  it("is reversible: a deprecated rule recovers to active with good outcomes", () => {
+    const r = applyOutcome(rule({ status: "deprecated", successRate: 0.5, outcomeCount: 2 }), 0.9);
+    assert.equal(r.status, "active"); // resurrected, nothing was deleted
+  });
+
+  it("a single anomalous outcome barely moves a high-confidence rule", () => {
+    const r = applyOutcome(rule({ status: "active", successRate: 0.9, outcomeCount: 20 }), 0.0);
+    assert.ok(r.successRate! > 0.85, `expected >0.85, got ${r.successRate}`);
+    assert.equal(r.status, "active"); // one bad event does not flip it
   });
 });
 

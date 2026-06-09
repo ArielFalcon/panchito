@@ -841,7 +841,7 @@ test("learning layer: learned rules are injected into generation input", async (
   const calls: string[] = [];
   const d = deps(passing(), calls, { diff: DIFF_4, coverage: [cov([1, 2, 3, 4])], message: "feat: add x" });
   d.retrieveRules = () => ({
-    rules: [{ id: "rule-1", trigger: "test", action: "assert", errorClass: "E-STATIC" as const, confidence: "low" as const, usageCount: 0, successRate: null, lastVerified: null, source: "run-1", status: "candidate" as const, at: "" }],
+    rules: [{ id: "rule-1", trigger: "test", action: "assert", errorClass: "E-STATIC" as const, confidence: "low" as const, usageCount: 0, outcomeCount: 0, successRate: null, lastVerified: null, source: "run-1", status: "candidate" as const, at: "" }],
     promptSection: "## Learned rules\n- Do X when Y",
   });
   await runPipeline(app, "ret0001", d, "manual", { mode: "diff", runId: "run-lrn-2" });
