@@ -24,6 +24,7 @@ export interface RunRequest {
   source?: TriggerSource; // "webhook" (default) | "manual"
   fixCases?: QaCase[]; // continuation: failed cases to fix in the first generation
   parentRunId?: string; // continuation: the run this continues
+  triggerRepo?: string; // cross-repo runs: the service repo whose commit originated this run
   previousNamespace?: string; // cleanup: namespace from an interrupted previous run
 }
 
@@ -54,7 +55,7 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
     }
   }
 
-  const record = createRecord({ app: req.app, sha: req.sha, target: req.target, mode: req.mode, parentRunId: req.parentRunId });
+  const record = createRecord({ app: req.app, sha: req.sha, target: req.target, mode: req.mode, parentRunId: req.parentRunId, triggerRepo: req.triggerRepo });
   console.log(`[qa] enqueued ${req.app}@${req.sha} mode=${req.mode}${req.parentRunId ? ` (continue of ${req.parentRunId})` : ""} (queue: ${queue.size + 1})`);
 
   queue.enqueue(async (signal) => {
@@ -105,7 +106,7 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
           },
         },
         req.source ?? "webhook",
-        { mode: req.mode, target: req.target, guidance: req.guidance, fixCases: req.fixCases, parentRunId: req.parentRunId, previousNamespace, runId: record.id },
+        { mode: req.mode, target: req.target, guidance: req.guidance, fixCases: req.fixCases, parentRunId: req.parentRunId, triggerRepo: req.triggerRepo, previousNamespace, runId: record.id },
         (step, detail) => updateRecord(record.id, { step, stepDetail: detail, retrying: step === "retry" }),
         // A test finished → persist the case (live bar/history) AND mark its activity
         // todo completed so it stops being the "running" focus.

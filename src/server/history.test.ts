@@ -123,6 +123,16 @@ test("recordRuleOutcome accumulates a running mean and earns promotion (never ov
   assert.equal(r!.status, "active"); // promotion earned from objective outcomes
 });
 
+test("createRecord persists triggerRepo and getRecord returns it", () => {
+  const rec = createRecord({ app: "shop", sha: "a1b2c3d", target: "e2e", mode: "diff", triggerRepo: "org/orders-svc" });
+  assert.equal(getRecord(rec.id)?.triggerRepo, "org/orders-svc");
+});
+
+test("triggerRepo is optional and absent by default", () => {
+  const rec = createRecord({ app: "shop", sha: "a1b2c3d", target: "e2e", mode: "diff" });
+  assert.equal(getRecord(rec.id)?.triggerRepo, undefined);
+});
+
 test("scorecard persists oracle outcomes and aggregates valueScore across runs", () => {
   // Unique app per run: the on-disk DB persists across test-suite runs and saveScorecardEntry
   // APPENDS (by design), so a fixed app name would accumulate entries and break absolute counts.

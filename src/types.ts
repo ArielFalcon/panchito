@@ -39,6 +39,7 @@ export interface RunOptions {
   parentRunId?: string;
   previousNamespace?: string; // cleanup: namespace from an interrupted previous run
   runId?: string; // the tracked run id; scopes the data/coverage namespace per run
+  triggerRepo?: string; // cross-repo: the service repo whose commit triggered this run
 }
 
 // Outcome of an OpenCode agent run. The agent writes the E2E tests directly into
@@ -123,6 +124,7 @@ export interface RunRecord {
   note?: string;
   retrying?: boolean;
   parentRunId?: string;
+  triggerRepo?: string; // cross-repo runs: the service repo that originated the event
   cases: QaCase[];
   specs?: SpecRecord[];
   logs: string[];

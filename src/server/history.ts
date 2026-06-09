@@ -74,6 +74,7 @@ function ensureDb(): void {
       note TEXT,
       retrying INTEGER DEFAULT 0,
       parent_run_id TEXT,
+      trigger_repo TEXT,
       at TEXT NOT NULL,
       step_started_at TEXT,
       logs TEXT DEFAULT ''
@@ -167,10 +168,13 @@ function ensureDb(): void {
   if (!columnExists("learning_rules", "outcome_count")) {
     db.exec("ALTER TABLE learning_rules ADD COLUMN outcome_count INTEGER NOT NULL DEFAULT 0");
   }
+  if (!columnExists("runs", "trigger_repo")) {
+    db.exec("ALTER TABLE runs ADD COLUMN trigger_repo TEXT");
+  }
 
   insertRun = db.prepare(`
-    INSERT INTO runs (id, app, sha, ref, target, mode, status, step, step_detail, verdict, passed, failed, note, retrying, parent_run_id, at, logs)
-    VALUES (@id, @app, @sha, @ref, @target, @mode, @status, @step, @stepDetail, @verdict, @passed, @failed, @note, @retrying, @parentRunId, @at, @logs)
+    INSERT INTO runs (id, app, sha, ref, target, mode, status, step, step_detail, verdict, passed, failed, note, retrying, parent_run_id, trigger_repo, at, logs)
+    VALUES (@id, @app, @sha, @ref, @target, @mode, @status, @step, @stepDetail, @verdict, @passed, @failed, @note, @retrying, @parentRunId, @triggerRepo, @at, @logs)
   `);
   getRunStmt = db.prepare("SELECT * FROM runs WHERE id = ?");
   listRunsStmt = db.prepare("SELECT * FROM runs WHERE app = ? ORDER BY at DESC, rowid DESC LIMIT ?");
@@ -260,6 +264,7 @@ function rowToRecord(row: Record<string, unknown>): RunRecord {
     note: (row.note as string) || undefined,
     retrying: Boolean(row.retrying),
     parentRunId: (row.parent_run_id as string) || undefined,
+    triggerRepo: (row.trigger_repo as string) || undefined,
     cases,
     specs: specRows.length > 0 ? specRows : undefined,
     logs: logsText ? logsText.split("\n").filter(Boolean) : [],
@@ -277,7 +282,7 @@ function rowToRecord(row: Record<string, unknown>): RunRecord {
 }
 
 export function createRecord(opts: {
-  app: string; sha: string; ref?: string; target: TestTarget; mode: RunMode; parentRunId?: string;
+  app: string; sha: string; ref?: string; target: TestTarget; mode: RunMode; parentRunId?: string; triggerRepo?: string;
 }): RunRecord {
   ensureDb();
   const id = `run-${opts.sha.slice(0, 7)}-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
@@ -299,6 +304,7 @@ export function createRecord(opts: {
     note: null,
     retrying: 0,
     parentRunId: opts.parentRunId ?? null,
+    triggerRepo: opts.triggerRepo ?? null,
     at,
     logs: "",
   });
@@ -315,6 +321,7 @@ export function createRecord(opts: {
     logs: [],
     at,
     parentRunId: opts.parentRunId,
+    triggerRepo: opts.triggerRepo,
   };
 }
 
