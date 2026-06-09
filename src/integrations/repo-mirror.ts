@@ -65,6 +65,33 @@ export async function ensureMirror(repo: string, sha: string, deps: MirrorDeps):
   return dir;
 }
 
+// A branch name passed to git as a positional arg must never be parseable as an
+// option (no leading '-') nor as a rev range ('..'). Same injection-closing rationale
+// as assertHexSha for SHAs coming from an attacker-controlled webhook.
+const BRANCH_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+export function assertBranchName(branch: string): void {
+  if (!BRANCH_RE.test(branch) || branch.includes("..")) {
+    throw new Error(`invalid branch name: ${JSON.stringify(branch)}`);
+  }
+}
+
+// Pristine working copy at the HEAD of origin/<branch> (not at a specific SHA).
+// Used for the PRIMARY repo of a cross-repo run: the triggering commit belongs to a
+// service repo, so the front is checked out at its own base branch instead.
+export async function ensureMirrorAtBranch(repo: string, branch: string, deps: MirrorDeps): Promise<string> {
+  assertBranchName(branch);
+  const root = deps.root ?? workdirRoot();
+  const dir = join(root, repo.replaceAll("/", "__"));
+  if (!deps.exists(dir)) {
+    await deps.git(["clone", remoteUrl(repo), dir]);
+  } else {
+    await deps.git([...authHeaderArgs(), "fetch", "origin"], dir);
+  }
+  await deps.git(["checkout", "-f", `origin/${branch}`], dir);
+  await deps.git(["clean", "-fd", "-e", "node_modules"], dir);
+  return dir;
+}
+
 // Diff of commit `sha` against its parent (content only, without the header).
 // A MERGE commit has 2+ parents, and `git show` emits an EMPTY diff for it by default —
 // which would blind both commit classification and change-coverage to the merge's blast

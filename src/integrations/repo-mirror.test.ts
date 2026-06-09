@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ensureMirror, getCommitDiff, listChangedSpecs, getCommitsBehind, MirrorDeps } from "./repo-mirror";
+import { ensureMirror, ensureMirrorAtBranch, getCommitDiff, listChangedSpecs, getCommitsBehind, MirrorDeps } from "./repo-mirror";
 
 // authHeaderArgs() depends on GITHUB_TOKEN; clear it to isolate the logic.
 delete process.env.GITHUB_TOKEN;
@@ -106,4 +106,26 @@ test("ensureMirror flattens a nested repo path (replaceAll, not just first slash
   const d = recorder(false);
   const dir = await ensureMirror("org/sub/app", "abc1234", d);
   assert.equal(dir, "/tmp/mirrors/org__sub__app");
+});
+
+test("ensureMirrorAtBranch clones when missing and checks out origin/<branch>", async () => {
+  const d = recorder(false);
+  const dir = await ensureMirrorAtBranch("org/shop-front", "main", d);
+  assert.equal(dir, "/tmp/mirrors/org__shop-front");
+  assert.equal(d.calls[0]?.[0], "clone");
+  assert.ok(d.calls.some((c) => c[0] === "checkout" && c.includes("origin/main")));
+  assert.ok(d.calls.some((c) => c[0] === "clean"));
+});
+
+test("ensureMirrorAtBranch fetches when the mirror exists", async () => {
+  const d = recorder(true);
+  await ensureMirrorAtBranch("org/shop-front", "main", d);
+  assert.ok(d.calls.some((c) => c.includes("fetch")));
+  assert.ok(!d.calls.some((c) => c[0] === "clone"));
+});
+
+test("ensureMirrorAtBranch rejects a branch name that could be parsed as a git option", async () => {
+  const d = recorder(true);
+  await assert.rejects(() => ensureMirrorAtBranch("org/x", "--upload-pack=evil", d));
+  await assert.rejects(() => ensureMirrorAtBranch("org/x", "a..b", d));
 });
