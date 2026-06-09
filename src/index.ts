@@ -1,7 +1,7 @@
 import { createServer, IncomingMessage } from "node:http";
 import { join } from "node:path";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { writeFileSync, readFileSync, chmodSync } from "node:fs";
+import { writeFileSync, readFileSync, chmodSync, rmSync, unlinkSync } from "node:fs";
 import { JobQueue } from "./server/queue";
 import { handleWebhook } from "./server/webhook";
 import { loadAppConfig, loadAppConfigsByRepo, listAppConfigs } from "./orchestrator/config-loader";
@@ -15,10 +15,13 @@ import { recordFixFailure, readFixFailures, renderFailureMemory, realMemoryFs } 
 import { installHttpDispatcher } from "./util/net";
 import { resolveRef, defaultMirrorDeps, authHeaderArgs, type MirrorDeps } from "./integrations/repo-mirror";
 import { defaultOpencodeDeps, askAssistant, OpencodeDeps, startEventStream } from "./integrations/opencode-client";
-import { appendLog, appendActivity } from "./server/history";
+import { appendLog, appendActivity, deleteAppHistory } from "./server/history";
 import { type RunMode, type TestTarget } from "./types";
 import { github } from "./integrations/github";
 import { scrubEnv } from "./qa/code-runner";
+import { createApp as adminCreateApp, deleteApp as adminDeleteApp, type AppAdminDeps } from "./server/app-admin";
+import { writeConfig, configExists } from "./server/onboard";
+import { applyEnvVars, defaultEnvStoreFs } from "./server/env-store";
 
 const SELF_REPO = process.env.AI_PIPELINE_REPO ?? "ArielFalcon/ai-pipeline";
 const ROOT = process.env.AI_PIPELINE_ROOT ?? process.cwd();
@@ -744,11 +747,27 @@ function getAskDeps(): Promise<OpencodeDeps> {
   return askDeps;
 }
 
+// Server-side app onboarding/deletion deps (F5): the orchestrator owns the GitHub
+// token, the config dir and the mirror cache, so the TUI never touches them directly.
+const appAdminDeps: AppAdminDeps = {
+  getRepoInfo: (repo) => github.getRepo(repo),
+  configExists: (name) => configExists(name, ROOT),
+  writeConfig: (name, yaml) => writeConfig(name, yaml, ROOT),
+  deleteConfig: (name) => unlinkSync(join(ROOT, "config", "apps", `${name}.yaml`)),
+  deleteMirror: (repo) => rmSync(join(process.env.MIRROR_DIR ?? join(ROOT, ".mirrors"), repo.replaceAll("/", "__")), { recursive: true, force: true }),
+  deleteHistory: (app) => deleteAppHistory(app),
+  applyEnv: (vars) => applyEnvVars(vars, { fs: defaultEnvStoreFs(), env: process.env }),
+  loadApp: (name) => loadAppConfig(name),
+  env: process.env,
+};
+
 const apiDeps: ApiDeps = {
   queue,
   enqueue: enqueueApiRun,
   loadApp: (name) => loadAppConfig(name),
   listApps: () => listAppConfigs(),
+  createApp: (input) => adminCreateApp(input, appAdminDeps),
+  deleteApp: (name, purge) => adminDeleteApp(name, purge, appAdminDeps),
   resolveRef: (repo, ref) => resolveRef(repo, ref, defaultMirrorDeps),
   getRecord,
   listRecords,
