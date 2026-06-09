@@ -82,6 +82,7 @@ export interface QaClient {
   ask(id: string, question: string, history?: Array<{ role: string; text: string }>): Promise<{ answer: string }>;
   help(question: string, history?: ChatEntry[]): Promise<{ answer: string }>;
   continueRun(id: string, cases: string[], guidance?: string): Promise<{ id: string; parentRunId: string }>;
+  cancelRun(id: string): Promise<void>;
 }
 
 export function createClient(opts: ClientOptions = {}): QaClient {
@@ -127,5 +128,6 @@ export function createClient(opts: ClientOptions = {}): QaClient {
     help: (question, history) => request<{ answer: string }>("POST", "/api/help", { question, history }),
     continueRun: (id, cases, guidance) =>
       request<{ id: string; parentRunId: string }>("POST", `/api/runs/${encodeURIComponent(id)}/continue`, { cases, guidance }),
+    cancelRun: (id) => request<void>("DELETE", `/api/runs/${encodeURIComponent(id)}`),
   };
 }

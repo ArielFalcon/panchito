@@ -3,7 +3,7 @@
 // These are the glue around the presentational Dashboard; the testable logic lives
 // in client.ts / format.ts / Dashboard.tsx.
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { Box, Text, useApp } from "ink";
 import Spinner from "ink-spinner";
 import SelectInput from "ink-select-input";
@@ -25,6 +25,7 @@ export function Watch({ client, id, onDone }: { client: QaClient; id: string; on
   const [record, setRecord] = useState<RunRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { exit } = useApp();
+  const finishedRef = useRef(false);
 
   useEffect(() => {
     let alive = true;
@@ -32,6 +33,7 @@ export function Watch({ client, id, onDone }: { client: QaClient; id: string; on
     let misses = 0;
 
     const finish = (code: number): void => {
+      finishedRef.current = true;
       if (onDone && code !== 99) { onDone(); return; }
       process.exitCode = code;
       timer = setTimeout(() => exit(), 80);
@@ -44,7 +46,7 @@ export function Watch({ client, id, onDone }: { client: QaClient; id: string; on
         misses = 0;
         setRecord(r);
         if (r.verdict) {
-          if (onDone) { timer = setTimeout(() => onDone(), 600); return; }
+          if (onDone) { finishedRef.current = true; timer = setTimeout(() => onDone(), 600); return; }
           finish(r.verdict === "pass" || r.verdict === "skipped" ? 0 : 1);
           return;
         }
@@ -60,7 +62,11 @@ export function Watch({ client, id, onDone }: { client: QaClient; id: string; on
     };
 
     void tick();
-    return () => { alive = false; if (timer) clearTimeout(timer); };
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+      if (!finishedRef.current) client.cancelRun(id).catch(() => {});
+    };
   }, [client, id, exit, onDone]);
 
   if (error) return <Text color="red">{`qa: ${error}`}</Text>;
