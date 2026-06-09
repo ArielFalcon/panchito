@@ -333,6 +333,12 @@ export async function runPipeline(
   if (opts.triggerRepo && opts.triggerRepo !== app.repo && !triggerService) {
     throw new Error(`trigger repo ${opts.triggerRepo} is not a declared service of app ${app.name}`);
   }
+  // Context mode is a whole-repo maintenance task driven from the primary repo; running it
+  // against a service trigger would pass the service diff to the architecture-map builder
+  // and contaminate the prompt with irrelevant signal.
+  if (triggerService && opts.mode === "context") {
+    throw new Error(`context mode cannot be triggered by a service repo (${triggerService.repo}); run it from the primary repo ${app.repo}`);
+  }
   const issueRepo = triggerService ? triggerService.repo : app.repo;
   const reviewerCorrections: string[] = []; // accumulated across review rounds (for RunOutcome)
   let retries = 0; // total regeneration attempts (review loop + failure retries)
@@ -892,7 +898,9 @@ export async function runPipeline(
   let coverageStatus: "pass" | "fail" | "unknown" = "unknown";
   let coverageSummary = "";
   let ccForPersistence: ChangeCoverage | undefined;
-  if (triggerService && mode === "diff" && run.verdict === "pass") {
+  // The change-coverage skip log fires only when coverage WAS configured — otherwise apps
+  // without a coverage provider would log a misleading "skipped" on every cross-repo pass run.
+  if (triggerService && mode === "diff" && run.verdict === "pass" && deps.collectCoverage && covPolicy.mode !== "off") {
     log(`[qa] change-coverage: skipped — the changed lines live in ${triggerService.repo}; browser coverage maps only the frontend (status=unknown).`);
   }
   if (deps.collectCoverage && generating && mode === "diff" && run.verdict === "pass" && covPolicy.mode !== "off" && !triggerService) {

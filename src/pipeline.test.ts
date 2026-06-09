@@ -966,6 +966,14 @@ test("cross-repo: triggerRepo not declared as a service throws (mis-routed event
   );
 });
 
+test("cross-repo: context mode triggered by a service throws (whole-repo maintenance is not a service event)", async () => {
+  const h = deps(passing(), []);
+  await assert.rejects(
+    () => runPipeline(crossApp, "a1b2c3d", h, "webhook", { mode: "context", triggerRepo: "org/orders-svc" }),
+    /context mode cannot be triggered by a service repo/,
+  );
+});
+
 test("cross-repo: generate receives service {repo, mirrorDir}; change-coverage is skipped", async () => {
   const calls: string[] = [];
   let coverageCalled = false;
