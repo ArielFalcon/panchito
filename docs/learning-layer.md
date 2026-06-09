@@ -449,7 +449,7 @@ Seis defensas:
 | Fase | Qué construís | Herramientas | Estado |
 |---|---|---|---|
 | **0 — Marcador** | `RunOutcome` append-only + Labeler + taxonomía (enum). Arregla el purge-30d. | — (TS puro) | ✅ hecho (ver review) |
-| **1 — Oráculo** | Mutation (`code`, scopeada al diff) + fault-injection de respuestas (`e2e`) + scorecard versionado. | Stryker, Playwright `route()` | parcial: code sin scopear, e2e pendiente |
+| **1 — Oráculo** | Mutation (`code`, scopeada al diff) + fault-injection de respuestas (`e2e`) + scorecard versionado. | Stryker, Playwright `route()` | ✅ oráculos hechos (commit `1439b12`); scorecard: pendiente persistir |
 | **2 — Lazo cerrado** | Reflexión + Ledger SQLite con gobierno: `successRate` estadístico, promoción/histéresis, deprecate-reversible, retrieval por `successRate` (active-first + exploración de candidatas). | SQLite | ✅ gobierno hecho (commit `b10da65`); Reflector ya existía |
 | **3 — Skills + meta** | Skill library gateado por valor + DSPy contra el benchmark + currículo automático. | DSPy | — |
 
@@ -479,9 +479,14 @@ Seis defensas:
    `src/qa/learning/*` ya commiteados; `npm test` 460/460 y sale limpio.
 2. ✅ **Lazo de gobierno cerrado** (commit `b10da65`) — `successRate` estadístico (no
    overwrite), promoción/histéresis, deprecate-reversible, retrieval por `successRate`.
-3. **Oráculo `e2e` (Fase 1):** fault-injection de respuestas vía Playwright `route()`
-   en `portfolio`, en `signal`-mode, etiquetado "response-oracle catch-rate".
-4. **Scopear mutation al diff** en `code` (mutar sólo lo cambiado, no todo el repo).
-5. **Disparar la atribución/promoción de verdad** depende de #3/#4: sin `valueScore`
-   (oráculo), las candidatas no acumulan outcomes → no se promueven. El gobierno está
-   listo y esperando la señal.
+3. ✅ **Oráculo `e2e`** — fault-injection de respuestas (seed `_faultInject` + `runFaultInjectionOracle`),
+   opt-in `qa.valueOracle: signal`, signal-only. **Limitaciones honestas**: cubre sólo aserciones
+   dependientes de la respuesta (no estado-cliente puro); sobre-corrompe (todas las respuestas); el
+   comportamiento real con Playwright contra DEV es **boundary sin test**; y los repos ya onboardeados
+   necesitan **sincronizar su `e2e/fixtures.ts`** para tener `_faultInject` (mismo problema de
+   evolución del seed que `_coverage`).
+4. ✅ **Mutation scopeada al diff** en `code` (`selectMutateTargets`).
+5. **Lo que falta para que el lazo gire de verdad**: (a) persistir el **scorecard** versionado
+   (`updateScorecard` ya existe, falta el sink); (b) validar el oráculo `e2e` contra un DEV real;
+   (c) decidir si `code` mutation corre por defecto (hoy sí) dado su costo. Sin `valueScore` real
+   fluyendo, el gobierno (ya listo) no promueve nada.
