@@ -101,6 +101,14 @@ serves both triggers (webhook `src/index.ts`, manual `src/cli.ts`), default
 **Shadow mode** (`qa.shadow: true` in app config) replaces every PR/Issue side
 effect with a log line — used to onboard a repo without dirtying it.
 
+**Cross-repo runs (microservices).** An e2e app may declare `services[]` in its
+YAML. A webhook from a service repo (sent by its CI **after** deploy — deploy-event
+semantics) triggers an e2e run of the app: diff/classify/gate come from the service
+mirror at the event SHA, while the suite runs from the primary mirror at `baseBranch`
+HEAD. Issues open in the triggering service repo; the suite PR always targets the
+primary repo. Change-coverage is `unknown` for these runs (browser coverage cannot
+map service-repo lines).
+
 ### Run modes (`RunOptions.mode`, CLI `--mode`, default `diff`)
 
 - **diff** — the flow above: test the blast radius of one commit. The **only** mode

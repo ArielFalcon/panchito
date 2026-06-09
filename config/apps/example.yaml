@@ -20,6 +20,19 @@ baseBranch: "main"             # target branch for the QA pull requests
 # In code mode the whole `dev:` block below is omitted (there is no DEV URL).
 # code: true
 
+# Optional (e2e apps only): the microservice repos that participate in this app's
+# flows. A webhook from one of these repos — sent by ITS CI/CD AFTER deploying to
+# DEV (deploy-event semantics) — triggers an e2e run of THIS app with the service
+# commit's diff as blast radius. versionUrl is an optional verification belt: when
+# present, the gate polls it for the service SHA before testing. The agent reads
+# the service's read-only working copy plus its OpenAPI to derive frontend impact
+# (it never calls the service directly — flows are always driven through the UI).
+# services:
+#   - repo: "org/orders-svc"
+#     openapi: "**/openapi/*.yaml"           # glob INSIDE the service repo
+#     versionUrl: "https://dev-api.example.internal/orders/version"
+#   - repo: "org/payments-svc"
+
 # `dev` is REQUIRED for e2e apps (the default) and OMITTED for code-mode apps.
 dev:
   baseUrl: "https://dev.example.internal"
