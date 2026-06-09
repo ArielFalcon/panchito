@@ -124,7 +124,9 @@ test("recordRuleOutcome accumulates a running mean and earns promotion (never ov
 });
 
 test("scorecard persists oracle outcomes and aggregates valueScore across runs", () => {
-  const app = "hist-sc-1";
+  // Unique app per run: the on-disk DB persists across test-suite runs and saveScorecardEntry
+  // APPENDS (by design), so a fixed app name would accumulate entries and break absolute counts.
+  const app = `hist-sc-${Date.now().toString(36)}`;
   saveScorecardEntry({ runId: "r1", app, sha: "s1", target: "code", valueScore: 0.5, mutantCount: 10, killedCount: 5, at: "t1" });
   saveScorecardEntry({ runId: "r2", app, sha: "s2", target: "code", valueScore: 0.7, mutantCount: 10, killedCount: 7, at: "t2" });
   const sc = loadScorecard(app);

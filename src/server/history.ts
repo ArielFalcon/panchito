@@ -38,6 +38,7 @@ let insertOutcome!: Database.Statement;
 let listOutcomesStmt!: Database.Statement;
 let upsertRuleStmt!: Database.Statement;
 let listRulesStmt!: Database.Statement;
+let listAllRulesStmt!: Database.Statement;
 let incrementRuleUsageStmt!: Database.Statement;
 let loadCurriculumStmt!: Database.Statement;
 let saveCurriculumStmt!: Database.Statement;
@@ -207,6 +208,7 @@ function ensureDb(): void {
       status = excluded.status
   `);
   listRulesStmt = db.prepare("SELECT * FROM learning_rules WHERE app = ? AND status IN ('active', 'candidate') ORDER BY (status = 'active') DESC, COALESCE(success_rate, 0) DESC, at DESC LIMIT ?");
+  listAllRulesStmt = db.prepare("SELECT * FROM learning_rules WHERE app = ? ORDER BY at DESC LIMIT ?");
   incrementRuleUsageStmt = db.prepare("UPDATE learning_rules SET usage_count = usage_count + 1 WHERE id = ?");
   loadCurriculumStmt = db.prepare("SELECT data, updated_at FROM curriculum WHERE app = ?");
   saveCurriculumStmt = db.prepare("INSERT INTO curriculum (app, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(app) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at");
@@ -508,6 +510,15 @@ function rowToRule(row: Record<string, unknown>): LearningRule {
 export function listLearningRules(app: string, limit = 20): LearningRule[] {
   ensureDb();
   const rows = listRulesStmt.all(app, limit) as Array<Record<string, unknown>>;
+  return rows.map(rowToRule);
+}
+
+// ALL rules regardless of status — used ONLY by the distiller for de-duplication, so a recurring
+// failure pattern cannot spawn a duplicate candidate for a rule that was demoted (`deprecated`) or
+// `superseded`. Retrieval must NOT use this (it injects only active/candidate).
+export function listAllLearningRules(app: string, limit = 200): LearningRule[] {
+  ensureDb();
+  const rows = listAllRulesStmt.all(app, limit) as Array<Record<string, unknown>>;
   return rows.map(rowToRule);
 }
 

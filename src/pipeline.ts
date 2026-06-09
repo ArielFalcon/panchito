@@ -878,6 +878,10 @@ export async function runPipeline(
   // signal-only) — never a redeploy. Off-path and fail-open: any error is a non-blocking warning,
   // and the score NEVER gates publish.
   const valueOraclePolicy = app.qa.valueOracle ?? "off";
+  // e2e is restricted to `diff` ON PURPOSE: fault-injection re-runs the WHOLE suite corrupted, so
+  // running it on a `complete`/`exhaustive` whole-repo suite would double a very large run for a
+  // diffuse signal. code mutation runs in any mode (it is diff-scoped and cheap). Both are opt-in
+  // / signal-only and never block.
   const runValueOracle =
     !!deps.runOracle && generating && run.verdict === "pass" &&
     (isCode || (mode === "diff" && valueOraclePolicy === "signal" && !!app.dev?.baseUrl));
@@ -1006,7 +1010,9 @@ export async function runPipeline(
     });
     if (labeled.errorClass && labeled.errorClass !== "E-INFRA" && labeled.errorClass !== "E-FLAKY") {
       const outcome: RunOutcome = { ...labeled, gateSignals: { ...labeled.gateSignals, valueScore: valueScore ?? null }, rulesRetrieved: retrievedRuleIds, at: labeled.at };
-      deps.reflectAndDistill({ app: app.name, runId: opts.runId, outcome }).catch(() => {});
+      deps
+        .reflectAndDistill({ app: app.name, runId: opts.runId, outcome })
+        .catch((err) => log(`[qa] WARNING: reflect/distill failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`));
     }
   }
 

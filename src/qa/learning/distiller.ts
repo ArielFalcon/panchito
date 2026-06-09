@@ -1,7 +1,7 @@
 import type { StructuredReflection } from "../../types";
 import type { RuleUpsert } from "./learning-rule";
 import { deduplicateRules, ruleKey } from "./learning-rule";
-import { upsertLearningRule, listLearningRules } from "../../server/history";
+import { upsertLearningRule, listAllLearningRules } from "../../server/history";
 import { randomBytes } from "node:crypto";
 
 export interface DistillerInput {
@@ -21,7 +21,9 @@ export function reflectionToRuleUpsert(input: DistillerInput): RuleUpsert {
 
 export function distillReflection(input: DistillerInput): { inserted: boolean; ruleId: string } {
   const candidate = reflectionToRuleUpsert(input);
-  const existing = listLearningRules(input.app, 100);
+  // Dedup against ALL statuses (incl. deprecated/superseded): a recurring failure pattern must not
+  // spawn a duplicate candidate for a rule that was already tried and demoted.
+  const existing = listAllLearningRules(input.app, 200);
   const { toInsert, toSkip } = deduplicateRules([candidate], existing);
 
   if (toInsert.length === 0) {
