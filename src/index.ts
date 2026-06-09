@@ -125,14 +125,14 @@ process.on("unhandledRejection", (reason) => {
   recordIncident({ source: "qa-generator", severity: "error", summary: `unhandled rejection: ${msg}` });
 });
 
-function enqueueApiRun(app: string, sha: string, target: string, mode: RunMode, guidance?: string, shadow?: boolean): string {
+function enqueueApiRun(app: string, sha: string, target: string, mode: RunMode, guidance?: string, shadow?: boolean, triggerRepo?: string): string {
   if (shuttingDown) {
     console.warn(`[qa] rejecting run ${app}@${sha} — shutting down`);
     return "";
   }
   // Orphan-data cleanup is reconstructed inside enqueueTrackedRun (the single funnel), so
   // every trigger gets it — not just this webhook path.
-  return enqueueTrackedRun(queue, { app, sha, target: target as TestTarget, mode, guidance, shadow, source: "webhook" });
+  return enqueueTrackedRun(queue, { app, sha, target: target as TestTarget, mode, guidance, shadow, source: "webhook", triggerRepo });
 }
 
 // ── Self-maintenance: clone ai-pipeline into a persistent working copy ───────
@@ -859,11 +859,15 @@ const server = createServer(async (req, res) => {
           return;
         }
         const { repo, sha, mode, guidance } = result.payload;
-        const app = loadAppConfigsByRepo(repo)[0]?.app ?? null;
-        if (!app) console.warn(`[qa] no config/apps entry for ${repo}; event ignored`);
-        else {
+        const matches = loadAppConfigsByRepo(repo);
+        if (matches.length === 0) console.warn(`[qa] no config/apps entry for ${repo}; event ignored`);
+        for (const m of matches) {
           try {
-            enqueueApiRun(app.name, sha, app.code ? "code" : "e2e", mode, guidance);
+            if (m.role === "primary") {
+              enqueueApiRun(m.app.name, sha, m.app.code ? "code" : "e2e", mode, guidance);
+            } else {
+              enqueueApiRun(m.app.name, sha, "e2e", "diff", guidance, undefined, repo);
+            }
           } catch (err) {
             console.error("[qa] webhook enqueue failed:", err instanceof Error ? err.message : String(err));
             res.writeHead(500, { "Content-Type": "application/json" });
