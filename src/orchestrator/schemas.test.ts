@@ -53,3 +53,10 @@ test("rejects duplicate service repos", () => {
     }),
   );
 });
+
+test("qa.parallelDiff parses and defaults to undefined", () => {
+  const on = AppConfigSchema.parse({ ...base, qa: { ...base.qa, parallelDiff: true } });
+  assert.equal(on.qa.parallelDiff, true);
+  const off = AppConfigSchema.parse(base);
+  assert.equal(off.qa.parallelDiff, undefined);
+});

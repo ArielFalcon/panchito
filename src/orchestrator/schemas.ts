@@ -40,6 +40,10 @@ export const AppConfigSchema = z
       needsReview: z.boolean(),
       testDataPrefix: z.string().min(1, { error: "qa.testDataPrefix is required" }),
       shadow: z.boolean().optional(),
+      // Diff-mode fan-out: when true, a diff run plans the blast radius into objectives
+      // and dispatches parallel qa-workers (>=2 objectives; single-agent otherwise).
+      // Default off: protects cost/determinism for simple apps.
+      parallelDiff: z.boolean().optional(),
       // Change-coverage policy (the value keystone). off = skip; signal (default) = measure +
       // record only; enforce = also try to close the gap and block publishing if it stays low.
       changeCoverage: z
