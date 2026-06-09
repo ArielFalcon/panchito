@@ -76,6 +76,7 @@ export interface GenerateInput {
   runId?: string; // for SSE live activity: maps the OpenCode session to this run record
   contextMap?: ArchitectureContext; // cross-cutting: the FE↔BE map loaded from e2e/.qa/context.json
   service?: { repo: string; mirrorDir: string; openapi?: string | string[] }; // cross-repo: the triggering microservice (read-only working copy)
+  services?: Array<{ repo: string; mirrorDir: string; openapi?: string | string[] }>; // context mode: every declared service, mirrored read-only
 }
 
 export interface PipelineDeps {
@@ -125,6 +126,9 @@ export interface PipelineDeps {
   log?(msg: string): void;
   // Context mode: validates the produced context.json. Injected so tests can bypass file I/O.
   validateContextFn?(content: unknown): { ok: boolean; errors: string[] };
+  // Context mode: reads the built map back for the per-service coverage warning.
+  // Absent ⇒ the warning step is skipped (unit tests that don't care).
+  readBuiltContext?(e2eDir: string): ArchitectureContext | null;
   // Diff mode: checks whether the deployed context.json is stale vs the current HEAD.
   // Returns a warning string if stale, empty string if fresh or no map exists.
   checkContextStaleness?(mirrorDir: string, sha: string): Promise<string>;
@@ -164,6 +168,7 @@ export function defaultPipelineDeps(): PipelineDeps {
         runId: input.runId,
         contextMap: input.contextMap,
         service: input.service,
+        services: input.services,
       };
       const oc = await defaultOpencodeDeps();
       // complete/exhaustive fan out to parallel workers (plan → workers → consolidate); the other
@@ -186,6 +191,13 @@ export function defaultPipelineDeps(): PipelineDeps {
     executeCode: (repoDir, opts) => runCodeTests(repoDir, opts, defaultCodeExecuteDeps),
     publishCode: (input) => publishCode(input, defaultPublishDeps),
     publishContext: (input) => publishContext(input, defaultPublishDeps),
+    readBuiltContext: (e2eDir) => {
+      try {
+        return JSON.parse(readFileSync(join(e2eDir, ".qa", "context.json"), "utf8")) as ArchitectureContext;
+      } catch {
+        return null;
+      }
+    },
     checkContextStaleness: async (mirrorDir, sha) => {
       const ctxPath = join(mirrorDir, E2E_DIR, ".qa", "context.json");
       if (!existsSync(ctxPath)) return "";
@@ -458,6 +470,18 @@ export async function runPipeline(
     log("[qa] context mode: building the FE↔BE architecture map...");
     onStep?.("generate");
 
+    // Mirror every declared service (read-only). The agent uses these working copies to
+    // extract each service's OpenAPI operations into the unified context map.
+    let serviceRefs: GenerateInput["services"];
+    if (app.services?.length) {
+      serviceRefs = [];
+      for (const svc of app.services) {
+        log(`[qa] context: mirroring service ${svc.repo}...`);
+        const m = await deps.prepareAtBranch(svc.repo, svc.baseBranch ?? "main");
+        serviceRefs.push({ repo: svc.repo, mirrorDir: m.mirrorDir, openapi: svc.openapi });
+      }
+    }
+
     const genInput: GenerateInput = {
       repo: app.repo,
       sha,
@@ -469,6 +493,7 @@ export async function runPipeline(
       appName: app.name,
       baseUrl: app.dev?.baseUrl,
       openapi: app.openapi,
+      services: serviceRefs,
     };
     const ctxResult = await deps.generate(genInput, signal, log);
 
@@ -504,6 +529,19 @@ export async function runPipeline(
     }
 
     log(`[qa] context map validated: OK`);
+
+    // Advisory: warn for any configured service whose operations were not mapped
+    // (its OpenAPI was not found or not extracted). Cross-repo runs for it will
+    // lack the context map. Never fails the run — the map is structurally valid.
+    if (app.services?.length && deps.readBuiltContext) {
+      const built = deps.readBuiltContext(e2eDir);
+      const mapped = new Set((built?.api ?? []).map((o) => o.service).filter(Boolean));
+      for (const svc of app.services) {
+        if (!mapped.has(svc.repo)) {
+          log(`[qa] WARNING: the context map has no operations for service ${svc.repo} — its OpenAPI was not found or not extracted. Cross-repo runs for it will lack the map.`);
+        }
+      }
+    }
 
     if (shadow) {
       log("[qa] (shadow) context map built; a PR would have been opened.");

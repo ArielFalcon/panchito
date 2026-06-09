@@ -980,3 +980,65 @@ test("cross-repo: generate receives service {repo, mirrorDir}; change-coverage i
   assert.equal(captured?.mirrorDir, "/m/front");
   assert.equal(coverageCalled, false);
 });
+
+// ── F2: multi-service context map ───────────────────────────────────────────
+// Context mode mirrors every declared service repo (read-only) and passes them to the
+// agent so the resulting context.json joins the front's routes to ALL services' OpenAPI
+// operations (ApiOperation.service identifies the owning microservice).
+
+const ctxApp: AppConfig = {
+  name: "shop",
+  repo: "org/shop-front",
+  baseBranch: "main",
+  dev: { baseUrl: "https://dev.shop.io" },
+  services: [
+    { repo: "org/orders-svc", openapi: "api/*.yaml" },
+    { repo: "org/payments-svc", baseBranch: "develop" },
+  ],
+  qa: { needsReview: false, testDataPrefix: "qa-shop", shadow: true },
+  report: { onFailure: "github-issue" },
+};
+
+test("context mode with services mirrors each service and passes them to generate", async () => {
+  const calls: string[] = [];
+  const branched: string[] = [];
+  const h = deps(passing(), calls);
+  h.prepare = async () => ({ mirrorDir: "/m/front", diff: "", message: "chore: ctx" });
+  h.prepareAtBranch = async (repo: string, branch: string) => { branched.push(`${repo}#${branch}`); calls.push("prepareAtBranch"); return { mirrorDir: `/m/${repo.split("/")[1]}` }; };
+  h.validateContextFn = () => ({ ok: true, errors: [] });
+  await runPipeline(ctxApp, "a1b2c3d", h, "manual", { mode: "context", runId: "r1" });
+  // No assumption about ordering — only that both services were mirrored at the right branches.
+  assert.ok(branched.includes("org/orders-svc#main"));
+  assert.ok(branched.includes("org/payments-svc#develop"));
+  const captured = h.genInputs.find((g) => g.mode === "context");
+  assert.equal(captured?.services?.length, 2);
+  const ordersFromInput = captured!.services!.find((s) => s.repo === "org/orders-svc")!;
+  assert.equal(ordersFromInput.mirrorDir, "/m/orders-svc");
+  assert.equal(ordersFromInput.openapi, "api/*.yaml");
+});
+
+test("context mode without services passes no services (unchanged behavior)", async () => {
+  const calls: string[] = [];
+  const h = deps(passing(), calls);
+  h.prepare = async () => ({ mirrorDir: "/m/front", diff: "", message: "chore: ctx" });
+  h.validateContextFn = () => ({ ok: true, errors: [] });
+  const singleApp: AppConfig = { ...ctxApp, services: undefined };
+  await runPipeline(singleApp, "a1b2c3d", h, "manual", { mode: "context", runId: "r1" });
+  const captured = h.genInputs.find((g) => g.mode === "context");
+  assert.equal(captured?.services, undefined);
+});
+
+test("context mode warns (does not fail) when a configured service has no mapped operations", async () => {
+  const calls: string[] = [];
+  const logs: string[] = [];
+  const h = deps(passing(), calls);
+  h.prepare = async () => ({ mirrorDir: "/m/front", diff: "", message: "chore: ctx" });
+  h.prepareAtBranch = async () => ({ mirrorDir: "/m/svc" });
+  h.validateContextFn = () => ({ ok: true, errors: [] });
+  h.readBuiltContext = () => ({ builtAtSha: "a1b2c3d", routes: [], api: [], feBe: [] });
+  h.log = (m: string) => logs.push(m);
+  const singleSvcApp: AppConfig = { ...ctxApp, services: [{ repo: "org/orders-svc" }] };
+  const r = await runPipeline(singleSvcApp, "a1b2c3d", h, "manual", { mode: "context", runId: "r1" });
+  assert.equal(r.verdict, "pass");
+  assert.ok(logs.some((l) => l.includes("no operations for service org/orders-svc")), logs.join("\n"));
+});
