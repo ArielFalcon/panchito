@@ -51,3 +51,51 @@ test("a connection failure is reported distinctly from an HTTP error", async () 
   const client = createClient({ host: "localhost:59999", fetchImpl: failing });
   await assert.rejects(() => client.getQueue(), (e) => e instanceof QaApiError && /cannot reach localhost:59999/.test(e.message) && e.status === undefined);
 });
+
+test("validateRepo POSTs /api/apps with validateOnly", async () => {
+  const cap: { url?: string; init?: RequestInit } = {};
+  const client = createClient({
+    host: "h:1",
+    fetchImpl: stubFetch(200, JSON.stringify({ ok: true, repoInfo: { fullName: "o/r", defaultBranch: "main", private: false, name: "r", description: null } }), cap),
+  });
+  const r = await client.validateRepo("o/r");
+  assert.equal(cap.url, "http://h:1/api/apps");
+  assert.equal(cap.init?.method, "POST");
+  assert.deepEqual(JSON.parse(String(cap.init?.body)), { repo: "o/r", validateOnly: true });
+  assert.equal(r.repoInfo?.defaultBranch, "main");
+});
+
+test("createApp POSTs the full input to /api/apps", async () => {
+  const cap: { url?: string; init?: RequestInit } = {};
+  const client = createClient({
+    host: "h:1",
+    fetchImpl: stubFetch(201, JSON.stringify({ ok: true, name: "shop", path: "/x/shop.yaml" }), cap),
+  });
+  const r = await client.createApp({ repo: "org/shop-front", name: "shop", target: "e2e" });
+  assert.equal(cap.url, "http://h:1/api/apps");
+  assert.equal(cap.init?.method, "POST");
+  assert.match(String(cap.init?.body), /"name":"shop"/);
+  assert.equal(r.name, "shop");
+});
+
+test("deleteApp DELETEs with the purge flag", async () => {
+  const cap: { url?: string; init?: RequestInit } = {};
+  const client = createClient({
+    host: "h:1",
+    fetchImpl: stubFetch(200, JSON.stringify({ removed: ["config:shop"] }), cap),
+  });
+  const r = await client.deleteApp("shop", true);
+  assert.equal(cap.url, "http://h:1/api/apps/shop?purge=1");
+  assert.equal(cap.init?.method, "DELETE");
+  assert.deepEqual(r.removed, ["config:shop"]);
+});
+
+test("deleteApp without purge omits the query string", async () => {
+  const cap: { url?: string; init?: RequestInit } = {};
+  const client = createClient({
+    host: "h:1",
+    fetchImpl: stubFetch(200, JSON.stringify({ removed: ["config:shop"] }), cap),
+  });
+  await client.deleteApp("shop", false);
+  assert.equal(cap.url, "http://h:1/api/apps/shop");
+});

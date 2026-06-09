@@ -39,6 +39,38 @@ export interface CreateRunInput {
   shadow?: boolean;
 }
 
+export interface OnboardServiceInput {
+  repo: string;
+  openapi?: string;
+  versionUrl?: string;
+}
+
+export interface CreateAppRequest {
+  repo: string;
+  name?: string;
+  baseUrl?: string;
+  versionUrl?: string;
+  target?: "e2e" | "code";
+  needsReview?: boolean;
+  shadow?: boolean;
+  testDataPrefix?: string;
+  services?: OnboardServiceInput[];
+  env?: Record<string, string>;
+  dryRun?: boolean;
+  validateOnly?: boolean;
+}
+
+export interface CreateAppResponse {
+  ok: boolean;
+  errors?: string[];
+  repoInfo?: { name: string; fullName: string; private: boolean; defaultBranch: string; description: string | null };
+  yaml?: string;
+  name?: string;
+  path?: string;
+  envApplied?: string[];
+  warnings?: string[];
+}
+
 export class QaApiError extends Error {
   constructor(
     message: string,
@@ -83,6 +115,9 @@ export interface QaClient {
   help(question: string, history?: ChatEntry[]): Promise<{ answer: string }>;
   continueRun(id: string, cases: string[], guidance?: string): Promise<{ id: string; parentRunId: string }>;
   cancelRun(id: string): Promise<void>;
+  validateRepo(repo: string): Promise<CreateAppResponse>;
+  createApp(input: CreateAppRequest): Promise<CreateAppResponse>;
+  deleteApp(name: string, purge: boolean): Promise<{ removed: string[] }>;
 }
 
 export function createClient(opts: ClientOptions = {}): QaClient {
@@ -129,5 +164,9 @@ export function createClient(opts: ClientOptions = {}): QaClient {
     continueRun: (id, cases, guidance) =>
       request<{ id: string; parentRunId: string }>("POST", `/api/runs/${encodeURIComponent(id)}/continue`, { cases, guidance }),
     cancelRun: (id) => request<void>("DELETE", `/api/runs/${encodeURIComponent(id)}`),
+    validateRepo: (repo) => request<CreateAppResponse>("POST", "/api/apps", { repo, validateOnly: true }),
+    createApp: (input) => request<CreateAppResponse>("POST", "/api/apps", input),
+    deleteApp: (name, purge) =>
+      request<{ removed: string[] }>("DELETE", `/api/apps/${encodeURIComponent(name)}${purge ? "?purge=1" : ""}`),
   };
 }
