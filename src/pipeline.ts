@@ -11,7 +11,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { AppConfig } from "./orchestrator/config-loader";
 import { DeployTarget, waitForDeploy } from "./env/deploy-gate";
 import { ensureMirror, ensureMirrorAtBranch, getCommitDiff, getCommitMessage, listChangedSpecs as gitListChangedSpecs, getCommitsBehind, defaultMirrorDeps } from "./integrations/repo-mirror";
-import { runOpencode, runOpencodeParallel, defaultOpencodeDeps, reviewIndependently, getOpenSessionCount } from "./integrations/opencode-client";
+import { runOpencode, runOpencodeParallel, shouldFanOut, defaultOpencodeDeps, reviewIndependently, getOpenSessionCount } from "./integrations/opencode-client";
 import { classifyCommit, CommitIntent } from "./qa/commit-classify";
 import { setupE2eProject, defaultSetupDeps } from "./qa/setup";
 import { validateSpecs, defaultValidateDeps } from "./qa/validate";
@@ -73,6 +73,7 @@ export interface GenerateInput {
   reviewCorrections?: string[]; // re-generation: corrections from a reviewer rejection
   coverageGap?: string; // re-generation: changed lines not yet exercised (change-coverage)
   learnedRules?: string; // retrieval: rules from past runs injected into the agent prompt
+  parallelDiff?: boolean; // qa.parallelDiff: diff-mode fan-out opt-in
   runId?: string; // for SSE live activity: maps the OpenCode session to this run record
   contextMap?: ArchitectureContext; // cross-cutting: the FE↔BE map loaded from e2e/.qa/context.json
   service?: { repo: string; mirrorDir: string; openapi?: string | string[] }; // cross-repo: the triggering microservice (read-only working copy)
@@ -173,12 +174,9 @@ export function defaultPipelineDeps(): PipelineDeps {
       const oc = await defaultOpencodeDeps();
       // complete/exhaustive fan out to parallel workers (plan → workers → consolidate); the other
       // modes (diff/manual) and any fix/review re-generation use the single-agent path. Code mode
-      // always uses the single agent (no web fan-out).
-      const useParallel =
-        (input.target ?? "e2e") === "e2e" &&
-        (input.mode === "complete" || input.mode === "exhaustive") &&
-        !input.fixCases?.length &&
-        !input.reviewCorrections?.length;
+      // always uses the single agent (no web fan-out). Diff mode fans out only when
+      // qa.parallelDiff is explicitly enabled in the app config.
+      const useParallel = shouldFanOut(input);
       return useParallel
         ? runOpencodeParallel(ocInput, oc, { signal, onProgress })
         : runOpencode(ocInput, oc, { signal, onProgress });
@@ -673,6 +671,7 @@ export async function runPipeline(
     intent,
     guidance: opts.guidance,
     openapi: app.openapi,
+    parallelDiff: app.qa.parallelDiff,
     contextMap,
     service: triggerService
       ? { repo: triggerService.repo, mirrorDir: serviceMirrorDir!, openapi: triggerService.openapi }

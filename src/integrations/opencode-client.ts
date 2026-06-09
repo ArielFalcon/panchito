@@ -611,6 +611,23 @@ export function buildWorkerPrompt(w: ParallelWorkerInput): string {
   ].filter((l): l is string => l !== null).join("\n");
 }
 
+// The single routing decision between the single-agent path (runOpencode) and the
+// plan→workers fan-out (runOpencodeParallel). Re-generation passes (fix/review/coverage)
+// are always single-agent: they carry feedback context the worker prompts cannot hold.
+export function shouldFanOut(input: {
+  target?: TestTarget;
+  mode: RunMode;
+  parallelDiff?: boolean;
+  fixCases?: QaCase[];
+  reviewCorrections?: string[];
+  coverageGap?: string;
+}): boolean {
+  if ((input.target ?? "e2e") !== "e2e") return false;
+  if (input.fixCases?.length || input.reviewCorrections?.length || input.coverageGap) return false;
+  if (input.mode === "complete" || input.mode === "exhaustive") return true;
+  return input.mode === "diff" && input.parallelDiff === true;
+}
+
 // Two-phase complete/exhaustive entry point (see the block comment above). Returns an AgentResult
 // shaped like runOpencode's, so the pipeline reviews/validates/executes it identically.
 export async function runOpencodeParallel(

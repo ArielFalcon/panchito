@@ -15,6 +15,7 @@ import {
   buildWorkerPrompt,
   buildPlanPrompt,
   renderArchitectureContext,
+  shouldFanOut,
   ManifestFs,
   ParallelWorkerInput,
   OpencodeDeps,
@@ -465,4 +466,19 @@ test("buildContextTask without services is unchanged (no microservice section)",
     namespace: "qa-1", needsReview: false, target: "e2e", mode: "context", appName: "shop",
   });
   assert.doesNotMatch(text, /Microservice repos/);
+});
+
+test("shouldFanOut: complete/exhaustive e2e fan out; diff only with parallelDiff", () => {
+  assert.equal(shouldFanOut({ target: "e2e", mode: "complete" }), true);
+  assert.equal(shouldFanOut({ target: "e2e", mode: "exhaustive" }), true);
+  assert.equal(shouldFanOut({ target: "e2e", mode: "diff" }), false);
+  assert.equal(shouldFanOut({ target: "e2e", mode: "diff", parallelDiff: true }), true);
+});
+
+test("shouldFanOut: never for code target, re-generation passes, or context mode", () => {
+  assert.equal(shouldFanOut({ target: "code", mode: "complete" }), false);
+  assert.equal(shouldFanOut({ target: "e2e", mode: "diff", parallelDiff: true, fixCases: [{ name: "t", status: "fail" }] }), false);
+  assert.equal(shouldFanOut({ target: "e2e", mode: "diff", parallelDiff: true, reviewCorrections: ["fix x"] }), false);
+  assert.equal(shouldFanOut({ target: "e2e", mode: "diff", parallelDiff: true, coverageGap: "lines 1-3" }), false);
+  assert.equal(shouldFanOut({ target: "e2e", mode: "context" }), false);
 });
