@@ -12,6 +12,7 @@ import { buildRunContext, buildLearningContext } from "./chat";
 import { buildHelpContext } from "./help";
 import { json, readBody } from "./helpers";
 import { getOpenSessionCount, activityRouter } from "../integrations/opencode-client";
+import type { CreateAppInput, CreateAppResult } from "./app-admin";
 
 const MODES: RunMode[] = ["diff", "complete", "exhaustive", "manual"];
 const TARGETS: TestTarget[] = ["e2e", "code"];
@@ -30,6 +31,9 @@ export interface ApiDeps {
   // Continuation (human-in-the-loop): re-run fixing the parent run's failed cases.
   // `cases` optionally narrows to specific failed case names; omitted → all failed.
   continueRun?: (parentId: string, cases: string[] | undefined, guidance?: string) => string;
+  // App onboarding/deletion (F5). Absent ⇒ the corresponding routes return 501.
+  createApp?: (input: CreateAppInput) => Promise<CreateAppResult>;
+  deleteApp?: (name: string, purge: boolean) => { removed: string[] };
 }
 
 // Returns true when the request matched an /api route (so the caller stops here).
@@ -58,6 +62,12 @@ export async function handleApi(
   }
 
   const appMatch = path.match(/^\/api\/apps\/([^/]+)$/);
+  if (req.method === "POST" && path === "/api/apps") {
+    return await handleCreateApp(req, res, deps);
+  }
+  if (req.method === "DELETE" && appMatch) {
+    return handleDeleteApp(res, deps, appMatch[1]!, url.searchParams.get("purge") === "1");
+  }
   if (req.method === "GET" && appMatch) {
     return handleGetApp(res, deps, appMatch[1]!);
   }
@@ -418,5 +428,49 @@ async function handleContinue(req: IncomingMessage, res: ServerResponse, deps: A
 
   const id = deps.continueRun(parentId, cases, guidance);
   json(res, 202, { id, parentRunId: parentId, app: parent.app, sha: parent.sha, status: "enqueued" });
+  return true;
+}
+
+async function handleCreateApp(req: IncomingMessage, res: ServerResponse, deps: ApiDeps): Promise<boolean> {
+  if (!deps.createApp) {
+    json(res, 501, { error: "app onboarding is not available" });
+    return true;
+  }
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(await readBody(req));
+  } catch {
+    json(res, 400, { error: "invalid JSON" });
+    return true;
+  }
+  if (typeof body.repo !== "string" || !body.repo.includes("/")) {
+    json(res, 400, { error: "'repo' is required in 'org/name' form" });
+    return true;
+  }
+  try {
+    const result = await deps.createApp(body as unknown as CreateAppInput);
+    if (!result.ok) {
+      json(res, 422, { errors: result.errors ?? ["invalid app config"] });
+      return true;
+    }
+    // env VALUES never travel back; CreateAppResult only carries the key names.
+    json(res, body.dryRun || body.validateOnly ? 200 : 201, result);
+  } catch (err) {
+    json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+  return true;
+}
+
+function handleDeleteApp(res: ServerResponse, deps: ApiDeps, name: string, purge: boolean): boolean {
+  if (!deps.deleteApp) {
+    json(res, 501, { error: "app deletion is not available" });
+    return true;
+  }
+  try {
+    json(res, 200, deps.deleteApp(name, purge));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    json(res, msg.includes("not found") ? 404 : 500, { error: msg });
+  }
   return true;
 }

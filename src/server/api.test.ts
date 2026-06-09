@@ -327,3 +327,92 @@ test("POST /api/runs/:id/continue on a run with no failures → 409", async () =
   );
   assert.equal(res.status, 409);
 });
+
+test("POST /api/apps delegates to createApp and 201s on success", async () => {
+  const res = mkRes();
+  const ok = await handleApi(
+    mkReq("POST", "/api/apps", JSON.stringify({ repo: "org/shop-front", name: "shop" })),
+    res,
+    deps({ createApp: async (input) => ({ ok: true, name: input.name, path: "/x/shop.yaml", envApplied: ["K"] }) }),
+  );
+  assert.equal(ok, true);
+  assert.equal(res.status, 201);
+  const body = JSON.parse(res.body);
+  assert.equal(body.name, "shop");
+});
+
+test("POST /api/apps maps a validation failure to 422", async () => {
+  const res = mkRes();
+  await handleApi(
+    mkReq("POST", "/api/apps", JSON.stringify({ repo: "org/x" })),
+    res,
+    deps({ createApp: async () => ({ ok: false, errors: ["bad url"] }) }),
+  );
+  assert.equal(res.status, 422);
+  const body = JSON.parse(res.body);
+  assert.deepEqual(body.errors, ["bad url"]);
+});
+
+test("POST /api/apps without the dep returns 501", async () => {
+  const res = mkRes();
+  await handleApi(mkReq("POST", "/api/apps", JSON.stringify({ repo: "org/x" })), res, deps({}));
+  assert.equal(res.status, 501);
+});
+
+test("POST /api/apps with dryRun or validateOnly returns 200 (not 201)", async () => {
+  const dry = mkRes();
+  await handleApi(
+    mkReq("POST", "/api/apps", JSON.stringify({ repo: "org/x", dryRun: true })),
+    dry,
+    deps({ createApp: async () => ({ ok: true, yaml: "name: x" }) }),
+  );
+  assert.equal(dry.status, 200);
+
+  const va = mkRes();
+  await handleApi(
+    mkReq("POST", "/api/apps", JSON.stringify({ repo: "org/x", validateOnly: true })),
+    va,
+    deps({ createApp: async () => ({ ok: true, repoInfo: { name: "x", fullName: "org/x", private: false, defaultBranch: "main", description: null } }) }),
+  );
+  assert.equal(va.status, 200);
+});
+
+test("DELETE /api/apps/:name passes purge and 200s", async () => {
+  let got: { name: string; purge: boolean } | undefined;
+  const res = mkRes();
+  await handleApi(
+    mkReq("DELETE", "/api/apps/shop?purge=1"),
+    res,
+    deps({ deleteApp: (name, purge) => { got = { name, purge }; return { removed: [`config:${name}`] }; } }),
+  );
+  assert.equal(res.status, 200);
+  assert.deepEqual(got, { name: "shop", purge: true });
+});
+
+test("DELETE /api/apps/:name without purge passes purge=false", async () => {
+  let got: { name: string; purge: boolean } | undefined;
+  const res = mkRes();
+  await handleApi(
+    mkReq("DELETE", "/api/apps/shop"),
+    res,
+    deps({ deleteApp: (name, purge) => { got = { name, purge }; return { removed: [`config:${name}`] }; } }),
+  );
+  assert.equal(res.status, 200);
+  assert.deepEqual(got, { name: "shop", purge: false });
+});
+
+test("DELETE /api/apps/:name on a missing app returns 404", async () => {
+  const res = mkRes();
+  await handleApi(
+    mkReq("DELETE", "/api/apps/shop"),
+    res,
+    deps({ deleteApp: () => { throw new Error("config/apps/shop.yaml not found — is the app onboarded?"); } }),
+  );
+  assert.equal(res.status, 404);
+});
+
+test("DELETE /api/apps/:name without the dep returns 501", async () => {
+  const res = mkRes();
+  await handleApi(mkReq("DELETE", "/api/apps/shop"), res, deps({}));
+  assert.equal(res.status, 501);
+});
