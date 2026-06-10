@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@inkjs/ui": "^2.0.0",
     "@opencode-ai/sdk": "1.15.13",
     "better-sqlite3": "12.10.0",
     "ink": "^7.0.5",

@@ -5,8 +5,9 @@ import React, { useCallback, useState } from "react";
 import { Box, Text } from "ink";
 import { useInput } from "ink";
 import { writeFileSync } from "node:fs";
+import { Badge } from "@inkjs/ui";
 import { RunRecord } from "../../types";
-import { PIPELINE_STEPS, stepState, sectionLabel, verdictColor, verdictIcon, shortSha, caseColor, caseIcon, formatElapsed } from "../format";
+import { PIPELINE_STEPS, stepState, sectionLabel, shortSha, caseColor, caseIcon, formatElapsed } from "../format";
 import { ChatInput } from "./ChatInput";
 import type { QaClient } from "../client";
 
@@ -300,12 +301,12 @@ export function RunSummary({ record, client, onBack, onContinue }: {
         {retrying ? <Text color="#c2891b"> ↻ retried during execution</Text> : null}
         {isShadow ? <Text dimColor> [shadow mode]</Text> : null}
 
-        <Box marginTop={1}>
-          <Text color={verdictColor(verdict)} bold>
-            {`${verdictIcon(verdict)} ${verdict ?? "running"}`}
-          </Text>
+        <Box marginTop={1} gap={1}>
+          <Badge color={verdict === "pass" || verdict === "skipped" ? "green" : verdict === "fail" || verdict === "invalid" ? "red" : verdict === "flaky" ? "yellow" : "blue"}>
+            {verdict?.toUpperCase() ?? "RUNNING"}
+          </Badge>
           {total > 0 ? (
-            <Text dimColor>{` — ${passed} passed, ${failed} failed${failed ? `, ${total - passed - failed} flaky` : ""}`}</Text>
+            <Text dimColor>{`${passed} passed, ${failed} failed${failed ? `, ${total - passed - failed} flaky` : ""}`}</Text>
           ) : null}
         </Box>
       </Box>

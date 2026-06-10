@@ -3,9 +3,10 @@
 
 import React from "react";
 import { Box, Text } from "ink";
+import { Badge, ProgressBar } from "@inkjs/ui";
 import { RunRecord } from "../../types";
 import {
-  PIPELINE_STEPS, stepState, progressBar, verdictColor, verdictIcon, shortSha,
+  PIPELINE_STEPS, stepState, shortSha,
   deriveActivityView, formatElapsed, ActivityView,
 } from "../format";
 import { Section } from "./Section";
@@ -88,13 +89,10 @@ export function Dashboard({ record }: { record: RunRecord }): React.ReactElement
               {s === "execute" && total > 0 ? (
                 <Box flexDirection="column">
                   <HistoryList items={toHistoryItems(cases)} />
-                  <Text>
-                    {"  "}
-                    <Text color={failed > 0 ? "#c0392b" : "#3b7a57"}>
-                      {progressBar(passed, total)}
-                    </Text>
-                    {`  ${passed}/${total}`}
-                  </Text>
+                  <Box gap={1}>
+                    <ProgressBar value={total > 0 ? (passed / total) * 100 : 0} />
+                    <Text dimColor>{passed}/{total}</Text>
+                  </Box>
                 </Box>
               ) : null}
               {/* Execute: pending specs (not yet run), shown only when execute is active/pending */}
@@ -121,11 +119,11 @@ export function Dashboard({ record }: { record: RunRecord }): React.ReactElement
 
       {/* Verdict */}
       {verdict ? (
-        <Box marginTop={1}>
-          <Text color={verdictColor(verdict)} bold>
-            {`${verdictIcon(verdict)} verdict: ${verdict}`}
-          </Text>
-          {record.note ? <Text dimColor>{` — ${record.note}`}</Text> : null}
+        <Box marginTop={1} gap={1}>
+          <Badge color={verdict === "pass" || verdict === "skipped" ? "green" : verdict === "fail" || verdict === "invalid" ? "red" : verdict === "flaky" ? "yellow" : "blue"}>
+            {verdict.toUpperCase()}
+          </Badge>
+          {record.note ? <Text dimColor>{record.note}</Text> : null}
         </Box>
       ) : null}
     </Box>

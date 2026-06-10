@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { render } from "ink";
+import { ThemeWrapper } from "./theme";
 import { createClient, QaApiError, QaClient } from "./client";
 import { Watch, RunFlow } from "./app";
 import { HomeScreen } from "./components/HomeScreen";
@@ -90,13 +91,13 @@ async function cmdRun(client: QaClient, args: string[]): Promise<void> {
       apps.splice(selfIdx, 1);
       apps.unshift("ai-pipeline");
     }
-    render(<RunFlow client={client} apps={apps} refName={ref} sha={sha} guidance={guidance} />);
+    render(<ThemeWrapper><RunFlow client={client} apps={apps} refName={ref} sha={sha} guidance={guidance} /></ThemeWrapper>);
     return;
   }
 
   const res = await client.createRun({ app, target, mode, sha, ref: sha ? undefined : ref ?? "main", guidance });
   if (watch) {
-    render(<Watch client={client} id={res.id} />);
+    render(<ThemeWrapper><Watch client={client} id={res.id} /></ThemeWrapper>);
   } else {
     console.log(`▶ ${res.app} · ${ref ?? sha ?? "main"} → ${res.sha.slice(0, 7)} · ${res.mode}  (${res.id})`);
     process.exit(0);
@@ -157,7 +158,7 @@ async function cmdContinue(client: QaClient, args: string[]): Promise<void> {
   if (invalid.length) fail(`case(s) not found in run ${id}: ${invalid.join(", ")}`);
   const res = await client.continueRun(id, cases, guidance);
   if (watch) {
-    render(<Watch client={client} id={res.id} />);
+    render(<ThemeWrapper><Watch client={client} id={res.id} /></ThemeWrapper>);
   } else {
     console.log(`▶ continue ${res.parentRunId} → ${res.id}`);
     process.exit(0);
@@ -184,7 +185,7 @@ async function cmdHistory(client: QaClient, args: string[]): Promise<void> {
 }
 
 function cmdOnboard(): void {
-  render(<OnboardWizard onDone={() => process.exit(0)} onCancel={() => process.exit(0)} />);
+  render(<ThemeWrapper><OnboardWizard onDone={() => process.exit(0)} onCancel={() => process.exit(0)} /></ThemeWrapper>);
 }
 
 async function main(): Promise<void> {
@@ -210,7 +211,7 @@ async function main(): Promise<void> {
         return cmdOnboard();
       case undefined:
         if (!process.stdout.isTTY) return usage();
-        render(<HomeScreen client={client} onExit={() => process.exit(0)} />);
+        render(<ThemeWrapper><HomeScreen client={client} onExit={() => process.exit(0)} /></ThemeWrapper>);
         return;
       case "-h":
       case "--help":

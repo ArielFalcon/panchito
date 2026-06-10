@@ -55,7 +55,7 @@ test("renders the verdict banner when the run is done", () => {
       })}
     />,
   );
-  assert.match(lastFrame() ?? "", /verdict: pass/);
+  assert.match(lastFrame() ?? "", /PASS/);
   unmount();
 });
 
