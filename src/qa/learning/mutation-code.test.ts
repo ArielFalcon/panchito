@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, writeFileSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runMutationOracle, selectMutateTargets, type MutationDeps } from "./mutation-code";
+import { runMutationOracle, selectMutateTargets, resolveStrykerCommand, type MutationDeps } from "./mutation-code";
 import type { OracleInput } from "./oracle-types";
 import type { ChildProcess } from "node:child_process";
 
@@ -257,5 +257,17 @@ describe("selectMutateTargets (change-scoped mutation)", () => {
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
+  });
+});
+
+describe("resolveStrykerCommand", () => {
+  it("prefers the orchestrator's bundled Stryker binary over npx (no runtime download)", () => {
+    // We ship @stryker-mutator/core in the orchestrator, so the resolved command must be the
+    // local bin — never `npx stryker`, which would resolve from the watched repo and download the
+    // deprecated unscoped package at runtime (the bug that made the code oracle a silent no-op).
+    const { cmd, args } = resolveStrykerCommand();
+    assert.notEqual(cmd, "npx", "must not fall through to npx when the bundled binary is present");
+    assert.match(cmd, /[/\\]stryker$/, `expected a path to the local stryker bin, got ${cmd}`);
+    assert.deepEqual(args, ["run"]);
   });
 });

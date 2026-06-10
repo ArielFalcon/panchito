@@ -24,6 +24,20 @@ function ecosystemForRepo(repoDir: string): string | null {
   }
 }
 
+// Resolve the Stryker binary. We ship @stryker-mutator/core in the ORCHESTRATOR image, so the
+// oracle works for ANY watched JS/TS repo even when the repo doesn't depend on Stryker — and we
+// invoke that binary directly (cwd = repoDir) instead of `npx stryker`, which would resolve from
+// the repo and, finding nothing, download the DEPRECATED unscoped `stryker` package at runtime
+// (the bug that made this oracle a silent no-op for most repos). The command runner is built into
+// core, so no per-framework runner plugin is needed. Falls back to `npx` only if the bundled
+// binary is somehow absent (a degraded image) — logged by the caller via the null result.
+export function resolveStrykerCommand(): { cmd: string; args: string[] } {
+  const root = process.env.AI_PIPELINE_ROOT ?? process.cwd();
+  const bin = join(root, "node_modules", ".bin", "stryker");
+  if (existsSync(bin)) return { cmd: bin, args: ["run"] };
+  return { cmd: "npx", args: ["stryker", "run"] };
+}
+
 function sourceGlobs(repoDir: string): string[] {
   const candidates = [
     "src/**/*.ts",
@@ -146,7 +160,8 @@ export async function runMutationOracle(
   const timeoutMs = input.timeoutMs ?? DEFAULT_MUTATION_TIMEOUT_MS;
 
   return new Promise((resolve) => {
-    const child = deps.spawn("npx", ["stryker", "run"], {
+    const { cmd, args } = resolveStrykerCommand();
+    const child = deps.spawn(cmd, args, {
       cwd: input.repoDir,
       env: scrubEnv(),
       detached: true,
