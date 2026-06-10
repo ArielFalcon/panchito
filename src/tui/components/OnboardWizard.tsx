@@ -279,7 +279,7 @@ export function OnboardWizard({
 
     // ── text input steps ────────────────────────────────────────────────
     if (step === "dev-url") {
-      if (key.return && baseUrl.trim()) { setStep(isEditMode ? "edit-menu" : target === "code" ? "qa-target" : "dev-version"); return; }
+      if (key.return) { setStep(isEditMode ? "edit-menu" : target === "code" ? "qa-target" : "dev-version"); return; }
       if (key.backspace || key.delete) { setBaseUrl((p) => p.slice(0, -1)); return; }
       if (char.length === 1 && char >= " ") { setBaseUrl((p) => p + char); }
       return;
@@ -358,7 +358,7 @@ export function OnboardWizard({
     return (
       <Box flexDirection="column">
         <Text bold>How would you like to select the repo?</Text>
-        <SelectInput items={items} onSelect={(i) => { i.value === "browse" ? setStep("browse-owner") : setStep("repo"); }} />
+        <SelectInput items={items} onSelect={(i) => { if (i.value === "browse") { setRepoFilter(""); setRepoFilterActive(false); setStep("browse-owner"); } else { setStep("repo"); } }} />
         <Box marginTop={1}><Text dimColor>Esc to cancel</Text></Box>
       </Box>
     );
@@ -375,7 +375,7 @@ export function OnboardWizard({
             const owner = v.trim() || "@me";
             setBrowseOwner(owner);
             setRepoPage(1);
-            void fetchRepos(owner, 1).then(() => setStep("browse-list"));
+            void fetchRepos(owner, 1).then(() => { setRepoFilter(""); setRepoFilterActive(false); setStep("browse-list"); });
           }}
         />
         <Box marginTop={1}>
