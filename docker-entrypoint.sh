@@ -7,4 +7,4 @@ DATA_DIR="/app/data"
 mkdir -p "$DATA_DIR"
 chown -R appuser:app "$DATA_DIR"
 
-exec runuser -u appuser -- sh -c "node boot-guard.mjs && tsx src/index.ts"
+exec runuser -u appuser -- sh -c "export PATH=\"/app/node_modules/.bin:\$PATH\" && node boot-guard.mjs && tsx src/index.ts"
