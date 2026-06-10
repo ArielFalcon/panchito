@@ -16,6 +16,7 @@ import {
   buildPlanPrompt,
   renderArchitectureContext,
   shouldFanOut,
+  parseModelRef,
   ManifestFs,
   ParallelWorkerInput,
   OpencodeDeps,
@@ -400,6 +401,39 @@ test("buildPlanPrompt forbids writing specs and demands self-questioned objectiv
   assert.match(p, /QUESTION your own list/);
   assert.match(p, /edge cases/);
   assert.match(p, /"objectives"/);
+});
+
+test("buildWorkerPrompt injects learnedRules so fan-out workers don't repeat past mistakes", () => {
+  const base: ParallelWorkerInput = { objective: "pay", flow: "checkout", symbols: ["pay"], needsUi: true, specFile: "flows/checkout.spec.ts", repo: "r", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "ns", baseUrl: "https://dev", appName: "a", mode: "complete" };
+  // Without rules: no lessons block.
+  assert.doesNotMatch(buildWorkerPrompt(base), /Lessons learned/);
+  // With rules: the block appears, carrying the rule text, before the closing JSON contract.
+  const withRules = buildWorkerPrompt({ ...base, learnedRules: "- avoid waitForTimeout; assert on the visible outcome" });
+  assert.match(withRules, /Lessons learned from past runs/);
+  assert.match(withRules, /avoid waitForTimeout/);
+  assert.ok(withRules.indexOf("Lessons learned") < withRules.indexOf('{"spec"'), "lessons precede the JSON contract");
+});
+
+test("buildPlanPrompt injects learnedRules in both diff and complete variants", () => {
+  const rule = "- prefer getByRole over nth-child selectors";
+  const diffWithRules = buildPlanPrompt({ ...diffPlanInput, learnedRules: rule });
+  assert.match(diffWithRules, /Lessons learned from past runs/);
+  assert.match(diffWithRules, /prefer getByRole/);
+  const completeWithRules = buildPlanPrompt({ ...input, mode: "complete", intent: undefined, learnedRules: rule });
+  assert.match(completeWithRules, /Lessons learned from past runs/);
+  // Absent rules → no lessons block (no wasted tokens).
+  assert.doesNotMatch(buildPlanPrompt({ ...input, mode: "complete", intent: undefined }), /Lessons learned/);
+});
+
+test("parseModelRef splits provider/model and rejects malformed refs", () => {
+  // The fallback model override must reach the SDK as {providerID, modelID}, not a raw string
+  // (the bug that broke typecheck). A model id can itself contain slashes — only the FIRST splits.
+  assert.deepEqual(parseModelRef("opencode-go/deepseek-v4-pro"), { providerID: "opencode-go", modelID: "deepseek-v4-pro" });
+  assert.deepEqual(parseModelRef("a/b/c"), { providerID: "a", modelID: "b/c" });
+  // Unparseable → undefined so the override is skipped, never sent malformed.
+  assert.equal(parseModelRef("noslash"), undefined);
+  assert.equal(parseModelRef("/leading"), undefined);
+  assert.equal(parseModelRef("trailing/"), undefined);
 });
 
 test("withTimeout resolves if the promise arrives in time", async () => {

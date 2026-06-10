@@ -67,7 +67,8 @@ function recordCircuitSuccess(): void {
 
 // Read fallback model mapping from opencode.json (root-level key). Keeps the
 // fallback logic in one place so the orchestrator can retry with a different
-// model when the primary is unavailable.
+// model when the primary is unavailable. Opt-in: absent `model_fallback` key
+// (the default) means no fallback — the primary error propagates unchanged.
 function getFallbackModel(agent: string): string | undefined {
   try {
     const configPath = join(process.cwd(), "opencode", "opencode.json");
@@ -77,6 +78,16 @@ function getFallbackModel(agent: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+// The session.prompt SDK takes a structured model override ({providerID, modelID}),
+// not the "provider/model" string opencode.json uses. Parse it; an unparseable ref
+// (no provider segment) yields undefined so the override is skipped rather than sent
+// malformed.
+export function parseModelRef(ref: string): { providerID: string; modelID: string } | undefined {
+  const i = ref.indexOf("/");
+  if (i <= 0 || i >= ref.length - 1) return undefined;
+  return { providerID: ref.slice(0, i), modelID: ref.slice(i + 1) };
 }
 
 // Shared OpenCode SDK client — lazy-initialised once, reused by SSE stream AND
@@ -620,6 +631,7 @@ export interface ParallelWorkerInput {
   baseUrl?: string;
   appName: string;
   mode: RunMode;
+  learnedRules?: string; // anti-pattern rules from past runs — injected so workers don't repeat them
 }
 
 // Dispatch each worker objective to a SEPARATE qa-worker session, bounded concurrency.
@@ -698,6 +710,13 @@ export function buildWorkerPrompt(w: ParallelWorkerInput): string {
     `## Rules`,
     ...rules,
     `- Do NOT write to the manifest — the orchestrator records metadata. Do NOT read or edit other workers' files.`,
+    ...(w.learnedRules
+      ? [
+          ``,
+          `## Lessons learned from past runs (avoid repeating these)`,
+          w.learnedRules,
+        ]
+      : []),
     `- End your reply with ONLY this JSON: {"spec":"${w.specFile}"}`,
   ].filter((l): l is string => l !== null).join("\n");
 }
@@ -791,6 +810,7 @@ export async function runOpencodeParallel(
     baseUrl: input.baseUrl,
     appName: input.appName,
     mode: input.mode,
+    learnedRules: input.learnedRules,
   }));
   const { results, errors } = await generateParallel(workers, deps, { signal: opts?.signal, concurrency: opts?.concurrency });
   opts?.onProgress?.(`[qa] workers: ${results.length} spec(s) written, ${errors.length} error(s)`);
@@ -822,6 +842,9 @@ export async function runOpencodeParallel(
 // return STRUCTURED objectives (no spec files). It must question its own list (drop naive flows,
 // keep main use cases + MVP happy paths + relevant edge cases).
 export function buildPlanPrompt(input: OpencodeRunInput): string {
+  const lessonsBlock = input.learnedRules
+    ? [``, `## Lessons learned from past runs (factor these into the objectives you plan)`, input.learnedRules]
+    : [];
   if (input.mode === "diff") {
     return [
       `Plan E2E test objectives for the blast radius of commit ${input.sha} of ${input.repo}.`,
@@ -853,6 +876,7 @@ export function buildPlanPrompt(input: OpencodeRunInput): string {
             `changed service behavior through the UI.`,
           ]
         : []),
+      ...lessonsBlock,
       ``,
       `## Output — end with ONLY this JSON (no spec files):`,
       `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","symbols":["CheckoutService.pay"],"needsUi":true}]}`,
@@ -880,6 +904,7 @@ export function buildPlanPrompt(input: OpencodeRunInput): string {
     `   criterion in given/when/then form, with the code symbols it exercises.`,
     `   For each objective, set "needsUi": true when the flow involves page navigation or DOM`,
     `   interaction, and "needsUi": false for pure logic (validation, calculation, data transformation).`,
+    ...lessonsBlock,
     ``,
     `## Output — end with ONLY this JSON (no spec files):`,
     `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","symbols":["CheckoutService.pay"],"needsUi":true}]}`,
@@ -1416,12 +1441,13 @@ export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
           withTimeout(
             (() => {
               checkCircuit();
-              const runPrompt = (modelOverride?: string) =>
-                client.session
+              const runPrompt = (modelOverride?: string) => {
+                const overrideModel = modelOverride ? parseModelRef(modelOverride) : undefined;
+                return client.session
                   .prompt({
                     path: { id },
                     query: { directory: cwd },
-                    body: { agent, parts: [{ type: "text", text }], ...(modelOverride ? { model: modelOverride } : {}) },
+                    body: { agent, parts: [{ type: "text", text }], ...(overrideModel ? { model: overrideModel } : {}) },
                   })
                   .then((res) => {
                     if (res.error) {
@@ -1435,6 +1461,7 @@ export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
                     recordCircuitFailure();
                     throw err;
                   });
+              };
               return runPrompt().catch((err) => {
                 const fallback = getFallbackModel(agent);
                 if (fallback) {
