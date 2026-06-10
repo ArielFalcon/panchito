@@ -6,6 +6,8 @@ import {
   selectForRetrieval,
   renderRulesForPrompt,
   applyOutcome,
+  preventionOutcome,
+  PREVENTION_HELD_SCORE,
   type LearningRule,
   type RuleUpsert,
 } from "./learning-rule";
@@ -31,6 +33,41 @@ function rule(overrides: Partial<LearningRule> = {}): LearningRule {
 describe("ruleKey", () => {
   it("produces stable key from trigger + action", () => {
     assert.equal(ruleKey({ trigger: "a", action: "b" }), "a::b");
+  });
+});
+
+describe("preventionOutcome (governance signal without an oracle)", () => {
+  it("scores 0 when the run still incurred the rule's own class (the rule failed its purpose)", () => {
+    assert.equal(preventionOutcome("E-FRAGILE-SELECTOR", "E-FRAGILE-SELECTOR"), 0);
+  });
+  it("scores a weak positive (held) on a clean run, capped at medium — never high", () => {
+    assert.equal(preventionOutcome("E-FRAGILE-SELECTOR", null), PREVENTION_HELD_SCORE);
+    // The held score must stay below the 0.7 "high" threshold so proxy-only rules cap at medium.
+    assert.ok(PREVENTION_HELD_SCORE < 0.7, "held score must not reach high confidence");
+  });
+  it("returns null for an unrelated failure (no evidence about this rule)", () => {
+    assert.equal(preventionOutcome("E-FRAGILE-SELECTOR", "E-EXEC-FAIL"), null);
+  });
+  it("returns null for noisy classes (infra/flaky) even when they match", () => {
+    assert.equal(preventionOutcome("E-INFRA", "E-INFRA"), null);
+    assert.equal(preventionOutcome("E-FLAKY", "E-FLAKY"), null);
+  });
+  it("a rule that consistently holds is promoted to active, but plateaus at medium", () => {
+    let r = rule({ status: "candidate", errorClass: "E-FRAGILE-SELECTOR" });
+    for (let i = 0; i < 5; i++) {
+      const s = preventionOutcome(r.errorClass, null);
+      if (s !== null) r = applyOutcome(r, s);
+    }
+    assert.equal(r.status, "active", "held across runs → promoted");
+    assert.equal(r.confidence, "medium", "proxy-only promotion never reaches high");
+  });
+  it("a rule whose class keeps recurring is demoted out of active", () => {
+    let r = rule({ status: "active", successRate: 0.7, outcomeCount: 4, errorClass: "E-FRAGILE-SELECTOR" });
+    for (let i = 0; i < 6; i++) {
+      const s = preventionOutcome(r.errorClass, "E-FRAGILE-SELECTOR"); // keeps failing
+      if (s !== null) r = applyOutcome(r, s);
+    }
+    assert.equal(r.status, "deprecated", "a rule that never prevents its class loses trust");
   });
 });
 

@@ -56,6 +56,14 @@ qa:
   changeCoverage:
     mode: signal               # off | signal (measure+record only) | enforce (close the gap, block if still low)
     minRatio: 0.7              # fraction of changed lines that must be exercised to "pass"
+  # Value oracle — the ground-truth that lets the learning flywheel PROMOTE rules (not just
+  # accumulate them). code apps: mutation testing via Stryker (bundled in the orchestrator — no
+  # repo setup needed; JS/TS only). e2e apps: response fault-injection, which RE-RUNS the suite
+  # against DEV once per green diff (≈2× execution — that is the cost of ground-truth).
+  # Default is shadow-aware: OFF while `shadow: true` (don't double-run DEV during onboarding),
+  # ON once you go to production (`shadow: false`). Set explicitly to override — e.g. a static
+  # site with no backend should set "off" (fault-injection has nothing meaningful to corrupt).
+  # valueOracle: signal        # off | signal  (omit to use the shadow-aware default)
 
 report:
   onFailure: "github-issue"

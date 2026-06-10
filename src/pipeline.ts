@@ -24,6 +24,7 @@ import { runMutationOracle } from "./qa/learning/mutation-code";
 import { runFaultInjectionOracle } from "./qa/learning/fault-injection-e2e";
 import type { OracleInput, ValueOracleResult } from "./qa/learning/oracle-types";
 import { retrieveRules, type RetrievalResult } from "./qa/learning/retrieval";
+import { preventionOutcome, type LearningRule } from "./qa/learning/learning-rule";
 import { distillReflection, distillReviewerCorrections } from "./qa/learning/distiller";
 import { detectStructuralPatterns } from "./qa/learning/structural-pattern";
 import { matchExemplars, renderExemplarsForPrompt } from "./qa/learning/skill-exemplar";
@@ -347,6 +348,7 @@ export async function runPipeline(
   const reviewerCorrections: string[] = []; // accumulated across review rounds (for RunOutcome)
   let retries = 0; // total regeneration attempts (review loop + failure retries)
   let retrievedRuleIds: string[] = []; // rule IDs retrieved for this run (for RunOutcome)
+  let retrievedRules: LearningRule[] = []; // full retrieved rules (errorClass needed for governance)
   let curriculum: ReturnType<typeof initCurriculum> | null = null; // persisted across runs
 
   const persistOutcome = (verdict: QaRunResult, overrides?: { staticOk?: boolean; coverageRatio?: number | null; valueScore?: number | null; rulesRetrieved?: string[] }) => {
@@ -732,6 +734,7 @@ export async function runPipeline(
         if (retrieval.promptSection) {
           learnedRules = retrieval.promptSection;
           retrievedRuleIds = retrieval.rules.map((r) => r.id);
+          retrievedRules = retrieval.rules;
           log(`[qa] retrieval: injected ${retrievedRuleIds.length} learning rule(s) into the agent prompt`);
         }
       } catch (err) {
@@ -1009,7 +1012,11 @@ export async function runPipeline(
   // testing scoped to the diff. e2e: response fault-injection against the SAME live DEV (opt-in,
   // signal-only) — never a redeploy. Off-path and fail-open: any error is a non-blocking warning,
   // and the score NEVER gates publish.
-  const valueOraclePolicy = app.qa.valueOracle ?? "off";
+  // Default is shadow-aware: while a repo is in shadow (onboarding/validation) the e2e oracle is
+  // OFF so fault-injection doesn't double-run the suite against DEV before the team trusts the
+  // engine. Once shadow is lifted (real production — PRs/Issues publish), the oracle turns ON by
+  // default so the learning flywheel gets ground-truth. An explicit qa.valueOracle always wins.
+  const valueOraclePolicy = app.qa.valueOracle ?? (app.qa.shadow ? "off" : "signal");
   // e2e is restricted to `diff` ON PURPOSE: fault-injection re-runs the WHOLE suite corrupted, so
   // running it on a `complete`/`exhaustive` whole-repo suite would double a very large run for a
   // diffuse signal. code mutation runs in any mode (it is diff-scoped and cheap). Both are opt-in
@@ -1144,15 +1151,40 @@ export async function runPipeline(
   const ratio = ccForPersistence?.overall.ratio ?? null;
   persistOutcome(run, { staticOk: !isCode && generating, coverageRatio: ratio, valueScore, rulesRetrieved: retrievedRuleIds });
 
+  // Label the run once: its errorClass drives both the governance signal (below) and reflect/distill.
+  const labeled = labelRunOutcome({
+    runId: opts.runId ?? sha, app: app.name, sha, mode, target: opts.target ?? "e2e",
+    verdict: run.verdict, staticOk: !isCode && generating,
+    coverageRatio: ratio,
+    minCoverageRatio: app.qa.changeCoverage?.minRatio ?? DEFAULT_COVERAGE_POLICY.minRatio,
+    reviewerCorrections, flaky: run.verdict === "flaky", retries,
+    valueScore,
+  });
+
+  // Governance WITHOUT an oracle: when the oracle produced no valueScore (it is off, or not
+  // applicable to this app), fold a CONSERVATIVE prevention signal — derived from this run's own
+  // errorClass — into the retrieved rules. This lets candidate rules earn or lose trust for EVERY
+  // app, not just oracle-enabled ones, so the flywheel turns universally. Off-path, non-blocking,
+  // and capped at "medium" confidence (only the oracle lifts a rule to "high"). See preventionOutcome.
+  if (valueScore === null && retrievedRules.length > 0 && opts.runId) {
+    try {
+      const { recordRuleOutcome } = await import("./server/history");
+      let folded = 0;
+      for (const rule of retrievedRules) {
+        const score = preventionOutcome(rule.errorClass, labeled.errorClass);
+        if (score === null) continue; // no evidence about this rule from this run
+        recordRuleOutcome(rule.id, score);
+        folded++;
+      }
+      if (folded > 0) {
+        log(`[qa] governance: folded prevention signal into ${folded} rule(s) (no oracle; runErrorClass=${labeled.errorClass ?? "none"})`);
+      }
+    } catch (err) {
+      log(`[qa] WARNING: governance signal update failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   if (deps.reflectAndDistill && opts.runId && !signal?.aborted) {
-    const labeled = labelRunOutcome({
-      runId: opts.runId, app: app.name, sha, mode, target: opts.target ?? "e2e",
-      verdict: run.verdict, staticOk: !isCode && generating,
-      coverageRatio: ratio,
-      minCoverageRatio: app.qa.changeCoverage?.minRatio ?? DEFAULT_COVERAGE_POLICY.minRatio,
-      reviewerCorrections, flaky: run.verdict === "flaky", retries,
-      valueScore,
-    });
     if (labeled.errorClass && labeled.errorClass !== "E-INFRA" && labeled.errorClass !== "E-FLAKY") {
       const outcome: RunOutcome = { ...labeled, gateSignals: { ...labeled.gateSignals, valueScore: valueScore ?? null }, rulesRetrieved: retrievedRuleIds, at: labeled.at };
       deps

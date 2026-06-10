@@ -55,6 +55,32 @@ function nextStatus(status: RuleStatus, outcomeCount: number, successRate: numbe
   }
 }
 
+// ── Governance WITHOUT an oracle: the prevention signal ──────────────────────────
+// The oracle (mutation / fault-injection) is the strong ground-truth, but it is opt-in and
+// not applicable to every app. To make the flywheel turn for ANY app, we derive a weaker,
+// CONSERVATIVE signal from the run's own errorClass — available on every run, no oracle needed:
+//
+//   - The rule's OWN class still occurred (the run was labeled with it) → 0. Strong, precise
+//     negative: the rule failed at the exact thing it exists to prevent. This is Goodhart-proof
+//     (it never rewards trivial-green tests; it only punishes a rule that demonstrably didn't work).
+//   - A CLEAN run (no errorClass) → a weak positive. The rule "held". Capped at the medium band
+//     (see PREVENTION_HELD_SCORE) so a proxy-only rule can reach "active/medium" but NEVER "high":
+//     high confidence stays reserved for oracle-proven rules.
+//   - An UNRELATED failure (some other class), or a noisy class (infra/flaky) → null: no evidence
+//     either way, so the rule's statistics are left untouched.
+//
+// PREVENTION_HELD_SCORE sits exactly on PROMOTE_RATE: a rule that consistently holds is promoted
+// over MIN_OUTCOMES runs, but its running mean plateaus at 0.6 → deriveConfidence caps it at
+// "medium". Only the oracle's higher scores lift a rule into "high".
+export const PREVENTION_HELD_SCORE = 0.6;
+
+export function preventionOutcome(ruleErrorClass: ErrorClass, runErrorClass: ErrorClass | null): number | null {
+  if (runErrorClass === "E-INFRA" || runErrorClass === "E-FLAKY") return null; // noisy — teaches nothing
+  if (runErrorClass === ruleErrorClass) return 0; // the rule did not prevent its own class
+  if (runErrorClass === null) return PREVENTION_HELD_SCORE; // clean run → the rule held (weak positive)
+  return null; // an unrelated failure → no evidence about this rule
+}
+
 // Fold one objective outcome (a valueScore in [0,1]) into a rule. successRate is a RUNNING
 // MEAN over all outcomes — never an overwrite — so confidence is earned from many results.
 // Pure: no time, no I/O (the caller stamps lastVerified).

@@ -788,12 +788,31 @@ test("oracle: runOracle is called for code mode green runs", async () => {
   assert.equal(o.gateSignals.valueScore, 0.85);
 });
 
-test("oracle: runOracle is NOT called for e2e mode", async () => {
+test("oracle: e2e runs the oracle by default once shadow is off (production)", async () => {
   const calls: string[] = [];
   const d = deps(passing(), calls, { diff: DIFF_4, coverage: [cov([1, 2, 3, 4])], message: "feat: x" });
   await runPipeline(app, "e2e0001", d, "manual", { mode: "diff", runId: "run-orc-2" });
 
-  assert.equal(d.oracleCalls.length, 0, "oracle should NOT be called for e2e");
+  assert.equal(d.oracleCalls.length, 1, "e2e oracle turns on by default in non-shadow runs");
+  assert.equal(d.oracleCalls[0]!.target, "e2e");
+});
+
+test("oracle: e2e oracle is OFF in shadow mode (no DEV double-run during onboarding)", async () => {
+  const calls: string[] = [];
+  const shadowApp = { ...app, qa: { ...app.qa, shadow: true } };
+  const d = deps(passing(), calls, { diff: DIFF_4, coverage: [cov([1, 2, 3, 4])], message: "feat: x" });
+  await runPipeline(shadowApp, "e2eShad", d, "manual", { mode: "diff", runId: "run-orc-2b" });
+
+  assert.equal(d.oracleCalls.length, 0, "shadow defaults the e2e oracle off");
+});
+
+test("oracle: explicit valueOracle 'off' disables the e2e oracle even in production", async () => {
+  const calls: string[] = [];
+  const offApp = { ...app, qa: { ...app.qa, valueOracle: "off" as const } };
+  const d = deps(passing(), calls, { diff: DIFF_4, coverage: [cov([1, 2, 3, 4])], message: "feat: x" });
+  await runPipeline(offApp, "e2eOff", d, "manual", { mode: "diff", runId: "run-orc-2c" });
+
+  assert.equal(d.oracleCalls.length, 0, "explicit off always wins");
 });
 
 test("oracle: runOracle is NOT called for failing runs", async () => {

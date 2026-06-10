@@ -15,6 +15,9 @@ qa:
   needsReview: true
   shadow: true                # first run: no PR, no Issues — only logs what it would do
   testDataPrefix: "qa-bot"
+  valueOracle: "off"          # static CV site, no backend → response fault-injection has nothing
+                              # meaningful to corrupt. Explicit off so it STAYS off if shadow is
+                              # lifted (this is the demo connection — not a representative app).
 
 report:
   onFailure: "github-issue"
