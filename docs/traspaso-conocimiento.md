@@ -47,7 +47,7 @@ Ambas capas comparten un volumen de trabajo para los repositorios (working copie
 | **Revisión independiente** | Un segundo modelo (distinto al generador) revisa los tests por calidad: rechaza aserciones triviales, selectores frágiles o tests que no verifican el cambio | Evita que el generador se auto-apruebe |
 | **Gate estático** | Compilación TypeScript, lint, lista de tests de Playwright y validación del manifest deben pasar | Tests inválidos nunca llegan a ejecutarse |
 | **Ejecución** | Corre los tests contra la URL de DEV en vivo | La verificación es real, no teórica |
-| **Oracle** | Para repos de código (no web), corre mutation testing con Stryker para medir cuántos bugs inyectados los tests realmente detectan | Mide la calidad objetiva, no solo el verde |
+| **Oracle** (opt-in, off por defecto) | Mide calidad objetiva más allá del verde. Repos de código **JS/TS**: mutation testing con Stryker (el repo debe proveer Stryker). e2e: fault-injection sobre las respuestas. Se activa con `qa.valueOracle: signal` | Sin él, el aprendizaje acumula reglas pero no puede *probarlas* (ver §2) |
 | **Reflexión** | En runs fallidos, un agente analiza el error y produce una regla preventiva estructurada | Cada fallo se convierte en conocimiento reutilizable |
 | **Decisión** | Verde + aprobado → PR con auto-merge. Fallo → Issue. Flaky → cuarentena. DEV caído → error de infraestructura | El outcome es siempre actionable y claro |
 
@@ -56,10 +56,21 @@ Ambas capas comparten un volumen de trabajo para los repositorios (working copie
 El sistema mantiene un ledger de aprendizaje con cinco componentes:
 
 - **Labeler:** clasifica cada run en una clase de error (estático, ejecución, falso positivo…) sin usar LLM.
-- **Oracle:** mide calidad objetiva (mutation testing).
+- **Oracle:** mide calidad objetiva (mutation testing / fault-injection). **Opt-in** — ver §1.
 - **Reflector:** produce reflexiones estructuradas en fallos.
-- **Distiller:** convierte reflexiones en reglas reutilizables, deduplicadas y con decay.
+- **Distiller:** convierte reflexiones en reglas reutilizables y deduplicadas.
 - **Curriculum:** rastrea qué arquetipos de escenario han demostrado atrapar bugs reales; solo los probados se inyectan en futuros prompts.
+
+> **Estado actual (sé honesto con esto al onboardar):** la *fontanería* del ledger está
+> completa y activa — cada run se etiqueta, los fallos producen reflexiones, estas se destilan
+> en reglas, y las reglas se inyectan en el prompt del agente (incluido el camino paralelo de
+> `complete`/`exhaustive`/`parallelDiff`). Lo que **requiere el Oracle** es el *volante de
+> gobernanza*: la promoción de reglas candidatas a activas, su decay, y la activación de
+> arquetipos del curriculum dependen de un `valueScore`, que solo el Oracle produce. Con el
+> Oracle apagado (el default), el sistema **acumula e inyecta reglas candidatas** pero ninguna
+> se promueve ni decae todavía. Para encender el volante, activa `qa.valueOracle: signal` en una
+> app con backend (donde la inyección de fallos es significativa) o un repo de código JS/TS con
+> Stryker.
 
 ### 3. Multi-app, motor único
 
@@ -95,16 +106,20 @@ El escenario de oro es el flujo por webhook:
 | **`complete`** | Quieres rellenar huecos de cobertura | Analiza todo el repo y genera tests para flujos importantes no cubiertos |
 | **`exhaustive`** | Auditoría completa | Re-evalúa cada test existente y regenera la suite entera |
 | **`manual`** | Quieres forzar un enfoque | Generación guiada por un prompt natural del operador |
-| **`code`** (target) | Backend/librería sin web | Corre la suite de tests propia del repo (pytest, go test, cargo test…) y mide con mutation testing |
+| **`code`** (target) | Backend/librería sin web | Corre la suite de tests propia del repo (pytest, go test, cargo test…). Mutation testing es opt-in y **solo JS/TS** (requiere Stryker en el repo) |
 
 ### Gate de calidad (la confianza se gana en capas)
 
 El sistema tiene cuatro capas de gate para que un test llegue al repo de la app:
 
-1. **Análisis estático:** ¿compila? ¿pasa lint? ¿la lista de tests de Playwright es válida? ¿el manifest tiene metadatos correctos?
-2. **Reviewer IA:** ¿el test tiene valor real? ¿asevera algo? ¿usa selectores robustos? ¿verifica el cambio real?
-3. **Change-coverage:** ¿el test pasa pero **ejecuta** las líneas que el commit cambió? Un verde que no toca el cambio es un falso positivo.
-4. **Mutation testing:** ¿el test detecta bugs inyectados? Mide la calidad más profunda posible.
+1. **Análisis estático** (siempre activo): ¿compila? ¿pasa lint? ¿la lista de tests de Playwright es válida? ¿el manifest tiene metadatos correctos?
+2. **Reviewer IA** (siempre activo): ¿el test tiene valor real? ¿asevera algo? ¿usa selectores robustos? ¿verifica el cambio real?
+3. **Change-coverage** (`signal` por defecto, `enforce` opt-in): ¿el test pasa pero **ejecuta** las líneas que el commit cambió? Un verde que no toca el cambio es un falso positivo. En `signal` se mide y registra; en `enforce` bloquea el PR. **Ojo:** en apps con assets bundleados (p.ej. Astro/Vercel) el mapeo URL→fuente puede no ser medible — el sistema lo reporta como `unknown` en vez de fingir cobertura.
+4. **Mutation testing** (opt-in, JS/TS): ¿el test detecta bugs inyectados? La capa más profunda. Requiere el Oracle activado (§1).
+
+> Las capas 1–2 son el gate real y siempre corren. Las capas 3–4 están **diseñadas y cableadas**
+> pero son opt-in: por defecto, 3 mide sin bloquear y 4 está apagada. Actívalas por app cuando el
+> entorno lo permita.
 
 ### Determinismo y reproducibilidad
 
@@ -160,15 +175,15 @@ El sistema está diseñado para que **dos runs consecutivos del mismo SHA produz
 
 ### Métricas y observabilidad
 
-- **OpenTelemetry tracing:** distribuido en todo el pipeline.
-- **Prometheus metrics:** disponibles en `/metrics` (profundidad de cola, sesiones abiertas de OpenCode, etc.).
+- **Logging estructurado (JSON):** todas las requests a la API se loguean con un `x-trace-id` de entrada y duración. *Nota:* NO hay OpenTelemetry distribuido todavía — el tracing inter-servicio está pendiente, no implementado.
+- **Métricas Prometheus:** expuestas en **`/api/metrics`** (detrás del token de la API, no en `/metrics`). Hoy emite dos gauges: profundidad de cola y sesiones abiertas de OpenCode.
 - **Health poller:** cada 60 segundos verifica que el servicio responde, profundidad de cola, y limpieza de sesiones huérfanas.
 - **Limpieza de mirrors:** cada 6 horas se eliminan working copies antiguos (>7 días) o huérfanos (app ya no configurada), preservando el más reciente por repo y nunca tocando uno en uso.
 
 ### Recuperación ante caídas
 
 - Si el proceso se reinicia durante un run, al arrancar se detectan los runs interrumpidos (`running` o `enqueued`) y se marcan como `infra-error`, registrando un incidente para trazabilidad.
-- La base de datos de historial es SQLite (persistente), no in-memory; los runs sobreviven a reinicios.
+- La base de datos de historial es SQLite (persistente), no in-memory; el **historial** sobrevive a reinicios. La cola de ejecución es en memoria: un run en vuelo o encolado **no se reanuda** tras un reinicio — se cierra como `infra-error` (re-disparable por el webhook/operador), nunca se pierde silenciosamente.
 - El gate de despliegue se salta si la app no tiene `versionUrl`, pero es recomendable configurarlo para no ejecutar contra un despliegue desfasado.
 
 ---
