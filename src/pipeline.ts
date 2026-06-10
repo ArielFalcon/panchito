@@ -55,6 +55,9 @@ import type { ReviewInput, ReviewResult } from "./integrations/opencode-client";
 // Tests live in this folder inside the repo (git is the source of truth).
 const E2E_DIR = "e2e";
 
+// Track consecutive reviewer failures to detect persistent outages.
+let consecutiveReviewerFailures = 0;
+
 export interface GenerateInput {
   repo: string;
   sha: string;
@@ -647,15 +650,27 @@ export async function runPipeline(
         // Fail open for a transient error, but make it OBSERVABLE: the reviewer is the only
         // independent gate against the circular self-approval loop, so a persistent outage
         // silently degrading every run to generator-self-approval must be visible.
-        log(`[qa] WARNING: independent reviewer FAILED — publishing on the generator's verdict WITHOUT independent review (${err instanceof Error ? err.message : String(err)}).`);
+        consecutiveReviewerFailures++;
+        if (consecutiveReviewerFailures >= 3) {
+          log(`[qa] CRITICAL: independent reviewer has FAILED ${consecutiveReviewerFailures} consecutive times — REVIEWER OUTAGE DETECTED. All runs are publishing WITHOUT independent review.`);
+        } else {
+          log(`[qa] WARNING: independent reviewer FAILED — publishing on the generator's verdict WITHOUT independent review (${err instanceof Error ? err.message : String(err)}).`);
+        }
         return { ...r, note: "published without independent review (reviewer error)" };
       }
       // A parse miss is NOT an actionable rejection: feeding the synthetic correction back
       // just burns a round and re-hits the same miss. Treat it like a reviewer error.
       if (review.parsed === false) {
-        log(`[qa] WARNING: independent reviewer produced NO parseable verdict — publishing WITHOUT independent review (not burning a regeneration round).`);
+        consecutiveReviewerFailures++;
+        if (consecutiveReviewerFailures >= 3) {
+          log(`[qa] CRITICAL: independent reviewer has produced NO parseable verdict ${consecutiveReviewerFailures} consecutive times — REVIEWER OUTAGE DETECTED.`);
+        } else {
+          log(`[qa] WARNING: independent reviewer produced NO parseable verdict — publishing WITHOUT independent review (not burning a regeneration round).`);
+        }
         return { ...r, note: "published without independent review (unparseable reviewer verdict)" };
       }
+      // Reset counter on successful reviewer response
+      consecutiveReviewerFailures = 0;
       log(`[qa] independent reviewer round ${round + 1}/${MAX_REVIEW_ROUNDS}: approved=${review.approved} corrections=${review.corrections.length}`);
       if (!review.approved) reviewerCorrections.push(...review.corrections);
       if (review.approved) return { ...r, approved: true, note: undefined };
@@ -722,6 +737,13 @@ export async function runPipeline(
       } catch (err) {
         log(`[qa] WARNING: rule retrieval failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
       }
+    }
+
+    // Cap learned rules to prevent context window exhaustion
+    const MAX_LEARNED_RULES_CHARS = 5000;
+    if (learnedRules && learnedRules.length > MAX_LEARNED_RULES_CHARS) {
+      log(`[qa] WARNING: learnedRules truncated from ${learnedRules.length} to ${MAX_LEARNED_RULES_CHARS} chars (cap exceeded)`);
+      learnedRules = learnedRules.substring(0, MAX_LEARNED_RULES_CHARS) + "\n...[truncated]";
     }
 
     let allPromptSections = learnedRules ?? "";
@@ -1122,7 +1144,7 @@ export async function runPipeline(
   const ratio = ccForPersistence?.overall.ratio ?? null;
   persistOutcome(run, { staticOk: !isCode && generating, coverageRatio: ratio, valueScore, rulesRetrieved: retrievedRuleIds });
 
-  if (deps.reflectAndDistill && opts.runId) {
+  if (deps.reflectAndDistill && opts.runId && !signal?.aborted) {
     const labeled = labelRunOutcome({
       runId: opts.runId, app: app.name, sha, mode, target: opts.target ?? "e2e",
       verdict: run.verdict, staticOk: !isCode && generating,

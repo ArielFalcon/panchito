@@ -4,7 +4,7 @@
 // in client.ts / format.ts / Dashboard.tsx.
 
 import React, { useEffect, useState, useRef } from "react";
-import { Box, Text, useApp } from "ink";
+import { Box, Text, useApp, useInput } from "ink";
 import Spinner from "ink-spinner";
 import SelectInput from "ink-select-input";
 import { Dashboard } from "./components/Dashboard";
@@ -24,6 +24,7 @@ interface SelectItem { label: string; value: string }
 export function Watch({ client, id, onDone }: { client: QaClient; id: string; onDone?: () => void }): React.ReactElement {
   const [record, setRecord] = useState<RunRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [cancelled, setCancelled] = useState(false);
   const { exit } = useApp();
   const finishedRef = useRef(false);
 
@@ -52,7 +53,7 @@ export function Watch({ client, id, onDone }: { client: QaClient; id: string; on
         }
       } catch (e) {
         if (!alive) return;
-        if (e instanceof QaApiError && e.status === undefined && ++misses >= 5) {
+        if (e instanceof QaApiError && ++misses >= 5) {
           setError(e.message);
           finish(1);
           return;
@@ -69,6 +70,14 @@ export function Watch({ client, id, onDone }: { client: QaClient; id: string; on
     };
   }, [client, id, exit, onDone]);
 
+  useInput((input, key) => {
+    if (key.ctrl && input === "c") {
+      setCancelled(true);
+      client.cancelRun(id).catch(() => {});
+    }
+  });
+
+  if (cancelled) return <Text color="yellow">{`qa: run cancelled by operator`}</Text>;
   if (error) return <Text color="red">{`qa: ${error}`}</Text>;
   if (!record) return <Text color="cyan"><Spinner type="dots" />{" starting…"}</Text>;
   return (
