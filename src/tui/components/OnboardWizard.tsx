@@ -194,6 +194,7 @@ export function OnboardWizard({
   // ── input handler ───────────────────────────────────────────────────────
   useInput((char, key) => {
     if (key.escape) {
+      if (step === "browse-list" && repoFilterActive) { setRepoFilterActive(false); return; }
       if (step === "repo-error" || step === "write-error") { reset(); return; }
       if (step === "done") { onDone(appName); return; }
       onCancel();
@@ -356,9 +357,9 @@ export function OnboardWizard({
       <Box flexDirection="column">
         <Text bold>{`Repos for ${browseOwner}`}{repoFilterActive ? `  (filter: ${repoFilter || "_"})` : ""}  page {repoPage}</Text>
         {repoFilterActive ? (
-          <Box marginTop={1}><Text dimColor>filter: {repoFilter || "_"}  Enter to apply  ·  Esc to cancel filter</Text></Box>
+          <Box marginTop={1}><Text dimColor>filter: {repoFilter || "_"}  Enter to apply  ·  Esc to close filter</Text></Box>
         ) : (
-          <Box marginTop={1}><Text dimColor>/ filter  ·  → next page  ·  {repoPage > 1 ? "← prev page  ·  " : ""}Esc to cancel</Text></Box>
+          <Box marginTop={1}><Text dimColor>/ filter  ·  → next page  ·  {repoPage > 1 ? "← prev page  ·  " : ""}Esc to go back</Text></Box>
         )}
         {loading ? (
           <Box marginTop={1}><Text color="cyan"><Spinner type="dots" /> loading…</Text></Box>

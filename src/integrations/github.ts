@@ -189,6 +189,11 @@ export const github = {
       const url = `https://api.github.com/${endpoint}?per_page=${perPage}&page=${page}&sort=updated`;
       const res = await fetch(url, { headers: ghHeaders() });
       if (res.status === 404) return null;
+      if (res.status === 403 && res.headers.get("X-RateLimit-Remaining") === "0") {
+        const reset = res.headers.get("X-RateLimit-Reset");
+        const resetDate = reset ? new Date(Number(reset) * 1000).toLocaleTimeString() : "soon";
+        throw new Error(`GitHub API rate limit exceeded — resets at ${resetDate}. Wait or use a token with higher limits.`);
+      }
       if (!res.ok) throw new Error(`GitHub list repos error ${res.status}: ${await res.text()}`);
       return res;
     };
