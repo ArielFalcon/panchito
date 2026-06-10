@@ -24,13 +24,18 @@ import { dirname } from "node:path";
 //     package files; a Dockerfile/compose change takes effect only on an image rebuild, so
 //     the canary would pass while the real effect ships unverified.
 export const PROTECTED_PATHS: string[] = [
-  "boot-guard.mjs", // the root rollback net (never swapped, always runs intact)
-  "src/server/self-update.ts", // swap / rollback machinery
-  "src/server/merge-guard.ts", // these very safety gates
-  ".github/", // CI / required checks
-  "Dockerfile", // orchestrator image build (not exercised by the canary)
-  "opencode/Dockerfile", // agent image build
-  "docker-compose.yml", // service topology + secret scoping
+  "boot-guard.mjs",
+  "src/server/self-update.ts",
+  "src/server/merge-guard.ts",
+  "src/util/redact.ts",
+  "src/orchestrator/sanitizer.ts",
+  ".github/",
+  "Dockerfile",
+  "opencode/Dockerfile",
+  "docker-compose.yml",
+  "docker-compose.override.yml",
+  "package.json",
+  "package-lock.json",
 ];
 
 export function isProtectedPath(file: string): boolean {

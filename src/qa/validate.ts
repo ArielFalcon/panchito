@@ -12,6 +12,7 @@
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { scrubEnv } from "./code-runner";
 import { validateManifest } from "./metadata";
 
 export interface CheckResult {
@@ -63,7 +64,7 @@ export async function validateSpecs(
 // project's own deps, installed by the orchestrator before this gate).
 function sh(cmd: string, args: string[], e2eDir: string): Promise<CheckResult> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd: e2eDir, env: { ...process.env } });
+    const child = spawn(cmd, args, { cwd: e2eDir, env: scrubEnv() });
     let out = "";
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (out += d));

@@ -4,10 +4,10 @@ ai-pipeline can diagnose and fix incidents in **its own** codebase, then deploy 
 the running service **without a human in the loop**. That is a powerful but dangerous
 capability: a self-modifying service must never ship a change that breaks itself *and*
 removes its own ability to recover (an irrecoverable state). This document describes the
-defense-in-depth that makes autonomous self-merge safe enough to run **on by default**.
+defense-in-depth that makes autonomous self-merge safe enough to opt into.
 
-> Toggle: `SELF_MAINTAINER_AUTOMERGE` (default `true`). Set to `false` to stop every fix at
-> an open PR for a human to review and merge.
+> Toggle: `SELF_MAINTAINER_AUTOMERGE` (default `false`). Set to `true` to let verified fixes
+> auto-deploy; left at `false`, every fix stops at an open PR for a human to review and merge.
 
 ## The flow at a glance
 

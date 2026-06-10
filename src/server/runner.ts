@@ -13,6 +13,7 @@ import { recordIncident } from "./maintainer";
 import { testDataNamespace } from "../qa/test-data";
 import { RunMode, TestTarget, TriggerSource, QaCase } from "../types";
 import { activityRouter } from "../integrations/opencode-client";
+import { redactError } from "../util/redact";
 
 export interface RunRequest {
   app: string;
@@ -129,7 +130,7 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
     } catch (err) {
       // A crash MUST finalize the record (status=done) — otherwise it stays
       // "running" forever and `qa run --watch` hangs waiting for a verdict.
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = redactError(err);
       updateRecord(record.id, { status: "done", step: "done", verdict: "infra-error", note: msg });
       console.error(`[qa] run crashed ${req.app}@${req.sha}: ${msg}`);
 
@@ -143,7 +144,7 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
         recordIncident({ source: "qa-generator", severity: "error", summary: `pipeline crash for ${req.app}: ${msg}` });
       }
     }
-  });
+  }, record.id);
 
   return record.id;
 }

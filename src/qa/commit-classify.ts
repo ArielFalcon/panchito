@@ -71,7 +71,7 @@ const TYPES = new Set<string>([
 
 function parseHeader(message: string): { type: CommitType; breaking: boolean } {
   const first = (message.split("\n")[0] ?? "").trim();
-  // type, optional scope (ignored), optional `!` for breaking, `:`
+  if (/^Revert "/i.test(first)) return { type: "revert", breaking: false };
   const m = first.match(/^(\w+)(?:\([^)]*\))?(!)?:/);
   const raw = m?.[1]?.toLowerCase();
   const type = (raw && TYPES.has(raw) ? raw : "unknown") as CommitType;

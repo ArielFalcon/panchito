@@ -32,7 +32,7 @@ const HEX_SHA = /^[0-9a-f]{7,40}$/i;
 export function parseWebhook(body: unknown): WebhookPayload | null {
   if (!body || typeof body !== "object") return null;
   const b = body as Record<string, unknown>;
-  const guidance = typeof b.guidance === "string" ? b.guidance : undefined;
+  const guidance = typeof b.guidance === "string" ? b.guidance.slice(0, 2000) : undefined;
 
   // Simple shape { repo, sha, mode?, guidance? } — sha must be a hex commit id.
   if (typeof b.repo === "string" && typeof b.sha === "string" && HEX_SHA.test(b.sha)) {

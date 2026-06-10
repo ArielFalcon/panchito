@@ -33,5 +33,9 @@ COPY . .
 # lives in each repo's `e2e/`, and the orchestrator runs `npm ci` there per run
 # (qa/setup.ts). The image already ships the Playwright browsers.
 
+RUN groupadd -r app && useradd -r -g app -d /app appuser \
+    && chown -R appuser:app /app
+USER appuser
+
 # Service entry point: webhook + sequential queue.
 CMD ["npm", "run", "start"]

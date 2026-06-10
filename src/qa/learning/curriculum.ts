@@ -77,15 +77,18 @@ export function selectActiveArchetypes(curriculum: Curriculum): ScenarioArchetyp
 const activeCache = new Map<string, ScenarioArchetype[]>();
 
 export function selectActiveArchetypesCached(curriculum: Curriculum): ScenarioArchetype[] {
-  const cached = activeCache.get(curriculum.app);
+  const key = `${curriculum.app}:${curriculum.updatedAt}`;
+  const cached = activeCache.get(key);
   if (cached) return cached;
   const active = selectActiveArchetypes(curriculum);
-  activeCache.set(curriculum.app, active);
+  activeCache.set(key, active);
   return active;
 }
 
 export function clearActiveArchetypesCache(app: string): void {
-  activeCache.delete(app);
+  for (const k of [...activeCache.keys()]) {
+    if (k === app || k.startsWith(`${app}:`)) activeCache.delete(k);
+  }
 }
 
 export function renderArchetypesForPrompt(archetypes: ScenarioArchetype[]): string {

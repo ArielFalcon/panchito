@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@opencode-ai/sdk": "^1.15.13",
+    "@opencode-ai/sdk": "1.15.13",
     "better-sqlite3": "12.10.0",
     "ink": "^7.0.5",
     "ink-select-input": "^6.2.0",

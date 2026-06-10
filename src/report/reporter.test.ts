@@ -61,7 +61,10 @@ test("a run with no cases, no note and no logs still renders a valid headline", 
 });
 
 test("budgets an oversized log so the body stays under GitHub's 65536-char limit, keeping the tail", () => {
-  const huge = "x".repeat(300_000) + "FINAL_ERROR_MARKER";
+  // Realistic log shape: many short lines (not one giant contiguous base64-char run,
+  // which would be flagged by the sanitizer's base64-secret rule). The marker lives
+  // at the tail so we can prove head+tail truncation keeps the failing region.
+  const huge = "verbose log line\n".repeat(20_000) + "FINAL_ERROR_MARKER";
   const body = renderIssue(
     { sha: "abc123", verdict: "fail", passed: false, cases: [{ name: "c", status: "fail", detail: "boom" }], logs: huge },
     { note: "the run did not converge" },

@@ -39,7 +39,23 @@ export type PublishResult = { prUrl: string; merged: boolean };
 const E2E_PATHSPEC = ["e2e", ":(exclude)e2e/.qa/coverage", ":(exclude)e2e/.qa/coverage/**"];
 // Code-mode tests can live anywhere in the repo (the agent matches the repo's
 // conventions) — commit the whole tree, but never the installed dependencies.
-const CODE_PATHSPEC = [".", ":(exclude)node_modules/", ":(exclude)e2e/.qa/coverage/"];
+const CODE_PATHSPEC = [
+  ".",
+  ":(exclude)node_modules/",
+  ":(exclude)e2e/.qa/coverage/",
+  ":(exclude).env",
+  ":(exclude).env.*",
+  ":(exclude)*.env",
+  ":(exclude)dist/",
+  ":(exclude)build/",
+  ":(exclude)__pycache__/",
+  ":(exclude)*.pyc",
+  ":(exclude).venv/",
+  ":(exclude)venv/",
+  ":(exclude)target/",
+  ":(exclude).next/",
+  ":(exclude)coverage/",
+];
 
 interface PublishShape {
   statusPathspec: string[]; // pathspec for the "did anything change?" check

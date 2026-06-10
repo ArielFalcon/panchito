@@ -147,7 +147,14 @@ query to avoid cross-mode contamination.
 End with a single JSON block, with no text after it:
 
 ```json
-{ "approved": true, "specs": ["login.spec.ts"], "note": "" }
+{
+  "approved": true,
+  "specs": ["login.spec.ts"],
+  "specMetas": [
+    { "file": "login.spec.ts", "flow": "user-login", "objective": "given valid credentials, the dashboard is visible after login", "targets": ["AuthService.login"] }
+  ],
+  "note": ""
+}
 ```
 
 - `approved`: the reviewer's final verdict (`false` if it did not converge).

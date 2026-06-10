@@ -296,7 +296,8 @@ export function defaultPipelineDeps(): PipelineDeps {
           return json as StructuredReflection;
         }
         return null;
-      } catch {
+      } catch (err) {
+        console.warn(`[qa] WARNING: reflectAndDistill internal failure (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
         return null;
       }
     },
@@ -711,11 +712,15 @@ export async function runPipeline(
 
     let learnedRules: string | undefined;
     if (deps.retrieveRules && generating) {
-      const retrieval = deps.retrieveRules(app.name, null);
-      if (retrieval.promptSection) {
-        learnedRules = retrieval.promptSection;
-        retrievedRuleIds = retrieval.rules.map((r) => r.id);
-        log(`[qa] retrieval: injected ${retrievedRuleIds.length} learning rule(s) into the agent prompt`);
+      try {
+        const retrieval = deps.retrieveRules(app.name, null);
+        if (retrieval.promptSection) {
+          learnedRules = retrieval.promptSection;
+          retrievedRuleIds = retrieval.rules.map((r) => r.id);
+          log(`[qa] retrieval: injected ${retrievedRuleIds.length} learning rule(s) into the agent prompt`);
+        }
+      } catch (err) {
+        log(`[qa] WARNING: rule retrieval failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 
@@ -1148,7 +1153,7 @@ export async function runPipeline(
 }
 
 function resultOf(ns: string, verdict: QaRunResult["verdict"], logs: string, note?: string): QaRunResult {
-  return { sha: ns, verdict, passed: false, cases: [], logs, note };
+  return { sha: ns, verdict, passed: verdict === "pass", cases: [], logs, note };
 }
 
 // What the agent reported testing (flow + objective per spec) — the "what was tested"

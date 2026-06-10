@@ -43,6 +43,11 @@ services:
       # override re-adds them for live editing. The E2E suite is NOT in a volume: it lives in git.
       - mirrors:/app/.mirrors # local working copies (shared with opencode); the harness runs over <repo>/e2e here
       - qa-data:/app/data # run history + maintainer state (markers/ledger/failure memory) — persists across restarts
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2.0"
 
   opencode:
     build: ./opencode # official opencode + uv/JDK (Serena) + engram (see opencode/Dockerfile)
@@ -69,7 +74,7 @@ services:
       DEV_TEST_USER: ${DEV_TEST_USER:-}
       DEV_TEST_PASS: ${DEV_TEST_PASS:-}
     volumes:
-      - ./opencode:/root/.config/opencode # opencode.json + agents + AGENTS.md + skills
+      - ./opencode:/root/.config/opencode:ro # opencode.json + agents + AGENTS.md + skills (read-only: agents must NOT rewrite their own prompts)
       - mirrors:/app/.mirrors # SAME path as the orchestrator: the agent reads/writes here (Serena caches in <repo>/.serena)
       - serena-cache:/root/.cache/uv # uv/Serena cache (avoids re-downloading on each boot)
       - engram-data:/data # engram's episodic-memory SQLite — persists across restarts
@@ -80,6 +85,11 @@ services:
       timeout: 5s
       retries: 5
       start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+          cpus: "4.0"
 
 volumes:
   mirrors:

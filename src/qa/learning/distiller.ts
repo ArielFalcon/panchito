@@ -17,8 +17,8 @@ export interface DistillerInput {
 
 export function reflectionToRuleUpsert(input: DistillerInput): RuleUpsert {
   return {
-    trigger: input.reflection.preventiveRule.trigger,
-    action: input.reflection.preventiveRule.action,
+    trigger: input.reflection.preventiveRule.trigger.slice(0, RULE_FIELD_MAX),
+    action: input.reflection.preventiveRule.action.slice(0, RULE_FIELD_MAX),
     errorClass: input.reflection.errorClass,
     source: input.runId,
   };

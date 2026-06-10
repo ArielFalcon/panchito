@@ -8,6 +8,7 @@ import { IncomingMessage, ServerResponse } from "node:http";
 import { RunMode, TestTarget, RunRecord } from "../types";
 import { AppConfig } from "../orchestrator/config-loader";
 import { sanitizeText } from "../orchestrator/sanitizer";
+import { redactError } from "../util/redact";
 import { buildRunContext, buildLearningContext } from "./chat";
 import { buildHelpContext } from "./help";
 import { json, readBody } from "./helpers";
@@ -133,7 +134,7 @@ async function handleCreateRun(req: IncomingMessage, res: ServerResponse, deps: 
         : "e2e";
   const mode: RunMode =
     typeof body.mode === "string" && (MODES as string[]).includes(body.mode) ? (body.mode as RunMode) : "diff";
-  const guidance = typeof body.guidance === "string" ? body.guidance : undefined;
+  const guidance = typeof body.guidance === "string" ? body.guidance.slice(0, 2000) : undefined;
   const shadow = typeof body.shadow === "boolean" ? body.shadow : undefined;
 
   let sha: string;
@@ -146,7 +147,7 @@ async function handleCreateRun(req: IncomingMessage, res: ServerResponse, deps: 
     try {
       sha = await deps.resolveRef(appConfig.repo, body.ref);
     } catch (err) {
-      json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      json(res, 400, { error: redactError(err) });
       return true;
     }
   } else {
@@ -159,6 +160,10 @@ async function handleCreateRun(req: IncomingMessage, res: ServerResponse, deps: 
     id = deps.enqueue(appConfig.name, sha, target, mode, guidance, shadow);
   } catch (err) {
     json(res, 500, { error: `failed to enqueue run: ${err instanceof Error ? err.message : String(err)}` });
+    return true;
+  }
+  if (!id) {
+    json(res, 503, { error: "service shutting down" });
     return true;
   }
   json(res, 202, { id, app: appConfig.name, sha, target, mode, status: "enqueued" });
@@ -408,7 +413,7 @@ async function handleContinue(req: IncomingMessage, res: ServerResponse, deps: A
     const raw = await readBody(req);
     if (raw.trim()) {
       const body = JSON.parse(raw) as Record<string, unknown>;
-      guidance = typeof body.guidance === "string" ? body.guidance : undefined;
+      guidance = typeof body.guidance === "string" ? body.guidance.slice(0, 2000) : undefined;
       if (Array.isArray(body.cases)) cases = body.cases.filter((c): c is string => typeof c === "string");
     }
   } catch {
@@ -427,6 +432,10 @@ async function handleContinue(req: IncomingMessage, res: ServerResponse, deps: A
   }
 
   const id = deps.continueRun(parentId, cases, guidance);
+  if (!id) {
+    json(res, 503, { error: "service shutting down" });
+    return true;
+  }
   json(res, 202, { id, parentRunId: parentId, app: parent.app, sha: parent.sha, status: "enqueued" });
   return true;
 }

@@ -34,7 +34,7 @@ export interface GateDeps {
 const defaultDeps: GateDeps = {
   fetchVersion: async (url) => {
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
       if (!res.ok) return null;
       return (await res.json()) as VersionInfo;
     } catch {

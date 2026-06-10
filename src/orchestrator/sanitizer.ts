@@ -50,7 +50,7 @@ const NAMED_SECRET_PATTERNS: Array<{ name: string; p: RegExp }> = [
   // assignment patterns so the more specific ones fire first.
   { name: "api-key-assignment", p: /(?:api[_-]?key|token|secret|password|passwd|pwd)[\"']?\s*[:=]\s*\S+/gi },
   // base64‑encoded secrets (>40 chars of base64 chars), with data‑URI filter
-  { name: "base64-secret", p: /\b[A-Za-z0-9+/=]{40,}\b/g },
+  { name: "base64-secret", p: /(?<![A-Za-z0-9+/=])[A-Za-z0-9+/=]{40,}(?![A-Za-z0-9+/=])/g },
 ];
 
 const INTERNAL_HOST_PATTERNS: RegExp[] = [

@@ -17,6 +17,9 @@ ARG ENGRAM_VERSION=1.16.1
 # depends on outbound GitHub/PyPI access and startup is deterministic and fast. Pin a
 # release tag for reproducibility — bump it deliberately, never float on a moving ref.
 ARG SERENA_VERSION=v1.5.3
+# NOTE: opencode-ai / @playwright/mcp install "latest" at image build time. The IMAGE
+# is the version anchor — rebuilding the image is the deliberate bump point. Pin
+# explicitly here if a future bump introduces a breaking change.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl ca-certificates git openjdk-17-jdk-headless python3 \
    && rm -rf /var/lib/apt/lists/* \
@@ -32,5 +35,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Serena (`uv tool install`) and uv both land in /root/.local/bin → on PATH at run time.
 ENV PATH="/root/.local/bin:${PATH}"
 
+# KNOWN LIMITATION: this container currently runs as root. Switching to non-root
+# requires re-homing /root/.local/share/opencode, /root/.cache/uv, /data, and the
+# /app/.mirrors mount to a non-root user — a coordinated change across both
+# Dockerfiles + docker-compose.yml. Tracked in the production hardening backlog.
 ENTRYPOINT ["opencode"]
 # docker-compose passes the args (`serve --hostname 0.0.0.0 --port 4096`).
