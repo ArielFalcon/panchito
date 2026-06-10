@@ -3,6 +3,7 @@ import { Box, Text } from "ink";
 import { useInput } from "ink";
 import Spinner from "ink-spinner";
 import SelectInput from "ink-select-input";
+import { TextInput } from "@inkjs/ui";
 import { TestTarget } from "../../types";
 import { QaClient, CreateAppRequest, CreateAppResponse, OnboardServiceInput, createClient } from "../client";
 import { suggestName } from "../../server/onboard";
@@ -212,14 +213,6 @@ export function OnboardWizard({
       return;
     }
 
-    // ── browse owner ────────────────────────────────────────────────────
-    if (step === "browse-owner") {
-      if (key.return && browseOwner.trim()) { setRepoPage(1); void fetchRepos(1).then(() => setStep("browse-list")); return; }
-      if (key.backspace || key.delete) { setBrowseOwner((p) => p.slice(0, -1)); return; }
-      if (char.length === 1 && char >= " " && char !== "/") { setBrowseOwner((p) => p + char); }
-      return;
-    }
-
     // ── browse list ─────────────────────────────────────────────────────
     if (step === "browse-list") {
       if (key.rightArrow && repoHasMore && !loading) { void fetchRepos(repoPage + 1); return; }
@@ -232,15 +225,6 @@ export function OnboardWizard({
         return;
       }
       if (key.return) { /* handled by SelectInput */ return; }
-      return;
-    }
-
-    // ── manual repo input ───────────────────────────────────────────────
-    if (step === "repo" || step === "repo-error") {
-      if (step === "repo-error" && key.return) { void validateRepo(repoInput); return; }
-      if (step === "repo" && key.return && repoInput.trim()) { void validateRepo(repoInput); return; }
-      if (key.backspace || key.delete) { setRepoInput((p) => p.slice(0, -1)); return; }
-      if (char.length === 1 && char >= " ") { setRepoInput((p) => p + char); }
       return;
     }
 
@@ -332,12 +316,12 @@ export function OnboardWizard({
     return (
       <Box flexDirection="column">
         <Text bold>Enter GitHub username or organization:</Text>
+        <TextInput
+          placeholder="username"
+          onSubmit={(v) => { if (v.trim()) { setBrowseOwner(v); setRepoPage(1); void fetchRepos(1).then(() => setStep("browse-list")); } }}
+        />
         <Box marginTop={1}>
-          <Text dimColor>{"> "}</Text>
-          <Text>{browseOwner || "username"}</Text>
-        </Box>
-        <Box marginTop={1}>
-          <Text dimColor>Enter to search  ·  Esc to cancel</Text>
+          <Text dimColor>Esc to cancel</Text>
         </Box>
       </Box>
     );
@@ -377,14 +361,16 @@ export function OnboardWizard({
 
   // ── manual repo / validating / repo-error ─────────────────────────────
   if (step === "repo" || step === "validating" || step === "repo-error") {
-    const hint = showBack ? "  ← back" : "";
+    const showBackHint = STEPS_BACK[step] !== undefined;
     return (
       <Box flexDirection="column">
         <Text bold>Enter the GitHub repo (org/name):</Text>
-        <Box marginTop={1}>
-          <Text dimColor>{"> "}</Text>
-          <Text>{repoInput || "org/repo"}</Text>
-        </Box>
+        {step === "repo" ? (
+          <TextInput
+            placeholder="org/repo"
+            onSubmit={(v) => { if (v.trim()) { setRepoInput(v); void validateRepo(v); } }}
+          />
+        ) : null}
         <Box marginTop={1}>
           {step === "validating"
             ? <Text color="cyan"><Spinner type="dots" /> validating…</Text>
@@ -395,7 +381,12 @@ export function OnboardWizard({
                 <Box marginTop={1}><Text dimColor>Enter to retry  ·  Esc to go back</Text></Box>
               </Box>
             )
-            : <Text dimColor>Enter to validate{hint}  ·  Esc to cancel</Text>}
+            : step === "repo" ? null : null}
+          {step === "repo" ? (
+            <Box marginTop={1}>
+              <Text dimColor>Esc to cancel{showBackHint ? "  ← back" : ""}</Text>
+            </Box>
+          ) : null}
         </Box>
       </Box>
     );

@@ -5,7 +5,7 @@ import React, { useCallback, useState } from "react";
 import { Box, Text } from "ink";
 import { useInput } from "ink";
 import { writeFileSync } from "node:fs";
-import { Badge } from "@inkjs/ui";
+import { Badge, Alert } from "@inkjs/ui";
 import { RunRecord } from "../../types";
 import { PIPELINE_STEPS, stepState, sectionLabel, shortSha, caseColor, caseIcon, formatElapsed } from "../format";
 import { ChatInput } from "./ChatInput";
@@ -260,18 +260,20 @@ export function RunSummary({ record, client, onBack, onContinue }: {
       }
       case "shadow":
         return (
-          <Box flexDirection="column">
-            <Text dimColor>  Shadow mode is ON — no PRs or Issues were published.</Text>
-            {verdict === "pass" ? (
-              <Text dimColor>  A PR with {specs?.length ?? 0} spec(s) would have been opened in {app}.</Text>
-            ) : verdict === "fail" ? (
-              <Text dimColor>  A GitHub Issue with sanitized error logs would have been opened in {app}.</Text>
-            ) : verdict === "flaky" ? (
-              <Text dimColor>  Flaky tests would have been quarantined without PR or Issue.</Text>
-            ) : (
-              <Text dimColor>  Shadow mode prevents publication to {app}.</Text>
-            )}
-          </Box>
+          <Alert variant="warning">
+            <Box flexDirection="column">
+              <Text bold>Shadow mode is ON — no PRs or Issues were published</Text>
+              {verdict === "pass" ? (
+                <Text>A PR with {specs?.length ?? 0} spec(s) would have been opened in {app}.</Text>
+              ) : verdict === "fail" ? (
+                <Text>A GitHub Issue with sanitized error logs would have been opened in {app}.</Text>
+              ) : verdict === "flaky" ? (
+                <Text>Flaky tests would have been quarantined without PR or Issue.</Text>
+              ) : (
+                <Text>Shadow mode prevents publication to {app}.</Text>
+              )}
+            </Box>
+          </Alert>
         );
       case "note":
         return <Text dimColor>  {note}</Text>;

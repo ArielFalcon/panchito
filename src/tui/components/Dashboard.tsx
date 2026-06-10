@@ -90,6 +90,7 @@ export function Dashboard({ record }: { record: RunRecord }): React.ReactElement
                 <Box flexDirection="column">
                   <HistoryList items={toHistoryItems(cases)} />
                   <Box gap={1}>
+                    <Text dimColor>Tests</Text>
                     <ProgressBar value={total > 0 ? (passed / total) * 100 : 0} />
                     <Text dimColor>{passed}/{total}</Text>
                   </Box>

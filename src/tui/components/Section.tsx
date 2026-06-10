@@ -1,5 +1,5 @@
-// Collapsible pipeline step. Active: expanded with full detail (spinner + children).
-// Done: collapsed to a one-line summary. Pending: dim dot, no detail.
+// Collapsible pipeline step. Active: spinner + detail. Done: checkmark.
+// Pending: dim dot, no detail.
 
 import React from "react";
 import { Box, Text } from "ink";

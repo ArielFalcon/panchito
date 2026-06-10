@@ -1,10 +1,10 @@
-// Immutable case history. Uses Ink <Static> so completed items never re-render.
-// Each case shows flow as title, objective/reason as context, and colored status.
-
+// Immutable case history. Shows the current running test during execution, and 
+// a full pass/fail summary when done. Failures render with Alert for visibility.
 import React from "react";
 import { Text, Box } from "ink";
+import { Alert, Badge } from "@inkjs/ui";
 import { QaCase } from "../../types";
-import { caseColor, caseIcon } from "../format";
+import { caseIcon, parseAssertionError } from "../format";
 
 export interface HistoryItem {
   name: string;
@@ -27,24 +27,40 @@ export function toHistoryItems(cases: QaCase[]): HistoryItem[] {
 }
 
 export function HistoryList({ items }: { items: HistoryItem[] }): React.ReactElement {
-  // Only show the LAST item — during execution, the current test is the only
-  // relevant one. When done, the Section label already summarizes totals.
   const last = items.length > 0 ? [items[items.length - 1]!] : [];
   return (
     <Box flexDirection="column">
-      {last.map((item) => (
-        <Box key={item.name} flexDirection="column">
-          <Text>
-            {"  "}
-            <Text color={caseColor(item.status)}>{caseIcon(item.status)}</Text>
-            {" "}
-            <Text>{(item.flow ?? item.name).slice(0, 60)}</Text>
-          </Text>
-          {item.detail && item.status === "fail" ? (
-            <Text color="#c0392b">{`     ${item.detail.slice(0, 120)}`}</Text>
-          ) : null}
-        </Box>
-      ))}
+      {last.map((item) => {
+        if (item.status === "fail" && item.detail) {
+          const parsed = parseAssertionError(item.detail);
+          return (
+            <Box key={item.name} flexDirection="column">
+              <Alert variant="error">
+                <Box flexDirection="column" gap={1}>
+                  <Box gap={1}>
+                    <Badge color="red">FAIL</Badge>
+                    <Text bold>{(item.flow ?? item.name).slice(0, 60)}</Text>
+                  </Box>
+                  <Text>{parsed.message.slice(0, 100)}</Text>
+                  {parsed.expectLine ? <Text dimColor>  expected: {parsed.expectLine.slice(0, 60)}</Text> : null}
+                  {parsed.actualLine ? <Text dimColor>  actual:   {parsed.actualLine.slice(0, 60)}</Text> : null}
+                  {parsed.location ? <Text dimColor>  at {parsed.location}</Text> : null}
+                </Box>
+              </Alert>
+            </Box>
+          );
+        }
+        return (
+          <Box key={item.name} flexDirection="column">
+            <Text>
+              {"  "}
+              <Text>{caseIcon(item.status)}</Text>
+              {" "}
+              <Text dimColor={item.status === "pass"}>{(item.flow ?? item.name).slice(0, 60)}</Text>
+            </Text>
+          </Box>
+        );
+      })}
     </Box>
   );
 }

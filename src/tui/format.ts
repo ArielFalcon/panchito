@@ -217,3 +217,40 @@ export function formatElapsed(ms: number): string {
   const h = Math.floor(m / 60);
   return `${h}h ${m % 60}m`;
 }
+
+// ── Error display ────────────────────────────────────────────────────────────
+// Node.js AssertionError detail strings carry the full stack trace + diff.
+// Extract only the actionable parts: the assertion message and the file location.
+
+export interface ParsedError {
+  message: string;
+  expectLine?: string;
+  actualLine?: string;
+  location?: string;
+  raw: string;
+}
+
+export function parseAssertionError(detail: string): ParsedError {
+  const lines = detail.split("\n");
+  const firstLine = (lines[0] ?? detail.slice(0, 200)).trim();
+  let location: string | undefined;
+  for (const l of lines) {
+    const m = l.match(/\((.+?:\d+:\d+)\)/);
+    if (m) { location = m[1]!; break; }
+  }
+  let expectLine: string | undefined;
+  let actualLine: string | undefined;
+  for (const l of lines) {
+    if (l.startsWith("+") && !l.startsWith("+++")) actualLine = l.slice(1).trim();
+    if (l.startsWith("-") && !l.startsWith("---")) expectLine = l.slice(1).trim();
+  }
+  if (!expectLine || !actualLine) {
+    for (const l of lines) {
+      const em = l.match(/(?:Expected|expected):\s*(.+)/i);
+      const am = l.match(/(?:Actual|actual):\s*(.+)/i);
+      if (em) expectLine = em[1]!.trim();
+      if (am) actualLine = am[1]!.trim();
+    }
+  }
+  return { message: firstLine, expectLine, actualLine, location, raw: detail };
+}
