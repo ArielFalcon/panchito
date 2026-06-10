@@ -9,12 +9,14 @@ function makeStubClient(opts: {
   onValidate?: (repo: string) => void;
   onCreate?: (input: CreateAppRequest) => void;
   onDelete?: () => void;
+  listRepos?: () => Promise<{ repos: Array<{ fullName: string; private: boolean; description: string | null }>; hasMore: boolean }>;
   validateOk?: boolean;
   createOk?: boolean;
 } = {}): QaClient {
   const validateOk = opts.validateOk ?? true;
   const createOk = opts.createOk ?? true;
   return {
+    listRepos: opts.listRepos ?? (async () => ({ repos: [], hasMore: false })),
     validateRepo: async (repo: string): Promise<CreateAppResponse> => {
       opts.onValidate?.(repo);
       return validateOk
@@ -35,14 +37,28 @@ function makeStubClient(opts: {
   } as unknown as QaClient;
 }
 
-test("renders the repo input step initially", () => {
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+async function typeSlowly(stdin: { write: (s: string) => void }, s: string): Promise<void> {
+  for (const ch of s) { stdin.write(ch); await sleep(5); }
+}
+
+// Helper: select "Enter repo manually" from the initial repo-source step.
+async function goManual(stdin: { write: (s: string) => void }): Promise<void> {
+  stdin.write("\x1b[B"); // down arrow → select "Enter repo manually"
+  await sleep(10);
+  stdin.write("\r");      // Enter → confirm
+  await sleep(50);
+}
+
+test("renders the repo source selection initially", () => {
   const client = makeStubClient();
   const { lastFrame, unmount } = render(
     <OnboardWizard client={client} onDone={() => {}} onCancel={() => {}} />,
   );
   const f = lastFrame() ?? "";
-  assert.match(f, /Enter the GitHub repo/);
-  assert.match(f, /org\/repo/);
+  assert.match(f, /How would you like to select the repo/);
+  assert.match(f, /Browse my repos/);
+  assert.match(f, /Enter repo manually/);
   unmount();
 });
 
@@ -54,23 +70,16 @@ test("renders without crashing", () => {
   unmount();
 });
 
-async function typeSlowly(stdin: { write: (s: string) => void }, s: string): Promise<void> {
-  for (const ch of s) {
-    stdin.write(ch);
-    await new Promise((r) => setTimeout(r, 5));
-  }
-}
-
-test("typing a repo and pressing Enter calls client.validateRepo (no in-process github.getRepo)", async () => {
+test("selecting manual entry → typing a repo → Enter calls client.validateRepo", async () => {
   let validatedWith: string | null = null;
   const client = makeStubClient({ onValidate: (r) => { validatedWith = r; } });
   const { stdin, unmount } = render(
     <OnboardWizard client={client} onDone={() => {}} onCancel={() => {}} />,
   );
+  await goManual(stdin);
   await typeSlowly(stdin, "org/repo");
   stdin.write("\r");
-  // Let the microtasks settle.
-  await new Promise((r) => setTimeout(r, 50));
+  await sleep(50);
   assert.equal(validatedWith, "org/repo");
   unmount();
 });
@@ -81,9 +90,10 @@ test("invalid repo format goes to repo-error without calling validateRepo", asyn
   const { stdin, lastFrame, unmount } = render(
     <OnboardWizard client={client} onDone={() => {}} onCancel={() => {}} />,
   );
+  await goManual(stdin);
   await typeSlowly(stdin, "notarepo");
   stdin.write("\r");
-  await new Promise((r) => setTimeout(r, 50));
+  await sleep(50);
   assert.equal(called, false);
   assert.match(lastFrame() ?? "", /org\/name/);
   unmount();

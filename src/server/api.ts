@@ -35,6 +35,7 @@ export interface ApiDeps {
   // App onboarding/deletion (F5). Absent ⇒ the corresponding routes return 501.
   createApp?: (input: CreateAppInput) => Promise<CreateAppResult>;
   deleteApp?: (name: string, purge: boolean) => { removed: string[] };
+  listRepos?: (owner: string, page: number) => Promise<{ repos: Array<{ fullName: string; private: boolean; description: string | null }>; hasMore: boolean }>;
 }
 
 // Returns true when the request matched an /api route (so the caller stops here).
@@ -75,6 +76,10 @@ export async function handleApi(
 
   if (req.method === "GET" && path === "/api/apps") {
     return handleListApps(res, deps);
+  }
+
+  if (req.method === "GET" && path === "/api/repos") {
+    return await handleListRepos(res, deps, url.searchParams.get("owner"), Number(url.searchParams.get("page")) || 1);
   }
 
   if (req.method === "GET" && path === "/api/queue") {
@@ -480,6 +485,28 @@ function handleDeleteApp(res: ServerResponse, deps: ApiDeps, name: string, purge
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     json(res, msg.includes("not found") ? 404 : 500, { error: msg });
+  }
+  return true;
+}
+
+async function handleListRepos(res: ServerResponse, deps: ApiDeps, owner: string | null, page: number): Promise<boolean> {
+  if (!owner) {
+    json(res, 400, { error: "'owner' query parameter is required (e.g. /api/repos?owner=arielyumn)" });
+    return true;
+  }
+  if (!deps.listRepos) {
+    json(res, 501, { error: "repo listing is not available" });
+    return true;
+  }
+  try {
+    const result = await deps.listRepos(owner, page);
+    json(res, 200, result);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const status = msg.includes("not found") || msg.includes("no repos found") ? 404
+      : msg.includes("token") || msg.includes("GITHUB_TOKEN") ? 401
+      : 500;
+    json(res, status, { error: msg });
   }
   return true;
 }

@@ -768,6 +768,7 @@ const apiDeps: ApiDeps = {
   listApps: () => listAppConfigs(),
   createApp: (input) => adminCreateApp(input, appAdminDeps),
   deleteApp: (name, purge) => adminDeleteApp(name, purge, appAdminDeps),
+  listRepos: (owner, page) => github.listRepos(owner, page),
   resolveRef: (repo, ref) => resolveRef(repo, ref, defaultMirrorDeps),
   getRecord,
   listRecords,

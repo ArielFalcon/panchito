@@ -115,6 +115,7 @@ export interface QaClient {
   help(question: string, history?: ChatEntry[]): Promise<{ answer: string }>;
   continueRun(id: string, cases: string[], guidance?: string): Promise<{ id: string; parentRunId: string }>;
   cancelRun(id: string): Promise<void>;
+  listRepos(owner: string, page?: number): Promise<{ repos: Array<{ fullName: string; private: boolean; description: string | null }>; hasMore: boolean }>;
   validateRepo(repo: string): Promise<CreateAppResponse>;
   createApp(input: CreateAppRequest): Promise<CreateAppResponse>;
   deleteApp(name: string, purge: boolean): Promise<{ removed: string[] }>;
@@ -164,6 +165,7 @@ export function createClient(opts: ClientOptions = {}): QaClient {
     continueRun: (id, cases, guidance) =>
       request<{ id: string; parentRunId: string }>("POST", `/api/runs/${encodeURIComponent(id)}/continue`, { cases, guidance }),
     cancelRun: (id) => request<void>("DELETE", `/api/runs/${encodeURIComponent(id)}`),
+    listRepos: (owner, page = 1) => request<{ repos: Array<{ fullName: string; private: boolean; description: string | null }>; hasMore: boolean }>("GET", `/api/repos?owner=${encodeURIComponent(owner)}&page=${page}`),
     validateRepo: (repo) => request<CreateAppResponse>("POST", "/api/apps", { repo, validateOnly: true }),
     createApp: (input) => request<CreateAppResponse>("POST", "/api/apps", input),
     deleteApp: (name, purge) =>

@@ -183,4 +183,33 @@ export const github = {
       description: data.description,
     };
   },
+
+  async listRepos(owner: string, page = 1, perPage = 10): Promise<{ repos: RepoInfo[]; hasMore: boolean }> {
+    const ghRepos = async (endpoint: string): Promise<Response | null> => {
+      const url = `https://api.github.com/${endpoint}?per_page=${perPage}&page=${page}&sort=updated`;
+      const res = await fetch(url, { headers: ghHeaders() });
+      if (res.status === 404) return null;
+      if (!res.ok) throw new Error(`GitHub list repos error ${res.status}: ${await res.text()}`);
+      return res;
+    };
+
+    let res = await ghRepos(`users/${encodeURIComponent(owner)}/repos`);
+    if (!res) res = await ghRepos(`orgs/${encodeURIComponent(owner)}/repos`);
+    if (!res) throw new Error(`no repos found for '${owner}' — check the name is correct and the token has access`);
+
+    const items = (await res.json()) as Array<{
+      name: string; full_name: string; private: boolean;
+      default_branch: string; description: string | null;
+    }>;
+    return {
+      repos: items.map((r) => ({
+        name: r.name,
+        fullName: r.full_name,
+        private: r.private,
+        defaultBranch: r.default_branch,
+        description: r.description,
+      })),
+      hasMore: items.length === perPage,
+    };
+  },
 };
