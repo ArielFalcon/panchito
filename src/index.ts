@@ -67,8 +67,8 @@ if (process.env.QA_API_TOKEN) {
 // Reject unsigned webhooks unless explicitly opted in (local dev).
 const ALLOW_UNSIGNED_WEBHOOK = process.env.WEBHOOK_ALLOW_UNSIGNED === "true";
 if (!secret && !ALLOW_UNSIGNED_WEBHOOK) {
-  throw new Error(
-    "WEBHOOK_SECRET is not set — webhook POSTs will be REJECTED. " +
+  console.warn(
+    "[qa] CRITICAL: WEBHOOK_SECRET is not set — webhook POSTs will be REJECTED. " +
       "Set WEBHOOK_SECRET, or set WEBHOOK_ALLOW_UNSIGNED=true to accept unsigned webhooks (local only).",
   );
 }
