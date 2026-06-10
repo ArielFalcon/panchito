@@ -34,8 +34,9 @@ COPY . .
 # (qa/setup.ts). The image already ships the Playwright browsers.
 
 RUN groupadd -r app && useradd -r -g app -d /app appuser \
-    && chown -R appuser:app /app
-USER appuser
+    && chown -R appuser:app /app \
+    && chmod +x /app/docker-entrypoint.sh
 
-# Service entry point: webhook + sequential queue.
-CMD ["npm", "run", "start"]
+# Container starts as root so the entrypoint can fix data-volume permissions,
+# then drops to appuser before starting the service.
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
