@@ -13,6 +13,14 @@ import { requireEnv } from "../util/env";
 export const GITHUB_MAX_TITLE = 256;
 export const GITHUB_MAX_BODY = 65536;
 
+export interface GitHubDeps {
+  fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+}
+
+export const defaultGitHubDeps: GitHubDeps = {
+  fetch: (input, init?) => globalThis.fetch(input, init),
+};
+
 export function clampTitle(title: string): string {
   if (title.length <= GITHUB_MAX_TITLE) return title;
   return title.slice(0, GITHUB_MAX_TITLE - 1).trimEnd() + "…";
@@ -56,8 +64,9 @@ export const github = {
     repo: string,
     title: string,
     body: string,
+    deps: GitHubDeps = defaultGitHubDeps,
   ): Promise<{ url: string }> {
-    const res = await fetch(`https://api.github.com/repos/${repo}/issues`, {
+    const res = await deps.fetch(`https://api.github.com/repos/${repo}/issues`, {
       method: "POST",
       headers: ghHeaders(),
       body: JSON.stringify({ title: clampTitle(title), body: clampBody(body) }),
@@ -70,8 +79,9 @@ export const github = {
   async createPullRequest(
     repo: string,
     args: { title: string; head: string; base: string; body: string },
+    deps: GitHubDeps = defaultGitHubDeps,
   ): Promise<PullRequest> {
-    const res = await fetch(`https://api.github.com/repos/${repo}/pulls`, {
+    const res = await deps.fetch(`https://api.github.com/repos/${repo}/pulls`, {
       method: "POST",
       headers: ghHeaders(),
       body: JSON.stringify({ ...args, title: clampTitle(args.title), body: clampBody(args.body) }),
@@ -85,8 +95,8 @@ export const github = {
   // Requires the repo to have "Allow auto-merge" enabled (and, in practice,
   // branch protection with checks). Otherwise, the mutation fails and the caller
   // treats it as best-effort, leaving the PR open.
-  async enableAutoMerge(nodeId: string, mergeMethod = "SQUASH"): Promise<void> {
-    const res = await fetch("https://api.github.com/graphql", {
+  async enableAutoMerge(nodeId: string, mergeMethod = "SQUASH", deps: GitHubDeps = defaultGitHubDeps): Promise<void> {
+    const res = await deps.fetch("https://api.github.com/graphql", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${requireEnv("GITHUB_TOKEN")}`,
@@ -107,8 +117,8 @@ export const github = {
   // Deterministically merge a PR via the REST API (used by the maintainer self-update
   // AFTER the orchestrator's own typecheck+test gate passes — so the merge does not
   // depend on the repo having branch protection / "Allow auto-merge" configured).
-  async mergePullRequest(repo: string, number: number, mergeMethod = "squash"): Promise<void> {
-    const res = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}/merge`, {
+  async mergePullRequest(repo: string, number: number, mergeMethod = "squash", deps: GitHubDeps = defaultGitHubDeps): Promise<void> {
+    const res = await deps.fetch(`https://api.github.com/repos/${repo}/pulls/${number}/merge`, {
       method: "PUT",
       headers: ghHeaders(),
       body: JSON.stringify({ merge_method: mergeMethod }),
@@ -116,8 +126,8 @@ export const github = {
     if (!res.ok) throw new Error(`GitHub merge error ${res.status}: ${await res.text()}`);
   },
 
-  async getPullRequest(repo: string, number: number): Promise<PrState> {
-    const res = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, {
+  async getPullRequest(repo: string, number: number, deps: GitHubDeps = defaultGitHubDeps): Promise<PrState> {
+    const res = await deps.fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, {
       headers: ghHeaders(),
     });
     if (!res.ok) throw new Error(`GitHub get PR error ${res.status}: ${await res.text()}`);
@@ -132,15 +142,16 @@ export const github = {
   async getPrStatus(
     repo: string,
     number: number,
+    deps: GitHubDeps = defaultGitHubDeps,
   ): Promise<{ merged: boolean; state: string; checks: "pending" | "success" | "failure" | "none" }> {
-    const prRes = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, { headers: ghHeaders() });
+    const prRes = await deps.fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, { headers: ghHeaders() });
     if (!prRes.ok) throw new Error(`GitHub get PR error ${prRes.status}: ${await prRes.text()}`);
     const pr = (await prRes.json()) as { merged: boolean; state: string; head: { sha: string } };
     const sha = pr.head.sha;
 
     const [crRes, stRes] = await Promise.all([
-      fetch(`https://api.github.com/repos/${repo}/commits/${sha}/check-runs`, { headers: ghHeaders() }),
-      fetch(`https://api.github.com/repos/${repo}/commits/${sha}/status`, { headers: ghHeaders() }),
+      deps.fetch(`https://api.github.com/repos/${repo}/commits/${sha}/check-runs`, { headers: ghHeaders() }),
+      deps.fetch(`https://api.github.com/repos/${repo}/commits/${sha}/status`, { headers: ghHeaders() }),
     ]);
     if (!crRes.ok) throw new Error(`GitHub check-runs error ${crRes.status}: ${await crRes.text()}`);
     if (!stRes.ok) throw new Error(`GitHub status error ${stRes.status}: ${await stRes.text()}`);
@@ -163,8 +174,8 @@ export const github = {
     return { merged: pr.merged, state: pr.state, checks };
   },
 
-  async getRepo(repo: string): Promise<RepoInfo> {
-    const res = await fetch(`https://api.github.com/repos/${repo}`, {
+  async getRepo(repo: string, deps: GitHubDeps = defaultGitHubDeps): Promise<RepoInfo> {
+    const res = await deps.fetch(`https://api.github.com/repos/${repo}`, {
       headers: ghHeaders(),
     });
     if (res.status === 404) {
@@ -184,10 +195,10 @@ export const github = {
     };
   },
 
-  async listRepos(owner: string, page = 1, perPage = 10): Promise<{ repos: RepoInfo[]; hasMore: boolean }> {
+  async listRepos(owner: string, page = 1, perPage = 10, deps: GitHubDeps = defaultGitHubDeps): Promise<{ repos: RepoInfo[]; hasMore: boolean }> {
     const ghRepos = async (endpoint: string): Promise<Response | null> => {
       const url = `https://api.github.com/${endpoint}?per_page=${perPage}&page=${page}&sort=updated`;
-      const res = await fetch(url, { headers: ghHeaders() });
+      const res = await deps.fetch(url, { headers: ghHeaders() });
       if (res.status === 404) return null;
       if (res.status === 403 && res.headers.get("X-RateLimit-Remaining") === "0") {
         const reset = res.headers.get("X-RateLimit-Reset");

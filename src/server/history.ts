@@ -603,3 +603,32 @@ export function saveScorecardEntry(entry: ScorecardEntry): void {
 process.on("exit", () => {
   if (initialized) db.close();
 });
+
+// ── SQLite backup (cron-like) ───────────────────────────────────────────────
+// Copies the DB file to a backup directory with a timestamp. Keeps the last
+// N backups. Called from the health poller in index.ts every 24h.
+
+export function backupDatabase(): { backedUp: boolean; path?: string; error?: string } {
+  if (!initialized) return { backedUp: false, error: "db not initialized" };
+  const dbPath = process.env.HISTORY_DB_PATH ?? join(process.env.AI_PIPELINE_ROOT ?? process.cwd(), "data", "ai-pipeline.db");
+  const backupDir = join(process.env.AI_PIPELINE_ROOT ?? process.cwd(), "data", "backups");
+  try {
+    mkdirSync(backupDir, { recursive: true });
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const backupPath = join(backupDir, `ai-pipeline-${timestamp}.db`);
+    const { copyFileSync } = require("node:fs");
+    copyFileSync(dbPath, backupPath);
+    // Prune old backups: keep only the last 7
+    const { readdirSync, unlinkSync } = require("node:fs");
+    const files = readdirSync(backupDir)
+      .filter((f: string) => f.startsWith("ai-pipeline-") && f.endsWith(".db"))
+      .sort();
+    while (files.length > 7) {
+      const old = files.shift();
+      if (old) unlinkSync(join(backupDir, old));
+    }
+    return { backedUp: true, path: backupPath };
+  } catch (err) {
+    return { backedUp: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}

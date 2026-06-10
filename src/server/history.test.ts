@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createRecord, getRecord, listRecords, currentRun, updateRecord, addCase, continuationDepth, clearDatabase, appendActivity, upsertLearningRule, listLearningRules, recordRuleOutcome, saveScorecardEntry, loadScorecard, deleteAppHistory } from "./history";
+import { createRecord, getRecord, listRecords, currentRun, updateRecord, addCase, continuationDepth, clearDatabase, appendActivity, upsertLearningRule, listLearningRules, recordRuleOutcome, saveScorecardEntry, loadScorecard, deleteAppHistory, interruptedRecords } from "./history";
 
 test("createRecord stores an enqueued record findable by id", () => {
   const r = createRecord({ target: "e2e",  app: "hist-a", sha: "abcdef1234", mode: "diff" });
@@ -66,6 +66,22 @@ test("currentRun prefers running over enqueued when both exist (queue FIFO)", ()
   const cur = currentRun();
   assert.ok(cur);
   assert.equal(cur!.id, olderRunning.id, "must return the actually-running job, not the newest enqueued");
+});
+
+test("interruptedRecords returns running and enqueued records", () => {
+  clearDatabase();
+  const running = createRecord({ target: "e2e", app: "hist-zombie", sha: "7777777", mode: "diff" });
+  const enqueued = createRecord({ target: "e2e", app: "hist-zombie", sha: "8888888", mode: "diff" });
+  const done = createRecord({ target: "e2e", app: "hist-zombie", sha: "9999999", mode: "diff" });
+  updateRecord(running.id, { status: "running" });
+  updateRecord(enqueued.id, { status: "enqueued" });
+  updateRecord(done.id, { status: "done", verdict: "pass" });
+  const zombies = interruptedRecords();
+  assert.equal(zombies.length, 2);
+  const ids = new Set(zombies.map((z) => z.id));
+  assert.ok(ids.has(running.id));
+  assert.ok(ids.has(enqueued.id));
+  assert.ok(!ids.has(done.id));
 });
 
 test("appendActivity round-trips structured events (kind, status, text) newest-last", () => {
