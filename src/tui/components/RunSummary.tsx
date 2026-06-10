@@ -108,7 +108,7 @@ export function RunSummary({ record, client, onBack, onContinue }: {
       return;
     }
     if (_char === "f" || _char === "F") { if (failedCases.length && onContinue) onContinue(failedCases.map((c: { name: string }) => c.name)); return; }
-    if (_char === "b" || _char === "B" || key.escape) { onBack(); return; }
+    if (_char === "b" || _char === "B" || _char === " " || key.escape) { onBack(); return; }
   });
 
   const renderSection = (id: string): React.ReactElement => {
@@ -341,7 +341,7 @@ export function RunSummary({ record, client, onBack, onContinue }: {
           <ChatInput client={client} runId={record.id} />
         ) : (
           <Box flexDirection="column">
-            <Text dimColor>[↑↓] navigate  [↩] expand  [E]xport JSON  [C]hat  [B]ack  [Esc] quit</Text>
+            <Text dimColor>[↑↓] navigate  [↩] expand  [E]xport JSON  [C]hat  [Space/B/Esc] back</Text>
             {failedCases.length > 0 && onContinue ? (
               <Text dimColor>[F] continue — fix {failedCases.length} failed case(s)</Text>
             ) : null}

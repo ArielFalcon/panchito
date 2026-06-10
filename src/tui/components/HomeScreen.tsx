@@ -125,10 +125,12 @@ export function HomeScreen({
   useInput(
     useCallback(
       (_char: string, key: { escape: boolean }) => {
-        if (
-          key.escape &&
-          (view === "status" || view === "onboard" || view === "help" || view === "delete-list" || view === "delete")
-        ) {
+        if (key.escape && (view === "status" || view === "onboard" || view === "help" || view === "delete-list" || view === "delete")) {
+          setSelectedApp(null);
+          setView("home");
+          return;
+        }
+        if (_char === " " && (view === "status" || view === "delete-list" || view === "delete")) {
           setSelectedApp(null);
           setView("home");
         }
@@ -181,7 +183,7 @@ export function HomeScreen({
       return (
         <Box flexDirection="column" paddingX={1}>
           <Text dimColor>No apps configured.</Text>
-          <Text dimColor>Esc → back to home</Text>
+          <Text dimColor>Space / Esc → back to home</Text>
         </Box>
       );
     }
@@ -197,7 +199,7 @@ export function HomeScreen({
           }}
         />
         <Box marginTop={1}>
-          <Text dimColor>Esc → back to home</Text>
+          <Text dimColor>Space / Esc → back to home</Text>
         </Box>
       </Box>
     );
@@ -261,7 +263,7 @@ export function HomeScreen({
         </Box>
 
         <Box marginTop={2}>
-          <Text dimColor>Esc → back to home</Text>
+          <Text dimColor>Space / Esc → back to home</Text>
         </Box>
       </Box>
     );
