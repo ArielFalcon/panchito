@@ -12,6 +12,7 @@ export interface SpecMeta {
   flow: string;    // user flow, e.g. "login"
   objective: string; // acceptance criterion
   targets: string[];  // symbols/routes the spec exercises
+  sha256?: string; // content checksum for integrity verification
 }
 
 // Execution mode for a run (taken from the POST body; defaults to "diff").

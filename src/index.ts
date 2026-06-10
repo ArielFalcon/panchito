@@ -1,7 +1,7 @@
 import { createServer, IncomingMessage } from "node:http";
 import { join } from "node:path";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { writeFileSync, readFileSync, chmodSync, rmSync, unlinkSync } from "node:fs";
+import { writeFileSync, readFileSync, chmodSync, rmSync, unlinkSync, readdirSync, statSync } from "node:fs";
 import { JobQueue } from "./server/queue";
 import { handleWebhook } from "./server/webhook";
 import { loadAppConfig, loadAppConfigsByRepo, listAppConfigs } from "./orchestrator/config-loader";
@@ -14,14 +14,15 @@ import { assessChange, assessRate, parseNumstat, readDeployHistory, recordDeploy
 import { recordFixFailure, readFixFailures, renderFailureMemory, realMemoryFs } from "./server/maintainer-memory";
 import { installHttpDispatcher } from "./util/net";
 import { resolveRef, defaultMirrorDeps, authHeaderArgs, type MirrorDeps } from "./integrations/repo-mirror";
-import { defaultOpencodeDeps, askAssistant, OpencodeDeps, startEventStream } from "./integrations/opencode-client";
+import { defaultOpencodeDeps, askAssistant, OpencodeDeps, startEventStream, getOpenSessionCount } from "./integrations/opencode-client";
 import { appendLog, appendActivity, deleteAppHistory } from "./server/history";
 import { type RunMode, type TestTarget } from "./types";
 import { github } from "./integrations/github";
 import { scrubEnv } from "./qa/code-runner";
-import { createApp as adminCreateApp, deleteApp as adminDeleteApp, type AppAdminDeps } from "./server/app-admin";
+import { createApp as adminCreateApp, updateApp as adminUpdateApp, deleteApp as adminDeleteApp, type AppAdminDeps } from "./server/app-admin";
 import { writeConfig, configExists } from "./server/onboard";
 import { applyEnvVars, defaultEnvStoreFs } from "./server/env-store";
+import { logJson } from "./integrations/logger";
 
 const SELF_REPO = process.env.AI_PIPELINE_REPO ?? "ArielFalcon/ai-pipeline";
 const ROOT = process.env.AI_PIPELINE_ROOT ?? process.cwd();
@@ -66,8 +67,8 @@ if (process.env.QA_API_TOKEN) {
 // Reject unsigned webhooks unless explicitly opted in (local dev).
 const ALLOW_UNSIGNED_WEBHOOK = process.env.WEBHOOK_ALLOW_UNSIGNED === "true";
 if (!secret && !ALLOW_UNSIGNED_WEBHOOK) {
-  console.warn(
-    "[qa] CRITICAL: WEBHOOK_SECRET is not set — webhook POSTs will be REJECTED. " +
+  throw new Error(
+    "WEBHOOK_SECRET is not set — webhook POSTs will be REJECTED. " +
       "Set WEBHOOK_SECRET, or set WEBHOOK_ALLOW_UNSIGNED=true to accept unsigned webhooks (local only).",
   );
 }
@@ -471,6 +472,155 @@ async function cleanupOrphanedSessions(): Promise<void> {
   }
 }
 
+function generatePrometheusMetrics(queue: JobQueue, openSessions: number): string {
+  const lines: string[] = [];
+  lines.push(`# HELP panchito_queue_depth Current depth of the job queue`);
+  lines.push(`# TYPE panchito_queue_depth gauge`);
+  lines.push(`panchito_queue_depth ${queue.size}`);
+  lines.push(`# HELP panchito_open_sessions Number of open OpenCode sessions`);
+  lines.push(`# TYPE panchito_open_sessions gauge`);
+  lines.push(`panchito_open_sessions ${openSessions}`);
+  return lines.join("\n");
+}
+
+let backupTick = 0;
+let pruneTick = 0;
+const PRUNE_INTERVAL_TICKS = 360; // 6 hours (360 × 60 s)
+const PRUNE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const PROTECTED_MIRROR_NAMES = new Set(["ai-pipeline-self"]);
+
+function getDirectorySize(dir: string): number {
+  let size = 0;
+  try {
+    const entries = readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        size += getDirectorySize(fullPath);
+      } else if (entry.isFile()) {
+        try {
+          size += statSync(fullPath).size;
+        } catch {
+          /* ignore unreadable files */
+        }
+      }
+    }
+  } catch {
+    /* ignore unreadable directories */
+  }
+  return size;
+}
+
+async function pruneOldMirrors(): Promise<void> {
+  const mirrorRoot = process.env.MIRROR_DIR ?? join(process.cwd(), ".mirrors");
+
+  // Determine which repos are currently in use by an active run
+  const activeRepos = new Set<string>();
+  const running = currentRun();
+  if (running && running.status === "running") {
+    try {
+      const cfg = loadAppConfig(running.app);
+      activeRepos.add(cfg.repo.replaceAll("/", "__"));
+    } catch {
+      /* app config missing — ignore */
+    }
+    if (running.triggerRepo) {
+      activeRepos.add(running.triggerRepo.replaceAll("/", "__"));
+    }
+  }
+  // Also guard by the queue's current runId (defensive: DB and queue may be momentarily out of sync)
+  const currentRunId = queue.current;
+  if (currentRunId && (!running || running.id !== currentRunId)) {
+    const record = getRecord(currentRunId);
+    if (record) {
+      try {
+        const cfg = loadAppConfig(record.app);
+        activeRepos.add(cfg.repo.replaceAll("/", "__"));
+      } catch {
+        /* ignore */
+      }
+      if (record.triggerRepo) {
+        activeRepos.add(record.triggerRepo.replaceAll("/", "__"));
+      }
+    }
+  }
+
+  // Build set of repos that are still configured
+  const configuredRepos = new Set<string>();
+  for (const app of listAppConfigs()) {
+    configuredRepos.add(app.repo.replaceAll("/", "__"));
+    if (app.services) {
+      for (const svc of app.services) {
+        configuredRepos.add(svc.repo.replaceAll("/", "__"));
+      }
+    }
+  }
+
+  // Scan the mirrors directory
+  let entries: string[];
+  try {
+    entries = readdirSync(mirrorRoot);
+  } catch {
+    logJson("warn", "pruneOldMirrors: could not read mirror directory", { mirrorRoot });
+    return;
+  }
+
+  const now = Date.now();
+  const dirs = entries
+    .filter((name) => !PROTECTED_MIRROR_NAMES.has(name))
+    .map((name) => {
+      const path = join(mirrorRoot, name);
+      try {
+        const s = statSync(path);
+        if (!s.isDirectory()) return undefined;
+        return { name, path, atimeMs: s.atimeMs };
+      } catch {
+        return undefined;
+      }
+    })
+    .filter((d): d is { name: string; path: string; atimeMs: number } => d !== undefined);
+
+  // Group by repo name (directory name is the repo slug)
+  const byRepo = new Map<string, Array<{ name: string; path: string; atimeMs: number }>>();
+  for (const d of dirs) {
+    const list = byRepo.get(d.name) ?? [];
+    list.push(d);
+    byRepo.set(d.name, list);
+  }
+
+  const toDelete: Array<{ name: string; path: string; atimeMs: number }> = [];
+  for (const [repoName, list] of byRepo) {
+    // Sort by access time descending — most recent first
+    list.sort((a, b) => b.atimeMs - a.atimeMs);
+
+    for (const [i, d] of list.entries()) {
+      if (i === 0) continue; // keep the most recent working copy for this repo
+      if (activeRepos.has(repoName)) continue; // don't touch anything for an active run
+      const isOld = now - d.atimeMs > PRUNE_MAX_AGE_MS;
+      const isOrphan = !configuredRepos.has(repoName);
+      if (isOld || isOrphan) {
+        toDelete.push(d);
+      }
+    }
+  }
+
+  let deletedCount = 0;
+  let freedBytes = 0;
+  for (const d of toDelete) {
+    try {
+      freedBytes += getDirectorySize(d.path);
+      rmSync(d.path, { recursive: true, force: true });
+      deletedCount++;
+    } catch (err) {
+      logJson("warn", "pruneOldMirrors: failed to delete mirror", { path: d.path, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  if (deletedCount > 0) {
+    logJson("info", "pruned old mirrors", { deletedCount, freedBytes, freedMB: Math.round(freedBytes / 1024 / 1024) });
+  }
+}
+
 function startHealthPoller(): void {
   let fails = 0;
   let lastQueueWarn = 0;
@@ -499,13 +649,33 @@ function startHealthPoller(): void {
     if (pending.length > 0 && getMaintainerStatus() === "idle") {
       triggerMaintainer();
     }
+
+    // SQLite backup every 24h (1440 ticks at 60s intervals)
+    backupTick++;
+    if (backupTick >= 1440) {
+      backupTick = 0;
+      const { backupDatabase } = await import("./server/history");
+      const r = backupDatabase();
+      if (r.backedUp) {
+        logJson("info", "SQLite backup created", { path: r.path });
+      } else if (r.error) {
+        logJson("warn", "SQLite backup failed", { error: r.error });
+      }
+    }
+
+    // Mirror prune every 6h (360 ticks at 60s intervals)
+    pruneTick++;
+    if (pruneTick >= PRUNE_INTERVAL_TICKS) {
+      pruneTick = 0;
+      await pruneOldMirrors();
+    }
   }, 60_000);
 }
 
 function recoverMaintainerState(): void {
   const diagnosing = getIncidents().filter((i) => i.status === "diagnosing");
   if (diagnosing.length > 0) {
-    console.log(`[maintainer] recovering: ${diagnosing.length} incident(s) were mid-diagnosis; re-triggering`);
+    logJson("info", "maintainer recovering: incidents were mid-diagnosis; re-triggering", { count: diagnosing.length });
     triggerMaintainer();
   }
 }
@@ -542,7 +712,7 @@ function confirmSwapAfterBoot(): void {
         detail: "the swapped code booted but did not serve /api/health",
       });
       const rolled = rollback(process.cwd(), dataDir);
-      console.error(`[maintainer] canary unhealthy — ${rolled ? "rolled back to previous code" : "NO backup to roll back to"}; PR left unmerged: ${marker.prUrl ?? ""}`);
+      logJson("error", "canary unhealthy — rolled back or no backup", { rolled, prUrl: marker.prUrl ?? "" });
       if (rolled) {
         try {
           (await import("node:child_process")).execSync("npm install --no-audit --no-fund", { cwd: process.cwd(), stdio: "inherit", env: scrubEnv() });
@@ -556,7 +726,7 @@ function confirmSwapAfterBoot(): void {
     // Canary healthy → clear the rollback marker FIRST, so a slow promotion can never cause the
     // boot-guard to roll back an already-healthy service on a later restart.
     confirmSwapHealthy(process.cwd(), dataDir);
-    console.log(`[maintainer] canary verified healthy — cleared rollback marker.${marker.prUrl ? ` (${marker.prUrl})` : ""}`);
+    logJson("info", "canary verified healthy — cleared rollback marker", { prUrl: marker.prUrl });
     // Then PROMOTE: merge the PR so main adopts the now-proven fix. Promotion is gated by the
     // OUTER GUARD (the required CI check on main) and is best-effort — the running service
     // already has the fix, so a promotion failure never rolls it back, only flags a human.
@@ -583,7 +753,7 @@ async function promote(
   const mergeNow = async (why: string): Promise<void> => {
     try {
       await github.mergePullRequest(p.repo, p.prNumber);
-      console.log(`[maintainer] ${why} — promoted (merged) ${ref} to main.`);
+      logJson("info", `${why} — promoted (merged) to main`, { ref });
     } catch (err) {
       recordIncident({
         source: "health-check",
@@ -601,9 +771,9 @@ async function promote(
   try {
     await github.enableAutoMerge(p.nodeId);
     autoMerge = true;
-    console.log(`[maintainer] auto-merge enabled for ${ref} — GitHub will merge once the required CI check passes.`);
+    logJson("info", "auto-merge enabled — GitHub will merge once CI passes", { ref });
   } catch (err) {
-    console.warn(`[maintainer] native auto-merge unavailable (${err instanceof Error ? err.message : String(err)}) — self-enforcing the CI gate.`);
+    logJson("warn", "native auto-merge unavailable — self-enforcing the CI gate", { ref, error: err instanceof Error ? err.message : String(err) });
   }
 
   // 2. Observe the outcome so we both finish the merge when appropriate and LEARN on CI failure.
@@ -615,17 +785,17 @@ async function promote(
     try {
       s = await github.getPrStatus(p.repo, p.prNumber);
     } catch (err) {
-      console.warn(`[maintainer] could not read PR status for ${ref}: ${err instanceof Error ? err.message : String(err)}`);
+      logJson("warn", "could not read PR status", { ref, error: err instanceof Error ? err.message : String(err) });
       await sleep(15_000);
       continue;
     }
     if (s.merged) {
-      console.log(`[maintainer] promoted (merged) ${ref} to main.`);
+      logJson("info", "promoted (merged) to main", { ref });
       return;
     }
     if (s.state === "closed") {
       noteFailure("ci-failed", "the PR was closed without merging");
-      console.warn(`[maintainer] ${ref} was closed without merging — not promoted.`);
+      logJson("warn", "PR was closed without merging — not promoted", { ref });
       return;
     }
     if (s.checks === "failure") {
@@ -636,7 +806,7 @@ async function promote(
         detail: ref,
       });
       noteFailure("ci-failed", "the required CI check on main went red for this fix");
-      console.warn(`[maintainer] CI failed for ${ref} — leaving the PR open (main untouched).`);
+      logJson("warn", "CI failed — leaving the PR open (main untouched)", { ref });
       return;
     }
     if (!autoMerge) {
@@ -651,7 +821,7 @@ async function promote(
         summary: "maintainer canary healthy but branch protection/auto-merge is not configured — PR left for a human to review and merge",
         detail: ref,
       });
-      console.warn(`[maintainer] ${ref}: no branch protection — PR left open for human review.`);
+      logJson("warn", "no branch protection — PR left open for human review", { ref });
       return;
     }
     // pending; or (autoMerge waiting for GitHub to land the merge).
@@ -664,7 +834,7 @@ async function promote(
     detail: ref,
   });
   noteFailure("ci-timeout", "the required CI check did not complete (or auto-merge did not land) within the promote window");
-  console.warn(`[maintainer] promote timed out for ${ref} — PR left open.`);
+  logJson("warn", "promote timed out — PR left open", { ref });
 }
 
 // Canary health probe: two health checks a few seconds apart must both succeed, so a
@@ -715,8 +885,11 @@ function recoverRollbackRecord(): void {
 
 function finalizeInterruptedRuns(): void {
   const zombies = interruptedRecords();
-  if (zombies.length === 0) return;
-  console.log(`[qa] finalizing ${zombies.length} interrupted run(s) from previous process...`);
+  if (zombies.length === 0) {
+    console.log("[qa] no interrupted runs from previous process — queue is clean");
+    return;
+  }
+  console.log(`[qa] recovering ${zombies.length} interrupted run(s) from previous process...`);
   for (const r of zombies) {
     updateRecord(r.id, {
       status: "done",
@@ -724,8 +897,15 @@ function finalizeInterruptedRuns(): void {
       verdict: "infra-error",
       note: "process restarted — run was interrupted",
     });
+    recordIncident({
+      source: "health-check",
+      severity: "warn",
+      summary: `run ${r.id} (${r.app}@${r.sha.slice(0, 7)}) was interrupted by process restart`,
+      detail: `Previous status: ${r.status}, step: ${r.step ?? "unknown"}`,
+    });
     console.log(`[qa]   finalized ${r.id} (${r.app}@${r.sha.slice(0, 7)}) as infra-error`);
   }
+  console.log(`[qa] recovery complete — ${zombies.length} run(s) marked as infra-error`);
 }
 
 function authorized(req: IncomingMessage): boolean {
@@ -767,6 +947,7 @@ const apiDeps: ApiDeps = {
   loadApp: (name) => loadAppConfig(name),
   listApps: () => listAppConfigs(),
   createApp: (input) => adminCreateApp(input, appAdminDeps),
+  updateApp: (input) => adminUpdateApp(input, appAdminDeps),
   deleteApp: (name, purge) => adminDeleteApp(name, purge, appAdminDeps),
   listRepos: (owner, page) => github.listRepos(owner, page),
   resolveRef: (repo, ref) => resolveRef(repo, ref, defaultMirrorDeps),
@@ -822,6 +1003,8 @@ const apiDeps: ApiDeps = {
 
 const server = createServer(async (req, res) => {
   const path = (req.url ?? "/").split("?")[0] ?? "/";
+  const traceId = req.headers["x-trace-id"] as string | undefined;
+  const startTime = Date.now();
 
   if (req.method === "OPTIONS") {
     res.writeHead(204);
@@ -838,13 +1021,21 @@ const server = createServer(async (req, res) => {
       res.end(JSON.stringify({ error: "unauthorized" }));
       return;
     }
+    if (path === "/api/metrics") {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(generatePrometheusMetrics(queue, getOpenSessionCount()));
+      return;
+    }
     if (path.startsWith("/api/maintainer")) {
       if (await handleMaintainerApi(req, res, triggerMaintainer)) return;
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "not found" }));
       return;
     }
-    if (await handleApi(req, res, apiDeps)) return;
+    if (await handleApi(req, res, apiDeps)) {
+      logJson("info", `API request`, { traceId, path, duration: Date.now() - startTime });
+      return;
+    }
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "not found" }));
     return;
@@ -880,7 +1071,7 @@ const server = createServer(async (req, res) => {
         }
         const { repo, sha, mode, guidance } = result.payload;
         const matches = loadAppConfigsByRepo(repo);
-        if (matches.length === 0) console.warn(`[qa] no config/apps entry for ${repo}; event ignored`);
+        if (matches.length === 0) logJson("warn", "no config/apps entry for repo; event ignored", { repo });
         for (const m of matches) {
           try {
             if (m.role === "primary") {
@@ -889,7 +1080,7 @@ const server = createServer(async (req, res) => {
               enqueueApiRun(m.app.name, sha, "e2e", "diff", guidance, undefined, repo);
             }
           } catch (err) {
-            console.error("[qa] webhook enqueue failed:", err instanceof Error ? err.message : String(err));
+            logJson("error", "webhook enqueue failed", { error: err instanceof Error ? err.message : String(err), repo, sha });
             res.writeHead(500, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ message: "internal error — run could not be enqueued" }));
             return;
@@ -907,11 +1098,11 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(port, () => {
-  console.log(`ai-pipeline listening on :${port}${apiToken ? " (API auth on)" : ""}`);
+  logJson("info", `ai-pipeline listening on :${port}${apiToken ? " (API auth on)" : ""}`);
   // Make global fetch proxy-aware (HTTP(S)_PROXY/NO_PROXY) from boot, before any GitHub API or
   // health call. No-op when no proxy is configured. (A per-run build refines the timeouts.)
   const startupTimeout = Number(process.env.OPENCODE_TIMEOUT_MS) || 900_000;
-  installHttpDispatcher(startupTimeout).catch((err) => console.warn(`[qa] HTTP dispatcher setup failed: ${err instanceof Error ? err.message : String(err)}`));
+  installHttpDispatcher(startupTimeout).catch((err) => logJson("warn", "HTTP dispatcher setup failed", { error: err instanceof Error ? err.message : String(err) }));
   // Start the SSE event stream from OpenCode so agent activity (tool calls,
   // file edits, streaming text) is routed to RunRecord logs in real time.
   startEventStream(
@@ -921,10 +1112,32 @@ server.listen(port, () => {
       appendLog(a.runId, a.display);
     },
     eventStreamController.signal,
-  ).catch((err) => console.warn(`[qa] event stream failed: ${err instanceof Error ? err.message : String(err)}`));
+  ).catch((err) => logJson("warn", "event stream failed", { error: err instanceof Error ? err.message : String(err) }));
   recoverRollbackRecord();
   confirmSwapAfterBoot();
   finalizeInterruptedRuns();
   startHealthPoller();
   recoverMaintainerState();
 });
+
+// Graceful shutdown: drain the queue and close the database.
+async function gracefulShutdown(signal: string): Promise<void> {
+  logJson("info", `received ${signal}, starting graceful shutdown...`);
+  shuttingDown = true;
+  const drainMs = Number(process.env.SHUTDOWN_DRAIN_MS) || 60_000;
+  const start = Date.now();
+  while (queue.size > 0 && Date.now() - start < drainMs) {
+    await new Promise((r) => setTimeout(r, 1_000));
+  }
+  if (queue.size > 0) {
+    logJson("warn", "shutdown timeout reached with jobs still in queue", { queueSize: queue.size });
+  }
+  // The database is closed via process.on("exit") in history.ts.
+  server.close(() => {
+    logJson("info", "server closed");
+    process.exit(0);
+  });
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));

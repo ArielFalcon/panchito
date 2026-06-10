@@ -416,3 +416,40 @@ test("DELETE /api/apps/:name without the dep returns 501", async () => {
   await handleApi(mkReq("DELETE", "/api/apps/shop"), res, deps({}));
   assert.equal(res.status, 501);
 });
+
+test("PUT /api/apps/:name delegates to updateApp and 200s", async () => {
+  let got: { name: string; body: unknown } | undefined;
+  const res = mkRes();
+  await handleApi(
+    mkReq("PUT", "/api/apps/shop", JSON.stringify({ baseUrl: "https://new.dev.io" })),
+    res,
+    deps({
+      updateApp: async (input) => {
+        got = { name: input.name, body: input };
+        return { ok: true, name: "shop" };
+      },
+    }),
+  );
+  assert.equal(res.status, 200);
+  assert.equal(got?.name, "shop");
+});
+
+test("PUT /api/apps/:name maps validation failure to 422", async () => {
+  const res = mkRes();
+  await handleApi(
+    mkReq("PUT", "/api/apps/shop", JSON.stringify({ baseUrl: "bad" })),
+    res,
+    deps({
+      updateApp: async () => ({ ok: false, errors: ["bad url"] }),
+    }),
+  );
+  assert.equal(res.status, 422);
+  const body = JSON.parse(res.body);
+  assert.deepEqual(body.errors, ["bad url"]);
+});
+
+test("PUT /api/apps/:name without the dep returns 501", async () => {
+  const res = mkRes();
+  await handleApi(mkReq("PUT", "/api/apps/shop", JSON.stringify({ baseUrl: "https://x" })), res, deps({}));
+  assert.equal(res.status, 501);
+});

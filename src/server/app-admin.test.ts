@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createApp, deleteApp, type AppAdminDeps, type CreateAppInput } from "./app-admin";
+import { createApp, updateApp, deleteApp, type AppAdminDeps, type CreateAppInput } from "./app-admin";
 import type { AppConfig } from "../orchestrator/config-loader";
 
 function makeDeps(overrides: Partial<AppAdminDeps> = {}): AppAdminDeps & { written: Record<string, string>; removed: string[] } {
@@ -111,4 +111,56 @@ test("deleteApp removes the config; purge also removes the PRIMARY mirror and hi
   const deps2 = makeDeps();
   const purged = deleteApp("shop", true, deps2);
   assert.deepEqual(purged.removed, ["config:shop", "mirror:org/shop-front", "history:shop"]);
+});
+
+test("updateApp loads existing config, merges changes, and writes", async () => {
+  const deps = makeDeps();
+  const r = await updateApp(
+    { name: "shop", baseUrl: "https://new.dev.shop.io", shadow: false },
+    deps,
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.name, "shop");
+  const yaml = deps.written["shop"] ?? "";
+  assert.match(yaml, /baseUrl: "https:\/\/new\.dev\.shop\.io"/);
+  assert.match(yaml, /shadow: false/);
+  assert.match(yaml, /repo: "org\/shop-front"/);
+});
+
+test("updateApp validates repo when it changes", async () => {
+  const deps = makeDeps();
+  const r = await updateApp(
+    { name: "shop", repo: "org/new-repo" },
+    deps,
+  );
+  assert.equal(r.ok, true);
+  assert.match(deps.written["shop"] ?? "", /repo: "org\/new-repo"/);
+});
+
+test("updateApp rejects invalid config", async () => {
+  const deps = makeDeps();
+  const r = await updateApp(
+    { name: "shop", baseUrl: "not-a-url" },
+    deps,
+  );
+  assert.equal(r.ok, false);
+  assert.ok((r.errors ?? []).length > 0);
+  assert.deepEqual(deps.written, {});
+});
+
+test("updateApp returns 404 when app does not exist", async () => {
+  const deps = makeDeps({
+    loadApp: () => { throw new Error("not found"); },
+  });
+  const r = await updateApp({ name: "missing", baseUrl: "https://x" }, deps);
+  assert.equal(r.ok, false);
+  assert.match(r.errors?.[0] ?? "", /not found/);
+});
+
+test("updateApp dryRun returns yaml without writing", async () => {
+  const deps = makeDeps();
+  const r = await updateApp({ name: "shop", shadow: false, dryRun: true }, deps);
+  assert.equal(r.ok, true);
+  assert.ok(r.yaml);
+  assert.deepEqual(deps.written, {});
 });

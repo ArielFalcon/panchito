@@ -9,11 +9,11 @@ import { RunMode, TestTarget, RunRecord } from "../types";
 import { AppConfig } from "../orchestrator/config-loader";
 import { sanitizeText } from "../orchestrator/sanitizer";
 import { redactError } from "../util/redact";
-import { buildRunContext, buildLearningContext } from "./chat";
+import { buildRunContext, buildLearningContext, buildRunChatContext } from "./chat";
 import { buildHelpContext } from "./help";
 import { json, readBody } from "./helpers";
 import { getOpenSessionCount, activityRouter } from "../integrations/opencode-client";
-import type { CreateAppInput, CreateAppResult } from "./app-admin";
+import type { CreateAppInput, CreateAppResult, UpdateAppInput } from "./app-admin";
 
 const MODES: RunMode[] = ["diff", "complete", "exhaustive", "manual"];
 const TARGETS: TestTarget[] = ["e2e", "code"];
@@ -34,6 +34,7 @@ export interface ApiDeps {
   continueRun?: (parentId: string, cases: string[] | undefined, guidance?: string) => string;
   // App onboarding/deletion (F5). Absent ⇒ the corresponding routes return 501.
   createApp?: (input: CreateAppInput) => Promise<CreateAppResult>;
+  updateApp?: (input: UpdateAppInput) => Promise<CreateAppResult>;
   deleteApp?: (name: string, purge: boolean) => { removed: string[] };
   listRepos?: (owner: string, page: number) => Promise<{ repos: Array<{ fullName: string; private: boolean; description: string | null }>; hasMore: boolean }>;
 }
@@ -66,6 +67,9 @@ export async function handleApi(
   const appMatch = path.match(/^\/api\/apps\/([^/]+)$/);
   if (req.method === "POST" && path === "/api/apps") {
     return await handleCreateApp(req, res, deps);
+  }
+  if (req.method === "PUT" && appMatch) {
+    return await handleUpdateApp(req, res, deps, appMatch[1]!);
   }
   if (req.method === "DELETE" && appMatch) {
     return handleDeleteApp(res, deps, appMatch[1]!, url.searchParams.get("purge") === "1");
@@ -233,14 +237,22 @@ function handleListRuns(res: ServerResponse, deps: ApiDeps, app: string | null |
   return true;
 }
 
-function appView(app: AppConfig): { name: string; repo: string; baseUrl: string; code: boolean; shadow: boolean } {
+function appView(app: AppConfig): { name: string; repo: string; baseUrl: string; versionUrl: string; code: boolean; shadow: boolean; needsReview: boolean; testDataPrefix: string; services: Array<{ repo: string; openapi?: string; versionUrl?: string }> } {
   // Code-mode apps have no dev environment (and no baseUrl).
   return {
     name: app.name,
     repo: app.repo,
     baseUrl: app.dev?.baseUrl ?? "",
+    versionUrl: app.dev?.versionUrl ?? "",
     code: app.code ?? false,
     shadow: app.qa.shadow ?? false,
+    needsReview: app.qa.needsReview,
+    testDataPrefix: app.qa.testDataPrefix,
+    services: (app.services ?? []).map((s) => ({
+      repo: s.repo,
+      openapi: typeof s.openapi === "string" ? s.openapi : s.openapi?.[0],
+      versionUrl: s.versionUrl,
+    })),
   };
 }
 
@@ -295,10 +307,15 @@ async function handleAsk(req: IncomingMessage, res: ServerResponse, deps: ApiDep
     return true;
   }
 
-  const question = typeof body.question === "string" ? body.question.trim() : "";
+  let question = typeof body.question === "string" ? body.question.trim() : "";
   if (!question) {
     json(res, 400, { error: "'question' is required" });
     return true;
+  }
+  // Truncate to prevent context window exhaustion
+  const MAX_QUESTION_LEN = 4000;
+  if (question.length > MAX_QUESTION_LEN) {
+    question = question.substring(0, MAX_QUESTION_LEN) + " [truncated]";
   }
 
   const historyLines: string[] = [];
@@ -322,7 +339,7 @@ async function handleAsk(req: IncomingMessage, res: ServerResponse, deps: ApiDep
     const activityCtx = activityRouter.contextForRun(record.id);
     const learningCtx = buildLearningContext(record.app);
     const runCtx = buildRunContext(record, undefined, appInfo, activityCtx || undefined, learningCtx || undefined);
-    const productCtx = buildHelpContext();
+    const productCtx = buildRunChatContext();
     const historyCtx = historyLines.length > 0 ? `\n\nRecent conversation:\n${historyLines.slice(-6).join("\n")}` : "";
     const answer = await deps.ask({ context: `${productCtx}\n\n---\n\n${runCtx}${historyCtx}`, question });
     // Sanitize on egress (logs→chat is a new egress path).
@@ -377,8 +394,13 @@ async function handleHelp(req: IncomingMessage, res: ServerResponse, deps: ApiDe
       question,
       instruction:
         "You are a helpful assistant answering questions about panchito (the TUI for ai-pipeline). " +
-        "Use ONLY the context below. Be concise and friendly. If the context does not contain " +
-        "the answer, say so and suggest what the user could ask instead.",
+        "Use ONLY the context below. " +
+        "TERMINAL-FRIENDLY FORMATTING (this renders in a TUI via Ink <Text>): " +
+        "allowed: blank lines, indentation, capitalized headers (RESUMEN, USO), " +
+        "plain text lists with '-', '───' separators between topics. " +
+        "forbidden: **bold**, `code`, # headings, code fences, emojis, HTML. " +
+        "Respond in the SAME language as the question. Be concise. " +
+        "If the context lacks the answer, say so and suggest what to ask instead.",
     });
     json(res, 200, { answer: sanitizeText(answer).text });
   } catch (err) {
@@ -469,6 +491,31 @@ async function handleCreateApp(req: IncomingMessage, res: ServerResponse, deps: 
     }
     // env VALUES never travel back; CreateAppResult only carries the key names.
     json(res, body.dryRun || body.validateOnly ? 200 : 201, result);
+  } catch (err) {
+    json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+  return true;
+}
+
+async function handleUpdateApp(req: IncomingMessage, res: ServerResponse, deps: ApiDeps, name: string): Promise<boolean> {
+  if (!deps.updateApp) {
+    json(res, 501, { error: "app update is not available" });
+    return true;
+  }
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(await readBody(req));
+  } catch {
+    json(res, 400, { error: "invalid JSON" });
+    return true;
+  }
+  try {
+    const result = await deps.updateApp({ ...body, name } as unknown as UpdateAppInput);
+    if (!result.ok) {
+      json(res, 422, { errors: result.errors ?? ["invalid app config"] });
+      return true;
+    }
+    json(res, body.dryRun ? 200 : 200, result);
   } catch (err) {
     json(res, 500, { error: err instanceof Error ? err.message : String(err) });
   }

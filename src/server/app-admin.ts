@@ -39,6 +39,20 @@ export interface CreateAppInput {
   validateOnly?: boolean;
 }
 
+export interface UpdateAppInput {
+  name: string;
+  repo?: string;
+  baseUrl?: string;
+  versionUrl?: string;
+  target?: TestTarget;
+  needsReview?: boolean;
+  shadow?: boolean;
+  testDataPrefix?: string;
+  services?: OnboardServiceInput[];
+  env?: Record<string, string>;
+  dryRun?: boolean;
+}
+
 export interface CreateAppResult {
   ok: boolean;
   errors?: string[];
@@ -97,6 +111,64 @@ export async function createApp(input: CreateAppInput, deps: AppAdminDeps): Prom
     ? ["env vars persisted to .env and applied live — if you deploy with Doppler, add them in Doppler too or they die with the container"]
     : [];
   return { ok: true, repoInfo, name, path, envApplied, warnings };
+}
+
+export async function updateApp(input: UpdateAppInput, deps: AppAdminDeps): Promise<CreateAppResult> {
+  let existing: AppConfig;
+  try {
+    existing = deps.loadApp(input.name);
+  } catch (err) {
+    return { ok: false, errors: [`app '${input.name}' not found`] };
+  }
+
+  const repo = input.repo ?? existing.repo;
+  let repoInfo: RepoInfo | undefined;
+  if (repo !== existing.repo) {
+    try {
+      repoInfo = await deps.getRepoInfo(repo);
+    } catch (err) {
+      return { ok: false, errors: [`repo validation failed: ${err instanceof Error ? err.message : String(err)}`] };
+    }
+  }
+
+  const target = input.target ?? (existing.code ? "code" : "e2e");
+  const onboard: OnboardInput = {
+    name: input.name,
+    repo: repoInfo?.fullName ?? repo,
+    baseBranch: repoInfo?.defaultBranch ?? existing.baseBranch ?? "main",
+    baseUrl: input.baseUrl ?? existing.dev?.baseUrl ?? `https://github.com/${repo}`,
+    versionUrl: input.versionUrl ?? existing.dev?.versionUrl ?? undefined,
+    target,
+    needsReview: input.needsReview ?? existing.qa.needsReview,
+    shadow: input.shadow ?? existing.qa.shadow ?? true,
+    testDataPrefix: input.testDataPrefix ?? existing.qa.testDataPrefix ?? "qa-bot",
+    services: input.services ?? existing.services?.map((s) => ({
+      repo: s.repo,
+      openapi: Array.isArray(s.openapi) ? s.openapi[0] : s.openapi,
+      versionUrl: s.versionUrl,
+    })),
+  };
+
+  const yaml = buildYaml(onboard);
+
+  const expansionEnv = { ...deps.env, ...(input.env ?? {}) };
+  try {
+    AppConfigSchema.parse(parse(expandEnv(yaml, expansionEnv)));
+  } catch (err) {
+    return { ok: false, errors: [err instanceof Error ? err.message : String(err)], yaml };
+  }
+
+  if (input.dryRun) return { ok: true, repoInfo, name: input.name, yaml };
+
+  let envApplied: string[] = [];
+  if (input.env && Object.keys(input.env).length > 0) {
+    envApplied = deps.applyEnv(input.env);
+  }
+  const path = deps.writeConfig(input.name, yaml);
+  const warnings = envApplied.length
+    ? ["env vars persisted to .env and applied live — if you deploy with Doppler, add them in Doppler too or they die with the container"]
+    : [];
+  return { ok: true, repoInfo, name: input.name, path, envApplied, warnings };
 }
 
 export function deleteApp(name: string, purge: boolean, deps: AppAdminDeps): { removed: string[] } {
