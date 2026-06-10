@@ -29,11 +29,12 @@ function parseReviewFromLogs(logs: string[]): string | null {
 }
 
 // Filtered tail: drop heartbeat + empty lines, keep at most `max` lines.
+const HEARTBEAT_RE = /^\[qa\] agent (?:active|is working)/;
 function tailLogs(logs: string[], max: number): string[] {
   const filtered = logs.filter((l) => {
     const t = l.trim();
     if (!t) return false;
-    if (t.includes("agent active (") || t.includes("agent is working...")) return false;
+    if (HEARTBEAT_RE.test(t)) return false;
     return true;
   });
   return filtered.slice(-max);
@@ -42,8 +43,7 @@ function tailLogs(logs: string[], max: number): string[] {
 function runDuration(record: RunRecord): string {
   const start = Date.parse(record.at);
   if (Number.isNaN(start)) return "";
-  const end = record.status === "done" ? Date.now() : start; // approximate; real "finishedAt" doesn't exist yet
-  return formatElapsed(end - start);
+  return formatElapsed(Date.now() - start);
 }
 
 function shortId(id: string): string {
@@ -101,8 +101,9 @@ export function RunSummary({ record, client, onBack, onContinue }: {
         const path = `./qa-run-${id.slice(0, 16)}.json`;
         writeFileSync(path, JSON.stringify(record, null, 2), "utf8");
         setExported(path);
-      } catch {
-        setExported("(error writing file)");
+      } catch (err) {
+        console.error(`[qa] export failed: ${err instanceof Error ? err.message : String(err)}`);
+        setExported("(error writing file — check terminal for details)");
       }
       return;
     }
@@ -130,7 +131,7 @@ export function RunSummary({ record, client, onBack, onContinue }: {
               const extra =
                 s === "generate" && reviewInfo ? ` — ${reviewInfo}` :
                 s === "execute" && record.stepDetail ? ` — ${record.stepDetail}` :
-                s === "execute" && total > 0 ? ` — ${duration}` :
+                s === "execute" && total > 0 && duration ? ` — ≈ ${duration}` :
                 undefined;
               return (
                 <Box key={s} flexDirection="column">
@@ -291,7 +292,6 @@ export function RunSummary({ record, client, onBack, onContinue }: {
             <Text dimColor>SHA </Text>{shortSha(sha)}
             {refName ? <Text dimColor>{`  ref ${refName}`}</Text> : null}
             <Text dimColor>{`  ${target}/${mode}`}</Text>
-            {duration ? <Text dimColor>{`  ${duration}`}</Text> : null}
           </Text>
         </Box>
         {parentRunId ? (

@@ -20,7 +20,10 @@ export interface SetupDeps {
 
 export async function setupE2eProject(e2eDir: string, deps: SetupDeps): Promise<void> {
   if (!deps.hasProject(e2eDir)) deps.bootstrap(e2eDir); // first time: seed it
-  if (isInstallCurrent(e2eDir)) return;
+  if (isInstallCurrent(e2eDir)) {
+    console.log("[qa] e2e dependencies up to date; skipping npm ci");
+    return;
+  }
   await deps.install(e2eDir);
   markInstallCurrent(e2eDir);
 }
