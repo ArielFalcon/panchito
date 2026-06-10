@@ -130,8 +130,9 @@ export function OnboardWizard({
       return;
     }
 
-    if (step === "repo") {
-      if (key.return && repoInput.trim()) { void validateRepo(); return; }
+    if (step === "repo" || step === "repo-error") {
+      if (step === "repo-error" && key.return) { void validateRepo(); return; }
+      if (step === "repo" && key.return && repoInput.trim()) { void validateRepo(); return; }
       if (key.backspace || key.delete) { setRepoInput((p) => p.slice(0, -1)); return; }
       if (char.length === 1 && char >= " ") { setRepoInput((p) => p + char); }
       return;
@@ -226,8 +227,15 @@ export function OnboardWizard({
         <Box marginTop={1}>
           {step === "validating"
             ? <Text color="cyan"><Spinner type="dots" /> validating…</Text>
-            : step === "repo-error"
-            ? <Text color="#c0392b">✗ {error}</Text>
+              : step === "repo-error"
+              ? (
+                <Box flexDirection="column">
+                  <Text color="#c0392b">✗ {error}</Text>
+                  <Box marginTop={1}>
+                    <Text dimColor>Enter to retry · Esc to go back</Text>
+                  </Box>
+                </Box>
+              )
             : <Text dimColor>Enter to validate · Esc to cancel</Text>}
         </Box>
       </Box>
