@@ -43,6 +43,17 @@ services:
       # override re-adds them for live editing. The E2E suite is NOT in a volume: it lives in git.
       - mirrors:/app/.mirrors # local working copies (shared with opencode); the harness runs over <repo>/e2e here
       - qa-data:/app/data # run history + maintainer state (markers/ledger/failure memory) — persists across restarts
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
     deploy:
       resources:
         limits:
@@ -79,6 +90,11 @@ services:
       - serena-cache:/root/.cache/uv # uv/Serena cache (avoids re-downloading on each boot)
       - engram-data:/data # engram's episodic-memory SQLite — persists across restarts
       - opencode-data:/root/.local/share/opencode # sessions + auth — survives restarts
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4096/global/health"]
       interval: 10s
