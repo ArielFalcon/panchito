@@ -1120,24 +1120,8 @@ server.listen(port, () => {
   recoverMaintainerState();
 });
 
-// Graceful shutdown: drain the queue and close the database.
-async function gracefulShutdown(signal: string): Promise<void> {
-  logJson("info", `received ${signal}, starting graceful shutdown...`);
-  shuttingDown = true;
-  const drainMs = Number(process.env.SHUTDOWN_DRAIN_MS) || 60_000;
-  const start = Date.now();
-  while (queue.size > 0 && Date.now() - start < drainMs) {
-    await new Promise((r) => setTimeout(r, 1_000));
-  }
-  if (queue.size > 0) {
-    logJson("warn", "shutdown timeout reached with jobs still in queue", { queueSize: queue.size });
-  }
-  // The database is closed via process.on("exit") in history.ts.
-  server.close(() => {
-    logJson("info", "server closed");
-    process.exit(0);
-  });
-}
-
-process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
-process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+// NOTE: SIGTERM/SIGINT are handled by the single pair of handlers registered near the
+// top of this file (they cancel the in-flight run via queue.cancel(), drain, then exit).
+// The database is closed via process.on("exit") in history.ts. There is intentionally no
+// second shutdown path here — two handlers for one signal raced (two drain timers, two
+// exits) and made `docker stop` behavior non-deterministic.
