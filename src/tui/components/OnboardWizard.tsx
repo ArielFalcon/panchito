@@ -26,7 +26,17 @@ interface RepoItem {
   description: string | null;
 }
 
+// Steps where TextInput is rendered — leftArrow is for cursor movement in these steps,
+// not back navigation. Use Escape to go back.
+const TEXT_INPUT_STEPS = new Set<Step>([
+  "browse-owner", "repo", "repo-error",
+  "dev-url", "dev-version", "qa-prefix",
+  "svc-repo", "svc-openapi", "svc-version",
+  "env-entry",
+]);
+
 const STEPS_BACK: Partial<Record<Step, Step>> = {
+  "browse-owner": "repo-source",
   "browse-list": "browse-owner",
   "repo": "repo-source",
   "repo-error": "repo",
@@ -40,7 +50,7 @@ const STEPS_BACK: Partial<Record<Step, Step>> = {
   "svc-repo": "svc-ask",
   "svc-openapi": "svc-repo",
   "svc-version": "svc-openapi",
-  "env-ask": "svc-ask",
+  "env-ask": "svc-ask",   // code-mode override handled in goBack
   "env-entry": "env-ask",
   "review": "env-ask",
   "config-error": "loading-config",
@@ -74,7 +84,6 @@ export function OnboardWizard({
   const [services, setServices] = useState<OnboardServiceInput[]>([]);
   const [svcDraft, setSvcDraft] = useState<OnboardServiceInput>({ repo: "" });
   const [envVars, setEnvVars] = useState<Record<string, string>>({});
-  const [envDraft, setEnvDraft] = useState("");
   const [yamlPreview, setYamlPreview] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -124,16 +133,20 @@ export function OnboardWizard({
     setBaseUrl(""); setVersionUrl(""); setTarget("e2e");
     setNeedsReview(true); setShadow(true); setTestPrefix("qa-bot");
     setServices([]); setSvcDraft({ repo: "" });
-    setEnvVars({}); setEnvDraft(""); setYamlPreview("");
+    setEnvVars({}); setYamlPreview("");
     setError(null); setLoading(false);
     setBrowseOwner(""); setRepos([]); setRepoPage(1); setRepoHasMore(false);
     setRepoFilter(""); setRepoFilterActive(false);
   }, [isEditMode]);
 
   const goBack = useCallback(() => {
+    // Code mode: svc-ask was skipped, so env-ask goes back to qa-prefix
+    if (step === "env-ask" && target !== "e2e") {
+      setStep("qa-prefix"); setError(null); return;
+    }
     const prev = STEPS_BACK[step];
     if (prev) { setStep(prev); setError(null); }
-  }, [step]);
+  }, [step, target]);
 
   const validateRepo = useCallback(async (repo: string) => {
     const trimmed = repo.trim();
@@ -239,27 +252,23 @@ export function OnboardWizard({
   useInput((char, key) => {
     if (key.escape) {
       if (step === "browse-list" && repoFilterActive) { setRepoFilterActive(false); return; }
-      if (step === "repo-error" || step === "write-error") { reset(); return; }
+      if (step === "write-error") { reset(); return; }
       if (step === "done") { onDone(appName); return; }
       if (isEditMode && (step === "edit-menu" || step === "config-error")) { onCancel(); return; }
       if (isEditMode && step !== "loading-config" && step !== "review" && step !== "committing") { setStep("edit-menu"); return; }
+      // For any step with a back target, Escape goes back instead of cancelling
+      if (STEPS_BACK[step]) { goBack(); return; }
       onCancel();
       return;
     }
 
-    if (key.leftArrow && step !== "repo-source" && step !== "browse-owner" && step !== "browse-list" && step !== "loading-config" && step !== "edit-menu") {
+    // Left arrow: back navigation only for non-text-input steps
+    // (TextInput uses leftArrow for cursor movement)
+    if (key.leftArrow && !TEXT_INPUT_STEPS.has(step) && step !== "repo-source" && step !== "browse-list" && step !== "loading-config" && step !== "edit-menu") {
       if (isEditMode && step !== "config-error" && step !== "review" && step !== "committing" && step !== "done" && step !== "write-error") {
-        setStep("edit-menu");
-        return;
+        setStep("edit-menu"); return;
       }
-      goBack();
-      return;
-    }
-
-    // ── repo source ─────────────────────────────────────────────────────
-    if (step === "repo-source") {
-      if (key.return) { /* handled by SelectInput */ return; }
-      return;
+      goBack(); return;
     }
 
     // ── browse list ─────────────────────────────────────────────────────
@@ -273,62 +282,9 @@ export function OnboardWizard({
         if (char.length === 1 && char >= " ") { setRepoFilter((p) => p + char); }
         return;
       }
-      if (key.return) { /* handled by SelectInput */ return; }
       return;
     }
 
-    // ── text input steps ────────────────────────────────────────────────
-    if (step === "dev-url") {
-      if (key.return) { setStep(isEditMode ? "edit-menu" : target === "code" ? "qa-target" : "dev-version"); return; }
-      if (key.backspace || key.delete) { setBaseUrl((p) => p.slice(0, -1)); return; }
-      if (char.length === 1 && char >= " ") { setBaseUrl((p) => p + char); }
-      return;
-    }
-    if (step === "dev-version") {
-      if (key.return) { setStep(isEditMode ? "edit-menu" : "qa-target"); return; }
-      if (key.backspace || key.delete) { setVersionUrl((p) => p.slice(0, -1)); return; }
-      if (char.length === 1 && char >= " ") { setVersionUrl((p) => p + char); }
-      return;
-    }
-    if (step === "qa-prefix") {
-      if (key.return && testPrefix.trim()) { setStep(isEditMode ? "edit-menu" : target === "e2e" ? "svc-ask" : "env-ask"); return; }
-      if (key.backspace || key.delete) { setTestPrefix((p) => p.slice(0, -1)); return; }
-      if (char.length === 1 && char >= " ") { setTestPrefix((p) => p + char); }
-      return;
-    }
-    if (step === "svc-repo") {
-      if (key.return && svcDraft.repo.trim().includes("/")) { setStep(isEditMode ? "edit-menu" : "svc-openapi"); return; }
-      if (key.backspace || key.delete) { setSvcDraft((p) => ({ ...p, repo: p.repo.slice(0, -1) })); return; }
-      if (char.length === 1 && char >= " ") { setSvcDraft((p) => ({ ...p, repo: p.repo + char })); }
-      return;
-    }
-    if (step === "svc-openapi") {
-      if (key.return) { setStep(isEditMode ? "edit-menu" : "svc-version"); return; }
-      if (key.backspace || key.delete) { setSvcDraft((p) => ({ ...p, openapi: (p.openapi ?? "").slice(0, -1) || undefined })); return; }
-      if (char.length === 1 && char >= " ") { setSvcDraft((p) => ({ ...p, openapi: (p.openapi ?? "") + char })); }
-      return;
-    }
-    if (step === "svc-version") {
-      if (key.return) {
-        if (!isEditMode) { setServices((prev) => [...prev, { ...svcDraft, repo: svcDraft.repo.trim() }]); setStep("svc-ask"); return; }
-        setServices((prev) => [...prev, { ...svcDraft, repo: svcDraft.repo.trim() }]); setStep("edit-menu"); return;
-      }
-      if (key.backspace || key.delete) { setSvcDraft((p) => ({ ...p, versionUrl: (p.versionUrl ?? "").slice(0, -1) || undefined })); return; }
-      if (char.length === 1 && char >= " ") { setSvcDraft((p) => ({ ...p, versionUrl: (p.versionUrl ?? "") + char })); }
-      return;
-    }
-    if (step === "env-entry") {
-      if (key.return) {
-        const eq = envDraft.indexOf("=");
-        if (eq > 0) { const k = envDraft.slice(0, eq).trim(); const v = envDraft.slice(eq + 1); setEnvVars((prev) => ({ ...prev, [k]: v })); }
-        setEnvDraft("");
-        setStep(isEditMode ? "edit-menu" : "env-ask");
-        return;
-      }
-      if (key.backspace || key.delete) { setEnvDraft((p) => p.slice(0, -1)); return; }
-      if (char.length === 1 && char >= " ") { setEnvDraft((p) => p + char); }
-      return;
-    }
     if (step === "done" && key.return) { onDone(appName); }
   });
 
@@ -347,7 +303,8 @@ export function OnboardWizard({
     && step !== "committing" && step !== "done" && step !== "write-error"
     && step !== "loading-config" && step !== "config-error" && step !== "edit-menu";
 
-  const showBack = STEPS_BACK[step] !== undefined && step !== "edit-menu";
+  const showBack = STEPS_BACK[step] !== undefined && !TEXT_INPUT_STEPS.has(step) && step !== "edit-menu";
+  const backHint = showBack ? "  ·  ← back" : "";
 
   // ── repo source ───────────────────────────────────────────────────────
   if (step === "repo-source") {
@@ -379,7 +336,7 @@ export function OnboardWizard({
           }}
         />
         <Box marginTop={1}>
-          <Text dimColor>Enter to search  ·  empty Enter = your repos  ·  Esc to cancel</Text>
+          <Text dimColor>Enter to search  ·  empty Enter = your repos  ·  Esc to go back</Text>
         </Box>
       </Box>
     );
@@ -417,105 +374,53 @@ export function OnboardWizard({
     );
   }
 
-  // ── manual repo / validating / repo-error ─────────────────────────────
-  if (step === "repo" || step === "validating" || step === "repo-error") {
-    const showBackHint = STEPS_BACK[step] !== undefined;
+  // ── manual repo entry ─────────────────────────────────────────────────
+  if (step === "repo") {
     return (
       <Box flexDirection="column">
         <Text bold>Enter the GitHub repo (org/name):</Text>
-        {step === "repo" ? (
-          <TextInput
-            placeholder="org/repo"
-            onSubmit={(v) => { if (v.trim()) { setRepoInput(v); void validateRepo(v); } }}
-          />
-        ) : null}
-        <Box marginTop={1}>
-          {step === "validating"
-            ? <Text color="cyan"><Spinner type="dots" /> validating…</Text>
-            : step === "repo-error"
-            ? (
-              <Box flexDirection="column">
-                <Text color="#c0392b">✗ {error}</Text>
-                <Box marginTop={1}><Text dimColor>Enter to retry  ·  Esc to go back</Text></Box>
-              </Box>
-            )
-            : step === "repo" ? null : null}
-          {step === "repo" ? (
-            <Box marginTop={1}>
-              <Text dimColor>Esc to cancel{showBackHint ? "  ← back" : ""}</Text>
-            </Box>
-          ) : null}
+        <TextInput
+          defaultValue={isEditMode ? undefined : (repoInput || undefined)}
+          placeholder={isEditMode ? (repoInput || "org/repo") : "org/repo"}
+          onChange={isEditMode ? undefined : setRepoInput}
+          onSubmit={(v) => { const r = v.trim() || repoInput; if (r) { setRepoInput(r); void validateRepo(r); } }}
+        />
+        <Box marginTop={1}><Text dimColor>Enter to validate  ·  Esc to go back</Text></Box>
+      </Box>
+    );
+  }
+
+  // ── validating ────────────────────────────────────────────────────────
+  if (step === "validating") {
+    return (
+      <Box flexDirection="column">
+        <Text bold>Enter the GitHub repo (org/name):</Text>
+        <Box marginTop={1}><Text color="cyan"><Spinner type="dots" /> validating {repoInput}…</Text></Box>
+      </Box>
+    );
+  }
+
+  // ── repo error ────────────────────────────────────────────────────────
+  if (step === "repo-error") {
+    return (
+      <Box flexDirection="column">
+        <Text bold>Enter the GitHub repo (org/name):</Text>
+        <TextInput
+          defaultValue={repoInput}
+          placeholder="org/repo"
+          onChange={setRepoInput}
+          onSubmit={(v) => { if (v.trim()) { setRepoInput(v); void validateRepo(v); } }}
+        />
+        <Box marginTop={1} flexDirection="column">
+          <Text color="#c0392b">✗ {error}</Text>
+          <Text dimColor>Enter to retry  ·  Esc to go back</Text>
         </Box>
       </Box>
     );
   }
 
-  // ── env-ask ───────────────────────────────────────────────────────────
-  if (step === "env-ask") {
-    const items: SelectItem[] = [
-      { label: Object.keys(envVars).length ? `Add another env var (${Object.keys(envVars).length} added)` : "Add an env var (KEY=value)", value: "add" },
-      { label: isEditMode ? "Back to menu" : "Continue — review the YAML", value: "next" },
-    ];
-    return (
-      <Box flexDirection="column">
-        {showSummary ? renderSummaryBar() : null}
-        <Text bold>Environment variables (optional, server-side):</Text>
-        {Object.entries(envVars).map(([k, v]) => (
-          <Text key={k} dimColor>  ✓ {k}={"•".repeat(Math.max(4, Math.min(v.length, 12)))}</Text>
-        ))}
-        <SelectInput items={items} onSelect={(i) => {
-          if (i.value === "add") { setEnvDraft(""); setStep("env-entry"); }
-          else if (isEditMode) { setStep("edit-menu"); }
-          else void loadPreview();
-        }} />
-        <Box marginTop={1}><Text dimColor>Esc to cancel{showBack ? "  ← back" : ""}</Text></Box>
-      </Box>
-    );
-  }
-
-  // ── env-entry ─────────────────────────────────────────────────────────
-  if (step === "env-entry") {
-    const eq = envDraft.indexOf("=");
-    const masked = eq > 0
-      ? `${envDraft.slice(0, eq + 1)}${"•".repeat(Math.max(4, Math.min(envDraft.length - eq - 1, 12)))}`
-      : envDraft;
-    return (
-      <Box flexDirection="column">
-        {showSummary ? renderSummaryBar() : null}
-        <Text bold>Env var (KEY=value):</Text>
-        <Box marginTop={1}>
-          <Text dimColor>{"> "}</Text>
-          <Text>{masked || "KEY=value"}</Text>
-        </Box>
-        <Box marginTop={1}><Text dimColor>Enter to add{showBack ? "  ← back" : ""}  ·  Esc to cancel</Text></Box>
-      </Box>
-    );
-  }
-
-  // ── svc-ask ───────────────────────────────────────────────────────────
-  if (step === "svc-ask") {
-    const items: SelectItem[] = [
-      { label: services.length ? `Add another service (${services.length} added)` : "Add a microservice repo (multi-repo app)", value: "add" },
-      { label: isEditMode ? "Back to menu" : "Continue — no more services", value: "next" },
-    ];
-    return (
-      <Box flexDirection="column">
-        {showSummary ? renderSummaryBar() : null}
-        <Text bold>Microservice repos (optional):</Text>
-        {services.map((s) => <Text key={s.repo} dimColor>  ✓ {s.repo}{s.openapi ? ` (openapi: ${s.openapi})` : ""}</Text>)}
-        <SelectInput items={items} onSelect={(i) => {
-          if (i.value === "add") { setSvcDraft({ repo: "" }); setStep("svc-repo"); }
-          else setStep(isEditMode ? "edit-menu" : "env-ask");
-        }} />
-        <Box marginTop={1}><Text dimColor>Esc to cancel{showBack ? "  ← back" : ""}</Text></Box>
-      </Box>
-    );
-  }
-
-  // ── simple steps (dev-url, dev-version, qa-target, qa-review, qa-shadow, qa-prefix, svc-*, review, committing, done, write-error) ──
-
+  // ── dev-url ───────────────────────────────────────────────────────────
   if (step === "dev-url") {
-    const isCode = target === "code";
     return (
       <Box flexDirection="column">
         {showSummary ? renderSummaryBar() : null}
@@ -524,27 +429,37 @@ export function OnboardWizard({
             <Text><Text color="#3b7a57">✓</Text>{` ${repoInfo.fullName} `}<Text color={repoInfo.private ? "yellow" : "green"}>({repoInfo.private ? "private" : "public"})</Text>{` · default branch: ${repoInfo.defaultBranch}`}</Text>
           </Box>
         ) : null}
-        <Text bold>{isCode ? "Base URL (dummy for code mode):" : "DEV base URL:"}</Text>
-        <Box marginTop={1}>
-          <Text dimColor>{"> "}</Text>
-          <Text>{baseUrl || (isCode ? `https://github.com/${repoInput}` : "https://dev.example.com")}</Text>
-        </Box>
-        <Box marginTop={1}><Text dimColor>Enter to continue{showBack ? "  ← back" : ""}  ·  Esc to cancel</Text></Box>
+        <Text bold>DEV base URL <Text dimColor>(optional — Enter to skip)</Text></Text>
+        {/* edit mode: start empty so typing replaces rather than appends; placeholder shows current value */}
+        <TextInput
+          defaultValue={isEditMode ? undefined : (baseUrl || undefined)}
+          placeholder={isEditMode ? (baseUrl || "https://dev.myapp.com") : "https://dev.myapp.com"}
+          onChange={isEditMode ? undefined : setBaseUrl}
+          onSubmit={(v) => { if (v.trim()) setBaseUrl(v.trim()); setStep(isEditMode ? "edit-menu" : "dev-version"); }}
+        />
+        <Box marginTop={1}><Text dimColor>Enter to continue  ·  Esc to go back</Text></Box>
       </Box>
     );
   }
 
+  // ── dev-version ───────────────────────────────────────────────────────
   if (step === "dev-version") {
     return (
       <Box flexDirection="column">
         {showSummary ? renderSummaryBar() : null}
-        <Text bold>Version endpoint (optional, Enter to skip):</Text>
-        <Box marginTop={1}><Text dimColor>{"> "}</Text><Text>{versionUrl || "(skip — no deploy gate)"}</Text></Box>
-        <Box marginTop={1}><Text dimColor>Enter to continue{showBack ? "  ← back" : ""}  ·  Esc to cancel</Text></Box>
+        <Text bold>Version endpoint <Text dimColor>(optional — Enter to skip)</Text></Text>
+        <TextInput
+          defaultValue={isEditMode ? undefined : (versionUrl || undefined)}
+          placeholder={isEditMode ? (versionUrl || "https://dev.myapp.com/version") : "https://dev.myapp.com/version"}
+          onChange={isEditMode ? undefined : setVersionUrl}
+          onSubmit={(v) => { if (v.trim()) setVersionUrl(v.trim()); setStep(isEditMode ? "edit-menu" : "qa-target"); }}
+        />
+        <Box marginTop={1}><Text dimColor>Enter to continue  ·  Esc to go back</Text></Box>
       </Box>
     );
   }
 
+  // ── qa-target ─────────────────────────────────────────────────────────
   if (step === "qa-target") {
     const items: SelectItem[] = [
       { label: "e2e  — browser tests against DEV", value: "e2e" },
@@ -560,6 +475,7 @@ export function OnboardWizard({
     );
   }
 
+  // ── qa-review ─────────────────────────────────────────────────────────
   if (step === "qa-review") {
     const items: SelectItem[] = [
       { label: "Yes — AI reviewer validates generated tests", value: "yes" },
@@ -575,6 +491,7 @@ export function OnboardWizard({
     );
   }
 
+  // ── qa-shadow ─────────────────────────────────────────────────────────
   if (step === "qa-shadow") {
     const items: SelectItem[] = [
       { label: "Yes — run silently, no PRs or Issues (recommended)", value: "yes" },
@@ -590,50 +507,162 @@ export function OnboardWizard({
     );
   }
 
+  // ── qa-prefix ─────────────────────────────────────────────────────────
   if (step === "qa-prefix") {
     return (
       <Box flexDirection="column">
         {showSummary ? renderSummaryBar() : null}
-        <Text bold>Test data prefix:</Text>
-        <Box marginTop={1}><Text dimColor>{"> "}</Text><Text>{testPrefix || "qa-bot"}</Text></Box>
-        <Box marginTop={1}><Text dimColor>Enter to continue{showBack ? "  ← back" : ""}  ·  Esc to cancel</Text></Box>
+        <Text bold>Test data prefix <Text dimColor>(Enter to keep current or set new)</Text></Text>
+        <TextInput
+          defaultValue={isEditMode ? undefined : (testPrefix || undefined)}
+          placeholder={testPrefix || "qa-bot"}
+          onChange={isEditMode ? undefined : setTestPrefix}
+          onSubmit={(v) => {
+            const name = v.trim() || testPrefix || "qa-bot";
+            setTestPrefix(name);
+            setStep(isEditMode ? "edit-menu" : target === "e2e" ? "svc-ask" : "env-ask");
+          }}
+        />
+        <Box marginTop={1}><Text dimColor>Enter to continue  ·  Esc to go back</Text></Box>
       </Box>
     );
   }
 
+  // ── svc-ask ───────────────────────────────────────────────────────────
+  if (step === "svc-ask") {
+    const items: SelectItem[] = [
+      { label: services.length ? `Add another service (${services.length} added)` : "Add a microservice repo (multi-repo app)", value: "add" },
+      { label: isEditMode ? "Back to menu" : "Continue — no more services", value: "next" },
+    ];
+    return (
+      <Box flexDirection="column">
+        {showSummary ? renderSummaryBar() : null}
+        <Text bold>Microservice repos <Text dimColor>(optional)</Text></Text>
+        {services.map((s) => <Text key={s.repo} dimColor>  ✓ {s.repo}{s.openapi ? ` (openapi: ${s.openapi})` : ""}</Text>)}
+        <SelectInput items={items} onSelect={(i) => {
+          if (i.value === "add") { setSvcDraft({ repo: "" }); setStep("svc-repo"); }
+          else setStep(isEditMode ? "edit-menu" : "env-ask");
+        }} />
+        <Box marginTop={1}><Text dimColor>Esc to cancel{backHint}</Text></Box>
+      </Box>
+    );
+  }
+
+  // ── svc-repo ──────────────────────────────────────────────────────────
   if (step === "svc-repo") {
     return (
       <Box flexDirection="column">
         {showSummary ? renderSummaryBar() : null}
         <Text bold>Service repo (org/name):</Text>
-        <Box marginTop={1}><Text dimColor>{"> "}</Text><Text>{svcDraft.repo || "org/service"}</Text></Box>
-        <Box marginTop={1}><Text dimColor>Enter to continue{showBack ? "  ← back" : ""}  ·  Esc to cancel</Text></Box>
+        <TextInput
+          defaultValue={svcDraft.repo}
+          placeholder="org/service-name"
+          onChange={(v) => setSvcDraft((p) => ({ ...p, repo: v }))}
+          onSubmit={(v) => {
+            if (!v.trim().includes("/")) {
+              setError("repo must be in 'org/name' format (e.g. 'org/my-service')");
+              return;
+            }
+            setError(null);
+            setSvcDraft((p) => ({ ...p, repo: v.trim() }));
+            setStep("svc-openapi");
+          }}
+        />
+        {error ? <Box marginTop={1}><Text color="#c0392b">✗ {error}</Text></Box> : null}
+        <Box marginTop={1}><Text dimColor>Enter to continue  ·  Esc to go back</Text></Box>
       </Box>
     );
   }
 
+  // ── svc-openapi ───────────────────────────────────────────────────────
   if (step === "svc-openapi") {
     return (
       <Box flexDirection="column">
         {showSummary ? renderSummaryBar() : null}
-        <Text bold>Service OpenAPI glob (optional, Enter to skip):</Text>
-        <Box marginTop={1}><Text dimColor>{"> "}</Text><Text>{svcDraft.openapi || "(skip)"}</Text></Box>
-        <Box marginTop={1}><Text dimColor>Enter to continue{showBack ? "  ← back" : ""}  ·  Esc to cancel</Text></Box>
+        <Text bold>Service OpenAPI glob <Text dimColor>(optional — Enter to skip)</Text></Text>
+        <TextInput
+          defaultValue={svcDraft.openapi ?? ""}
+          placeholder="api/**/*.yaml"
+          onChange={(v) => setSvcDraft((p) => ({ ...p, openapi: v || undefined }))}
+          onSubmit={(v) => {
+            setSvcDraft((p) => ({ ...p, openapi: v.trim() || undefined }));
+            setStep("svc-version");
+          }}
+        />
+        <Box marginTop={1}><Text dimColor>Enter to continue  ·  Esc to go back</Text></Box>
       </Box>
     );
   }
 
+  // ── svc-version ───────────────────────────────────────────────────────
   if (step === "svc-version") {
     return (
       <Box flexDirection="column">
         {showSummary ? renderSummaryBar() : null}
-        <Text bold>Service version endpoint (optional, Enter to skip):</Text>
-        <Box marginTop={1}><Text dimColor>{"> "}</Text><Text>{svcDraft.versionUrl || "(skip)"}</Text></Box>
-        <Box marginTop={1}><Text dimColor>Enter to continue{showBack ? "  ← back" : ""}  ·  Esc to cancel</Text></Box>
+        <Text bold>Service version endpoint <Text dimColor>(optional — Enter to skip)</Text></Text>
+        <TextInput
+          defaultValue={svcDraft.versionUrl ?? ""}
+          placeholder="https://service/version"
+          onChange={(v) => setSvcDraft((p) => ({ ...p, versionUrl: v || undefined }))}
+          onSubmit={(v) => {
+            const versionUrl = v.trim() || undefined;
+            setServices((prev) => [...prev, { repo: svcDraft.repo.trim(), openapi: svcDraft.openapi, versionUrl }]);
+            setSvcDraft({ repo: "" });
+            setStep("svc-ask");
+          }}
+        />
+        <Box marginTop={1}><Text dimColor>Enter to continue  ·  Esc to go back</Text></Box>
       </Box>
     );
   }
 
+  // ── env-ask ───────────────────────────────────────────────────────────
+  if (step === "env-ask") {
+    const items: SelectItem[] = [
+      { label: Object.keys(envVars).length ? `Add another env var (${Object.keys(envVars).length} added)` : "Add an env var (KEY=value)", value: "add" },
+      { label: isEditMode ? "Back to menu" : "Continue — review the YAML", value: "next" },
+    ];
+    return (
+      <Box flexDirection="column">
+        {showSummary ? renderSummaryBar() : null}
+        <Text bold>Environment variables <Text dimColor>(optional, server-side)</Text></Text>
+        {Object.entries(envVars).map(([k, v]) => (
+          <Text key={k} dimColor>  ✓ {k}={"•".repeat(Math.max(4, Math.min(v.length, 12)))}</Text>
+        ))}
+        <SelectInput items={items} onSelect={(i) => {
+          if (i.value === "add") { setStep("env-entry"); }
+          else if (isEditMode) { setStep("edit-menu"); }
+          else void loadPreview();
+        }} />
+        <Box marginTop={1}><Text dimColor>Esc to cancel{backHint}</Text></Box>
+      </Box>
+    );
+  }
+
+  // ── env-entry ─────────────────────────────────────────────────────────
+  if (step === "env-entry") {
+    return (
+      <Box flexDirection="column">
+        {showSummary ? renderSummaryBar() : null}
+        <Text bold>Env var <Text dimColor>(KEY=value)</Text></Text>
+        <TextInput
+          placeholder="GITHUB_TOKEN=ghp_xxx"
+          onSubmit={(v) => {
+            const eq = v.indexOf("=");
+            if (eq > 0) {
+              const k = v.slice(0, eq).trim();
+              const val = v.slice(eq + 1);
+              setEnvVars((prev) => ({ ...prev, [k]: val }));
+            }
+            setStep(isEditMode ? "edit-menu" : "env-ask");
+          }}
+        />
+        <Box marginTop={1}><Text dimColor>Enter to add  ·  Esc to go back</Text></Box>
+      </Box>
+    );
+  }
+
+  // ── review ────────────────────────────────────────────────────────────
   if (step === "review") {
     const items: SelectItem[] = [
       { label: isEditMode ? "Yes — save changes" : "Yes — write config file", value: "yes" },
@@ -711,12 +740,13 @@ export function OnboardWizard({
           <SelectInput items={items} onSelect={(i) => {
             switch (i.value) {
               case "repo": setStep("repo"); break;
-              case "baseUrl": setBaseUrl(""); setStep("dev-url"); break;
-              case "versionUrl": setVersionUrl(""); setStep("dev-version"); break;
+              // Do NOT clear field values — existing values remain for editing
+              case "baseUrl": setStep("dev-url"); break;
+              case "versionUrl": setStep("dev-version"); break;
               case "target": setStep("qa-target"); break;
               case "needsReview": setStep("qa-review"); break;
               case "shadow": setStep("qa-shadow"); break;
-              case "testPrefix": setTestPrefix(""); setStep("qa-prefix"); break;
+              case "testPrefix": setStep("qa-prefix"); break;
               case "services": setStep("svc-ask"); break;
               case "env": setStep("env-ask"); break;
               case "review": void loadPreview(); break;
