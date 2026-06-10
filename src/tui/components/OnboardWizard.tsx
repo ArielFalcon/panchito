@@ -164,9 +164,7 @@ export function OnboardWizard({
     void validateRepo(fullName);
   }, [validateRepo]);
 
-  const fetchRepos = useCallback(async (page: number) => {
-    const owner = browseOwner.trim();
-    if (!owner) return;
+  const fetchRepos = useCallback(async (owner: string, page: number) => {
     setLoading(true);
     try {
       const r = await client.listRepos(owner, page);
@@ -179,7 +177,7 @@ export function OnboardWizard({
     } finally {
       setLoading(false);
     }
-  }, [browseOwner, client]);
+  }, [client]);
 
   const buildRequest = useCallback((flags: { dryRun?: boolean }): CreateAppRequest => ({
     repo: repoInfo?.fullName ?? repoInput.trim(),
@@ -266,8 +264,8 @@ export function OnboardWizard({
 
     // ── browse list ─────────────────────────────────────────────────────
     if (step === "browse-list") {
-      if (key.rightArrow && repoHasMore && !loading) { void fetchRepos(repoPage + 1); return; }
-      if (key.leftArrow && repoPage > 1 && !loading) { void fetchRepos(repoPage - 1); return; }
+      if (key.rightArrow && repoHasMore && !loading) { void fetchRepos(browseOwner, repoPage + 1); return; }
+      if (key.leftArrow && repoPage > 1 && !loading) { void fetchRepos(browseOwner, repoPage - 1); return; }
       if (char === "/") { setRepoFilterActive((p) => !p); if (repoFilterActive) setRepoFilter(""); return; }
       if (repoFilterActive) {
         if (key.return) { setRepoFilterActive(false); return; }
@@ -372,11 +370,16 @@ export function OnboardWizard({
       <Box flexDirection="column">
         <Text bold>Enter GitHub username or organization:</Text>
         <TextInput
-          placeholder="username"
-          onSubmit={(v) => { if (v.trim()) { setBrowseOwner(v); setRepoPage(1); void fetchRepos(1).then(() => setStep("browse-list")); } }}
+          placeholder="@me (your repos)"
+          onSubmit={(v) => {
+            const owner = v.trim() || "@me";
+            setBrowseOwner(owner);
+            setRepoPage(1);
+            void fetchRepos(owner, 1).then(() => setStep("browse-list"));
+          }}
         />
         <Box marginTop={1}>
-          <Text dimColor>Esc to cancel</Text>
+          <Text dimColor>Enter to search  ·  empty Enter = your repos  ·  Esc to cancel</Text>
         </Box>
       </Box>
     );
@@ -394,7 +397,7 @@ export function OnboardWizard({
     }
     return (
       <Box flexDirection="column">
-        <Text bold>{`Repos for ${browseOwner}`}{repoFilterActive ? `  (filter: ${repoFilter || "_"})` : ""}  page {repoPage}</Text>
+        <Text bold>{`Repos for ${browseOwner === "@me" ? "your account" : browseOwner}`}{repoFilterActive ? `  (filter: ${repoFilter || "_"})` : ""}  page {repoPage}</Text>
         {repoFilterActive ? (
           <Box marginTop={1}><Text dimColor>filter: {repoFilter || "_"}  Enter to apply  ·  Esc to close filter</Text></Box>
         ) : (

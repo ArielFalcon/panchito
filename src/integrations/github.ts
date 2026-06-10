@@ -209,9 +209,15 @@ export const github = {
       return res;
     };
 
-    let res = await ghRepos(`users/${encodeURIComponent(owner)}/repos`);
-    if (!res) res = await ghRepos(`orgs/${encodeURIComponent(owner)}/repos`);
-    if (!res) throw new Error(`no repos found for '${owner}' — check the name is correct and the token has access`);
+    let res: Response | null;
+    if (owner === "@me" || !owner) {
+      res = await ghRepos("user/repos");
+      if (!res) throw new Error("no repos found for your account — check GITHUB_TOKEN has 'repo' or 'public_repo' scope");
+    } else {
+      res = await ghRepos(`users/${encodeURIComponent(owner)}/repos`);
+      if (!res) res = await ghRepos(`orgs/${encodeURIComponent(owner)}/repos`);
+      if (!res) throw new Error(`no repos found for '${owner}' — check the name is correct and the token has access`);
+    }
 
     const items = (await res.json()) as Array<{
       name: string; full_name: string; private: boolean;
