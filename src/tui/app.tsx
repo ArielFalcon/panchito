@@ -89,12 +89,21 @@ export function Watch({ client, id, onDone }: { client: QaClient; id: string; on
   );
 }
 
-export function Launcher({ apps, defaultGuidance, onLaunch, onOnboard }: { apps: string[]; defaultGuidance?: string; onLaunch: (app: string, target: TestTarget, mode: RunMode, guidance?: string, shadow?: boolean) => void; onOnboard: () => void }): React.ReactElement {
+export function Launcher({ apps, defaultGuidance, onLaunch, onOnboard, onBack }: { apps: string[]; defaultGuidance?: string; onLaunch: (app: string, target: TestTarget, mode: RunMode, guidance?: string, shadow?: boolean) => void; onOnboard: () => void; onBack?: () => void }): React.ReactElement {
   const [app, setApp] = useState<string | null>(null);
   const [target, setTarget] = useState<TestTarget | null>(null);
   const [mode, setMode] = useState<RunMode | null>(null);
   const [shadow, setShadow] = useState<boolean | null>(null);
   const [manualGuidance, setManualGuidance] = useState<string | undefined>(undefined);
+
+  useInput((_, key) => {
+    if (!key.escape) return;
+    if (app === null) { onBack?.(); return; }
+    if (target === null) { setApp(null); return; }
+    if (mode === "manual" && manualGuidance === undefined && shadow === null) return; // GuidancePrompt handles
+    if (mode !== null && shadow === null) { setMode(null); return; }
+    setTarget(null);
+  });
 
   if (app === null) {
     const items: SelectItem[] = [...apps.map((a) => ({ label: a, value: a })), { label: "+ onboard new project", value: "__onboard__" }];
@@ -102,6 +111,7 @@ export function Launcher({ apps, defaultGuidance, onLaunch, onOnboard }: { apps:
       <Box flexDirection="column">
         <Text bold>Select an app</Text>
         <SelectInput items={items} onSelect={(i) => { if (i.value === "__onboard__") { onOnboard(); return; } setApp(i.value); }} />
+        {onBack ? <Box marginTop={1}><Text dimColor>Esc → back</Text></Box> : null}
       </Box>
     );
   }
@@ -112,6 +122,7 @@ export function Launcher({ apps, defaultGuidance, onLaunch, onOnboard }: { apps:
         <Text bold>{`Test target for ${app}`}</Text>
         <Text dimColor>e2e: browser tests against DEV. code: source-logic tests without a browser.</Text>
         <SelectInput items={items} onSelect={(i) => setTarget(i.value as TestTarget)} />
+        <Box marginTop={1}><Text dimColor>Esc → back</Text></Box>
       </Box>
     );
   }
@@ -132,6 +143,7 @@ export function Launcher({ apps, defaultGuidance, onLaunch, onOnboard }: { apps:
           setShadow(s);
           onLaunch(app!, target!, mode!, mode === "manual" ? manualGuidance : defaultGuidance, s);
         }} />
+        <Box marginTop={1}><Text dimColor>Esc → back</Text></Box>
       </Box>
     );
   }
@@ -140,12 +152,13 @@ export function Launcher({ apps, defaultGuidance, onLaunch, onOnboard }: { apps:
     <Box flexDirection="column">
       <Text bold>{`Mode for ${app} · ${target}`}</Text>
       <SelectInput items={items} onSelect={(i) => { const m = i.value as RunMode; setMode(m); }} />
+      <Box marginTop={1}><Text dimColor>Esc → back</Text></Box>
     </Box>
   );
 }
 
-export function RunFlow({ client, apps, refName, sha, guidance }: {
-  client: QaClient; apps: string[]; refName?: string; sha?: string; guidance?: string;
+export function RunFlow({ client, apps, refName, sha, guidance, onBack }: {
+  client: QaClient; apps: string[]; refName?: string; sha?: string; guidance?: string; onBack?: () => void;
 }): React.ReactElement {
   const [runId, setRunId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -161,7 +174,7 @@ export function RunFlow({ client, apps, refName, sha, guidance }: {
   if (runId && !done) return <Watch client={client} id={runId} onDone={() => setDone(true)} />;
   if (runId && done) return <SummaryScreen client={client} id={runId} onBack={() => { setRunId(null); setDone(false); }} />;
   if (onboarding) return <OnboardWizard client={client} onDone={() => setOnboarding(false)} onCancel={() => setOnboarding(false)} />;
-  return <Launcher apps={apps} defaultGuidance={guidance} onLaunch={(a, t, m, g, s) => void launch(a, t, m, g, s)} onOnboard={() => setOnboarding(true)} />;
+  return <Launcher apps={apps} defaultGuidance={guidance} onLaunch={(a, t, m, g, s) => void launch(a, t, m, g, s)} onOnboard={() => setOnboarding(true)} onBack={onBack} />;
 }
 
 function SummaryScreen({ client, id, onBack }: { client: QaClient; id: string; onBack: () => void }): React.ReactElement {
@@ -181,7 +194,7 @@ function SummaryScreen({ client, id, onBack }: { client: QaClient; id: string; o
     } catch { /* continue failed — stay on summary */ }
   };
 
-  if (continueId) return <Watch client={client} id={continueId} onDone={() => {}} />;
+  if (continueId) return <Watch client={client} id={continueId} onDone={() => setContinueId(null)} />;
   if (!record) return <Text color="cyan"><Spinner type="dots" />{" loading result…"}</Text>;
   return <RunSummary record={record} client={client} onBack={onBack} onContinue={handleContinue} />;
 }

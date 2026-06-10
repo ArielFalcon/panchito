@@ -119,6 +119,7 @@ export function HomeScreen({
         setView("help");
         break;
       case "status":
+        setStatusText(null);
         setView("status");
         break;
       case "exit":
@@ -160,7 +161,7 @@ export function HomeScreen({
         </Box>
       );
     }
-    return <RunFlow client={client} apps={apps} />;
+    return <RunFlow client={client} apps={apps} onBack={() => setView("home")} />;
   }
 
   if (view === "onboard") {

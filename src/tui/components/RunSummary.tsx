@@ -285,7 +285,7 @@ export function RunSummary({ record, client, onBack, onContinue }: {
             {verdict?.toUpperCase() ?? "RUNNING"}
           </Badge>
           {total > 0 ? (
-            <Text dimColor>{`${passed} passed, ${failed} failed${failed ? `, ${total - passed - failed} flaky` : ""}`}</Text>
+            <Text dimColor>{`${passed} passed${failed > 0 ? `, ${failed} failed` : ""}${total - passed - failed > 0 ? `, ${total - passed - failed} flaky` : ""}`}</Text>
           ) : null}
         </Box>
       </Box>
