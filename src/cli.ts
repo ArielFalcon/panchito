@@ -1,10 +1,15 @@
-// Manual trigger. Routes through the SAME sequential funnel as the webhook and the
-// control API (enqueueTrackedRun → JobQueue), so a manual run is queued, recorded
-// in history and addressable — and can never run concurrently against DEV. It then
-// drains the queue and exits with the run's verdict.
+// Manual trigger. Routes through a sequential funnel (enqueueTrackedRun → JobQueue), so a
+// manual run is queued, recorded in history and addressable. It then drains the queue and
+// exits with the run's verdict.
 //   npm run qa -- --app <app> --sha <sha> [--mode diff|complete|exhaustive|manual]
-//                 [--target e2e|code] [--guidance "..."]
+//                 [--target e2e|code] [--guidance "..."] [--allow-concurrent]
 //   npm run qa -- --app <app> --learning   → show learning state (outcomes, rules, curriculum)
+//
+// IMPORTANT: this CLI uses its OWN in-process queue. If the long-lived service is also
+// running on this host it has a SEPARATE queue, so a CLI run could execute QA against DEV
+// concurrently with a service run — breaking the "one run at a time against DEV" invariant.
+// We therefore refuse to start when the local service answers its health probe, unless the
+// operator explicitly accepts the risk with --allow-concurrent.
 
 import { JobQueue } from "./server/queue";
 import { enqueueTrackedRun } from "./server/runner";
@@ -12,12 +17,35 @@ import { getRecord, listRunOutcomes, listLearningRules, loadCurriculum } from ".
 import { loadAppConfig } from "./orchestrator/config-loader";
 import { RunMode, TestTarget } from "./types";
 
+// Probe the local service's unauthenticated liveness endpoint. A 200 means a long-lived
+// orchestrator owns the queue on this host and a second queue here would race it against DEV.
+async function localServiceIsRunning(): Promise<boolean> {
+  const port = Number(process.env.PORT ?? 8080);
+  try {
+    const res = await fetch(`http://localhost:${port}/api/health`, { signal: AbortSignal.timeout(1500) });
+    return res.ok;
+  } catch {
+    return false; // nothing listening / not reachable → safe to run locally
+  }
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
   if (args.learning) {
     showLearning(args.app);
     return;
+  }
+
+  if (!args.allowConcurrent && (await localServiceIsRunning())) {
+    console.error(
+      "[qa] the long-lived service is running on this host (responded on /api/health).\n" +
+        "      A manual CLI run uses a SEPARATE queue and could run QA concurrently against DEV,\n" +
+        "      breaking the sequential-queue invariant. Trigger the run through the service instead\n" +
+        "      (TUI, or POST /api/runs), or stop the service.\n" +
+        "      To override and accept the risk, re-run with --allow-concurrent.",
+    );
+    process.exit(2);
   }
 
   const queue = new JobQueue();
@@ -42,18 +70,20 @@ async function main(): Promise<void> {
 const MODES: RunMode[] = ["diff", "complete", "exhaustive", "manual", "context"];
 const TARGETS: TestTarget[] = ["e2e", "code"];
 
-function parseArgs(argv: string[]): { app: string; sha: string; mode: RunMode; target?: TestTarget; guidance?: string; learning: boolean } {
+function parseArgs(argv: string[]): { app: string; sha: string; mode: RunMode; target?: TestTarget; guidance?: string; learning: boolean; allowConcurrent: boolean } {
   const out: Record<string, string> = {};
   let learning = false;
+  let allowConcurrent = false;
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i]?.replace(/^--/, "");
     if (key === "learning") { learning = true; continue; }
+    if (key === "allow-concurrent") { allowConcurrent = true; continue; }
     if (key) out[key] = argv[i + 1] ?? "";
     if (key) i++; // skip value
   }
   if (!learning && (!out.app || !out.sha)) {
     console.error(
-      'Usage: npm run qa -- --app <app> --sha <sha> [--mode diff|complete|exhaustive|manual] [--target e2e|code] [--guidance "..."]',
+      'Usage: npm run qa -- --app <app> --sha <sha> [--mode diff|complete|exhaustive|manual] [--target e2e|code] [--guidance "..."] [--allow-concurrent]',
     );
     console.error('       npm run qa -- --app <app> --learning');
     process.exit(2);
@@ -65,7 +95,7 @@ function parseArgs(argv: string[]): { app: string; sha: string; mode: RunMode; t
   const mode = (MODES as string[]).includes(out.mode ?? "") ? (out.mode as RunMode) : "diff";
   // Undefined when not passed → the caller derives it from the app config (code vs e2e).
   const target = (TARGETS as string[]).includes(out.target ?? "") ? (out.target as TestTarget) : undefined;
-  return { app: out.app ?? "", sha: out.sha ?? "", mode, target, guidance: out.guidance, learning };
+  return { app: out.app ?? "", sha: out.sha ?? "", mode, target, guidance: out.guidance, learning, allowConcurrent };
 }
 
 function showLearning(app: string): void {
