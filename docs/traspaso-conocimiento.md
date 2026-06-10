@@ -47,7 +47,7 @@ Ambas capas comparten un volumen de trabajo para los repositorios (working copie
 | **Revisión independiente** | Un segundo modelo (distinto al generador) revisa los tests por calidad: rechaza aserciones triviales, selectores frágiles o tests que no verifican el cambio | Evita que el generador se auto-apruebe |
 | **Gate estático** | Compilación TypeScript, lint, lista de tests de Playwright y validación del manifest deben pasar | Tests inválidos nunca llegan a ejecutarse |
 | **Ejecución** | Corre los tests contra la URL de DEV en vivo | La verificación es real, no teórica |
-| **Oracle** (opt-in, off por defecto) | Mide calidad objetiva más allá del verde. Repos de código **JS/TS**: mutation testing con Stryker (el repo debe proveer Stryker). e2e: fault-injection sobre las respuestas. Se activa con `qa.valueOracle: signal` | Sin él, el aprendizaje acumula reglas pero no puede *probarlas* (ver §2) |
+| **Oracle** | Mide calidad objetiva más allá del verde. Repos de código **JS/TS**: mutation testing con Stryker (**incluido en el orquestador** — sin setup en el repo). e2e: fault-injection sobre las respuestas (re-ejecuta la suite contra DEV, ≈2× por diff verde). Default *shadow-aware*: off en shadow, on en producción; override con `qa.valueOracle` | Da el ground-truth que **promueve** reglas; donde no corre, la gobernanza usa una señal de prevención más débil (ver §2) |
 | **Reflexión** | En runs fallidos, un agente analiza el error y produce una regla preventiva estructurada | Cada fallo se convierte en conocimiento reutilizable |
 | **Decisión** | Verde + aprobado → PR con auto-merge. Fallo → Issue. Flaky → cuarentena. DEV caído → error de infraestructura | El outcome es siempre actionable y claro |
 
@@ -56,21 +56,26 @@ Ambas capas comparten un volumen de trabajo para los repositorios (working copie
 El sistema mantiene un ledger de aprendizaje con cinco componentes:
 
 - **Labeler:** clasifica cada run en una clase de error (estático, ejecución, falso positivo…) sin usar LLM.
-- **Oracle:** mide calidad objetiva (mutation testing / fault-injection). **Opt-in** — ver §1.
+- **Oracle:** mide calidad objetiva (mutation testing / fault-injection). El ground-truth fuerte — ver §1.
 - **Reflector:** produce reflexiones estructuradas en fallos.
 - **Distiller:** convierte reflexiones en reglas reutilizables y deduplicadas.
 - **Curriculum:** rastrea qué arquetipos de escenario han demostrado atrapar bugs reales; solo los probados se inyectan en futuros prompts.
 
-> **Estado actual (sé honesto con esto al onboardar):** la *fontanería* del ledger está
-> completa y activa — cada run se etiqueta, los fallos producen reflexiones, estas se destilan
-> en reglas, y las reglas se inyectan en el prompt del agente (incluido el camino paralelo de
-> `complete`/`exhaustive`/`parallelDiff`). Lo que **requiere el Oracle** es el *volante de
-> gobernanza*: la promoción de reglas candidatas a activas, su decay, y la activación de
-> arquetipos del curriculum dependen de un `valueScore`, que solo el Oracle produce. Con el
-> Oracle apagado (el default), el sistema **acumula e inyecta reglas candidatas** pero ninguna
-> se promueve ni decae todavía. Para encender el volante, activa `qa.valueOracle: signal` en una
-> app con backend (donde la inyección de fallos es significativa) o un repo de código JS/TS con
-> Stryker.
+> **Cómo gira el volante (dos señales, no una):** cada run etiqueta su outcome, los fallos
+> producen reflexiones, estas se destilan en reglas, y las reglas se inyectan en el prompt del
+> agente (incluido el camino paralelo de `complete`/`exhaustive`/`parallelDiff`). La **promoción
+> y el decay** de reglas usan dos fuentes de evidencia:
+>
+> 1. **El Oracle (fuerte, ground-truth):** donde corre (code-mode siempre; e2e en producción),
+>    el `valueScore` de mutation/fault-injection promueve reglas hasta confianza **alta**.
+> 2. **Señal de prevención (siempre disponible, conservadora):** cuando no hay Oracle, cada regla
+>    se evalúa contra la clase de error del propio run — si el run vuelve a incurrir en la clase
+>    que la regla previene, la regla pierde confianza (negativo fuerte); si el run sale limpio,
+>    la regla "se sostuvo" (positivo débil, con techo en confianza **media** — nunca alta).
+>
+> Así el volante **gira para cualquier app onboardeada**, no solo las que pueden correr el
+> Oracle; y "alta confianza" queda reservada para reglas con ground-truth real. Una app estática
+> sin backend (la conexión de prueba) corre solo con la señal de prevención — y eso es correcto.
 
 ### 3. Multi-app, motor único
 
@@ -106,7 +111,7 @@ El escenario de oro es el flujo por webhook:
 | **`complete`** | Quieres rellenar huecos de cobertura | Analiza todo el repo y genera tests para flujos importantes no cubiertos |
 | **`exhaustive`** | Auditoría completa | Re-evalúa cada test existente y regenera la suite entera |
 | **`manual`** | Quieres forzar un enfoque | Generación guiada por un prompt natural del operador |
-| **`code`** (target) | Backend/librería sin web | Corre la suite de tests propia del repo (pytest, go test, cargo test…). Mutation testing es opt-in y **solo JS/TS** (requiere Stryker en el repo) |
+| **`code`** (target) | Backend/librería sin web | Corre la suite de tests propia del repo (pytest, go test, cargo test…). Mutation testing (**solo JS/TS**) viene **incluido en el orquestador** y corre por defecto en runs verdes |
 
 ### Gate de calidad (la confianza se gana en capas)
 
@@ -115,11 +120,11 @@ El sistema tiene cuatro capas de gate para que un test llegue al repo de la app:
 1. **Análisis estático** (siempre activo): ¿compila? ¿pasa lint? ¿la lista de tests de Playwright es válida? ¿el manifest tiene metadatos correctos?
 2. **Reviewer IA** (siempre activo): ¿el test tiene valor real? ¿asevera algo? ¿usa selectores robustos? ¿verifica el cambio real?
 3. **Change-coverage** (`signal` por defecto, `enforce` opt-in): ¿el test pasa pero **ejecuta** las líneas que el commit cambió? Un verde que no toca el cambio es un falso positivo. En `signal` se mide y registra; en `enforce` bloquea el PR. **Ojo:** en apps con assets bundleados (p.ej. Astro/Vercel) el mapeo URL→fuente puede no ser medible — el sistema lo reporta como `unknown` en vez de fingir cobertura.
-4. **Mutation testing** (opt-in, JS/TS): ¿el test detecta bugs inyectados? La capa más profunda. Requiere el Oracle activado (§1).
+4. **Mutation / fault-injection** (el Oracle, §1, JS/TS para code): ¿el test detecta bugs inyectados? La capa más profunda. No bloquea el PR — alimenta el `valueScore` que gobierna el aprendizaje.
 
-> Las capas 1–2 son el gate real y siempre corren. Las capas 3–4 están **diseñadas y cableadas**
-> pero son opt-in: por defecto, 3 mide sin bloquear y 4 está apagada. Actívalas por app cuando el
-> entorno lo permita.
+> Las capas 1–2 son el gate real y siempre corren y bloquean. La capa 3 mide siempre y bloquea
+> solo en `enforce`. La capa 4 (el Oracle) no bloquea: produce la señal de calidad que promueve
+> reglas; corre por defecto en producción (shadow-aware) y nunca durante shadow.
 
 ### Determinismo y reproducibilidad
 

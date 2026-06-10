@@ -21,7 +21,7 @@ No build step — the service runs TypeScript directly via `tsx`.
 
 ```bash
 npm install                 # required once (root has no node_modules until you do)
-npm test                    # node:test via tsx; 604 tests, network/OpenCode/Playwright stubbed
+npm test                    # node:test via tsx; 616 tests, network/OpenCode/Playwright stubbed
 npm run typecheck           # tsc --noEmit (strict, noUncheckedIndexedAccess)
 
 # Run a single test file or filter by name:
