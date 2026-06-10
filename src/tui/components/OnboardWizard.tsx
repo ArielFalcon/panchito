@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Box, Text } from "ink";
 import { useInput } from "ink";
 import Spinner from "ink-spinner";
@@ -17,7 +17,8 @@ type Step =
   | "qa-target" | "qa-review" | "qa-shadow" | "qa-prefix"
   | "svc-ask" | "svc-repo" | "svc-openapi" | "svc-version"
   | "env-ask" | "env-entry"
-  | "review" | "committing" | "done" | "write-error";
+  | "review" | "committing" | "done" | "write-error"
+  | "loading-config" | "config-error" | "edit-menu";
 
 interface RepoItem {
   fullName: string;
@@ -42,19 +43,25 @@ const STEPS_BACK: Partial<Record<Step, Step>> = {
   "env-ask": "svc-ask",
   "env-entry": "env-ask",
   "review": "env-ask",
+  "config-error": "loading-config",
+  "edit-menu": "loading-config",
 };
 
 export function OnboardWizard({
   client: clientProp,
   onDone,
   onCancel,
+  editMode,
+  initialAppName,
 }: {
   client?: QaClient;
   onDone: (appName: string) => void;
   onCancel: () => void;
+  editMode?: boolean;
+  initialAppName?: string;
 }): React.ReactElement {
   const [client] = useState<QaClient>(() => clientProp ?? createClient());
-  const [step, setStep] = useState<Step>("repo-source");
+  const [step, setStep] = useState<Step>(editMode ? "loading-config" : "repo-source");
   const [repoInput, setRepoInput] = useState("");
   const [repoInfo, setRepoInfo] = useState<CreateAppResponse["repoInfo"] | null>(null);
   const [appName, setAppName] = useState("");
@@ -71,6 +78,8 @@ export function OnboardWizard({
   const [yamlPreview, setYamlPreview] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [isEditMode] = useState<boolean>(editMode ?? false);
+  const [editAppName, setEditAppName] = useState<string>(initialAppName ?? "");
 
   // ── repo browser state ──────────────────────────────────────────────────
   const [browseOwner, setBrowseOwner] = useState("");
@@ -80,7 +89,37 @@ export function OnboardWizard({
   const [repoFilter, setRepoFilter] = useState("");
   const [repoFilterActive, setRepoFilterActive] = useState(false);
 
+  useEffect(() => {
+    if (!isEditMode || !editAppName) return;
+    setLoading(true);
+    client.getApp(editAppName)
+      .then((app) => {
+        setRepoInput(app.repo);
+        setAppName(app.name);
+        setBaseUrl(app.baseUrl);
+        setVersionUrl(app.versionUrl);
+        setTarget(app.code ? "code" : "e2e");
+        setNeedsReview(app.needsReview);
+        setShadow(app.shadow);
+        setTestPrefix(app.testDataPrefix);
+        setServices(app.services.map((s) => ({ repo: s.repo, openapi: s.openapi, versionUrl: s.versionUrl })));
+        setStep("edit-menu");
+        setError(null);
+      })
+      .catch((e) => {
+        setError(e instanceof Error ? e.message : String(e));
+        setStep("config-error");
+      })
+      .finally(() => setLoading(false));
+  }, [isEditMode, editAppName, client]);
+
   const reset = useCallback(() => {
+    if (isEditMode) {
+      setStep("loading-config");
+      setError(null);
+      setLoading(false);
+      return;
+    }
     setStep("repo-source"); setRepoInput(""); setRepoInfo(null); setAppName("");
     setBaseUrl(""); setVersionUrl(""); setTarget("e2e");
     setNeedsReview(true); setShadow(true); setTestPrefix("qa-bot");
@@ -89,7 +128,7 @@ export function OnboardWizard({
     setError(null); setLoading(false);
     setBrowseOwner(""); setRepos([]); setRepoPage(1); setRepoHasMore(false);
     setRepoFilter(""); setRepoFilterActive(false);
-  }, []);
+  }, [isEditMode]);
 
   const goBack = useCallback(() => {
     const prev = STEPS_BACK[step];
@@ -158,7 +197,10 @@ export function OnboardWizard({
 
   const loadPreview = useCallback(async () => {
     try {
-      const r = await client.createApp(buildRequest({ dryRun: true }));
+      const req = buildRequest({ dryRun: true });
+      const r = isEditMode
+        ? await client.updateApp(appName, req)
+        : await client.createApp(req);
       if (!r.ok) throw new Error(r.errors?.join("; ") ?? "invalid configuration");
       setYamlPreview(r.yaml ?? "");
       setStep("review");
@@ -166,19 +208,22 @@ export function OnboardWizard({
       setError(e instanceof Error ? e.message : String(e));
       setStep("write-error");
     }
-  }, [client, buildRequest]);
+  }, [client, buildRequest, isEditMode, appName]);
 
   const commit = useCallback(async () => {
     setStep("committing");
     try {
-      const r = await client.createApp(buildRequest({}));
-      if (!r.ok) throw new Error(r.errors?.join("; ") ?? "creation failed");
+      const req = buildRequest({});
+      const r = isEditMode
+        ? await client.updateApp(appName, req)
+        : await client.createApp(req);
+      if (!r.ok) throw new Error(r.errors?.join("; ") ?? (isEditMode ? "update failed" : "creation failed"));
       setStep("done");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setStep("write-error");
     }
-  }, [client, buildRequest]);
+  }, [client, buildRequest, isEditMode, appName]);
 
   // ── config summary line ─────────────────────────────────────────────────
   const summaryParts: string[] = [];
@@ -198,11 +243,17 @@ export function OnboardWizard({
       if (step === "browse-list" && repoFilterActive) { setRepoFilterActive(false); return; }
       if (step === "repo-error" || step === "write-error") { reset(); return; }
       if (step === "done") { onDone(appName); return; }
+      if (isEditMode && (step === "edit-menu" || step === "config-error")) { onCancel(); return; }
+      if (isEditMode && step !== "loading-config" && step !== "review" && step !== "committing") { setStep("edit-menu"); return; }
       onCancel();
       return;
     }
 
-    if (key.leftArrow && step !== "repo-source" && step !== "browse-owner" && step !== "browse-list") {
+    if (key.leftArrow && step !== "repo-source" && step !== "browse-owner" && step !== "browse-list" && step !== "loading-config" && step !== "edit-menu") {
+      if (isEditMode && step !== "config-error" && step !== "review" && step !== "committing" && step !== "done" && step !== "write-error") {
+        setStep("edit-menu");
+        return;
+      }
       goBack();
       return;
     }
@@ -230,37 +281,40 @@ export function OnboardWizard({
 
     // ── text input steps ────────────────────────────────────────────────
     if (step === "dev-url") {
-      if (key.return && baseUrl.trim()) { setStep(target === "code" ? "qa-target" : "dev-version"); return; }
+      if (key.return && baseUrl.trim()) { setStep(isEditMode ? "edit-menu" : target === "code" ? "qa-target" : "dev-version"); return; }
       if (key.backspace || key.delete) { setBaseUrl((p) => p.slice(0, -1)); return; }
       if (char.length === 1 && char >= " ") { setBaseUrl((p) => p + char); }
       return;
     }
     if (step === "dev-version") {
-      if (key.return) { setStep("qa-target"); return; }
+      if (key.return) { setStep(isEditMode ? "edit-menu" : "qa-target"); return; }
       if (key.backspace || key.delete) { setVersionUrl((p) => p.slice(0, -1)); return; }
       if (char.length === 1 && char >= " ") { setVersionUrl((p) => p + char); }
       return;
     }
     if (step === "qa-prefix") {
-      if (key.return && testPrefix.trim()) { setStep(target === "e2e" ? "svc-ask" : "env-ask"); return; }
+      if (key.return && testPrefix.trim()) { setStep(isEditMode ? "edit-menu" : target === "e2e" ? "svc-ask" : "env-ask"); return; }
       if (key.backspace || key.delete) { setTestPrefix((p) => p.slice(0, -1)); return; }
       if (char.length === 1 && char >= " ") { setTestPrefix((p) => p + char); }
       return;
     }
     if (step === "svc-repo") {
-      if (key.return && svcDraft.repo.trim().includes("/")) { setStep("svc-openapi"); return; }
+      if (key.return && svcDraft.repo.trim().includes("/")) { setStep(isEditMode ? "edit-menu" : "svc-openapi"); return; }
       if (key.backspace || key.delete) { setSvcDraft((p) => ({ ...p, repo: p.repo.slice(0, -1) })); return; }
       if (char.length === 1 && char >= " ") { setSvcDraft((p) => ({ ...p, repo: p.repo + char })); }
       return;
     }
     if (step === "svc-openapi") {
-      if (key.return) { setStep("svc-version"); return; }
+      if (key.return) { setStep(isEditMode ? "edit-menu" : "svc-version"); return; }
       if (key.backspace || key.delete) { setSvcDraft((p) => ({ ...p, openapi: (p.openapi ?? "").slice(0, -1) || undefined })); return; }
       if (char.length === 1 && char >= " ") { setSvcDraft((p) => ({ ...p, openapi: (p.openapi ?? "") + char })); }
       return;
     }
     if (step === "svc-version") {
-      if (key.return) { setServices((prev) => [...prev, { ...svcDraft, repo: svcDraft.repo.trim() }]); setStep("svc-ask"); return; }
+      if (key.return) {
+        if (!isEditMode) { setServices((prev) => [...prev, { ...svcDraft, repo: svcDraft.repo.trim() }]); setStep("svc-ask"); return; }
+        setServices((prev) => [...prev, { ...svcDraft, repo: svcDraft.repo.trim() }]); setStep("edit-menu"); return;
+      }
       if (key.backspace || key.delete) { setSvcDraft((p) => ({ ...p, versionUrl: (p.versionUrl ?? "").slice(0, -1) || undefined })); return; }
       if (char.length === 1 && char >= " ") { setSvcDraft((p) => ({ ...p, versionUrl: (p.versionUrl ?? "") + char })); }
       return;
@@ -270,7 +324,7 @@ export function OnboardWizard({
         const eq = envDraft.indexOf("=");
         if (eq > 0) { const k = envDraft.slice(0, eq).trim(); const v = envDraft.slice(eq + 1); setEnvVars((prev) => ({ ...prev, [k]: v })); }
         setEnvDraft("");
-        setStep("env-ask");
+        setStep(isEditMode ? "edit-menu" : "env-ask");
         return;
       }
       if (key.backspace || key.delete) { setEnvDraft((p) => p.slice(0, -1)); return; }
@@ -292,9 +346,10 @@ export function OnboardWizard({
 
   const showSummary = step !== "repo-source" && step !== "browse-owner" && step !== "browse-list"
     && step !== "repo" && step !== "validating" && step !== "repo-error"
-    && step !== "committing" && step !== "done" && step !== "write-error";
+    && step !== "committing" && step !== "done" && step !== "write-error"
+    && step !== "loading-config" && step !== "config-error" && step !== "edit-menu";
 
-  const showBack = STEPS_BACK[step] !== undefined;
+  const showBack = STEPS_BACK[step] !== undefined && step !== "edit-menu";
 
   // ── repo source ───────────────────────────────────────────────────────
   if (step === "repo-source") {
@@ -396,7 +451,7 @@ export function OnboardWizard({
   if (step === "env-ask") {
     const items: SelectItem[] = [
       { label: Object.keys(envVars).length ? `Add another env var (${Object.keys(envVars).length} added)` : "Add an env var (KEY=value)", value: "add" },
-      { label: "Continue — review the YAML", value: "next" },
+      { label: isEditMode ? "Back to menu" : "Continue — review the YAML", value: "next" },
     ];
     return (
       <Box flexDirection="column">
@@ -407,6 +462,7 @@ export function OnboardWizard({
         ))}
         <SelectInput items={items} onSelect={(i) => {
           if (i.value === "add") { setEnvDraft(""); setStep("env-entry"); }
+          else if (isEditMode) { setStep("edit-menu"); }
           else void loadPreview();
         }} />
         <Box marginTop={1}><Text dimColor>Esc to cancel{showBack ? "  ← back" : ""}</Text></Box>
@@ -437,7 +493,7 @@ export function OnboardWizard({
   if (step === "svc-ask") {
     const items: SelectItem[] = [
       { label: services.length ? `Add another service (${services.length} added)` : "Add a microservice repo (multi-repo app)", value: "add" },
-      { label: "Continue — no more services", value: "next" },
+      { label: isEditMode ? "Back to menu" : "Continue — no more services", value: "next" },
     ];
     return (
       <Box flexDirection="column">
@@ -446,7 +502,7 @@ export function OnboardWizard({
         {services.map((s) => <Text key={s.repo} dimColor>  ✓ {s.repo}{s.openapi ? ` (openapi: ${s.openapi})` : ""}</Text>)}
         <SelectInput items={items} onSelect={(i) => {
           if (i.value === "add") { setSvcDraft({ repo: "" }); setStep("svc-repo"); }
-          else setStep("env-ask");
+          else setStep(isEditMode ? "edit-menu" : "env-ask");
         }} />
         <Box marginTop={1}><Text dimColor>Esc to cancel{showBack ? "  ← back" : ""}</Text></Box>
       </Box>
@@ -495,7 +551,7 @@ export function OnboardWizard({
       <Box flexDirection="column">
         {showSummary ? renderSummaryBar() : null}
         <Text bold>Test target:</Text>
-        <SelectInput items={items} onSelect={(i) => { setTarget(i.value as TestTarget); setStep("qa-review"); }} />
+        <SelectInput items={items} onSelect={(i) => { setTarget(i.value as TestTarget); setStep(isEditMode ? "edit-menu" : "qa-review"); }} />
         <Box marginTop={1}><Text dimColor>{showBack ? "← back  ·  " : ""}Esc to cancel</Text></Box>
       </Box>
     );
@@ -510,7 +566,7 @@ export function OnboardWizard({
       <Box flexDirection="column">
         {showSummary ? renderSummaryBar() : null}
         <Text bold>Enable AI review?</Text>
-        <SelectInput items={items} onSelect={(i) => { setNeedsReview(i.value === "yes"); setStep("qa-shadow"); }} />
+        <SelectInput items={items} onSelect={(i) => { setNeedsReview(i.value === "yes"); setStep(isEditMode ? "edit-menu" : "qa-shadow"); }} />
         <Box marginTop={1}><Text dimColor>{showBack ? "← back  ·  " : ""}Esc to cancel</Text></Box>
       </Box>
     );
@@ -525,7 +581,7 @@ export function OnboardWizard({
       <Box flexDirection="column">
         {showSummary ? renderSummaryBar() : null}
         <Text bold>Shadow mode?</Text>
-        <SelectInput items={items} onSelect={(i) => { setShadow(i.value === "yes"); setStep("qa-prefix"); }} />
+        <SelectInput items={items} onSelect={(i) => { setShadow(i.value === "yes"); setStep(isEditMode ? "edit-menu" : "qa-prefix"); }} />
         <Box marginTop={1}><Text dimColor>{showBack ? "← back  ·  " : ""}Esc to cancel</Text></Box>
       </Box>
     );
@@ -577,12 +633,12 @@ export function OnboardWizard({
 
   if (step === "review") {
     const items: SelectItem[] = [
-      { label: "Yes — write config file", value: "yes" },
+      { label: isEditMode ? "Yes — save changes" : "Yes — write config file", value: "yes" },
       { label: "No — cancel", value: "no" },
     ];
     return (
       <Box flexDirection="column">
-        <Text bold>Review — config/apps/{appName}.yaml</Text>
+        <Text bold>{isEditMode ? `Review changes — config/apps/${appName}.yaml` : `Review — config/apps/${appName}.yaml`}</Text>
         <Box marginY={1} flexDirection="column">
           {yamlPreview.split("\n").map((line, i) => <Text key={i} dimColor>{`  ${line}`}</Text>)}
         </Box>
@@ -593,14 +649,14 @@ export function OnboardWizard({
   }
 
   if (step === "committing") {
-    return <Text color="cyan"><Spinner type="dots" /> committing…</Text>;
+    return <Text color="cyan"><Spinner type="dots" /> {isEditMode ? "saving…" : "committing…"}</Text>;
   }
 
   if (step === "done") {
     return (
       <Box flexDirection="column">
-        <Text color="#3b7a57">✓ config/apps/{appName}.yaml created</Text>
-        <Box marginTop={1}><Text>Enter → run first QA  ·  Esc → exit</Text></Box>
+        <Text color="#3b7a57">✓ config/apps/{appName}.yaml {isEditMode ? "updated" : "created"}</Text>
+        <Box marginTop={1}><Text>Enter → {isEditMode ? "done" : "run first QA"}  ·  Esc → exit</Text></Box>
       </Box>
     );
   }
@@ -608,8 +664,64 @@ export function OnboardWizard({
   if (step === "write-error") {
     return (
       <Box flexDirection="column">
-        <Text color="#c0392b">✗ Failed to write config: {error}</Text>
+        <Text color="#c0392b">✗ Failed to {isEditMode ? "save" : "write"} config: {error}</Text>
         <Box marginTop={1}><Text dimColor>Esc to go back</Text></Box>
+      </Box>
+    );
+  }
+
+  if (step === "loading-config") {
+    return (
+      <Box flexDirection="column">
+        <Text color="cyan"><Spinner type="dots" /> loading config for {editAppName}…</Text>
+      </Box>
+    );
+  }
+
+  if (step === "config-error") {
+    return (
+      <Box flexDirection="column">
+        <Text color="#c0392b">✗ Failed to load config: {error}</Text>
+        <Box marginTop={1}><Text dimColor>Esc to cancel</Text></Box>
+      </Box>
+    );
+  }
+
+  if (step === "edit-menu") {
+    const items: SelectItem[] = [
+      { label: `Repo: ${repoInput || repoInfo?.fullName || "(none)"}`, value: "repo" },
+      { label: `Base URL: ${baseUrl || "(none)"}`, value: "baseUrl" },
+      { label: `Version URL: ${versionUrl || "(none)"}`, value: "versionUrl" },
+      { label: `Target: ${target}`, value: "target" },
+      { label: `AI Review: ${needsReview ? "yes" : "no"}`, value: "needsReview" },
+      { label: `Shadow: ${shadow ? "yes" : "no"}`, value: "shadow" },
+      { label: `Test Prefix: ${testPrefix || "qa-bot"}`, value: "testPrefix" },
+      { label: `Services: ${services.length}`, value: "services" },
+      { label: `Env Vars: ${Object.keys(envVars).length}`, value: "env" },
+      { label: "Review & Save", value: "review" },
+      { label: "Cancel", value: "cancel" },
+    ];
+    return (
+      <Box flexDirection="column">
+        <Text bold>Edit config/apps/{appName}.yaml</Text>
+        <Box marginTop={1}>
+          <SelectInput items={items} onSelect={(i) => {
+            switch (i.value) {
+              case "repo": setStep("repo"); break;
+              case "baseUrl": setBaseUrl(""); setStep("dev-url"); break;
+              case "versionUrl": setVersionUrl(""); setStep("dev-version"); break;
+              case "target": setStep("qa-target"); break;
+              case "needsReview": setStep("qa-review"); break;
+              case "shadow": setStep("qa-shadow"); break;
+              case "testPrefix": setTestPrefix(""); setStep("qa-prefix"); break;
+              case "services": setStep("svc-ask"); break;
+              case "env": setStep("env-ask"); break;
+              case "review": void loadPreview(); break;
+              case "cancel": onCancel(); break;
+            }
+          }} />
+        </Box>
+        <Box marginTop={1}><Text dimColor>Esc to cancel</Text></Box>
       </Box>
     );
   }

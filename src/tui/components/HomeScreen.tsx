@@ -14,7 +14,7 @@ interface SelectItem {
   value: string;
 }
 
-type View = "home" | "run" | "onboard" | "help" | "status" | "delete-list" | "delete";
+type View = "home" | "run" | "onboard" | "edit-list" | "edit" | "help" | "status" | "delete-list" | "delete";
 
 const W = 54;
 
@@ -50,6 +50,7 @@ export function HomeScreen({
   const MENU_ITEMS: SelectItem[] = [
     { label: "▶  Run QA", value: "run" },
     { label: "+  Add New Project", value: "onboard" },
+    { label: "✎  Edit Project", value: "edit" },
     { label: "-  Delete Project", value: "delete" },
     { label: "?  Help", value: "help" },
     { label: "⊞  Status", value: "status" },
@@ -106,6 +107,10 @@ export function HomeScreen({
       case "onboard":
         setView("onboard");
         break;
+      case "edit":
+        void fetchApps();
+        setView("edit-list");
+        break;
       case "delete":
         void fetchApps();
         setView("delete-list");
@@ -125,12 +130,12 @@ export function HomeScreen({
   useInput(
     useCallback(
       (_char: string, key: { escape: boolean }) => {
-        if (key.escape && (view === "status" || view === "onboard" || view === "help" || view === "delete-list" || view === "delete")) {
+        if (key.escape && (view === "status" || view === "onboard" || view === "edit-list" || view === "edit" || view === "help" || view === "delete-list" || view === "delete")) {
           setSelectedApp(null);
           setView("home");
           return;
         }
-        if (_char === " " && (view === "status" || view === "delete-list" || view === "delete")) {
+        if (_char === " " && (view === "status" || view === "edit-list" || view === "edit" || view === "delete-list" || view === "delete")) {
           setSelectedApp(null);
           setView("home");
         }
@@ -164,6 +169,61 @@ export function HomeScreen({
         client={client}
         onDone={() => setView("home")}
         onCancel={() => setView("home")}
+      />
+    );
+  }
+
+  if (view === "edit-list") {
+    if (appsLoading) {
+      return (
+        <Box paddingX={1} paddingY={1}>
+          <Text color="cyan">
+            <Spinner type="dots" />
+            {" loading apps…"}
+          </Text>
+        </Box>
+      );
+    }
+    if (apps.length === 0) {
+      return (
+        <Box flexDirection="column" paddingX={1}>
+          <Text dimColor>No apps configured.</Text>
+          <Text dimColor>Space / Esc → back to home</Text>
+        </Box>
+      );
+    }
+    const items: SelectItem[] = apps.map((a) => ({ label: a, value: a }));
+    return (
+      <Box flexDirection="column" paddingX={1}>
+        <Text bold>Select a project to edit</Text>
+        <SelectInput
+          items={items}
+          onSelect={(i) => {
+            setSelectedApp(i.value);
+            setView("edit");
+          }}
+        />
+        <Box marginTop={1}>
+          <Text dimColor>Space / Esc → back to home</Text>
+        </Box>
+      </Box>
+    );
+  }
+
+  if (view === "edit" && selectedApp) {
+    return (
+      <OnboardWizard
+        client={client}
+        editMode
+        initialAppName={selectedApp}
+        onDone={() => {
+          setSelectedApp(null);
+          setView("home");
+        }}
+        onCancel={() => {
+          setSelectedApp(null);
+          setView("home");
+        }}
       />
     );
   }

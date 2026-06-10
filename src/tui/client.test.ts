@@ -99,3 +99,27 @@ test("deleteApp without purge omits the query string", async () => {
   await client.deleteApp("shop", false);
   assert.equal(cap.url, "http://h:1/api/apps/shop");
 });
+
+test("getApp GETs /api/apps/:name", async () => {
+  const cap: { url?: string; init?: RequestInit } = {};
+  const client = createClient({
+    host: "h:1",
+    fetchImpl: stubFetch(200, JSON.stringify({ name: "shop", repo: "org/shop", baseUrl: "https://dev", versionUrl: "", code: false, shadow: true, needsReview: true, testDataPrefix: "qa", services: [] }), cap),
+  });
+  const r = await client.getApp("shop");
+  assert.equal(cap.url, "http://h:1/api/apps/shop");
+  assert.equal(cap.init?.method, "GET");
+  assert.equal(r.name, "shop");
+});
+
+test("updateApp PUTs to /api/apps/:name", async () => {
+  const cap: { url?: string; init?: RequestInit } = {};
+  const client = createClient({
+    host: "h:1",
+    fetchImpl: stubFetch(200, JSON.stringify({ ok: true, name: "shop" }), cap),
+  });
+  const r = await client.updateApp("shop", { baseUrl: "https://new.dev.io" });
+  assert.equal(cap.url, "http://h:1/api/apps/shop");
+  assert.equal(cap.init?.method, "PUT");
+  assert.equal(r.name, "shop");
+});

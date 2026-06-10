@@ -12,8 +12,12 @@ export interface AppView {
   name: string;
   repo: string;
   baseUrl: string;
-  code?: boolean;
+  versionUrl: string;
+  code: boolean;
   shadow: boolean;
+  needsReview: boolean;
+  testDataPrefix: string;
+  services: Array<{ repo: string; openapi?: string; versionUrl?: string }>;
 }
 
 export interface QueueStatus {
@@ -111,6 +115,7 @@ export interface QaClient {
   listRuns(app: string, limit?: number): Promise<RunRecord[]>;
   getQueue(): Promise<QueueStatus>;
   listApps(): Promise<AppView[]>;
+  getApp(name: string): Promise<AppView>;
   ask(id: string, question: string, history?: Array<{ role: string; text: string }>): Promise<{ answer: string }>;
   help(question: string, history?: ChatEntry[]): Promise<{ answer: string }>;
   continueRun(id: string, cases: string[], guidance?: string): Promise<{ id: string; parentRunId: string }>;
@@ -118,6 +123,7 @@ export interface QaClient {
   listRepos(owner: string, page?: number): Promise<{ repos: Array<{ fullName: string; private: boolean; description: string | null }>; hasMore: boolean }>;
   validateRepo(repo: string): Promise<CreateAppResponse>;
   createApp(input: CreateAppRequest): Promise<CreateAppResponse>;
+  updateApp(name: string, input: Omit<CreateAppRequest, "repo" | "name"> & { repo?: string }): Promise<CreateAppResponse>;
   deleteApp(name: string, purge: boolean): Promise<{ removed: string[] }>;
 }
 
@@ -160,6 +166,7 @@ export function createClient(opts: ClientOptions = {}): QaClient {
     listRuns: (app, limit = 10) => request<RunRecord[]>("GET", `/api/runs?app=${encodeURIComponent(app)}&limit=${limit}`),
     getQueue: () => request<QueueStatus>("GET", "/api/queue"),
     listApps: () => request<AppView[]>("GET", "/api/apps"),
+    getApp: (name) => request<AppView>("GET", `/api/apps/${encodeURIComponent(name)}`),
     ask: (id, question, history) => request<{ answer: string }>("POST", `/api/runs/${encodeURIComponent(id)}/ask`, { question, history }),
     help: (question, history) => request<{ answer: string }>("POST", "/api/help", { question, history }),
     continueRun: (id, cases, guidance) =>
@@ -168,6 +175,7 @@ export function createClient(opts: ClientOptions = {}): QaClient {
     listRepos: (owner, page = 1) => request<{ repos: Array<{ fullName: string; private: boolean; description: string | null }>; hasMore: boolean }>("GET", `/api/repos?owner=${encodeURIComponent(owner)}&page=${page}`),
     validateRepo: (repo) => request<CreateAppResponse>("POST", "/api/apps", { repo, validateOnly: true }),
     createApp: (input) => request<CreateAppResponse>("POST", "/api/apps", input),
+    updateApp: (name, input) => request<CreateAppResponse>("PUT", `/api/apps/${encodeURIComponent(name)}`, input),
     deleteApp: (name, purge) =>
       request<{ removed: string[] }>("DELETE", `/api/apps/${encodeURIComponent(name)}${purge ? "?purge=1" : ""}`),
   };
