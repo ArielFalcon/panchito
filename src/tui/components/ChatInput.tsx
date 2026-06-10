@@ -8,6 +8,7 @@ import { useTypewriter } from "../useTypewriter";
 type ChatEntry = { id: number; role: "q" | "a" | "err"; text: string };
 
 const CARET_BLINK_MS = 530;
+const MAX_INPUT = 400;
 
 let _id = 0;
 function nextId(): number {
@@ -90,12 +91,22 @@ export function ChatInput({ client, runId }: ChatInputProps): React.ReactElement
       setInput("");
       return;
     }
+    // Word delete: Ctrl+W (\x17) or Ctrl+Backspace on macOS
+    if (char === "\x17" || char === "\b" && key.meta) {
+      setInput((prev) => prev.replace(/\s*\S+$/, ""));
+      return;
+    }
+    // Delete entire line: Ctrl+U
+    if (char === "\x15") {
+      setInput("");
+      return;
+    }
     if (key.backspace || key.delete) {
       setInput((prev) => prev.slice(0, -1));
       return;
     }
     if (char.length === 1 && char >= " ") {
-      setInput((prev) => prev + char);
+      setInput((prev) => (prev.length < MAX_INPUT ? prev + char : prev));
     }
   });
 

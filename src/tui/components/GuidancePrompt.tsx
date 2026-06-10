@@ -23,6 +23,14 @@ export function GuidancePrompt({ app, target, onSubmit, onCancel }: GuidanceProm
       onCancel();
       return;
     }
+    if (char === "\x17" || (char === "\b" && key.meta)) {
+      setInput((prev) => prev.replace(/\s*\S+$/, ""));
+      return;
+    }
+    if (char === "\x15") {
+      setInput("");
+      return;
+    }
     if (key.backspace || key.delete) {
       setInput((prev) => prev.slice(0, -1));
       return;

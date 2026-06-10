@@ -17,10 +17,10 @@ function nextId(): number {
   return ++_nextId;
 }
 
-export function HelpChat({ client, onBack }: { client: QaClient; onBack: () => void }): React.ReactElement {
+export function HelpChat({ client, onBack, context }: { client: QaClient; onBack: () => void; context?: string }): React.ReactElement {
   const [input, setInput] = useState("");
   const [entries, setEntries] = useState<ChatEntry[]>([
-    { id: nextId(), role: "a", text: "panchito help — ask me anything about the QA pipeline, run modes, onboarding, configuration, or commands." },
+    { id: nextId(), role: "a", text: context ? `panchito help — ${context}` : "panchito help — ask me anything about the QA pipeline, run modes, onboarding, configuration, or commands." },
   ]);
   const [streamingText, setStreamingText] = useState("");
   const [streamingId, setStreamingId] = useState<number | null>(null);
@@ -77,7 +77,7 @@ export function HelpChat({ client, onBack }: { client: QaClient; onBack: () => v
   }, [input, loading, entries, client, resolveStreaming]);
 
   const handleKey = useCallback(
-    (char: string, key: { escape: boolean; return: boolean; backspace: boolean; delete: boolean; upArrow: boolean; downArrow: boolean }) => {
+    (char: string, key: { escape: boolean; return: boolean; backspace: boolean; delete: boolean; meta?: boolean; upArrow: boolean; downArrow: boolean }) => {
       if (key.escape) {
         onBack();
         return;
@@ -92,6 +92,14 @@ export function HelpChat({ client, onBack }: { client: QaClient; onBack: () => v
       }
       if (key.downArrow) {
         scrollRef.current = Math.max(scrollRef.current - 1, 0);
+        return;
+      }
+      if (char === "\x17" || (char === "\b" && key.meta)) {
+        setInput((prev) => prev.replace(/\s*\S+$/, ""));
+        return;
+      }
+      if (char === "\x15") {
+        setInput("");
         return;
       }
       if (key.backspace || key.delete) {
