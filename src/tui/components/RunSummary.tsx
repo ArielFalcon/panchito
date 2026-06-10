@@ -7,7 +7,7 @@ import { useInput } from "ink";
 import { writeFileSync } from "node:fs";
 import { Badge, Alert } from "@inkjs/ui";
 import { RunRecord } from "../../types";
-import { PIPELINE_STEPS, stepState, sectionLabel, shortSha, caseColor, caseIcon, formatElapsed } from "../format";
+import { PIPELINE_STEPS, stepState, sectionLabel, shortSha, caseColor, caseIcon, formatElapsed, parseAssertionError } from "../format";
 import { ChatInput } from "./ChatInput";
 import type { QaClient } from "../client";
 
@@ -144,46 +144,10 @@ export function RunSummary({ record, client, onBack, onContinue }: {
         );
       }
       case "results": {
-        const specMap = new Map<string, { name: string; flow?: string; objective?: string }>();
-        if (specs) {
-          for (const s of specs) {
-            const key = s.flow || s.name;
-            if (key && !specMap.has(key)) specMap.set(key, s);
-          }
-        }
+        const failedOnly = cases.filter((c: { status: string }) => c.status === "fail");
+        const passedOnly = cases.filter((c: { status: string }) => c.status !== "fail");
 
-        const casesByFlow = new Map<string, typeof cases>();
-        for (const c of cases) {
-          const flowFromName = c.name.split(" › ")[0]?.trim() || c.name;
-          const key = c.flow || flowFromName;
-          const existing = casesByFlow.get(key) || [];
-          existing.push(c);
-          casesByFlow.set(key, existing);
-        }
-
-        const displayed: Array<{ label: string; flow: string; objective?: string; cases: typeof cases }> = [];
-        for (const [flow, spec] of specMap) {
-          const flowCases = casesByFlow.get(flow) || [];
-          casesByFlow.delete(flow);
-          displayed.push({ label: spec.name, flow, objective: spec.objective, cases: flowCases });
-        }
-        for (const [flow, flowCases] of casesByFlow) {
-          displayed.push({ label: flow, flow, cases: flowCases });
-        }
-
-        if (displayed.length === 0) {
-          if (total > 0) {
-            return (
-              <Box flexDirection="column">
-                {cases.map((c, i) => (
-                  <Box key={i} flexDirection="column">
-                    <Text>{"  "}<Text color={caseColor(c.status)}>{caseIcon(c.status)}</Text>{" "}{c.flow ?? c.name.slice(0, 70)}</Text>
-                    {c.status === "fail" && c.detail ? <Text color="#c0392b">     {c.detail.slice(0, 200)}</Text> : null}
-                  </Box>
-                ))}
-              </Box>
-            );
-          }
+        if (total === 0) {
           if (specs && specs.length > 0) {
             return (
               <Box flexDirection="column">
@@ -199,32 +163,45 @@ export function RunSummary({ record, client, onBack, onContinue }: {
 
         return (
           <Box flexDirection="column">
-            {displayed.map((d) => {
-              const failCount = d.cases.filter((c: { status: string }) => c.status === "fail").length;
-              const passCount = d.cases.length - failCount;
-              const allPass = failCount === 0 && d.cases.length > 0;
-              const icon = d.cases.length === 0 ? "·" : allPass ? "✓" : "✗";
-              const color = d.cases.length === 0 ? undefined : allPass ? "#3b7a57" : "#c0392b";
-              const summary = d.cases.length > 0
-                ? ` — ${passCount}/${d.cases.length} passed`
-                : total > 0 ? " — ran as part of suite" : " — not executed";
+            {/* Failed cases — most important, shown first with full error detail */}
+            {failedOnly.map((c, i) => {
+              const parsed = c.detail ? parseAssertionError(c.detail) : null;
               return (
-                <Box key={d.flow} flexDirection="column">
-                  <Box flexDirection="column">
-                    <Text>{"  "}<Text color={color}>{icon}</Text>{" "}{d.label}{summary}</Text>
-                    {d.objective ? <Text dimColor>      {d.objective}</Text> : null}
-                  </Box>
-                  {d.cases.filter((c: { status: string }) => c.status === "fail").map((c, i) => (
-                    <Box key={i} flexDirection="column" marginLeft={4}>
-                      <Text color="#c0392b">✗ {c.name.slice(0, 80)}</Text>
-                      {c.detail ? <Text color="#c0392b">  {c.detail.slice(0, 200)}</Text> : null}
+                <Box key={`fail-${i}`} flexDirection="column">
+                  <Alert variant="error">
+                    <Box flexDirection="column" gap={1}>
+                      <Box gap={1}>
+                        <Badge color="red">FAIL</Badge>
+                        <Text bold>{(c.flow ?? c.name).slice(0, 60)}</Text>
+                      </Box>
+                      {parsed ? (
+                        <Box flexDirection="column">
+                          <Text>{parsed.message.slice(0, 120)}</Text>
+                          {parsed.expectLine ? <Text dimColor>  expected: {parsed.expectLine.slice(0, 60)}</Text> : null}
+                          {parsed.actualLine ? <Text dimColor>  actual:   {parsed.actualLine.slice(0, 60)}</Text> : null}
+                          {parsed.location ? <Text dimColor>  at {parsed.location}</Text> : null}
+                        </Box>
+                      ) : c.detail ? (
+                        <Text dimColor>{c.detail.slice(0, 200)}</Text>
+                      ) : null}
                     </Box>
-                  ))}
+                  </Alert>
                 </Box>
               );
             })}
-            {verdict === "infra-error" && note ? (
-              <Box marginTop={1}><Text color="#4a6877">  {note}</Text></Box>
+
+            {/* Passed cases — compact summary */}
+            {passedOnly.length > 0 ? (
+              <Box marginTop={failedOnly.length > 0 ? 1 : 0} flexDirection="column">
+                <Text dimColor>
+                  {`  ✓ ${passedOnly.length} passed: `}
+                  {passedOnly.map((c, i) => (
+                    <Text key={i} dimColor>
+                      {(i > 0 ? ", " : "")}{(c.flow ?? c.name).slice(0, 40)}
+                    </Text>
+                  ))}
+                </Text>
+              </Box>
             ) : null}
           </Box>
         );
