@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ensureMirror, ensureMirrorAtBranch, getCommitDiff, listChangedSpecs, getCommitsBehind, MirrorDeps } from "./repo-mirror";
+import { ensureMirror, ensureMirrorAtBranch, getCommitDiff, listChangedSpecs, getCommitsBehind, getCommitMessage, resolveRef, MirrorDeps } from "./repo-mirror";
 
 // authHeaderArgs() depends on GITHUB_TOKEN; clear it to isolate the logic.
 delete process.env.GITHUB_TOKEN;
@@ -128,4 +128,102 @@ test("ensureMirrorAtBranch rejects a branch name that could be parsed as a git o
   const d = recorder(true);
   await assert.rejects(() => ensureMirrorAtBranch("org/x", "--upload-pack=evil", d));
   await assert.rejects(() => ensureMirrorAtBranch("org/x", "a..b", d));
+});
+
+// ── Integration tests: Git boundary failure modes ────────────────────────────
+
+test("ensureMirror propagates git clone failure (network timeout / auth failure)", async () => {
+  const d: MirrorDeps = {
+    root: "/tmp/mirrors",
+    exists: () => false,
+    git: async () => { throw new Error("git clone failed: connection timeout"); },
+  };
+  await assert.rejects(() => ensureMirror("org/app", "abc1234", d), /git clone failed/);
+});
+
+test("ensureMirror propagates git checkout failure", async () => {
+  let callCount = 0;
+  const d: MirrorDeps = {
+    root: "/tmp/mirrors",
+    exists: () => true,
+    git: async (args) => {
+      callCount++;
+      if (callCount === 2) throw new Error("git checkout failed: unknown revision");
+      return "ok";
+    },
+  };
+  await assert.rejects(() => ensureMirror("org/app", "abc1234", d), /git checkout failed/);
+});
+
+test("ensureMirror propagates git fetch failure", async () => {
+  let callCount = 0;
+  const d: MirrorDeps = {
+    root: "/tmp/mirrors",
+    exists: () => true,
+    git: async (args) => {
+      callCount++;
+      if (callCount === 1) throw new Error("git fetch failed: 401 Unauthorized");
+      return "ok";
+    },
+  };
+  await assert.rejects(() => ensureMirror("org/app", "abc1234", d), /git fetch failed/);
+});
+
+test("getCommitDiff propagates git show failure", async () => {
+  const d: MirrorDeps = {
+    root: "/tmp/mirrors",
+    exists: () => true,
+    git: async () => { throw new Error("git show failed: bad object"); },
+  };
+  await assert.rejects(() => getCommitDiff("/dir", "abc1234", d), /git show failed/);
+});
+
+test("listChangedSpecs propagates git status failure", async () => {
+  const d: MirrorDeps = {
+    root: "/tmp/mirrors",
+    exists: () => true,
+    git: async () => { throw new Error("git status failed: not a git repository"); },
+  };
+  await assert.rejects(() => listChangedSpecs("/dir", "e2e", d), /git status failed/);
+});
+
+test("getCommitMessage propagates git show failure", async () => {
+  const d: MirrorDeps = {
+    root: "/tmp/mirrors",
+    exists: () => true,
+    git: async () => { throw new Error("git show failed"); },
+  };
+  await assert.rejects(() => getCommitMessage("/dir", "abc1234", d), /git show failed/);
+});
+
+test("resolveRef propagates git ls-remote failure", async () => {
+  const d: MirrorDeps = {
+    root: "/tmp/mirrors",
+    exists: () => true,
+    git: async () => { throw new Error("ls-remote failed: Could not resolve host"); },
+  };
+  await assert.rejects(() => resolveRef("org/app", "main", d), /ls-remote failed/);
+});
+
+test("ensureMirrorAtBranch propagates git clone failure", async () => {
+  const d: MirrorDeps = {
+    root: "/tmp/mirrors",
+    exists: () => false,
+    git: async () => { throw new Error("git clone failed"); },
+  };
+  await assert.rejects(() => ensureMirrorAtBranch("org/app", "main", d), /git clone failed/);
+});
+
+test("ensureMirrorAtBranch propagates git checkout failure", async () => {
+  let callCount = 0;
+  const d: MirrorDeps = {
+    root: "/tmp/mirrors",
+    exists: () => true,
+    git: async (args) => {
+      callCount++;
+      if (args[0] === "checkout") throw new Error("git checkout failed");
+      return "ok";
+    },
+  };
+  await assert.rejects(() => ensureMirrorAtBranch("org/app", "main", d), /git checkout failed/);
 });

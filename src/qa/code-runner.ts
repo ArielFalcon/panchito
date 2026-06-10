@@ -64,12 +64,18 @@ function killTree(child: ChildProcess): void {
 
 export function scrubEnv(extraAllowed?: RegExp): Record<string, string> {
   const env: Record<string, string> = {};
+  const dropped: string[] = [];
   for (const [key, value] of Object.entries(process.env)) {
     if (value === undefined) continue;
     if (BLOCKED_ENV_PREFIX.test(key)) continue; // secrets are blocked even if extraAllowed matches
     if (ALLOWED_ENV_EXACT.has(key) || ALLOWED_ENV_PREFIX.test(key) || (extraAllowed?.test(key) ?? false)) {
       env[key] = value;
+    } else {
+      dropped.push(key);
     }
+  }
+  if (dropped.length > 0) {
+    console.warn(`[qa] scrubEnv dropped ${dropped.length} env var(s) not in allowlist: ${dropped.join(", ")}`);
   }
   return env;
 }

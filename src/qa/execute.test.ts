@@ -131,3 +131,33 @@ test("a ran report that executed zero tests is infra-error, not a false pass", a
   assert.equal(run.verdict, "infra-error");
   assert.equal(run.passed, false);
 });
+
+// ── Integration tests: Playwright boundary failure modes ─────────────────────
+
+test("runE2E propagates error when deps.runSuite throws (runner crash / spawn error)", async () => {
+  const deps: ExecuteDeps = {
+    runSuite: async () => { throw new Error("Playwright runner crashed: spawn ENOENT"); },
+  };
+  await assert.rejects(
+    () => runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-crash" }, deps),
+    /spawn ENOENT/,
+  );
+});
+
+test("runE2E handles a malformed report shape by returning infra-error", async () => {
+  const deps: ExecuteDeps = {
+    runSuite: async () => ({ report: { notSuites: "x" }, logs: "weird output", ran: true }),
+  };
+  const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-malformed" }, deps);
+  assert.equal(run.verdict, "infra-error");
+  assert.equal(run.passed, false);
+});
+
+test("runE2E handles a null report by returning infra-error", async () => {
+  const deps: ExecuteDeps = {
+    runSuite: async () => ({ report: null, logs: "null report", ran: true }),
+  };
+  const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-null" }, deps);
+  assert.equal(run.verdict, "infra-error");
+  assert.equal(run.passed, false);
+});

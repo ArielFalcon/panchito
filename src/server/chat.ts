@@ -8,6 +8,31 @@ import { RunRecord } from "../types";
 import { sanitizeText } from "../orchestrator/sanitizer";
 import { listRunOutcomes, listLearningRules, loadCurriculum } from "./history";
 
+export function buildRunChatContext(): string {
+  return sanitizeText([
+    "## About this chat",
+    "",
+    "You are answering questions about a SPECIFIC QA run. The operator is looking at",
+    "this run in the terminal. Focus on what happened with THEIR tests — do not explain",
+    "what panchito is or how the pipeline works in general. The run context below has",
+    "everything you need: step, verdict, cases, and logs.",
+    "",
+    "## Verdicts (what each outcome means for the operator)",
+    "· pass   → all tests green, reviewer approved → tests committed via PR",
+    "· fail   → test failures detected → GitHub Issue opened for the team",
+    "· flaky  → passes only after retries → quarantined (no action needed)",
+    "· invalid → static checks failed (compilation, linting, or metadata)",
+    "· infra-error → DEV environment was unhealthy or unreachable",
+    "· skipped → the commit needed no testing (style-only or valid no-op)",
+    "",
+    "## Boundaries of this chat",
+    "· You have NO tools — cannot read files, run commands, or call MCPs.",
+    "· Answer ONLY from the run context below. It is bounded (cases + logs are",
+    "  capped) and ephemeral (runs leave memory after ~30 days).",
+    "· You cannot trigger actions — only describe what already happened.",
+  ].join("\n")).text;
+}
+
 export function buildLearningContext(app: string): string | null {
   try {
     const outcomes = listRunOutcomes(app, 10);

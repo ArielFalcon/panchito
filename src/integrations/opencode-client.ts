@@ -11,6 +11,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { createHash } from "node:crypto";
 import { AgentResult, QaCase, RunMode, TestTarget, SpecMeta, ActivityKind } from "../types";
 import { CommitIntent } from "../qa/commit-classify";
 import type { ArchitectureContext } from "../qa/context";
@@ -28,21 +29,78 @@ interface SessionEntry {
 
 const sessionRegistry = new Map<string, SessionEntry>();
 
+// Circuit breaker for the OpenCode client: if consecutive failures exceed the
+// threshold, the circuit opens and requests are rejected for a cooldown period.
+// This prevents cascading failures when the OpenCode server is down or overloaded.
+let circuitFailures = 0;
+let circuitOpen = false;
+let circuitLastFailure = 0;
+const CIRCUIT_THRESHOLD = 5;
+const CIRCUIT_COOLDOWN_MS = 60_000;
+
+function checkCircuit(): void {
+  if (circuitOpen) {
+    const elapsed = Date.now() - circuitLastFailure;
+    if (elapsed < CIRCUIT_COOLDOWN_MS) {
+      throw new Error(`OpenCode circuit breaker is OPEN (cooldown ${Math.round((CIRCUIT_COOLDOWN_MS - elapsed) / 1000)}s remaining)`);
+    }
+    circuitOpen = false;
+    circuitFailures = 0;
+  }
+}
+
+function recordCircuitFailure(): void {
+  circuitFailures++;
+  circuitLastFailure = Date.now();
+  if (circuitFailures >= CIRCUIT_THRESHOLD) {
+    circuitOpen = true;
+    console.warn(`[qa] OpenCode circuit breaker OPENED after ${circuitFailures} consecutive failures`);
+  }
+}
+
+function recordCircuitSuccess(): void {
+  if (circuitFailures > 0) {
+    circuitFailures = 0;
+    circuitOpen = false;
+  }
+}
+
+// Read fallback model mapping from opencode.json (root-level key). Keeps the
+// fallback logic in one place so the orchestrator can retry with a different
+// model when the primary is unavailable.
+function getFallbackModel(agent: string): string | undefined {
+  try {
+    const configPath = join(process.cwd(), "opencode", "opencode.json");
+    if (!existsSync(configPath)) return undefined;
+    const raw = JSON.parse(readFileSync(configPath, "utf8"));
+    return raw.model_fallback?.[agent] as string | undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // Shared OpenCode SDK client — lazy-initialised once, reused by SSE stream AND
 // session operations. This avoids creating two independent HTTP connections to
 // the OpenCode server (official best practice: one client, many operations).
 let sharedClient: Awaited<ReturnType<typeof import("@opencode-ai/sdk").createOpencodeClient>> | undefined;
 
 async function getSharedClient() {
+  checkCircuit();
   if (sharedClient) return sharedClient;
   const { createOpencodeClient } = await import("@opencode-ai/sdk");
   const serverPassword = process.env.OPENCODE_SERVER_PASSWORD;
-  sharedClient = createOpencodeClient({
-    baseUrl: process.env.OPENCODE_SERVE_URL ?? "http://opencode:4096",
-    ...(serverPassword
-      ? { headers: { Authorization: `Basic ${Buffer.from(`opencode:${serverPassword}`).toString("base64")}` } }
-      : {}),
-  });
+  try {
+    sharedClient = createOpencodeClient({
+      baseUrl: process.env.OPENCODE_SERVE_URL ?? "http://opencode:4096",
+      ...(serverPassword
+        ? { headers: { Authorization: `Basic ${Buffer.from(`opencode:${serverPassword}`).toString("base64")}` } }
+        : {}),
+    });
+    recordCircuitSuccess();
+  } catch (err) {
+    recordCircuitFailure();
+    throw err;
+  }
   return sharedClient;
 }
 
@@ -154,18 +212,36 @@ export async function askAssistant(
     [
       `Answer the operator's question about this QA run using ONLY the run context below.`,
       ``,
+      `RESPONSE STRUCTURE (for questions about a test failure or run status):`,
+      `  1. One-line summary of what happened (verdict, phase, key numbers)`,
+      `  2. Key detail: what failed and why (1-3 sentences, root cause in plain language)`,
+      `  3. What to do next (if applicable: wait, re-run, check the issue, continue)`,
+      `  Use "───" to separate sections when the answer covers multiple topics.`,
+      ``,
       `CRITICAL RULES:`,
       `- Respond in the SAME language as the question (Spanish → Spanish, English → English).`,
       `  Use neutral, standard language — no regional slang, no colloquialisms.`,
-      `- NO markdown formatting. This text renders in a terminal TUI. Use plain text only.`,
-      `  No **bold**, no \`code\`, no bullet lists with -, no headings with #.`,
+      ``,
+      `TERMINAL-FRIENDLY FORMATTING (this renders in a TUI via Ink <Text>):`,
+      `  ALLOWED — these render correctly in the terminal:`,
+      `    · Blank lines to separate ideas.`,
+      `    · Indentation (2-3 spaces) for nested detail.`,
+      `    · CAPITALIZED single-word headers for structure (e.g. RESUMEN, CAUSA, ACCIÓN).`,
+      `    · Plain text lists with "-" or "·" as bullet markers.`,
+      `    · "───" (Unicode box-drawing) as visual separators between topics.`,
+      `  FORBIDDEN — these do NOT render in the terminal:`,
+      `    · **bold markdown**, \`inline code\`, # headings, > blockquotes.`,
+      `    · Code fences (\`\`\`), HTML tags, URLs (unless asked for).`,
+      `    · Emojis. Never use emojis.`,
+      ``,
       `- Translate internal terms to user-friendly language:`,
-      `  * "agent is working" → "el agente está generando pruebas" (no mencionar heartbeats)`,
-      `  * "pipeline phase" → speak about what's HAPPENING (testing, generating, validating)`,
-      `  * "step/status/verdict" → describe the outcome in plain words`,
-      `  * "classify/generate/validate/execute" → explain what the system is doing, not the phase name`,
-      `  * Never refer to panchito, the TUI, or pipeline internals. Focus on the user's tests.`,
-      `- Be concise. Avoid walls of text. Use line breaks to separate ideas.`,
+      `  · "agent is working" → speak about what the agent is DOING (generating tests, exploring the page)`,
+      `  · "heartbeat" → never mention; instead say "the agent is still active"`,
+      `  · "pipeline phase" → speak about what's HAPPENING (testing, generating, validating)`,
+      `  · "step/status/verdict" → describe the outcome in plain words`,
+      `  · "classify/generate/validate/execute" → explain what the system is doing, not the phase name`,
+      `  · Never mention panchito, the TUI, or pipeline internals. Focus on the user's tests.`,
+      ``,
       `- If the context lacks the answer, say: "No tengo suficiente información para responder eso."`,
     ].join("\n");
   const session = await deps.open("qa-assistant", cwd);
@@ -284,13 +360,18 @@ export async function runOpencode(
     // watched repo (same reason measured.json is gated to e2e — M1/D1).
     if (input.target !== "code" && verdict.specMetas && verdict.specMetas.length > 0) {
       const changeType = input.intent?.type ?? "unknown";
-      const entries: ManifestEntry[] = verdict.specMetas.map((m) => ({
-        id: m.flow,
-        objective: m.objective,
-        flow: m.flow,
-        targets: m.targets,
-        changeRef: { sha: input.sha, type: changeType },
-      }));
+      const entries: ManifestEntry[] = verdict.specMetas.map((m) => {
+        const specPath = join(input.mirrorDir, input.e2eRelDir, m.file);
+        const sha256 = sha256File(specPath);
+        return {
+          id: m.flow,
+          objective: m.objective,
+          flow: m.flow,
+          targets: m.targets,
+          changeRef: { sha: input.sha, type: changeType },
+          ...(sha256 ? { sha256 } : {}),
+        };
+      });
       upsertManifest(
         realManifestFs,
         join(input.mirrorDir, input.e2eRelDir, ".qa", "manifest.json"),
@@ -495,6 +576,16 @@ export const realManifestFs: ManifestFs = {
     writeFileSync(p, c);
   },
 };
+
+// Compute SHA-256 checksum of a file for integrity verification.
+export function sha256File(path: string): string | undefined {
+  try {
+    const data = readFileSync(path);
+    return createHash("sha256").update(data).digest("hex");
+  } catch {
+    return undefined;
+  }
+}
 
 // Upsert (by id) manifest entries for the worker-written specs. Pure given the fs; preserves
 // unrelated existing entries and any measured fields already on an upserted entry.
@@ -1323,16 +1414,36 @@ export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
         id,
         prompt: (text) =>
           withTimeout(
-            client.session
-              .prompt({
-                path: { id },
-                query: { directory: cwd },
-                body: { agent, parts: [{ type: "text", text }] },
-              })
-              .then((res) => {
-                if (res.error) throw new Error(`OpenCode session.prompt failed: ${JSON.stringify(res.error)}`);
-                return extractText(res.data?.parts);
-              }),
+            (() => {
+              checkCircuit();
+              const runPrompt = (modelOverride?: string) =>
+                client.session
+                  .prompt({
+                    path: { id },
+                    query: { directory: cwd },
+                    body: { agent, parts: [{ type: "text", text }], ...(modelOverride ? { model: modelOverride } : {}) },
+                  })
+                  .then((res) => {
+                    if (res.error) {
+                      recordCircuitFailure();
+                      throw new Error(`OpenCode session.prompt failed: ${JSON.stringify(res.error)}`);
+                    }
+                    recordCircuitSuccess();
+                    return extractText(res.data?.parts);
+                  })
+                  .catch((err) => {
+                    recordCircuitFailure();
+                    throw err;
+                  });
+              return runPrompt().catch((err) => {
+                const fallback = getFallbackModel(agent);
+                if (fallback) {
+                  console.warn(`[qa] primary model failed for ${agent}, retrying with fallback ${fallback}: ${err instanceof Error ? err.message : String(err)}`);
+                  return runPrompt(fallback);
+                }
+                throw err;
+              });
+            })(),
             promptTimeoutMs,
             "OpenCode prompt",
           ),

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { publishE2e, publishCode, PublishDeps } from "./publish";
+import { publishE2e, publishCode, publishContext, PublishDeps } from "./publish";
 
 function deps(status: string, opts: { autoMergeFails?: boolean; mergeFails?: boolean } = {}): PublishDeps & {
   gitCalls: string[][];
@@ -92,4 +92,60 @@ test("publishCode: commits the whole tree (minus node_modules) on a qa/code- bra
   assert.ok(d.gitCalls.some((c) => c[0] === "checkout" && c.includes("qa/code-abc1234")));
     assert.ok(d.gitCalls.some((c) => c[0] === "add" && c.some((a: string) => a.includes("node_modules"))));
   assert.ok(d.gitCalls.some((c) => c.includes("commit") && c.includes("test(code): automated QA for abc1234")));
+});
+
+// ── Integration tests: Publish boundary failure modes ───────────────────────
+
+test("publishE2e propagates git checkout failure", async () => {
+  const d = deps(" M e2e/x.spec.ts");
+  const origStatus = " M e2e/x.spec.ts";
+  d.git = async (args) => {
+    d.gitCalls.push(args);
+    if (args[0] === "status") return origStatus;
+    if (args[0] === "checkout") throw new Error("git checkout failed: path conflict");
+    return "";
+  };
+  await assert.rejects(() => publishE2e(input, d), /git checkout failed/);
+});
+
+test("publishE2e propagates git push failure", async () => {
+  const d = deps(" M e2e/x.spec.ts");
+  const origStatus = " M e2e/x.spec.ts";
+  d.git = async (args) => {
+    d.gitCalls.push(args);
+    if (args[0] === "status") return origStatus;
+    if (args.includes("push")) throw new Error("git push failed: 403");
+    return "";
+  };
+  await assert.rejects(() => publishE2e(input, d), /git push failed/);
+});
+
+test("publishE2e propagates createPullRequest failure", async () => {
+  const d = deps(" M e2e/x.spec.ts");
+  d.createPullRequest = async () => { throw new Error("GitHub PR creation failed: 422"); };
+  await assert.rejects(() => publishE2e(input, d), /GitHub PR creation failed/);
+});
+
+test("publishCode propagates git failure", async () => {
+  const d = deps(" A src/math.test.ts");
+  const origStatus = " A src/math.test.ts";
+  d.git = async (args) => {
+    d.gitCalls.push(args);
+    if (args[0] === "status") return origStatus;
+    if (args[0] === "add") throw new Error("git add failed");
+    return "";
+  };
+  await assert.rejects(() => publishCode(input, d), /git add failed/);
+});
+
+test("publishContext propagates git commit failure", async () => {
+  const d = deps(" M e2e/.qa/context.json");
+  const origStatus = " M e2e/.qa/context.json";
+  d.git = async (args) => {
+    d.gitCalls.push(args);
+    if (args[0] === "status") return origStatus;
+    if (args.includes("commit")) throw new Error("git commit failed: nothing to commit");
+    return "";
+  };
+  await assert.rejects(() => publishContext(input, d), /git commit failed/);
 });

@@ -20,6 +20,8 @@ import {
   ParallelWorkerInput,
   OpencodeDeps,
   OpencodeRunInput,
+  askAssistant,
+  reviewIndependently,
 } from "./opencode-client";
 import type { ArchitectureContext } from "../qa/context";
 
@@ -557,4 +559,132 @@ test("diff fan-out with >=2 objectives dispatches workers (no fallback)", async 
   );
   assert.deepEqual(agents.filter((a) => a.startsWith("qa-worker")), ["qa-worker", "qa-worker"]);
   assert.equal(result.specs.length, 2);
+});
+
+// ── Integration tests: OpenCode SDK boundary failure modes ──────────────────
+
+test("runOpencode propagates error when deps.open throws (network timeout / auth failure)", async () => {
+  const failingDeps: OpencodeDeps = {
+    open: async () => { throw new Error("OpenCode connection timeout"); },
+  };
+  await assert.rejects(() => runOpencode(input, failingDeps), /OpenCode connection timeout/);
+});
+
+test("runOpencode propagates error when session.prompt throws", async () => {
+  const failingDeps: OpencodeDeps = {
+    open: async () => ({
+      id: "s1",
+      prompt: async () => { throw new Error("OpenCode prompt failed: 500"); },
+      dispose: async () => {},
+    }),
+  };
+  await assert.rejects(() => runOpencode(input, failingDeps), /OpenCode prompt failed: 500/);
+});
+
+test("runOpencode still returns result when session.dispose throws (does not crash)", async () => {
+  const failingDeps: OpencodeDeps = {
+    open: async () => ({
+      id: "s1",
+      prompt: async () => '{ "approved": true, "specs": ["a.spec.ts"] }',
+      dispose: async () => { throw new Error("dispose failed"); },
+    }),
+  };
+  const res = await runOpencode(input, failingDeps);
+  assert.equal(res.approved, true);
+  assert.deepEqual(res.specs, ["a.spec.ts"]);
+});
+
+test("askAssistant propagates error when deps.open throws", async () => {
+  const failingDeps: OpencodeDeps = {
+    open: async () => { throw new Error("OpenCode unavailable"); },
+  };
+  await assert.rejects(
+    () => askAssistant({ context: "ctx", question: "q?" }, failingDeps, "/m"),
+    /OpenCode unavailable/,
+  );
+});
+
+test("reviewIndependently propagates error when deps.open throws", async () => {
+  const failingDeps: OpencodeDeps = {
+    open: async () => { throw new Error("OpenCode auth failure"); },
+  };
+  await assert.rejects(
+    () => reviewIndependently({ diff: "d", specs: ["a.spec.ts"], mirrorDir: "/m", e2eRelDir: "e2e", appName: "a", mode: "diff" }, failingDeps),
+    /OpenCode auth failure/,
+  );
+});
+
+test("reviewIndependently propagates error when session.prompt throws", async () => {
+  const failingDeps: OpencodeDeps = {
+    open: async () => ({
+      id: "s1",
+      prompt: async () => { throw new Error("prompt crashed"); },
+      dispose: async () => {},
+    }),
+  };
+  await assert.rejects(
+    () => reviewIndependently(
+      { diff: "d", specs: ["a.spec.ts"], mirrorDir: "/m", e2eRelDir: "e2e", appName: "a", mode: "diff" },
+      failingDeps,
+    ),
+    /prompt crashed/,
+  );
+});
+
+test("generateParallel collects all errors when every worker fails", async () => {
+  const workers: ParallelWorkerInput[] = [
+    { objective: "o1", flow: "a", symbols: [], needsUi: true, specFile: "flows/a.spec.ts", repo: "r", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "ns", appName: "a", mode: "complete" },
+    { objective: "o2", flow: "b", symbols: [], needsUi: true, specFile: "flows/b.spec.ts", repo: "r", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "ns", appName: "a", mode: "complete" },
+  ];
+  const failingDeps: OpencodeDeps = {
+    open: async () => { throw new Error("OpenCode down"); },
+  };
+  const { results, errors } = await generateParallel(workers, failingDeps, { concurrency: 2 });
+  assert.equal(results.length, 0);
+  assert.equal(errors.length, 2);
+  assert.ok(errors.every((e) => /OpenCode down/.test(e)));
+});
+
+test("runOpencodeParallel propagates planner failure", async () => {
+  const failingDeps: OpencodeDeps = {
+    open: async (agent) => {
+      if (agent === "qa-generator") throw new Error("planner timeout");
+      return { id: "w", prompt: async () => '{"spec":"x"}', dispose: async () => {} };
+    },
+  };
+  await assert.rejects(
+    () => runOpencodeParallel({ ...input, mode: "complete", intent: undefined }, failingDeps),
+    /planner timeout/,
+  );
+});
+
+test("runOpencodeParallel continues when pre-index serena fails (best-effort)", async () => {
+  const prevEnv = process.env.PRE_INDEX_SERENA;
+  process.env.PRE_INDEX_SERENA = "1";
+  try {
+    const failingDeps: OpencodeDeps = {
+      open: async (agent) => {
+        if (agent === "qa-worker-code") throw new Error("serena pre-index failed");
+        return {
+          id: "s",
+          prompt: async () =>
+            agent === "qa-generator"
+              ? '{"objectives":[{"flow":"a","objective":"oa","symbols":[],"needsUi":true}]}'
+              : '{"spec":"flows/a.spec.ts"}',
+          dispose: async () => {},
+        };
+      },
+    };
+    const fakeFs = { read: () => null, write: () => {} };
+    const result = await runOpencodeParallel(
+      { ...input, mode: "complete", intent: undefined },
+      failingDeps,
+      {},
+      fakeFs,
+    );
+    assert.equal(result.specs.length, 1);
+  } finally {
+    process.env.PRE_INDEX_SERENA = prevEnv ?? "";
+    if (!prevEnv) delete process.env.PRE_INDEX_SERENA;
+  }
 });
