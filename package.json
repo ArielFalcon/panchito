@@ -6,6 +6,7 @@
   "description": "App-agnostic AI-assisted E2E QA engine. Template: a watched app is onboarded via config/ + .env only.",
   "scripts": {
     "qa": "tsx src/cli.ts",
+    "contract:gen": "tsx scripts/gen-openapi.ts",
     "start": "node boot-guard.mjs && tsx src/index.ts",
     "test": "node --import tsx --test \"src/**/*.test.ts\" \"src/**/*.test.tsx\"",
     "typecheck": "tsc --noEmit"

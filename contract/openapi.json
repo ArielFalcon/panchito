@@ -1,0 +1,1226 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Panchito Control Plane",
+    "version": "1.0.0",
+    "description": "The Channel Gateway contract: queued commands + the RunEvent SSE stream. Source of truth: src/contract/*.ts (zod). GENERATED — do not edit by hand; run `npm run contract:gen`."
+  },
+  "paths": {
+    "/api/v1/runs": {
+      "post": {
+        "operationId": "createRun",
+        "summary": "Enqueue a run",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRunInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "enqueued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateRunResult"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "listRuns",
+        "summary": "List recent runs for an app",
+        "parameters": [
+          {
+            "name": "app",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "runs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RunRecord"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runs/{id}": {
+      "get": {
+        "operationId": "getRun",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunRecord"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "cancelRun",
+        "summary": "Cancel a run",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "cancelled"
+          }
+        }
+      }
+    },
+    "/api/v1/runs/{id}/events": {
+      "get": {
+        "operationId": "streamRunEvents",
+        "summary": "SSE stream of RunEvents; Last-Event-ID resumes from the given seq",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "event stream",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunEvent"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runs/{id}/ask": {
+      "post": {
+        "operationId": "askRun",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AskRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AskResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runs/{id}/continue": {
+      "post": {
+        "operationId": "continueRun",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContinueRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "continuation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContinueResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/queue": {
+      "get": {
+        "operationId": "getQueue",
+        "responses": {
+          "200": {
+            "description": "queue depth",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/apps": {
+      "get": {
+        "operationId": "listApps",
+        "responses": {
+          "200": {
+            "description": "configured apps",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AppView"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/help": {
+      "post": {
+        "operationId": "help",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AskRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AskResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "RunEvent": {
+        "type": "object",
+        "properties": {
+          "seq": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "runId": {
+            "type": "string"
+          },
+          "ts": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "body": {
+            "$ref": "#/components/schemas/RunEventBody"
+          }
+        },
+        "required": [
+          "seq",
+          "runId",
+          "ts",
+          "body"
+        ],
+        "additionalProperties": false
+      },
+      "RunEventBody": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "run.started"
+                ]
+              },
+              "app": {
+                "type": "string"
+              },
+              "sha": {
+                "type": "string"
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "diff",
+                  "complete",
+                  "exhaustive",
+                  "manual",
+                  "context"
+                ]
+              },
+              "target": {
+                "type": "string",
+                "enum": [
+                  "e2e",
+                  "code"
+                ]
+              }
+            },
+            "required": [
+              "type",
+              "app",
+              "sha",
+              "mode",
+              "target"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "step.changed"
+                ]
+              },
+              "step": {
+                "type": "string",
+                "enum": [
+                  "gate",
+                  "classify",
+                  "setup",
+                  "generate",
+                  "validate",
+                  "health",
+                  "execute",
+                  "retry",
+                  "decide",
+                  "done"
+                ]
+              },
+              "detail": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "step"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "agent.activity"
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "analyzing",
+                  "writing",
+                  "command",
+                  "subagent"
+                ]
+              },
+              "target": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "running",
+                  "completed"
+                ]
+              },
+              "callId": {
+                "type": "string"
+              },
+              "workerId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "kind",
+              "target",
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.updated"
+                ]
+              },
+              "todos": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "content": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "pending",
+                        "in_progress",
+                        "completed",
+                        "cancelled"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "content",
+                    "status"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "type",
+              "todos"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "spec.written"
+                ]
+              },
+              "file": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "file"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "test.discovered"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "file": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "name"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "test.started"
+                ]
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "name"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "test.passed"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "durationMs": {
+                "type": "number",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "type",
+              "name",
+              "durationMs"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "test.failed"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "durationMs": {
+                "type": "number",
+                "minimum": 0
+              },
+              "detail": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "name"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "test.flaky"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "attempts": {
+                "type": "integer",
+                "minimum": 0,
+                "exclusiveMinimum": true,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "type",
+              "name",
+              "attempts"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "reviewer.verdict"
+                ]
+              },
+              "approved": {
+                "type": "boolean"
+              },
+              "reasons": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "type",
+              "approved",
+              "reasons"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "coverage.computed"
+                ]
+              },
+              "changedLines": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "coveredLines": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "type",
+              "changedLines",
+              "coveredLines"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "run.verdict"
+                ]
+              },
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "pass",
+                  "fail",
+                  "flaky",
+                  "invalid",
+                  "infra-error",
+                  "skipped"
+                ]
+              },
+              "passed": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "failed": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "type",
+              "verdict"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "agent.error"
+                ]
+              },
+              "detail": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "detail"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "log.line"
+                ]
+              },
+              "level": {
+                "type": "string",
+                "enum": [
+                  "info",
+                  "warn",
+                  "error"
+                ]
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "level",
+              "text"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "RunRecord": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "app": {
+            "type": "string"
+          },
+          "sha": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string",
+            "enum": [
+              "e2e",
+              "code"
+            ]
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "diff",
+              "complete",
+              "exhaustive",
+              "manual",
+              "context"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "enqueued",
+              "running",
+              "done"
+            ]
+          },
+          "step": {
+            "type": "string"
+          },
+          "stepDetail": {
+            "type": "string"
+          },
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "fail",
+              "flaky",
+              "invalid",
+              "infra-error",
+              "skipped"
+            ]
+          },
+          "passed": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "failed": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "note": {
+            "type": "string"
+          },
+          "retrying": {
+            "type": "boolean"
+          },
+          "parentRunId": {
+            "type": "string"
+          },
+          "triggerRepo": {
+            "type": "string"
+          },
+          "cases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QaCase"
+            }
+          },
+          "specs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SpecRecord"
+            }
+          },
+          "logs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "activity": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentActivity"
+            }
+          },
+          "stepStartedAt": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "app",
+          "sha",
+          "target",
+          "mode",
+          "status",
+          "cases",
+          "logs",
+          "at"
+        ],
+        "additionalProperties": false
+      },
+      "QaCase": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "fail",
+              "flaky"
+            ]
+          },
+          "detail": {
+            "type": "string"
+          },
+          "flow": {
+            "type": "string"
+          },
+          "objective": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "SpecRecord": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "objective": {
+            "type": "string"
+          },
+          "flow": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "AgentActivity": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "file",
+              "command",
+              "todo",
+              "phase",
+              "error"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "in_progress",
+              "completed"
+            ]
+          },
+          "ts": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "text",
+          "ts"
+        ],
+        "additionalProperties": false
+      },
+      "AppView": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "baseUrl": {
+            "type": "string"
+          },
+          "versionUrl": {
+            "type": "string"
+          },
+          "code": {
+            "type": "boolean"
+          },
+          "shadow": {
+            "type": "boolean"
+          },
+          "needsReview": {
+            "type": "boolean"
+          },
+          "testDataPrefix": {
+            "type": "string"
+          },
+          "services": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AppService"
+            }
+          }
+        },
+        "required": [
+          "name",
+          "repo",
+          "baseUrl",
+          "versionUrl",
+          "code",
+          "shadow",
+          "needsReview",
+          "testDataPrefix",
+          "services"
+        ],
+        "additionalProperties": false
+      },
+      "AppService": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string"
+          },
+          "openapi": {
+            "type": "string"
+          },
+          "versionUrl": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "QueueStatus": {
+        "type": "object",
+        "properties": {
+          "pending": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "running": {
+            "nullable": true,
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "app": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "app"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "pending",
+          "running"
+        ],
+        "additionalProperties": false
+      },
+      "ChatEntry": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "CreateRunInput": {
+        "type": "object",
+        "properties": {
+          "app": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string",
+            "enum": [
+              "e2e",
+              "code"
+            ]
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "diff",
+              "complete",
+              "exhaustive",
+              "manual",
+              "context"
+            ]
+          },
+          "sha": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "guidance": {
+            "type": "string"
+          },
+          "shadow": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "app",
+          "target",
+          "mode"
+        ],
+        "additionalProperties": false
+      },
+      "CreateRunResult": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "app": {
+            "type": "string"
+          },
+          "sha": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "diff",
+              "complete",
+              "exhaustive",
+              "manual",
+              "context"
+            ]
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "app",
+          "sha",
+          "mode",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "AskRequest": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string"
+          },
+          "history": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatEntry"
+            }
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "additionalProperties": false
+      },
+      "AskResponse": {
+        "type": "object",
+        "properties": {
+          "answer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "answer"
+        ],
+        "additionalProperties": false
+      },
+      "ContinueRequest": {
+        "type": "object",
+        "properties": {
+          "cases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "guidance": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cases"
+        ],
+        "additionalProperties": false
+      },
+      "ContinueResult": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "parentRunId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "parentRunId"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+}
