@@ -14,6 +14,19 @@ import { testDataNamespace } from "../qa/test-data";
 import { RunMode, TestTarget, TriggerSource, QaCase } from "../types";
 import { activityRouter } from "../integrations/opencode-client";
 import { redactError } from "../util/redact";
+import type { RunEventStore } from "./run-events";
+import type { RunEventBody } from "../contract/events";
+
+type RunStepEvent = Extract<RunEventBody, { type: "step.changed" }>;
+type RunStep = RunStepEvent["step"];
+
+const RUN_EVENT_STEPS = new Set<RunStep>([
+  "gate", "classify", "setup", "generate", "validate", "health", "execute", "retry", "decide", "done",
+]);
+
+function isRunStep(value: string): value is RunStep {
+  return RUN_EVENT_STEPS.has(value as RunStep);
+}
 
 export interface RunRequest {
   app: string;
@@ -33,6 +46,7 @@ export interface RunRequest {
 export interface RunnerDeps {
   pipeline?: PipelineDeps; // defaults to the real deps, built per run
   loadApp?: (name: string) => AppConfig; // defaults to the real config loader
+  runEvents?: RunEventStore;
 }
 
 // Creates the tracked RunRecord and enqueues the pipeline on the shared queue.
@@ -69,6 +83,7 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
       }
       updateRecord(record.id, { status: "running" });
       const appConfig = loadApp(req.app);
+      deps.runEvents?.publish(record.id, { type: "run.started", app: req.app, sha: req.sha, mode: req.mode, target: req.target });
       // Runtime shadow override from the TUI/API takes precedence over the YAML config.
       if (req.shadow !== undefined) {
         appConfig.qa.shadow = req.shadow;
@@ -108,15 +123,38 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
         },
         req.source ?? "webhook",
         { mode: req.mode, target: req.target, guidance: req.guidance, fixCases: req.fixCases, parentRunId: req.parentRunId, triggerRepo: req.triggerRepo, previousNamespace, runId: record.id },
-        (step, detail) => updateRecord(record.id, { step, stepDetail: detail, retrying: step === "retry" }),
+        (step, detail) => {
+          updateRecord(record.id, { step, stepDetail: detail, retrying: step === "retry" });
+          const normalized = step === "publish" ? "decide" : step;
+          if (isRunStep(normalized)) {
+            deps.runEvents?.publish(record.id, { type: "step.changed", step: normalized, detail });
+          }
+        },
         // A test finished → persist the case (live bar/history) AND mark its activity
         // todo completed so it stops being the "running" focus.
-        (c) => { addCase(record.id, c); appendActivity(record.id, { kind: "todo", text: c.name, status: "completed" }); },
+        (c) => {
+          addCase(record.id, c);
+          appendActivity(record.id, { kind: "todo", text: c.name, status: "completed" });
+          deps.runEvents?.publish(record.id, c.status === "pass"
+            ? { type: "test.passed", name: c.name, durationMs: 0 }
+            : c.status === "fail"
+              ? { type: "test.failed", name: c.name, detail: c.detail }
+              : { type: "test.flaky", name: c.name, attempts: 2 });
+        },
         (specs) => updateRecord(record.id, { specs }),
         signal,
         // A test started → it becomes the in-progress focus card during execute.
-        (title) => appendActivity(record.id, { kind: "todo", text: title, status: "in_progress" }),
+        (title) => {
+          appendActivity(record.id, { kind: "todo", text: title, status: "in_progress" });
+          deps.runEvents?.publish(record.id, { type: "test.started", name: title });
+        },
       );
+      deps.runEvents?.publish(record.id, {
+        type: "run.verdict",
+        verdict: run.verdict,
+        passed: run.cases.filter((x) => x.status === "pass").length,
+        failed: run.cases.filter((x) => x.status === "fail").length,
+      });
       updateRecord(record.id, {
         status: "done",
         verdict: run.verdict,
@@ -132,6 +170,8 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
       // "running" forever and `qa run --watch` hangs waiting for a verdict.
       const msg = redactError(err);
       updateRecord(record.id, { status: "done", step: "done", verdict: "infra-error", note: msg });
+      deps.runEvents?.publish(record.id, { type: "agent.error", detail: msg });
+      deps.runEvents?.publish(record.id, { type: "run.verdict", verdict: "infra-error" });
       console.error(`[qa] run crashed ${req.app}@${req.sha}: ${msg}`);
 
       // Infrastructure errors (DEV deploy timeout, operator cancel, network) are

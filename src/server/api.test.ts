@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { handleApi, ApiDeps } from "./api";
 import { RunRecord } from "../types";
+import { AppViewSchema, CreateRunResultSchema, QueueStatusSchema, RunRecordSchema } from "../contract/commands";
+import { RunEventSchema } from "../contract/events";
+import { createRunEventStore } from "./run-events";
 
 function mkReq(method: string, url: string, body?: string): any {
   const r: any = Readable.from(body != null ? [body] : []);
@@ -16,8 +19,17 @@ function mkRes(): any {
   return {
     status: 0,
     body: "",
+    headers: {} as Record<string, string>,
+    writes: [] as string[],
     writeHead(s: number) {
       this.status = s;
+    },
+    setHeader(k: string, v: string) {
+      this.headers[k.toLowerCase()] = v;
+    },
+    write(chunk: string) {
+      this.writes.push(chunk);
+      this.body += chunk;
     },
     end(b?: string) {
       this.body = b ?? "";
@@ -25,7 +37,12 @@ function mkRes(): any {
   };
 }
 
-const appConfig: any = { name: "demo", repo: "org/demo", dev: { baseUrl: "https://dev" }, qa: { shadow: true } };
+const appConfig: any = {
+  name: "demo",
+  repo: "org/demo",
+  dev: { baseUrl: "https://dev", versionUrl: "https://dev/version" },
+  qa: { shadow: true, needsReview: false, testDataPrefix: "qa" },
+};
 
 function deps(over: Partial<ApiDeps> = {}): ApiDeps {
   return {
@@ -80,6 +97,14 @@ test("POST /api/runs with a sha enqueues and returns 202", async () => {
   assert.equal(ok, true);
   assert.equal(res.status, 202);
   assert.match(res.body, /run-xyz/);
+});
+
+test("POST /api/v1/runs is served and its response validates against the contract", async () => {
+  const res = mkRes();
+  const ok = await handleApi(mkReq("POST", "/api/v1/runs", JSON.stringify({ app: "demo", sha: "abc1234", mode: "diff", target: "e2e" })), res, deps());
+  assert.equal(ok, true);
+  assert.equal(res.status, 202);
+  CreateRunResultSchema.parse(JSON.parse(res.body));
 });
 
 test("POST /api/runs accepts context mode", async () => {
@@ -153,11 +178,50 @@ test("GET /api/runs/:id → 404 when missing", async () => {
   assert.equal(res.status, 404);
 });
 
+test("GET /api/v1/runs/:id is served and validates RunRecord output", async () => {
+  const record: RunRecord = { id: "r1", app: "demo", sha: "abc", target: "e2e", mode: "diff", status: "done", verdict: "pass", cases: [], logs: [], at: "t" };
+  const res = mkRes();
+  const ok = await handleApi(mkReq("GET", "/api/v1/runs/r1"), res, deps({ getRecord: () => record }));
+  assert.equal(ok, true);
+  assert.equal(res.status, 200);
+  RunRecordSchema.parse(JSON.parse(res.body));
+});
+
+test("GET /api/v1/runs/:id/events replays RunEvents after Last-Event-ID as SSE", async () => {
+  const record: RunRecord = { id: "r1", app: "demo", sha: "abc", target: "e2e", mode: "diff", status: "running", cases: [], logs: [], at: "t" };
+  const events = createRunEventStore({ now: () => 123 });
+  events.publish("r1", { type: "run.started", app: "demo", sha: "abc", mode: "diff", target: "e2e" });
+  const second = events.publish("r1", { type: "step.changed", step: "execute", detail: "running tests" });
+  const res = mkRes();
+  const req = mkReq("GET", "/api/v1/runs/r1/events");
+  req.headers["last-event-id"] = "0";
+
+  const ok = await handleApi(req, res, deps({ getRecord: () => record, runEvents: events }));
+
+  assert.equal(ok, true);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers["content-type"], "text/event-stream; charset=utf-8");
+  assert.doesNotMatch(res.body, /run.started/);
+  assert.match(res.body, /id: 1/);
+  assert.match(res.body, /event: step.changed/);
+  const data = res.body.match(/^data: (.+)$/m)?.[1];
+  assert.ok(data);
+  assert.deepEqual(RunEventSchema.parse(JSON.parse(data)), second);
+});
+
 test("GET /api/apps lists configured apps", async () => {
   const res = mkRes();
   await handleApi(mkReq("GET", "/api/apps"), res, deps());
   assert.equal(res.status, 200);
   assert.match(res.body, /demo/);
+});
+
+test("GET /api/v1/apps validates AppView output against the contract", async () => {
+  const res = mkRes();
+  await handleApi(mkReq("GET", "/api/v1/apps"), res, deps());
+  assert.equal(res.status, 200);
+  const body = JSON.parse(res.body);
+  assert.deepEqual(body.map((app: unknown) => AppViewSchema.parse(app).name), ["demo"]);
 });
 
 test("GET /api/queue reports pending count and the running id", async () => {
@@ -167,6 +231,14 @@ test("GET /api/queue reports pending count and the running id", async () => {
   assert.equal(res.status, 200);
   assert.match(res.body, /"pending":2/);
   assert.match(res.body, /"id":"r1"/);
+});
+
+test("GET /api/v1/queue validates QueueStatus output against the contract", async () => {
+  const running: RunRecord = { id: "r1", app: "demo", sha: "abc", target: "e2e", mode: "diff", status: "running", cases: [], logs: [], at: "t" };
+  const res = mkRes();
+  await handleApi(mkReq("GET", "/api/v1/queue"), res, deps({ currentRun: () => running }));
+  assert.equal(res.status, 200);
+  QueueStatusSchema.parse(JSON.parse(res.body));
 });
 
 test("GET /api/health → 200", async () => {

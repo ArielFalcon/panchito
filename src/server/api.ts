@@ -5,6 +5,7 @@
 // the routing + validation logic is unit-tested with stubs — no fs or network.
 
 import { IncomingMessage, ServerResponse } from "node:http";
+import { z } from "zod";
 import { RUN_MODES, RunMode, TestTarget, RunRecord } from "../types";
 import { AppConfig } from "../orchestrator/config-loader";
 import { sanitizeText } from "../orchestrator/sanitizer";
@@ -14,6 +15,16 @@ import { buildHelpContext } from "./help";
 import { json, readBody } from "./helpers";
 import { getOpenSessionCount, activityRouter } from "../integrations/opencode-client";
 import type { CreateAppInput, CreateAppResult, UpdateAppInput } from "./app-admin";
+import {
+  AppViewSchema,
+  AskResponseSchema,
+  ContinueResultSchema,
+  CreateRunResultSchema,
+  QueueStatusSchema,
+  RunRecordSchema,
+} from "../contract/commands";
+import { RunEventSchema } from "../contract/events";
+import type { RunEventStore } from "./run-events";
 
 const TARGETS: TestTarget[] = ["e2e", "code"];
 
@@ -36,6 +47,42 @@ export interface ApiDeps {
   updateApp?: (input: UpdateAppInput) => Promise<CreateAppResult>;
   deleteApp?: (name: string, purge: boolean) => { removed: string[] };
   listRepos?: (owner: string, page: number) => Promise<{ repos: Array<{ fullName: string; private: boolean; description: string | null }>; hasMore: boolean }>;
+  runEvents?: RunEventStore;
+}
+
+function contractJson(res: ServerResponse, status: number, schema: z.ZodTypeAny, body: unknown): void {
+  const result = schema.safeParse(body);
+  if (!result.success) {
+    // Surface the drift loudly (CLAUDE.md invariant) — a silent 500 hides a real
+    // schema mismatch between the handler and the contract.
+    console.error("[contract] response validation failed:", result.error.issues);
+    json(res, 500, { error: "contract response validation failed" });
+    return;
+  }
+  json(res, status, result.data);
+}
+
+function sseWrite(res: ServerResponse, event: unknown): void {
+  // Guard the write-after-close race: the bus is synchronous, so an event emitted
+  // as the socket closes can reach here after the stream already ended.
+  if (res.writableEnded) return;
+  const result = RunEventSchema.safeParse(event);
+  if (!result.success) {
+    console.error("[sse] dropped malformed RunEvent:", result.error.issues);
+    return;
+  }
+  const parsed = result.data;
+  res.write(`id: ${parsed.seq}\n`);
+  res.write(`event: ${parsed.body.type}\n`);
+  res.write(`data: ${JSON.stringify(parsed)}\n\n`);
+}
+
+function parseLastEventId(req: IncomingMessage): number {
+  const raw = req.headers["last-event-id"];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  if (!value) return -1;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : -1;
 }
 
 // Returns true when the request matched an /api route (so the caller stops here).
@@ -45,10 +92,15 @@ export async function handleApi(
   deps: ApiDeps,
 ): Promise<boolean> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-  const path = url.pathname;
+  const path = url.pathname.replace(/^\/api\/v1(?=\/|$)/, "/api");
 
   if (req.method === "POST" && path === "/api/runs") {
     return handleCreateRun(req, res, deps);
+  }
+
+  const eventMatch = path.match(/^\/api\/runs\/([^/]+)\/events$/);
+  if (req.method === "GET" && eventMatch) {
+    return handleRunEvents(req, res, deps, eventMatch[1]!);
   }
 
   const runMatch = path.match(/^\/api\/runs\/([^/]+)$/);
@@ -174,7 +226,7 @@ async function handleCreateRun(req: IncomingMessage, res: ServerResponse, deps: 
     json(res, 503, { error: "service shutting down" });
     return true;
   }
-  json(res, 202, { id, app: appConfig.name, sha, target, mode, status: "enqueued" });
+  contractJson(res, 202, CreateRunResultSchema, { id, app: appConfig.name, sha, target, mode, status: "enqueued" });
   return true;
 }
 
@@ -197,7 +249,50 @@ function handleGetRun(res: ServerResponse, deps: ApiDeps, id: string): boolean {
     json(res, 404, { error: `run not found: ${id}` });
     return true;
   }
-  json(res, 200, sanitizeRecord(record));
+  contractJson(res, 200, RunRecordSchema, sanitizeRecord(record));
+  return true;
+}
+
+function handleRunEvents(req: IncomingMessage, res: ServerResponse, deps: ApiDeps, id: string): boolean {
+  if (!deps.runEvents) {
+    json(res, 501, { error: "run event stream is not available" });
+    return true;
+  }
+  const record = deps.getRecord(id);
+  if (!record) {
+    json(res, 404, { error: `run not found: ${id}` });
+    return true;
+  }
+
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.writeHead(200);
+
+  for (const event of deps.runEvents.replay(id, parseLastEventId(req))) {
+    sseWrite(res, event);
+  }
+
+  // A terminated run emits nothing more: replay, then close so the client stops
+  // waiting on a stream that will never produce another event.
+  if (record.status === "done") {
+    res.end();
+    return true;
+  }
+
+  let unsubscribe: () => void = () => {};
+  unsubscribe = deps.runEvents.subscribe(id, (event) => {
+    sseWrite(res, event);
+    // run.verdict is terminal — close the stream once the run finishes so the
+    // connection (and its bus listener) is not held open indefinitely.
+    if (event.body.type === "run.verdict") {
+      unsubscribe();
+      res.end();
+    }
+  });
+  // Client disconnect → drop the bus listener. The write-after-close race is also
+  // guarded centrally in sseWrite (writableEnded), so a late event is a no-op.
+  req.on("close", () => unsubscribe());
   return true;
 }
 
@@ -232,7 +327,7 @@ function handleListRuns(res: ServerResponse, deps: ApiDeps, app: string | null |
     json(res, 400, { error: "?app=<name> query parameter is required" });
     return true;
   }
-  json(res, 200, deps.listRecords(app, limit).map(sanitizeRecord));
+  contractJson(res, 200, z.array(RunRecordSchema), deps.listRecords(app, limit).map(sanitizeRecord));
   return true;
 }
 
@@ -257,7 +352,7 @@ function appView(app: AppConfig): { name: string; repo: string; baseUrl: string;
 
 function handleGetApp(res: ServerResponse, deps: ApiDeps, name: string): boolean {
   try {
-    json(res, 200, appView(deps.loadApp(name)));
+    contractJson(res, 200, AppViewSchema, appView(deps.loadApp(name)));
   } catch {
     json(res, 404, { error: `app not found: '${name}'` });
   }
@@ -273,13 +368,13 @@ function handleListApps(res: ServerResponse, deps: ApiDeps): boolean {
       // A single malformed config should not hide every other app.
     }
   }
-  json(res, 200, apps);
+  contractJson(res, 200, z.array(AppViewSchema), apps);
   return true;
 }
 
 function handleQueue(res: ServerResponse, deps: ApiDeps): boolean {
   const running = deps.currentRun();
-  json(res, 200, {
+  contractJson(res, 200, QueueStatusSchema, {
     pending: deps.queue.size,
     running: running ? { id: running.id, app: running.app } : null,
   });
@@ -342,7 +437,7 @@ async function handleAsk(req: IncomingMessage, res: ServerResponse, deps: ApiDep
     const historyCtx = historyLines.length > 0 ? `\n\nRecent conversation:\n${historyLines.slice(-6).join("\n")}` : "";
     const answer = await deps.ask({ context: `${productCtx}\n\n---\n\n${runCtx}${historyCtx}`, question });
     // Sanitize on egress (logs→chat is a new egress path).
-    json(res, 200, { answer: sanitizeText(answer).text });
+    contractJson(res, 200, AskResponseSchema, { answer: sanitizeText(answer).text });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     json(res, 502, { error: `assistant failed: ${msg}` });
@@ -401,7 +496,7 @@ async function handleHelp(req: IncomingMessage, res: ServerResponse, deps: ApiDe
         "Respond in the SAME language as the question. Be concise. " +
         "If the context lacks the answer, say so and suggest what to ask instead.",
     });
-    json(res, 200, { answer: sanitizeText(answer).text });
+    contractJson(res, 200, AskResponseSchema, { answer: sanitizeText(answer).text });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     json(res, 502, { error: `assistant failed: ${msg}` });
@@ -462,7 +557,7 @@ async function handleContinue(req: IncomingMessage, res: ServerResponse, deps: A
     json(res, 503, { error: "service shutting down" });
     return true;
   }
-  json(res, 202, { id, parentRunId: parentId, app: parent.app, sha: parent.sha, status: "enqueued" });
+  contractJson(res, 202, ContinueResultSchema, { id, parentRunId: parentId, app: parent.app, sha: parent.sha, status: "enqueued" });
   return true;
 }
 

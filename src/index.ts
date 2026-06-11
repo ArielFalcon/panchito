@@ -6,6 +6,7 @@ import { JobQueue } from "./server/queue";
 import { handleWebhook } from "./server/webhook";
 import { loadAppConfig, loadAppConfigsByRepo, listAppConfigs } from "./orchestrator/config-loader";
 import { handleApi, ApiDeps } from "./server/api";
+import { createRunEventStore } from "./server/run-events";
 import { handleMaintainerApi, recordIncident, setMaintainerStatus, getMaintainerStatus, getIncidents, updateIncident } from "./server/maintainer";
 import { getRecord, listRecords, currentRun, updateRecord, interruptedRecords, continuationDepth, MAX_CONTINUATION_DEPTH } from "./server/history";
 import { enqueueTrackedRun } from "./server/runner";
@@ -28,6 +29,7 @@ import { logJson } from "./integrations/logger";
 const SELF_REPO = process.env.AI_PIPELINE_REPO ?? "ArielFalcon/ai-pipeline";
 const ROOT = process.env.AI_PIPELINE_ROOT ?? process.cwd();
 const TOKEN_FILE = join(ROOT, "config", ".api_token");
+const runEvents = createRunEventStore();
 // The maintainer's autonomous merge+hot-swap is OFF by default. Opt-in with
 // SELF_MAINTAINER_AUTOMERGE=true (requires branch protection on the self-repo).
 const AUTONOMOUS_MAINTAINER = process.env.SELF_MAINTAINER_AUTOMERGE === "true";
@@ -137,7 +139,7 @@ function enqueueApiRun(app: string, sha: string, target: string, mode: RunMode, 
   }
   // Orphan-data cleanup is reconstructed inside enqueueTrackedRun (the single funnel), so
   // every trigger gets it — not just this webhook path.
-  return enqueueTrackedRun(queue, { app, sha, target: target as TestTarget, mode, guidance, shadow, source: "webhook", triggerRepo });
+  return enqueueTrackedRun(queue, { app, sha, target: target as TestTarget, mode, guidance, shadow, source: "webhook", triggerRepo }, { runEvents });
 }
 
 // ── Self-maintenance: clone ai-pipeline into a persistent working copy ───────
@@ -823,6 +825,7 @@ const apiDeps: ApiDeps = {
   updateApp: (input) => adminUpdateApp(input, appAdminDeps),
   deleteApp: (name, purge) => adminDeleteApp(name, purge, appAdminDeps),
   listRepos: (owner, page) => github.listRepos(owner, page),
+  runEvents,
   resolveRef: (repo, ref) => resolveRef(repo, ref, defaultMirrorDeps),
   getRecord,
   listRecords,
@@ -870,7 +873,7 @@ const apiDeps: ApiDeps = {
       fixCases: failed,
       parentRunId: parentId,
       source: "manual",
-    });
+    }, { runEvents });
   },
 };
 
@@ -990,7 +993,14 @@ server.listen(port, () => {
       appendLog(a.runId, a.display);
     },
     eventStreamController.signal,
-    { log: (msg) => logJson("warn", msg) },
+    {
+      log: (msg) => logJson("warn", msg),
+      // Rich live activity (agent.activity/plan.updated/…) onto the RunEvent SSE
+      // stream. Advisory: a bad event must never break the reconnect loop.
+      onRunEvent: (runId, body) => {
+        try { runEvents.publish(runId, body); } catch { /* advisory */ }
+      },
+    },
   ).catch((err) => logJson("warn", "event stream reconnect loop failed", { error: err instanceof Error ? err.message : String(err) }));
   recoverRollbackRecord();
   confirmSwapAfterBoot();

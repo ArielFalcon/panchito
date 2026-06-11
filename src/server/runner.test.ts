@@ -9,6 +9,7 @@ import { getRecord } from "./history";
 import { PipelineDeps } from "../pipeline";
 import { AppConfig } from "../orchestrator/config-loader";
 import { QaCase } from "../types";
+import { createRunEventStore } from "./run-events";
 
 const cfg = (name: string): AppConfig => ({
   name,
@@ -83,6 +84,36 @@ test("a green run finalizes the record with verdict + case counts", async () => 
   assert.equal(r.passed, 2);
   assert.equal(r.failed, 0);
   assert.equal(r.cases.length, 2); // onCase populated the record
+});
+
+test("a green run publishes live RunEvents for steps, tests and final verdict", async () => {
+  const queue = new JobQueue();
+  const runEvents = createRunEventStore({ now: () => 123 });
+  const id = enqueueTrackedRun(
+    queue,
+    { app: "runner-events", sha: "def5678", target: "e2e", mode: "diff", source: "webhook" },
+    {
+      pipeline: stubDeps({
+        execute: async (_dir, opts) => {
+          opts.onRunning?.("checkout");
+          const cases: QaCase[] = [{ name: "checkout", status: "pass" }];
+          cases.forEach((c) => opts.onCase?.(c));
+          return { sha: opts.namespace ?? "ns", verdict: "pass", passed: true, cases, logs: "" };
+        },
+      }),
+      loadApp: cfg,
+      runEvents,
+    },
+  );
+
+  await queue.drain();
+
+  const bodies = runEvents.replay(id).map((event) => event.body);
+  assert.deepEqual(bodies[0], { type: "run.started", app: "runner-events", sha: "def5678", mode: "diff", target: "e2e" });
+  assert.ok(bodies.some((body) => body.type === "step.changed" && body.step === "execute"));
+  assert.ok(bodies.some((body) => body.type === "test.started" && body.name === "checkout"));
+  assert.ok(bodies.some((body) => body.type === "test.passed" && body.name === "checkout"));
+  assert.deepEqual(bodies.at(-1), { type: "run.verdict", verdict: "pass", passed: 1, failed: 0 });
 });
 
 test("a crashing pipeline finalizes the record as infra-error with the message (no zombie)", async () => {
