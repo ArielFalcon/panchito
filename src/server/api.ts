@@ -5,7 +5,7 @@
 // the routing + validation logic is unit-tested with stubs — no fs or network.
 
 import { IncomingMessage, ServerResponse } from "node:http";
-import { RunMode, TestTarget, RunRecord } from "../types";
+import { RUN_MODES, RunMode, TestTarget, RunRecord } from "../types";
 import { AppConfig } from "../orchestrator/config-loader";
 import { sanitizeText } from "../orchestrator/sanitizer";
 import { redactError } from "../util/redact";
@@ -15,7 +15,6 @@ import { json, readBody } from "./helpers";
 import { getOpenSessionCount, activityRouter } from "../integrations/opencode-client";
 import type { CreateAppInput, CreateAppResult, UpdateAppInput } from "./app-admin";
 
-const MODES: RunMode[] = ["diff", "complete", "exhaustive", "manual"];
 const TARGETS: TestTarget[] = ["e2e", "code"];
 
 export interface ApiDeps {
@@ -142,7 +141,7 @@ async function handleCreateRun(req: IncomingMessage, res: ServerResponse, deps: 
         ? "code" // default to code mode for code-mode apps
         : "e2e";
   const mode: RunMode =
-    typeof body.mode === "string" && (MODES as string[]).includes(body.mode) ? (body.mode as RunMode) : "diff";
+    typeof body.mode === "string" && (RUN_MODES as readonly string[]).includes(body.mode) ? (body.mode as RunMode) : "diff";
   const guidance = typeof body.guidance === "string" ? body.guidance.slice(0, 2000) : undefined;
   const shadow = typeof body.shadow === "boolean" ? body.shadow : undefined;
 

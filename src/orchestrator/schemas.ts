@@ -137,7 +137,7 @@ export const WebhookPayloadSchema = z.object({
   repo: z.string().min(1),
   sha: z.string().min(7),
   target: z.enum(["e2e", "code"]).optional(),
-  mode: z.enum(["diff", "complete", "exhaustive", "manual"]).optional(),
+  mode: z.enum(["diff", "complete", "exhaustive", "manual", "context"]).optional(),
   guidance: z.string().optional(),
 });
 

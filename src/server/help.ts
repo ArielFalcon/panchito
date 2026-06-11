@@ -18,7 +18,7 @@ over HTTP. It provides a visual dashboard for launching and tracking QA runs.
 
 - \`panchito\` — opens the home screen (interactive menu)
 - \`panchito --help\` — shows all CLI commands
-- \`panchito run [app] [--target e2e|code] [--mode diff|complete|exhaustive|manual] [--guidance "..."] [-w|--watch]\` — trigger a run
+- \`panchito run [app] [--target e2e|code] [--mode diff|complete|exhaustive|manual|context] [--guidance "..."] [-w|--watch]\` — trigger a run
 - \`panchito status [app]\` — queue status or last run for an app
 - \`panchito apps\` — list configured apps
 - \`panchito logs <app> [--last N]\` — show run logs
@@ -36,6 +36,7 @@ The service must be running: \`docker compose up\` (or the orchestrator started 
 - **complete** — analyze the whole repo, estimate coverage, test uncovered important flows.
 - **exhaustive** — audit every existing test and regenerate the entire suite from scratch.
 - **manual** — focused generation guided by your natural-language prompt.
+- **context** — build or refresh the FE↔BE architecture map used by later E2E generation.
 
 ## Test targets
 

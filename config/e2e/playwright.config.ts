@@ -19,6 +19,10 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: 2, // retries = flakiness SIGNAL (Filter C), not a fix
+  // Whole-run ceiling: Playwright exits cleanly on its own, comfortably under the
+  // orchestrator's 15-min kill-tree (QA_E2E_TIMEOUT_MS) so the SIGKILL never fires
+  // in the normal slow-run case.
+  globalTimeout: 12 * 60 * 1000, // 12 min
   reporter: [["json"]],
   use: {
     baseURL: process.env.PW_BASE_URL,

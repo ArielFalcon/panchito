@@ -98,8 +98,12 @@ export const test = base.extend<QaFixtures>({
   // re-runs the green suite with corrupted JSON response VALUES (numbers/booleans flipped; status,
   // shape, strings/ids preserved so auth and refs survive). A spec that stays green under corrupted
   // data has a weak oracle (it would accept a backend regression). No-op in a normal run.
+  // It also dumps how many responses were ACTUALLY corrupted to .qa/fault-injection/<ns>/, so the
+  // orchestrator can tell "no JSON API surface to corrupt" (oracle not applicable → no score)
+  // apart from "corruption happened and the suite stayed green" (score 0 — a weak oracle).
   _faultInject: [
     async ({ page }, use) => {
+      let corrupted = 0;
       if (process.env.QA_FAULT_INJECT === "1") {
         await page.route("**", async (route) => {
           const type = route.request().resourceType();
@@ -118,10 +122,20 @@ export const test = base.extend<QaFixtures>({
           } catch {
             return route.fulfill({ response: res });
           }
+          corrupted++;
           return route.fulfill({ response: res, json: corruptValues(body) });
         });
       }
       await use();
+      if (corrupted > 0) {
+        try {
+          const dir = join(process.cwd(), ".qa", "fault-injection", process.env.PW_NAMESPACE ?? "local");
+          mkdirSync(dir, { recursive: true });
+          writeFileSync(join(dir, `injected-${process.pid}.json`), JSON.stringify({ corrupted }));
+        } catch {
+          /* best effort — the marker is a signal, never a test failure */
+        }
+      }
     },
     { auto: true },
   ],

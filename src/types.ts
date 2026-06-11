@@ -29,6 +29,7 @@ export interface SpecMeta {
 //   context    → build or refresh the FE↔BE architecture map (e2e/.qa/context.json)
 //                from structured sources (routing, OpenAPI, generated clients).
 export type RunMode = "diff" | "complete" | "exhaustive" | "manual" | "context";
+export const RUN_MODES: readonly RunMode[] = ["diff", "complete", "exhaustive", "manual", "context"] as const;
 
 export interface RunOptions {
   target?: TestTarget; // defaults to "e2e" when omitted

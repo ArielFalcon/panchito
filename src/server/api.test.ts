@@ -82,6 +82,18 @@ test("POST /api/runs with a sha enqueues and returns 202", async () => {
   assert.match(res.body, /run-xyz/);
 });
 
+test("POST /api/runs accepts context mode", async () => {
+  let seenMode = "";
+  const res = mkRes();
+  await handleApi(
+    mkReq("POST", "/api/runs", JSON.stringify({ app: "demo", sha: "abc1234", mode: "context" })),
+    res,
+    deps({ enqueue: (_app, _sha, _target, mode) => { seenMode = mode; return "run-context"; } }),
+  );
+  assert.equal(res.status, 202);
+  assert.equal(seenMode, "context");
+});
+
 test("POST /api/runs with a ref resolves it to a sha", async () => {
   let seen = "";
   const res = mkRes();

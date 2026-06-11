@@ -4,7 +4,7 @@
 // the webhook with the control API on one port).
 
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { RunMode } from "../types";
+import { RUN_MODES, RunMode } from "../types";
 
 export interface WebhookPayload {
   repo: string;
@@ -13,9 +13,8 @@ export interface WebhookPayload {
   guidance?: string; // for "manual" mode
 }
 
-const MODES: RunMode[] = ["diff", "complete", "exhaustive", "manual"];
 function asMode(v: unknown): RunMode {
-  return typeof v === "string" && (MODES as string[]).includes(v) ? (v as RunMode) : "diff";
+  return typeof v === "string" && (RUN_MODES as readonly string[]).includes(v) ? (v as RunMode) : "diff";
 }
 
 export function verifySignature(secret: string, body: string, signature?: string): boolean {

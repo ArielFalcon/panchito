@@ -34,6 +34,7 @@ test("parseWebhook reads mode and guidance", () => {
   // unknown mode falls back to diff
   assert.equal(parseWebhook({ repo: "a", sha: SHA, mode: "nope" })?.mode, "diff");
   assert.equal(parseWebhook({ repo: "a", sha: SHA, mode: "complete" })?.mode, "complete");
+  assert.equal(parseWebhook({ repo: "a", sha: SHA, mode: "context" })?.mode, "context");
 });
 
 test("parseWebhook understands the GitHub push event (mode diff)", () => {
