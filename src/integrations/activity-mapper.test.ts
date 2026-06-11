@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mapOpencodeEvent, type RawOpencodeEvent } from "./activity-mapper";
+import { mapOpencodeEvent, eventRunId, type RawOpencodeEvent } from "./activity-mapper";
 import { RunEventBodySchema } from "../contract/events";
 
 const SESSIONS = new Map<string, string>([["sess_1", "run_1"]]);
@@ -94,4 +94,11 @@ test("events for an unknown session are dropped (demux safety)", () => {
 
 test("an event with no resolvable session is dropped", () => {
   assert.deepEqual(mapOpencodeEvent({ type: "file.edited", properties: { file: "a.ts" } }, SESSIONS), []);
+});
+
+test("eventRunId resolves the run from a top-level or part-level sessionID", () => {
+  assert.equal(eventRunId({ type: "todo.updated", properties: { sessionID: "sess_1" } }, SESSIONS), "run_1");
+  assert.equal(eventRunId(toolEvent({ status: "completed" }, { tool: "read" }), SESSIONS), "run_1");
+  assert.equal(eventRunId({ type: "todo.updated", properties: { sessionID: "ghost" } }, SESSIONS), undefined);
+  assert.equal(eventRunId({ type: "file.edited", properties: { file: "a.ts" } }, SESSIONS), undefined);
 });

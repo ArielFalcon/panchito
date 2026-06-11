@@ -17,6 +17,8 @@ import { CommitIntent } from "../qa/commit-classify";
 import type { ArchitectureContext } from "../qa/context";
 import { sanitizeText } from "../orchestrator/sanitizer";
 import { ActivityRouter } from "./agent-activity";
+import { mapOpencodeEvent, eventRunId } from "./activity-mapper";
+import type { RunEventBody } from "../contract/events";
 import { appendLog } from "../server/history";
 import { installHttpDispatcher } from "../util/net";
 
@@ -148,6 +150,10 @@ export interface LiveActivity {
 export async function startEventStream(
   onActivity: (a: LiveActivity) => void,
   signal?: AbortSignal,
+  // The new contract RunEvent stream: each raw event is mapped (preserving
+  // ToolState.title/callID, all tools, todos) and published to the run it belongs
+  // to. Advisory — never authoritative, never allowed to break the stream loop.
+  onRunEvent?: (runId: string, body: RunEventBody) => void,
 ): Promise<void> {
   const client = await getSharedClient();
 
@@ -170,10 +176,21 @@ export async function startEventStream(
       const payload = event.payload;
       if (!payload?.type) continue;
 
-      const activities = activityRouter.route({
-        type: payload.type,
-        properties: payload.properties,
-      });
+      const raw = { type: payload.type, properties: payload.properties };
+
+      // Rich contract RunEvents (agent.activity/plan.updated/…) from the RAW event,
+      // so ToolState.title/callID survive. Published to the owning run; a malformed
+      // body must never break the loop.
+      if (onRunEvent) {
+        const rid = eventRunId(raw, activityRouter.sessionMap());
+        if (rid) {
+          for (const body of mapOpencodeEvent(raw, activityRouter.sessionMap())) {
+            try { onRunEvent(rid, body); } catch { /* advisory */ }
+          }
+        }
+      }
+
+      const activities = activityRouter.route(raw);
 
       for (const activity of activities) {
         // Build a concise display line for the human log feed (chat-assistant context).
@@ -211,6 +228,7 @@ export interface EventStreamReconnectOptions {
   initialDelayMs?: number;
   maxDelayMs?: number;
   log?: (msg: string) => void;
+  onRunEvent?: (runId: string, body: RunEventBody) => void;
 }
 
 function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
@@ -243,7 +261,7 @@ export async function startEventStreamWithReconnect(
 
   while (!signal?.aborted) {
     try {
-      await start(onActivity, signal);
+      await start(onActivity, signal, opts.onRunEvent);
       delayMs = initialDelayMs;
       if (!signal?.aborted) opts.log?.(`[qa] OpenCode event stream closed; reconnecting in ${delayMs}ms`);
     } catch (err) {

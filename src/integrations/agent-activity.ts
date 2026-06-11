@@ -159,6 +159,12 @@ export class ActivityRouter {
     this.context.delete(sessionId);
   }
 
+  // Read-only view of the session→run mapping, for the stream consumer that maps
+  // raw events to contract RunEvents (mapOpencodeEvent needs the same demux map).
+  sessionMap(): ReadonlyMap<string, string> {
+    return this.sessions;
+  }
+
   // Returns the activities to surface for this event (already deduped). Empty when
   // nothing new is worth showing.
   route(event: RawEvent): RoutedActivity[] {

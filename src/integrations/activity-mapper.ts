@@ -114,17 +114,28 @@ function toolActivity(part: PartLike): RunEventBody[] {
   return out;
 }
 
+// Resolves the run an event belongs to via its sessionID (top-level on most
+// events, on the part for message.part.updated). Exported so the stream consumer
+// can publish each mapped body to the right run without re-deriving the session.
+export function eventRunId(
+  event: RawOpencodeEvent,
+  sessions: ReadonlyMap<string, string>,
+): string | undefined {
+  const p = event.properties ?? {};
+  const part = p.part as PartLike | undefined;
+  const sessionID = (p.sessionID as string | undefined) ?? part?.sessionID;
+  return sessionID ? sessions.get(sessionID) : undefined;
+}
+
 // Maps one raw OpenCode event to 0..N contract event bodies. Returns [] when the
 // event cannot be attributed to a known session or carries only prose/control.
 export function mapOpencodeEvent(
   event: RawOpencodeEvent,
   sessions: ReadonlyMap<string, string>,
 ): RunEventBody[] {
+  if (!eventRunId(event, sessions)) return [];
   const p = event.properties ?? {};
   const part = p.part as PartLike | undefined;
-  // sessionID is top-level on most events, but lives on the part for message.part.updated.
-  const sessionID = (p.sessionID as string | undefined) ?? part?.sessionID;
-  if (!sessionID || !sessions.has(sessionID)) return [];
 
   switch (event.type) {
     case "message.part.updated":
