@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { progressBar, stepState, verdictColor, verdictIcon, caseIcon, shortSha, deriveActivityView, formatElapsed } from "./format";
-import { AgentActivity } from "../types";
+import { PIPELINE_STEPS, progressBar, stepState, verdictColor, verdictIcon, caseIcon, shortSha, deriveActivityView, formatElapsed } from "./format";
+import { AgentActivity, RunVerdict } from "../types";
 
 const act = (kind: AgentActivity["kind"], text: string, status?: AgentActivity["status"], ts = "t"): AgentActivity =>
   ({ kind, text, ...(status ? { status } : {}), ts });
@@ -20,13 +20,30 @@ test("stepState marks earlier steps done, the current active, later pending", ()
   assert.equal(stepState("validate", "generate"), "done");
   assert.equal(stepState("validate", "validate"), "active");
   assert.equal(stepState("validate", "execute"), "pending");
+  assert.equal(stepState("validate", "coverage"), "pending");
 });
 
 test("stepState: done marks everything done; retry keeps execute active", () => {
   assert.equal(stepState("done", "classify"), "done");
   assert.equal(stepState("done", "execute"), "done");
+  assert.equal(stepState("done", "coverage"), "done");
   assert.equal(stepState("retry", "validate"), "done");
   assert.equal(stepState("retry", "execute"), "active");
+  assert.equal(stepState("retry", "coverage"), "pending");
+});
+
+test("stepState: coverage step keeps earlier steps done and itself active", () => {
+  assert.equal(stepState("coverage", "classify"), "done");
+  assert.equal(stepState("coverage", "execute"), "done");
+  assert.equal(stepState("coverage", "coverage"), "active");
+});
+
+test("stepState: unknown future steps never regress listed steps to pending", () => {
+  for (const s of PIPELINE_STEPS) assert.equal(stepState("some-future-step", s), "done");
+});
+
+test("stepState: no current step (enqueued) renders everything pending", () => {
+  for (const s of PIPELINE_STEPS) assert.equal(stepState(undefined, s), "pending");
 });
 
 test("verdictColor / verdictIcon map verdicts", () => {
@@ -37,6 +54,14 @@ test("verdictColor / verdictIcon map verdicts", () => {
   assert.equal(verdictIcon("pass"), "✓");
   assert.equal(verdictIcon("fail"), "✗");
   assert.equal(verdictIcon("skipped"), "⊘");
+});
+
+test("each of the six verdicts has a distinct color and icon identity", () => {
+  const verdicts: RunVerdict[] = ["pass", "fail", "flaky", "invalid", "infra-error", "skipped"];
+  const colors = verdicts.map(verdictColor);
+  const icons = verdicts.map(verdictIcon);
+  assert.equal(new Set(colors).size, verdicts.length, `colors collide: ${colors.join(", ")}`);
+  assert.equal(new Set(icons).size, verdicts.length, `icons collide: ${icons.join(", ")}`);
 });
 
 test("caseIcon and shortSha", () => {

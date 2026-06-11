@@ -3,10 +3,12 @@
 
 import React from "react";
 import { Box, Text } from "ink";
+import Spinner from "ink-spinner";
 import { Badge, ProgressBar } from "@inkjs/ui";
 import { RunRecord } from "../../types";
+import { QueueStatus } from "../client";
 import {
-  PIPELINE_STEPS, stepState, shortSha,
+  PIPELINE_STEPS, stepState, shortSha, verdictColor, verdictIcon,
   deriveActivityView, formatElapsed, ActivityView,
 } from "../format";
 import { Section } from "./Section";
@@ -35,12 +37,14 @@ function stepDetail(record: RunRecord, step: string, isActive: boolean, view: Ac
       if (total > 0) return `${total} case(s) — ${passed} passed, ${failed} failed`;
       if (target === "code") return `running test suite...${elapsed}`;
       return (sd || "running") + elapsed;
+    case "coverage":
+      return (sd || "mapping executed code to the diff") + elapsed;
     default:
       return sd || undefined;
   }
 }
 
-export function Dashboard({ record }: { record: RunRecord }): React.ReactElement {
+export function Dashboard({ record, queue }: { record: RunRecord; queue?: QueueStatus | null }): React.ReactElement {
   const { app, sha, target, mode, step, verdict, passed = 0, failed = 0, cases, specs } = record;
   const total = cases.length;
   const isCode = target === "code";
@@ -58,6 +62,18 @@ export function Dashboard({ record }: { record: RunRecord }): React.ReactElement
         {`/${mode}`}
         {record.retrying ? <Text color="#c2891b">{"  ↻ retrying"}</Text> : null}
       </Text>
+
+      {/* Enqueued: the run has not started — make the waiting state unmistakable */}
+      {record.status === "enqueued" ? (
+        <Box marginTop={1} gap={1}>
+          <Badge color="#c2891b">QUEUED</Badge>
+          <Text color="#c2891b"><Spinner type="dots" /></Text>
+          <Text dimColor>
+            {"waiting for the queue"}
+            {queue ? ` — ${queue.pending} pending${queue.running ? ` · running: ${queue.running.app}` : ""}` : ""}
+          </Text>
+        </Box>
+      ) : null}
 
       <Box flexDirection="column" marginTop={1}>
         {PIPELINE_STEPS.map((s) => {
@@ -118,11 +134,11 @@ export function Dashboard({ record }: { record: RunRecord }): React.ReactElement
         </Box>
       ) : null}
 
-      {/* Verdict */}
+      {/* Verdict — color/icon come from the shared format palette (one identity per verdict) */}
       {verdict ? (
         <Box marginTop={1} gap={1}>
-          <Badge color={verdict === "pass" || verdict === "skipped" ? "green" : verdict === "fail" || verdict === "invalid" ? "red" : verdict === "flaky" ? "yellow" : "blue"}>
-            {verdict.toUpperCase()}
+          <Badge color={verdictColor(verdict)}>
+            {`${verdictIcon(verdict)} ${verdict.toUpperCase()}`}
           </Badge>
           {record.note ? <Text dimColor>{record.note}</Text> : null}
         </Box>

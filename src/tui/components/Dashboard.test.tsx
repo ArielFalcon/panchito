@@ -66,6 +66,35 @@ test("shows the pipeline step labels", () => {
   assert.match(f, /generate/);
   assert.match(f, /validate/);
   assert.match(f, /execute/);
+  assert.match(f, /coverage/);
+  unmount();
+});
+
+test("coverage step: earlier steps stay done (✓ on execute), coverage shows its detail", () => {
+  const { lastFrame, unmount } = render(
+    <Dashboard record={rec({ step: "coverage", passed: 2, failed: 0, cases: [
+      { name: "a", status: "pass" },
+      { name: "b", status: "pass" },
+    ] })} />,
+  );
+  const f = lastFrame() ?? "";
+  assert.match(f, /✓ {2}execute tests/);            // execute did NOT regress to pending
+  assert.match(f, /mapping executed code to the diff/);
+  unmount();
+});
+
+test("enqueued run: renders the QUEUED badge, waiting line, and queue depth", () => {
+  const { lastFrame, unmount } = render(
+    <Dashboard
+      record={rec({ status: "enqueued", step: undefined })}
+      queue={{ pending: 3, running: { id: "run-0", app: "shop" } }}
+    />,
+  );
+  const f = lastFrame() ?? "";
+  assert.match(f, /QUEUED/);
+  assert.match(f, /waiting for the queue/);
+  assert.match(f, /3 pending/);
+  assert.match(f, /running: shop/);
   unmount();
 });
 

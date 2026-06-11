@@ -14,9 +14,8 @@ import { Watch, RunFlow } from "./app";
 import { HomeScreen } from "./components/HomeScreen";
 import { OnboardWizard } from "./components/OnboardWizard";
 import { caseIcon } from "./format";
-import { RunMode, TestTarget } from "../types";
+import { RUN_MODES, RunMode, TestTarget } from "../types";
 
-const MODES: RunMode[] = ["diff", "complete", "exhaustive", "manual"];
 const DIV = "─".repeat(60);
 
 function resolveToken(): string | undefined {
@@ -73,7 +72,7 @@ async function cmdRun(client: QaClient, args: string[]): Promise<void> {
     else if (a === "--ref") ref = args[++i];
     else if (a === "--latest") ref = "main";
     else if (a === "--sha") sha = args[++i];
-    else if (a === "--mode") mode = (MODES as string[]).includes(args[i + 1] ?? "") ? (args[++i] as RunMode) : fail(`invalid --mode (diff|complete|exhaustive|manual)`);
+    else if (a === "--mode") mode = (RUN_MODES as readonly string[]).includes(args[i + 1] ?? "") ? (args[++i] as RunMode) : fail(`invalid --mode (${RUN_MODES.join("|")})`);
     else if (a === "--guidance") guidance = args[++i];
     else if (a === "-w" || a === "--watch") watch = true;
     else if (a.startsWith("-")) fail(`unknown flag: ${a}`);
@@ -185,7 +184,20 @@ async function cmdHistory(client: QaClient, args: string[]): Promise<void> {
 }
 
 function cmdOnboard(): void {
-  render(<ThemeWrapper><OnboardWizard onDone={() => process.exit(0)} onCancel={() => process.exit(0)} /></ThemeWrapper>);
+  // Bare CLI path: there is no launcher to return to, so "run first QA" becomes
+  // a copy-pasteable command instead of a silent exit.
+  const inst = render(
+    <ThemeWrapper>
+      <OnboardWizard
+        onDone={(appName) => {
+          inst.unmount();
+          console.log(`\n✓ ${appName} onboarded — run your first QA with:\n\n  panchito run ${appName} --watch\n`);
+          process.exit(0);
+        }}
+        onCancel={() => process.exit(0)}
+      />
+    </ThemeWrapper>,
+  );
 }
 
 async function main(): Promise<void> {

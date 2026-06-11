@@ -3,7 +3,6 @@ import { Box, Text } from "ink";
 import { useInput } from "ink";
 import Spinner from "ink-spinner";
 import { QaClient } from "../client";
-import { useTypewriter } from "../useTypewriter";
 
 type ChatEntry = { id: number; role: "q" | "a" | "err"; text: string };
 
@@ -18,18 +17,19 @@ function nextId(): number {
 export interface ChatInputProps {
   client: QaClient;
   runId: string;
+  // Watch-screen command keys, honored only while the ask buffer is EMPTY:
+  // 'q'/Esc → detach, 'x' → cancel. Any other keystroke reports "other" (the
+  // watch uses it to disarm a pending cancel confirmation) and is then handled
+  // as normal input. Once the user starts typing, every key is just text.
+  onWatchKey?: (k: "detach" | "cancel" | "other") => void;
 }
 
-export function ChatInput({ client, runId }: ChatInputProps): React.ReactElement {
+export function ChatInput({ client, runId, onWatchKey }: ChatInputProps): React.ReactElement {
   const [input, setInput] = useState("");
   const [entries, setEntries] = useState<ChatEntry[]>([]);
-  const [streamingText, setStreamingText] = useState("");
-  const [streamingId, setStreamingId] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [caretOn, setCaretOn] = useState(true);
-
-  const { displayed } = useTypewriter(streamingText);
 
   useEffect(() => {
     const id = setInterval(() => setCaretOn((v) => !v), CARET_BLINK_MS);
@@ -39,21 +39,9 @@ export function ChatInput({ client, runId }: ChatInputProps): React.ReactElement
   useEffect(() => {
     setInput("");
     setEntries([]);
-    setStreamingText("");
-    setStreamingId(null);
     setError(null);
     setLoading(false);
   }, [runId]);
-
-  const resolveStreaming = useCallback(() => {
-    if (streamingId !== null && streamingText) {
-      setEntries((prev) =>
-        prev.map((e) => (e.id === streamingId ? { ...e, text: streamingText } : e)),
-      );
-    }
-    setStreamingId(null);
-    setStreamingText("");
-  }, [streamingId, streamingText]);
 
   const submit = useCallback(async () => {
     const question = input.trim();
@@ -61,28 +49,38 @@ export function ChatInput({ client, runId }: ChatInputProps): React.ReactElement
     setInput("");
     setLoading(true);
     setError(null);
-    resolveStreaming();
 
     const qId = nextId();
     const aId = nextId();
     setEntries((prev) => [...prev, { id: qId, role: "q", text: question }, { id: aId, role: "a", text: "" }]);
-    setStreamingId(aId);
 
     try {
       const history = entries.map((e) => ({ role: e.role, text: e.text }));
       const { answer } = await client.ask(runId, question, history);
-      setStreamingText(answer);
+      // Answers are plain JSON (no streaming) — render them immediately in full.
+      setEntries((prev) => prev.map((e) => (e.id === aId ? { ...e, text: answer } : e)));
     } catch (e) {
-      setStreamingId(null);
-      setStreamingText("");
+      setEntries((prev) => prev.filter((e2) => e2.id !== aId));
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
     } finally {
       setLoading(false);
     }
-  }, [input, loading, client, runId, resolveStreaming]);
+  }, [input, loading, entries, client, runId]);
 
   useInput((char, key) => {
+    // Reserved keys are commands only while the buffer is empty.
+    if (onWatchKey && input.length === 0) {
+      if (key.escape || char === "q") {
+        onWatchKey("detach");
+        return;
+      }
+      if (char === "x") {
+        onWatchKey("cancel");
+        return;
+      }
+      onWatchKey("other");
+    }
     if (key.return) {
       void submit();
       return;
@@ -110,10 +108,7 @@ export function ChatInput({ client, runId }: ChatInputProps): React.ReactElement
     }
   });
 
-  const rendered = entries.map((e) =>
-    e.id === streamingId ? { ...e, text: displayed } : e,
-  );
-  const last = rendered.slice(-2); // only the most recent Q+A pair
+  const last = entries.slice(-2); // only the most recent Q+A pair
 
   return (
     <Box flexDirection="column" marginTop={1}>
@@ -124,12 +119,12 @@ export function ChatInput({ client, runId }: ChatInputProps): React.ReactElement
           ) : entry.role === "err" ? (
             <Text color="#c0392b">{"  "}{entry.text}</Text>
           ) : (
-            <Text>{entry.text || (loading && !streamingText ? " " : "")}</Text>
+            <Text>{entry.text || (loading ? " " : "")}</Text>
           )}
         </Box>
       ))}
 
-      {loading && !streamingText ? (
+      {loading ? (
         <Text color="cyan">
           <Spinner type="dots" />
           {" thinking…"}

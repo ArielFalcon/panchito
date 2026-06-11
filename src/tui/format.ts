@@ -4,7 +4,8 @@
 import { RunVerdict, CaseStatus, TestTarget, RunMode, AgentActivity } from "../types";
 
 // The visible pipeline (the OpenCode-internal generate↔review loop stays opaque).
-export const PIPELINE_STEPS = ["classify", "generate", "validate", "execute"] as const;
+// "coverage" runs after execute (change-coverage measurement on diff runs).
+export const PIPELINE_STEPS = ["classify", "generate", "validate", "execute", "coverage"] as const;
 export type PipelineStep = (typeof PIPELINE_STEPS)[number];
 
 export type StepState = "done" | "active" | "pending";
@@ -31,6 +32,7 @@ export function sectionLabel(step: PipelineStep, state: StepState, cases: { pass
     generate: "generate tests",
     validate: "validate specs",
     execute:  "execute tests",
+    coverage: "measure coverage",
   };
   if (state === "done") {
     if (step === "execute" && cases.total > 0) {
@@ -51,9 +53,13 @@ export function stepState(current: string | undefined, step: PipelineStep): Step
   if (current === "retry") {
     return step === "execute" ? "active" : PIPELINE_STEPS.indexOf(step) < execIdx ? "done" : "pending";
   }
-  const ci = current ? PIPELINE_STEPS.indexOf(current as PipelineStep) : -1;
+  if (!current) return "pending"; // enqueued — nothing has started yet
+  const ci = PIPELINE_STEPS.indexOf(current as PipelineStep);
   const si = PIPELINE_STEPS.indexOf(step);
-  if (ci < 0) return "pending"; // enqueued / unknown
+  // Unknown (future) step names must never collapse the dashboard back to all-pending:
+  // a step we do not know about is assumed to come after every listed one, so
+  // everything we list stays done rather than regressing.
+  if (ci < 0) return "done";
   if (si < ci) return "done";
   if (si === ci) return "active";
   return "pending";
@@ -66,13 +72,16 @@ export function progressBar(passed: number, total: number, width = 20): string {
   return "▓".repeat(filled) + "░".repeat(width - filled);
 }
 
+// The single source of truth for verdict identity: every one of the six verdicts
+// gets a distinct color+icon pair. Components must use these, never local maps.
 export function verdictColor(verdict: RunVerdict | undefined): string {
   switch (verdict) {
     case "pass":
       return "#3b7a57";
     case "fail":
-    case "invalid":
       return "#c0392b";
+    case "invalid":
+      return "#c24e2c";
     case "skipped":
       return "#6b685b";
     case "flaky":
@@ -89,8 +98,9 @@ export function verdictIcon(verdict: RunVerdict | undefined): string {
     case "pass":
       return "✓";
     case "fail":
-    case "invalid":
       return "✗";
+    case "invalid":
+      return "⊗";
     case "skipped":
       return "⊘";
     case "flaky":

@@ -1,9 +1,8 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Box, Text } from "ink";
 import { useInput } from "ink";
 import Spinner from "ink-spinner";
 import { QaClient, QaApiError } from "../client";
-import { useTypewriter } from "../useTypewriter";
 
 type ChatEntry = { id: number; role: "q" | "a" | "err"; text: string };
 
@@ -22,40 +21,25 @@ export function HelpChat({ client, onBack, context }: { client: QaClient; onBack
   const [entries, setEntries] = useState<ChatEntry[]>([
     { id: nextId(), role: "a", text: context ? `panchito help — ${context}` : "panchito help — ask me anything about the QA pipeline, run modes, onboarding, configuration, or commands." },
   ]);
-  const [streamingText, setStreamingText] = useState("");
-  const [streamingId, setStreamingId] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [caretOn, setCaretOn] = useState(true);
-  const scrollRef = useRef(0);
+  // Scroll offset is state, not a ref: ↑/↓ must repaint the transcript immediately.
+  const [scroll, setScroll] = useState(0);
 
   useEffect(() => {
     const id = setInterval(() => setCaretOn((v) => !v), CARET_BLINK_MS);
     return () => clearInterval(id);
   }, []);
 
-  const { displayed } = useTypewriter(streamingText);
-
-  const resolveStreaming = useCallback(() => {
-    if (streamingId !== null && streamingText) {
-      setEntries((prev) =>
-        prev.map((e) => (e.id === streamingId ? { ...e, text: streamingText } : e)),
-      );
-    }
-    setStreamingId(null);
-    setStreamingText("");
-  }, [streamingId, streamingText]);
-
   const submit = useCallback(async () => {
     const question = input.trim();
     if (!question || loading || question.length > MAX_INPUT) return;
     setInput("");
     setLoading(true);
-    resolveStreaming();
 
     const qEntry: ChatEntry = { id: nextId(), role: "q", text: question };
     const aId = nextId();
     setEntries((prev) => [...prev, qEntry, { id: aId, role: "a", text: "" }]);
-    setStreamingId(aId);
 
     const history = entries
       .filter((e) => e.role === "q" || e.role === "a")
@@ -64,17 +48,16 @@ export function HelpChat({ client, onBack, context }: { client: QaClient; onBack
 
     try {
       const { answer } = await client.help(question, history);
-      setStreamingText(answer);
-      scrollRef.current = 0;
+      // Answers are plain JSON (no streaming) — render them immediately in full.
+      setEntries((prev) => prev.map((e) => (e.id === aId ? { ...e, text: answer } : e)));
+      setScroll(0);
     } catch (e) {
-      setStreamingId(null);
-      setStreamingText("");
       const msg = e instanceof QaApiError ? e.message : String(e);
-      setEntries((prev) => [...prev, { id: nextId(), role: "err", text: msg }]);
+      setEntries((prev) => [...prev.filter((e2) => e2.id !== aId), { id: nextId(), role: "err", text: msg }]);
     } finally {
       setLoading(false);
     }
-  }, [input, loading, entries, client, resolveStreaming]);
+  }, [input, loading, entries, client]);
 
   const handleKey = useCallback(
     (char: string, key: { escape: boolean; return: boolean; backspace: boolean; delete: boolean; meta?: boolean; upArrow: boolean; downArrow: boolean }) => {
@@ -87,11 +70,11 @@ export function HelpChat({ client, onBack, context }: { client: QaClient; onBack
         return;
       }
       if (key.upArrow) {
-        scrollRef.current = Math.min(scrollRef.current + 1, Math.max(0, entries.length - VISIBLE_ENTRIES));
+        setScroll((prev) => Math.min(prev + 1, Math.max(0, entries.length - VISIBLE_ENTRIES)));
         return;
       }
       if (key.downArrow) {
-        scrollRef.current = Math.max(scrollRef.current - 1, 0);
+        setScroll((prev) => Math.max(prev - 1, 0));
         return;
       }
       if (char === "\x17" || (char === "\b" && key.meta)) {
@@ -115,16 +98,9 @@ export function HelpChat({ client, onBack, context }: { client: QaClient; onBack
 
   useInput(handleKey);
 
-  const renderedEntries = entries.map((entry) => {
-    if (entry.id === streamingId) {
-      return { ...entry, text: displayed };
-    }
-    return entry;
-  });
-
-  const visible = renderedEntries.slice(
-    Math.max(0, renderedEntries.length - VISIBLE_ENTRIES - scrollRef.current),
-    renderedEntries.length - scrollRef.current,
+  const visible = entries.slice(
+    Math.max(0, entries.length - VISIBLE_ENTRIES - scroll),
+    entries.length - scroll,
   );
 
   return (
@@ -162,7 +138,7 @@ export function HelpChat({ client, onBack, context }: { client: QaClient; onBack
             </Box>
           ))
         )}
-        {loading && !streamingText ? (
+        {loading ? (
           <Box>
             <Text color="cyan">
               <Spinner type="dots" />

@@ -4,7 +4,7 @@ import React from "react";
 import { Text, Box } from "ink";
 import { Alert, Badge } from "@inkjs/ui";
 import { QaCase } from "../../types";
-import { caseIcon, parseAssertionError } from "../format";
+import { caseColor, caseIcon, parseAssertionError } from "../format";
 
 export interface HistoryItem {
   name: string;
@@ -38,7 +38,7 @@ export function HistoryList({ items }: { items: HistoryItem[] }): React.ReactEle
               <Alert variant="error">
                 <Box flexDirection="column" gap={1}>
                   <Box gap={1}>
-                    <Badge color="red">FAIL</Badge>
+                    <Badge color={caseColor(item.status)}>FAIL</Badge>
                     <Text bold>{(item.flow ?? item.name).slice(0, 60)}</Text>
                   </Box>
                   <Text>{parsed.message.slice(0, 100)}</Text>
@@ -54,7 +54,7 @@ export function HistoryList({ items }: { items: HistoryItem[] }): React.ReactEle
           <Box key={item.name} flexDirection="column">
             <Text>
               {"  "}
-              <Text>{caseIcon(item.status)}</Text>
+              <Text color={caseColor(item.status)}>{caseIcon(item.status)}</Text>
               {" "}
               <Text dimColor={item.status === "pass"}>{(item.flow ?? item.name).slice(0, 60)}</Text>
             </Text>

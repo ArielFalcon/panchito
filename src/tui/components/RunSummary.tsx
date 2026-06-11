@@ -7,7 +7,7 @@ import { useInput } from "ink";
 import { writeFileSync } from "node:fs";
 import { Badge, Alert } from "@inkjs/ui";
 import { RunRecord } from "../../types";
-import { PIPELINE_STEPS, stepState, sectionLabel, shortSha, caseColor, caseIcon, formatElapsed, parseAssertionError } from "../format";
+import { PIPELINE_STEPS, stepState, sectionLabel, shortSha, caseColor, caseIcon, verdictColor, verdictIcon, formatElapsed, parseAssertionError } from "../format";
 import { ChatInput } from "./ChatInput";
 import type { QaClient } from "../client";
 
@@ -171,7 +171,7 @@ export function RunSummary({ record, client, onBack, onContinue }: {
                   <Alert variant="error">
                     <Box flexDirection="column" gap={1}>
                       <Box gap={1}>
-                        <Badge color="red">FAIL</Badge>
+                        <Badge color={caseColor(c.status)}>FAIL</Badge>
                         <Text bold>{(c.flow ?? c.name).slice(0, 60)}</Text>
                       </Box>
                       {parsed ? (
@@ -190,14 +190,16 @@ export function RunSummary({ record, client, onBack, onContinue }: {
               );
             })}
 
-            {/* Passed cases — compact summary */}
+            {/* Non-failed cases — compact summary; flaky ones keep their own icon/color */}
             {passedOnly.length > 0 ? (
               <Box marginTop={failedOnly.length > 0 ? 1 : 0} flexDirection="column">
                 <Text dimColor>
-                  {`  ✓ ${passedOnly.length} passed: `}
+                  {`  ${caseIcon("pass")} ${passedOnly.length} passed: `}
                   {passedOnly.map((c, i) => (
-                    <Text key={i} dimColor>
-                      {(i > 0 ? ", " : "")}{(c.flow ?? c.name).slice(0, 40)}
+                    <Text key={i} color={caseColor(c.status)} dimColor={c.status !== "flaky"}>
+                      {(i > 0 ? ", " : "")}
+                      {c.status === "flaky" ? `${caseIcon(c.status)} ` : ""}
+                      {(c.flow ?? c.name).slice(0, 40)}
                     </Text>
                   ))}
                 </Text>
@@ -281,8 +283,9 @@ export function RunSummary({ record, client, onBack, onContinue }: {
         {isShadow ? <Text dimColor> [shadow mode]</Text> : null}
 
         <Box marginTop={1} gap={1}>
-          <Badge color={verdict === "pass" || verdict === "skipped" ? "green" : verdict === "fail" || verdict === "invalid" ? "red" : verdict === "flaky" ? "yellow" : "blue"}>
-            {verdict?.toUpperCase() ?? "RUNNING"}
+          {/* Verdict identity comes from the shared format palette — never a local map */}
+          <Badge color={verdictColor(verdict)}>
+            {verdict ? `${verdictIcon(verdict)} ${verdict.toUpperCase()}` : "RUNNING"}
           </Badge>
           {total > 0 ? (
             <Text dimColor>{`${passed} passed${failed > 0 ? `, ${failed} failed` : ""}${total - passed - failed > 0 ? `, ${total - passed - failed} flaky` : ""}`}</Text>

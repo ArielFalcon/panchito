@@ -161,7 +161,7 @@ export function OnboardWizard({
       const r = await client.validateRepo(trimmed);
       if (!r.ok || !r.repoInfo) throw new Error(r.errors?.join("; ") ?? "validation failed");
       setRepoInfo(r.repoInfo);
-      setAppName(suggestName(trimmed));
+      if (!isEditMode) setAppName(suggestName(trimmed));
       setStep("dev-url");
       setError(null);
     } catch (e) {
@@ -170,7 +170,7 @@ export function OnboardWizard({
     } finally {
       setLoading(false);
     }
-  }, [client]);
+  }, [client, isEditMode]);
 
   const selectRepo = useCallback((fullName: string) => {
     setRepoInput(fullName);
@@ -210,7 +210,7 @@ export function OnboardWizard({
     try {
       const req = buildRequest({ dryRun: true });
       const r = isEditMode
-        ? await client.updateApp(appName, req)
+        ? await client.updateApp(editAppName, req)
         : await client.createApp(req);
       if (!r.ok) throw new Error(r.errors?.join("; ") ?? "invalid configuration");
       setYamlPreview(r.yaml ?? "");
@@ -219,14 +219,14 @@ export function OnboardWizard({
       setError(e instanceof Error ? e.message : String(e));
       setStep("write-error");
     }
-  }, [client, buildRequest, isEditMode, appName]);
+  }, [client, buildRequest, isEditMode, editAppName]);
 
   const commit = useCallback(async () => {
     setStep("committing");
     try {
       const req = buildRequest({});
       const r = isEditMode
-        ? await client.updateApp(appName, req)
+        ? await client.updateApp(editAppName, req)
         : await client.createApp(req);
       if (!r.ok) throw new Error(r.errors?.join("; ") ?? (isEditMode ? "update failed" : "creation failed"));
       setStep("done");
@@ -234,7 +234,7 @@ export function OnboardWizard({
       setError(e instanceof Error ? e.message : String(e));
       setStep("write-error");
     }
-  }, [client, buildRequest, isEditMode, appName]);
+  }, [client, buildRequest, isEditMode, editAppName]);
 
   // ── config summary line ─────────────────────────────────────────────────
   const summaryParts: string[] = [];
@@ -251,7 +251,8 @@ export function OnboardWizard({
   // ── input handler ───────────────────────────────────────────────────────
   useInput((char, key) => {
     if (key.escape) {
-      if (step === "browse-list" && repoFilterActive) { setRepoFilterActive(false); return; }
+      // Esc while filtering closes AND clears the filter — never leaves a hidden one applied.
+      if (step === "browse-list" && repoFilterActive) { setRepoFilterActive(false); setRepoFilter(""); return; }
       if (step === "write-error") { reset(); return; }
       if (step === "done") { onDone(appName); return; }
       if (isEditMode && (step === "edit-menu" || step === "config-error")) { onCancel(); return; }
@@ -275,13 +276,14 @@ export function OnboardWizard({
     if (step === "browse-list") {
       if (key.rightArrow && repoHasMore && !loading) { void fetchRepos(browseOwner, repoPage + 1); return; }
       if (key.leftArrow && repoPage > 1 && !loading) { void fetchRepos(browseOwner, repoPage - 1); return; }
-      if (char === "/") { setRepoFilterActive((p) => !p); if (repoFilterActive) setRepoFilter(""); return; }
       if (repoFilterActive) {
+        // While filtering, "/" is a literal character (repo names are "org/name").
         if (key.return) { setRepoFilterActive(false); return; }
         if (key.backspace || key.delete) { setRepoFilter((p) => p.slice(0, -1)); return; }
         if (char.length === 1 && char >= " ") { setRepoFilter((p) => p + char); }
         return;
       }
+      if (char === "/") { setRepoFilterActive(true); return; }
       return;
     }
 
@@ -429,13 +431,14 @@ export function OnboardWizard({
             <Text><Text color="#3b7a57">✓</Text>{` ${repoInfo.fullName} `}<Text color={repoInfo.private ? "yellow" : "green"}>({repoInfo.private ? "private" : "public"})</Text>{` · default branch: ${repoInfo.defaultBranch}`}</Text>
           </Box>
         ) : null}
-        <Text bold>DEV base URL <Text dimColor>(optional — Enter to skip)</Text></Text>
-        {/* edit mode: start empty so typing replaces rather than appends; placeholder shows current value */}
+        <Text bold>DEV base URL <Text dimColor>{"(optional — Enter to skip · \"-\" to clear)"}</Text></Text>
+        {/* edit mode: start empty so typing replaces rather than appends; placeholder shows current value.
+            A single "-" clears the stored value (empty Enter means "keep"). */}
         <TextInput
           defaultValue={isEditMode ? undefined : (baseUrl || undefined)}
           placeholder={isEditMode ? (baseUrl || "https://dev.myapp.com") : "https://dev.myapp.com"}
           onChange={isEditMode ? undefined : setBaseUrl}
-          onSubmit={(v) => { if (v.trim()) setBaseUrl(v.trim()); setStep(isEditMode ? "edit-menu" : "dev-version"); }}
+          onSubmit={(v) => { const t = v.trim(); if (t === "-") setBaseUrl(""); else if (t) setBaseUrl(t); setStep(isEditMode ? "edit-menu" : "dev-version"); }}
         />
         <Box marginTop={1}><Text dimColor>Enter to continue  ·  Esc to go back</Text></Box>
       </Box>
@@ -447,12 +450,12 @@ export function OnboardWizard({
     return (
       <Box flexDirection="column">
         {showSummary ? renderSummaryBar() : null}
-        <Text bold>Version endpoint <Text dimColor>(optional — Enter to skip)</Text></Text>
+        <Text bold>Version endpoint <Text dimColor>{"(optional — Enter to skip · \"-\" to clear)"}</Text></Text>
         <TextInput
           defaultValue={isEditMode ? undefined : (versionUrl || undefined)}
           placeholder={isEditMode ? (versionUrl || "https://dev.myapp.com/version") : "https://dev.myapp.com/version"}
           onChange={isEditMode ? undefined : setVersionUrl}
-          onSubmit={(v) => { if (v.trim()) setVersionUrl(v.trim()); setStep(isEditMode ? "edit-menu" : "qa-target"); }}
+          onSubmit={(v) => { const t = v.trim(); if (t === "-") setVersionUrl(""); else if (t) setVersionUrl(t); setStep(isEditMode ? "edit-menu" : "qa-target"); }}
         />
         <Box marginTop={1}><Text dimColor>Enter to continue  ·  Esc to go back</Text></Box>
       </Box>
@@ -688,7 +691,8 @@ export function OnboardWizard({
     return (
       <Box flexDirection="column">
         <Text color="#3b7a57">✓ config/apps/{appName}.yaml {isEditMode ? "updated" : "created"}</Text>
-        <Box marginTop={1}><Text>Enter → {isEditMode ? "done" : "run first QA"}  ·  Esc → exit</Text></Box>
+        {/* Enter and Esc both fire onDone — the app exists either way */}
+        <Box marginTop={1}><Text>Enter → {isEditMode ? "done" : "run your first QA"}</Text></Box>
       </Box>
     );
   }

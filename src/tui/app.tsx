@@ -2,8 +2,12 @@
 // interactive Launcher/RunFlow (TTY-only: pick app + target + mode, then watch).
 // These are the glue around the presentational Dashboard; the testable logic lives
 // in client.ts / format.ts / Dashboard.tsx.
+//
+// Watch key model: leaving the watch NEVER cancels the run. 'q'/Esc detach (the
+// run keeps going server-side; so does closing the terminal or Ctrl+C). Only an
+// explicit 'x' pressed twice cancels.
 
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import Spinner from "ink-spinner";
 import SelectInput from "ink-select-input";
@@ -12,19 +16,28 @@ import { ChatInput } from "./components/ChatInput";
 import { OnboardWizard } from "./components/OnboardWizard";
 import { GuidancePrompt } from "./components/GuidancePrompt";
 import { RunSummary } from "./components/RunSummary";
-import { QaClient, QaApiError } from "./client";
-import { RunRecord, RunMode, TestTarget } from "../types";
+import { QaClient, QaApiError, QueueStatus } from "./client";
+import { RUN_MODES, RunRecord, RunMode, TestTarget } from "../types";
 import { MODE_INFO, TARGET_INFO } from "./format";
 
-const MODES: RunMode[] = ["diff", "complete", "exhaustive", "manual"];
 const TARGETS: TestTarget[] = ["e2e", "code"];
 
 interface SelectItem { label: string; value: string }
 
-export function Watch({ client, id, onDone }: { client: QaClient; id: string; onDone?: () => void }): React.ReactElement {
+export function Watch({ client, id, onDone, onDetach }: {
+  client: QaClient;
+  id: string;
+  onDone?: () => void;
+  // Interactive flows pass this: invoked with a notice when the user detaches or
+  // cancels, so the caller returns to its launcher instead of exiting the app.
+  onDetach?: (notice: string) => void;
+}): React.ReactElement {
   const [record, setRecord] = useState<RunRecord | null>(null);
+  const [queue, setQueue] = useState<QueueStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [cancelled, setCancelled] = useState(false);
+  const [armCancel, setArmCancel] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [exitMsg, setExitMsg] = useState<string | null>(null);
   const { exit } = useApp();
   const finishedRef = useRef(false);
 
@@ -41,18 +54,25 @@ export function Watch({ client, id, onDone }: { client: QaClient; id: string; on
     };
 
     const tick = async (): Promise<void> => {
+      if (finishedRef.current) return;
       try {
         const r = await client.getRun(id);
-        if (!alive) return;
+        if (!alive || finishedRef.current) return;
         misses = 0;
         setRecord(r);
+        if (r.status === "enqueued") {
+          // Show the queue depth while we wait for our turn.
+          client.getQueue().then((q) => { if (alive) setQueue(q); }).catch(() => {});
+        } else {
+          setQueue(null);
+        }
         if (r.verdict) {
           if (onDone) { finishedRef.current = true; timer = setTimeout(() => onDone(), 600); return; }
           finish(r.verdict === "pass" || r.verdict === "skipped" ? 0 : 1);
           return;
         }
       } catch (e) {
-        if (!alive) return;
+        if (!alive || finishedRef.current) return;
         if (e instanceof QaApiError && ++misses >= 5) {
           setError(e.message);
           finish(1);
@@ -63,34 +83,86 @@ export function Watch({ client, id, onDone }: { client: QaClient; id: string; on
     };
 
     void tick();
+    // Unmount only stops polling — the run keeps going server-side (detach semantics).
     return () => {
       alive = false;
       if (timer) clearTimeout(timer);
-      if (!finishedRef.current) client.cancelRun(id).catch(() => {});
     };
   }, [client, id, exit, onDone]);
 
-  useInput((input, key) => {
-    if (key.ctrl && input === "c") {
-      setCancelled(true);
-      client.cancelRun(id).catch(() => {});
-    }
-  });
+  const detach = useCallback((): void => {
+    if (finishedRef.current) return;
+    finishedRef.current = true;
+    const notice = `run ${id} continues in the background — follow it with 'panchito status' or 'panchito logs'`;
+    if (onDetach) { onDetach(notice); return; }
+    setExitMsg(`detached — ${notice}`);
+    process.exitCode = 0;
+    setTimeout(() => exit(), 80);
+  }, [id, onDetach, exit]);
 
-  if (cancelled) return <Text color="yellow">{`qa: run cancelled by operator`}</Text>;
+  const requestCancel = useCallback((): void => {
+    if (finishedRef.current) return;
+    if (!armCancel) { setArmCancel(true); return; }
+    finishedRef.current = true;
+    setArmCancel(false);
+    setCancelling(true);
+    const leave = (notice: string): void => {
+      if (onDetach) { onDetach(notice); return; }
+      setCancelling(false);
+      setExitMsg(notice);
+      process.exitCode = 1;
+      setTimeout(() => exit(), 80);
+    };
+    client.cancelRun(id).then(
+      () => leave(`run ${id} cancelled by operator`),
+      (e: unknown) => leave(`cancel failed: ${e instanceof Error ? e.message : String(e)} — the run may have already finished`),
+    );
+  }, [armCancel, client, id, onDetach, exit]);
+
+  const handleWatchKey = useCallback((k: "detach" | "cancel" | "other"): void => {
+    if (k === "detach") { detach(); return; }
+    if (k === "cancel") { requestCancel(); return; }
+    setArmCancel(false);
+  }, [detach, requestCancel]);
+
+  // While the dashboard (and its ChatInput) is not mounted yet, the watch handles
+  // its own keys; afterwards ChatInput forwards them while its buffer is empty.
+  useInput((input, key) => {
+    if (key.escape || input === "q") { handleWatchKey("detach"); return; }
+    if (input === "x") { handleWatchKey("cancel"); return; }
+    handleWatchKey("other");
+  }, { isActive: record === null && !exitMsg && !cancelling && !error });
+
+  if (exitMsg) return <Text color="yellow">{`qa: ${exitMsg}`}</Text>;
+  if (cancelling) return <Text color="yellow"><Spinner type="dots" />{" cancelling run…"}</Text>;
   if (error) return <Text color="red">{`qa: ${error}`}</Text>;
-  if (!record) return <Text color="cyan"><Spinner type="dots" />{" starting…"}</Text>;
+
+  const footer = armCancel ? (
+    <Text color="#c2891b">{"press x again to cancel the run · any other key keeps it running"}</Text>
+  ) : (
+    <Text dimColor>{"q detach · x cancel · type to ask the assistant"}</Text>
+  );
+
+  if (!record) {
+    return (
+      <Box flexDirection="column">
+        <Text color="cyan"><Spinner type="dots" />{" starting…"}</Text>
+        <Box marginTop={1}>{footer}</Box>
+      </Box>
+    );
+  }
   return (
     <Box flexDirection="column">
-      <Dashboard record={record} />
+      <Dashboard record={record} queue={queue} />
       <Box marginTop={1}><Text dimColor>{"─".repeat(60)}</Text></Box>
-      <ChatInput client={client} runId={id} />
+      <ChatInput client={client} runId={id} onWatchKey={handleWatchKey} />
+      <Box marginTop={1}>{footer}</Box>
     </Box>
   );
 }
 
-export function Launcher({ apps, defaultGuidance, onLaunch, onOnboard, onBack }: { apps: string[]; defaultGuidance?: string; onLaunch: (app: string, target: TestTarget, mode: RunMode, guidance?: string, shadow?: boolean) => void; onOnboard: () => void; onBack?: () => void }): React.ReactElement {
-  const [app, setApp] = useState<string | null>(null);
+export function Launcher({ apps, initialApp, defaultGuidance, onLaunch, onOnboard, onBack }: { apps: string[]; initialApp?: string; defaultGuidance?: string; onLaunch: (app: string, target: TestTarget, mode: RunMode, guidance?: string, shadow?: boolean) => void; onOnboard: () => void; onBack?: () => void }): React.ReactElement {
+  const [app, setApp] = useState<string | null>(initialApp ?? null);
   const [target, setTarget] = useState<TestTarget | null>(null);
   const [mode, setMode] = useState<RunMode | null>(null);
   const [shadow, setShadow] = useState<boolean | null>(null);
@@ -101,7 +173,9 @@ export function Launcher({ apps, defaultGuidance, onLaunch, onOnboard, onBack }:
     if (app === null) { onBack?.(); return; }
     if (target === null) { setApp(null); return; }
     if (mode === "manual" && manualGuidance === undefined && shadow === null) return; // GuidancePrompt handles
-    if (mode !== null && shadow === null) { setMode(null); return; }
+    // Backing out past the guidance step discards the typed guidance — re-picking
+    // "manual" must always prompt again, never reuse a stale answer.
+    if (mode !== null && shadow === null) { setMode(null); setManualGuidance(undefined); return; }
     setTarget(null);
   });
 
@@ -127,7 +201,7 @@ export function Launcher({ apps, defaultGuidance, onLaunch, onOnboard, onBack }:
     );
   }
   if (mode === "manual" && manualGuidance === undefined && shadow === null) {
-    return <GuidancePrompt app={app} target={target!} onSubmit={(guidance) => setManualGuidance(guidance)} onCancel={() => setMode(null)} />;
+    return <GuidancePrompt app={app} target={target!} onSubmit={(guidance) => setManualGuidance(guidance)} onCancel={() => { setMode(null); setManualGuidance(undefined); }} />;
   }
   if (mode !== null && shadow === null) {
     const items: SelectItem[] = [
@@ -147,34 +221,80 @@ export function Launcher({ apps, defaultGuidance, onLaunch, onOnboard, onBack }:
       </Box>
     );
   }
-  const items: SelectItem[] = MODES.map((m) => ({ label: `${m}  — ${MODE_INFO[m]}`, value: m }));
+  const items: SelectItem[] = RUN_MODES.map((m) => ({ label: `${m}  — ${MODE_INFO[m]}`, value: m }));
   return (
     <Box flexDirection="column">
       <Text bold>{`Mode for ${app} · ${target}`}</Text>
-      <SelectInput items={items} onSelect={(i) => { const m = i.value as RunMode; setMode(m); }} />
+      <SelectInput items={items} onSelect={(i) => { const m = i.value as RunMode; setManualGuidance(undefined); setMode(m); }} />
       <Box marginTop={1}><Text dimColor>Esc → back</Text></Box>
     </Box>
   );
 }
 
-export function RunFlow({ client, apps, refName, sha, guidance, onBack }: {
-  client: QaClient; apps: string[]; refName?: string; sha?: string; guidance?: string; onBack?: () => void;
+export function RunFlow({ client, apps, initialApp, refName, sha, guidance, onBack }: {
+  client: QaClient; apps: string[]; initialApp?: string; refName?: string; sha?: string; guidance?: string; onBack?: () => void;
 }): React.ReactElement {
   const [runId, setRunId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [onboarding, setOnboarding] = useState(false);
   const [done, setDone] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  // The app list is local state so onboarding inside the flow can refresh it —
+  // the prop is the initial snapshot (fetched once by the caller).
+  const [appList, setAppList] = useState<string[]>(apps);
+  const [preselect, setPreselect] = useState<string | undefined>(initialApp);
+
+  useEffect(() => { setAppList(apps); }, [apps]);
+
+  const refreshApps = async (newApp: string): Promise<void> => {
+    try {
+      const fresh = (await client.listApps()).map((a) => a.name);
+      setAppList(fresh.includes(newApp) ? fresh : [...fresh, newApp]);
+    } catch {
+      setAppList((prev) => (prev.includes(newApp) ? prev : [...prev, newApp]));
+    }
+  };
 
   const launch = async (app: string, target: TestTarget, mode: RunMode, g?: string, shadow?: boolean): Promise<void> => {
-    try { setDone(false); const res = await client.createRun({ app, target, mode, sha, ref: sha ? undefined : refName ?? "main", guidance: g ?? guidance, shadow }); setRunId(res.id); }
+    try { setNotice(null); setDone(false); const res = await client.createRun({ app, target, mode, sha, ref: sha ? undefined : refName ?? "main", guidance: g ?? guidance, shadow }); setRunId(res.id); }
     catch (e) { setErr(e instanceof QaApiError ? e.message : String(e)); }
   };
 
   if (err) return <Text color="red">{`qa: ${err}`}</Text>;
-  if (runId && !done) return <Watch client={client} id={runId} onDone={() => setDone(true)} />;
-  if (runId && done) return <SummaryScreen client={client} id={runId} onBack={() => { setRunId(null); setDone(false); }} />;
-  if (onboarding) return <OnboardWizard client={client} onDone={() => setOnboarding(false)} onCancel={() => setOnboarding(false)} />;
-  return <Launcher apps={apps} defaultGuidance={guidance} onLaunch={(a, t, m, g, s) => void launch(a, t, m, g, s)} onOnboard={() => setOnboarding(true)} onBack={onBack} />;
+  if (runId && !done) {
+    return (
+      <Watch
+        client={client}
+        id={runId}
+        onDone={() => setDone(true)}
+        onDetach={(n) => { setNotice(n); setRunId(null); setDone(false); setPreselect(undefined); }}
+      />
+    );
+  }
+  if (runId && done) return <SummaryScreen client={client} id={runId} onBack={() => { setRunId(null); setDone(false); setPreselect(undefined); }} />;
+  if (onboarding) {
+    return (
+      <OnboardWizard
+        client={client}
+        onDone={(appName) => { setOnboarding(false); setPreselect(appName); void refreshApps(appName); }}
+        onCancel={() => setOnboarding(false)}
+      />
+    );
+  }
+  return (
+    <Box flexDirection="column">
+      {notice ? <Box marginBottom={1}><Text color="#c2891b">{`⚠ ${notice}`}</Text></Box> : null}
+      <Launcher
+        key={preselect ?? ""}
+        apps={appList}
+        initialApp={preselect}
+        defaultGuidance={guidance}
+        onLaunch={(a, t, m, g, s) => void launch(a, t, m, g, s)}
+        onOnboard={() => setOnboarding(true)}
+        onBack={onBack}
+      />
+    </Box>
+  );
 }
 
 function SummaryScreen({ client, id, onBack }: { client: QaClient; id: string; onBack: () => void }): React.ReactElement {
@@ -194,7 +314,16 @@ function SummaryScreen({ client, id, onBack }: { client: QaClient; id: string; o
     } catch { /* continue failed — stay on summary */ }
   };
 
-  if (continueId) return <Watch client={client} id={continueId} onDone={() => setContinueId(null)} />;
+  if (continueId) {
+    return (
+      <Watch
+        client={client}
+        id={continueId}
+        onDone={() => setContinueId(null)}
+        onDetach={() => setContinueId(null)}
+      />
+    );
+  }
   if (!record) return <Text color="cyan"><Spinner type="dots" />{" loading result…"}</Text>;
   return <RunSummary record={record} client={client} onBack={onBack} onContinue={handleContinue} />;
 }

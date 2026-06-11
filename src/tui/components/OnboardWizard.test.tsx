@@ -164,3 +164,42 @@ test("edit mode review & save calls client.updateApp", async () => {
   assert.equal(updatedWith.value.name, "shop");
   unmount();
 });
+
+test("edit mode changing repo updates the original app config name", async () => {
+  const updatedWith: { value: { name: string; input: CreateAppRequest } | null } = { value: null };
+  const client = makeStubClient({
+    onUpdate: (name, input) => { updatedWith.value = { name, input }; },
+  });
+  const { stdin, lastFrame, unmount } = render(
+    <OnboardWizard client={client} onDone={() => {}} onCancel={() => {}} editMode initialAppName="shop" />,
+  );
+  await sleep(50);
+
+  // edit menu starts on "Repo"; select it, type a new repo, and validate it.
+  stdin.write("\r");
+  await sleep(50);
+  await typeSlowly(stdin, "org/new-repo");
+  stdin.write("\r");
+  await sleep(80);
+
+  // Repo validation lands on DEV URL in the normal wizard flow. Keep current URL
+  // and return to the edit menu.
+  stdin.write("\r");
+  await sleep(50);
+
+  assert.match(lastFrame() ?? "", /Edit config\/apps\/shop\.yaml/);
+  assert.match(lastFrame() ?? "", /Repo: org\/new-repo/);
+
+  for (let i = 0; i < 9; i++) { stdin.write("\x1b[B"); await sleep(5); }
+  stdin.write("\r");
+  await sleep(50);
+  assert.match(lastFrame() ?? "", /Review changes/);
+  stdin.write("\r");
+  await sleep(50);
+
+  assert.ok(updatedWith.value);
+  assert.equal(updatedWith.value.name, "shop");
+  assert.equal(updatedWith.value.input.name, "shop");
+  assert.equal(updatedWith.value.input.repo, "org/new-repo");
+  unmount();
+});

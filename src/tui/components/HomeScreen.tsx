@@ -46,6 +46,8 @@ export function HomeScreen({
   const [statusText, setStatusText] = useState<string | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
   const [selectedApp, setSelectedApp] = useState<string | null>(null);
+  // App just created by the wizard — preselected in the run launcher right after.
+  const [postOnboardApp, setPostOnboardApp] = useState<string | null>(null);
 
   const MENU_ITEMS: SelectItem[] = [
     { label: "▶  Run QA", value: "run" },
@@ -133,6 +135,7 @@ export function HomeScreen({
       (_char: string, key: { escape: boolean }) => {
         if (key.escape && (view === "status" || view === "onboard" || view === "edit-list" || view === "edit" || view === "help" || view === "delete-list" || view === "delete")) {
           setSelectedApp(null);
+          setPostOnboardApp(null);
           setView("home");
           return;
         }
@@ -161,14 +164,27 @@ export function HomeScreen({
         </Box>
       );
     }
-    return <RunFlow client={client} apps={apps} onBack={() => setView("home")} />;
+    return (
+      <RunFlow
+        client={client}
+        apps={apps}
+        initialApp={postOnboardApp ?? undefined}
+        onBack={() => { setPostOnboardApp(null); setView("home"); }}
+      />
+    );
   }
 
   if (view === "onboard") {
     return (
       <OnboardWizard
         client={client}
-        onDone={() => setView("home")}
+        onDone={(appName) => {
+          // The wizard promised "Enter → run first QA": refresh the (stale) app
+          // list and land in the run launcher with the new app preselected.
+          void fetchApps();
+          setPostOnboardApp(appName);
+          setView("run");
+        }}
         onCancel={() => setView("home")}
       />
     );
