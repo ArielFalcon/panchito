@@ -106,6 +106,7 @@ export const CreateRunResultSchema = z.object({
   id: z.string(),
   app: z.string(),
   sha: z.string(),
+  target: TestTargetSchema,
   mode: RunModeSchema,
   status: z.string(),
 });
@@ -118,7 +119,7 @@ export const AskRequestSchema = z.object({
 export const AskResponseSchema = z.object({ answer: z.string() });
 
 export const ContinueRequestSchema = z.object({
-  cases: z.array(z.string()),
+  cases: z.array(z.string()).optional(),
   guidance: z.string().optional(),
 });
 

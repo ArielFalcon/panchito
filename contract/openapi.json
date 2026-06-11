@@ -21,7 +21,7 @@
           }
         },
         "responses": {
-          "201": {
+          "202": {
             "description": "enqueued",
             "content": {
               "application/json": {
@@ -110,7 +110,7 @@
           }
         ],
         "responses": {
-          "204": {
+          "200": {
             "description": "cancelled"
           }
         }
@@ -139,11 +139,12 @@
         ],
         "responses": {
           "200": {
-            "description": "event stream",
+            "description": "SSE stream. Each event uses id=<RunEvent.seq>, event=<RunEvent.body.type>, data=<RunEvent JSON>.",
             "content": {
               "text/event-stream": {
                 "schema": {
-                  "$ref": "#/components/schemas/RunEvent"
+                  "type": "string",
+                  "description": "Line-oriented Server-Sent Events carrying JSON RunEvent payloads in each data field."
                 }
               }
             }
@@ -212,7 +213,7 @@
           }
         },
         "responses": {
-          "200": {
+          "202": {
             "description": "continuation",
             "content": {
               "application/json": {
@@ -1134,6 +1135,13 @@
           "sha": {
             "type": "string"
           },
+          "target": {
+            "type": "string",
+            "enum": [
+              "e2e",
+              "code"
+            ]
+          },
           "mode": {
             "type": "string",
             "enum": [
@@ -1152,6 +1160,7 @@
           "id",
           "app",
           "sha",
+          "target",
           "mode",
           "status"
         ],
@@ -1200,9 +1209,6 @@
             "type": "string"
           }
         },
-        "required": [
-          "cases"
-        ],
         "additionalProperties": false
       },
       "ContinueResult": {

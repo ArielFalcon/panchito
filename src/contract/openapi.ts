@@ -68,7 +68,7 @@ function paths(): Record<string, unknown> {
       post: {
         operationId: "createRun", summary: "Enqueue a run",
         requestBody: { required: true, content: jsonBody("CreateRunInput") },
-        responses: { "201": { description: "enqueued", content: jsonBody("CreateRunResult") } },
+        responses: { "202": { description: "enqueued", content: jsonBody("CreateRunResult") } },
       },
       get: {
         operationId: "listRuns", summary: "List recent runs for an app",
@@ -81,21 +81,33 @@ function paths(): Record<string, unknown> {
     },
     "/api/v1/runs/{id}": {
       get: { operationId: "getRun", parameters: [idParam], responses: { "200": { description: "run", content: jsonBody("RunRecord") } } },
-      delete: { operationId: "cancelRun", summary: "Cancel a run", parameters: [idParam], responses: { "204": { description: "cancelled" } } },
+      delete: { operationId: "cancelRun", summary: "Cancel a run", parameters: [idParam], responses: { "200": { description: "cancelled" } } },
     },
     "/api/v1/runs/{id}/events": {
       get: {
         operationId: "streamRunEvents",
         summary: "SSE stream of RunEvents; Last-Event-ID resumes from the given seq",
         parameters: [idParam, { name: "Last-Event-ID", in: "header", schema: { type: "string" } }],
-        responses: { "200": { description: "event stream", content: { "text/event-stream": { schema: ref("RunEvent") } } } },
+        responses: {
+          "200": {
+            description: "SSE stream. Each event uses id=<RunEvent.seq>, event=<RunEvent.body.type>, data=<RunEvent JSON>.",
+            content: {
+              "text/event-stream": {
+                schema: {
+                  type: "string",
+                  description: "Line-oriented Server-Sent Events carrying JSON RunEvent payloads in each data field.",
+                },
+              },
+            },
+          },
+        },
       },
     },
     "/api/v1/runs/{id}/ask": {
       post: { operationId: "askRun", parameters: [idParam], requestBody: { required: true, content: jsonBody("AskRequest") }, responses: { "200": { description: "answer", content: jsonBody("AskResponse") } } },
     },
     "/api/v1/runs/{id}/continue": {
-      post: { operationId: "continueRun", parameters: [idParam], requestBody: { required: true, content: jsonBody("ContinueRequest") }, responses: { "200": { description: "continuation", content: jsonBody("ContinueResult") } } },
+      post: { operationId: "continueRun", parameters: [idParam], requestBody: { required: true, content: jsonBody("ContinueRequest") }, responses: { "202": { description: "continuation", content: jsonBody("ContinueResult") } } },
     },
     "/api/v1/queue": { get: { operationId: "getQueue", responses: { "200": { description: "queue depth", content: jsonBody("QueueStatus") } } } },
     "/api/v1/apps": { get: { operationId: "listApps", responses: { "200": { description: "configured apps", content: jsonArray("AppView") } } } },

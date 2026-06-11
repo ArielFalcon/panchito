@@ -29,6 +29,7 @@ export interface CreateRunResult {
   id: string;
   app: string;
   sha: string;
+  target: TestTarget;
   mode: RunMode;
   status: string;
 }
