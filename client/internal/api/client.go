@@ -66,7 +66,8 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		return fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
+	// Cap the read: a rogue/misconfigured server must not OOM the client.
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10 MiB
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return &APIError{Status: resp.StatusCode, Msg: errorMessage(data)}
 	}
@@ -90,6 +91,14 @@ func errorMessage(data []byte) string {
 		if e.Message != "" {
 			return e.Message
 		}
+	}
+	// Non-JSON body (e.g. a proxy's plain-text 502): keep a truncated snippet
+	// rather than masking it behind a generic message.
+	if s := strings.TrimSpace(string(data)); s != "" {
+		if len(s) > 256 {
+			s = s[:256]
+		}
+		return s
 	}
 	return "request failed"
 }

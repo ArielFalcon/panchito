@@ -44,6 +44,61 @@ func TestStreamRunEventsDecodesAndForwardsLastEventID(t *testing.T) {
 	}
 }
 
+func TestStreamRunEventsFlushesFinalEventWithoutTrailingBlank(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// A final event with no trailing blank line, then the connection closes.
+		_, _ = w.Write([]byte("data: {\"seq\":0,\"runId\":\"r1\",\"ts\":1,\"body\":{\"type\":\"test.started\",\"name\":\"nav\"}}\n"))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "")
+	var got []events.RunEvent
+	if err := c.StreamRunEvents(context.Background(), "r1", -1, func(ev events.RunEvent) { got = append(got, ev) }); err != nil {
+		t.Fatalf("StreamRunEvents: %v", err)
+	}
+	if len(got) != 1 || got[0].Type != "test.started" {
+		t.Fatalf("final event was not flushed: %+v", got)
+	}
+}
+
+func TestStreamRunEventsJoinsMultiLineData(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// One JSON payload split across two data: lines — SSE joins them with \n,
+		// which is valid JSON whitespace between tokens.
+		_, _ = w.Write([]byte("data: {\"seq\":0,\"runId\":\"r1\",\"ts\":1,\ndata: \"body\":{\"type\":\"test.started\",\"name\":\"nav\"}}\n\n"))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "")
+	var got []events.RunEvent
+	if err := c.StreamRunEvents(context.Background(), "r1", -1, func(ev events.RunEvent) { got = append(got, ev) }); err != nil {
+		t.Fatalf("StreamRunEvents: %v", err)
+	}
+	if len(got) != 1 || got[0].Type != "test.started" {
+		t.Fatalf("multi-line data not joined: %+v", got)
+	}
+}
+
+func TestStreamRunEventsReconnectStopsOnPermanentError(t *testing.T) {
+	connects := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connects++
+		w.WriteHeader(http.StatusUnauthorized) // a 401 must not be retried forever
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "")
+	err := c.StreamRunEventsReconnect(context.Background(), "r1", func(ev events.RunEvent) {})
+	if err == nil {
+		t.Fatal("want an error on 401, got nil")
+	}
+	if connects != 1 {
+		t.Fatalf("reconnected %d times on a 401 (want 1)", connects)
+	}
+}
+
 func TestStreamRunEventsReconnectStopsOnVerdict(t *testing.T) {
 	connects := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
