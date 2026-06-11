@@ -17,8 +17,11 @@ orchestrator's published `contract/openapi.json` (no hand-written drift).
   type-switch decoder for the 15-variant SSE union (which does not codegen into
   idiomatic Go). Tolerant reader — an unknown event type becomes `UnknownEvent`,
   never an error. Round-trip tested against canonical contract JSON.
-- ⏳ HTTP/SSE client, the Bubble Tea screens (connect / home / launcher / live /
-  summary / chat), `theme.json`, reconnect, OS token storage.
+- ✅ HTTP + SSE client (`internal/api`): typed command verbs over the contract
+  DTOs, and a `text/event-stream` reader that decodes RunEvents with `Last-Event-ID`
+  reconnect (stops on the terminal `run.verdict`). UI-agnostic, stdlib-only.
+- ⏳ The Bubble Tea screens (connect / home / launcher / live / summary / chat),
+  `theme.json`, OS token storage.
 
 ## Commands
 
