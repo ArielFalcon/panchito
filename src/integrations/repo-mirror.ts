@@ -5,7 +5,7 @@
 // verifiable without touching disk or network in tests.
 
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 export type Git = (args: string[], cwd?: string) => Promise<string>;
@@ -13,6 +13,7 @@ export type Git = (args: string[], cwd?: string) => Promise<string>;
 export interface MirrorDeps {
   git: Git;
   exists(path: string): boolean;
+  removeFile(path: string): void;
   root?: string;
 }
 
@@ -20,12 +21,14 @@ function workdirRoot(): string {
   return process.env.MIRROR_DIR ?? join(process.cwd(), ".mirrors");
 }
 
-function remoteUrl(repo: string): string {
+// The remote URL NEVER carries a credential. git persists the clone URL into the
+// mirror's .git/config, and the mirrors volume is mounted into the agent container
+// (the agent's session cwd, with bash/read tools) — a token in the URL would hand
+// the push credential to the LLM and to untrusted watched-repo lifecycle scripts.
+// Auth happens exclusively through the transient -c insteadOf rewrite (authHeaderArgs).
+function tokenlessUrl(repo: string): string {
   const base = process.env.GIT_REMOTE_BASE ?? "https://github.com";
-  const token = process.env.GITHUB_TOKEN;
-  return token
-    ? `https://x-access-token:${token}@github.com/${repo}.git`
-    : `${base}/${repo}.git`;
+  return `${base}/${repo}.git`;
 }
 
 // A commit SHA passed to git as a positional arg MUST be a hex id. A hex 7–40 string
@@ -46,6 +49,28 @@ export function authHeaderArgs(): string[] {
     : [];
 }
 
+// Brings the mirror up to date with origin: tokenless clone when missing, fetch when
+// present. On the existing-dir path it first self-heals two failure modes:
+//   1. A stale `.git/index.lock` — the queue is strictly sequential and only the
+//      orchestrator performs git writes, so any lock present here was left by an
+//      abruptly-interrupted run and would otherwise poison every later run.
+//   2. A token embedded in origin's URL — mirrors cloned before the tokenless-URL
+//      policy persist the credential in .git/config; `remote set-url` (idempotent,
+//      cheap) scrubs it on the next run.
+async function syncMirror(repo: string, deps: MirrorDeps): Promise<string> {
+  const root = deps.root ?? workdirRoot();
+  const dir = join(root, repo.replaceAll("/", "__"));
+  if (!deps.exists(dir)) {
+    await deps.git([...authHeaderArgs(), "clone", tokenlessUrl(repo), dir]);
+  } else {
+    const indexLock = join(dir, ".git", "index.lock");
+    if (deps.exists(indexLock)) deps.removeFile(indexLock);
+    await deps.git(["remote", "set-url", "origin", tokenlessUrl(repo)], dir);
+    await deps.git([...authHeaderArgs(), "fetch", "origin"], dir);
+  }
+  return dir;
+}
+
 // Leaves the working copy PRISTINE at the SHA. `checkout -f` discards changes to
 // tracked files (e.g. `e2e/` touched by a previous run that did not publish) and
 // `clean -fd` removes untracked files (leftover specs), EXCEPT node_modules so
@@ -53,13 +78,7 @@ export function authHeaderArgs(): string[] {
 // that do not publish would contaminate the next one (or break the checkout).
 export async function ensureMirror(repo: string, sha: string, deps: MirrorDeps): Promise<string> {
   assertHexSha(sha);
-  const root = deps.root ?? workdirRoot();
-  const dir = join(root, repo.replaceAll("/", "__"));
-  if (!deps.exists(dir)) {
-    await deps.git(["clone", remoteUrl(repo), dir]);
-  } else {
-    await deps.git([...authHeaderArgs(), "fetch", "origin"], dir);
-  }
+  const dir = await syncMirror(repo, deps);
   await deps.git(["checkout", "-f", sha], dir);
   await deps.git(["clean", "-fd", "-e", "node_modules"], dir);
   return dir;
@@ -80,13 +99,7 @@ export function assertBranchName(branch: string): void {
 // service repo, so the front is checked out at its own base branch instead.
 export async function ensureMirrorAtBranch(repo: string, branch: string, deps: MirrorDeps): Promise<string> {
   assertBranchName(branch);
-  const root = deps.root ?? workdirRoot();
-  const dir = join(root, repo.replaceAll("/", "__"));
-  if (!deps.exists(dir)) {
-    await deps.git(["clone", remoteUrl(repo), dir]);
-  } else {
-    await deps.git([...authHeaderArgs(), "fetch", "origin"], dir);
-  }
+  const dir = await syncMirror(repo, deps);
   await deps.git(["checkout", "-f", `origin/${branch}`], dir);
   await deps.git(["clean", "-fd", "-e", "node_modules"], dir);
   return dir;
@@ -139,15 +152,18 @@ export const realGit: Git = (args, cwd) =>
     );
   });
 
-export const defaultMirrorDeps: MirrorDeps = { git: realGit, exists: existsSync };
+export const defaultMirrorDeps: MirrorDeps = {
+  git: realGit,
+  exists: existsSync,
+  removeFile: (path) => rmSync(path, { force: true }),
+};
 
 // Resolves a symbolic ref (branch/tag) to a concrete SHA via git ls-remote.
-// Embeds GITHUB_TOKEN directly in the URL to bypass credential helpers that would
-// otherwise intercept auth and prompt for a username (no terminal → crash).
+// Auth flows through the -c insteadOf rewrite: the rewritten URL carries inline
+// credentials, so no credential helper is consulted (no terminal → no prompt) and
+// the URL argument itself stays tokenless.
 export async function resolveRef(repo: string, ref: string, deps: MirrorDeps): Promise<string> {
-  const token = process.env.GITHUB_TOKEN;
-  const url = token ? `https://x-access-token:${token}@github.com/${repo}.git` : remoteUrl(repo);
-  const stdout = await deps.git(["ls-remote", url, ref]);
+  const stdout = await deps.git([...authHeaderArgs(), "ls-remote", tokenlessUrl(repo), ref]);
   const sha = stdout.split(/\s/)[0];
   if (!sha || sha.length < 40) throw new Error(`no SHA resolved for ${ref}`);
   return sha;

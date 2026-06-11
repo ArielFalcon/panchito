@@ -1,7 +1,7 @@
 import { createServer, IncomingMessage } from "node:http";
 import { join } from "node:path";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { writeFileSync, readFileSync, chmodSync, rmSync, unlinkSync, readdirSync, statSync } from "node:fs";
+import { writeFileSync, readFileSync, chmodSync, rmSync, unlinkSync } from "node:fs";
 import { JobQueue } from "./server/queue";
 import { handleWebhook } from "./server/webhook";
 import { loadAppConfig, loadAppConfigsByRepo, listAppConfigs } from "./orchestrator/config-loader";
@@ -9,12 +9,13 @@ import { handleApi, ApiDeps } from "./server/api";
 import { handleMaintainerApi, recordIncident, setMaintainerStatus, getMaintainerStatus, getIncidents, updateIncident } from "./server/maintainer";
 import { getRecord, listRecords, currentRun, updateRecord, interruptedRecords, continuationDepth, MAX_CONTINUATION_DEPTH } from "./server/history";
 import { enqueueTrackedRun } from "./server/runner";
+import { pruneMirrors, defaultMirrorPruneDeps } from "./server/mirror-prune";
 import { performSwap, confirmSwapHealthy, rollback, realSwapFs, SWAP_MARKER_FILE } from "./server/self-update";
 import { assessChange, assessRate, parseNumstat, readDeployHistory, recordDeploy } from "./server/merge-guard";
 import { recordFixFailure, readFixFailures, renderFailureMemory, realMemoryFs } from "./server/maintainer-memory";
 import { installHttpDispatcher } from "./util/net";
 import { resolveRef, defaultMirrorDeps, authHeaderArgs, type MirrorDeps } from "./integrations/repo-mirror";
-import { defaultOpencodeDeps, askAssistant, OpencodeDeps, startEventStream, getOpenSessionCount } from "./integrations/opencode-client";
+import { defaultOpencodeDeps, askAssistant, OpencodeDeps, startEventStreamWithReconnect, getOpenSessionCount } from "./integrations/opencode-client";
 import { appendLog, appendActivity, deleteAppHistory } from "./server/history";
 import { type RunMode, type TestTarget } from "./types";
 import { github } from "./integrations/github";
@@ -451,7 +452,13 @@ async function triggerMaintainer(): Promise<void> {
   }
 }
 
-const MAX_SESSION_AGE_MS = 30 * 60 * 1000;
+// Orphan-session sweep threshold. Must always exceed the longest possible agent
+// turn: when an operator raises OPENCODE_TIMEOUT_MS above 30 min, a live session
+// would otherwise be deleted mid-prompt. The 5-min buffer covers dispose/teardown.
+const MAX_SESSION_AGE_MS = Math.max(
+  30 * 60 * 1000,
+  (Number(process.env.OPENCODE_TIMEOUT_MS) || 0) + 5 * 60 * 1000,
+);
 
 let cleanupDeps: Promise<OpencodeDeps> | undefined;
 function getCleanupDeps(): Promise<OpencodeDeps> {
@@ -486,140 +493,6 @@ function generatePrometheusMetrics(queue: JobQueue, openSessions: number): strin
 let backupTick = 0;
 let pruneTick = 0;
 const PRUNE_INTERVAL_TICKS = 360; // 6 hours (360 × 60 s)
-const PRUNE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-const PROTECTED_MIRROR_NAMES = new Set(["ai-pipeline-self"]);
-
-function getDirectorySize(dir: string): number {
-  let size = 0;
-  try {
-    const entries = readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        size += getDirectorySize(fullPath);
-      } else if (entry.isFile()) {
-        try {
-          size += statSync(fullPath).size;
-        } catch {
-          /* ignore unreadable files */
-        }
-      }
-    }
-  } catch {
-    /* ignore unreadable directories */
-  }
-  return size;
-}
-
-async function pruneOldMirrors(): Promise<void> {
-  const mirrorRoot = process.env.MIRROR_DIR ?? join(process.cwd(), ".mirrors");
-
-  // Determine which repos are currently in use by an active run
-  const activeRepos = new Set<string>();
-  const running = currentRun();
-  if (running && running.status === "running") {
-    try {
-      const cfg = loadAppConfig(running.app);
-      activeRepos.add(cfg.repo.replaceAll("/", "__"));
-    } catch {
-      /* app config missing — ignore */
-    }
-    if (running.triggerRepo) {
-      activeRepos.add(running.triggerRepo.replaceAll("/", "__"));
-    }
-  }
-  // Also guard by the queue's current runId (defensive: DB and queue may be momentarily out of sync)
-  const currentRunId = queue.current;
-  if (currentRunId && (!running || running.id !== currentRunId)) {
-    const record = getRecord(currentRunId);
-    if (record) {
-      try {
-        const cfg = loadAppConfig(record.app);
-        activeRepos.add(cfg.repo.replaceAll("/", "__"));
-      } catch {
-        /* ignore */
-      }
-      if (record.triggerRepo) {
-        activeRepos.add(record.triggerRepo.replaceAll("/", "__"));
-      }
-    }
-  }
-
-  // Build set of repos that are still configured
-  const configuredRepos = new Set<string>();
-  for (const app of listAppConfigs()) {
-    configuredRepos.add(app.repo.replaceAll("/", "__"));
-    if (app.services) {
-      for (const svc of app.services) {
-        configuredRepos.add(svc.repo.replaceAll("/", "__"));
-      }
-    }
-  }
-
-  // Scan the mirrors directory
-  let entries: string[];
-  try {
-    entries = readdirSync(mirrorRoot);
-  } catch {
-    logJson("warn", "pruneOldMirrors: could not read mirror directory", { mirrorRoot });
-    return;
-  }
-
-  const now = Date.now();
-  const dirs = entries
-    .filter((name) => !PROTECTED_MIRROR_NAMES.has(name))
-    .map((name) => {
-      const path = join(mirrorRoot, name);
-      try {
-        const s = statSync(path);
-        if (!s.isDirectory()) return undefined;
-        return { name, path, atimeMs: s.atimeMs };
-      } catch {
-        return undefined;
-      }
-    })
-    .filter((d): d is { name: string; path: string; atimeMs: number } => d !== undefined);
-
-  // Group by repo name (directory name is the repo slug)
-  const byRepo = new Map<string, Array<{ name: string; path: string; atimeMs: number }>>();
-  for (const d of dirs) {
-    const list = byRepo.get(d.name) ?? [];
-    list.push(d);
-    byRepo.set(d.name, list);
-  }
-
-  const toDelete: Array<{ name: string; path: string; atimeMs: number }> = [];
-  for (const [repoName, list] of byRepo) {
-    // Sort by access time descending — most recent first
-    list.sort((a, b) => b.atimeMs - a.atimeMs);
-
-    for (const [i, d] of list.entries()) {
-      if (i === 0) continue; // keep the most recent working copy for this repo
-      if (activeRepos.has(repoName)) continue; // don't touch anything for an active run
-      const isOld = now - d.atimeMs > PRUNE_MAX_AGE_MS;
-      const isOrphan = !configuredRepos.has(repoName);
-      if (isOld || isOrphan) {
-        toDelete.push(d);
-      }
-    }
-  }
-
-  let deletedCount = 0;
-  let freedBytes = 0;
-  for (const d of toDelete) {
-    try {
-      freedBytes += getDirectorySize(d.path);
-      rmSync(d.path, { recursive: true, force: true });
-      deletedCount++;
-    } catch (err) {
-      logJson("warn", "pruneOldMirrors: failed to delete mirror", { path: d.path, error: err instanceof Error ? err.message : String(err) });
-    }
-  }
-
-  if (deletedCount > 0) {
-    logJson("info", "pruned old mirrors", { deletedCount, freedBytes, freedMB: Math.round(freedBytes / 1024 / 1024) });
-  }
-}
 
 function startHealthPoller(): void {
   let fails = 0;
@@ -655,7 +528,7 @@ function startHealthPoller(): void {
     if (backupTick >= 1440) {
       backupTick = 0;
       const { backupDatabase } = await import("./server/history");
-      const r = backupDatabase();
+      const r = await backupDatabase();
       if (r.backedUp) {
         logJson("info", "SQLite backup created", { path: r.path });
       } else if (r.error) {
@@ -667,7 +540,7 @@ function startHealthPoller(): void {
     pruneTick++;
     if (pruneTick >= PRUNE_INTERVAL_TICKS) {
       pruneTick = 0;
-      await pruneOldMirrors();
+      pruneMirrors(defaultMirrorPruneDeps(() => queue.current));
     }
   }, 60_000);
 }
@@ -1097,6 +970,11 @@ const server = createServer(async (req, res) => {
   res.end(JSON.stringify({ error: "not found" }));
 });
 
+// Finalize zombie runs from a previous process BEFORE accepting traffic: a webhook
+// landing during boot creates a legitimate `enqueued` record that a late sweep would
+// wrongly finalize as infra-error.
+finalizeInterruptedRuns();
+
 server.listen(port, () => {
   logJson("info", `ai-pipeline listening on :${port}${apiToken ? " (API auth on)" : ""}`);
   // Make global fetch proxy-aware (HTTP(S)_PROXY/NO_PROXY) from boot, before any GitHub API or
@@ -1105,17 +983,17 @@ server.listen(port, () => {
   installHttpDispatcher(startupTimeout).catch((err) => logJson("warn", "HTTP dispatcher setup failed", { error: err instanceof Error ? err.message : String(err) }));
   // Start the SSE event stream from OpenCode so agent activity (tool calls,
   // file edits, streaming text) is routed to RunRecord logs in real time.
-  startEventStream(
+  startEventStreamWithReconnect(
     (a) => {
       // Structured event → the live TUI panel; display line → the human log feed.
       appendActivity(a.runId, { kind: a.kind, text: a.text, status: a.status });
       appendLog(a.runId, a.display);
     },
     eventStreamController.signal,
-  ).catch((err) => logJson("warn", "event stream failed", { error: err instanceof Error ? err.message : String(err) }));
+    { log: (msg) => logJson("warn", msg) },
+  ).catch((err) => logJson("warn", "event stream reconnect loop failed", { error: err instanceof Error ? err.message : String(err) }));
   recoverRollbackRecord();
   confirmSwapAfterBoot();
-  finalizeInterruptedRuns();
   startHealthPoller();
   recoverMaintainerState();
 });

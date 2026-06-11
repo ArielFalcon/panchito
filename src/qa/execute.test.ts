@@ -1,6 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runE2E, ExecuteDeps, parseStreamEvent, streamStatusToCase } from "./execute";
+import { spawn } from "node:child_process";
+import {
+  runE2E,
+  ExecuteDeps,
+  parseStreamEvent,
+  streamStatusToCase,
+  killTree,
+  playwrightArgs,
+  e2eTimeoutMs,
+  DEFAULT_E2E_TIMEOUT_MS,
+} from "./execute";
 import { QaCase } from "../types";
 
 test("runs, maps cases and SANITIZES the logs", async () => {
@@ -160,4 +170,108 @@ test("runE2E handles a null report by returning infra-error", async () => {
   const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-null" }, deps);
   assert.equal(run.verdict, "infra-error");
   assert.equal(run.passed, false);
+});
+
+// ── Process safeguards: timeout, abort, kill-tree, --project ─────────────────
+
+test("a hung runner is timed out and classified infra-error, never a test failure", async () => {
+  const deps: ExecuteDeps = {
+    runSuite: () => new Promise(() => { /* hangs forever, like a wedged browser */ }),
+  };
+  const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-hang", timeoutMs: 30 }, deps);
+  assert.equal(run.verdict, "infra-error");
+  assert.equal(run.passed, false);
+  assert.equal(run.cases.length, 0);
+  assert.match(run.logs, /timed out after 30ms — killed/);
+});
+
+test("an abort signal kills a hung runner and classifies infra-error", async () => {
+  const controller = new AbortController();
+  const deps: ExecuteDeps = {
+    runSuite: () => new Promise(() => { /* hangs until aborted */ }),
+  };
+  setTimeout(() => controller.abort(), 10);
+  const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-abort", signal: controller.signal }, deps);
+  assert.equal(run.verdict, "infra-error");
+  assert.equal(run.passed, false);
+  assert.match(run.logs, /aborted by operator cancel/);
+});
+
+test("an already-aborted signal returns infra-error without starting the runner", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let started = false;
+  const deps: ExecuteDeps = {
+    runSuite: async () => { started = true; return { report: { stats: {} }, logs: "", ran: true }; },
+  };
+  const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-preabort", signal: controller.signal }, deps);
+  assert.equal(run.verdict, "infra-error");
+  assert.equal(started, false);
+});
+
+test("runE2E passes project, signal and timeoutMs through to the runner deps", async () => {
+  const controller = new AbortController();
+  let seen: { project?: string; signal?: AbortSignal; timeoutMs?: number } = {};
+  const deps: ExecuteDeps = {
+    runSuite: async (args) => {
+      seen = { project: args.project, signal: args.signal, timeoutMs: args.timeoutMs };
+      return { report: { stats: { expected: 1 } }, logs: "ok", ran: true };
+    },
+  };
+  await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-proj", project: "desktop", signal: controller.signal, timeoutMs: 5_000 }, deps);
+  assert.equal(seen.project, "desktop");
+  assert.equal(seen.signal, controller.signal);
+  assert.equal(seen.timeoutMs, 5_000);
+});
+
+test("runE2E rejects a project name outside the allowlist (arg-injection surface)", async () => {
+  let started = false;
+  const deps: ExecuteDeps = {
+    runSuite: async () => { started = true; return { report: { stats: {} }, logs: "", ran: true }; },
+  };
+  await assert.rejects(
+    () => runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-inj", project: "desktop --workers=99" }, deps),
+    /invalid Playwright project name/,
+  );
+  await assert.rejects(
+    () => runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-inj2", project: "a;rm -rf /" }, deps),
+    /invalid Playwright project name/,
+  );
+  assert.equal(started, false);
+});
+
+test("playwrightArgs appends --project only when set, and validates it", () => {
+  assert.deepEqual(playwrightArgs("/tmp/rep.cjs"), ["playwright", "test", "--reporter=/tmp/rep.cjs,json"]);
+  assert.deepEqual(
+    playwrightArgs("/tmp/rep.cjs", "desktop"),
+    ["playwright", "test", "--reporter=/tmp/rep.cjs,json", "--project=desktop"],
+  );
+  assert.throws(() => playwrightArgs("/tmp/rep.cjs", "desktop mobile"), /invalid Playwright project name/);
+  assert.throws(() => playwrightArgs("/tmp/rep.cjs", "$(reboot)"), /invalid Playwright project name/);
+});
+
+test("e2eTimeoutMs honors QA_E2E_TIMEOUT_MS and falls back to the default on garbage", () => {
+  const prev = process.env.QA_E2E_TIMEOUT_MS;
+  try {
+    process.env.QA_E2E_TIMEOUT_MS = "123456";
+    assert.equal(e2eTimeoutMs(), 123456);
+    process.env.QA_E2E_TIMEOUT_MS = "not-a-number";
+    assert.equal(e2eTimeoutMs(), DEFAULT_E2E_TIMEOUT_MS);
+    process.env.QA_E2E_TIMEOUT_MS = "-5";
+    assert.equal(e2eTimeoutMs(), DEFAULT_E2E_TIMEOUT_MS);
+    delete process.env.QA_E2E_TIMEOUT_MS;
+    assert.equal(e2eTimeoutMs(), DEFAULT_E2E_TIMEOUT_MS);
+  } finally {
+    if (prev === undefined) delete process.env.QA_E2E_TIMEOUT_MS;
+    else process.env.QA_E2E_TIMEOUT_MS = prev;
+  }
+});
+
+test("killTree SIGKILLs a detached child (the helper behind every QA spawn)", async () => {
+  // A real, cheap child that would otherwise hang forever — same shape as a wedged runner.
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true });
+  await new Promise((resolve) => child.once("spawn", resolve));
+  const closed = new Promise<NodeJS.Signals | null>((resolve) => child.on("close", (_code, signal) => resolve(signal)));
+  killTree(child);
+  assert.equal(await closed, "SIGKILL");
 });

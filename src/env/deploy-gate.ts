@@ -59,13 +59,18 @@ export function shaMatches(a: string | undefined, b: string | undefined): boolea
   return false;
 }
 
+// The optional signal stops the poll loop early: the pipeline aborts the gate when the
+// run is cancelled or when classification decides the commit is a skip (the gate runs
+// concurrently with local work, so by the time a skip is known it may still be polling).
 export async function waitForDeploy(
   app: DeployTarget,
   sha: string,
   deps: GateDeps = defaultDeps,
+  signal?: AbortSignal,
 ): Promise<void> {
   const deadline = deps.now() + app.deployTimeoutMs;
   while (deps.now() < deadline) {
+    if (signal?.aborted) throw new Error(`deploy gate aborted for ${app.name}`);
     const v = await deps.fetchVersion(app.versionUrl);
     if (shaMatches(v?.sha, sha) && v?.healthy === true) return;
     await deps.sleep(app.pollIntervalMs);

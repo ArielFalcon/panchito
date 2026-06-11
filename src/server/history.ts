@@ -9,7 +9,7 @@
 
 import Database from "better-sqlite3";
 import { join } from "node:path";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { RunRecord, RunMode, TestTarget, QaCase, RunVerdict, SpecRecord, RunOutcome, AgentActivity } from "../types";
 import { applyOutcome, type LearningRule, type RuleUpsert, type Confidence, type RuleStatus } from "../qa/learning/learning-rule";
@@ -605,21 +605,20 @@ process.on("exit", () => {
 });
 
 // ── SQLite backup (cron-like) ───────────────────────────────────────────────
-// Copies the DB file to a backup directory with a timestamp. Keeps the last
+// Writes a consistent snapshot of the DB to a backup directory with a timestamp,
+// using better-sqlite3's native online backup API — WAL-safe, unlike a raw file
+// copy which can miss the -wal tail and produce a torn backup. Keeps the last
 // N backups. Called from the health poller in index.ts every 24h.
 
-export function backupDatabase(): { backedUp: boolean; path?: string; error?: string } {
+export async function backupDatabase(): Promise<{ backedUp: boolean; path?: string; error?: string }> {
   if (!initialized) return { backedUp: false, error: "db not initialized" };
-  const dbPath = process.env.HISTORY_DB_PATH ?? join(process.env.AI_PIPELINE_ROOT ?? process.cwd(), "data", "ai-pipeline.db");
   const backupDir = join(process.env.AI_PIPELINE_ROOT ?? process.cwd(), "data", "backups");
   try {
     mkdirSync(backupDir, { recursive: true });
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const backupPath = join(backupDir, `ai-pipeline-${timestamp}.db`);
-    const { copyFileSync } = require("node:fs");
-    copyFileSync(dbPath, backupPath);
+    await db.backup(backupPath);
     // Prune old backups: keep only the last 7
-    const { readdirSync, unlinkSync } = require("node:fs");
     const files = readdirSync(backupDir)
       .filter((f: string) => f.startsWith("ai-pipeline-") && f.endsWith(".db"))
       .sort();

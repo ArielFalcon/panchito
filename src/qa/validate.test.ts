@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { validateSpecs, ValidateDeps } from "./validate";
+import { validateSpecs, ValidateDeps, runCheck } from "./validate";
 
 const ok = async () => ({ ok: true, output: "" });
 
@@ -64,4 +64,44 @@ test("invalid metadata makes the run invalid", async () => {
   const res = await validateSpecs("/dir", deps);
   assert.equal(res.ok, false);
   assert.match(res.errors[0]!, /\[manifest\].*objective/);
+});
+
+// ── runCheck process safeguards (real, cheap children — no network/tooling) ──
+
+test("runCheck kills a hung check on timeout and classifies it as INFRA", async () => {
+  // A child that would hang forever — same shape as a wedged tsc/eslint/playwright.
+  const res = await runCheck(process.execPath, ["-e", "setInterval(() => {}, 1000)"], process.cwd(), 100);
+  assert.equal(res.ok, false);
+  assert.equal(res.infra, true); // a wedged child is infrastructure, not a code defect
+  assert.match(res.output, /timed out after 100ms — killed/);
+});
+
+test("runCheck resolves ok on a clean exit and captures output", async () => {
+  const res = await runCheck(process.execPath, ["-e", "console.log('all good')"], process.cwd());
+  assert.equal(res.ok, true);
+  assert.match(res.output, /all good/);
+  assert.equal(res.infra, undefined);
+});
+
+test("runCheck flags a non-zero exit as a CODE failure, not infra", async () => {
+  const res = await runCheck(process.execPath, ["-e", "console.error('TS2322'); process.exit(2)"], process.cwd());
+  assert.equal(res.ok, false);
+  assert.equal(res.infra, undefined); // the tool ran and judged the code
+  assert.match(res.output, /TS2322/);
+});
+
+test("runCheck flags a missing binary (ENOENT) as INFRA", async () => {
+  const res = await runCheck("/definitely/not/a/binary-qa-xyz", [], process.cwd(), 5_000);
+  assert.equal(res.ok, false);
+  assert.equal(res.infra, true);
+});
+
+test("a timed-out check routes through validateSpecs as pure infra", async () => {
+  // The shape runCheck produces on timeout, fed through the aggregation: the run
+  // must surface as infra-error (gate couldn't run), never `invalid`.
+  const timedOut = async () => ({ ok: false, output: "npx tsc --noEmit timed out after 300000ms — killed", infra: true });
+  const deps: ValidateDeps = { typecheck: timedOut, lint: ok, listTests: ok, checkManifest: ok };
+  const res = await validateSpecs("/dir", deps);
+  assert.equal(res.ok, false);
+  assert.equal(res.infra, true);
 });

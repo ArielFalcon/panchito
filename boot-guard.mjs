@@ -10,6 +10,7 @@
 // the backed-up src/ (+ package files) so the service returns to the last known-good code.
 
 import { existsSync, rmSync, cpSync, readFileSync, writeFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { join } from "node:path";
 
 const ROOT = process.env.AI_PIPELINE_ROOT ?? process.cwd();
@@ -33,12 +34,25 @@ if ((marker.attempt ?? 0) >= MAX_BOOT_ATTEMPTS) {
   if (existsSync(srcBak)) {
     rmSync(join(ROOT, "src"), { recursive: true, force: true });
     cpSync(srcBak, join(ROOT, "src"), { recursive: true });
+    let packagesRestored = false;
     for (const f of ["package.json", "package-lock.json"]) {
       const bak = join(ROOT, `${f}.bak`);
-      if (existsSync(bak)) cpSync(bak, join(ROOT, f), { force: true });
+      if (existsSync(bak)) {
+        cpSync(bak, join(ROOT, f), { force: true });
+        packagesRestored = true;
+      }
     }
     for (const b of ["src.bak", "package.json.bak", "package-lock.json.bak"]) {
       rmSync(join(ROOT, b), { recursive: true, force: true });
+    }
+    // The swap already installed the NEW package set into node_modules; the restored code on
+    // mutated deps could crash-loop with no recovery left. Reinstall the restored lockfile.
+    if (packagesRestored) {
+      try {
+        execSync("npm install --no-audit --no-fund", { cwd: ROOT, stdio: "inherit", timeout: 10 * 60 * 1000 });
+      } catch (err) {
+        console.error(`[boot-guard] WARNING: npm install after rollback failed (${err?.message ?? err}) — the restored code may not boot until deps are reinstalled manually.`);
+      }
     }
     console.error(`[boot-guard] swapped code failed ${marker.attempt} boot(s) — ROLLED BACK to the previous src/.`);
     // Bridge: the boot-guard can't use the app's modules, so it leaves the marker for the (now

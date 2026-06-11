@@ -13,7 +13,14 @@ import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { scrubEnv } from "./code-runner";
+import { killTree } from "./execute";
 import { validateManifest } from "./metadata";
+
+// Per-check wall-clock budget for the static gate's spawned tools (tsc, eslint,
+// playwright --list). A wedged child must never freeze the sequential queue; on
+// expiry the process TREE is SIGKILLed and the check resolves as INFRA (the gate
+// itself couldn't run — not a code-quality verdict).
+export const DEFAULT_VALIDATE_CHECK_TIMEOUT_MS = 300_000; // 5 min
 
 export interface CheckResult {
   ok: boolean;
@@ -62,24 +69,45 @@ export async function validateSpecs(
 // Default runners: run the tools INSIDE the repo's `e2e/` project (its own
 // config/tooling). They require tsc/eslint/playwright to be available (the e2e
 // project's own deps, installed by the orchestrator before this gate).
-function sh(cmd: string, args: string[], e2eDir: string): Promise<CheckResult> {
+// Exported so the timeout/kill-tree behavior is testable with a real (cheap) child.
+export function runCheck(
+  cmd: string,
+  args: string[],
+  e2eDir: string,
+  timeoutMs: number = DEFAULT_VALIDATE_CHECK_TIMEOUT_MS,
+): Promise<CheckResult> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd: e2eDir, env: scrubEnv() });
+    // `detached: true` makes the child its own process-group leader so killTree can
+    // reap grandchildren (npx forks the real tool as a child of the child).
+    const child = spawn(cmd, args, { cwd: e2eDir, env: scrubEnv(), detached: true });
     let out = "";
+    let settled = false;
+    const settle = (res: CheckResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(res);
+    };
+    // A wedged check (hung tsc/eslint/playwright) is infrastructure, same as
+    // ENOENT/signal-kill below: kill the tree and route through the infra path.
+    const timer = setTimeout(() => {
+      killTree(child);
+      settle({ ok: false, output: `${cmd} ${args.join(" ")} timed out after ${timeoutMs}ms — killed`, infra: true });
+    }, timeoutMs);
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (out += d));
     // ENOENT (missing binary) or any spawn-level failure is infrastructure, not a
     // code-quality verdict — it means the static gate itself couldn't run.
-    child.on("error", (e) => resolve({ ok: false, output: String(e), infra: true }));
+    child.on("error", (e) => settle({ ok: false, output: String(e), infra: true }));
     // Signal-kill (code === null) is also infrastructure (OOM, host pressure).
-    child.on("close", (code) => resolve({ ok: code === 0, output: out, infra: code === null ? true : undefined }));
+    child.on("close", (code) => settle({ ok: code === 0, output: out, infra: code === null ? true : undefined }));
   });
 }
 
 export const defaultValidateDeps: ValidateDeps = {
-  typecheck: (e2eDir) => sh("npx", ["tsc", "--noEmit"], e2eDir),
-  lint: (e2eDir) => sh("npx", ["eslint", "."], e2eDir),
-  listTests: (e2eDir) => sh("npx", ["playwright", "test", "--list"], e2eDir),
+  typecheck: (e2eDir) => runCheck("npx", ["tsc", "--noEmit"], e2eDir),
+  lint: (e2eDir) => runCheck("npx", ["eslint", "."], e2eDir),
+  listTests: (e2eDir) => runCheck("npx", ["playwright", "test", "--list"], e2eDir),
   checkManifest: async (e2eDir) => {
     try {
       const raw = JSON.parse(readFileSync(join(e2eDir, ".qa", "manifest.json"), "utf8"));

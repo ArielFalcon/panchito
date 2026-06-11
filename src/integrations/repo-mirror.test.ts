@@ -2,15 +2,24 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ensureMirror, ensureMirrorAtBranch, getCommitDiff, listChangedSpecs, getCommitsBehind, getCommitMessage, resolveRef, MirrorDeps } from "./repo-mirror";
 
-// authHeaderArgs() depends on GITHUB_TOKEN; clear it to isolate the logic.
+// authHeaderArgs() depends on GITHUB_TOKEN and the remote URL on GIT_REMOTE_BASE;
+// clear both to isolate the logic (token-bearing tests set GITHUB_TOKEN per-test).
 delete process.env.GITHUB_TOKEN;
+delete process.env.GIT_REMOTE_BASE;
 
-function recorder(exists: boolean): MirrorDeps & { calls: string[][] } {
+// exists: a boolean covers both the mirror dir and the stale-lock probe; a function
+// lets a test answer differently per path (e.g. "dir exists but no index.lock").
+function recorder(exists: boolean | ((path: string) => boolean)): MirrorDeps & { calls: string[][]; removed: string[] } {
   const calls: string[][] = [];
+  const removed: string[] = [];
   return {
     calls,
+    removed,
     root: "/tmp/mirrors",
-    exists: () => exists,
+    exists: typeof exists === "function" ? exists : () => exists,
+    removeFile: (path) => {
+      removed.push(path);
+    },
     git: async (args) => {
       calls.push(args);
       return "diff-output";
@@ -22,24 +31,108 @@ test("clones, force-checks out and cleans when the working copy does not exist",
   const d = recorder(false);
   const dir = await ensureMirror("org/app", "abc1234", d);
   assert.equal(dir, "/tmp/mirrors/org__app");
-  assert.equal(d.calls[0]![0], "clone");
+  assert.deepEqual(d.calls[0], ["clone", "https://github.com/org/app.git", "/tmp/mirrors/org__app"]);
   assert.deepEqual(d.calls[1], ["checkout", "-f", "abc1234"]);
   assert.deepEqual(d.calls[2], ["clean", "-fd", "-e", "node_modules"]);
 });
 
-test("fetches, force-checks out and cleans when the working copy already exists", async () => {
-  const d = recorder(true);
+test("existing mirror: scrubs origin URL, fetches, force-checks out and cleans", async () => {
+  const d = recorder((p) => !p.endsWith("index.lock"));
   await ensureMirror("org/app", "abc1234", d);
-  assert.deepEqual(d.calls[0], ["fetch", "origin"]);
-  assert.deepEqual(d.calls[1], ["checkout", "-f", "abc1234"]);
-  assert.deepEqual(d.calls[2], ["clean", "-fd", "-e", "node_modules"]);
+  assert.deepEqual(d.calls[0], ["remote", "set-url", "origin", "https://github.com/org/app.git"]);
+  assert.deepEqual(d.calls[1], ["fetch", "origin"]);
+  assert.deepEqual(d.calls[2], ["checkout", "-f", "abc1234"]);
+  assert.deepEqual(d.calls[3], ["clean", "-fd", "-e", "node_modules"]);
+});
+
+// ── Security: the push token must never be persisted into the mirror ─────────
+// The mirrors volume is mounted into the agent container (its session cwd, with
+// bash/read tools): a token in the clone URL would land in .git/config and hand
+// the credential to the LLM and to watched-repo lifecycle scripts.
+
+const INSTEADOF_FLAG = "url.https://x-access-token:sekret-token@github.com/.insteadOf=https://github.com/";
+
+test("clone URL is tokenless; auth rides the transient -c insteadOf rewrite", async () => {
+  process.env.GITHUB_TOKEN = "sekret-token";
+  try {
+    const d = recorder(false);
+    await ensureMirror("org/app", "abc1234", d);
+    assert.deepEqual(d.calls[0], ["-c", INSTEADOF_FLAG, "clone", "https://github.com/org/app.git", "/tmp/mirrors/org__app"]);
+    // Nothing after the -c rewrite (the args git persists/uses as URL) carries the token.
+    for (const arg of d.calls[0]!.slice(2)) assert.ok(!arg.includes("sekret-token"), `token leaked into ${arg}`);
+  } finally {
+    delete process.env.GITHUB_TOKEN;
+  }
+});
+
+test("ensureMirrorAtBranch clone URL is tokenless with the insteadOf rewrite too", async () => {
+  process.env.GITHUB_TOKEN = "sekret-token";
+  try {
+    const d = recorder(false);
+    await ensureMirrorAtBranch("org/app", "main", d);
+    assert.deepEqual(d.calls[0], ["-c", INSTEADOF_FLAG, "clone", "https://github.com/org/app.git", "/tmp/mirrors/org__app"]);
+  } finally {
+    delete process.env.GITHUB_TOKEN;
+  }
+});
+
+test("existing mirror: origin is reset to the tokenless URL before fetch (scrubs token persisted by older clones)", async () => {
+  process.env.GITHUB_TOKEN = "sekret-token";
+  try {
+    const d = recorder((p) => !p.endsWith("index.lock"));
+    await ensureMirror("org/app", "abc1234", d);
+    assert.deepEqual(d.calls[0], ["remote", "set-url", "origin", "https://github.com/org/app.git"]);
+    assert.deepEqual(d.calls[1], ["-c", INSTEADOF_FLAG, "fetch", "origin"]);
+  } finally {
+    delete process.env.GITHUB_TOKEN;
+  }
+});
+
+test("resolveRef queries ls-remote with the tokenless URL through the insteadOf rewrite", async () => {
+  process.env.GITHUB_TOKEN = "sekret-token";
+  try {
+    const d = gitStub(() => "a".repeat(40) + "\trefs/heads/main\n");
+    const sha = await resolveRef("org/app", "main", d);
+    assert.equal(sha, "a".repeat(40));
+    assert.deepEqual(d.calls[0], ["-c", INSTEADOF_FLAG, "ls-remote", "https://github.com/org/app.git", "main"]);
+  } finally {
+    delete process.env.GITHUB_TOKEN;
+  }
+});
+
+// ── Stale git lock self-heal ──────────────────────────────────────────────────
+// The queue is strictly sequential and only the orchestrator performs git writes,
+// so an index.lock present at the start of a run is stale by definition.
+
+test("removes a stale .git/index.lock before any git command", async () => {
+  const d = recorder(true); // mirror dir AND lock exist
+  await ensureMirror("org/app", "abc1234", d);
+  assert.deepEqual(d.removed, ["/tmp/mirrors/org__app/.git/index.lock"]);
+});
+
+test("ensureMirrorAtBranch also removes a stale index.lock", async () => {
+  const d = recorder(true);
+  await ensureMirrorAtBranch("org/app", "main", d);
+  assert.deepEqual(d.removed, ["/tmp/mirrors/org__app/.git/index.lock"]);
+});
+
+test("does not touch index.lock when absent", async () => {
+  const d = recorder((p) => !p.endsWith("index.lock"));
+  await ensureMirror("org/app", "abc1234", d);
+  assert.deepEqual(d.removed, []);
+});
+
+test("does not probe for a lock on the clone path (no mirror, no lock)", async () => {
+  const d = recorder(false);
+  await ensureMirror("org/app", "abc1234", d);
+  assert.deepEqual(d.removed, []);
 });
 
 // A custom git stub whose output depends on the args (so the parent-count probe and
 // the diff can return different things).
 function gitStub(reply: (args: string[]) => string): MirrorDeps & { calls: string[][] } {
   const calls: string[][] = [];
-  return { calls, root: "/tmp/mirrors", exists: () => true, git: async (args) => { calls.push(args); return reply(args); } };
+  return { calls, root: "/tmp/mirrors", exists: () => true, removeFile: () => {}, git: async (args) => { calls.push(args); return reply(args); } };
 }
 
 test("getCommitDiff of a single-parent commit uses plain git show", async () => {
@@ -136,19 +229,19 @@ test("ensureMirror propagates git clone failure (network timeout / auth failure)
   const d: MirrorDeps = {
     root: "/tmp/mirrors",
     exists: () => false,
+    removeFile: () => {},
     git: async () => { throw new Error("git clone failed: connection timeout"); },
   };
   await assert.rejects(() => ensureMirror("org/app", "abc1234", d), /git clone failed/);
 });
 
 test("ensureMirror propagates git checkout failure", async () => {
-  let callCount = 0;
   const d: MirrorDeps = {
     root: "/tmp/mirrors",
     exists: () => true,
+    removeFile: () => {},
     git: async (args) => {
-      callCount++;
-      if (callCount === 2) throw new Error("git checkout failed: unknown revision");
+      if (args[0] === "checkout") throw new Error("git checkout failed: unknown revision");
       return "ok";
     },
   };
@@ -156,13 +249,12 @@ test("ensureMirror propagates git checkout failure", async () => {
 });
 
 test("ensureMirror propagates git fetch failure", async () => {
-  let callCount = 0;
   const d: MirrorDeps = {
     root: "/tmp/mirrors",
     exists: () => true,
+    removeFile: () => {},
     git: async (args) => {
-      callCount++;
-      if (callCount === 1) throw new Error("git fetch failed: 401 Unauthorized");
+      if (args.includes("fetch")) throw new Error("git fetch failed: 401 Unauthorized");
       return "ok";
     },
   };
@@ -173,6 +265,7 @@ test("getCommitDiff propagates git show failure", async () => {
   const d: MirrorDeps = {
     root: "/tmp/mirrors",
     exists: () => true,
+    removeFile: () => {},
     git: async () => { throw new Error("git show failed: bad object"); },
   };
   await assert.rejects(() => getCommitDiff("/dir", "abc1234", d), /git show failed/);
@@ -182,6 +275,7 @@ test("listChangedSpecs propagates git status failure", async () => {
   const d: MirrorDeps = {
     root: "/tmp/mirrors",
     exists: () => true,
+    removeFile: () => {},
     git: async () => { throw new Error("git status failed: not a git repository"); },
   };
   await assert.rejects(() => listChangedSpecs("/dir", "e2e", d), /git status failed/);
@@ -191,6 +285,7 @@ test("getCommitMessage propagates git show failure", async () => {
   const d: MirrorDeps = {
     root: "/tmp/mirrors",
     exists: () => true,
+    removeFile: () => {},
     git: async () => { throw new Error("git show failed"); },
   };
   await assert.rejects(() => getCommitMessage("/dir", "abc1234", d), /git show failed/);
@@ -200,6 +295,7 @@ test("resolveRef propagates git ls-remote failure", async () => {
   const d: MirrorDeps = {
     root: "/tmp/mirrors",
     exists: () => true,
+    removeFile: () => {},
     git: async () => { throw new Error("ls-remote failed: Could not resolve host"); },
   };
   await assert.rejects(() => resolveRef("org/app", "main", d), /ls-remote failed/);
@@ -209,18 +305,18 @@ test("ensureMirrorAtBranch propagates git clone failure", async () => {
   const d: MirrorDeps = {
     root: "/tmp/mirrors",
     exists: () => false,
+    removeFile: () => {},
     git: async () => { throw new Error("git clone failed"); },
   };
   await assert.rejects(() => ensureMirrorAtBranch("org/app", "main", d), /git clone failed/);
 });
 
 test("ensureMirrorAtBranch propagates git checkout failure", async () => {
-  let callCount = 0;
   const d: MirrorDeps = {
     root: "/tmp/mirrors",
     exists: () => true,
+    removeFile: () => {},
     git: async (args) => {
-      callCount++;
       if (args[0] === "checkout") throw new Error("git checkout failed");
       return "ok";
     },

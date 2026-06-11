@@ -22,6 +22,9 @@ services:
     build: .
     env_file: .env
     restart: always
+    # The graceful-shutdown drain (src/index.ts) needs up to 25s to close the in-flight run;
+    # Docker's default 10s grace would SIGKILL it mid-drain on every `docker stop`/redeploy.
+    stop_grace_period: 35s
     # Explicit public resolvers: Docker's embedded DNS (127.0.0.11) forwards to the host
     # resolver, which under a VPN / split-DNS may fail to resolve external names (this caused
     # "ENOTFOUND github.com" when opening the PR). Pinning resolvers makes egress deterministic.

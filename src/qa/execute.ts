@@ -4,7 +4,7 @@
 // tests it is stubbed. The output is SANITIZED before being returned (it may
 // carry PII/DEV data that would later feed an Issue).
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { writeFileSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,12 +13,51 @@ import { scrubEnv } from "./code-runner";
 import { parsePlaywrightReport } from "./playwright-report";
 import { sanitizeText, containsSecrets, recordAudit } from "../orchestrator/sanitizer";
 
+// Default wall-clock budget for one Playwright suite run. A hung browser must never
+// freeze the sequential queue (one run blocks ALL apps); on expiry the whole process
+// TREE is SIGKILLed and the run is classified infra-error, never a test failure.
+// Override per-deploy via the QA_E2E_TIMEOUT_MS env var. The seed playwright config
+// sets globalTimeout to 12 min so Playwright normally exits cleanly on its own first.
+export const DEFAULT_E2E_TIMEOUT_MS = 900_000; // 15 min
+
+// Budget for the best-effort orphan-data cleanup pass (a single spec — far shorter).
+export const DEFAULT_CLEANUP_TIMEOUT_MS = 300_000; // 5 min
+
+// Resolves the effective e2e timeout: QA_E2E_TIMEOUT_MS when set to a positive
+// number of milliseconds, the default otherwise.
+export function e2eTimeoutMs(): number {
+  const raw = Number(process.env.QA_E2E_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_E2E_TIMEOUT_MS;
+}
+
+// Playwright project names the orchestrator may pass with --project. Strict
+// allowlist keeps the spawn arg-injection surface closed (the value reaches a
+// child-process argv).
+export const PW_PROJECT_RE = /^[A-Za-z0-9_-]+$/;
+
+// Kills a spawned process AND its descendants. Spawns are `detached: true` so the
+// child is its own process-group leader; `process.kill(-pid)` signals the whole group
+// (npx/playwright fork browser grandchildren that a plain `child.kill()` would orphan).
+// Falls back to a direct kill if the group send fails (e.g. the child already exited).
+// Same pattern as the code-mode runner (src/qa/code-runner.ts) — the in-repo standard.
+export function killTree(child: ChildProcess): void {
+  try {
+    if (child.pid) process.kill(-child.pid, "SIGKILL");
+    else child.kill("SIGKILL");
+  } catch {
+    try { child.kill("SIGKILL"); } catch { /* already gone */ }
+  }
+}
+
 export interface ExecuteOptions {
   baseUrl: string;
   namespace: string;
   onCase?: (c: QaCase) => void;        // called per test as it completes (live bar/history)
   onRunning?: (title: string) => void; // called when a test starts (focus card)
   faultInject?: boolean;               // response-oracle pass: corrupt JSON response values (QA_FAULT_INJECT)
+  signal?: AbortSignal;                // operator cancel: kills the runner's process tree → infra-error
+  timeoutMs?: number;                  // wall-clock budget; defaults to e2eTimeoutMs()
+  project?: string;                    // restrict to one Playwright --project (must match PW_PROJECT_RE)
 }
 
 // One streamed test-lifecycle event, parsed from the custom NDJSON reporter's stdout.
@@ -60,7 +99,16 @@ export interface RunOutput {
 export interface ExecuteDeps {
   // onEvent streams test-lifecycle events as they happen (advisory: the verdict is
   // still decided from the final report). Absent in unit stubs.
-  runSuite(args: { dir: string; baseUrl: string; namespace: string; faultInject?: boolean; onEvent?: (ev: StreamEvent) => void }): Promise<RunOutput>;
+  runSuite(args: {
+    dir: string;
+    baseUrl: string;
+    namespace: string;
+    faultInject?: boolean;
+    project?: string;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    onEvent?: (ev: StreamEvent) => void;
+  }): Promise<RunOutput>;
 }
 
 // A Playwright JSON report always carries `suites` and/or `stats`. An empty `{}`
@@ -80,6 +128,23 @@ export async function runE2E(
   opts: ExecuteOptions,
   deps: ExecuteDeps,
 ): Promise<QaRunResult> {
+  // The project name reaches a child-process argv (`--project=<value>`): reject
+  // anything outside the strict allowlist before it gets near a spawn.
+  if (opts.project !== undefined && !PW_PROJECT_RE.test(opts.project)) {
+    throw new Error(`invalid Playwright project name ${JSON.stringify(opts.project)}: must match ${String(PW_PROJECT_RE)}`);
+  }
+
+  // Already-aborted signal: don't even start the runner.
+  if (opts.signal?.aborted) {
+    return {
+      sha: opts.namespace,
+      verdict: "infra-error",
+      passed: false,
+      cases: [],
+      logs: "e2e run aborted by operator cancel before the runner started",
+    };
+  }
+
   // Bridge streamed events to the live callbacks: a test starting → focus card,
   // a test finishing → one incremental case (fills the pass/fail bar + history).
   const onEvent = (opts.onCase || opts.onRunning)
@@ -92,13 +157,46 @@ export async function runE2E(
       }
     : undefined;
 
-  const { report, logs, ran } = await deps.runSuite({
+  const runPromise = deps.runSuite({
     dir: specDir,
     baseUrl: opts.baseUrl,
     namespace: opts.namespace,
     faultInject: opts.faultInject,
+    project: opts.project,
+    signal: opts.signal,
+    timeoutMs: opts.timeoutMs,
     onEvent,
   });
+
+  // Race the suite against timeout and operator cancel at the orchestration level
+  // (defense in depth: defaultExecuteDeps also SIGKILLs the process tree on both —
+  // this catch-all covers stubbed runners and edge cases). A `ran: false` output
+  // routes through the crashed-runner branch below → infra-error, NEVER a test
+  // failure and never a silent pass.
+  const timeoutMs = opts.timeoutMs ?? e2eTimeoutMs();
+  const timedOut: RunOutput = { report: {}, logs: `playwright runner timed out after ${timeoutMs}ms — killed`, ran: false };
+  const abortedOut: RunOutput = { report: {}, logs: "playwright runner aborted by operator cancel — killed", ran: false };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const racers: Array<Promise<RunOutput>> = [
+    runPromise,
+    new Promise<RunOutput>((resolve) => { timer = setTimeout(() => resolve(timedOut), timeoutMs); }),
+  ];
+  if (opts.signal) {
+    racers.push(new Promise<RunOutput>((resolve) => {
+      onAbort = () => resolve(abortedOut);
+      opts.signal!.addEventListener("abort", onAbort, { once: true });
+    }));
+  }
+
+  let out: RunOutput;
+  try {
+    out = await Promise.race(racers);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) opts.signal?.removeEventListener("abort", onAbort);
+  }
+  const { report, logs, ran } = out;
 
   if (containsSecrets(logs)) {
     console.warn("[sanitizer] Secrets detected in E2E execution logs — redacting before publish");
@@ -152,20 +250,41 @@ export async function runE2E(
 // run's namespace, so a crashed run's namespaced test data is deleted before the next
 // run. Best-effort: it never throws and never blocks the new run (failures are warnings).
 export interface CleanupDeps {
-  runCleanup(args: { dir: string; baseUrl: string; namespace: string }): Promise<void>;
+  runCleanup(args: { dir: string; baseUrl: string; namespace: string; signal?: AbortSignal; timeoutMs?: number }): Promise<void>;
 }
 
 export const defaultCleanupDeps: CleanupDeps = {
-  runCleanup: ({ dir, baseUrl, namespace }) =>
+  runCleanup: ({ dir, baseUrl, namespace, signal, timeoutMs }) =>
     new Promise((resolve) => {
       const child = spawn("npx", ["playwright", "test", "cleanup.spec.ts", "--reporter=line"], {
         cwd: dir,
         // Agent-written specs run here: scrub the orchestrator's secrets (GITHUB_TOKEN etc.)
         // while keeping the app's DEV_* login creds the fixtures need.
         env: { ...scrubEnv(/^DEV_/), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PW_CLEANUP: "1" },
+        detached: true, // own process group → killTree can reap browser grandchildren
       });
-      child.on("error", () => resolve()); // best-effort
-      child.on("close", () => resolve());
+      let settled = false;
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (onAbort) signal?.removeEventListener("abort", onAbort);
+        resolve(); // best-effort: cleanup never throws and never blocks the next run
+      };
+      // Even best-effort cleanup must not wedge the sequential queue: kill the tree
+      // on timeout/cancel and move on (orphan data is reaped by a later run).
+      const ms = timeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS;
+      const timer = setTimeout(() => {
+        console.warn(`[qa] orphan-data cleanup timed out after ${ms}ms — killed (best-effort, continuing)`);
+        killTree(child);
+        settle();
+      }, ms);
+      const onAbort = signal
+        ? () => { killTree(child); settle(); }
+        : undefined;
+      if (onAbort) signal!.addEventListener("abort", onAbort, { once: true });
+      child.on("error", () => settle());
+      child.on("close", () => settle());
     }),
 };
 
@@ -185,8 +304,21 @@ class QaStreamReporter {
 module.exports = QaStreamReporter;
 `;
 
+// Builds the args for the suite spawn (after the `npx` binary). Pure and exported so
+// the --project append + allowlist stay unit-testable without spawning Playwright.
+export function playwrightArgs(reporterPath: string, project?: string): string[] {
+  const args = ["playwright", "test", `--reporter=${reporterPath},json`];
+  if (project !== undefined) {
+    if (!PW_PROJECT_RE.test(project)) {
+      throw new Error(`invalid Playwright project name ${JSON.stringify(project)}: must match ${String(PW_PROJECT_RE)}`);
+    }
+    args.push(`--project=${project}`);
+  }
+  return args;
+}
+
 export const defaultExecuteDeps: ExecuteDeps = {
-  runSuite: ({ dir, baseUrl, namespace, faultInject, onEvent }) =>
+  runSuite: ({ dir, baseUrl, namespace, faultInject, project, signal, timeoutMs, onEvent }) =>
     new Promise((resolve, reject) => {
       const work = mkdtempSync(join(tmpdir(), "qa-pw-"));
       const reporterPath = join(work, "qa-stream-reporter.cjs");
@@ -195,14 +327,42 @@ export const defaultExecuteDeps: ExecuteDeps = {
 
       // JSON → file (authoritative, via PLAYWRIGHT_JSON_OUTPUT_NAME); NDJSON → stdout
       // (live feed). The two reporters never collide on stdout.
-      const child = spawn("npx", ["playwright", "test", `--reporter=${reporterPath},json`], {
+      const child = spawn("npx", playwrightArgs(reporterPath, project), {
         cwd: dir,
         // Agent-written specs are untrusted code: scrub orchestrator secrets, keep DEV_* creds.
         env: { ...scrubEnv(/^DEV_/), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonPath, ...(faultInject ? { QA_FAULT_INJECT: "1" } : {}) },
+        detached: true, // own process group → killTree reaps npx/playwright/browser grandchildren
       });
 
       let stderr = "";
       let buf = "";
+      let settled = false;
+      const settle = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (onAbort) signal?.removeEventListener("abort", onAbort);
+        fn();
+      };
+
+      // Timeout guard: a hung browser must not block the sequential queue forever.
+      // Kill the whole PROCESS TREE and resolve `ran: false` → classified infra-error
+      // by runE2E (a wedged runner, never a test failure and never a pass).
+      const ms = timeoutMs ?? e2eTimeoutMs();
+      const timer = setTimeout(() => {
+        killTree(child);
+        settle(() => resolve({ report: {}, logs: `playwright runner timed out after ${ms}ms — killed\n${stderr}`, ran: false }));
+      }, ms);
+
+      // Operator cancel: the pipeline's AbortSignal fires → kill the suite immediately.
+      const onAbort = signal
+        ? () => {
+            killTree(child);
+            settle(() => resolve({ report: {}, logs: `playwright runner aborted by operator cancel — killed\n${stderr}`, ran: false }));
+          }
+        : undefined;
+      if (onAbort) signal!.addEventListener("abort", onAbort, { once: true });
+
       child.stdout.on("data", (d) => {
         buf += String(d);
         let nl: number;
@@ -214,7 +374,7 @@ export const defaultExecuteDeps: ExecuteDeps = {
         }
       });
       child.stderr.on("data", (d) => (stderr += d));
-      child.on("error", (err) => { try { rmSync(work, { recursive: true, force: true }); } catch { /* best-effort */ } reject(err); });
+      child.on("error", (err) => { try { rmSync(work, { recursive: true, force: true }); } catch { /* best-effort */ } settle(() => reject(err)); });
       child.on("close", (code) => {
         let report: unknown = {};
         let ran = false;
@@ -227,7 +387,7 @@ export const defaultExecuteDeps: ExecuteDeps = {
           ran = false;
         }
         try { rmSync(work, { recursive: true, force: true }); } catch { /* best-effort */ }
-        resolve({ report, logs: stderr, ran, exitCode: code ?? undefined });
+        settle(() => resolve({ report, logs: stderr, ran, exitCode: code ?? undefined }));
       });
     }),
 };

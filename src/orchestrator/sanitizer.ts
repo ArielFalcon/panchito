@@ -123,3 +123,42 @@ export function recordAudit(runId: string, detection: SecretDetection): void {
     SECRET_AUDIT.set(runId, detection.count);
   }
 }
+
+// ── Diff prompt budget ───────────────────────────────────────────────────────
+// The commit diff is the one LLM input with no natural size bound (a lockfile or merge
+// commit can reach megabytes) and it is embedded in up to ~6 prompts per run (generate,
+// plan, review rounds, retry, coverage-enforce). Cap it ONCE at the pipeline boundary:
+// keep whole per-file sections in order until the budget is spent, then replace the rest
+// with the list of omitted files. The agent always has the full diff available in its
+// working copy (`git show <sha>`), so nothing is lost — only the prompt is bounded.
+// Local consumers (the classifier, parseDiffHunks) keep using the raw diff.
+export const MAX_PROMPT_DIFF_CHARS = 50_000;
+
+export function capDiff(diff: string, maxChars: number = MAX_PROMPT_DIFF_CHARS): string {
+  if (diff.length <= maxChars) return diff;
+  // Split into per-file sections; the leading chunk (before the first header) stays first.
+  const sections = diff.split(/^(?=diff --git )/m);
+  const kept: string[] = [];
+  const omitted: string[] = [];
+  let used = 0;
+  for (const section of sections) {
+    if (omitted.length === 0 && used + section.length <= maxChars) {
+      kept.push(section);
+      used += section.length;
+    } else {
+      const file = /^diff --git a\/(\S+)/.exec(section)?.[1] ?? "(unnamed section)";
+      omitted.push(file);
+    }
+  }
+  // Degenerate single-section overflow (one giant file): hard-truncate that section.
+  if (kept.length === 0 && sections.length > 0) {
+    kept.push(sections[0]!.slice(0, maxChars));
+    omitted.shift();
+  }
+  return (
+    kept.join("") +
+    `\n[diff truncated for the prompt: ${omitted.length} file(s) omitted (${diff.length} chars total).` +
+    ` Omitted files: ${omitted.join(", ")}.` +
+    ` Read the full change in the working copy with \`git show <sha>\`.]\n`
+  );
+}
