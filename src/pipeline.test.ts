@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { runPipeline, PipelineDeps, GenerateInput } from "./pipeline";
 import { ReviewResult } from "./integrations/opencode-client";
 import { CoveredLines } from "./qa/change-coverage";
@@ -55,11 +58,17 @@ function deps(
     message?: string; // commit message (classification)
     diff?: string;
     coverage?: Array<CoveredLines | null>; // a sequence of collectCoverage results, one per call
+    context?: "valid" | "missing";
   } = {},
 ): Harness {
   const issues: string[] = [];
   const savedOutcomes: RunOutcome[] = [];
   const oracleCalls: OracleInput[] = [];
+  const mirrorDir = mkdtempSync(join(tmpdir(), "qa-pipeline-"));
+  if (opts.context !== "missing") {
+    mkdirSync(join(mirrorDir, "e2e", ".qa"), { recursive: true });
+    writeFileSync(join(mirrorDir, "e2e", ".qa", "context.json"), JSON.stringify({ builtAtSha: "abc123", routes: [], api: [], feBe: [] }));
+  }
   const h = { issues, published: false, genInputs: [], savedOutcomes, oracleCalls } as unknown as Harness;
   const healthSeq = Array.isArray(opts.healthy) ? [...opts.healthy] : null;
   const agentSeq = opts.agents ? [...opts.agents] : null;
@@ -71,7 +80,7 @@ function deps(
     },
     prepare: async () => {
       calls.push("prepare");
-      return { mirrorDir: "/mirrors/org__demo", diff: opts.diff ?? "DIFF", message: opts.message ?? "feat: change" };
+      return { mirrorDir, diff: opts.diff ?? "DIFF", message: opts.message ?? "feat: change" };
     },
     prepareAtBranch: async (_repo: string, _branch: string) => {
       calls.push("prepareAtBranch");
@@ -261,10 +270,10 @@ test("records measured data for e2e but NOT in code mode", async () => {
   assert.equal(codeCalls, 0, "code mode must NOT persist measured (would pollute the repo)");
 });
 
-// Reviewer fail-open must be bounded and observable: an UNPARSEABLE verdict is not an
+// Reviewer fail-closed must be bounded and observable: an UNPARSEABLE verdict is not an
 // actionable rejection — feeding a fake correction just burns a round and re-hits the
-// same miss. Treat it like a reviewer error: publish on the generator's verdict, loudly.
-test("an unparseable reviewer verdict publishes without review and does NOT burn a regeneration round", async () => {
+// same miss. Treat it like a reviewer error: fail closed, loudly, and do not publish.
+test("an unparseable reviewer verdict fails closed and does NOT burn a regeneration round", async () => {
   const logs: string[] = [];
   const h = deps(passing(), [], {
     agent: { output: "x", specs: ["a.spec.ts"], reviewed: true, approved: true },
@@ -273,7 +282,9 @@ test("an unparseable reviewer verdict publishes without review and does NOT burn
   h.log = (m: string) => logs.push(m);
   await runPipeline(app, "abc1234def", h, "manual", { mode: "diff" });
   assert.equal(h.genInputs.length, 1, "must not regenerate on a parse miss");
-  assert.ok(logs.some((l) => /without independent review/i.test(l)));
+  assert.equal(h.published, false);
+  assert.equal(h.issues.length, 1);
+  assert.ok(logs.some((l) => /failing closed/i.test(l)));
 });
 
 // A post-rejection regeneration that writes NO specs must not be treated as an approved
@@ -420,18 +431,18 @@ test("reviewer never converges: bounded at MAX_REVIEW_ROUNDS, no publish, opens 
   assert.match(d.issues[0]!, /did not approve/);
 });
 
-test("reviewer error fails open: trusts the generator and publishes", async () => {
+test("reviewer error fails closed: does not trust the generator or publish", async () => {
   const calls: string[] = [];
   const h = deps(passing(), calls, {});
-  // a review() that throws → fail open
+  // a review() that throws → fail closed
   (h as PipelineDeps).review = async () => {
     calls.push("review");
     throw new Error("reviewer crashed");
   };
   await runPipeline(app, "abc123", h);
   assert.equal(calls.filter((c) => c === "generate").length, 1);
-  assert.equal(h.published, true);
-  assert.equal(h.issues.length, 0);
+  assert.equal(h.published, false);
+  assert.equal(h.issues.length, 1);
 });
 
 // ── change-coverage (Filter D) ───────────────────────────────────────────────
@@ -671,6 +682,53 @@ test("context mode (shadow): builds map but does not publish or open Issues", as
   // Shadow mode: no publish, no issue.
   assert.equal(d.published, false);
   assert.equal(d.issues.length, 0);
+});
+
+test("diff mode bootstraps missing context map before generating tests", async () => {
+  const calls: string[] = [];
+  const builtContext = { builtAtSha: "abc123", routes: [], api: [], feBe: [] };
+  const h = deps(passing(), calls, {
+    context: "missing",
+    agents: [
+      { output: "context map built", specs: [".qa/context.json"], reviewed: false, approved: true },
+      generated,
+    ],
+  });
+  h.validateContextFn = () => ({ ok: true, errors: [] });
+  h.readBuiltContext = () => builtContext;
+
+  const run = await runPipeline(app, "abc123", h, "manual", { mode: "diff" });
+
+  assert.equal(run.verdict, "pass");
+  assert.deepEqual(calls.filter((c) => c === "generate"), ["generate", "generate"]);
+  assert.equal(h.genInputs[0]!.mode, "context");
+  assert.equal(h.genInputs[1]!.mode, "diff");
+  assert.equal(h.genInputs[1]!.contextMap, builtContext);
+  assert.ok(!calls.includes("publishContext"), "automatic bootstrap must not publish a separate context PR");
+});
+
+test("diff mode refreshes a stale context map before generating tests", async () => {
+  const calls: string[] = [];
+  const mirror = mkdtempSync(join(tmpdir(), "qa-context-stale-"));
+  mkdirSync(join(mirror, "e2e", ".qa"), { recursive: true });
+  writeFileSync(join(mirror, "e2e", ".qa", "context.json"), JSON.stringify({ builtAtSha: "oldsha1", routes: [], api: [], feBe: [] }));
+  const refreshedContext = { builtAtSha: "abc123", routes: [{ path: "/checkout" }], api: [], feBe: [] };
+  const h = deps(passing(), calls, {
+    agents: [
+      { output: "context refreshed", specs: [".qa/context.json"], reviewed: false, approved: true },
+      generated,
+    ],
+  });
+  h.prepare = async () => ({ mirrorDir: mirror, diff: DIFF_4, message: "feat: checkout" });
+  h.checkContextStaleness = async () => "map built at oldsha1 is 40 commits behind HEAD (abc123), threshold is 20";
+  h.validateContextFn = () => ({ ok: true, errors: [] });
+  h.readBuiltContext = () => refreshedContext;
+
+  await runPipeline(app, "abc123", h, "manual", { mode: "diff" });
+
+  assert.equal(h.genInputs[0]!.mode, "context");
+  assert.equal(h.genInputs[1]!.mode, "diff");
+  assert.equal(h.genInputs[1]!.contextMap, refreshedContext);
 });
 
 test("learning layer: saveOutcome is called on green runs with the labeled outcome", async () => {

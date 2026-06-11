@@ -49,6 +49,7 @@ import {
   type ChangeCoveragePolicy,
 } from "./qa/change-coverage";
 import { github } from "./integrations/github";
+import { capDiff } from "./orchestrator/sanitizer";
 import { renderIssue, type IssueContext, type TestedItem } from "./report/reporter";
 import { AgentResult, QaCase, QaRunResult, TriggerSource, RunMode, RunOptions, TestTarget, RunOutcome } from "./types";
 import type { ReviewInput, ReviewResult } from "./integrations/opencode-client";
@@ -85,7 +86,9 @@ export interface GenerateInput {
 }
 
 export interface PipelineDeps {
-  waitForDeploy(target: DeployTarget, sha: string): Promise<void>;
+  // The signal aborts the gate's poll loop early (run cancelled, or the commit was
+  // classified as a skip while the gate was still polling in the background).
+  waitForDeploy(target: DeployTarget, sha: string, signal?: AbortSignal): Promise<void>;
   prepare(repo: string, sha: string): Promise<{ mirrorDir: string; diff: string; message: string }>;
   // Cross-repo runs: the PRIMARY repo at the HEAD of its base branch (the triggering
   // SHA belongs to the service repo and does not exist in the primary).
@@ -98,7 +101,7 @@ export interface PipelineDeps {
   listChangedSpecs?(mirrorDir: string, e2eRelDir: string): Promise<string[]>;
   setupE2e(e2eDir: string): Promise<void>; // installs the e2e project's dependencies
   validate(e2eDir: string): Promise<{ ok: boolean; errors: string[]; infra: boolean }>;
-  execute(e2eDir: string, opts: { baseUrl: string; namespace: string; onCase?: (c: QaCase) => void; onRunning?: (title: string) => void }): Promise<QaRunResult>;
+  execute(e2eDir: string, opts: { baseUrl: string; namespace: string; onCase?: (c: QaCase) => void; onRunning?: (title: string) => void; signal?: AbortSignal }): Promise<QaRunResult>;
   cleanup(e2eDir: string, opts: { baseUrl: string; namespace: string }): Promise<void>; // orphan-data cleanup (best-effort)
   isHealthy(versionUrl: string): Promise<boolean>; // is DEV healthy right now? (infra vs quality)
   review?(input: ReviewInput, signal?: AbortSignal): Promise<ReviewResult>; // independent reviewer (null = disabled)
@@ -131,6 +134,9 @@ export interface PipelineDeps {
   // Reviewer→learning: distill this run's reviewer corrections into candidate rules.
   // Off-path: a failure is a warning, never a verdict change. Absent ⇒ skipped.
   distillCorrections?(input: { app: string; runId: string; corrections: string[] }): { inserted: string[] };
+  // The app's most recent persisted outcome's errorClass — biases rule retrieval toward
+  // rules that prevent the failure the engine made last. Absent ⇒ no bias.
+  recentErrorClass?(app: string): Promise<string | null>;
   log?(msg: string): void;
   // Context mode: validates the produced context.json. Injected so tests can bypass file I/O.
   validateContextFn?(content: unknown): { ok: boolean; errors: string[] };
@@ -144,7 +150,7 @@ export interface PipelineDeps {
 
 export function defaultPipelineDeps(): PipelineDeps {
   return {
-    waitForDeploy: (target, sha) => waitForDeploy(target, sha),
+    waitForDeploy: (target, sha, signal) => waitForDeploy(target, sha, undefined, signal),
     prepare: async (repo, sha) => {
       const mirrorDir = await ensureMirror(repo, sha, defaultMirrorDeps);
       const diff = await getCommitDiff(mirrorDir, sha, defaultMirrorDeps);
@@ -257,13 +263,20 @@ export function defaultPipelineDeps(): PipelineDeps {
     runOracle: async (input) =>
       input.target === "e2e" ? runFaultInjectionOracle(input) : runMutationOracle(input),
     retrieveRules: (app, errorClass) => retrieveRules({ app, errorClass: errorClass as import("./qa/learning/taxonomy").ErrorClass | null }),
+    recentErrorClass: async (app) => {
+      const { listRunOutcomes } = await import("./server/history");
+      return listRunOutcomes(app, 1)[0]?.errorClass ?? null;
+    },
     distillCorrections: (input) => distillReviewerCorrections(input),
     reflectAndDistill: async (input) => {
       // Defer: skip the reflection when the system is already busy with another
       // run. Opening a qa-assistant session would contend for the OpenCode server
       // and the LLM API — the reflection is best-effort, never worth delaying the
-      // next queued run.
-      if (getOpenSessionCount() > 0) return null;
+      // next queued run. Loud: a skipped reflection is lost learning, never silent.
+      if (getOpenSessionCount() > 0) {
+        console.warn("[qa] reflection skipped (non-blocking): another OpenCode session is open; this failure will not produce a rule");
+        return null;
+      }
       const { buildReflectionPrompt } = await import("./qa/learning/reflector");
       const prompt = buildReflectionPrompt({
         errorClass: input.outcome.errorClass!,
@@ -387,37 +400,48 @@ export async function runPipeline(
   // 1. Gate: wait until DEV runs this SHA and is healthy. Skipped for code mode (no
   //    web environment), context mode (builds from source only), and when no version
   //    endpoint is configured (already deployed).
+  //    STARTED here but AWAITED only after classification (step 4): the gate is pure
+  //    network waiting, while prepare/classify/setup are local — overlapping them saves
+  //    up to the whole deploy wait, and a skip-classified commit never waits for DEV.
   const versionUrl = (isCode || mode === "context") ? undefined : app.dev?.versionUrl;
   const devHealthy = () => (versionUrl ? deps.isHealthy(versionUrl) : Promise.resolve(true));
-  if (isCode) {
-    log("[qa] code mode: no web environment; skipping the deploy gate and health checks.");
-  } else if (triggerService) {
-    if (triggerService.versionUrl) {
-      log(`[qa] waiting for ${triggerService.repo} to serve ${sha} on DEV...`);
-      await deps.waitForDeploy(
-        {
-          name: `${app.name}/${triggerService.repo}`,
-          versionUrl: triggerService.versionUrl,
-          pollIntervalMs: triggerService.pollIntervalMs ?? 10_000,
-          deployTimeoutMs: triggerService.deployTimeoutMs ?? 600_000,
-        },
-        sha,
-      );
+  const gateAbort = new AbortController();
+  if (signal) signal.addEventListener("abort", () => gateAbort.abort(), { once: true });
+  const gatePromise: Promise<void> = (async () => {
+    if (isCode) {
+      log("[qa] code mode: no web environment; skipping the deploy gate and health checks.");
+    } else if (triggerService) {
+      if (triggerService.versionUrl) {
+        log(`[qa] waiting for ${triggerService.repo} to serve ${sha} on DEV...`);
+        await deps.waitForDeploy(
+          {
+            name: `${app.name}/${triggerService.repo}`,
+            versionUrl: triggerService.versionUrl,
+            pollIntervalMs: triggerService.pollIntervalMs ?? 10_000,
+            deployTimeoutMs: triggerService.deployTimeoutMs ?? 600_000,
+          },
+          sha,
+          gateAbort.signal,
+        );
+      } else {
+        log(`[qa] deploy-event trigger from ${triggerService.repo} without versionUrl; trusting the event (gate skipped).`);
+      }
+    } else if (versionUrl && app.dev) {
+      const target: DeployTarget = {
+        name: app.name,
+        versionUrl,
+        pollIntervalMs: app.dev.pollIntervalMs ?? 10_000,
+        deployTimeoutMs: app.dev.deployTimeoutMs ?? 600_000,
+      };
+      log("[qa] waiting for a stable deploy on DEV...");
+      await deps.waitForDeploy(target, sha, gateAbort.signal);
     } else {
-      log(`[qa] deploy-event trigger from ${triggerService.repo} without versionUrl; trusting the event (gate skipped).`);
+      log("[qa] no version endpoint configured; skipping the deploy gate.");
     }
-  } else if (versionUrl && app.dev) {
-    const target: DeployTarget = {
-      name: app.name,
-      versionUrl,
-      pollIntervalMs: app.dev.pollIntervalMs ?? 10_000,
-      deployTimeoutMs: app.dev.deployTimeoutMs ?? 600_000,
-    };
-    log("[qa] waiting for a stable deploy on DEV...");
-    await deps.waitForDeploy(target, sha);
-  } else {
-    log("[qa] no version endpoint configured; skipping the deploy gate.");
-  }
+  })();
+  // The gate is observed at the Promise.all below; this extra handler only prevents an
+  // unhandled rejection when a local step throws (or a skip returns) before that await.
+  gatePromise.catch(() => {});
 
   // 2. Working copy of the repo at the SHA (the agent's cwd, holds `e2e/`) + diff + message.
   log("[qa] preparing working copy and diff...");
@@ -458,6 +482,7 @@ export async function runPipeline(
     log(`[qa] commit '${cls.type}' → ${cls.action}${cls.contradiction ? " (message/diff contradiction)" : ""}: ${cls.reason}`);
     if (cls.action === "skip" && !isContinuation) {
       log(`[qa] no testable objective (${cls.type}); nothing to run.`);
+      gateAbort.abort(); // stop the background deploy-gate poll: this run never needed DEV
       return { sha: ns, verdict: "skipped", passed: true, cases: [], logs: cls.reason };
     }
     generating = isContinuation || cls.action === "generate";
@@ -466,22 +491,49 @@ export async function runPipeline(
     log(`[qa] mode=${mode}: whole-repo/guided run (commit classification skipped).`);
   }
 
-  // 4. Set up the project so the agent has what it needs to build on. e2e: bootstrap
-  //    the seed if missing + install the e2e deps. code: install the repo's own deps
-  //    so its test suite can run. context: same as e2e (the agent writes into e2e/.qa/).
-  if (isCode) {
-    log("[qa] code mode: installing the repo's dependencies...");
-    await deps.setupCode(mirrorDir, { signal });
-  } else {
-    await deps.setupE2e(e2eDir);
+  // The PROMPT-facing diff is size-capped once here; every LLM consumer (generator, planner,
+  // reviewer, regeneration rounds) receives this bounded form. Local consumers (the classifier
+  // above, parseDiffHunks for coverage/oracle scoping) keep the raw diff — they are free.
+  const promptDiff = capDiff(diff);
+  if (promptDiff.length < diff.length) {
+    log(`[qa] diff capped for prompts: ${diff.length} → ${promptDiff.length} chars (full diff stays available in the working copy).`);
   }
 
-  // ── context mode: build the FE↔BE architecture map ──────────────────────────
-  // Diverges early: the agent builds context.json from structured sources (routing,
-  // OpenAPI, generated clients), we validate it deterministically, and publish via PR.
-  // No tests are generated or executed — this is a maintenance task.
-  if (mode === "context") {
-    log("[qa] context mode: building the FE↔BE architecture map...");
+  // 4. Set up the project so the agent has what it needs to build on — IN PARALLEL with
+  //    the deploy gate started in step 1 (dependency install needs no DEV). e2e: bootstrap
+  //    the seed if missing + install the e2e deps. code: install the repo's own deps
+  //    so its test suite can run. context: same as e2e (the agent writes into e2e/.qa/).
+  if (isCode) log("[qa] code mode: installing the repo's dependencies...");
+  const setupPromise = isCode ? deps.setupCode(mirrorDir, { signal }) : deps.setupE2e(e2eDir);
+  setupPromise.catch(() => {}); // observed at the Promise.all; avoids an unhandled rejection if the gate throws first
+  try {
+    await Promise.all([gatePromise, setupPromise]);
+  } catch (err) {
+    gateAbort.abort(); // setup failed first → don't leave the gate polling in the background
+    throw err;
+  }
+
+  const loadContextMap = (): ArchitectureContext | undefined => {
+    const ctxJsonPath = join(e2eDir, ".qa", "context.json");
+    if (!existsSync(ctxJsonPath)) return undefined;
+    try {
+      const raw = JSON.parse(readFileSync(ctxJsonPath, "utf8"));
+      const v = validateContext(raw);
+      if (v.ok) {
+        const map = raw as ArchitectureContext;
+        log(`[qa] loaded architecture map: ${map.routes.length} routes, ${map.api.length} api ops, ${map.feBe?.length ?? 0} links`);
+        return map;
+      }
+      log(`[qa] WARNING: context.json exists but is invalid (${v.errors.join("; ")}); regenerating the architecture context before test generation.`);
+      return undefined;
+    } catch {
+      log("[qa] WARNING: could not parse context.json; regenerating the architecture context before test generation.");
+      return undefined;
+    }
+  };
+
+  const buildContextMap = async (publish: boolean): Promise<{ run?: QaRunResult; contextMap?: ArchitectureContext }> => {
+    log(publish ? "[qa] context mode: building the FE↔BE architecture map..." : "[qa] context bootstrap: building missing/stale FE↔BE architecture map...");
     onStep?.("generate");
 
     // Mirror every declared service (read-only). The agent uses these working copies to
@@ -503,7 +555,7 @@ export async function runPipeline(
       mirrorDir,
       namespace: ns,
       needsReview: false,
-      mode,
+      mode: "context",
       appName: app.name,
       baseUrl: app.dev?.baseUrl,
       openapi: app.openapi,
@@ -539,7 +591,7 @@ export async function runPipeline(
           note: `The FE↔BE context map could not be validated.\n${validated.errors.join("\n")}`,
         }),
       );
-      return resultOf(ns, "invalid", validated.errors.join("\n\n"));
+      return { run: resultOf(ns, "invalid", validated.errors.join("\n\n")) };
     }
 
     log(`[qa] context map validated: OK`);
@@ -557,7 +609,9 @@ export async function runPipeline(
       }
     }
 
-    if (shadow) {
+    if (!publish) {
+      log("[qa] context bootstrap complete; continuing with the requested QA mode.");
+    } else if (shadow) {
       log("[qa] (shadow) context map built; a PR would have been opened.");
     } else {
       const pr = await deps.publishContext({ repo: app.repo, sha, mirrorDir, baseBranch: app.baseBranch ?? "main" });
@@ -568,7 +622,16 @@ export async function runPipeline(
         : "[qa] OK — context map built (no changes to publish).");
     }
 
-    return resultOf(ns, "pass", "context map built and validated");
+    return { run: publish ? resultOf(ns, "pass", "context map built and validated") : undefined, contextMap: deps.readBuiltContext?.(e2eDir) ?? loadContextMap() };
+  };
+
+  // ── context mode: build the FE↔BE architecture map ──────────────────────────
+  // Diverges early: the agent builds context.json from structured sources (routing,
+  // OpenAPI, generated clients), we validate it deterministically, and publish via PR.
+  // No tests are generated or executed — this is a maintenance task.
+  if (mode === "context") {
+    const built = await buildContextMap(true);
+    return built.run ?? resultOf(ns, "pass", "context map built and validated");
   }
 
   // 4a. Clean up orphaned test data from a previous INTERRUPTED run (crash, SIGKILL,
@@ -586,20 +649,19 @@ export async function runPipeline(
   // exhaustive, manual) so the agent crosses the frontend→backend boundary without
   // re-deriving the architecture from raw code on every run. Context mode is the
   // producer of this map; all other modes are consumers.
-  let contextMap: ArchitectureContext | undefined;
-  const ctxJsonPath = join(e2eDir, ".qa", "context.json");
-  if (existsSync(ctxJsonPath)) {
-    try {
-      const raw = JSON.parse(readFileSync(ctxJsonPath, "utf8"));
-      const v = validateContext(raw);
-      if (v.ok) {
-        contextMap = raw as ArchitectureContext;
-        log(`[qa] loaded architecture map: ${contextMap.routes.length} routes, ${contextMap.api.length} api ops, ${contextMap.feBe?.length ?? 0} links`);
-      } else {
-        log(`[qa] WARNING: context.json exists but is invalid (${v.errors.join("; ")}); the agent will not receive architecture context.`);
-      }
-    } catch {
-      log("[qa] WARNING: could not parse context.json; the agent will not receive architecture context.");
+  let contextMap: ArchitectureContext | undefined = loadContextMap();
+  if (!isCode && generating && !triggerService) {
+    let refreshReason = contextMap ? "" : "missing or invalid context map";
+    if (contextMap && deps.checkContextStaleness) {
+      const staleWarn = await deps.checkContextStaleness(mirrorDir, sha);
+      if (staleWarn) refreshReason = staleWarn;
+    }
+    if (refreshReason) {
+      log(`[qa] context bootstrap needed: ${refreshReason}`);
+      const built = await buildContextMap(false);
+      if (built.run) return built.run;
+      contextMap = built.contextMap;
+      if (!contextMap) log("[qa] WARNING: context bootstrap finished but the map could not be reloaded; continuing without architecture context.");
     }
   }
 
@@ -608,7 +670,8 @@ export async function runPipeline(
   // independent and AUTHORITATIVE — it breaks the circular quality loop documented in AGENTS.md.
   // On rejection, the reviewer's actionable corrections are reinjected and the agent regenerates
   // (up to MAX_REVIEW_ROUNDS) BEFORE giving up; only then is the result marked not-approved
-  // (→ Issue). A reviewer error fails open (trust the generator) and stops the loop.
+  // (→ Issue). A reviewer error or unparseable verdict FAILS CLOSED (not-approved → Issue):
+  // nothing publishes without an actual independent review.
   // Disk over the agent's word (CLAUDE.md: never trust the LLM's self-report over the
   // working copy). The no-op decision and the reviewer's file list both key off `specs`,
   // so they must reflect the *.spec.ts actually on disk, not what the agent printed in its
@@ -645,31 +708,32 @@ export async function runPipeline(
       let review: ReviewResult;
       try {
         review = await deps.review(
-          { diff, specs: r.specs, mirrorDir, e2eRelDir: E2E_DIR, baseUrl: app.dev?.baseUrl, intent, appName: app.name, mode },
+          { diff: promptDiff, specs: r.specs, mirrorDir, e2eRelDir: isCode ? "" : E2E_DIR, baseUrl: app.dev?.baseUrl, intent, appName: app.name, mode, target: opts.target },
           signal,
         );
       } catch (err) {
-        // Fail open for a transient error, but make it OBSERVABLE: the reviewer is the only
-        // independent gate against the circular self-approval loop, so a persistent outage
-        // silently degrading every run to generator-self-approval must be visible.
+        // FAIL CLOSED: the reviewer is the only independent gate against the circular
+        // self-approval loop. A reviewer outage must never silently degrade every run to
+        // generator-self-approval — green-but-unreviewed work reports as not-approved
+        // (→ Issue, nothing lands in the app repo) until the reviewer is back.
         consecutiveReviewerFailures++;
         if (consecutiveReviewerFailures >= 3) {
-          log(`[qa] CRITICAL: independent reviewer has FAILED ${consecutiveReviewerFailures} consecutive times — REVIEWER OUTAGE DETECTED. All runs are publishing WITHOUT independent review.`);
+          log(`[qa] CRITICAL: independent reviewer has FAILED ${consecutiveReviewerFailures} consecutive times — REVIEWER OUTAGE DETECTED. Runs are failing closed (no publish without review).`);
         } else {
-          log(`[qa] WARNING: independent reviewer FAILED — publishing on the generator's verdict WITHOUT independent review (${err instanceof Error ? err.message : String(err)}).`);
+          log(`[qa] WARNING: independent reviewer FAILED — failing closed: this run will not publish without independent review (${err instanceof Error ? err.message : String(err)}).`);
         }
-        return { ...r, note: "published without independent review (reviewer error)" };
+        return { ...r, approved: false, note: "independent review unavailable (reviewer error) — not publishing unreviewed tests" };
       }
       // A parse miss is NOT an actionable rejection: feeding the synthetic correction back
-      // just burns a round and re-hits the same miss. Treat it like a reviewer error.
+      // just burns a round and re-hits the same miss. Treat it like a reviewer error (fail closed).
       if (review.parsed === false) {
         consecutiveReviewerFailures++;
         if (consecutiveReviewerFailures >= 3) {
           log(`[qa] CRITICAL: independent reviewer has produced NO parseable verdict ${consecutiveReviewerFailures} consecutive times — REVIEWER OUTAGE DETECTED.`);
         } else {
-          log(`[qa] WARNING: independent reviewer produced NO parseable verdict — publishing WITHOUT independent review (not burning a regeneration round).`);
+          log(`[qa] WARNING: independent reviewer produced NO parseable verdict — failing closed (not burning a regeneration round).`);
         }
-        return { ...r, note: "published without independent review (unparseable reviewer verdict)" };
+        return { ...r, approved: false, note: "independent review unavailable (unparseable reviewer verdict) — not publishing unreviewed tests" };
       }
       // Reset counter on successful reviewer response
       consecutiveReviewerFailures = 0;
@@ -685,10 +749,15 @@ export async function runPipeline(
     return r;
   };
 
+  // Learned rules + exemplars + curriculum, assembled once in the generation block below and
+  // included in EVERY generation prompt by default — including the failure-retry and the
+  // coverage-enforce regeneration, which previously dropped them.
+  let promptSections: string | undefined;
+
   const baseGenInput = (extra: Partial<GenerateInput>): GenerateInput => ({
     repo: app.repo,
     sha,
-    diff,
+    diff: promptDiff,
     mirrorDir,
     namespace: ns,
     needsReview: app.qa.needsReview,
@@ -701,6 +770,7 @@ export async function runPipeline(
     openapi: app.openapi,
     parallelDiff: app.qa.parallelDiff,
     contextMap,
+    learnedRules: promptSections,
     service: triggerService
       ? { repo: triggerService.repo, mirrorDir: serviceMirrorDir!, openapi: triggerService.openapi }
       : undefined,
@@ -720,17 +790,20 @@ export async function runPipeline(
     checkSignal();
     onStep?.("generate");
 
-    // Staleness check: if context.json exists but is too far behind HEAD, warn
-    // so the agent knows the map may be outdated and should verify before trusting.
-    if (mode === "diff" && deps.checkContextStaleness) {
-      const staleWarn = await deps.checkContextStaleness(mirrorDir, sha);
-      if (staleWarn) log(`[qa] ${staleWarn}`);
-    }
-
     let learnedRules: string | undefined;
     if (deps.retrieveRules && generating) {
       try {
-        const retrieval = deps.retrieveRules(app.name, null);
+        // Bias retrieval toward the app's most recent failure class: rules that prevent
+        // the error the engine just made are the most likely to matter on this run.
+        let lastErrorClass: string | null = null;
+        if (deps.recentErrorClass) {
+          try {
+            lastErrorClass = await deps.recentErrorClass(app.name);
+          } catch {
+            lastErrorClass = null; // relevance bias only — never blocks retrieval
+          }
+        }
+        const retrieval = deps.retrieveRules(app.name, lastErrorClass);
         if (retrieval.promptSection) {
           learnedRules = retrieval.promptSection;
           retrievedRuleIds = retrieval.rules.map((r) => r.id);
@@ -768,8 +841,10 @@ export async function runPipeline(
       allPromptSections = (allPromptSections ? allPromptSections + "\n" : "") + archetypeText;
     }
 
+    promptSections = allPromptSections || undefined; // every later regeneration inherits this via baseGenInput
+
     log("[qa] generating E2E tests with OpenCode...");
-    result = await generateAndReview(baseGenInput({ fixCases: opts.fixCases, learnedRules: allPromptSections || undefined }));
+    result = await generateAndReview(baseGenInput({ fixCases: opts.fixCases }));
 
     // Wire the specs into the RunRecord so the TUI shows what was generated.
     // specMetas carries structured data (flow, objective); specs[] is the flat fallback.
@@ -797,6 +872,72 @@ export async function runPipeline(
     log("[qa] regression: not generating tests; validating and running the existing suite.");
   }
 
+  // Learning fold shared by the static-gate early return and the end of the pipeline:
+  // distill reviewer corrections, label the run, fold the prevention signal into the
+  // retrieved rules (no-oracle governance), reflect on the failure, and persist the
+  // curriculum. Without this on the `invalid` path the engine would never learn anything
+  // from static-gate failures — the most common failure mode of generated tests.
+  // Off-path: every step is non-blocking and a failure is only a warning.
+  const foldRunLearning = async (v: QaRunResult, o: { staticOk: boolean; coverageRatio?: number | null; valueScore?: number | null }) => {
+    if (reviewerCorrections.length > 0 && opts.runId && deps.distillCorrections) {
+      try {
+        const distilled = deps.distillCorrections({ app: app.name, runId: opts.runId, corrections: reviewerCorrections });
+        if (distilled.inserted.length > 0) {
+          log(`[qa] learning: distilled ${distilled.inserted.length} candidate rule(s) from reviewer corrections`);
+        }
+      } catch (err) {
+        log(`[qa] WARNING: reviewer-corrections distillation failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    const labeled = labelRunOutcome({
+      runId: opts.runId ?? sha, app: app.name, sha, mode, target: opts.target ?? "e2e",
+      verdict: v.verdict, staticOk: o.staticOk,
+      coverageRatio: o.coverageRatio ?? null,
+      minCoverageRatio: app.qa.changeCoverage?.minRatio ?? DEFAULT_COVERAGE_POLICY.minRatio,
+      reviewerCorrections, flaky: v.verdict === "flaky", retries,
+      valueScore: o.valueScore ?? null,
+    });
+    // Governance WITHOUT an oracle: when the oracle produced no valueScore (off, or not
+    // applicable), fold a CONSERVATIVE prevention signal — derived from this run's own
+    // errorClass — into the retrieved rules. This lets candidate rules earn or lose trust for
+    // EVERY app, not just oracle-enabled ones, so the flywheel turns universally. Capped at
+    // "medium" confidence (only the oracle lifts a rule to "high"). See preventionOutcome.
+    if ((o.valueScore ?? null) === null && retrievedRules.length > 0 && opts.runId) {
+      try {
+        const { recordRuleOutcome } = await import("./server/history");
+        let folded = 0;
+        for (const rule of retrievedRules) {
+          const score = preventionOutcome(rule.errorClass, labeled.errorClass);
+          if (score === null) continue; // no evidence about this rule from this run
+          recordRuleOutcome(rule.id, score);
+          folded++;
+        }
+        if (folded > 0) {
+          log(`[qa] governance: folded prevention signal into ${folded} rule(s) (no oracle; runErrorClass=${labeled.errorClass ?? "none"})`);
+        }
+      } catch (err) {
+        log(`[qa] WARNING: governance signal update failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (deps.reflectAndDistill && opts.runId && !signal?.aborted) {
+      if (labeled.errorClass && labeled.errorClass !== "E-INFRA" && labeled.errorClass !== "E-FLAKY") {
+        const outcome: RunOutcome = { ...labeled, gateSignals: { ...labeled.gateSignals, valueScore: o.valueScore ?? null }, rulesRetrieved: retrievedRuleIds, at: labeled.at };
+        deps
+          .reflectAndDistill({ app: app.name, runId: opts.runId, outcome })
+          .catch((err) => log(`[qa] WARNING: reflect/distill failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`));
+      }
+    }
+    // Persist curriculum (archetypes that caught real bugs survive across runs)
+    if (curriculum) {
+      const { saveCurriculum } = await import("./server/history");
+      try {
+        saveCurriculum(curriculum);
+      } catch {
+        // fail-open
+      }
+    }
+  };
+
   checkSignal();
   // 6. Filter B — static gate. e2e: typecheck/lint/list/manifest over `e2e/`. Code
   //    mode has no separate static gate: running the repo's own suite IS the gate
@@ -823,6 +964,7 @@ export async function runPipeline(
         tested: testedFrom(result),
         intent,
       });
+      await foldRunLearning(invalid, { staticOk: false }); // E-STATIC must feed the flywheel too
       return invalid;
     }
 
@@ -853,7 +995,7 @@ export async function runPipeline(
     onStep?.("execute");
     log(`[qa] running E2E (namespace ${ns}) against ${app.dev.baseUrl}...`);
     deps.clearCoverage?.(e2eDir, ns); // fresh dumps only: never union a prior run's coverage
-    run = await deps.execute(e2eDir, { baseUrl: app.dev.baseUrl, namespace: ns, onCase, onRunning: onRunningTest });
+    run = await deps.execute(e2eDir, { baseUrl: app.dev.baseUrl, namespace: ns, onCase, onRunning: onRunningTest, signal });
     // Infra vs quality: failures with an unhealthy DEV are infrastructure, not code.
     if (run.verdict === "fail" && !(await devHealthy())) {
       run = resultOf(ns, "infra-error", "failures with an unhealthy DEV: treated as infrastructure");
@@ -906,7 +1048,7 @@ export async function runPipeline(
       }
       log("[qa] re-running E2E with fixed tests...");
       deps.clearCoverage?.(e2eDir, ns);
-      const retryRun = await deps.execute(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: ns, onCase, onRunning: onRunningTest });
+      const retryRun = await deps.execute(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: ns, onCase, onRunning: onRunningTest, signal });
       if (retryRun.verdict === "fail" && !(await devHealthy())) {
         run = resultOf(ns, "infra-error", "failures with an unhealthy DEV: treated as infrastructure");
         break;
@@ -956,7 +1098,7 @@ export async function runPipeline(
             if (!isCode) deps.clearCoverage?.(e2eDir, ns); // re-measure only the improved suite's dumps
             const reRun = isCode
               ? await deps.executeCode(mirrorDir, { namespace: ns, onCase, signal })
-              : await deps.execute(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: ns, onCase, onRunning: onRunningTest });
+              : await deps.execute(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: ns, onCase, onRunning: onRunningTest, signal });
             if (reRun.verdict === "pass") {
               run = reRun;
               result = improved;
@@ -1012,18 +1154,19 @@ export async function runPipeline(
   // testing scoped to the diff. e2e: response fault-injection against the SAME live DEV (opt-in,
   // signal-only) — never a redeploy. Off-path and fail-open: any error is a non-blocking warning,
   // and the score NEVER gates publish.
-  // Default is shadow-aware: while a repo is in shadow (onboarding/validation) the e2e oracle is
-  // OFF so fault-injection doesn't double-run the suite against DEV before the team trusts the
-  // engine. Once shadow is lifted (real production — PRs/Issues publish), the oracle turns ON by
-  // default so the learning flywheel gets ground-truth. An explicit qa.valueOracle always wins.
+  // Default is shadow-aware FOR BOTH TARGETS: while a repo is in shadow (onboarding/validation)
+  // the oracle is OFF so neither fault-injection (double DEV runs) nor mutation testing (up to
+  // 10 min of Stryker) spends anything before the team trusts the engine. Once shadow is lifted,
+  // it turns ON by default so the flywheel gets ground-truth. An explicit qa.valueOracle ALWAYS
+  // wins — including "off" for code-mode apps.
   const valueOraclePolicy = app.qa.valueOracle ?? (app.qa.shadow ? "off" : "signal");
   // e2e is restricted to `diff` ON PURPOSE: fault-injection re-runs the WHOLE suite corrupted, so
   // running it on a `complete`/`exhaustive` whole-repo suite would double a very large run for a
-  // diffuse signal. code mutation runs in any mode (it is diff-scoped and cheap). Both are opt-in
-  // / signal-only and never block.
+  // diffuse signal. code mutation runs in any mode (it is diff-scoped and capped). Both are
+  // signal-only and never block.
   const runValueOracle =
-    !!deps.runOracle && generating && run.verdict === "pass" &&
-    (isCode || (mode === "diff" && valueOraclePolicy === "signal" && !!app.dev?.baseUrl));
+    !!deps.runOracle && generating && run.verdict === "pass" && valueOraclePolicy === "signal" &&
+    (isCode || (mode === "diff" && !!app.dev?.baseUrl));
   if (runValueOracle) {
     try {
       log(isCode ? "[qa] oracle: running mutation testing (diff-scoped)..." : "[qa] oracle: running response fault-injection (signal)...");
@@ -1089,6 +1232,24 @@ export async function runPipeline(
     clearActiveArchetypesCache(app.name);
   }
 
+  // No-oracle curriculum signal: without this, archetypes can NEVER become proven for an app
+  // whose oracle is off — the component would exist only on paper there. The closest available
+  // ground truth is the engine's own purpose: a reviewer-endorsed suite that FAILED against the
+  // live DEV right after a deploy demonstrably noticed a behavioral deviation (it is the event
+  // that opens a defect Issue). Conservative on purpose: diff runs only, `fail` only (never
+  // flaky/invalid), and only when the independent reviewer approved the suite.
+  if (curriculum && valueScore === null && mode === "diff" && generating && run.verdict === "fail" && result?.approved) {
+    const patterns = detectStructuralPatterns(diff, intent?.changedFiles ?? []);
+    const exemplars = patterns.flatMap((p) => matchExemplars(p));
+    for (const ex of exemplars) {
+      curriculum = recordArchetypeHit(curriculum, ex.archetype);
+    }
+    if (exemplars.length > 0) {
+      clearActiveArchetypesCache(app.name);
+      log(`[qa] curriculum: ${exemplars.length} archetype(s) credited — a reviewer-approved suite caught a live failure (no-oracle signal)`);
+    }
+  }
+
   // 9. Final decision.
   const kind = isCode ? "code" : "E2E";
   if (run.verdict !== "pass") {
@@ -1135,73 +1296,12 @@ export async function runPipeline(
   // result so the TUI/chat can show why a retry or skip happened.
   if (result?.note && !run.note) run.note = result.note;
 
-  // Reviewer→learning: rejections persist as candidate rules so the next run is
-  // born knowing what this reviewer already rejected. Off-path, never blocks.
-  if (reviewerCorrections.length > 0 && opts.runId && deps.distillCorrections) {
-    try {
-      const distilled = deps.distillCorrections({ app: app.name, runId: opts.runId, corrections: reviewerCorrections });
-      if (distilled.inserted.length > 0) {
-        log(`[qa] learning: distilled ${distilled.inserted.length} candidate rule(s) from reviewer corrections`);
-      }
-    } catch (err) {
-      log(`[qa] WARNING: reviewer-corrections distillation failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
   const ratio = ccForPersistence?.overall.ratio ?? null;
   persistOutcome(run, { staticOk: !isCode && generating, coverageRatio: ratio, valueScore, rulesRetrieved: retrievedRuleIds });
 
-  // Label the run once: its errorClass drives both the governance signal (below) and reflect/distill.
-  const labeled = labelRunOutcome({
-    runId: opts.runId ?? sha, app: app.name, sha, mode, target: opts.target ?? "e2e",
-    verdict: run.verdict, staticOk: !isCode && generating,
-    coverageRatio: ratio,
-    minCoverageRatio: app.qa.changeCoverage?.minRatio ?? DEFAULT_COVERAGE_POLICY.minRatio,
-    reviewerCorrections, flaky: run.verdict === "flaky", retries,
-    valueScore,
-  });
-
-  // Governance WITHOUT an oracle: when the oracle produced no valueScore (it is off, or not
-  // applicable to this app), fold a CONSERVATIVE prevention signal — derived from this run's own
-  // errorClass — into the retrieved rules. This lets candidate rules earn or lose trust for EVERY
-  // app, not just oracle-enabled ones, so the flywheel turns universally. Off-path, non-blocking,
-  // and capped at "medium" confidence (only the oracle lifts a rule to "high"). See preventionOutcome.
-  if (valueScore === null && retrievedRules.length > 0 && opts.runId) {
-    try {
-      const { recordRuleOutcome } = await import("./server/history");
-      let folded = 0;
-      for (const rule of retrievedRules) {
-        const score = preventionOutcome(rule.errorClass, labeled.errorClass);
-        if (score === null) continue; // no evidence about this rule from this run
-        recordRuleOutcome(rule.id, score);
-        folded++;
-      }
-      if (folded > 0) {
-        log(`[qa] governance: folded prevention signal into ${folded} rule(s) (no oracle; runErrorClass=${labeled.errorClass ?? "none"})`);
-      }
-    } catch (err) {
-      log(`[qa] WARNING: governance signal update failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
-  if (deps.reflectAndDistill && opts.runId && !signal?.aborted) {
-    if (labeled.errorClass && labeled.errorClass !== "E-INFRA" && labeled.errorClass !== "E-FLAKY") {
-      const outcome: RunOutcome = { ...labeled, gateSignals: { ...labeled.gateSignals, valueScore: valueScore ?? null }, rulesRetrieved: retrievedRuleIds, at: labeled.at };
-      deps
-        .reflectAndDistill({ app: app.name, runId: opts.runId, outcome })
-        .catch((err) => log(`[qa] WARNING: reflect/distill failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`));
-    }
-  }
-
-  // Persist curriculum (archetypes that caught real bugs survive across runs)
-  if (curriculum) {
-    const { saveCurriculum } = await import("./server/history");
-    try {
-      saveCurriculum(curriculum);
-    } catch {
-      // fail-open
-    }
-  }
+  // Reviewer-corrections distillation, labeling, prevention governance, reflection and
+  // curriculum persistence — shared with the static-gate (`invalid`) early return above.
+  await foldRunLearning(run, { staticOk: !isCode && generating, coverageRatio: ratio, valueScore });
 
   return run;
 }

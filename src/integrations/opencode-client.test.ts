@@ -23,6 +23,7 @@ import {
   OpencodeRunInput,
   askAssistant,
   reviewIndependently,
+  startEventStreamWithReconnect,
 } from "./opencode-client";
 import type { ArchitectureContext } from "../qa/context";
 
@@ -221,6 +222,55 @@ test("parseVerdict drops specMetas entries missing required fields", () => {
   assert.equal(v.specMetas![0]!.file, "ok.spec.ts");
 });
 
+test("startEventStreamWithReconnect retries after a stream error until aborted", async () => {
+  const controller = new AbortController();
+  let attempts = 0;
+  const delays: number[] = [];
+  const logs: string[] = [];
+
+  await startEventStreamWithReconnect(
+    () => {},
+    controller.signal,
+    {
+      initialDelayMs: 10,
+      maxDelayMs: 20,
+      log: (msg) => logs.push(msg),
+      sleep: async (ms) => { delays.push(ms); },
+      start: async () => {
+        attempts++;
+        if (attempts === 1) throw new Error("opencode down");
+        controller.abort();
+      },
+    },
+  );
+
+  assert.equal(attempts, 2);
+  assert.deepEqual(delays, [10]);
+  assert.match(logs.join("\n"), /opencode down/);
+});
+
+test("startEventStreamWithReconnect reconnects after a clean stream close", async () => {
+  const controller = new AbortController();
+  let attempts = 0;
+  const delays: number[] = [];
+
+  await startEventStreamWithReconnect(
+    () => {},
+    controller.signal,
+    {
+      initialDelayMs: 5,
+      sleep: async (ms) => { delays.push(ms); },
+      start: async () => {
+        attempts++;
+        if (attempts === 2) controller.abort();
+      },
+    },
+  );
+
+  assert.equal(attempts, 2);
+  assert.deepEqual(delays, [5]);
+});
+
 test("parseVerdict returns undefined specMetas when absent or empty", () => {
   assert.equal(parseVerdict('{"approved": true, "specs": ["a.spec.ts"]}').specMetas, undefined);
   assert.equal(parseVerdict('{"approved": true, "specMetas": "not-array"}').specMetas, undefined);
@@ -364,7 +414,8 @@ test("runOpencodeParallel: plan → workers → orchestrator writes the manifest
   assert.deepEqual(res.specs.sort(), ["flows/checkout.spec.ts", "flows/login.spec.ts"]);
   assert.equal(res.approved, true);
   assert.equal(opened[0], "qa-generator"); // planner first
-  assert.ok(opened.slice(1).every((a) => a === "qa-worker")); // then workers
+  assert.equal(opened[1], "qa-worker-code"); // serena pre-index (default-on, best-effort)
+  assert.ok(opened.slice(2).every((a) => a === "qa-worker")); // then workers
   // the orchestrator wrote ONE manifest with both entries
   const written = [...store.values()];
   assert.equal(written.length, 1);
@@ -591,8 +642,28 @@ test("diff fan-out with >=2 objectives dispatches workers (no fallback)", async 
     },
     stubDeps, undefined, fakeFs,
   );
-  assert.deepEqual(agents.filter((a) => a.startsWith("qa-worker")), ["qa-worker", "qa-worker"]);
+  assert.deepEqual(agents.filter((a) => a === "qa-worker"), ["qa-worker", "qa-worker"]);
   assert.equal(result.specs.length, 2);
+});
+
+test("runOpencodeParallel: PRE_INDEX_SERENA=0 opts out of the serena pre-index session", async () => {
+  const prevEnv = process.env.PRE_INDEX_SERENA;
+  process.env.PRE_INDEX_SERENA = "0";
+  try {
+    const opened: string[] = [];
+    const deps = fanoutDeps(
+      '{"objectives":[{"flow":"a","objective":"o1","symbols":[]},{"flow":"b","objective":"o2","symbols":[]}]}',
+      (_cwd, prompt) => (prompt.includes("flows/a.spec.ts") ? '{"spec":"flows/a.spec.ts"}' : '{"spec":"flows/b.spec.ts"}'),
+      opened,
+    );
+    const store = new Map<string, string>();
+    const fs: ManifestFs = { read: (p) => store.get(p) ?? null, write: (p, c) => void store.set(p, c) };
+    await runOpencodeParallel({ ...input, mode: "complete", intent: undefined }, deps, {}, fs);
+    assert.ok(!opened.includes("qa-worker-code")); // no pre-index session when opted out
+  } finally {
+    process.env.PRE_INDEX_SERENA = prevEnv ?? "";
+    if (!prevEnv) delete process.env.PRE_INDEX_SERENA;
+  }
 });
 
 // ── Integration tests: OpenCode SDK boundary failure modes ──────────────────

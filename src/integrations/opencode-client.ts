@@ -205,6 +205,57 @@ export async function startEventStream(
   }
 }
 
+export interface EventStreamReconnectOptions {
+  start?: typeof startEventStream;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  initialDelayMs?: number;
+  maxDelayMs?: number;
+  log?: (msg: string) => void;
+}
+
+function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms);
+    const onAbort = () => done();
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+// Keeps the OpenCode SSE bridge alive for the lifetime of the orchestrator. The
+// underlying SDK stream can fail during startup or after a transient network blip;
+// without this wrapper the TUI silently loses live activity until process restart.
+export async function startEventStreamWithReconnect(
+  onActivity: (a: LiveActivity) => void,
+  signal?: AbortSignal,
+  opts: EventStreamReconnectOptions = {},
+): Promise<void> {
+  const start = opts.start ?? startEventStream;
+  const sleep = opts.sleep ?? sleepWithAbort;
+  const initialDelayMs = opts.initialDelayMs ?? 1_000;
+  const maxDelayMs = opts.maxDelayMs ?? 30_000;
+  let delayMs = initialDelayMs;
+
+  while (!signal?.aborted) {
+    try {
+      await start(onActivity, signal);
+      delayMs = initialDelayMs;
+      if (!signal?.aborted) opts.log?.(`[qa] OpenCode event stream closed; reconnecting in ${delayMs}ms`);
+    } catch (err) {
+      if (signal?.aborted) break;
+      opts.log?.(`[qa] OpenCode event stream failed: ${err instanceof Error ? err.message : String(err)}; reconnecting in ${delayMs}ms`);
+    }
+    if (signal?.aborted) break;
+    await sleep(delayMs, signal);
+    delayMs = Math.min(delayMs * 2, maxDelayMs);
+  }
+}
+
 export function getOpenSessions(): SessionEntry[] {
   return [...sessionRegistry.values()];
 }
@@ -421,6 +472,7 @@ export interface ReviewInput {
   intent?: CommitIntent;
   appName: string;
   mode: RunMode;
+  target?: TestTarget; // "e2e" (default) or "code" — adjusts wording and spec paths
 }
 
 export interface ReviewResult {
@@ -432,17 +484,23 @@ export interface ReviewResult {
   parsed?: boolean;
 }
 
+// The reviewer is a bounded, read-only judge (10 steps, contents inlined in the prompt) —
+// it must never inherit the generator's 25-minute worst-case budget: a hung reviewer would
+// add that whole window to the run before the loop fails closed.
+const REVIEWER_TIMEOUT_MS = Number(process.env.OPENCODE_REVIEWER_TIMEOUT_MS) || 6 * 60 * 1000;
+
 export async function reviewIndependently(
   input: ReviewInput,
   deps: OpencodeDeps,
   opts?: { signal?: AbortSignal },
 ): Promise<ReviewResult> {
-  const session = await deps.open("qa-reviewer", input.mirrorDir, { signal: opts?.signal });
+  const session = await deps.open("qa-reviewer", input.mirrorDir, { signal: opts?.signal, timeoutMs: REVIEWER_TIMEOUT_MS });
   try {
     const changeType = input.intent?.type ?? input.mode;
     const specBlock = renderReviewSpecs(input);
+    const kind = input.target === "code" ? "tests" : "E2E tests";
     const prompt = [
-      `## Independent review — judge these E2E tests WITHOUT the generator's reasoning`,
+      `## Independent review — judge these ${kind} WITHOUT the generator's reasoning`,
       ``,
       `You are reviewing tests written for this commit, but you have NO access to the`,
       `generator's thought process. Judge the tests on their own merit using the`,
@@ -491,6 +549,8 @@ export async function reviewIndependently(
 const REVIEW_SPECS_MAX_BYTES = 40_000;
 
 function renderReviewSpecs(input: ReviewInput): string {
+  // e2e specs are e2e/-relative; code-mode tests are repo-relative (e2eRelDir = "").
+  const rel = (s: string) => (input.e2eRelDir ? `${input.e2eRelDir}/${s}` : s);
   const contents: string[] = [];
   let totalBytes = 0;
   for (const s of input.specs) {
@@ -498,13 +558,13 @@ function renderReviewSpecs(input: ReviewInput): string {
     try {
       content = readFileSync(join(input.mirrorDir, input.e2eRelDir, s), "utf8");
     } catch {
-      contents.push(`### ${input.e2eRelDir}/${s}\n( could not read file — review skipped for this spec )`);
+      contents.push(`### ${rel(s)}\n( could not read file — review skipped for this spec )`);
       continue;
     }
-    const block = `### ${input.e2eRelDir}/${s}\n\`\`\`typescript\n${content}\n\`\`\``;
+    const block = `### ${rel(s)}\n\`\`\`typescript\n${content}\n\`\`\``;
     totalBytes += Buffer.byteLength(block, "utf8");
     if (totalBytes > REVIEW_SPECS_MAX_BYTES) {
-      return `## Specs to review\n\n${input.specs.map((n, i) => `${i + 1}. ${input.e2eRelDir}/${n}`).join("\n")}\n\n( spec contents exceed ${REVIEW_SPECS_MAX_BYTES} bytes — read each file with the read tool )`;
+      return `## Specs to review\n\n${input.specs.map((n, i) => `${i + 1}. ${rel(n)}`).join("\n")}\n\n( spec contents exceed ${REVIEW_SPECS_MAX_BYTES} bytes — read each file with the read tool )`;
     }
     contents.push(block);
   }
@@ -778,10 +838,10 @@ export async function runOpencodeParallel(
     return runOpencode(input, deps, opts);
   }
 
-  // Pre-index Serena when the flag is set, so every worker inherits a warm index
-  // instead of paying activate_project from scratch (15-60s each). Controlled by
-  // env PRE_INDEX_SERENA so it can be toggled without redeploy.
-  if (process.env.PRE_INDEX_SERENA === "1") {
+  // Pre-index Serena so every worker inherits a warm index instead of paying
+  // activate_project from scratch (15-60s each). On by default for fan-out runs
+  // (best-effort, 120s cap); opt out with PRE_INDEX_SERENA=0.
+  if (process.env.PRE_INDEX_SERENA !== "0") {
     opts?.onProgress?.(`[qa] pre-indexing serena for ${objectives.length} workers...`);
     try {
       const idxSession = await deps.open("qa-worker-code", input.mirrorDir, { timeoutMs: 120_000 });

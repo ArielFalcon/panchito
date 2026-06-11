@@ -11,6 +11,8 @@
 // logic or no-network flows) and is SIGNAL-ONLY: the caller treats failures as non-blocking and
 // never gates publish on it.
 
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { runE2E, defaultExecuteDeps } from "../execute";
 import type { OracleInput, ValueOracleResult } from "./oracle-types";
 import type { QaCase, QaRunResult } from "../../types";
@@ -33,11 +35,38 @@ export function computeFaultInjectionScore(
 
 export interface FaultInjectionDeps {
   runCorrupted(args: { dir: string; baseUrl: string; namespace: string }): Promise<QaRunResult>;
+  // How many JSON responses the seed's `_faultInject` fixture ACTUALLY corrupted during the
+  // re-run, summed from the marker dumps it writes to .qa/fault-injection/<namespace>/.
+  // 0 ⇒ the app exposed no JSON API surface to corrupt: the oracle is NOT APPLICABLE and must
+  // score null — scoring 0 would label every green run E-VALUE-SURVIVED on a static site and
+  // systematically demote healthy rules. (Repos seeded before the marker existed also read 0,
+  // which degrades to the safe "no signal" side.)
+  countInjected(e2eDir: string, namespace: string): number;
 }
 
 export const defaultFaultInjectionDeps: FaultInjectionDeps = {
+  // Desktop-only on purpose: the oracle measures assertion strength, not viewport behavior,
+  // and the seed runs every spec in BOTH projects — one project halves the re-run cost.
+  // A repo whose config renamed the seed's "desktop" project fails the pass → infra-error
+  // → valueScore null (inconclusive), never a wrong score.
   runCorrupted: ({ dir, baseUrl, namespace }) =>
-    runE2E(dir, { baseUrl, namespace, faultInject: true }, defaultExecuteDeps),
+    runE2E(dir, { baseUrl, namespace, faultInject: true, project: "desktop" }, defaultExecuteDeps),
+  countInjected: (e2eDir, namespace) => {
+    try {
+      const dir = join(e2eDir, ".qa", "fault-injection", namespace);
+      let total = 0;
+      for (const f of readdirSync(dir)) {
+        try {
+          total += Number((JSON.parse(readFileSync(join(dir, f), "utf8")) as { corrupted?: unknown }).corrupted) || 0;
+        } catch {
+          /* unreadable dump — skip */
+        }
+      }
+      return total;
+    } catch {
+      return 0; // no marker dir — nothing was corrupted
+    }
+  },
 };
 
 export async function runFaultInjectionOracle(
@@ -48,11 +77,24 @@ export async function runFaultInjectionOracle(
     return { valueScore: null, mutantCount: 0, killedCount: 0, details: "fault-injection needs e2eDir + baseUrl + baseline-passing specs" };
   }
   // A distinct namespace isolates this pass's (possibly broken) data from the published run's.
-  const run = await deps.runCorrupted({ dir: input.e2eDir, baseUrl: input.baseUrl, namespace: `${input.namespace}-fi` });
+  const fiNamespace = `${input.namespace}-fi`;
+  const run = await deps.runCorrupted({ dir: input.e2eDir, baseUrl: input.baseUrl, namespace: fiNamespace });
   if (run.verdict === "infra-error") {
     return { valueScore: null, mutantCount: 0, killedCount: 0, details: "fault-injection re-run inconclusive (infra)" };
   }
-  const { valueScore, killed, total } = computeFaultInjectionScore(input.baselineCases, run.cases);
+  // Not applicable ≠ weak: if the fixture intercepted no JSON at all (static site, no API
+  // traffic in these flows), there was nothing to notice and the pass proves nothing.
+  if (deps.countInjected(input.e2eDir, fiNamespace) === 0) {
+    return { valueScore: null, mutantCount: 0, killedCount: 0, details: "no JSON responses were intercepted — fault-injection is not applicable to this app's flows (no score)" };
+  }
+  // Score only the baseline-passing specs the corrupted pass actually executed: a spec absent
+  // from the re-run (filtered project, skipped) carries no evidence about its oracle strength.
+  const ranCorrupted = new Set(run.cases.map((c) => c.name));
+  const scoreable = input.baselineCases.filter((n) => ranCorrupted.has(n));
+  if (scoreable.length === 0) {
+    return { valueScore: null, mutantCount: 0, killedCount: 0, details: "the corrupted re-run executed none of the baseline-passing specs (inconclusive)" };
+  }
+  const { valueScore, killed, total } = computeFaultInjectionScore(scoreable, run.cases);
   return {
     valueScore,
     mutantCount: total,

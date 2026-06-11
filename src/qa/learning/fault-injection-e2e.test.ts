@@ -52,6 +52,7 @@ describe("runFaultInjectionOracle", () => {
           cases: [{ name: "a", status: "fail" }, { name: "b", status: "pass" }],
           logs: "",
         }),
+        countInjected: () => 3,
       },
     );
     assert.equal(r.valueScore, 0.5);
@@ -62,7 +63,10 @@ describe("runFaultInjectionOracle", () => {
   it("returns null when the corrupted re-run is inconclusive (infra-error)", async () => {
     const r = await runFaultInjectionOracle(
       { target: "e2e", repoDir: "/x", e2eDir: "/x/e2e", baseUrl: "http://dev", namespace: "ns", baselineCases: ["a"] },
-      { runCorrupted: async () => ({ sha: "ns-fi", verdict: "infra-error", passed: false, cases: [], logs: "" }) },
+      {
+        runCorrupted: async () => ({ sha: "ns-fi", verdict: "infra-error", passed: false, cases: [], logs: "" }),
+        countInjected: () => 0,
+      },
     );
     assert.equal(r.valueScore, null);
   });

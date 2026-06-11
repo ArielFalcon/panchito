@@ -55,6 +55,11 @@ const CODE_PATHSPEC = [
   ":(exclude)target/",
   ":(exclude).next/",
   ":(exclude)coverage/",
+  // Mutation-oracle artifacts (qa/learning/mutation-code.ts) — cleaned up best-effort after
+  // the pass, but a crash between Stryker and publish must never commit them into the PR.
+  ":(exclude).stryker-tmp/",
+  ":(exclude)stryker.conf.json",
+  ":(exclude)reports/mutation/",
 ];
 
 interface PublishShape {

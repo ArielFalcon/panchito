@@ -149,8 +149,25 @@ export function selectForRetrieval(
   scored.sort((a, b) => b.score - a.score);
 
   const limit = opts.maxRules ?? 8;
-  return scored.slice(0, limit).map((s) => s.rule);
+  const picked = scored.slice(0, limit).map((s) => s.rule);
+
+  // Exploration floor: once `limit` ACTIVE rules exist, the +100 exploit bonus would shut
+  // candidates out of retrieval forever — they could never accumulate the outcomes that
+  // earn (or deny) promotion, and the injected set would ossify. Reserve the last slots
+  // for the NEWEST candidates not already selected, so rule turnover never stalls.
+  if (eligible.length > limit) {
+    const pickedIds = new Set(picked.map((r) => r.id));
+    const freshCandidates = eligible
+      .filter((r) => r.status === "candidate" && !pickedIds.has(r.id))
+      .sort((a, b) => b.at.localeCompare(a.at));
+    const slots = Math.min(EXPLORATION_SLOTS, freshCandidates.length);
+    if (slots > 0) picked.splice(limit - slots, slots, ...freshCandidates.slice(0, slots));
+  }
+  return picked;
 }
+
+// How many retrieval slots are reserved for unproven candidates when actives saturate the cap.
+export const EXPLORATION_SLOTS = 2;
 
 export function renderRulesForPrompt(rules: LearningRule[]): string {
   if (rules.length === 0) return "";

@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { JobQueue } from "./queue";
 import { enqueueTrackedRun } from "./runner";
 import { getRecord } from "./history";
@@ -15,11 +18,19 @@ const cfg = (name: string): AppConfig => ({
   report: { onFailure: "github-issue" },
 });
 
+function makeMirror(): string {
+  const mirrorDir = mkdtempSync(join(tmpdir(), "qa-runner-"));
+  mkdirSync(join(mirrorDir, "e2e", ".qa"), { recursive: true });
+  writeFileSync(join(mirrorDir, "e2e", ".qa", "context.json"), JSON.stringify({ builtAtSha: "def5678", routes: [], api: [], feBe: [] }));
+  return mirrorDir;
+}
+
 function stubDeps(over: Partial<PipelineDeps> = {}): PipelineDeps {
+  const mirrorDir = makeMirror();
   return {
     waitForDeploy: async () => {},
-    prepare: async () => ({ mirrorDir: "/m", diff: "", message: "feat: x" }),
-    prepareAtBranch: async () => ({ mirrorDir: "/m" }),
+    prepare: async () => ({ mirrorDir, diff: "", message: "feat: x" }),
+    prepareAtBranch: async () => ({ mirrorDir }),
     generate: async (_input, _signal) => ({ output: "", specs: ["a.spec.ts"], reviewed: false, approved: true }),
     setupE2e: async () => {},
     validate: async () => ({ ok: true, errors: [], infra: false }),
@@ -101,7 +112,7 @@ test("a continuation forces generation (no skip) and records the parent run", as
       fixCases: [{ name: "checkout", status: "fail" }],
     },
     // The commit message classifies as "docs" (would normally skip) — the continuation must still run.
-    { pipeline: stubDeps({ prepare: async () => ({ mirrorDir: "/m", diff: "", message: "docs: tweak" }) }), loadApp: cfg },
+    { pipeline: stubDeps({ prepare: async () => ({ mirrorDir: makeMirror(), diff: "", message: "docs: tweak" }) }), loadApp: cfg },
   );
   await queue.drain();
   const r = getRecord(id)!;
