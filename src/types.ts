@@ -77,6 +77,7 @@ export interface QaCase {
   flow?: string;
   objective?: string;
   reason?: string;
+  durationMs?: number; // wall-clock of the test, from the Playwright stream (live cases)
 }
 
 export interface QaRunResult {

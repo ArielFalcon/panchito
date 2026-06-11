@@ -18,6 +18,7 @@ export const QaCaseSchema = z.object({
   flow: z.string().optional(),
   objective: z.string().optional(),
   reason: z.string().optional(),
+  durationMs: z.number().nonnegative().optional(),
 });
 
 export const SpecRecordSchema = z.object({

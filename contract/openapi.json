@@ -906,6 +906,10 @@
           },
           "reason": {
             "type": "string"
+          },
+          "durationMs": {
+            "type": "number",
+            "minimum": 0
           }
         },
         "required": [

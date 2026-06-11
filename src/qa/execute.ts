@@ -152,7 +152,7 @@ export async function runE2E(
         if (ev.phase === "testbegin") opts.onRunning?.(ev.title);
         else if (ev.phase === "testend") {
           const st = streamStatusToCase(ev.status);
-          if (st) opts.onCase?.({ name: ev.title, status: st });
+          if (st) opts.onCase?.({ name: ev.title, status: st, ...(ev.durationMs !== undefined ? { durationMs: ev.durationMs } : {}) });
         }
       }
     : undefined;

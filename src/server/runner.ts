@@ -136,9 +136,9 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
           addCase(record.id, c);
           appendActivity(record.id, { kind: "todo", text: c.name, status: "completed" });
           deps.runEvents?.publish(record.id, c.status === "pass"
-            ? { type: "test.passed", name: c.name, durationMs: 0 }
+            ? { type: "test.passed", name: c.name, durationMs: c.durationMs ?? 0 }
             : c.status === "fail"
-              ? { type: "test.failed", name: c.name, detail: c.detail }
+              ? { type: "test.failed", name: c.name, detail: c.detail, ...(c.durationMs !== undefined ? { durationMs: c.durationMs } : {}) }
               : { type: "test.flaky", name: c.name, attempts: 2 });
         },
         (specs) => updateRecord(record.id, { specs }),
