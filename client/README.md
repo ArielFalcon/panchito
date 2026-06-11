@@ -13,9 +13,10 @@ orchestrator's published `contract/openapi.json` (no hand-written drift).
 - ✅ Module scaffold + contract codegen (`internal/contract/types.gen.go`) for the
   command/entity types (RunRecord, QaCase, AppView, the command DTOs). Builds + a
   round-trip test proves the contract decodes in Go.
-- ⏳ **RunEvent decoding** (the SSE event union): `RunEventBody` is a 15-variant
-  `oneOf` that does not codegen into idiomatic Go. Next increment writes a thin
-  envelope + type-switch decoder (with a round-trip test against the contract).
+- ✅ **RunEvent decoding** (`internal/events`): a hand-written envelope +
+  type-switch decoder for the 15-variant SSE union (which does not codegen into
+  idiomatic Go). Tolerant reader — an unknown event type becomes `UnknownEvent`,
+  never an error. Round-trip tested against canonical contract JSON.
 - ⏳ HTTP/SSE client, the Bubble Tea screens (connect / home / launcher / live /
   summary / chat), `theme.json`, reconnect, OS token storage.
 
