@@ -64,7 +64,7 @@ export interface ExecuteOptions {
 export type StreamEvent =
   | { phase: "begin"; total: number }
   | { phase: "testbegin"; title: string; file?: string }
-  | { phase: "testend"; title: string; status: string };
+  | { phase: "testend"; title: string; status: string; durationMs?: number };
 
 // Pure parser of one NDJSON line emitted by the stream reporter. Returns null for
 // blank/non-JSON/unknown lines (the reporter shares stdout with nothing, but stay
@@ -72,11 +72,11 @@ export type StreamEvent =
 export function parseStreamEvent(line: string): StreamEvent | null {
   const s = line.trim();
   if (!s || s[0] !== "{") return null;
-  let obj: { e?: string; total?: number; title?: string; file?: string; status?: string };
+  let obj: { e?: string; total?: number; title?: string; file?: string; status?: string; d?: number };
   try { obj = JSON.parse(s); } catch { return null; }
   if (obj.e === "begin" && typeof obj.total === "number") return { phase: "begin", total: obj.total };
   if (obj.e === "testbegin" && typeof obj.title === "string") return { phase: "testbegin", title: obj.title, ...(obj.file ? { file: String(obj.file) } : {}) };
-  if (obj.e === "testend" && typeof obj.title === "string") return { phase: "testend", title: obj.title, status: String(obj.status ?? "") };
+  if (obj.e === "testend" && typeof obj.title === "string") return { phase: "testend", title: obj.title, status: String(obj.status ?? ""), ...(typeof obj.d === "number" ? { durationMs: obj.d } : {}) };
   return null;
 }
 
@@ -297,7 +297,7 @@ const STREAM_REPORTER = `
 class QaStreamReporter {
   onBegin(_config, suite) { this._w({ e: "begin", total: suite.allTests().length }); }
   onTestBegin(test) { this._w({ e: "testbegin", title: this._name(test), file: test.location && test.location.file }); }
-  onTestEnd(test, result) { this._w({ e: "testend", title: this._name(test), status: result.status }); }
+  onTestEnd(test, result) { this._w({ e: "testend", title: this._name(test), status: result.status, d: result.duration }); }
   _name(test) { return test.titlePath().filter(Boolean).slice(1).join(" \\u203a "); }
   _w(o) { try { process.stdout.write(JSON.stringify(o) + "\\n"); } catch (_e) {} }
 }
