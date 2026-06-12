@@ -8,8 +8,9 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="${GOBIN:-${GOPATH:-$HOME/go}/bin}/panchito"
 
-# One-time (or after the client changes): compile and install the standalone binary.
-if [[ ! -x "$BIN" || "$REPO/client/cmd/panchito/main.go" -nt "$BIN" ]]; then
+# One-time (or after any client source changes): compile and install the binary.
+# The find rebuilds whenever ANY .go under client/ is newer than the binary.
+if [[ ! -x "$BIN" ]] || [[ -n "$(find "$REPO/client" -name '*.go' -newer "$BIN" -print -quit 2>/dev/null)" ]]; then
   echo "panchito: building client (one-time)…" >&2
   ( cd "$REPO/client" && go install ./cmd/panchito )
 fi
