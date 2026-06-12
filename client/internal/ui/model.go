@@ -18,6 +18,7 @@ const (
 	screenHome
 	screenLauncher
 	screenLive
+	screenChat
 )
 
 type Model struct {
@@ -27,6 +28,7 @@ type Model struct {
 	home     homeModel
 	launcher launcherModel
 	live     liveModel
+	chat     chatModel
 }
 
 func New() Model {
@@ -66,6 +68,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.live = newLiveModel(msg.id, m.launcher.app, ch, cancel)
 		m.screen = screenLive
 		return m, tea.Batch(startStreamCmd(ctx, m.client, msg.id, ch), waitForEventCmd(ch), m.live.spin.Tick)
+	case askMsg:
+		m.chat = newChatModel(m.client, m.live.runID)
+		m.screen = screenChat
+		return m, m.chat.Init()
+	case continueMsg:
+		return m, continueCmd(m.client, m.live.runID, msg.cases)
 	case backMsg:
 		m.screen = screenHome
 		return m, nil
@@ -81,6 +89,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.launcher, cmd = m.launcher.Update(msg)
 	case screenLive:
 		m.live, cmd = m.live.Update(msg)
+	case screenChat:
+		m.chat, cmd = m.chat.Update(msg)
 	}
 	return m, cmd
 }
@@ -93,6 +103,8 @@ func (m Model) View() string {
 		return m.launcher.View()
 	case screenLive:
 		return m.live.View()
+	case screenChat:
+		return m.chat.View()
 	default:
 		return m.connect.View()
 	}

@@ -151,3 +151,46 @@ func TestQOnlyQuitsOnHome(t *testing.T) {
 		}
 	}
 }
+
+func TestLiveAskAndContinueGatedOnDone(t *testing.T) {
+	m := newLiveModel("r", "portfolio", make(chan events.RunEvent, 1), func() {})
+
+	// Before the run finishes, 'a' and 'c' are inert.
+	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}); cmd != nil {
+		t.Fatal("'a' before done must do nothing")
+	}
+
+	m.done = true
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if cmd == nil {
+		t.Fatal("'a' when done must emit a command")
+	}
+	if _, ok := cmd().(askMsg); !ok {
+		t.Fatalf("want askMsg, got %T", cmd())
+	}
+
+	m.tests = []testItem{{name: "checkout", status: "fail"}, {name: "nav", status: "pass"}}
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	cm, ok := cmd().(continueMsg)
+	if !ok || len(cm.cases) != 1 || cm.cases[0] != "checkout" {
+		t.Fatalf("continue cases = %#v", cmd())
+	}
+}
+
+func TestChatAppendsQuestionAndRendersAnswer(t *testing.T) {
+	m := newChatModel(nil, "run_1")
+	m.input.SetValue("why did it fail?")
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if len(m.entries) != 1 || m.entries[0].role != "q" || !m.loading {
+		t.Fatalf("after enter: entries=%+v loading=%v", m.entries, m.loading)
+	}
+
+	m, _ = m.Update(answerMsg{text: "Because **the selector** broke."})
+	if len(m.entries) != 2 || m.entries[1].role != "a" || m.loading {
+		t.Fatalf("after answer: entries=%d loading=%v", len(m.entries), m.loading)
+	}
+	if !strings.Contains(m.View(), "why did it fail?") {
+		t.Fatalf("view missing the question:\n%s", m.View())
+	}
+}

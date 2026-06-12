@@ -66,6 +66,20 @@ func createRunCmd(c *api.Client, in contract.CreateRunInput) tea.Cmd {
 	}
 }
 
+// continueCmd re-runs the named failed cases as a continuation; the new run opens
+// in a fresh live screen.
+func continueCmd(c *api.Client, id string, cases []string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		res, err := c.Continue(ctx, id, contract.ContinueRequest{Cases: &cases})
+		if err != nil {
+			return errMsg{err}
+		}
+		return runCreatedMsg{id: res.Id}
+	}
+}
+
 func (m launcherModel) options() []option {
 	switch m.step {
 	case stepTarget:

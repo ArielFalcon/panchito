@@ -74,12 +74,33 @@ func (m liveModel) Update(msg tea.Msg) (liveModel, tea.Cmd) {
 		m.spin, cmd = m.spin.Update(msg)
 		return m, cmd
 	case tea.KeyMsg:
-		if msg.String() == "esc" {
+		switch msg.String() {
+		case "esc":
 			m.cancel() // stop the stream goroutine
 			return m, func() tea.Msg { return backMsg{} }
+		case "a":
+			if m.done {
+				return m, func() tea.Msg { return askMsg{} }
+			}
+		case "c":
+			if m.done {
+				if failed := m.failedTests(); len(failed) > 0 {
+					return m, func() tea.Msg { return continueMsg{cases: failed} }
+				}
+			}
 		}
 	}
 	return m, nil
+}
+
+func (m liveModel) failedTests() []string {
+	var out []string
+	for _, t := range m.tests {
+		if t.status == "fail" {
+			out = append(out, t.name)
+		}
+	}
+	return out
 }
 
 func (m *liveModel) fold(ev events.RunEvent) {
@@ -170,7 +191,15 @@ func (m liveModel) View() string {
 	if m.closed && !m.done {
 		b.WriteString("\n" + hintStyle.Render("stream closed"))
 	}
-	b.WriteString("\n" + hintStyle.Render("esc back · ctrl+c quit"))
+	footer := "esc back · ctrl+c quit"
+	if m.done {
+		footer = "a ask"
+		if len(m.failedTests()) > 0 {
+			footer += " · c continue failed"
+		}
+		footer += " · esc back · ctrl+c quit"
+	}
+	b.WriteString("\n" + hintStyle.Render(footer))
 	return screenStyle.Render(b.String())
 }
 

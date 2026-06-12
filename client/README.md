@@ -32,8 +32,11 @@ orchestrator's published `contract/openapi.json` (no hand-written drift).
   dedicated **PhaseProgress** (gate→…→decide stepper), **AgentActivityPane**
   (running tool with an animated spinner, by callID), **PlanChecklist** (☐◐☑), and
   **TestList** (spinner→✓/✗ + duration, failure detail) components.
-- ⏳ E4d: summary + chat (Glamour). Then `theme.json` sync, OS token storage,
-  Phase F cutover (replace the Ink TUI).
+- ✅ E4d: **chat** — read-only run Q&A (the qa-assistant) with Markdown answers
+  rendered by **Glamour**; and **continue** (`c` on a finished run re-runs the
+  failed cases as a new run). Opened from the live screen with `a` / `c`.
+- ⏳ OS token storage (go-keyring); parity screens (onboarding, history) before
+  the Phase F cutover that replaces the Ink TUI.
 
 ## Run
 
