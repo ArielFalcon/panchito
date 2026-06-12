@@ -314,8 +314,25 @@ func (m appAdminModel) View() string {
 	if m.status != "" {
 		b.WriteString("\n" + okStyle.Render(m.status))
 	}
-	b.WriteString("\n" + hintStyle.Render("esc back"))
+	b.WriteString("\n" + hintStyle.Render(m.footerHint()))
 	return screenStyle.Render(b.String())
+}
+
+// footerHint is the single, step-aware key legend for this screen — the only place
+// hints are rendered, so each binding (esc included) appears exactly once.
+func (m appAdminModel) footerHint() string {
+	switch m.step {
+	case appStepOwner:
+		return "enter search repos · esc back"
+	case appStepRepo:
+		return "↑↓ choose · enter form · esc owner"
+	case appStepForm:
+		return "tab move · space toggle · enter next/save · esc back"
+	case appStepDelete:
+		return "space toggle purge · enter delete · esc cancel"
+	default:
+		return "esc back"
+	}
 }
 
 func (m appAdminModel) renderRepos() string {
@@ -337,7 +354,6 @@ func (m appAdminModel) renderRepos() string {
 		}
 		b.WriteString(fmt.Sprintf("%s%s  %s\n", marker, name, hintStyle.Render(privacy)))
 	}
-	b.WriteString(hintStyle.Render("↑↓ choose · enter form") + "\n")
 	return b.String()
 }
 
@@ -367,17 +383,28 @@ func (m appAdminModel) renderForm() string {
 		}
 		b.WriteString(marker + text + "\n")
 	}
-	b.WriteString(hintStyle.Render("tab move · space toggle · enter next/save") + "\n")
 	return b.String()
 }
 
 func (m appAdminModel) renderDelete() string {
-	name := m.appName()
-	return fmt.Sprintf("%s\n%s\n%s\n",
-		errorStyle.Render("delete "+name+"?"),
-		fmt.Sprintf("purge mirrors/history: %t", m.purge),
-		hintStyle.Render("space toggle purge · enter delete · esc cancel"),
-	)
+	purgeBox, purgeWord, note := "☐", labelStyle.Render("purge"), hintStyle.Render("config entry only — mirrors & run history are kept")
+	if m.purge {
+		purgeBox, purgeWord, note = "☑", errorStyle.Render("purge"), errorStyle.Render("also wipes mirrors & run history — irreversible")
+	}
+	var b strings.Builder
+	b.WriteString(errorStyle.Bold(true).Render("delete "+m.appName()+" ?") + "\n")
+	if m.repo != "" {
+		b.WriteString(labelStyle.Render(m.repo) + "\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(okStyle.Render("▸ ") + purgeBox + " " + purgeWord + "\n")
+	b.WriteString("  " + note)
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colError).
+		Padding(0, 2).
+		Render(b.String())
+	return box + "\n"
 }
 
 type onboardSelectedMsg struct{}

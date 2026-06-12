@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/ArielFalcon/panchito/internal/api"
@@ -348,6 +349,9 @@ func (m liveModel) summaryBody() string {
 	if m.failed > 0 {
 		counts += labelStyle.Render(" · ") + errorStyle.Render(fmt.Sprintf("%d failed", m.failed))
 	}
+	if fl := countTests(m.tests).flaky; fl > 0 {
+		counts += labelStyle.Render(" · ") + shadowStyle.Render(fmt.Sprintf("%d flaky", fl))
+	}
 	b.WriteString(counts + "\n")
 
 	sections := []string{
@@ -389,13 +393,44 @@ func (m liveModel) renderPhases() string {
 			parts[i] = hintStyle.Render(p)
 		}
 	}
-	line := strings.Join(parts, hintStyle.Render(" · "))
+	line := wrapJoin(parts, hintStyle.Render(" · "), m.width-4) // -4: screenStyle horizontal padding
 	// A transient/unknown phase (e.g. "retry") matches no canonical step, so cur==-1
 	// and nothing would be highlighted — surface it explicitly instead of going blank.
 	if cur < 0 && m.phase != "" && !m.done {
 		line += "  " + titleStyle.Render("("+m.phase+")")
 	}
 	return line
+}
+
+// wrapJoin joins styled parts with sep, breaking to a new line whenever the next
+// part would exceed width (measured in display cells, so ANSI styling is ignored).
+// width <= 0 disables wrapping — used before a terminal size is known. Keeps the 8
+// pipeline phases readable on terminals narrower than 80 columns.
+func wrapJoin(parts []string, sep string, width int) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	if width <= 0 {
+		return strings.Join(parts, sep)
+	}
+	sepW := lipgloss.Width(sep)
+	var b strings.Builder
+	lineW := 0
+	for i, p := range parts {
+		pw := lipgloss.Width(p)
+		switch {
+		case i == 0:
+			b.WriteString(p)
+			lineW = pw
+		case lineW+sepW+pw > width:
+			b.WriteString("\n" + p)
+			lineW = pw
+		default:
+			b.WriteString(sep + p)
+			lineW += sepW + pw
+		}
+	}
+	return b.String()
 }
 
 func (m liveModel) renderActivity() string {
@@ -494,6 +529,7 @@ func (m liveModel) renderTests() string {
 				b.WriteString("    " + hintStyle.Render(truncate(failed.detail, 76)) + "\n")
 			}
 		}
+		b.WriteString(m.summaryTestDetail())
 	} else {
 		b.WriteString("  " + hintStyle.Render("waiting for test runner") + "\n")
 	}
@@ -592,6 +628,69 @@ func firstFailedTest(tests []testItem) (testItem, bool) {
 		}
 	}
 	return testItem{}, false
+}
+
+// summaryTestDetail is the recap-only block (rendered under "finished"): flaky
+// cases with their retry count, then the slowest cases with durations. Both are
+// bounded so an 80-test suite never overflows the summary.
+func (m liveModel) summaryTestDetail() string {
+	var b strings.Builder
+	if flaky := flakyTests(m.tests); len(flaky) > 0 {
+		b.WriteString("  " + shadowStyle.Render("flaky") + "\n")
+		for i, t := range flaky {
+			if i >= 5 {
+				b.WriteString("    " + hintStyle.Render(fmt.Sprintf("+%d more", len(flaky)-5)) + "\n")
+				break
+			}
+			line := "~ " + truncate(t.name, 56)
+			if t.attempts > 0 {
+				line += fmt.Sprintf(" (%d attempts)", t.attempts)
+			}
+			b.WriteString("    " + shadowStyle.Render(line) + "\n")
+		}
+	}
+	if slow := slowestTests(m.tests, 3); len(slow) > 0 {
+		b.WriteString("  " + labelStyle.Render("slowest") + "\n")
+		for _, t := range slow {
+			b.WriteString("    " + labelStyle.Render(truncate(t.name, 56)) + " " + hintStyle.Render(formatDuration(t.durationMs)) + "\n")
+		}
+	}
+	return b.String()
+}
+
+func flakyTests(tests []testItem) []testItem {
+	var out []testItem
+	for _, t := range tests {
+		if t.status == "flaky" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// slowestTests returns the n cases with the longest recorded duration, descending.
+func slowestTests(tests []testItem, n int) []testItem {
+	withDur := make([]testItem, 0, len(tests))
+	for _, t := range tests {
+		if t.durationMs > 0 {
+			withDur = append(withDur, t)
+		}
+	}
+	sort.SliceStable(withDur, func(i, j int) bool { return withDur[i].durationMs > withDur[j].durationMs })
+	if len(withDur) > n {
+		withDur = withDur[:n]
+	}
+	return withDur
+}
+
+func formatDuration(ms float64) string {
+	if ms <= 0 {
+		return ""
+	}
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", int(ms))
+	}
+	return fmt.Sprintf("%.1fs", ms/1000)
 }
 
 func (m liveModel) renderCoverage() string {
