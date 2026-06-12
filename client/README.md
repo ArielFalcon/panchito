@@ -28,9 +28,12 @@ orchestrator's published `contract/openapi.json` (no hand-written drift).
   consumes the RunEvent SSE stream end-to-end (a goroutine pushes events onto a
   channel; a read-next `tea.Cmd` hands each to the loop, so the model mutates only
   in `Update`). E4b renders a simple event feed + verdict.
-- ⏳ E4c: replace the feed with the dedicated **PhaseProgress / AgentActivityPane /
-  PlanChecklist / TestList** components. Then summary + chat (Glamour), `theme.json`
-  sync, OS token storage.
+- ✅ E4c: the live screen folds the stream into structured state and renders the
+  dedicated **PhaseProgress** (gate→…→decide stepper), **AgentActivityPane**
+  (running tool with an animated spinner, by callID), **PlanChecklist** (☐◐☑), and
+  **TestList** (spinner→✓/✗ + duration, failure detail) components.
+- ⏳ E4d: summary + chat (Glamour). Then `theme.json` sync, OS token storage,
+  Phase F cutover (replace the Ink TUI).
 
 ## Run
 

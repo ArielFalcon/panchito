@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ArielFalcon/panchito/internal/api"
@@ -76,21 +77,42 @@ func TestLauncherEscStepsBackThenLeaves(t *testing.T) {
 	}
 }
 
-func TestLiveFoldsEventsAndVerdict(t *testing.T) {
-	ch := make(chan events.RunEvent, 4)
+func TestLiveFoldsEventsIntoStructuredState(t *testing.T) {
+	ch := make(chan events.RunEvent, 8)
 	m := newLiveModel("run_1", "portfolio", ch, func() {})
 
 	m, _ = m.Update(runEventMsg(events.RunEvent{Type: "step.changed", Body: events.StepChanged{Step: "generate"}}))
-	if m.step != "generate" {
-		t.Fatalf("step = %q", m.step)
+	if m.phase != "generate" {
+		t.Fatalf("phase = %q", m.phase)
 	}
+
+	// A test goes running → pass, keyed by name (one row, not two).
+	m, _ = m.Update(runEventMsg(events.RunEvent{Type: "test.started", Body: events.TestStarted{Name: "login"}}))
 	m, _ = m.Update(runEventMsg(events.RunEvent{Type: "test.passed", Body: events.TestPassed{Name: "login", DurationMs: 1200}}))
-	if len(m.lines) < 2 {
-		t.Fatalf("want >=2 feed lines, got %d", len(m.lines))
+	if len(m.tests) != 1 || m.tests[0].status != "pass" || m.tests[0].durationMs != 1200 {
+		t.Fatalf("tests: %+v", m.tests)
 	}
+
+	// A running tool then its completion update the SAME activity row (by callID).
+	m, _ = m.Update(runEventMsg(events.RunEvent{Type: "agent.activity", Body: events.AgentActivity{Kind: "analyzing", Target: "Header.astro", Status: "running", CallID: "c1"}}))
+	m, _ = m.Update(runEventMsg(events.RunEvent{Type: "agent.activity", Body: events.AgentActivity{Kind: "analyzing", Target: "Header.astro", Status: "completed", CallID: "c1"}}))
+	if len(m.activity) != 1 || m.activity[0].status != "completed" {
+		t.Fatalf("activity: %+v", m.activity)
+	}
+
+	m, _ = m.Update(runEventMsg(events.RunEvent{Type: "plan.updated", Body: events.PlanUpdated{Todos: []events.PlanTodo{{Content: "a", Status: "in_progress"}}}}))
+	if len(m.plan) != 1 {
+		t.Fatalf("plan: %+v", m.plan)
+	}
+
 	m, _ = m.Update(runEventMsg(events.RunEvent{Type: "run.verdict", Body: events.RunVerdict{Verdict: "pass"}}))
 	if !m.done || m.verdict != "pass" {
 		t.Fatalf("done=%v verdict=%q", m.done, m.verdict)
+	}
+	// View renders without panicking and shows the dedicated sections.
+	out := m.View()
+	if !strings.Contains(out, "login") || !strings.Contains(out, "tests") {
+		t.Fatalf("view missing test section:\n%s", out)
 	}
 }
 
