@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
-# panchito — the Ink terminal UI for the ai-pipeline control API.
-# Talks HTTP to a RUNNING orchestrator (docker compose up). Host-only (Node + tsx).
+# panchito — the Go/Bubble Tea terminal client for the ai-pipeline control plane.
+# Talks HTTP to a RUNNING orchestrator (docker compose up). Build once, run freely:
+# the compiled binary lives in Go's bin dir; this shim builds it on first use only.
 # Env: QA_HOST (default localhost:8080) · QA_API_TOKEN (if the service requires auth).
 set -euo pipefail
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-exec node --import tsx "$DIR/src/tui/index.tsx" "$@"
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIN="${GOBIN:-${GOPATH:-$HOME/go}/bin}/panchito"
+
+# One-time (or after the client changes): compile and install the standalone binary.
+if [[ ! -x "$BIN" || "$REPO/client/cmd/panchito/main.go" -nt "$BIN" ]]; then
+  echo "panchito: building client (one-time)…" >&2
+  ( cd "$REPO/client" && go install ./cmd/panchito )
+fi
+
+exec "$BIN" "$@"
