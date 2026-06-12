@@ -7,8 +7,11 @@ The same layer later serves OpenClaw with zero orchestrator change. The bet is
 Code itself is Ink); it is **distribution** (single static binary) plus a
 **real-time, domain-parsed live view** of what the agent and the tests are doing.
 
-> **Status:** Planning — consolidated and ready to implement. Phase A (spike) not started.
-> **Scope:** the client, the control-plane contract, the live-event pipeline, the read-side event bus.
+> **Status:** Implemented — Phases B–E shipped and green (TS suite + `go test -race`).
+> The Go client reaches parity (connect→home→launcher→live→chat + history, onboarding,
+> agent-runtime settings). **Pending:** Phase A spike + the v1→v2 firehose swap (gated on
+> OpenCode quota); Phase F cutover (delete Ink) is unblocked but destructive, awaiting go-ahead.
+> **Scope:** the client, the control-plane contract, the live-event pipeline, the read-side event bus, and the multi-provider agent runtime (§14).
 > **Relationship:** extends and supersedes [interactive-layer.md](interactive-layer.md) for the client + live-activity surface. The orchestrator engine (pipeline, queue, harness) is **untouched** — this changes the interface, not the engine.
 > **Base:** engram entry #363 (TUI VNext requirements guide) + decisions #366.
 
@@ -304,12 +307,12 @@ Sequenced to retire the biggest unknown first (priority #2 depends on the fireho
 
 | Phase | Ships | De-risks |
 |-------|-------|----------|
-| **A. OpenCode live spike** | Run `opencode serve`; confirm v2 scoped subscribe + `history.list` replay + `ToolState.title`; confirm a deterministic verdict path. | The granularity of the whole live view. **Prerequisite.** |
-| **B. Contract layer** | ✅ RunEvent + command DTOs in zod ([events.ts](../src/contract/events.ts), [commands.ts](../src/contract/commands.ts)); native OpenAPI emission ([openapi.ts](../src/contract/openapi.ts), `npm run contract:gen` → [contract/openapi.json](../contract/openapi.json)); contract test + compile-time drift guard vs `src/types.ts`; `/api/v1` routes are served by the current Node gateway and key responses validate against zod before egress. **Remaining:** Go codegen happens in Phase E. | Drift; foundation shared with OpenClaw. |
-| **C. Event bus + domain events** | Bus ✅; OpenCode-event → RunEvent mapper ✅ ([activity-mapper.ts](../src/integrations/activity-mapper.ts)); runner publishes `run.started`, `step.changed`, `test.started`, terminal `test.*` (with **real per-test duration** carried on `QaCase` from the Playwright stream), `agent.error`, `run.verdict`; **OpenCode firehose activity (`agent.activity`/`plan.updated`, `ToolState.title`-rich) is mapped and published into the same store** ✅ ([opencode-client.ts](../src/integrations/opencode-client.ts) `onRunEvent` → `runEvents.publish`). **Remaining:** swap the v1 `global.event()` firehose for v2 scoped `event.subscribe` (spike-gated). | Produces the live data. |
-| **D. Gateway SSE + replay** | ✅ `GET /api/v1/runs/:id/events` streams SSE with `seq` as event id, a bounded in-memory ring buffer, and `Last-Event-ID` replay. **Remaining:** version/capability handshake and reconnect UX in the Go client. | The encapsulated client-facing layer. |
-| **E. Go Bubble Tea TUI** | connect→home→launcher→live→summary→chat; TestList + AgentActivityPane + PlanChecklist; Glamour; reconnect; token store. | The product. |
-| **F. Cutover** | `bin/panchito` → Go binary; delete `src/tui/`; drop `ink`/`react`/`ink-*`; Homebrew formula. | One switch + deletion; orchestrator repo ends with zero UI deps. |
+| **A. OpenCode live spike** | ⏳ Run `opencode serve`; confirm v2 scoped subscribe + `history.list` replay + `ToolState.title`; confirm a deterministic verdict path. Gated on OpenCode quota. | The granularity of the whole live view. **Prerequisite for the v2 swap.** |
+| **B. Contract layer** | ✅ RunEvent + command DTOs in zod ([events.ts](../src/contract/events.ts), [commands.ts](../src/contract/commands.ts)); native OpenAPI emission ([openapi.ts](../src/contract/openapi.ts), `npm run contract:gen` → [contract/openapi.json](../contract/openapi.json)); contract test + compile-time drift guard vs `src/types.ts`; `/api/v1` routes (runs, apps CRUD, repos, agent config/models/restart) served by the Node gateway and validated against zod before egress. Go codegen wired (Phase E). | Drift; foundation shared with OpenClaw. |
+| **C. Event bus + domain events** | ✅ Bus; OpenCode-event → RunEvent mapper ([activity-mapper.ts](../src/integrations/activity-mapper.ts)); runner publishes `run.started`, `step.changed`, `test.started`, terminal `test.*` (with **real per-test duration** carried on `QaCase` from the Playwright stream), `agent.error`, `run.verdict`; **OpenCode firehose activity (`agent.activity`/`plan.updated`, `ToolState.title`-rich) is mapped and published into the same store** ([opencode-client.ts](../src/integrations/opencode-client.ts) `onRunEvent` → `runEvents.publish`). **Remaining:** swap the v1 `global.event()` firehose for v2 scoped `event.subscribe` (spike-gated). | Produces the live data. |
+| **D. Gateway SSE + replay** | ✅ `GET /api/v1/runs/:id/events` streams SSE with `seq` as event id, a bounded in-memory ring buffer, and `Last-Event-ID` replay; Go client reconnects with backoff. **Remaining:** explicit version/capability handshake. | The encapsulated client-facing layer. |
+| **E. Go Bubble Tea TUI** | ✅ connect→home→launcher→live→chat; TestList + AgentActivityPane + PlanChecklist + PhaseProgress; Glamour chat; continue-failed-cases; reconnect; OS token store; **plus run history, app onboarding, and the agent-runtime settings screen (§14).** | The product. |
+| **F. Cutover** | ⏳ `bin/panchito` → Go binary; delete `src/tui/`; drop `ink`/`react`/`ink-*`; Homebrew formula. Unblocked (parity reached) — destructive, awaiting go-ahead. | One switch + deletion; orchestrator repo ends with zero UI deps. |
 
 ---
 
@@ -328,3 +331,42 @@ Sequenced to retire the biggest unknown first (priority #2 depends on the fireho
 - A message broker for the bus — over-engineering for one process.
 - Event-sourcing rewrite of `RunRecord` — it stays directly-mutated (per interactive-layer.md §3.4).
 - Moving the verdict to v2 queued delivery — keeps the determinism keystone on the blocking prompt.
+
+---
+
+## 14. Multi-provider agent runtime (OpenCode + Codex)
+
+The runtime is provider-agnostic: the orchestrator can drive **OpenCode**, **Codex**,
+or both at once. App-specificity still lives only in `config/`; this layer lives in
+`src/agent-runtime/` and is surfaced through the control plane like everything else.
+
+```
+src/agent-runtime/
+  types.ts            AgentRuntimeStrategy / AgentFacade contracts, role↔assignment mapping
+  config.ts           AgentRuntimeConfig, validation, env (de)serialization, defaults per provider
+  facades.ts          SingleAgentFacade / DualAgentFacade → OpencodeDeps the pipeline already consumes
+  opencode-strategy.ts  HTTP to `opencode serve` (unchanged path)
+  codex-strategy.ts     CodexHeadlessTransport: SupervisorExecTransport (HTTP) | CodexExecTransport (local)
+src/server/agent-runtime.ts   AgentRuntimeManager: apply/validate/restart, persists AGENT_* via env-store
+```
+
+| Concern | Decision |
+|---------|----------|
+| Seam | One `AgentRuntimeStrategy` per provider behind a `facade()` that returns the **same `OpencodeDeps`** `pipeline.ts` already injects — the engine is untouched. |
+| Modes | `single` (one provider, all roles) or `dual` (primary/reviewer/chat each pick a provider+model). A dual config that collapses to one provider requires `confirmSingleDowngrade`. |
+| Validation | A model must exist in its provider's catalog before apply (`validateAssignedModels`) — no silent fallback. |
+| Contract | `PublicAgentConfig` / `AgentConfigUpdate` / models / restart are in [commands.ts](../src/contract/commands.ts) and served at `/api/v1/agent/{config,models,restart}`; the Go `agent.go` screen and the (legacy) Ink `AgentRuntimeSettings.tsx` both drive them. |
+| Secrets | Keys persist via the 0600 env-store; `codexExecEnv` allowlists what reaches the agent; errors pass through `redactError`. |
+
+**Container topology.** Both runtimes live in the `opencode` image, fronted by
+`opencode/agent-supervisor.mjs` (port 4097). OpenCode is a long-lived `opencode serve`
+the orchestrator reaches over HTTP. **Codex is exec-per-prompt**: the orchestrator
+image ships no `codex` binary, so `SupervisorExecTransport` POSTs each turn to the
+supervisor's `/codex/exec`, which runs `codex exec --json` inside the agent container —
+the exact mirror of the OpenCode HTTP boundary. Codex health reflects real CLI
+availability (key present + binary resolvable), never a phantom process.
+
+> **Pending (gated on a live Codex):** swap the one-shot `codex exec` JSONL path for
+> the richer `codex app-server` protocol behind the same `CodexHeadlessTransport` seam
+> — it would also stream Codex tool activity into the live `RunEvent` view. Deferred
+> until Codex can be validated end-to-end, exactly as the OpenCode v1→v2 swap is.
