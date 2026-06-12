@@ -89,7 +89,7 @@ function normalizeTodoStatus(raw: unknown): "pending" | "in_progress" | "complet
   return "pending";
 }
 
-function toolActivity(part: PartLike): RunEventBody[] {
+function toolActivity(part: PartLike, workerId?: string): RunEventBody[] {
   const tool = String(part.tool ?? "");
   const state = part.state ?? {};
   const status = String(state.status ?? "");
@@ -104,7 +104,11 @@ function toolActivity(part: PartLike): RunEventBody[] {
   const liveStatus: "running" | "completed" = status === "running" ? "running" : "completed";
 
   const base = { type: "agent.activity" as const, kind: kindForTool(tool), target: targetFor(tool, state), status: liveStatus };
-  const activity: RunEventBody = part.callID ? { ...base, callId: part.callID } : base;
+  const activity: RunEventBody = {
+    ...base,
+    ...(part.callID ? { callId: part.callID } : {}),
+    ...(workerId ? { workerId } : {}),
+  };
 
   const out: RunEventBody[] = [activity];
   if (status === "completed" && base.kind === "writing") {
@@ -132,14 +136,17 @@ export function eventRunId(
 export function mapOpencodeEvent(
   event: RawOpencodeEvent,
   sessions: ReadonlyMap<string, string>,
+  workers?: ReadonlyMap<string, string>,
 ): RunEventBody[] {
   if (!eventRunId(event, sessions)) return [];
   const p = event.properties ?? {};
   const part = p.part as PartLike | undefined;
+  const sessionID = (p.sessionID as string | undefined) ?? part?.sessionID;
+  const workerId = sessionID ? workers?.get(sessionID) : undefined;
 
   switch (event.type) {
     case "message.part.updated":
-      return part?.type === "tool" ? toolActivity(part) : []; // text/reasoning/step → prose → drop
+      return part?.type === "tool" ? toolActivity(part, workerId) : []; // text/reasoning/step → prose → drop
 
     case "todo.updated": {
       const todos = Array.isArray(p.todos) ? (p.todos as TodoLike[]) : [];

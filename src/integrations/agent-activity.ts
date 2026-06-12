@@ -147,22 +147,31 @@ export function routeEvent(event: RawEvent, sessions: ReadonlyMap<string, string
 export class ActivityRouter {
   private readonly sessions = new Map<string, string>();
   private readonly context = new Map<string, SessionContext>();
+  private readonly workers = new Map<string, string>(); // sessionId → workerId (parallelDiff fan-out)
   readonly drops: Record<DropReason, number> = { "no-session": 0, "unknown-session": 0, "unknown-kind": 0 };
 
-  register(sessionId: string, runId: string): void {
+  register(sessionId: string, runId: string, workerId?: string): void {
     this.sessions.set(sessionId, runId);
     this.context.set(sessionId, { lastFile: undefined, lastTodo: undefined, fileCount: 0, emitted: new Set() });
+    if (workerId) this.workers.set(sessionId, workerId);
   }
 
   unregister(sessionId: string): void {
     this.sessions.delete(sessionId);
     this.context.delete(sessionId);
+    this.workers.delete(sessionId);
   }
 
   // Read-only view of the session→run mapping, for the stream consumer that maps
   // raw events to contract RunEvents (mapOpencodeEvent needs the same demux map).
   sessionMap(): ReadonlyMap<string, string> {
     return this.sessions;
+  }
+
+  // Read-only session→workerId map: lets the mapper tag a fan-out worker's activity
+  // so the TUI can show a dedicated multi-worker view.
+  workerMap(): ReadonlyMap<string, string> {
+    return this.workers;
   }
 
   // Returns the activities to surface for this event (already deduped). Empty when

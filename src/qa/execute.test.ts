@@ -91,6 +91,7 @@ test("a ran-but-empty report ({}) is infra-error, not a false pass", async () =>
 
 test("parseStreamEvent parses the NDJSON reporter lines and ignores noise", () => {
   assert.deepEqual(parseStreamEvent('{"e":"begin","total":3}'), { phase: "begin", total: 3 });
+  assert.deepEqual(parseStreamEvent('{"e":"discovered","title":"checkout › buys","file":"c.spec.ts"}'), { phase: "discovered", title: "checkout › buys", file: "c.spec.ts" });
   assert.deepEqual(parseStreamEvent('{"e":"testbegin","title":"checkout › buys","file":"c.spec.ts"}'), { phase: "testbegin", title: "checkout › buys", file: "c.spec.ts" });
   assert.deepEqual(parseStreamEvent('{"e":"testend","title":"checkout › buys","status":"passed"}'), { phase: "testend", title: "checkout › buys", status: "passed" });
   assert.equal(parseStreamEvent(""), null);

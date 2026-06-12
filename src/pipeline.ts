@@ -101,7 +101,7 @@ export interface PipelineDeps {
   listChangedSpecs?(mirrorDir: string, e2eRelDir: string): Promise<string[]>;
   setupE2e(e2eDir: string): Promise<void>; // installs the e2e project's dependencies
   validate(e2eDir: string): Promise<{ ok: boolean; errors: string[]; infra: boolean }>;
-  execute(e2eDir: string, opts: { baseUrl: string; namespace: string; onCase?: (c: QaCase) => void; onRunning?: (title: string) => void; signal?: AbortSignal }): Promise<QaRunResult>;
+  execute(e2eDir: string, opts: { baseUrl: string; namespace: string; onCase?: (c: QaCase) => void; onRunning?: (title: string) => void; onDiscovered?: (title: string, file?: string) => void; signal?: AbortSignal }): Promise<QaRunResult>;
   cleanup(e2eDir: string, opts: { baseUrl: string; namespace: string }): Promise<void>; // orphan-data cleanup (best-effort)
   isHealthy(versionUrl: string): Promise<boolean>; // is DEV healthy right now? (infra vs quality)
   review?(input: ReviewInput, signal?: AbortSignal): Promise<ReviewResult>; // independent reviewer (null = disabled)
@@ -343,6 +343,10 @@ export async function runPipeline(
   // Advisory: the independent reviewer's verdict for the live ReviewerCard. Fired
   // per review round; reasons are the actionable corrections on a rejection.
   onReviewer?: (approved: boolean, reasons: string[]) => void,
+  // Advisory: change-coverage result for the live coverage component (the value keystone).
+  onCoverage?: (changedLines: number, coveredLines: number) => void,
+  // Advisory: each test the runner discovered up front → the live "next" preview.
+  onTestDiscovered?: (name: string, file?: string) => void,
 ): Promise<QaRunResult> {
   const checkSignal = () => {
     if (signal?.aborted) throw new Error("run cancelled by operator");
@@ -1006,7 +1010,7 @@ export async function runPipeline(
     onStep?.("execute");
     log(`[qa] running E2E (namespace ${ns}) against ${app.dev.baseUrl}...`);
     deps.clearCoverage?.(e2eDir, ns); // fresh dumps only: never union a prior run's coverage
-    run = await deps.execute(e2eDir, { baseUrl: app.dev.baseUrl, namespace: ns, onCase, onRunning: onRunningTest, signal });
+    run = await deps.execute(e2eDir, { baseUrl: app.dev.baseUrl, namespace: ns, onCase, onRunning: onRunningTest, onDiscovered: onTestDiscovered, signal });
     // Infra vs quality: failures with an unhealthy DEV are infrastructure, not code.
     if (run.verdict === "fail" && !(await devHealthy())) {
       run = resultOf(ns, "infra-error", "failures with an unhealthy DEV: treated as infrastructure");
@@ -1097,6 +1101,7 @@ export async function runPipeline(
       ccForPersistence = cc;
       coverageStatus = decideCoverage(cc, covPolicy);
       log(`[qa] change-coverage: ${coverageStatus} — ${cc.overall.coveredChanged}/${cc.overall.changedLines} changed lines (${(cc.overall.ratio * 100).toFixed(0)}%, policy=${covPolicy.mode}, min=${Math.round(covPolicy.minRatio * 100)}%)`);
+      onCoverage?.(cc.overall.changedLines, cc.overall.coveredChanged);
 
       // enforce: ONE attempt to close the gap (regenerate targeting the uncovered lines → re-run).
       if (coverageStatus === "fail" && covPolicy.mode === "enforce") {
@@ -1116,6 +1121,7 @@ export async function runPipeline(
               cc = computeChangeCoverage(changed, (await collect()) ?? new Map());
               coverageStatus = decideCoverage(cc, covPolicy);
               log(`[qa] change-coverage after improvement: ${coverageStatus} (${(cc.overall.ratio * 100).toFixed(0)}%)`);
+              onCoverage?.(cc.overall.changedLines, cc.overall.coveredChanged);
             }
           }
         }

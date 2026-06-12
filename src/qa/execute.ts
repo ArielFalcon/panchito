@@ -54,6 +54,7 @@ export interface ExecuteOptions {
   namespace: string;
   onCase?: (c: QaCase) => void;        // called per test as it completes (live bar/history)
   onRunning?: (title: string) => void; // called when a test starts (focus card)
+  onDiscovered?: (title: string, file?: string) => void; // the full test list, up front (the "next" preview)
   faultInject?: boolean;               // response-oracle pass: corrupt JSON response values (QA_FAULT_INJECT)
   signal?: AbortSignal;                // operator cancel: kills the runner's process tree → infra-error
   timeoutMs?: number;                  // wall-clock budget; defaults to e2eTimeoutMs()
@@ -63,6 +64,7 @@ export interface ExecuteOptions {
 // One streamed test-lifecycle event, parsed from the custom NDJSON reporter's stdout.
 export type StreamEvent =
   | { phase: "begin"; total: number }
+  | { phase: "discovered"; title: string; file?: string }
   | { phase: "testbegin"; title: string; file?: string }
   | { phase: "testend"; title: string; status: string; durationMs?: number };
 
@@ -75,6 +77,7 @@ export function parseStreamEvent(line: string): StreamEvent | null {
   let obj: { e?: string; total?: number; title?: string; file?: string; status?: string; d?: number };
   try { obj = JSON.parse(s); } catch { return null; }
   if (obj.e === "begin" && typeof obj.total === "number") return { phase: "begin", total: obj.total };
+  if (obj.e === "discovered" && typeof obj.title === "string") return { phase: "discovered", title: obj.title, ...(obj.file ? { file: String(obj.file) } : {}) };
   if (obj.e === "testbegin" && typeof obj.title === "string") return { phase: "testbegin", title: obj.title, ...(obj.file ? { file: String(obj.file) } : {}) };
   if (obj.e === "testend" && typeof obj.title === "string") return { phase: "testend", title: obj.title, status: String(obj.status ?? ""), ...(typeof obj.d === "number" ? { durationMs: obj.d } : {}) };
   return null;
@@ -147,9 +150,10 @@ export async function runE2E(
 
   // Bridge streamed events to the live callbacks: a test starting → focus card,
   // a test finishing → one incremental case (fills the pass/fail bar + history).
-  const onEvent = (opts.onCase || opts.onRunning)
+  const onEvent = (opts.onCase || opts.onRunning || opts.onDiscovered)
     ? (ev: StreamEvent): void => {
-        if (ev.phase === "testbegin") opts.onRunning?.(ev.title);
+        if (ev.phase === "discovered") opts.onDiscovered?.(ev.title, ev.file);
+        else if (ev.phase === "testbegin") opts.onRunning?.(ev.title);
         else if (ev.phase === "testend") {
           const st = streamStatusToCase(ev.status);
           if (st) opts.onCase?.({ name: ev.title, status: st, ...(ev.durationMs !== undefined ? { durationMs: ev.durationMs } : {}) });
@@ -295,7 +299,11 @@ export const defaultCleanupDeps: CleanupDeps = {
 // unchanged and a missing report still forces infra-error.
 const STREAM_REPORTER = `
 class QaStreamReporter {
-  onBegin(_config, suite) { this._w({ e: "begin", total: suite.allTests().length }); }
+  onBegin(_config, suite) {
+    var tests = suite.allTests();
+    this._w({ e: "begin", total: tests.length });
+    for (var i = 0; i < tests.length; i++) this._w({ e: "discovered", title: this._name(tests[i]), file: tests[i].location && tests[i].location.file });
+  }
   onTestBegin(test) { this._w({ e: "testbegin", title: this._name(test), file: test.location && test.location.file }); }
   onTestEnd(test, result) { this._w({ e: "testend", title: this._name(test), status: result.status, d: result.duration }); }
   _name(test) { return test.titlePath().filter(Boolean).slice(1).join(" \\u203a "); }

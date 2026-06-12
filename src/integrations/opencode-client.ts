@@ -152,8 +152,8 @@ export function disposeSharedClient(): void {
 export const activityRouter = new ActivityRouter();
 
 // Maps an OpenCode session to a run so SSE events are routed to the correct RunRecord.
-export function registerRunSession(sessionId: string, runId: string, directory: string): void {
-  activityRouter.register(sessionId, runId);
+export function registerRunSession(sessionId: string, runId: string, directory: string, workerId?: string): void {
+  activityRouter.register(sessionId, runId, workerId);
   eventStreams.attach(sessionId, directory);
 }
 
@@ -209,7 +209,7 @@ export async function startScopedEventStream(
       if (onRunEvent) {
         const rid = eventRunId(raw, activityRouter.sessionMap());
         if (rid) {
-          for (const body of mapOpencodeEvent(raw, activityRouter.sessionMap())) {
+          for (const body of mapOpencodeEvent(raw, activityRouter.sessionMap(), activityRouter.workerMap())) {
             try { onRunEvent(rid, body); } catch { /* advisory */ }
           }
         }
@@ -832,6 +832,7 @@ export interface ParallelWorkerInput {
   appName: string;
   mode: RunMode;
   learnedRules?: string; // anti-pattern rules from past runs — injected so workers don't repeat them
+  runId?: string; // set on fan-out so the worker's live activity routes + carries a workerId
 }
 
 // Dispatch each worker objective to a SEPARATE qa-worker session, bounded concurrency.
@@ -852,12 +853,14 @@ export async function generateParallel(
     try {
       const agent = w.needsUi ? "qa-worker" : "qa-worker-code";
       const session = await deps.open(agent, w.mirrorDir, { signal: opts?.signal });
+      if (w.runId) registerRunSession(session.id, w.runId, w.mirrorDir, w.flow);
       try {
         const output = await session.prompt(buildWorkerPrompt(w));
         const json = lastJsonMatching(output, (x) => typeof x.spec === "string");
         if (json?.spec) results.push({ flow: w.flow, spec: json.spec as string });
         else errors.push(`${w.flow}: worker produced no parseable spec name`);
       } finally {
+        if (w.runId) unregisterRunSession(session.id);
         await session.dispose().catch(() => {});
       }
     } catch (err) {
@@ -1011,6 +1014,7 @@ export async function runOpencodeParallel(
     appName: input.appName,
     mode: input.mode,
     learnedRules: input.learnedRules,
+    runId: input.runId,
   }));
   const { results, errors } = await generateParallel(workers, deps, { signal: opts?.signal, concurrency: opts?.concurrency });
   opts?.onProgress?.(`[qa] workers: ${results.length} spec(s) written, ${errors.length} error(s)`);

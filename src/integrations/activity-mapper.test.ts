@@ -29,6 +29,13 @@ test("missing title falls back to the input file basename", () => {
   assert.deepEqual(out, [{ type: "agent.activity", kind: "analyzing", target: "Nav.astro", status: "running" }]);
 });
 
+test("a fan-out worker's tool activity is tagged with its workerId", () => {
+  const workers = new Map<string, string>([["sess_1", "checkout"]]);
+  const out = mapOpencodeEvent(toolEvent({ status: "running", title: "Reading Header.astro" }, { tool: "read", callID: "c1" }), SESSIONS, workers);
+  assert.deepEqual(out, [{ type: "agent.activity", kind: "analyzing", target: "Reading Header.astro", status: "running", callId: "c1", workerId: "checkout" }]);
+  RunEventBodySchema.parse(out[0]); // still a valid contract event
+});
+
 test("a completed write to a spec file emits writing + spec.written", () => {
   const out = mapValid(toolEvent({ status: "completed", title: "Wrote login.spec.ts", input: { filePath: "e2e/login.spec.ts" } }, { tool: "write" }));
   assert.deepEqual(out, [

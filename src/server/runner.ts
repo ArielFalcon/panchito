@@ -153,6 +153,14 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
         (approved, reasons) => {
           deps.runEvents?.publish(record.id, { type: "reviewer.verdict", approved, reasons });
         },
+        // Change-coverage result → the live coverage component (the value keystone).
+        (changedLines, coveredLines) => {
+          deps.runEvents?.publish(record.id, { type: "coverage.computed", changedLines, coveredLines });
+        },
+        // Each test the runner discovered up front → the live "next" preview.
+        (name, file) => {
+          deps.runEvents?.publish(record.id, { type: "test.discovered", name, ...(file ? { file } : {}) });
+        },
       );
       deps.runEvents?.publish(record.id, {
         type: "run.verdict",
