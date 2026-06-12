@@ -5,3 +5,17 @@ node_modules/
 *.sqlite
 .mirrors/
 data/
+
+# Secrets — never bake local credentials into the image (COPY . . would otherwise
+# include them). Doppler injects real secrets at runtime.
+.env
+.env.*
+!.env.example
+.api_token
+config/.api_token
+*.pem
+*.key
+
+# Not needed in the orchestrator (Node) image.
+client/
+.omo/

@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { applyEnvVars } from "./env-store";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { applyEnvVars, defaultEnvStoreFs } from "./env-store";
 
 function makeFs(initial: string | null) {
   let content = initial;
@@ -43,4 +46,17 @@ test("starts a fresh .env when no prior content exists", () => {
   const env: Record<string, string | undefined> = {};
   applyEnvVars({ NEW_KEY: "v" }, { fs, env });
   assert.match(fs.get()!, /^NEW_KEY=v$/m);
+});
+
+test("default env store writes secrets with owner-only permissions", () => {
+  const dir = mkdtempSync(join(tmpdir(), "qa-env-store-"));
+  try {
+    const path = join(dir, ".env");
+    const fs = defaultEnvStoreFs(path);
+    applyEnvVars({ CODEX_API_KEY: "secret" }, { fs, env: {} });
+
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

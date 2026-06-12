@@ -4,7 +4,7 @@
 // compose env_file does NOT strip inline comments (a known gotcha — see CLAUDE.md).
 // Doppler users must ALSO add the var in Doppler; .env only covers local boots.
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const KEY_RE = /^[A-Z][A-Z0-9_]*$/;
@@ -17,7 +17,10 @@ export interface EnvStoreFs {
 export function defaultEnvStoreFs(envPath = join(process.env.AI_PIPELINE_ROOT ?? process.cwd(), ".env")): EnvStoreFs {
   return {
     read: () => (existsSync(envPath) ? readFileSync(envPath, "utf8") : null),
-    write: (c) => writeFileSync(envPath, c, "utf8"),
+    write: (c) => {
+      writeFileSync(envPath, c, { encoding: "utf8", mode: 0o600 });
+      chmodSync(envPath, 0o600);
+    },
   };
 }
 

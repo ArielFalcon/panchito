@@ -24,3 +24,21 @@ test("redactError unwraps Error instance", () => {
   const out = redactError(new Error("https://x-access-token:tok@github.com fail"));
   assert.doesNotMatch(out, /tok@github/);
 });
+
+test("redacts a configured secret value verbatim regardless of surrounding format", () => {
+  const env = { CODEX_API_KEY: "sk-codexSECRETvalue123", OPENCODE_API_KEY: "oc-LIVE-key-998877" };
+  const out = redactSecrets("provider rejected key sk-codexSECRETvalue123 and oc-LIVE-key-998877", env);
+  assert.doesNotMatch(out, /sk-codexSECRETvalue123/);
+  assert.doesNotMatch(out, /oc-LIVE-key-998877/);
+});
+
+test("redacts raw API-key/secret assignments and known token shapes", () => {
+  const out = redactSecrets("OPENCODE_API_KEY=oc_live_abcdef123456 set; pat github_pat_ABCdef0123456789", {});
+  assert.doesNotMatch(out, /oc_live_abcdef123456/);
+  assert.doesNotMatch(out, /github_pat_ABCdef0123456789/);
+});
+
+test("redactError accepts an injected env for secret values", () => {
+  const out = redactError(new Error("codex exec exited 1: bad CODEX key superSecretCodex42"), { CODEX_API_KEY: "superSecretCodex42" });
+  assert.doesNotMatch(out, /superSecretCodex42/);
+});

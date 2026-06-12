@@ -13,6 +13,8 @@ data/
 
 # Espejos locales de los repos vigilados
 .mirrors/
+# Datos de runtime de continuación de runs (regenerable)
+.omo/
 /.idea/
 /.claude/
 /.sisyphus/
