@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/ArielFalcon/panchito/internal/api"
 	"github.com/ArielFalcon/panchito/internal/events"
@@ -49,30 +50,36 @@ type testItem struct {
 // view; once a verdict arrives it renders a Summary recap. A viewport scrolls the
 // body and absorbs terminal resizes.
 type liveModel struct {
-	runID     string
-	app       string
-	phase     string
-	activity  []activityItem
-	subagents []subagentItem
-	plan      []events.PlanTodo
-	specs     []string
-	tests     []testItem
-	reviewer  *bool
-	reasons   []string
-	coverage  *events.CoverageComputed
-	passed    int
-	failed    int
-	errs      []string
-	verdict   string
-	done      bool
-	closed    bool
-	spin      spinner.Model
-	vp        viewport.Model
-	ready     bool // a terminal size is known → the viewport is active
-	width     int
-	height    int
-	ch        chan events.RunEvent
-	cancel    context.CancelFunc
+	runID      string
+	app        string
+	sha        string
+	target     string
+	mode       string
+	phase      string
+	phaseStart time.Time
+	retrying   bool
+	activity   []activityItem
+	subagents  []subagentItem
+	plan       []events.PlanTodo
+	specs      []string
+	tests      []testItem
+	reviewer   *bool
+	reasons    []string
+	coverage   *events.CoverageComputed
+	passed     int
+	failed     int
+	errs       []string
+	agentErr   string
+	verdict    string
+	done       bool
+	closed     bool
+	spin       spinner.Model
+	vp         viewport.Model
+	ready      bool // a terminal size is known → the viewport is active
+	width      int
+	height     int
+	ch         chan events.RunEvent
+	cancel     context.CancelFunc
 }
 
 func newLiveModel(runID, app string, ch chan events.RunEvent, cancel context.CancelFunc, width, height int) liveModel {
@@ -148,8 +155,16 @@ func (m liveModel) failedTests() []string {
 
 func (m *liveModel) fold(ev events.RunEvent) {
 	switch b := ev.Body.(type) {
+	case events.RunStarted:
+		m.sha, m.target, m.mode = b.Sha, b.Target, b.Mode
 	case events.StepChanged:
+		if b.Step != m.phase {
+			m.phaseStart = time.Now() // reset the elapsed clock when the phase advances
+		}
 		m.phase = b.Step
+		if b.Step == "retry" {
+			m.retrying = true
+		}
 	case events.AgentActivity:
 		if b.Kind == "subagent" {
 			m.subagents = upsertSubagent(m.subagents, b)
@@ -183,7 +198,11 @@ func (m *liveModel) fold(ev events.RunEvent) {
 		m.failed = b.Failed
 		m.done = true
 	case events.AgentError:
-		m.errs = append(m.errs, b.Detail)
+		// A failed tool call (e.g. a read that the agent retries) is routine and NOT
+		// part of the verdict. The Ink TUI never surfaced these in the live view — it
+		// showed forward progress, not every hiccup. Keep only the last one, to explain
+		// a fail/infra-error in the SUMMARY; never as a live red banner.
+		m.agentErr = b.Detail
 	}
 }
 
@@ -299,10 +318,31 @@ func (m liveModel) View() string {
 func (m liveModel) header() string {
 	status := infoStyle.Render("running")
 	if m.done {
-		status = verdictStyle(m.verdict).Bold(true).Render(m.verdict)
+		status = verdictStyle(m.verdict).Bold(true).Render(strings.ToUpper(m.verdict))
 	}
-	top := titleStyle.Render("run") + "  " + labelStyle.Render(m.app) + "  " + hintStyle.Render(m.runID) + "  " + status
+	top := titleStyle.Render("run") + "  " + lipgloss.NewStyle().Bold(true).Render(m.app)
+	if m.sha != "" {
+		top += "  " + hintStyle.Render(shortSha(m.sha))
+	}
+	if m.target != "" {
+		tgt := infoStyle.Render(m.target)
+		if m.target == "code" {
+			tgt = shadowStyle.Render(m.target)
+		}
+		top += "  " + tgt + hintStyle.Render("/"+m.mode)
+	}
+	if m.retrying && !m.done {
+		top += "  " + shadowStyle.Render("↻ retrying")
+	}
+	top += "  " + status
 	return top + "\n" + m.renderPhases()
+}
+
+func shortSha(s string) string {
+	if len(s) > 7 {
+		return s[:7]
+	}
+	return s
 }
 
 func (m liveModel) footer() string {
@@ -328,10 +368,11 @@ func (m liveModel) body() string {
 }
 
 func (m liveModel) liveBody() string {
+	view := m.deriveActivity()
 	sections := []string{
-		m.renderActivity(),
+		m.renderFocusCard(view),
+		m.renderFeed(view),
 		m.renderSubagents(),
-		m.renderPlan(),
 		m.renderSpecs(),
 		m.renderTests(),
 		m.renderCoverage(),
@@ -359,6 +400,7 @@ func (m liveModel) summaryBody() string {
 		m.renderTests(),
 		m.renderCoverage(),
 		m.renderReviewer(),
+		m.renderAgentErr(),
 		m.renderErrs(),
 	}
 	body := joinSections(sections)
@@ -366,6 +408,15 @@ func (m liveModel) summaryBody() string {
 		b.WriteString("\n" + body)
 	}
 	return b.String()
+}
+
+// renderAgentErr shows the last agent tool error, but only in the SUMMARY and only
+// when the run did not pass — context for a failure, never a live alarm.
+func (m liveModel) renderAgentErr() string {
+	if m.agentErr == "" || m.verdict == "pass" || m.verdict == "skipped" {
+		return ""
+	}
+	return shadowStyle.Render("agent note") + "\n  " + hintStyle.Render(truncate(m.agentErr, 76))
 }
 
 func joinSections(sections []string) string {
@@ -433,20 +484,166 @@ func wrapJoin(parts []string, sep string, width int) string {
 	return b.String()
 }
 
-func (m liveModel) renderActivity() string {
-	if len(m.activity) == 0 {
+// ── Live activity: the FocusCard ("now") + the plan/wrote/ran feed ──────────────
+// Ported from the Ink dashboard (FocusCard + LiveActivity): a bordered card with the
+// current unit of work, then the agent's plan checklist, files written and commands
+// run. Derived from the folded state, never invented.
+
+type focusItem struct {
+	title    string
+	progress string // e.g. "3/8" of the plan todos
+	lastFile string
+	lastCmd  string
+}
+
+type activityView struct {
+	focus *focusItem
+	plan  []events.PlanTodo
+	wrote []string
+	ran   []string
+}
+
+func (m liveModel) deriveActivity() activityView {
+	var wrote, ran []string
+	var lastFile, lastCmd, lastRunning string
+	for _, a := range m.activity {
+		switch a.kind {
+		case "writing":
+			wrote = appendUnique(wrote, a.target)
+			lastFile = a.target
+		case "command":
+			ran = appendUnique(ran, a.target)
+			lastCmd = a.target
+		}
+		if a.status == "running" && a.target != "" {
+			lastRunning = a.target
+		}
+	}
+	title, completed := "", 0
+	for _, t := range m.plan {
+		if t.Status == "completed" {
+			completed++
+		}
+		if t.Status == "in_progress" && title == "" {
+			title = t.Content
+		}
+	}
+	if title == "" {
+		title = lastRunning
+	}
+	var focus *focusItem
+	if title != "" {
+		f := focusItem{title: title, lastFile: lastFile, lastCmd: lastCmd}
+		if len(m.plan) > 0 {
+			f.progress = fmt.Sprintf("%d/%d", completed, len(m.plan))
+		}
+		focus = &f
+	}
+	return activityView{focus: focus, plan: m.plan, wrote: wrote, ran: ran}
+}
+
+func (m liveModel) renderFocusCard(v activityView) string {
+	if v.focus == nil || m.done {
+		return ""
+	}
+	f := v.focus
+	head := infoStyle.Render("now") + "  " + m.spin.View() + "  " + lipgloss.NewStyle().Bold(true).Render(truncate(f.title, 48))
+	if f.progress != "" {
+		head += "   " + hintStyle.Render(f.progress)
+	}
+	if !m.phaseStart.IsZero() {
+		head += "   " + labelStyle.Render(formatElapsed(time.Since(m.phaseStart)))
+	}
+	var b strings.Builder
+	b.WriteString(head)
+	if f.lastFile != "" {
+		b.WriteString("\n" + hintStyle.Render("✎ "+truncate(f.lastFile, 46)))
+	}
+	if f.lastCmd != "" {
+		b.WriteString("\n" + hintStyle.Render("⚙ "+truncate(f.lastCmd, 46)))
+	}
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colInfo).Padding(0, 1).Render(b.String())
+}
+
+const feedGutter = 7
+
+func gutterLabel(s string) string {
+	if len(s) >= feedGutter {
+		return s[:feedGutter]
+	}
+	return s + strings.Repeat(" ", feedGutter-len(s))
+}
+
+func (m liveModel) renderFeed(v activityView) string {
+	if len(v.plan) == 0 && len(v.wrote) == 0 && len(v.ran) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString(infoStyle.Render("agent") + "\n")
-	for _, a := range m.activity {
-		marker := okStyle.Render("✓")
-		if a.status == "running" {
-			marker = m.spin.View()
+	for i, t := range v.plan {
+		label := ""
+		if i == 0 {
+			label = "plan"
 		}
-		b.WriteString("  " + marker + " " + labelStyle.Render(activityVerb(a.kind)) + " " + truncate(a.target, 60) + "\n")
+		icon, text := hintStyle.Render("·"), labelStyle
+		switch t.Status {
+		case "completed":
+			icon = okStyle.Render("✓")
+		case "in_progress":
+			icon, text = m.spin.View(), lipgloss.NewStyle()
+		case "cancelled":
+			icon = hintStyle.Render("✗")
+		}
+		b.WriteString(labelStyle.Render(gutterLabel(label)) + icon + " " + text.Render(truncate(t.Content, 52)) + "\n")
+	}
+	if len(v.wrote) > 0 {
+		shown := lastN(v.wrote, 3)
+		line := strings.Join(shown, " · ")
+		if extra := len(v.wrote) - len(shown); extra > 0 {
+			line += fmt.Sprintf("   +%d", extra)
+		}
+		b.WriteString(labelStyle.Render(gutterLabel("wrote")) + hintStyle.Render(truncate(line, 60)) + "\n")
+	}
+	if len(v.ran) > 0 {
+		var parts []string
+		for _, c := range lastN(v.ran, 2) {
+			parts = append(parts, truncate(c, 40))
+		}
+		b.WriteString(labelStyle.Render(gutterLabel("ran")) + hintStyle.Render(strings.Join(parts, " · ")) + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func lastN(xs []string, n int) []string {
+	if len(xs) > n {
+		return xs[len(xs)-n:]
+	}
+	return xs
+}
+
+func formatElapsed(d time.Duration) string {
+	s := int(d.Seconds())
+	if s < 60 {
+		return fmt.Sprintf("%ds", s)
+	}
+	if s < 3600 {
+		return fmt.Sprintf("%dm %ds", s/60, s%60)
+	}
+	return fmt.Sprintf("%dh %dm", s/3600, (s%3600)/60)
+}
+
+// progressBar is the Ink-style filled/empty block bar (green filled, muted empty).
+func progressBar(done, total, width int) string {
+	if total <= 0 {
+		return hintStyle.Render(strings.Repeat("░", width))
+	}
+	filled := done * width / total
+	if filled > width {
+		filled = width
+	}
+	if filled < 0 {
+		filled = 0
+	}
+	return okStyle.Render(strings.Repeat("▓", filled)) + hintStyle.Render(strings.Repeat("░", width-filled))
 }
 
 func (m liveModel) renderSubagents() string {
@@ -465,27 +662,6 @@ func (m liveModel) renderSubagents() string {
 			line += shadowStyle.Render("[" + s.worker + "] ")
 		}
 		b.WriteString(line + truncate(s.target, 56) + "\n")
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-func (m liveModel) renderPlan() string {
-	if len(m.plan) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString(infoStyle.Render("plan") + "\n")
-	for _, t := range m.plan {
-		box, st := "☐", labelStyle
-		switch t.Status {
-		case "in_progress":
-			box, st = "◐", infoStyle
-		case "completed":
-			box, st = "☑", okStyle
-		case "cancelled":
-			box, st = "✗", hintStyle
-		}
-		b.WriteString("  " + st.Render(box+" "+t.Content) + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -513,6 +689,9 @@ func (m liveModel) renderTests() string {
 	var b strings.Builder
 	b.WriteString(infoStyle.Render("tests") + "\n")
 	b.WriteString("  " + labelStyle.Render(formatTestHistory(counts)) + "\n")
+	if total := len(m.tests); total > 0 && (counts.passed+counts.failed+counts.flaky) > 0 {
+		b.WriteString("  " + progressBar(counts.passed, total, 24) + " " + hintStyle.Render(fmt.Sprintf("%d/%d", counts.passed, total)) + "\n")
+	}
 
 	if hasCurrent {
 		b.WriteString("  " + infoStyle.Bold(true).Render(m.spin.View()+" now "+current.name) + "\n")
@@ -731,21 +910,6 @@ func (m liveModel) renderErrs() string {
 		b.WriteString(errorStyle.Render("⚠ "+truncate(e, 70)) + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
-}
-
-func activityVerb(kind string) string {
-	switch kind {
-	case "analyzing":
-		return "analyzing"
-	case "writing":
-		return "writing"
-	case "command":
-		return "$"
-	case "subagent":
-		return "subagent"
-	default:
-		return kind
-	}
 }
 
 func verdictStyle(v string) lipgloss.Style {
