@@ -10,13 +10,16 @@ import { createRunEventStore } from "./server/run-events";
 import { handleMaintainerApi, recordIncident, setMaintainerStatus, getMaintainerStatus, getIncidents, updateIncident } from "./server/maintainer";
 import { getRecord, listRecords, currentRun, updateRecord, interruptedRecords, continuationDepth, MAX_CONTINUATION_DEPTH } from "./server/history";
 import { enqueueTrackedRun } from "./server/runner";
+import { defaultPipelineDeps } from "./pipeline";
 import { pruneMirrors, defaultMirrorPruneDeps } from "./server/mirror-prune";
 import { performSwap, confirmSwapHealthy, rollback, realSwapFs, SWAP_MARKER_FILE } from "./server/self-update";
 import { assessChange, assessRate, parseNumstat, readDeployHistory, recordDeploy } from "./server/merge-guard";
 import { recordFixFailure, readFixFailures, renderFailureMemory, realMemoryFs } from "./server/maintainer-memory";
 import { installHttpDispatcher } from "./util/net";
 import { resolveRef, defaultMirrorDeps, authHeaderArgs, type MirrorDeps } from "./integrations/repo-mirror";
-import { defaultOpencodeDeps, askAssistant, OpencodeDeps, startEventStreamWithReconnect, getOpenSessionCount } from "./integrations/opencode-client";
+import { askAssistant, OpencodeDeps, getOpenSessionCount } from "./integrations/opencode-client";
+import { createAgentRuntimeManager } from "./server/agent-runtime";
+import { CodexRuntimeStrategy, OpenCodeRuntimeStrategy } from "./agent-runtime";
 import { appendLog, appendActivity, deleteAppHistory } from "./server/history";
 import { type RunMode, type TestTarget } from "./types";
 import { github } from "./integrations/github";
@@ -87,6 +90,26 @@ const queue = new JobQueue((e) => {
 let shuttingDown = false;
 const SHUTDOWN_TIMEOUT_MS = 25_000;
 const eventStreamController = new AbortController();
+const agentRuntime = createAgentRuntimeManager({
+  env: process.env,
+  fs: defaultEnvStoreFs(),
+  strategies: {
+    opencode: new OpenCodeRuntimeStrategy({ env: process.env }),
+    codex: new CodexRuntimeStrategy({ env: process.env }),
+  },
+  hasOpenSessions: () => getOpenSessionCount() > 0,
+});
+
+function currentAgentDeps(): OpencodeDeps {
+  return agentRuntime.facade().deps();
+}
+
+function currentPipelineDeps() {
+  return defaultPipelineDeps({
+    agentDepsFactory: async () => currentAgentDeps(),
+    hasOpenSessions: () => agentRuntime.hasOpenSessions(),
+  });
+}
 
 process.on("SIGTERM", () => {
   console.log("[qa] SIGTERM received — cancelling in-flight run and draining");
@@ -139,7 +162,7 @@ function enqueueApiRun(app: string, sha: string, target: string, mode: RunMode, 
   }
   // Orphan-data cleanup is reconstructed inside enqueueTrackedRun (the single funnel), so
   // every trigger gets it — not just this webhook path.
-  return enqueueTrackedRun(queue, { app, sha, target: target as TestTarget, mode, guidance, shadow, source: "webhook", triggerRepo }, { runEvents });
+  return enqueueTrackedRun(queue, { app, sha, target: target as TestTarget, mode, guidance, shadow, source: "webhook", triggerRepo }, { runEvents, pipeline: currentPipelineDeps() });
 }
 
 // ── Self-maintenance: clone ai-pipeline into a persistent working copy ───────
@@ -208,7 +231,7 @@ async function triggerMaintainer(): Promise<void> {
   if (pending.length === 0) return;
 
   setMaintainerStatus("diagnosing");
-  const deps = await defaultOpencodeDeps();
+  const deps = currentAgentDeps();
 
   // Use the mirrors directory for the working copy (survives restarts as volume)
   const maintainerWorkDir = join(
@@ -462,14 +485,8 @@ const MAX_SESSION_AGE_MS = Math.max(
   (Number(process.env.OPENCODE_TIMEOUT_MS) || 0) + 5 * 60 * 1000,
 );
 
-let cleanupDeps: Promise<OpencodeDeps> | undefined;
-function getCleanupDeps(): Promise<OpencodeDeps> {
-  if (!cleanupDeps) cleanupDeps = defaultOpencodeDeps();
-  return cleanupDeps;
-}
-
 async function cleanupOrphanedSessions(): Promise<void> {
-  const deps = await getCleanupDeps();
+  const deps = currentAgentDeps();
   if (!deps.cleanupOrphans) return;
   try {
     const cleaned = await deps.cleanupOrphans(MAX_SESSION_AGE_MS);
@@ -796,12 +813,6 @@ function authorized(req: IncomingMessage): boolean {
 
 const ASSISTANT_CWD = "/tmp";
 
-let askDeps: Promise<OpencodeDeps> | undefined;
-function getAskDeps(): Promise<OpencodeDeps> {
-  if (!askDeps) askDeps = defaultOpencodeDeps();
-  return askDeps;
-}
-
 // Server-side app onboarding/deletion deps (F5): the orchestrator owns the GitHub
 // token, the config dir and the mirror cache, so the TUI never touches them directly.
 const appAdminDeps: AppAdminDeps = {
@@ -830,7 +841,8 @@ const apiDeps: ApiDeps = {
   getRecord,
   listRecords,
   currentRun,
-  ask: async (input) => askAssistant(input, await getAskDeps(), ASSISTANT_CWD),
+  ask: async (input) => askAssistant(input, currentAgentDeps(), ASSISTANT_CWD),
+  agentRuntime,
   cancelRun: (id) => {
     const record = getRecord(id);
     if (!record) return false;
@@ -986,22 +998,19 @@ server.listen(port, () => {
   installHttpDispatcher(startupTimeout).catch((err) => logJson("warn", "HTTP dispatcher setup failed", { error: err instanceof Error ? err.message : String(err) }));
   // Start the SSE event stream from OpenCode so agent activity (tool calls,
   // file edits, streaming text) is routed to RunRecord logs in real time.
-  startEventStreamWithReconnect(
+  agentRuntime.facade().startEventStream?.(
     (a) => {
       // Structured event → the live TUI panel; display line → the human log feed.
       appendActivity(a.runId, { kind: a.kind, text: a.text, status: a.status });
       appendLog(a.runId, a.display);
     },
     eventStreamController.signal,
-    {
-      log: (msg) => logJson("warn", msg),
-      // Rich live activity (agent.activity/plan.updated/…) onto the RunEvent SSE
+    (runId, body) => {
+      // Rich live activity (agent.activity/plan.updated/...) onto the RunEvent SSE
       // stream. Advisory: a bad event must never break the reconnect loop.
-      onRunEvent: (runId, body) => {
-        try { runEvents.publish(runId, body); } catch { /* advisory */ }
-      },
+      try { runEvents.publish(runId, body); } catch { /* advisory */ }
     },
-  ).catch((err) => logJson("warn", "event stream reconnect loop failed", { error: err instanceof Error ? err.message : String(err) }));
+  )?.catch((err) => logJson("warn", "event stream reconnect loop failed", { error: err instanceof Error ? err.message : String(err) }));
   recoverRollbackRecord();
   confirmSwapAfterBoot();
   startHealthPoller();

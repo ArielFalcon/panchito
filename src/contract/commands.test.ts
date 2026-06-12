@@ -5,7 +5,12 @@ import {
   RunRecordSchema,
   QaCaseSchema,
   CreateRunInputSchema,
+  CreateAppInputSchema,
+  CreateAppResultSchema,
+  DeleteAppResultSchema,
   QueueStatusSchema,
+  RepoListResponseSchema,
+  UpdateAppInputSchema,
   type RunRecord as ContractRunRecord,
   type QaCase as ContractQaCase,
 } from "./commands";
@@ -34,6 +39,37 @@ test("CreateRunInput requires app/target/mode and rejects an unknown mode", () =
 test("QueueStatus.running is nullable", () => {
   assert.doesNotThrow(() => QueueStatusSchema.parse({ pending: 0, running: null }));
   assert.doesNotThrow(() => QueueStatusSchema.parse({ pending: 1, running: { id: "run_1", app: "portfolio" } }));
+});
+
+test("app onboarding command schemas parse create/update/delete/repo list payloads", () => {
+  assert.doesNotThrow(() => CreateAppInputSchema.parse({
+    repo: "org/shop",
+    name: "shop",
+    baseUrl: "https://dev.shop.test",
+    target: "e2e",
+    shadow: true,
+    services: [{ repo: "org/api", openapi: "openapi.yaml" }],
+    env: { DEV_TOKEN: "secret" },
+    dryRun: true,
+  }));
+  assert.doesNotThrow(() => UpdateAppInputSchema.parse({
+    baseUrl: "https://new.dev.shop.test",
+    target: "code",
+    shadow: false,
+  }));
+  assert.doesNotThrow(() => CreateAppResultSchema.parse({
+    ok: true,
+    name: "shop",
+    path: "/config/apps/shop.yaml",
+    repoInfo: { name: "shop", fullName: "org/shop", private: false, defaultBranch: "main", description: null },
+    envApplied: ["DEV_TOKEN"],
+    warnings: ["remember doppler"],
+  }));
+  assert.doesNotThrow(() => DeleteAppResultSchema.parse({ removed: ["config:shop"] }));
+  assert.doesNotThrow(() => RepoListResponseSchema.parse({
+    repos: [{ fullName: "org/shop", private: true, description: null }],
+    hasMore: false,
+  }));
 });
 
 test("a full RunRecord (every optional populated) parses", () => {

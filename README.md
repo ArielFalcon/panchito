@@ -5,7 +5,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.6-blue)](https://www.typescriptlang.org)
 [![Playwright](https://img.shields.io/badge/Playwright-1.50-45ba4b)](https://playwright.dev)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED)](https://www.docker.com)
-[![OpenCode](https://img.shields.io/badge/OpenCode-powered-7b68ee)](https://opencode.ai)
+[![Agent Runtime](https://img.shields.io/badge/OpenCode%20%2F%20Codex-runtime-7b68ee)](https://opencode.ai)
 
 </div>
 
@@ -43,6 +43,7 @@ panchito turns every deploy into a QA checkpoint, automatically.
 | Capability | What it means |
 |---|---|
 | **Commit-aware testing** | Reads the diff and commit message to understand what changed. Skips style-only commits, writes targeted tests for features and fixes, runs regression-only for refactors. |
+| **Provider-agnostic runtime** | Runs on OpenCode, Codex, or dual mode through one facade. Primary, reviewer, and chat models are configurable from the CLI or Dashboard. |
 | **Two-model review** | A different AI model reviews every generated test for value. Tests that click without asserting, use fragile selectors, or miss the actual change are rejected before they reach the suite. |
 | **Self-improving suite** | When tests pass and the reviewer approves, they are committed to the app's repository via PR with auto-merge. The suite grows with every deploy and never degrades into "green noise." |
 | **Learning from failures** | Every failed run is reflected on, distilled into a reusable rule, and injected into future runs. Mutation testing measures whether the tests actually catch bugs (valueScore). Rules that correlate with better outcomes are promoted; the rest decay. |
@@ -67,7 +68,7 @@ panchito turns every deploy into a QA checkpoint, automatically.
 ```mermaid
 flowchart LR
     GH["GitHub push to DEV"] -->|webhook| O[Orchestrator]
-    O -->|HTTP session| OC[OpenCode AI Engine]
+    O -->|AgentFacade HTTP/session| OC[Dual Agent Container]
     OC -->|reads code via| SE[Serena LSP]
     OC -->|writes specs| WC[(Repo Working Copy)]
     OC -->|stores memory in| EN[Engram]
@@ -89,10 +90,10 @@ Receives webhooks, manages the sequential queue, clones repos, runs Playwright a
 </td>
 <td width="50%" valign="top">
 
-### OpenCode
-**AI engine** running two models.
+### Agent Runtime
+**OpenCode, Codex, or dual mode** behind one provider-neutral facade.
 
-The `qa-generator` agent reads code via Serena (semantic LSP navigation) and writes Playwright specs. The `qa-reviewer` subagent independently judges quality. Engram provides persistent episodic memory across runs.
+The primary agent reads code via Serena (semantic LSP navigation) and writes Playwright specs. The reviewer independently judges quality. Engram provides persistent episodic memory across runs. `panchito agent` or the Dashboard's Agent Runtime screen selects provider, role assignments, models, and API keys.
 
 </td>
 </tr>
@@ -185,7 +186,7 @@ Four layers prevent low-quality tests from entering the suite:
 
 - **Node.js 22** or later
 - **Docker** and Docker Compose (for production deployment)
-- An **OpenCode API key** (a single key covers both AI models)
+- An **OpenCode API key** or a **Codex/OpenAI API key**. Dual mode requires both.
 - A GitHub repo you want to watch, deployed to a DEV environment
 
 ### Install and verify
@@ -204,33 +205,37 @@ npm run typecheck  # strict TypeScript validation
 cp .env.example .env
 ```
 
-Edit `.env` and set:
+Edit `.env` and set at least one provider key:
 
 ```
 OPENCODE_API_KEY=opencode-go-your-key-here
+# or
+CODEX_API_KEY=sk-your-key-here
 ```
 
 > [!IMPORTANT]
-> The API key is the only mandatory secret for local development. For production, you also need `GITHUB_TOKEN` and `WEBHOOK_SECRET`.
+> One provider key is enough for single mode. Dual mode requires both provider keys. For production, you also need `GITHUB_TOKEN` and `WEBHOOK_SECRET`.
 
 ### AI model configuration
 
-The project uses two AI models via a single OpenCode API key. Both are pre-configured in `opencode/opencode.json` and require no changes to start.
+The project uses provider-neutral role assignments. Configure them from the Dashboard's **Agent Runtime** view or with `panchito agent`.
 
-| Agent | Model ID | Role |
+| Role | Default provider/model | Purpose |
 |---|---|---|
-| `qa-generator` | `opencode-go/deepseek-v4-pro` | Reads code, writes Playwright tests, invokes the reviewer |
-| `qa-reviewer` | `opencode-go/qwen3.7-max` | Read-only quality judge; rejects tests with trivial assertions or fragile patterns |
+| `primary` | `opencode-go/deepseek-v4-pro` | Reads code, writes Playwright tests, invokes the reviewer |
+| `reviewer` | `opencode-go/qwen3.7-max` | Read-only quality judge; rejects tests with trivial assertions or fragile patterns |
+| `chat` | `opencode-go/deepseek-v4-flash` | Read-only operator assistant |
 
 > [!TIP]
-> Run `opencode models` to verify both model IDs are available under your subscription. If a model is not listed, edit `opencode/opencode.json` and replace it with one that is. The reviewer must use a different model from the generator.
+> `panchito --opencode`, `panchito --codex`, and `panchito --dual` select the runtime before a command. `panchito agent` opens the runtime editor; `panchito agent status` prints the current config.
 
 **What you must configure manually:**
 
 | Item | Where | Required |
 |---|---|---|
-| API key | `.env` as `OPENCODE_API_KEY` | Yes |
-| Model IDs | `opencode/opencode.json` under `agent.*.model` | Only if the defaults are unavailable |
+| Provider key | `.env` as `OPENCODE_API_KEY` or `CODEX_API_KEY` | One key for single mode; both for dual |
+| Runtime mode/provider | Dashboard Agent Runtime, `panchito agent`, or `AGENT_*` env vars | Only if defaults are not desired |
+| Model IDs | Dashboard Agent Runtime or `AGENT_PRIMARY_MODEL`/`AGENT_REVIEWER_MODEL`/`AGENT_CHAT_MODEL` | Only if the defaults are unavailable |
 | GitHub token | `.env` as `GITHUB_TOKEN` | Yes, for PR and Issue creation |
 | Webhook secret | `.env` as `WEBHOOK_SECRET` | Yes, for production webhook validation |
 
@@ -239,10 +244,11 @@ The project uses two AI models via a single OpenCode API key. Both are pre-confi
 
 | Item | Where | Notes |
 |---|---|---|
-| Agent prompts and procedures | `opencode/agent/*.md` | Ready to use |
-| Playwright authoring skills | `opencode/skill/playwright-authoring/` | Login, geolocation, mobile, uploads |
-| Quality review criteria | `opencode/skill/test-value-review/` | False-positive pattern catalog |
-| MCP servers (Serena, Engram) | `opencode/opencode.json` | Code navigation + persistent memory |
+| Provider-neutral prompts and procedures | `agent/` | Shared by Codex and future OpenCode config |
+| OpenCode compatibility prompts | `opencode/agent/*.md` | Kept during migration |
+| Playwright authoring skills | `agent/skills/playwright-authoring/` | Login, geolocation, mobile, uploads |
+| Quality review criteria | `agent/skills/test-value-review/` | False-positive pattern catalog |
+| MCP servers (Serena, Engram, Playwright) | `opencode/opencode.json` and agent container | Code navigation + persistent memory |
 | Docker images | `Dockerfile`, `opencode/Dockerfile` | Both services build from these |
 
 </details>
@@ -323,4 +329,4 @@ curl -X POST localhost:8080 \
 
 ---
 
-**Need more detail?** Read [`CLAUDE.md`](CLAUDE.md) for the full operational reference, [`AGENTS.md`](AGENTS.md) for OpenCode agent instructions.
+**Need more detail?** Read [`CLAUDE.md`](CLAUDE.md) for the full operational reference, [`AGENTS.md`](AGENTS.md) for project instructions.

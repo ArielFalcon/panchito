@@ -52,7 +52,7 @@ import { github } from "./integrations/github";
 import { capDiff } from "./orchestrator/sanitizer";
 import { renderIssue, type IssueContext, type TestedItem } from "./report/reporter";
 import { AgentResult, QaCase, QaRunResult, TriggerSource, RunMode, RunOptions, TestTarget, RunOutcome } from "./types";
-import type { ReviewInput, ReviewResult } from "./integrations/opencode-client";
+import type { OpencodeDeps, ReviewInput, ReviewResult } from "./integrations/opencode-client";
 
 // Tests live in this folder inside the repo (git is the source of truth).
 const E2E_DIR = "e2e";
@@ -148,7 +148,15 @@ export interface PipelineDeps {
   checkContextStaleness?(mirrorDir: string, sha: string): Promise<string>;
 }
 
-export function defaultPipelineDeps(): PipelineDeps {
+export interface DefaultPipelineDepsOptions {
+  agentDepsFactory?: () => Promise<OpencodeDeps>;
+  hasOpenSessions?: () => boolean;
+}
+
+export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): PipelineDeps {
+  const agentDepsFactory = options.agentDepsFactory ?? defaultOpencodeDeps;
+  const hasOpenSessions = options.hasOpenSessions ?? (() => getOpenSessionCount() > 0);
+
   return {
     waitForDeploy: (target, sha, signal) => waitForDeploy(target, sha, undefined, signal),
     prepare: async (repo, sha) => {
@@ -184,7 +192,7 @@ export function defaultPipelineDeps(): PipelineDeps {
         service: input.service,
         services: input.services,
       };
-      const oc = await defaultOpencodeDeps();
+      const oc = await agentDepsFactory();
       // complete/exhaustive fan out to parallel workers (plan → workers → consolidate); the other
       // modes (diff/manual) and any fix/review re-generation use the single-agent path. Code mode
       // always uses the single agent (no web fan-out). Diff mode fans out only when
@@ -239,7 +247,7 @@ export function defaultPipelineDeps(): PipelineDeps {
       }
     },
     review: async (input, signal) =>
-      reviewIndependently(input, await defaultOpencodeDeps(), { signal }),
+      reviewIndependently(input, await agentDepsFactory(), { signal }),
     collectCoverage: async (input) => defaultCollectCoverage(input),
     clearCoverage: (e2eDir, ns) => clearBrowserCoverage(e2eDir, ns),
     hasCoverageDumps: (e2eDir, ns) => hasBrowserCoverageDumps(e2eDir, ns),
@@ -273,8 +281,8 @@ export function defaultPipelineDeps(): PipelineDeps {
       // run. Opening a qa-assistant session would contend for the OpenCode server
       // and the LLM API — the reflection is best-effort, never worth delaying the
       // next queued run. Loud: a skipped reflection is lost learning, never silent.
-      if (getOpenSessionCount() > 0) {
-        console.warn("[qa] reflection skipped (non-blocking): another OpenCode session is open; this failure will not produce a rule");
+      if (hasOpenSessions()) {
+        console.warn("[qa] reflection skipped (non-blocking): another agent session is open; this failure will not produce a rule");
         return null;
       }
       const { buildReflectionPrompt } = await import("./qa/learning/reflector");
@@ -286,8 +294,7 @@ export function defaultPipelineDeps(): PipelineDeps {
         mode: input.outcome.mode,
       });
       const { askAssistant } = await import("./integrations/opencode-client");
-      const { defaultOpencodeDeps } = await import("./integrations/opencode-client");
-      const deps = await defaultOpencodeDeps();
+      const deps = await agentDepsFactory();
       try {
         const raw = await askAssistant(
           { context: prompt, question: "Produce the StructuredReflection JSON.", instruction: "Output ONLY the JSON object. No markdown, no explanation." },

@@ -2,7 +2,7 @@
 # language runtimes its language servers need.
 FROM node:22-bookworm
 
-# - opencode: the agent CLI/server (npm global → ends up on PATH at /usr/local/bin).
+# - opencode/codex: agent CLIs (npm global → PATH at /usr/local/bin).
 # - engram: persistent episodic memory MCP (Go binary, single-file, no runtime deps).
 # - uv: the Python toolchain used to install Serena at BUILD time (see below).
 # - git: the agent/Serena read the working copy.
@@ -26,7 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
    && curl -LsSf https://astral.sh/uv/install.sh | sh \
    && export PATH="/root/.local/bin:${PATH}" \
    && uv tool install --python 3.11 "git+https://github.com/oraios/serena@${SERENA_VERSION}" \
-   && npm install -g opencode-ai typescript typescript-language-server \
+   && npm install -g opencode-ai @openai/codex typescript typescript-language-server \
    && npm install -g @playwright/mcp \
    && npx playwright install --with-deps chromium \
    && curl -fsSL "https://github.com/Gentleman-Programming/engram/releases/download/v${ENGRAM_VERSION}/engram_${ENGRAM_VERSION}_linux_amd64.tar.gz" \
@@ -35,9 +35,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Serena (`uv tool install`) and uv both land in /root/.local/bin → on PATH at run time.
 ENV PATH="/root/.local/bin:${PATH}"
 
+COPY agent-supervisor.mjs /usr/local/bin/agent-supervisor.mjs
+RUN chmod +x /usr/local/bin/agent-supervisor.mjs
+
 # KNOWN LIMITATION: this container currently runs as root. Switching to non-root
 # requires re-homing /root/.local/share/opencode, /root/.cache/uv, /data, and the
 # /app/.mirrors mount to a non-root user — a coordinated change across both
 # Dockerfiles + docker-compose.yml. Tracked in the production hardening backlog.
-ENTRYPOINT ["opencode"]
-# docker-compose passes the args (`serve --hostname 0.0.0.0 --port 4096`).
+ENTRYPOINT ["node", "/usr/local/bin/agent-supervisor.mjs"]

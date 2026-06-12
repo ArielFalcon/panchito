@@ -3,7 +3,19 @@ import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { handleApi, ApiDeps } from "./api";
 import { RunRecord } from "../types";
-import { AppViewSchema, CreateRunResultSchema, QueueStatusSchema, RunRecordSchema } from "../contract/commands";
+import {
+  AgentConfigApplyResultSchema,
+  AgentModelsResponseSchema,
+  AgentRestartResponseSchema,
+  AppViewSchema,
+  CreateAppResultSchema,
+  CreateRunResultSchema,
+  DeleteAppResultSchema,
+  PublicAgentConfigSchema,
+  QueueStatusSchema,
+  RepoListResponseSchema,
+  RunRecordSchema,
+} from "../contract/commands";
 import { RunEventSchema } from "../contract/events";
 import { createRunEventStore } from "./run-events";
 
@@ -247,6 +259,113 @@ test("GET /api/health → 200", async () => {
   assert.equal(res.status, 200);
 });
 
+const publicAgentConfig = {
+  mode: "single" as const,
+  singleProvider: "opencode" as const,
+  assignments: {
+    primary: { provider: "opencode" as const, model: "opencode-go/deepseek-v4-pro" },
+    reviewer: { provider: "opencode" as const, model: "opencode-go/qwen3.7-max" },
+    chat: { provider: "opencode" as const, model: "opencode-go/deepseek-v4-flash" },
+  },
+  keys: { opencode: true, codex: false },
+  validation: { ok: true, errors: [] },
+  health: {
+    opencode: { provider: "opencode" as const, status: "healthy" as const, configured: true },
+  },
+};
+
+test("GET /api/agent/config returns sanitized runtime config", async () => {
+  const res = mkRes();
+  const ok = await handleApi(mkReq("GET", "/api/agent/config"), res, deps({
+    agentRuntime: {
+      getConfig: async () => publicAgentConfig,
+      applyConfig: async () => ({ config: publicAgentConfig, restarted: [] }),
+      listModels: async () => [],
+      restart: async () => ({ provider: "opencode", status: "healthy", configured: true }),
+    },
+  }));
+  assert.equal(ok, true);
+  assert.equal(res.status, 200);
+  PublicAgentConfigSchema.parse(JSON.parse(res.body));
+  assert.doesNotMatch(res.body, /sk-|opencode-secret|codex-secret/);
+});
+
+test("GET /api/agent/models returns models for one provider", async () => {
+  const res = mkRes();
+  await handleApi(mkReq("GET", "/api/agent/models?provider=codex"), res, deps({
+    agentRuntime: {
+      getConfig: async () => publicAgentConfig,
+      applyConfig: async () => ({ config: publicAgentConfig, restarted: [] }),
+      listModels: async (provider) => [{ id: "gpt-5.4", label: "GPT-5.4", provider }],
+      restart: async () => ({ provider: "codex", status: "healthy", configured: true }),
+    },
+  }));
+  assert.equal(res.status, 200);
+  assert.deepEqual(AgentModelsResponseSchema.parse(JSON.parse(res.body)).models.map((m) => m.id), ["gpt-5.4"]);
+});
+
+test("PUT /api/agent/config applies runtime config without echoing api keys", async () => {
+  const res = mkRes();
+  let seen: unknown;
+  await handleApi(
+    mkReq("PUT", "/api/agent/config", JSON.stringify({ mode: "single", singleProvider: "codex", apiKeys: { codex: "sk-codex-secret" } })),
+    res,
+    deps({
+      agentRuntime: {
+        getConfig: async () => publicAgentConfig,
+        applyConfig: async (input) => {
+          seen = input;
+          return { config: { ...publicAgentConfig, singleProvider: "codex", keys: { opencode: true, codex: true } }, restarted: ["codex"] };
+        },
+        listModels: async () => [],
+        restart: async () => ({ provider: "codex", status: "healthy", configured: true }),
+      },
+    }),
+  );
+  assert.equal(res.status, 200);
+  assert.equal((seen as any).apiKeys.codex, "sk-codex-secret");
+  AgentConfigApplyResultSchema.parse(JSON.parse(res.body));
+  assert.doesNotMatch(res.body, /sk-codex-secret/);
+});
+
+test("PUT /api/agent/config blocks while a run is active", async () => {
+  const res = mkRes();
+  let applied = false;
+  const running: RunRecord = { id: "r1", app: "demo", sha: "abc", target: "e2e", mode: "diff", status: "running", cases: [], logs: [], at: "t" };
+  await handleApi(
+    mkReq("PUT", "/api/agent/config", JSON.stringify({ mode: "single", singleProvider: "codex" })),
+    res,
+    deps({
+      currentRun: () => running,
+      agentRuntime: {
+        getConfig: async () => publicAgentConfig,
+        applyConfig: async () => {
+          applied = true;
+          return { config: publicAgentConfig, restarted: [] };
+        },
+        listModels: async () => [],
+        restart: async () => ({ provider: "codex", status: "healthy", configured: true }),
+      },
+    }),
+  );
+  assert.equal(res.status, 409);
+  assert.equal(applied, false);
+});
+
+test("POST /api/agent/restart restarts one provider", async () => {
+  const res = mkRes();
+  await handleApi(mkReq("POST", "/api/agent/restart", JSON.stringify({ provider: "opencode" })), res, deps({
+    agentRuntime: {
+      getConfig: async () => publicAgentConfig,
+      applyConfig: async () => ({ config: publicAgentConfig, restarted: [] }),
+      listModels: async () => [],
+      restart: async (provider) => ({ provider, status: "healthy", configured: true }),
+    },
+  }));
+  assert.equal(res.status, 200);
+  assert.equal(AgentRestartResponseSchema.parse(JSON.parse(res.body)).health.provider, "opencode");
+});
+
 test("POST /api/runs/:id/ask returns the assistant answer", async () => {
   const res = mkRes();
   const ask = async (input: { context: string; question: string }) => {
@@ -422,7 +541,15 @@ test("POST /api/apps delegates to createApp and 201s on success", async () => {
   assert.equal(ok, true);
   assert.equal(res.status, 201);
   const body = JSON.parse(res.body);
+  CreateAppResultSchema.parse(body);
   assert.equal(body.name, "shop");
+});
+
+test("GET /api/v1/apps/:name validates AppView output against the contract", async () => {
+  const res = mkRes();
+  await handleApi(mkReq("GET", "/api/v1/apps/demo"), res, deps());
+  assert.equal(res.status, 200);
+  assert.equal(AppViewSchema.parse(JSON.parse(res.body)).name, "demo");
 });
 
 test("POST /api/apps maps a validation failure to 422", async () => {
@@ -441,6 +568,19 @@ test("POST /api/apps without the dep returns 501", async () => {
   const res = mkRes();
   await handleApi(mkReq("POST", "/api/apps", JSON.stringify({ repo: "org/x" })), res, deps({}));
   assert.equal(res.status, 501);
+});
+
+test("app onboarding error responses redact credentials from thrown errors", async () => {
+  const res = mkRes();
+  await handleApi(
+    mkReq("POST", "/api/apps", JSON.stringify({ repo: "org/x" })),
+    res,
+    deps({ createApp: async () => { throw new Error("upstream failed: Authorization: Bearer secret-token"); } }),
+  );
+
+  assert.equal(res.status, 500);
+  assert.doesNotMatch(res.body, /secret-token/);
+  assert.match(res.body, /\[REDACTED_CREDENTIAL\]/);
 });
 
 test("POST /api/apps with dryRun or validateOnly returns 200 (not 201)", async () => {
@@ -470,6 +610,7 @@ test("DELETE /api/apps/:name passes purge and 200s", async () => {
     deps({ deleteApp: (name, purge) => { got = { name, purge }; return { removed: [`config:${name}`] }; } }),
   );
   assert.equal(res.status, 200);
+  DeleteAppResultSchema.parse(JSON.parse(res.body));
   assert.deepEqual(got, { name: "shop", purge: true });
 });
 
@@ -516,6 +657,21 @@ test("PUT /api/apps/:name delegates to updateApp and 200s", async () => {
   );
   assert.equal(res.status, 200);
   assert.equal(got?.name, "shop");
+  CreateAppResultSchema.parse(JSON.parse(res.body));
+});
+
+test("GET /api/v1/repos validates repo list output against the contract", async () => {
+  const res = mkRes();
+  await handleApi(
+    mkReq("GET", "/api/v1/repos?owner=org&page=2"),
+    res,
+    deps({ listRepos: async (owner, page) => ({
+      repos: [{ fullName: `${owner}/shop`, private: false, description: `page ${page}` }],
+      hasMore: false,
+    }) }),
+  );
+  assert.equal(res.status, 200);
+  assert.deepEqual(RepoListResponseSchema.parse(JSON.parse(res.body)).repos.map((r) => r.fullName), ["org/shop"]);
 });
 
 test("PUT /api/apps/:name maps validation failure to 422", async () => {

@@ -261,6 +261,176 @@
             }
           }
         }
+      },
+      "post": {
+        "operationId": "createApp",
+        "summary": "Create or validate an app config",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAppInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "validated or dry-run app config",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateAppResult"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "created app config",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateAppResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid app config"
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{name}": {
+      "get": {
+        "operationId": "getApp",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "configured app",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppView"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "updateApp",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAppInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "updated or dry-run app config",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateAppResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid app config"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteApp",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "purge",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "deleted app config",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteAppResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repos": {
+      "get": {
+        "operationId": "listRepos",
+        "parameters": [
+          {
+            "name": "owner",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "repositories visible to the control plane",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepoListResponse"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/help": {
@@ -286,6 +456,112 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/agent/config": {
+      "get": {
+        "operationId": "getAgentConfig",
+        "responses": {
+          "200": {
+            "description": "agent runtime config",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicAgentConfig"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "updateAgentConfig",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentConfigUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "updated runtime config",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentConfigApplyResult"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "active run/session or downgrade confirmation required"
+          }
+        }
+      }
+    },
+    "/api/v1/agent/models": {
+      "get": {
+        "operationId": "listAgentModels",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "opencode",
+                "codex"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "models for provider",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentModelsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent/restart": {
+      "post": {
+        "operationId": "restartAgentProvider",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentRestartRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "provider health after restart",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRestartResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "active run/session"
           }
         }
       }
@@ -1228,6 +1504,583 @@
         "required": [
           "id",
           "parentRunId"
+        ],
+        "additionalProperties": false
+      },
+      "OnboardServiceInput": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string"
+          },
+          "openapi": {
+            "type": "string"
+          },
+          "versionUrl": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "RepoInfo": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "fullName": {
+            "type": "string"
+          },
+          "private": {
+            "type": "boolean"
+          },
+          "defaultBranch": {
+            "type": "string"
+          },
+          "description": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "fullName",
+          "private",
+          "defaultBranch",
+          "description"
+        ],
+        "additionalProperties": false
+      },
+      "CreateAppInput": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "baseUrl": {
+            "type": "string"
+          },
+          "versionUrl": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string",
+            "enum": [
+              "e2e",
+              "code"
+            ]
+          },
+          "needsReview": {
+            "type": "boolean"
+          },
+          "shadow": {
+            "type": "boolean"
+          },
+          "testDataPrefix": {
+            "type": "string"
+          },
+          "services": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OnboardServiceInput"
+            }
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "dryRun": {
+            "type": "boolean"
+          },
+          "validateOnly": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "UpdateAppInput": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string"
+          },
+          "baseUrl": {
+            "type": "string"
+          },
+          "versionUrl": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string",
+            "enum": [
+              "e2e",
+              "code"
+            ]
+          },
+          "needsReview": {
+            "type": "boolean"
+          },
+          "shadow": {
+            "type": "boolean"
+          },
+          "testDataPrefix": {
+            "type": "string"
+          },
+          "services": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OnboardServiceInput"
+            }
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "dryRun": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateAppResult": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "repoInfo": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RepoInfo"
+              }
+            ]
+          },
+          "yaml": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "envApplied": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "additionalProperties": false
+      },
+      "DeleteAppResult": {
+        "type": "object",
+        "properties": {
+          "removed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "removed"
+        ],
+        "additionalProperties": false
+      },
+      "RepoListItem": {
+        "type": "object",
+        "properties": {
+          "fullName": {
+            "type": "string"
+          },
+          "private": {
+            "type": "boolean"
+          },
+          "description": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "fullName",
+          "private",
+          "description"
+        ],
+        "additionalProperties": false
+      },
+      "RepoListResponse": {
+        "type": "object",
+        "properties": {
+          "repos": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RepoListItem"
+            }
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "repos",
+          "hasMore"
+        ],
+        "additionalProperties": false
+      },
+      "PublicAgentConfig": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "single",
+              "dual"
+            ]
+          },
+          "singleProvider": {
+            "type": "string",
+            "enum": [
+              "opencode",
+              "codex"
+            ]
+          },
+          "assignments": {
+            "type": "object",
+            "properties": {
+              "primary": {
+                "$ref": "#/components/schemas/RoleAssignment"
+              },
+              "reviewer": {
+                "$ref": "#/components/schemas/RoleAssignment"
+              },
+              "chat": {
+                "$ref": "#/components/schemas/RoleAssignment"
+              }
+            },
+            "required": [
+              "primary",
+              "reviewer",
+              "chat"
+            ],
+            "additionalProperties": false
+          },
+          "keys": {
+            "type": "object",
+            "properties": {
+              "opencode": {
+                "type": "boolean"
+              },
+              "codex": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "opencode",
+              "codex"
+            ],
+            "additionalProperties": false
+          },
+          "validation": {
+            "type": "object",
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              },
+              "errors": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "requiresSingleDowngradeConfirmation": {
+                "type": "boolean"
+              },
+              "downgradeProvider": {
+                "type": "string",
+                "enum": [
+                  "opencode",
+                  "codex"
+                ]
+              }
+            },
+            "required": [
+              "ok",
+              "errors"
+            ],
+            "additionalProperties": false
+          },
+          "health": {
+            "type": "object",
+            "properties": {
+              "opencode": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/AgentProviderHealth"
+                  }
+                ]
+              },
+              "codex": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/AgentProviderHealth"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "mode",
+          "singleProvider",
+          "assignments",
+          "keys",
+          "validation"
+        ],
+        "additionalProperties": false
+      },
+      "AgentConfigUpdate": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "single",
+              "dual"
+            ]
+          },
+          "singleProvider": {
+            "type": "string",
+            "enum": [
+              "opencode",
+              "codex"
+            ]
+          },
+          "assignments": {
+            "type": "object",
+            "properties": {
+              "primary": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/RoleAssignment"
+                  }
+                ]
+              },
+              "reviewer": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/RoleAssignment"
+                  }
+                ]
+              },
+              "chat": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/RoleAssignment"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          "apiKeys": {
+            "type": "object",
+            "properties": {
+              "opencode": {
+                "type": "string"
+              },
+              "codex": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "confirmSingleDowngrade": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentConfigApplyResult": {
+        "type": "object",
+        "properties": {
+          "config": {
+            "$ref": "#/components/schemas/PublicAgentConfig"
+          },
+          "restarted": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "opencode",
+                "codex"
+              ]
+            }
+          },
+          "downgraded": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "config",
+          "restarted"
+        ],
+        "additionalProperties": false
+      },
+      "AgentModelsResponse": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "opencode",
+              "codex"
+            ]
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentModelInfo"
+            }
+          }
+        },
+        "required": [
+          "provider",
+          "models"
+        ],
+        "additionalProperties": false
+      },
+      "AgentRestartRequest": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "opencode",
+              "codex"
+            ]
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "additionalProperties": false
+      },
+      "AgentRestartResponse": {
+        "type": "object",
+        "properties": {
+          "health": {
+            "$ref": "#/components/schemas/AgentProviderHealth"
+          }
+        },
+        "required": [
+          "health"
+        ],
+        "additionalProperties": false
+      },
+      "AgentProviderHealth": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "opencode",
+              "codex"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "stopped",
+              "starting",
+              "healthy",
+              "degraded",
+              "failed",
+              "needs_config"
+            ]
+          },
+          "configured": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "status",
+          "configured"
+        ],
+        "additionalProperties": false
+      },
+      "AgentModelInfo": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "opencode",
+              "codex"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "RoleAssignment": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "opencode",
+              "codex"
+            ]
+          },
+          "model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "model"
         ],
         "additionalProperties": false
       }

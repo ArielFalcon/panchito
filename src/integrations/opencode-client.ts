@@ -377,7 +377,7 @@ export interface OpencodeSession {
 }
 
 export interface OpencodeDeps {
-  open(agent: string, cwd: string, opts?: { signal?: AbortSignal; timeoutMs?: number }): Promise<OpencodeSession>;
+  open(agent: string, cwd: string, opts?: { signal?: AbortSignal; timeoutMs?: number; model?: string }): Promise<OpencodeSession>;
   cleanupOrphans?(maxAgeMs: number): Promise<number>;
 }
 
@@ -1540,7 +1540,7 @@ export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
                     throw err;
                   });
               };
-              return runPrompt().catch((err) => {
+              return runPrompt(opts?.model).catch((err) => {
                 const fallback = getFallbackModel(agent);
                 if (fallback) {
                   console.warn(`[qa] primary model failed for ${agent}, retrying with fallback ${fallback}: ${err instanceof Error ? err.message : String(err)}`);

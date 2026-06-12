@@ -15,6 +15,12 @@ import {
   AppViewSchema, AppServiceViewSchema, QueueStatusSchema, ChatEntrySchema,
   CreateRunInputSchema, CreateRunResultSchema, AskRequestSchema, AskResponseSchema,
   ContinueRequestSchema, ContinueResultSchema,
+  CreateAppInputSchema, UpdateAppInputSchema, CreateAppResultSchema,
+  DeleteAppResultSchema, RepoInfoSchema, OnboardServiceInputSchema,
+  RepoListItemSchema, RepoListResponseSchema,
+  PublicAgentConfigSchema, AgentConfigUpdateSchema, AgentConfigApplyResultSchema,
+  AgentModelsResponseSchema, AgentRestartRequestSchema, AgentRestartResponseSchema,
+  AgentProviderHealthSchema, AgentModelInfoSchema, RoleAssignmentSchema,
 } from "./commands";
 
 export const API_VERSION = "1.0.0";
@@ -38,6 +44,23 @@ const NAMED_SCHEMAS = {
   AskResponse: AskResponseSchema,
   ContinueRequest: ContinueRequestSchema,
   ContinueResult: ContinueResultSchema,
+  OnboardServiceInput: OnboardServiceInputSchema,
+  RepoInfo: RepoInfoSchema,
+  CreateAppInput: CreateAppInputSchema,
+  UpdateAppInput: UpdateAppInputSchema,
+  CreateAppResult: CreateAppResultSchema,
+  DeleteAppResult: DeleteAppResultSchema,
+  RepoListItem: RepoListItemSchema,
+  RepoListResponse: RepoListResponseSchema,
+  PublicAgentConfig: PublicAgentConfigSchema,
+  AgentConfigUpdate: AgentConfigUpdateSchema,
+  AgentConfigApplyResult: AgentConfigApplyResultSchema,
+  AgentModelsResponse: AgentModelsResponseSchema,
+  AgentRestartRequest: AgentRestartRequestSchema,
+  AgentRestartResponse: AgentRestartResponseSchema,
+  AgentProviderHealth: AgentProviderHealthSchema,
+  AgentModelInfo: AgentModelInfoSchema,
+  RoleAssignment: RoleAssignmentSchema,
 } as const;
 
 function componentSchemas(): Record<string, unknown> {
@@ -61,6 +84,7 @@ const ref = (id: string): { $ref: string } => ({ $ref: `#/components/schemas/${i
 const jsonBody = (id: string): unknown => ({ "application/json": { schema: ref(id) } });
 const jsonArray = (id: string): unknown => ({ "application/json": { schema: { type: "array", items: ref(id) } } });
 const idParam = { name: "id", in: "path", required: true, schema: { type: "string" } };
+const nameParam = { name: "name", in: "path", required: true, schema: { type: "string" } };
 
 function paths(): Record<string, unknown> {
   return {
@@ -110,8 +134,75 @@ function paths(): Record<string, unknown> {
       post: { operationId: "continueRun", parameters: [idParam], requestBody: { required: true, content: jsonBody("ContinueRequest") }, responses: { "202": { description: "continuation", content: jsonBody("ContinueResult") } } },
     },
     "/api/v1/queue": { get: { operationId: "getQueue", responses: { "200": { description: "queue depth", content: jsonBody("QueueStatus") } } } },
-    "/api/v1/apps": { get: { operationId: "listApps", responses: { "200": { description: "configured apps", content: jsonArray("AppView") } } } },
+    "/api/v1/apps": {
+      get: { operationId: "listApps", responses: { "200": { description: "configured apps", content: jsonArray("AppView") } } },
+      post: {
+        operationId: "createApp",
+        summary: "Create or validate an app config",
+        requestBody: { required: true, content: jsonBody("CreateAppInput") },
+        responses: {
+          "200": { description: "validated or dry-run app config", content: jsonBody("CreateAppResult") },
+          "201": { description: "created app config", content: jsonBody("CreateAppResult") },
+          "422": { description: "invalid app config" },
+        },
+      },
+    },
+    "/api/v1/apps/{name}": {
+      get: { operationId: "getApp", parameters: [nameParam], responses: { "200": { description: "configured app", content: jsonBody("AppView") } } },
+      put: {
+        operationId: "updateApp",
+        parameters: [nameParam],
+        requestBody: { required: true, content: jsonBody("UpdateAppInput") },
+        responses: {
+          "200": { description: "updated or dry-run app config", content: jsonBody("CreateAppResult") },
+          "422": { description: "invalid app config" },
+        },
+      },
+      delete: {
+        operationId: "deleteApp",
+        parameters: [nameParam, { name: "purge", in: "query", schema: { type: "boolean" } }],
+        responses: { "200": { description: "deleted app config", content: jsonBody("DeleteAppResult") } },
+      },
+    },
+    "/api/v1/repos": {
+      get: {
+        operationId: "listRepos",
+        parameters: [
+          { name: "owner", in: "query", required: true, schema: { type: "string" } },
+          { name: "page", in: "query", schema: { type: "integer" } },
+        ],
+        responses: { "200": { description: "repositories visible to the control plane", content: jsonBody("RepoListResponse") } },
+      },
+    },
     "/api/v1/help": { post: { operationId: "help", requestBody: { required: true, content: jsonBody("AskRequest") }, responses: { "200": { description: "answer", content: jsonBody("AskResponse") } } } },
+    "/api/v1/agent/config": {
+      get: { operationId: "getAgentConfig", responses: { "200": { description: "agent runtime config", content: jsonBody("PublicAgentConfig") } } },
+      put: {
+        operationId: "updateAgentConfig",
+        requestBody: { required: true, content: jsonBody("AgentConfigUpdate") },
+        responses: {
+          "200": { description: "updated runtime config", content: jsonBody("AgentConfigApplyResult") },
+          "409": { description: "active run/session or downgrade confirmation required" },
+        },
+      },
+    },
+    "/api/v1/agent/models": {
+      get: {
+        operationId: "listAgentModels",
+        parameters: [{ name: "provider", in: "query", required: true, schema: { type: "string", enum: ["opencode", "codex"] } }],
+        responses: { "200": { description: "models for provider", content: jsonBody("AgentModelsResponse") } },
+      },
+    },
+    "/api/v1/agent/restart": {
+      post: {
+        operationId: "restartAgentProvider",
+        requestBody: { required: true, content: jsonBody("AgentRestartRequest") },
+        responses: {
+          "200": { description: "provider health after restart", content: jsonBody("AgentRestartResponse") },
+          "409": { description: "active run/session" },
+        },
+      },
+    },
   };
 }
 

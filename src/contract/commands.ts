@@ -129,6 +129,162 @@ export const ContinueResultSchema = z.object({
   parentRunId: z.string(),
 });
 
+// ── App onboarding DTOs ──────────────────────────────────────────────────────
+export const OnboardServiceInputSchema = z.object({
+  repo: z.string(),
+  openapi: z.string().optional(),
+  versionUrl: z.string().optional(),
+});
+
+export const RepoInfoSchema = z.object({
+  name: z.string(),
+  fullName: z.string(),
+  private: z.boolean(),
+  defaultBranch: z.string(),
+  description: z.string().nullable(),
+});
+
+export const CreateAppInputSchema = z.object({
+  repo: z.string(),
+  name: z.string().optional(),
+  baseUrl: z.string().optional(),
+  versionUrl: z.string().optional(),
+  target: TestTargetSchema.optional(),
+  needsReview: z.boolean().optional(),
+  shadow: z.boolean().optional(),
+  testDataPrefix: z.string().optional(),
+  services: z.array(OnboardServiceInputSchema).optional(),
+  env: z.record(z.string(), z.string()).optional(),
+  dryRun: z.boolean().optional(),
+  validateOnly: z.boolean().optional(),
+});
+
+export const UpdateAppInputSchema = z.object({
+  repo: z.string().optional(),
+  baseUrl: z.string().optional(),
+  versionUrl: z.string().optional(),
+  target: TestTargetSchema.optional(),
+  needsReview: z.boolean().optional(),
+  shadow: z.boolean().optional(),
+  testDataPrefix: z.string().optional(),
+  services: z.array(OnboardServiceInputSchema).optional(),
+  env: z.record(z.string(), z.string()).optional(),
+  dryRun: z.boolean().optional(),
+});
+
+export const CreateAppResultSchema = z.object({
+  ok: z.boolean(),
+  errors: z.array(z.string()).optional(),
+  repoInfo: RepoInfoSchema.optional(),
+  yaml: z.string().optional(),
+  name: z.string().optional(),
+  path: z.string().optional(),
+  envApplied: z.array(z.string()).optional(),
+  warnings: z.array(z.string()).optional(),
+});
+
+export const DeleteAppResultSchema = z.object({
+  removed: z.array(z.string()),
+});
+
+export const RepoListItemSchema = z.object({
+  fullName: z.string(),
+  private: z.boolean(),
+  description: z.string().nullable(),
+});
+
+export const RepoListResponseSchema = z.object({
+  repos: z.array(RepoListItemSchema),
+  hasMore: z.boolean(),
+});
+
+// ── Agent runtime DTOs ───────────────────────────────────────────────────────
+export const AgentProviderSchema = z.enum(["opencode", "codex"]);
+export const AgentModeSchema = z.enum(["single", "dual"]);
+export const AgentRoleSchema = z.enum(["primary", "reviewer", "chat", "worker", "workerCode", "maintainer"]);
+
+export const RoleAssignmentSchema = z.object({
+  provider: AgentProviderSchema,
+  model: z.string(),
+});
+
+export const AgentAssignmentsSchema = z.object({
+  primary: RoleAssignmentSchema,
+  reviewer: RoleAssignmentSchema,
+  chat: RoleAssignmentSchema,
+});
+
+export const KeyPresenceSchema = z.object({
+  opencode: z.boolean(),
+  codex: z.boolean(),
+});
+
+export const AgentConfigValidationSchema = z.object({
+  ok: z.boolean(),
+  errors: z.array(z.string()),
+  requiresSingleDowngradeConfirmation: z.boolean().optional(),
+  downgradeProvider: AgentProviderSchema.optional(),
+});
+
+export const AgentRuntimeStatusSchema = z.enum(["stopped", "starting", "healthy", "degraded", "failed", "needs_config"]);
+
+export const AgentProviderHealthSchema = z.object({
+  provider: AgentProviderSchema,
+  status: AgentRuntimeStatusSchema,
+  configured: z.boolean(),
+  error: z.string().optional(),
+});
+
+export const AgentHealthMapSchema = z.object({
+  opencode: AgentProviderHealthSchema.optional(),
+  codex: AgentProviderHealthSchema.optional(),
+});
+
+export const PublicAgentConfigSchema = z.object({
+  mode: AgentModeSchema,
+  singleProvider: AgentProviderSchema,
+  assignments: AgentAssignmentsSchema,
+  keys: KeyPresenceSchema,
+  validation: AgentConfigValidationSchema,
+  health: AgentHealthMapSchema.optional(),
+});
+
+export const AgentConfigUpdateSchema = z.object({
+  mode: AgentModeSchema.optional(),
+  singleProvider: AgentProviderSchema.optional(),
+  assignments: AgentAssignmentsSchema.partial().optional(),
+  apiKeys: z.object({
+    opencode: z.string().optional(),
+    codex: z.string().optional(),
+  }).optional(),
+  confirmSingleDowngrade: z.boolean().optional(),
+});
+
+export const AgentModelInfoSchema = z.object({
+  id: z.string(),
+  label: z.string().optional(),
+  provider: AgentProviderSchema.optional(),
+});
+
+export const AgentModelsResponseSchema = z.object({
+  provider: AgentProviderSchema,
+  models: z.array(AgentModelInfoSchema),
+});
+
+export const AgentConfigApplyResultSchema = z.object({
+  config: PublicAgentConfigSchema,
+  restarted: z.array(AgentProviderSchema),
+  downgraded: z.boolean().optional(),
+});
+
+export const AgentRestartRequestSchema = z.object({
+  provider: AgentProviderSchema,
+});
+
+export const AgentRestartResponseSchema = z.object({
+  health: AgentProviderHealthSchema,
+});
+
 // ── Inferred types (what the server and tests import) ─────────────────────────
 export type QaCase = z.infer<typeof QaCaseSchema>;
 export type SpecRecord = z.infer<typeof SpecRecordSchema>;
@@ -143,3 +299,21 @@ export type AskRequest = z.infer<typeof AskRequestSchema>;
 export type AskResponse = z.infer<typeof AskResponseSchema>;
 export type ContinueRequest = z.infer<typeof ContinueRequestSchema>;
 export type ContinueResult = z.infer<typeof ContinueResultSchema>;
+export type OnboardServiceInput = z.infer<typeof OnboardServiceInputSchema>;
+export type RepoInfo = z.infer<typeof RepoInfoSchema>;
+export type CreateAppInput = z.infer<typeof CreateAppInputSchema>;
+export type UpdateAppInput = z.infer<typeof UpdateAppInputSchema>;
+export type CreateAppResult = z.infer<typeof CreateAppResultSchema>;
+export type DeleteAppResult = z.infer<typeof DeleteAppResultSchema>;
+export type RepoListItem = z.infer<typeof RepoListItemSchema>;
+export type RepoListResponse = z.infer<typeof RepoListResponseSchema>;
+export type AgentProvider = z.infer<typeof AgentProviderSchema>;
+export type AgentMode = z.infer<typeof AgentModeSchema>;
+export type AgentRole = z.infer<typeof AgentRoleSchema>;
+export type RoleAssignment = z.infer<typeof RoleAssignmentSchema>;
+export type PublicAgentConfig = z.infer<typeof PublicAgentConfigSchema>;
+export type AgentConfigUpdate = z.infer<typeof AgentConfigUpdateSchema>;
+export type AgentModelInfo = z.infer<typeof AgentModelInfoSchema>;
+export type AgentConfigApplyResult = z.infer<typeof AgentConfigApplyResultSchema>;
+export type AgentRestartRequest = z.infer<typeof AgentRestartRequestSchema>;
+export type AgentRestartResponse = z.infer<typeof AgentRestartResponseSchema>;
