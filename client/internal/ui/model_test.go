@@ -81,6 +81,32 @@ func TestLauncherEscStepsBackThenLeaves(t *testing.T) {
 	}
 }
 
+func TestLauncherManualCollectsGuidance(t *testing.T) {
+	m := newLauncherModel("portfolio")
+	enter := tea.KeyMsg{Type: tea.KeyEnter}
+	m, _ = m.Update(enter) // target → e2e
+	for i := 0; i < 3; i++ {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown}) // mode cursor → manual (index 3)
+	}
+	m, _ = m.Update(enter) // select manual → enters the guidance step
+	if m.step != stepGuidance {
+		t.Fatalf("manual mode must enter the guidance step, got step %d", m.step)
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("test the contact form")})
+	m, _ = m.Update(enter) // submit guidance → shadow
+	if m.step != stepShadow || m.guidance != "test the contact form" {
+		t.Fatalf("guidance=%q step=%d", m.guidance, m.step)
+	}
+	_, cmd := m.Update(enter) // shadow → false → launch
+	lm, ok := cmd().(launchMsg)
+	if !ok {
+		t.Fatalf("expected launchMsg, got %T", cmd())
+	}
+	if lm.input.Mode != "manual" || lm.input.Guidance == nil || *lm.input.Guidance != "test the contact form" {
+		t.Fatalf("launch input mode=%v guidance=%v", lm.input.Mode, lm.input.Guidance)
+	}
+}
+
 func TestLiveFoldsEventsIntoStructuredState(t *testing.T) {
 	ch := make(chan events.RunEvent, 8)
 	m := newLiveModel("run_1", "portfolio", ch, func() {}, 0, 0)
@@ -540,12 +566,12 @@ func TestAppAdminFormTogglesAndValidates(t *testing.T) {
 	m.repo = "org/shop"
 	m.nameInput.SetValue("shop")
 	m.baseInput.SetValue("")
-	m.formCursor = 2
+	m.formCursor = fTarget
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
 	if m.target != "code" {
 		t.Fatalf("target=%q, want code", m.target)
 	}
-	m.formCursor = 5
+	m.formCursor = fSave
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd == nil {
 		t.Fatal("code app save should produce command even without base url")
@@ -553,6 +579,7 @@ func TestAppAdminFormTogglesAndValidates(t *testing.T) {
 
 	m.target = "e2e"
 	m.baseInput.SetValue("")
+	m.formCursor = fSave
 	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd != nil || !strings.Contains(m.err, "base url") {
 		t.Fatalf("expected base url validation, cmd=%v err=%q", cmd, m.err)
@@ -566,14 +593,14 @@ func TestAppAdminEditKeepsNameReadOnly(t *testing.T) {
 		t.Fatalf("edit cursor=%d, want base url first", m.formCursor)
 	}
 
-	m.formCursor = 0
+	m.formCursor = fName
 	m.nameInput.SetValue("")
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
 	if got := m.nameInput.Value(); got != "" {
 		t.Fatalf("edit name input mutated: %q", got)
 	}
 
-	m.formCursor = 5
+	m.formCursor = fSave
 	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd == nil || m.err != "" {
 		t.Fatalf("edit save should use original name, cmd=%v err=%q", cmd, m.err)

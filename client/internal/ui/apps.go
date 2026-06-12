@@ -30,25 +30,39 @@ const (
 	appStepDelete
 )
 
+// Form field indices — fixed layout. version & prefix are optional (blank for code apps).
+const (
+	fName = iota
+	fURL
+	fVersion
+	fTarget
+	fShadow
+	fReview
+	fPrefix
+	fSave
+)
+
 type appAdminModel struct {
-	client      *api.Client
-	mode        appAdminMode
-	step        appAdminStep
-	loading     bool
-	err         string
-	status      string
-	repos       []contract.RepoListItem
-	repoCursor  int
-	formCursor  int
-	ownerInput  textinput.Model
-	nameInput   textinput.Model
-	baseInput   textinput.Model
-	repo        string
-	target      string
-	shadow      bool
-	needsReview bool
-	purge       bool
-	app         *contract.AppView
+	client       *api.Client
+	mode         appAdminMode
+	step         appAdminStep
+	loading      bool
+	err          string
+	status       string
+	repos        []contract.RepoListItem
+	repoCursor   int
+	formCursor   int
+	ownerInput   textinput.Model
+	nameInput    textinput.Model
+	baseInput    textinput.Model
+	versionInput textinput.Model
+	prefixInput  textinput.Model
+	repo         string
+	target       string
+	shadow       bool
+	needsReview  bool
+	purge        bool
+	app          *contract.AppView
 }
 
 func newOnboardModel(client *api.Client) appAdminModel {
@@ -57,6 +71,8 @@ func newOnboardModel(client *api.Client) appAdminModel {
 	m.ownerInput.Focus()
 	m.nameInput = appTextInput("app-name", 28)
 	m.baseInput = appTextInput("https://dev.example.com", 42)
+	m.versionInput = appTextInput("https://dev.example.com/version (optional)", 42)
+	m.prefixInput = appTextInput("qa-bot (optional)", 28)
 	return m
 }
 
@@ -74,6 +90,8 @@ func newEditAppModel(client *api.Client, app contract.AppView) appAdminModel {
 	m.needsReview = app.NeedsReview
 	m.nameInput.SetValue(app.Name)
 	m.baseInput.SetValue(app.BaseUrl)
+	m.versionInput.SetValue(app.VersionUrl)
+	m.prefixInput.SetValue(app.TestDataPrefix)
 	m.formCursor = 1
 	m.nameInput.Blur()
 	m.baseInput.Focus()
@@ -188,18 +206,26 @@ func (m appAdminModel) updateForm(msg tea.KeyMsg) (appAdminModel, tea.Cmd) {
 		return m, textinput.Blink
 	case " ":
 		m.toggleFormValue()
+		return m, nil
 	case "enter":
-		if m.formCursor < 5 {
+		if m.formCursor < fSave {
 			m.moveFormFocus(1)
 			return m, textinput.Blink
 		}
 		return m.save()
 	}
 	var cmd tea.Cmd
-	if m.formCursor == 0 && m.mode != appAdminEdit {
-		m.nameInput, cmd = m.nameInput.Update(msg)
-	} else if m.formCursor == 1 {
+	switch m.formCursor {
+	case fName:
+		if m.mode != appAdminEdit {
+			m.nameInput, cmd = m.nameInput.Update(msg)
+		}
+	case fURL:
 		m.baseInput, cmd = m.baseInput.Update(msg)
+	case fVersion:
+		m.versionInput, cmd = m.versionInput.Update(msg)
+	case fPrefix:
+		m.prefixInput, cmd = m.prefixInput.Update(msg)
 	}
 	return m, cmd
 }
@@ -207,38 +233,44 @@ func (m appAdminModel) updateForm(msg tea.KeyMsg) (appAdminModel, tea.Cmd) {
 func (m *appAdminModel) moveFormFocus(delta int) {
 	minCursor := 0
 	if m.mode == appAdminEdit {
-		minCursor = 1
+		minCursor = 1 // the name is fixed once created
 	}
 	m.formCursor += delta
 	if m.formCursor < minCursor {
-		m.formCursor = 5
+		m.formCursor = fSave
 	}
-	if m.formCursor > 5 {
+	if m.formCursor > fSave {
 		m.formCursor = minCursor
 	}
-	if m.formCursor == 0 && m.mode != appAdminEdit {
-		m.nameInput.Focus()
-		m.baseInput.Blur()
-	} else if m.formCursor == 1 {
-		m.nameInput.Blur()
+	m.nameInput.Blur()
+	m.baseInput.Blur()
+	m.versionInput.Blur()
+	m.prefixInput.Blur()
+	switch m.formCursor {
+	case fName:
+		if m.mode != appAdminEdit {
+			m.nameInput.Focus()
+		}
+	case fURL:
 		m.baseInput.Focus()
-	} else {
-		m.nameInput.Blur()
-		m.baseInput.Blur()
+	case fVersion:
+		m.versionInput.Focus()
+	case fPrefix:
+		m.prefixInput.Focus()
 	}
 }
 
 func (m *appAdminModel) toggleFormValue() {
 	switch m.formCursor {
-	case 2:
+	case fTarget:
 		if m.target == "e2e" {
 			m.target = "code"
 		} else {
 			m.target = "e2e"
 		}
-	case 3:
+	case fShadow:
 		m.shadow = !m.shadow
-	case 4:
+	case fReview:
 		m.needsReview = !m.needsReview
 	}
 }
@@ -257,12 +289,14 @@ func (m appAdminModel) save() (appAdminModel, tea.Cmd) {
 		m.err = "base url is required for e2e apps"
 		return m, nil
 	}
+	versionURL := strings.TrimSpace(m.versionInput.Value())
+	prefix := strings.TrimSpace(m.prefixInput.Value())
 	m.loading = true
 	m.err = ""
 	if m.mode == appAdminEdit {
-		return m, updateAppCmd(m.client, m.appName(), name, m.repo, baseURL, m.target, m.shadow, m.needsReview)
+		return m, updateAppCmd(m.client, m.appName(), name, m.repo, baseURL, versionURL, m.target, prefix, m.shadow, m.needsReview)
 	}
-	return m, createAppCmd(m.client, m.repo, name, baseURL, m.target, m.shadow, m.needsReview)
+	return m, createAppCmd(m.client, m.repo, name, baseURL, versionURL, m.target, prefix, m.shadow, m.needsReview)
 }
 
 func (m appAdminModel) appName() string {
@@ -293,7 +327,7 @@ func (m appAdminModel) View() string {
 	} else if m.mode == appAdminDelete {
 		title = "delete app"
 	}
-	b.WriteString(titleStyle.Render(title) + "\n\n")
+	b.WriteString(titleStyle.Render(title) + "  " + m.wizardCrumb() + "\n\n")
 	if m.loading {
 		b.WriteString(infoStyle.Render("loading…") + "\n")
 	} else {
@@ -316,6 +350,34 @@ func (m appAdminModel) View() string {
 	}
 	b.WriteString("\n" + hintStyle.Render(m.footerHint()))
 	return screenStyle.Render(b.String())
+}
+
+// wizardCrumb is the onboarding stepper (owner › repo › configure). Empty for
+// edit/delete, which start straight at the form / confirmation.
+func (m appAdminModel) wizardCrumb() string {
+	if m.mode != appAdminCreate {
+		return ""
+	}
+	steps := []struct {
+		at    appAdminStep
+		label string
+	}{
+		{appStepOwner, "owner"},
+		{appStepRepo, "repo"},
+		{appStepForm, "configure"},
+	}
+	var parts []string
+	for _, s := range steps {
+		st := hintStyle
+		switch {
+		case s.at == m.step:
+			st = okStyle.Bold(true)
+		case s.at < m.step:
+			st = labelStyle
+		}
+		parts = append(parts, st.Render(s.label))
+	}
+	return hintStyle.Render(strings.Join(parts, " › "))
 }
 
 // footerHint is the single, step-aware key legend for this screen — the only place
@@ -358,26 +420,28 @@ func (m appAdminModel) renderRepos() string {
 }
 
 func (m appAdminModel) renderForm() string {
-	nameRow := labelStyle.Render("name   ") + m.nameInput.View()
+	nameRow := labelStyle.Render("name    ") + m.nameInput.View()
 	if m.mode == appAdminEdit {
-		nameRow = labelStyle.Render("name   ") + hintStyle.Render(m.appName())
+		nameRow = labelStyle.Render("name    ") + hintStyle.Render(m.appName())
 	}
 	rows := []string{
 		nameRow,
-		labelStyle.Render("url    ") + m.baseInput.View(),
-		fmt.Sprintf("target  %s", m.target),
-		fmt.Sprintf("shadow  %t", m.shadow),
-		fmt.Sprintf("review  %t", m.needsReview),
+		labelStyle.Render("url     ") + m.baseInput.View(),
+		labelStyle.Render("version ") + m.versionInput.View(),
+		fmt.Sprintf("target   %s", m.target),
+		fmt.Sprintf("shadow   %t", m.shadow),
+		fmt.Sprintf("review   %t", m.needsReview),
+		labelStyle.Render("prefix  ") + m.prefixInput.View(),
 		"save",
 	}
 	var b strings.Builder
-	b.WriteString(labelStyle.Render("repo   ") + m.repo + "\n")
+	b.WriteString(labelStyle.Render("repo    ") + m.repo + "\n")
 	for i, row := range rows {
 		marker := "  "
 		text := row
 		if i == m.formCursor {
 			marker = okStyle.Render("▸ ")
-			if i >= 2 {
+			if i == fTarget || i == fShadow || i == fReview || i == fSave {
 				text = lipgloss.NewStyle().Bold(true).Render(text)
 			}
 		}
@@ -428,16 +492,18 @@ func listReposCmd(c *api.Client, owner string, page int) tea.Cmd {
 	}
 }
 
-func createAppCmd(c *api.Client, repo, name, baseURL, target string, shadow, needsReview bool) tea.Cmd {
+func createAppCmd(c *api.Client, repo, name, baseURL, versionURL, target, prefix string, shadow, needsReview bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		input := contract.CreateAppInput{
-			Repo:        repo,
-			Name:        &name,
-			BaseUrl:     stringPtrOrNil(baseURL),
-			Shadow:      &shadow,
-			NeedsReview: &needsReview,
+			Repo:           repo,
+			Name:           &name,
+			BaseUrl:        stringPtrOrNil(baseURL),
+			VersionUrl:     stringPtrOrNil(versionURL),
+			TestDataPrefix: stringPtrOrNil(prefix),
+			Shadow:         &shadow,
+			NeedsReview:    &needsReview,
 		}
 		t := contract.CreateAppInputTarget(target)
 		input.Target = &t
@@ -448,15 +514,17 @@ func createAppCmd(c *api.Client, repo, name, baseURL, target string, shadow, nee
 	}
 }
 
-func updateAppCmd(c *api.Client, originalName, name, repo, baseURL, target string, shadow, needsReview bool) tea.Cmd {
+func updateAppCmd(c *api.Client, originalName, name, repo, baseURL, versionURL, target, prefix string, shadow, needsReview bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		input := contract.UpdateAppInput{
-			Repo:        stringPtrOrNil(repo),
-			BaseUrl:     stringPtrOrNil(baseURL),
-			Shadow:      &shadow,
-			NeedsReview: &needsReview,
+			Repo:           stringPtrOrNil(repo),
+			BaseUrl:        stringPtrOrNil(baseURL),
+			VersionUrl:     stringPtrOrNil(versionURL),
+			TestDataPrefix: stringPtrOrNil(prefix),
+			Shadow:         &shadow,
+			NeedsReview:    &needsReview,
 		}
 		t := contract.UpdateAppInputTarget(target)
 		input.Target = &t
