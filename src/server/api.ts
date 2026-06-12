@@ -246,16 +246,18 @@ async function handleCreateRun(req: IncomingMessage, res: ServerResponse, deps: 
   } else if (typeof body.sha === "string" && body.sha.length > 0) {
     json(res, 400, { error: "'sha' must be 7–40 hex characters" });
     return true;
-  } else if (typeof body.ref === "string") {
+  } else {
+    // Neither a sha nor an explicit ref: default to the app's base branch HEAD. This
+    // is the TUI "launch" path (pick target/mode/shadow, no commit) — run the latest
+    // of the configured branch. resolveRef uses `git ls-remote`, so no mirror is
+    // required yet (works on the very first run).
+    const ref = typeof body.ref === "string" && body.ref.length > 0 ? body.ref : (appConfig.baseBranch ?? "main");
     try {
-      sha = await deps.resolveRef(appConfig.repo, body.ref);
+      sha = await deps.resolveRef(appConfig.repo, ref);
     } catch (err) {
       json(res, 400, { error: redactError(err) });
       return true;
     }
-  } else {
-    json(res, 400, { error: "either 'sha' or 'ref' is required" });
-    return true;
   }
 
   let id: string;

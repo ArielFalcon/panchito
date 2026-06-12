@@ -178,10 +178,39 @@ test("POST /api/runs for an unknown app → 404", async () => {
   assert.equal(res.status, 404);
 });
 
-test("POST /api/runs without sha or ref → 400", async () => {
+test("POST /api/runs without sha or ref defaults to the app base branch (TUI launch)", async () => {
+  let seen = "";
   const res = mkRes();
-  await handleApi(mkReq("POST", "/api/runs", JSON.stringify({ app: "demo" })), res, deps());
-  assert.equal(res.status, 400);
+  await handleApi(
+    mkReq("POST", "/api/runs", JSON.stringify({ app: "demo" })),
+    res,
+    deps({
+      resolveRef: async (_repo, ref) => {
+        seen = ref;
+        return "b".repeat(40);
+      },
+    }),
+  );
+  assert.equal(seen, "main"); // appConfig has no baseBranch → defaults to "main"
+  assert.equal(res.status, 202);
+});
+
+test("POST /api/runs honors a configured baseBranch when no sha/ref is given", async () => {
+  let seen = "";
+  const res = mkRes();
+  await handleApi(
+    mkReq("POST", "/api/runs", JSON.stringify({ app: "demo" })),
+    res,
+    deps({
+      loadApp: () => ({ ...appConfig, baseBranch: "develop" }),
+      resolveRef: async (_repo, ref) => {
+        seen = ref;
+        return "c".repeat(40);
+      },
+    }),
+  );
+  assert.equal(seen, "develop");
+  assert.equal(res.status, 202);
 });
 
 test("a failing resolveRef surfaces a 400 with the reason", async () => {
