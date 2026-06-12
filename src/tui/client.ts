@@ -76,6 +76,53 @@ export interface CreateAppResponse {
   warnings?: string[];
 }
 
+export type AgentProvider = "opencode" | "codex";
+export type AgentMode = "single" | "dual";
+export type AgentRuntimeStatus = "stopped" | "starting" | "healthy" | "degraded" | "failed" | "needs_config";
+
+export interface RoleAssignment {
+  provider: AgentProvider;
+  model: string;
+}
+
+export interface PublicAgentConfig {
+  mode: AgentMode;
+  singleProvider: AgentProvider;
+  assignments: {
+    primary: RoleAssignment;
+    reviewer: RoleAssignment;
+    chat: RoleAssignment;
+  };
+  keys: Record<AgentProvider, boolean>;
+  validation: {
+    ok: boolean;
+    errors: string[];
+    requiresSingleDowngradeConfirmation?: boolean;
+    downgradeProvider?: AgentProvider;
+  };
+  health?: Partial<Record<AgentProvider, { provider: AgentProvider; status: AgentRuntimeStatus; configured: boolean; error?: string }>>;
+}
+
+export interface AgentConfigUpdate {
+  mode?: AgentMode;
+  singleProvider?: AgentProvider;
+  assignments?: Partial<PublicAgentConfig["assignments"]>;
+  apiKeys?: Partial<Record<AgentProvider, string>>;
+  confirmSingleDowngrade?: boolean;
+}
+
+export interface AgentModelInfo {
+  id: string;
+  label?: string;
+  provider?: AgentProvider;
+}
+
+export interface AgentConfigApplyResult {
+  config: PublicAgentConfig;
+  restarted: AgentProvider[];
+  downgraded?: boolean;
+}
+
 export class QaApiError extends Error {
   constructor(
     message: string,
@@ -126,6 +173,10 @@ export interface QaClient {
   createApp(input: CreateAppRequest): Promise<CreateAppResponse>;
   updateApp(name: string, input: Omit<CreateAppRequest, "repo" | "name"> & { repo?: string }): Promise<CreateAppResponse>;
   deleteApp(name: string, purge: boolean): Promise<{ removed: string[] }>;
+  getAgentConfig(): Promise<PublicAgentConfig>;
+  updateAgentConfig(input: AgentConfigUpdate): Promise<AgentConfigApplyResult>;
+  listAgentModels(provider: AgentProvider): Promise<{ provider: AgentProvider; models: AgentModelInfo[] }>;
+  restartAgentProvider(provider: AgentProvider): Promise<{ health: NonNullable<PublicAgentConfig["health"]>[AgentProvider] }>;
 }
 
 export function createClient(opts: ClientOptions = {}): QaClient {
@@ -179,5 +230,9 @@ export function createClient(opts: ClientOptions = {}): QaClient {
     updateApp: (name, input) => request<CreateAppResponse>("PUT", `/api/apps/${encodeURIComponent(name)}`, input),
     deleteApp: (name, purge) =>
       request<{ removed: string[] }>("DELETE", `/api/apps/${encodeURIComponent(name)}${purge ? "?purge=1" : ""}`),
+    getAgentConfig: () => request<PublicAgentConfig>("GET", "/api/agent/config"),
+    updateAgentConfig: (input) => request<AgentConfigApplyResult>("PUT", "/api/agent/config", input),
+    listAgentModels: (provider) => request<{ provider: AgentProvider; models: AgentModelInfo[] }>("GET", `/api/agent/models?provider=${provider}`),
+    restartAgentProvider: (provider) => request<{ health: NonNullable<PublicAgentConfig["health"]>[AgentProvider] }>("POST", "/api/agent/restart", { provider }),
   };
 }

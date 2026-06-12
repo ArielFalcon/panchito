@@ -123,3 +123,65 @@ test("updateApp PUTs to /api/apps/:name", async () => {
   assert.equal(cap.init?.method, "PUT");
   assert.equal(r.name, "shop");
 });
+
+test("getAgentConfig GETs /api/agent/config", async () => {
+  const cap: { url?: string; init?: RequestInit } = {};
+  const body = {
+    mode: "single",
+    singleProvider: "opencode",
+    assignments: {
+      primary: { provider: "opencode", model: "opencode-go/deepseek-v4-pro" },
+      reviewer: { provider: "opencode", model: "opencode-go/qwen3.7-max" },
+      chat: { provider: "opencode", model: "opencode-go/deepseek-v4-flash" },
+    },
+    keys: { opencode: true, codex: false },
+    validation: { ok: true, errors: [] },
+  };
+  const client = createClient({ host: "h:1", fetchImpl: stubFetch(200, JSON.stringify(body), cap) });
+  const r = await client.getAgentConfig();
+  assert.equal(cap.url, "http://h:1/api/agent/config");
+  assert.equal(cap.init?.method, "GET");
+  assert.equal(r.singleProvider, "opencode");
+});
+
+test("updateAgentConfig PUTs sanitized runtime updates", async () => {
+  const cap: { url?: string; init?: RequestInit } = {};
+  const body = {
+    config: {
+      mode: "single",
+      singleProvider: "codex",
+      assignments: {
+        primary: { provider: "codex", model: "gpt-5.4" },
+        reviewer: { provider: "codex", model: "gpt-5.4" },
+        chat: { provider: "codex", model: "gpt-5.4-mini" },
+      },
+      keys: { opencode: true, codex: true },
+      validation: { ok: true, errors: [] },
+    },
+    restarted: ["codex"],
+  };
+  const client = createClient({ host: "h:1", fetchImpl: stubFetch(200, JSON.stringify(body), cap) });
+  const r = await client.updateAgentConfig({ mode: "single", singleProvider: "codex", apiKeys: { codex: "sk-test" } });
+  assert.equal(cap.url, "http://h:1/api/agent/config");
+  assert.equal(cap.init?.method, "PUT");
+  assert.deepEqual(JSON.parse(String(cap.init?.body)).apiKeys, { codex: "sk-test" });
+  assert.deepEqual(r.restarted, ["codex"]);
+});
+
+test("listAgentModels GETs provider query", async () => {
+  const cap: { url?: string; init?: RequestInit } = {};
+  const client = createClient({ host: "h:1", fetchImpl: stubFetch(200, JSON.stringify({ provider: "codex", models: [{ id: "gpt-5.4" }] }), cap) });
+  const r = await client.listAgentModels("codex");
+  assert.equal(cap.url, "http://h:1/api/agent/models?provider=codex");
+  assert.equal(r.models[0]?.id, "gpt-5.4");
+});
+
+test("restartAgentProvider POSTs one provider", async () => {
+  const cap: { url?: string; init?: RequestInit } = {};
+  const client = createClient({ host: "h:1", fetchImpl: stubFetch(200, JSON.stringify({ health: { provider: "opencode", status: "healthy", configured: true } }), cap) });
+  const r = await client.restartAgentProvider("opencode");
+  assert.equal(cap.url, "http://h:1/api/agent/restart");
+  assert.deepEqual(JSON.parse(String(cap.init?.body)), { provider: "opencode" });
+  assert.ok(r.health);
+  assert.equal(r.health.status, "healthy");
+});

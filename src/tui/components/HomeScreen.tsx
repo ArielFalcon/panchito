@@ -8,13 +8,14 @@ import { RunFlow } from "../app";
 import { OnboardWizard } from "./OnboardWizard";
 import { DeleteProjectDialog } from "./DeleteProjectDialog";
 import { HelpChat } from "./HelpChat";
+import { AgentRuntimeSettings } from "./AgentRuntimeSettings";
 
 interface SelectItem {
   label: string;
   value: string;
 }
 
-type View = "home" | "run" | "onboard" | "edit-list" | "edit" | "help" | "status" | "delete-list" | "delete";
+type View = "home" | "run" | "onboard" | "edit-list" | "edit" | "help" | "status" | "runtime" | "delete-list" | "delete";
 
 const W = 54;
 
@@ -54,6 +55,7 @@ export function HomeScreen({
     { label: "+  Add New Project", value: "onboard" },
     { label: "✎  Edit Project", value: "edit" },
     { label: "-  Delete Project", value: "delete" },
+    { label: "◈  Agent Runtime", value: "runtime" },
     { label: "?  Help", value: "help" },
     { label: "⊞  Status", value: "status" },
     { label: "✕  Exit", value: "exit" },
@@ -120,6 +122,9 @@ export function HomeScreen({
       case "help":
         setView("help");
         break;
+      case "runtime":
+        setView("runtime");
+        break;
       case "status":
         setStatusText(null);
         setView("status");
@@ -133,7 +138,7 @@ export function HomeScreen({
   useInput(
     useCallback(
       (_char: string, key: { escape: boolean }) => {
-        if (key.escape && (view === "status" || view === "onboard" || view === "edit-list" || view === "edit" || view === "help" || view === "delete-list" || view === "delete")) {
+        if (key.escape && (view === "status" || view === "runtime" || view === "onboard" || view === "edit-list" || view === "edit" || view === "help" || view === "delete-list" || view === "delete")) {
           setSelectedApp(null);
           setPostOnboardApp(null);
           setView("home");
@@ -302,6 +307,10 @@ export function HomeScreen({
 
   if (view === "help") {
     return <HelpChat client={client} onBack={() => setView("home")} />;
+  }
+
+  if (view === "runtime") {
+    return <AgentRuntimeSettings client={client} onBack={() => setView("home")} />;
   }
 
   if (view === "status") {

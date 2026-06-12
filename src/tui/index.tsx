@@ -9,10 +9,11 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { render } from "ink";
 import { ThemeWrapper } from "./theme";
-import { createClient, QaApiError, QaClient } from "./client";
+import { AgentProvider, createClient, PublicAgentConfig, QaApiError, QaClient } from "./client";
 import { Watch, RunFlow } from "./app";
 import { HomeScreen } from "./components/HomeScreen";
 import { OnboardWizard } from "./components/OnboardWizard";
+import { AgentRuntimeSettings } from "./components/AgentRuntimeSettings";
 import { caseIcon } from "./format";
 import { RUN_MODES, RunMode, TestTarget } from "../types";
 
@@ -45,6 +46,7 @@ function usage(): void {
   console.log(`panchito — launch and watch QA runs (needs the service: docker compose up)
 
 Usage: panchito <command> [options]
+  --opencode | --codex | --dual   Select agent runtime before running a command
   run [<app>]   Trigger a run (interactive launcher if <app> is omitted on a TTY)
     --target <t> | --ref <r> | --latest | --sha <s> | --mode <m> | --guidance ".." | -w/--watch
   status [app]  Queue status, or the last run for an app
@@ -54,8 +56,47 @@ Usage: panchito <command> [options]
   ask <id> ".." Ask the read-only assistant about a run
   continue <id> Re-run fixing marked failures with guidance  --cases "a,b" [--guidance ".."] [-w]
   onboard        Add a new project (interactive wizard)
+  agent          View or edit agent runtime, keys and models
 
 Env: QA_HOST (default localhost:8080) · QA_API_TOKEN (if the service requires auth)`);
+}
+
+function runtimeFlag(args: string[]): { provider?: AgentProvider; dual?: boolean; rest: string[] } {
+  const rest: string[] = [];
+  let provider: AgentProvider | undefined;
+  let dual = false;
+  for (const arg of args) {
+    if (arg === "--opencode") { provider = "opencode"; dual = false; continue; }
+    if (arg === "--codex") { provider = "codex"; dual = false; continue; }
+    if (arg === "--dual") { dual = true; provider = undefined; continue; }
+    rest.push(arg);
+  }
+  return { provider, dual, rest };
+}
+
+async function applyRuntimeFlag(client: QaClient, flagState: { provider?: AgentProvider; dual?: boolean }): Promise<void> {
+  if (flagState.provider) {
+    await client.updateAgentConfig({ mode: "single", singleProvider: flagState.provider });
+    return;
+  }
+  if (flagState.dual) {
+    const cfg = await client.getAgentConfig();
+    const primaryProvider = cfg.assignments.primary.provider;
+    const reviewerProvider = oppositeProvider(primaryProvider);
+    const [primaryModels, reviewerModels] = await Promise.all([
+      client.listAgentModels(primaryProvider),
+      client.listAgentModels(reviewerProvider),
+    ]);
+    await client.updateAgentConfig({
+      mode: "dual",
+      singleProvider: cfg.singleProvider,
+      assignments: {
+        primary: { provider: primaryProvider, model: cfg.assignments.primary.model || firstModel(primaryModels.models) },
+        reviewer: { provider: reviewerProvider, model: firstModel(reviewerModels.models, cfg.assignments.reviewer.model) },
+        chat: { provider: primaryProvider, model: cfg.assignments.chat.model || firstModel(primaryModels.models) },
+      },
+    });
+  }
 }
 
 async function cmdRun(client: QaClient, args: string[]): Promise<void> {
@@ -200,10 +241,50 @@ function cmdOnboard(): void {
   );
 }
 
+async function cmdAgent(client: QaClient, args: string[]): Promise<void> {
+  const sub = args[0];
+  if (!sub) {
+    if (process.stdout.isTTY) {
+      render(<ThemeWrapper><AgentRuntimeSettings client={client} onBack={() => process.exit(0)} /></ThemeWrapper>);
+      return;
+    }
+    printAgentConfig(await client.getAgentConfig());
+    process.exit(0);
+  }
+
+  if (sub === "status") {
+    printAgentConfig(await client.getAgentConfig());
+    process.exit(0);
+  }
+
+  if (sub === "models") {
+    const provider = parseProvider(flag(args, "--provider") ?? args[1] ?? "opencode");
+    const result = await client.listAgentModels(provider);
+    for (const model of result.models) console.log(`${result.provider}\t${model.id}${model.label ? `\t${model.label}` : ""}`);
+    process.exit(0);
+  }
+
+  if (sub === "set") {
+    const desired = runtimeFlag(args.slice(1));
+    const apiKeys = {
+      ...(flag(args, "--opencode-key") ? { opencode: flag(args, "--opencode-key")! } : {}),
+      ...(flag(args, "--codex-key") ? { codex: flag(args, "--codex-key")! } : {}),
+    };
+    if (Object.keys(apiKeys).length > 0) await client.updateAgentConfig({ apiKeys });
+    await applyRuntimeFlag(client, desired);
+    printAgentConfig(await client.getAgentConfig());
+    process.exit(0);
+  }
+
+  fail("usage: panchito agent [status|models|set] [--provider opencode|codex] [--opencode|--codex|--dual]");
+}
+
 async function main(): Promise<void> {
-  const [cmd, ...rest] = process.argv.slice(2);
+  const parsedRuntime = runtimeFlag(process.argv.slice(2));
+  const [cmd, ...rest] = parsedRuntime.rest;
   const client = createClient({ token: resolveToken() });
   try {
+    if (parsedRuntime.provider || parsedRuntime.dual) await applyRuntimeFlag(client, parsedRuntime);
     switch (cmd) {
       case "run":
         return await cmdRun(client, rest);
@@ -221,6 +302,8 @@ async function main(): Promise<void> {
         return await cmdContinue(client, rest);
       case "onboard":
         return cmdOnboard();
+      case "agent":
+        return await cmdAgent(client, rest);
       case undefined:
         if (!process.stdout.isTTY) return usage();
         render(<ThemeWrapper><HomeScreen client={client} onExit={() => process.exit(0)} /></ThemeWrapper>);
@@ -232,9 +315,46 @@ async function main(): Promise<void> {
         fail(`unknown command '${cmd}'`);
     }
   } catch (e) {
-    if (e instanceof QaApiError) fail(e.message);
+    if (e instanceof QaApiError) {
+      if ((parsedRuntime.provider || parsedRuntime.dual || cmd === "agent") && process.stdout.isTTY) {
+        console.error(`qa: ${e.message}`);
+        render(<ThemeWrapper><AgentRuntimeSettings client={client} onBack={() => process.exit(0)} /></ThemeWrapper>);
+        return;
+      }
+      fail(e.message);
+    }
     throw e;
   }
 }
 
 void main();
+
+function printAgentConfig(config: PublicAgentConfig): void {
+  console.log(`mode: ${config.mode}${config.mode === "single" ? `/${config.singleProvider}` : ""}`);
+  console.log(`keys: opencode=${config.keys.opencode ? "yes" : "no"} codex=${config.keys.codex ? "yes" : "no"}`);
+  for (const provider of ["opencode", "codex"] as AgentProvider[]) {
+    const health = config.health?.[provider];
+    console.log(`health.${provider}: ${health?.status ?? "unknown"}${health?.error ? ` (${health.error})` : ""}`);
+  }
+  for (const role of ["primary", "reviewer", "chat"] as const) {
+    const a = config.assignments[role];
+    console.log(`${role}: ${a.provider} ${a.model}`);
+  }
+  if (!config.validation.ok) {
+    console.log("errors:");
+    for (const err of config.validation.errors) console.log(`  - ${err}`);
+  }
+}
+
+function parseProvider(value: string): AgentProvider {
+  if (value === "opencode" || value === "codex") return value;
+  fail("provider must be opencode or codex");
+}
+
+function oppositeProvider(provider: AgentProvider): AgentProvider {
+  return provider === "opencode" ? "codex" : "opencode";
+}
+
+function firstModel(models: Array<{ id: string }>, fallback = ""): string {
+  return models[0]?.id ?? fallback;
+}
