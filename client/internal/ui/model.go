@@ -22,6 +22,8 @@ const (
 	screenHistory
 	screenAgent
 	screenAppAdmin
+	screenStatus
+	screenHelp
 )
 
 type Model struct {
@@ -38,6 +40,8 @@ type Model struct {
 	history       historyModel
 	agent         agentModel
 	appAdmin      appAdminModel
+	status        statusModel
+	help          helpModel
 }
 
 func New() Model {
@@ -98,6 +102,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.agent = newAgentModel(m.client)
 		m.screen = screenAgent
 		return m, m.agent.Init()
+	case statusSelectedMsg:
+		m.status = newStatusModel(m.client)
+		m.screen = screenStatus
+		return m, m.status.Init()
+	case helpSelectedMsg:
+		m.help = newHelpModel(m.client)
+		m.screen = screenHelp
+		return m, m.help.Init()
 	case onboardSelectedMsg:
 		m.appAdmin = newOnboardModel(m.client)
 		m.screen = screenAppAdmin
@@ -142,6 +154,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.agent, cmd = m.agent.Update(msg)
 	case screenAppAdmin:
 		m.appAdmin, cmd = m.appAdmin.Update(msg)
+	case screenStatus:
+		m.status, cmd = m.status.Update(msg)
+	case screenHelp:
+		m.help, cmd = m.help.Update(msg)
 	}
 	return m, cmd
 }
@@ -162,6 +178,10 @@ func (m Model) View() string {
 		return m.agent.View()
 	case screenAppAdmin:
 		return m.appAdmin.View()
+	case screenStatus:
+		return m.status.View()
+	case screenHelp:
+		return m.help.View()
 	default:
 		return m.connect.View()
 	}

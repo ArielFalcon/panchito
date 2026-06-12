@@ -284,16 +284,47 @@ func TestChatAppendsQuestionAndRendersAnswer(t *testing.T) {
 	}
 }
 
-func TestHomeHEmitsHistorySelectedMsg(t *testing.T) {
+func TestHomeMenuRunOpensProjectsThenSelectsApp(t *testing.T) {
 	m := newHomeModel([]contract.AppView{{Name: "portfolio"}})
-	m.cursor = 0
+	// "Run QA" is the first menu item → Enter drops into the projects sub-view.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.view != homeViewProjects || m.intent != "run" {
+		t.Fatalf("view=%v intent=%q, want projects/run", m.view, m.intent)
+	}
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("Enter on a project must emit a command")
+	}
+	if msg, ok := cmd().(appSelectedMsg); !ok || msg.app != "portfolio" {
+		t.Fatalf("expected appSelectedMsg{app:portfolio}, got %T %+v", cmd(), cmd())
+	}
+}
+
+func TestHomeProjectsHEmitsHistorySelectedMsg(t *testing.T) {
+	m := newHomeModel([]contract.AppView{{Name: "portfolio"}})
+	m.view = homeViewProjects
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
 	if cmd == nil {
-		t.Fatal("'h' must emit a command")
+		t.Fatal("'h' must emit a command in the projects view")
 	}
-	msg, ok := cmd().(historySelectedMsg)
-	if !ok || msg.app != "portfolio" {
+	if msg, ok := cmd().(historySelectedMsg); !ok || msg.app != "portfolio" {
 		t.Fatalf("expected historySelectedMsg{app:portfolio}, got %T %+v", cmd(), cmd())
+	}
+}
+
+func TestHomeMenuStatusAndHelpEmitMsgs(t *testing.T) {
+	m := newHomeModel(nil)
+	m.menuCursor = 5 // ⊞ Status
+	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd == nil {
+		t.Fatal("Status must emit a command")
+	} else if _, ok := cmd().(statusSelectedMsg); !ok {
+		t.Fatalf("expected statusSelectedMsg, got %T", cmd())
+	}
+	m.menuCursor = 6 // ? Help
+	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd == nil {
+		t.Fatal("Help must emit a command")
+	} else if _, ok := cmd().(helpSelectedMsg); !ok {
+		t.Fatalf("expected helpSelectedMsg, got %T", cmd())
 	}
 }
 
@@ -401,11 +432,12 @@ func TestWatchRunMsgOpensLiveScreen(t *testing.T) {
 	}
 }
 
-func TestHomeAEmitsAgentSelectedMsg(t *testing.T) {
+func TestHomeMenuAgentEmitsAgentSelectedMsg(t *testing.T) {
 	m := newHomeModel([]contract.AppView{{Name: "portfolio"}})
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m.menuCursor = 4 // ◈ Agent runtime
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd == nil {
-		t.Fatal("'a' must emit a command")
+		t.Fatal("agent menu item must emit a command")
 	}
 	if _, ok := cmd().(agentSelectedMsg); !ok {
 		t.Fatalf("expected agentSelectedMsg, got %T", cmd())
@@ -416,10 +448,14 @@ func TestHomeOnboardEditAndDeleteMessages(t *testing.T) {
 	app := contract.AppView{Name: "portfolio", Repo: "org/portfolio", BaseUrl: "https://dev", VersionUrl: "", Services: []contract.AppService{}}
 	m := newHomeModel([]contract.AppView{app})
 
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	// Onboard is a menu item (index 1).
+	m.menuCursor = 1
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if _, ok := cmd().(onboardSelectedMsg); !ok {
 		t.Fatalf("expected onboardSelectedMsg, got %T", cmd())
 	}
+	// Edit/Delete are 'e'/'d' shortcuts inside the projects sub-view.
+	m.view = homeViewProjects
 	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	if msg, ok := cmd().(editAppMsg); !ok || msg.app.Name != "portfolio" {
 		t.Fatalf("expected editAppMsg, got %T %+v", cmd(), cmd())
