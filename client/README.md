@@ -35,8 +35,10 @@ orchestrator's published `contract/openapi.json` (no hand-written drift).
 - ✅ E4d: **chat** — read-only run Q&A (the qa-assistant) with Markdown answers
   rendered by **Glamour**; and **continue** (`c` on a finished run re-runs the
   failed cases as a new run). Opened from the live screen with `a` / `c`.
-- ⏳ OS token storage (go-keyring); parity screens (onboarding, history) before
-  the Phase F cutover that replaces the Ink TUI.
+- ✅ OS token storage (`internal/store`, go-keyring): a working token is saved to
+  the Keychain/Secret-Service/Credential-Manager on connect and prefilled next time.
+- ⏳ parity screens (onboarding, run history) before the Phase F cutover that
+  retires the Ink TUI.
 
 ## Run
 

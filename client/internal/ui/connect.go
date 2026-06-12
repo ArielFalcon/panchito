@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ArielFalcon/panchito/internal/api"
+	"github.com/ArielFalcon/panchito/internal/store"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -37,10 +38,23 @@ func newConnectModel() connectModel {
 	return connectModel{host: host, token: token}
 }
 
-func (m connectModel) Init() tea.Cmd { return textinput.Blink }
+func (m connectModel) Init() tea.Cmd {
+	// Prefill the token from the OS keyring for the default host (side effect in a
+	// Cmd, so constructing the model touches no OS services — tests stay hermetic).
+	return tea.Batch(textinput.Blink, loadTokenCmd(m.host.Value()))
+}
+
+func loadTokenCmd(host string) tea.Cmd {
+	return func() tea.Msg { return tokenLoadedMsg{token: store.LoadToken(host)} }
+}
 
 func (m connectModel) Update(msg tea.Msg) (connectModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tokenLoadedMsg:
+		if msg.token != "" && m.token.Value() == "" {
+			m.token.SetValue(msg.token)
+		}
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "tab", "shift+tab", "up", "down":
@@ -106,6 +120,7 @@ func connectCmd(host, token string) tea.Cmd {
 		if err != nil {
 			return errMsg{err}
 		}
+		store.SaveToken(host, token) // remember the working token for next time
 		return connectedMsg{client: c, apps: apps}
 	}
 }

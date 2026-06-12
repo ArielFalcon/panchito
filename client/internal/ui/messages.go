@@ -35,6 +35,9 @@ type backMsg struct{}
 // errMsg carries a command failure to the active screen for display.
 type errMsg struct{ err error }
 
+// tokenLoadedMsg carries the token loaded from the OS keyring for the default host.
+type tokenLoadedMsg struct{ token string }
+
 // ── Live stream messages (SSE goroutine → main loop, via a channel) ───────────
 
 // runEventMsg is one decoded RunEvent crossing from the stream goroutine to the
