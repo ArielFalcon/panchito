@@ -148,6 +148,11 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
           appendActivity(record.id, { kind: "todo", text: title, status: "in_progress" });
           deps.runEvents?.publish(record.id, { type: "test.started", name: title });
         },
+        // The independent reviewer's verdict → the live ReviewerCard (reasons are the
+        // actionable corrections on a rejection).
+        (approved, reasons) => {
+          deps.runEvents?.publish(record.id, { type: "reviewer.verdict", approved, reasons });
+        },
       );
       deps.runEvents?.publish(record.id, {
         type: "run.verdict",

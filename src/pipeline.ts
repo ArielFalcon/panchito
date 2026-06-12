@@ -340,6 +340,9 @@ export async function runPipeline(
   onSpecs?: (specs: Array<{ name: string; objective?: string; flow?: string }>) => void,
   signal?: AbortSignal,
   onRunningTest?: (title: string) => void,
+  // Advisory: the independent reviewer's verdict for the live ReviewerCard. Fired
+  // per review round; reasons are the actionable corrections on a rejection.
+  onReviewer?: (approved: boolean, reasons: string[]) => void,
 ): Promise<QaRunResult> {
   const checkSignal = () => {
     if (signal?.aborted) throw new Error("run cancelled by operator");
@@ -745,6 +748,7 @@ export async function runPipeline(
       // Reset counter on successful reviewer response
       consecutiveReviewerFailures = 0;
       log(`[qa] independent reviewer round ${round + 1}/${MAX_REVIEW_ROUNDS}: approved=${review.approved} corrections=${review.corrections.length}`);
+      onReviewer?.(review.approved, review.approved ? [] : review.corrections);
       if (!review.approved) reviewerCorrections.push(...review.corrections);
       if (review.approved) return { ...r, approved: true, note: undefined };
       if (round === MAX_REVIEW_ROUNDS - 1) return { ...r, approved: false, note: review.corrections.join("; ") };

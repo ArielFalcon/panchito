@@ -28,14 +28,16 @@ type Model struct {
 	screen        screen
 	client        *api.Client
 	serverVersion string // from the connect handshake; carried to re-rendered home screens
+	width         int
+	height        int
 	connect       connectModel
-	home     homeModel
-	launcher launcherModel
-	live     liveModel
-	chat     chatModel
-	history  historyModel
-	agent    agentModel
-	appAdmin appAdminModel
+	home          homeModel
+	launcher      launcherModel
+	live          liveModel
+	chat          chatModel
+	history       historyModel
+	agent         agentModel
+	appAdmin      appAdminModel
 }
 
 func New() Model {
@@ -58,6 +60,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 		}
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
 	case connectedMsg:
 		m.client = msg.client
 		m.serverVersion = msg.info.ServerVersion
@@ -74,7 +78,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case runCreatedMsg:
 		ch := make(chan events.RunEvent, 64)
 		ctx, cancel := context.WithCancel(context.Background())
-		m.live = newLiveModel(msg.id, m.launcher.app, ch, cancel)
+		m.live = newLiveModel(msg.id, m.launcher.app, ch, cancel, m.width, m.height)
 		m.screen = screenLive
 		return m, tea.Batch(startStreamCmd(ctx, m.client, msg.id, ch), waitForEventCmd(ch), m.live.spin.Tick)
 	case askMsg:
@@ -114,7 +118,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case watchRunMsg:
 		ch := make(chan events.RunEvent, 64)
 		ctx, cancel := context.WithCancel(context.Background())
-		m.live = newLiveModel(msg.id, msg.app, ch, cancel)
+		m.live = newLiveModel(msg.id, msg.app, ch, cancel, m.width, m.height)
 		m.screen = screenLive
 		return m, tea.Batch(startStreamCmd(ctx, m.client, msg.id, ch), waitForEventCmd(ch), m.live.spin.Tick)
 	}

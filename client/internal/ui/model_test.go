@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -80,7 +82,7 @@ func TestLauncherEscStepsBackThenLeaves(t *testing.T) {
 
 func TestLiveFoldsEventsIntoStructuredState(t *testing.T) {
 	ch := make(chan events.RunEvent, 8)
-	m := newLiveModel("run_1", "portfolio", ch, func() {})
+	m := newLiveModel("run_1", "portfolio", ch, func() {}, 0, 0)
 
 	m, _ = m.Update(runEventMsg(events.RunEvent{Type: "step.changed", Body: events.StepChanged{Step: "generate"}}))
 	if m.phase != "generate" {
@@ -112,14 +114,100 @@ func TestLiveFoldsEventsIntoStructuredState(t *testing.T) {
 	}
 	// View renders without panicking and shows the dedicated sections.
 	out := m.View()
-	if !strings.Contains(out, "login") || !strings.Contains(out, "tests") {
+	if !strings.Contains(out, "1 passed") || !strings.Contains(out, "tests") {
 		t.Fatalf("view missing test section:\n%s", out)
+	}
+}
+
+func TestLiveExecutionViewFocusesCurrentTestAndKeepsLargeSuitesCompact(t *testing.T) {
+	m := newLiveModel("run_1", "portfolio", make(chan events.RunEvent, 1), func() {}, 100, 30)
+
+	for i := 1; i <= 80; i++ {
+		name := fmt.Sprintf("case-%02d", i)
+		m, _ = m.Update(runEventMsg(events.RunEvent{
+			Type: "test.discovered",
+			Body: events.TestDiscovered{Name: name, File: fmt.Sprintf("e2e/case-%02d.spec.ts", i)},
+		}))
+	}
+	for i := 1; i <= 40; i++ {
+		name := fmt.Sprintf("case-%02d", i)
+		m, _ = m.Update(runEventMsg(events.RunEvent{
+			Type: "test.passed",
+			Body: events.TestPassed{Name: name, DurationMs: float64(100 + i)},
+		}))
+	}
+	m, _ = m.Update(runEventMsg(events.RunEvent{
+		Type: "test.started",
+		Body: events.TestStarted{Name: "case-41"},
+	}))
+
+	out := m.renderTests()
+	for _, want := range []string{"tests", "history", "40 passed", "now", "case-41", "e2e/case-41.spec.ts", "next", "case-42"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("renderTests() missing %q:\n%s", want, out)
+		}
+	}
+	for _, hidden := range []string{"case-01", "case-80", "e2e/case-80.spec.ts"} {
+		if strings.Contains(out, hidden) {
+			t.Fatalf("renderTests() should not list non-focused test %q:\n%s", hidden, out)
+		}
+	}
+	if lines := strings.Count(out, "\n"); lines > 8 {
+		t.Fatalf("renderTests() too tall for a large suite: %d lines\n%s", lines, out)
+	}
+}
+
+func TestLiveRendersDedicatedComponentsAndSummary(t *testing.T) {
+	m := newLiveModel("r", "portfolio", make(chan events.RunEvent, 1), func() {}, 0, 0)
+
+	for _, ev := range []events.RunEvent{
+		{Type: "spec.written", Body: events.SpecWritten{File: "flows/contact.spec.ts"}},
+		{Type: "agent.activity", Body: events.AgentActivity{Kind: "subagent", Target: "explore checkout", Status: "running"}},
+		{Type: "coverage.computed", Body: events.CoverageComputed{ChangedLines: 10, CoveredLines: 7}},
+		{Type: "reviewer.verdict", Body: events.ReviewerVerdict{Approved: false, Reasons: []string{"scope the selector to the header"}}},
+	} {
+		m, _ = m.Update(runEventMsg(ev))
+	}
+
+	live := m.View()
+	for _, want := range []string{"specs", "flows/contact.spec.ts", "written", "subagents", "explore checkout", "coverage", "70%", "reviewer: rejected", "scope the selector"} {
+		if !strings.Contains(live, want) {
+			t.Fatalf("live view missing %q:\n%s", want, live)
+		}
+	}
+
+	m, _ = m.Update(runEventMsg(events.RunEvent{Type: "run.verdict", Body: events.RunVerdict{Verdict: "fail", Passed: 2, Failed: 1}}))
+	summary := m.View()
+	for _, want := range []string{"FAIL", "2 passed", "1 failed", "reviewer: rejected", "flows/contact.spec.ts"} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary view missing %q:\n%s", want, summary)
+		}
+	}
+}
+
+func TestSendRunEventStopsAfterCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ch := make(chan events.RunEvent)
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- sendRunEvent(ctx, ch, events.RunEvent{Type: "step.changed"})
+	}()
+
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("sendRunEvent should report false after cancellation")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("sendRunEvent blocked after cancellation")
 	}
 }
 
 func TestLiveEscCancelsAndGoesBack(t *testing.T) {
 	cancelled := false
-	m := newLiveModel("r", "a", make(chan events.RunEvent, 1), func() { cancelled = true })
+	m := newLiveModel("r", "a", make(chan events.RunEvent, 1), func() { cancelled = true }, 0, 0)
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if !cancelled {
 		t.Fatal("esc must cancel the stream")
@@ -154,7 +242,7 @@ func TestQOnlyQuitsOnHome(t *testing.T) {
 }
 
 func TestLiveAskAndContinueGatedOnDone(t *testing.T) {
-	m := newLiveModel("r", "portfolio", make(chan events.RunEvent, 1), func() {})
+	m := newLiveModel("r", "portfolio", make(chan events.RunEvent, 1), func() {}, 0, 0)
 
 	// Before the run finishes, 'a' and 'c' are inert.
 	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}); cmd != nil {
