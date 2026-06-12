@@ -134,6 +134,45 @@ func (c *Client) ListApps(ctx context.Context) ([]contract.AppView, error) {
 	return out, err
 }
 
+func (c *Client) GetApp(ctx context.Context, name string) (contract.AppView, error) {
+	var out contract.AppView
+	err := c.do(ctx, http.MethodGet, "/api/v1/apps/"+url.PathEscape(name), nil, &out)
+	return out, err
+}
+
+func (c *Client) CreateApp(ctx context.Context, in contract.CreateAppInput) (contract.CreateAppResult, error) {
+	var out contract.CreateAppResult
+	err := c.do(ctx, http.MethodPost, "/api/v1/apps", in, &out)
+	return out, err
+}
+
+func (c *Client) UpdateApp(ctx context.Context, name string, in contract.UpdateAppInput) (contract.CreateAppResult, error) {
+	var out contract.CreateAppResult
+	err := c.do(ctx, http.MethodPut, "/api/v1/apps/"+url.PathEscape(name), in, &out)
+	return out, err
+}
+
+func (c *Client) DeleteApp(ctx context.Context, name string, purge bool) (contract.DeleteAppResult, error) {
+	path := "/api/v1/apps/" + url.PathEscape(name)
+	if purge {
+		path += "?purge=1"
+	}
+	var out contract.DeleteAppResult
+	err := c.do(ctx, http.MethodDelete, path, nil, &out)
+	return out, err
+}
+
+func (c *Client) ListRepos(ctx context.Context, owner string, page int) (contract.RepoListResponse, error) {
+	q := url.Values{}
+	q.Set("owner", owner)
+	if page > 0 {
+		q.Set("page", strconv.Itoa(page))
+	}
+	var out contract.RepoListResponse
+	err := c.do(ctx, http.MethodGet, "/api/v1/repos?"+q.Encode(), nil, &out)
+	return out, err
+}
+
 func (c *Client) Queue(ctx context.Context) (contract.QueueStatus, error) {
 	var out contract.QueueStatus
 	err := c.do(ctx, http.MethodGet, "/api/v1/queue", nil, &out)
@@ -159,5 +198,34 @@ func (c *Client) Cancel(ctx context.Context, id string) error {
 func (c *Client) Help(ctx context.Context, in contract.AskRequest) (contract.AskResponse, error) {
 	var out contract.AskResponse
 	err := c.do(ctx, http.MethodPost, "/api/v1/help", in, &out)
+	return out, err
+}
+
+// ── Agent runtime ─────────────────────────────────────────────────────────────
+
+func (c *Client) GetAgentConfig(ctx context.Context) (contract.PublicAgentConfig, error) {
+	var out contract.PublicAgentConfig
+	err := c.do(ctx, http.MethodGet, "/api/v1/agent/config", nil, &out)
+	return out, err
+}
+
+func (c *Client) UpdateAgentConfig(ctx context.Context, in contract.AgentConfigUpdate) (contract.AgentConfigApplyResult, error) {
+	var out contract.AgentConfigApplyResult
+	err := c.do(ctx, http.MethodPut, "/api/v1/agent/config", in, &out)
+	return out, err
+}
+
+func (c *Client) ListAgentModels(ctx context.Context, provider string) (contract.AgentModelsResponse, error) {
+	q := url.Values{}
+	q.Set("provider", provider)
+	var out contract.AgentModelsResponse
+	err := c.do(ctx, http.MethodGet, "/api/v1/agent/models?"+q.Encode(), nil, &out)
+	return out, err
+}
+
+func (c *Client) RestartAgentProvider(ctx context.Context, provider string) (contract.AgentRestartResponse, error) {
+	in := contract.AgentRestartRequest{Provider: contract.AgentRestartRequestProvider(provider)}
+	var out contract.AgentRestartResponse
+	err := c.do(ctx, http.MethodPost, "/api/v1/agent/restart", in, &out)
 	return out, err
 }

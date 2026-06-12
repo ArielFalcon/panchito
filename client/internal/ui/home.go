@@ -35,6 +35,25 @@ func (m homeModel) Update(msg tea.Msg) (homeModel, tea.Cmd) {
 				app := m.apps[m.cursor].Name
 				return m, func() tea.Msg { return appSelectedMsg{app: app} }
 			}
+		case "h":
+			if len(m.apps) > 0 {
+				app := m.apps[m.cursor].Name
+				return m, func() tea.Msg { return historySelectedMsg{app: app} }
+			}
+		case "a":
+			return m, func() tea.Msg { return agentSelectedMsg{} }
+		case "o":
+			return m, func() tea.Msg { return onboardSelectedMsg{} }
+		case "e":
+			if len(m.apps) > 0 {
+				app := m.apps[m.cursor]
+				return m, func() tea.Msg { return editAppMsg{app: app} }
+			}
+		case "d":
+			if len(m.apps) > 0 {
+				app := m.apps[m.cursor]
+				return m, func() tea.Msg { return deleteAppMsg{app: app} }
+			}
 		}
 	}
 	return m, nil
@@ -44,7 +63,7 @@ func (m homeModel) View() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("panchito") + "  " + hintStyle.Render(fmt.Sprintf("%d app(s)", len(m.apps))) + "\n\n")
 	if len(m.apps) == 0 {
-		b.WriteString(hintStyle.Render("no apps configured — onboard one with the orchestrator") + "\n")
+		b.WriteString(hintStyle.Render("no apps configured — press o to onboard one") + "\n")
 	}
 	for i, a := range m.apps {
 		marker := "  "
@@ -63,6 +82,6 @@ func (m homeModel) View() string {
 		}
 		b.WriteString(line + "\n")
 	}
-	b.WriteString("\n" + hintStyle.Render("↑↓ move · enter launch · q quit"))
+	b.WriteString("\n" + hintStyle.Render("↑↓ move · enter launch · h history · o onboard · e edit · d delete · a agent · q quit"))
 	return screenStyle.Render(b.String())
 }

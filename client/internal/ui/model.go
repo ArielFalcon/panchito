@@ -19,6 +19,9 @@ const (
 	screenLauncher
 	screenLive
 	screenChat
+	screenHistory
+	screenAgent
+	screenAppAdmin
 )
 
 type Model struct {
@@ -29,6 +32,9 @@ type Model struct {
 	launcher launcherModel
 	live     liveModel
 	chat     chatModel
+	history  historyModel
+	agent    agentModel
+	appAdmin appAdminModel
 }
 
 func New() Model {
@@ -47,7 +53,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		case "q":
-			if m.screen == screenHome {
+			if m.screen == screenHome || m.screen == screenHistory {
 				return m, tea.Quit
 			}
 		}
@@ -77,6 +83,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case backMsg:
 		m.screen = screenHome
 		return m, nil
+	case historySelectedMsg:
+		m.history = newHistoryModel(m.client, msg.app)
+		m.screen = screenHistory
+		return m, m.history.Init()
+	case agentSelectedMsg:
+		m.agent = newAgentModel(m.client)
+		m.screen = screenAgent
+		return m, m.agent.Init()
+	case onboardSelectedMsg:
+		m.appAdmin = newOnboardModel(m.client)
+		m.screen = screenAppAdmin
+		return m, m.appAdmin.Init()
+	case editAppMsg:
+		m.appAdmin = newEditAppModel(m.client, msg.app)
+		m.screen = screenAppAdmin
+		return m, m.appAdmin.Init()
+	case deleteAppMsg:
+		m.appAdmin = newDeleteAppModel(m.client, msg.app)
+		m.screen = screenAppAdmin
+		return m, m.appAdmin.Init()
+	case appsChangedMsg:
+		m.home = newHomeModel(msg.apps)
+		m.screen = screenHome
+		return m, nil
+	case watchRunMsg:
+		ch := make(chan events.RunEvent, 64)
+		ctx, cancel := context.WithCancel(context.Background())
+		m.live = newLiveModel(msg.id, msg.app, ch, cancel)
+		m.screen = screenLive
+		return m, tea.Batch(startStreamCmd(ctx, m.client, msg.id, ch), waitForEventCmd(ch), m.live.spin.Tick)
 	}
 
 	var cmd tea.Cmd
@@ -91,6 +127,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.live, cmd = m.live.Update(msg)
 	case screenChat:
 		m.chat, cmd = m.chat.Update(msg)
+	case screenHistory:
+		m.history, cmd = m.history.Update(msg)
+	case screenAgent:
+		m.agent, cmd = m.agent.Update(msg)
+	case screenAppAdmin:
+		m.appAdmin, cmd = m.appAdmin.Update(msg)
 	}
 	return m, cmd
 }
@@ -105,6 +147,12 @@ func (m Model) View() string {
 		return m.live.View()
 	case screenChat:
 		return m.chat.View()
+	case screenHistory:
+		return m.history.View()
+	case screenAgent:
+		return m.agent.View()
+	case screenAppAdmin:
+		return m.appAdmin.View()
 	default:
 		return m.connect.View()
 	}

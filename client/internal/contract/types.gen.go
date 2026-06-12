@@ -51,6 +51,180 @@ func (e AgentActivityStatus) Valid() bool {
 	}
 }
 
+// Defines values for AgentConfigApplyResultRestarted.
+const (
+	AgentConfigApplyResultRestartedCodex    AgentConfigApplyResultRestarted = "codex"
+	AgentConfigApplyResultRestartedOpencode AgentConfigApplyResultRestarted = "opencode"
+)
+
+// Valid indicates whether the value is a known member of the AgentConfigApplyResultRestarted enum.
+func (e AgentConfigApplyResultRestarted) Valid() bool {
+	switch e {
+	case AgentConfigApplyResultRestartedCodex:
+		return true
+	case AgentConfigApplyResultRestartedOpencode:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AgentConfigUpdateMode.
+const (
+	AgentConfigUpdateModeDual   AgentConfigUpdateMode = "dual"
+	AgentConfigUpdateModeSingle AgentConfigUpdateMode = "single"
+)
+
+// Valid indicates whether the value is a known member of the AgentConfigUpdateMode enum.
+func (e AgentConfigUpdateMode) Valid() bool {
+	switch e {
+	case AgentConfigUpdateModeDual:
+		return true
+	case AgentConfigUpdateModeSingle:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AgentConfigUpdateSingleProvider.
+const (
+	AgentConfigUpdateSingleProviderCodex    AgentConfigUpdateSingleProvider = "codex"
+	AgentConfigUpdateSingleProviderOpencode AgentConfigUpdateSingleProvider = "opencode"
+)
+
+// Valid indicates whether the value is a known member of the AgentConfigUpdateSingleProvider enum.
+func (e AgentConfigUpdateSingleProvider) Valid() bool {
+	switch e {
+	case AgentConfigUpdateSingleProviderCodex:
+		return true
+	case AgentConfigUpdateSingleProviderOpencode:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AgentModelInfoProvider.
+const (
+	AgentModelInfoProviderCodex    AgentModelInfoProvider = "codex"
+	AgentModelInfoProviderOpencode AgentModelInfoProvider = "opencode"
+)
+
+// Valid indicates whether the value is a known member of the AgentModelInfoProvider enum.
+func (e AgentModelInfoProvider) Valid() bool {
+	switch e {
+	case AgentModelInfoProviderCodex:
+		return true
+	case AgentModelInfoProviderOpencode:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AgentModelsResponseProvider.
+const (
+	AgentModelsResponseProviderCodex    AgentModelsResponseProvider = "codex"
+	AgentModelsResponseProviderOpencode AgentModelsResponseProvider = "opencode"
+)
+
+// Valid indicates whether the value is a known member of the AgentModelsResponseProvider enum.
+func (e AgentModelsResponseProvider) Valid() bool {
+	switch e {
+	case AgentModelsResponseProviderCodex:
+		return true
+	case AgentModelsResponseProviderOpencode:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AgentProviderHealthProvider.
+const (
+	AgentProviderHealthProviderCodex    AgentProviderHealthProvider = "codex"
+	AgentProviderHealthProviderOpencode AgentProviderHealthProvider = "opencode"
+)
+
+// Valid indicates whether the value is a known member of the AgentProviderHealthProvider enum.
+func (e AgentProviderHealthProvider) Valid() bool {
+	switch e {
+	case AgentProviderHealthProviderCodex:
+		return true
+	case AgentProviderHealthProviderOpencode:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AgentProviderHealthStatus.
+const (
+	Degraded    AgentProviderHealthStatus = "degraded"
+	Failed      AgentProviderHealthStatus = "failed"
+	Healthy     AgentProviderHealthStatus = "healthy"
+	NeedsConfig AgentProviderHealthStatus = "needs_config"
+	Starting    AgentProviderHealthStatus = "starting"
+	Stopped     AgentProviderHealthStatus = "stopped"
+)
+
+// Valid indicates whether the value is a known member of the AgentProviderHealthStatus enum.
+func (e AgentProviderHealthStatus) Valid() bool {
+	switch e {
+	case Degraded:
+		return true
+	case Failed:
+		return true
+	case Healthy:
+		return true
+	case NeedsConfig:
+		return true
+	case Starting:
+		return true
+	case Stopped:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AgentRestartRequestProvider.
+const (
+	AgentRestartRequestProviderCodex    AgentRestartRequestProvider = "codex"
+	AgentRestartRequestProviderOpencode AgentRestartRequestProvider = "opencode"
+)
+
+// Valid indicates whether the value is a known member of the AgentRestartRequestProvider enum.
+func (e AgentRestartRequestProvider) Valid() bool {
+	switch e {
+	case AgentRestartRequestProviderCodex:
+		return true
+	case AgentRestartRequestProviderOpencode:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for CreateAppInputTarget.
+const (
+	CreateAppInputTargetCode CreateAppInputTarget = "code"
+	CreateAppInputTargetE2e  CreateAppInputTarget = "e2e"
+)
+
+// Valid indicates whether the value is a known member of the CreateAppInputTarget enum.
+func (e CreateAppInputTarget) Valid() bool {
+	switch e {
+	case CreateAppInputTargetCode:
+		return true
+	case CreateAppInputTargetE2e:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for CreateRunInputMode.
 const (
 	CreateRunInputModeComplete   CreateRunInputMode = "complete"
@@ -141,6 +315,60 @@ func (e CreateRunResultTarget) Valid() bool {
 	}
 }
 
+// Defines values for PublicAgentConfigMode.
+const (
+	PublicAgentConfigModeDual   PublicAgentConfigMode = "dual"
+	PublicAgentConfigModeSingle PublicAgentConfigMode = "single"
+)
+
+// Valid indicates whether the value is a known member of the PublicAgentConfigMode enum.
+func (e PublicAgentConfigMode) Valid() bool {
+	switch e {
+	case PublicAgentConfigModeDual:
+		return true
+	case PublicAgentConfigModeSingle:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for PublicAgentConfigSingleProvider.
+const (
+	PublicAgentConfigSingleProviderCodex    PublicAgentConfigSingleProvider = "codex"
+	PublicAgentConfigSingleProviderOpencode PublicAgentConfigSingleProvider = "opencode"
+)
+
+// Valid indicates whether the value is a known member of the PublicAgentConfigSingleProvider enum.
+func (e PublicAgentConfigSingleProvider) Valid() bool {
+	switch e {
+	case PublicAgentConfigSingleProviderCodex:
+		return true
+	case PublicAgentConfigSingleProviderOpencode:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for PublicAgentConfigValidationDowngradeProvider.
+const (
+	PublicAgentConfigValidationDowngradeProviderCodex    PublicAgentConfigValidationDowngradeProvider = "codex"
+	PublicAgentConfigValidationDowngradeProviderOpencode PublicAgentConfigValidationDowngradeProvider = "opencode"
+)
+
+// Valid indicates whether the value is a known member of the PublicAgentConfigValidationDowngradeProvider enum.
+func (e PublicAgentConfigValidationDowngradeProvider) Valid() bool {
+	switch e {
+	case PublicAgentConfigValidationDowngradeProviderCodex:
+		return true
+	case PublicAgentConfigValidationDowngradeProviderOpencode:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for QaCaseStatus.
 const (
 	QaCaseStatusFail  QaCaseStatus = "fail"
@@ -156,6 +384,24 @@ func (e QaCaseStatus) Valid() bool {
 	case QaCaseStatusFlaky:
 		return true
 	case QaCaseStatusPass:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RoleAssignmentProvider.
+const (
+	RoleAssignmentProviderCodex    RoleAssignmentProvider = "codex"
+	RoleAssignmentProviderOpencode RoleAssignmentProvider = "opencode"
+)
+
+// Valid indicates whether the value is a known member of the RoleAssignmentProvider enum.
+func (e RoleAssignmentProvider) Valid() bool {
+	switch e {
+	case RoleAssignmentProviderCodex:
+		return true
+	case RoleAssignmentProviderOpencode:
 		return true
 	default:
 		return false
@@ -212,16 +458,16 @@ func (e RunRecordStatus) Valid() bool {
 
 // Defines values for RunRecordTarget.
 const (
-	Code RunRecordTarget = "code"
-	E2e  RunRecordTarget = "e2e"
+	RunRecordTargetCode RunRecordTarget = "code"
+	RunRecordTargetE2e  RunRecordTarget = "e2e"
 )
 
 // Valid indicates whether the value is a known member of the RunRecordTarget enum.
 func (e RunRecordTarget) Valid() bool {
 	switch e {
-	case Code:
+	case RunRecordTargetCode:
 		return true
-	case E2e:
+	case RunRecordTargetE2e:
 		return true
 	default:
 		return false
@@ -258,6 +504,42 @@ func (e RunRecordVerdict) Valid() bool {
 	}
 }
 
+// Defines values for UpdateAppInputTarget.
+const (
+	Code UpdateAppInputTarget = "code"
+	E2e  UpdateAppInputTarget = "e2e"
+)
+
+// Valid indicates whether the value is a known member of the UpdateAppInputTarget enum.
+func (e UpdateAppInputTarget) Valid() bool {
+	switch e {
+	case Code:
+		return true
+	case E2e:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ListAgentModelsParamsProvider.
+const (
+	ListAgentModelsParamsProviderCodex    ListAgentModelsParamsProvider = "codex"
+	ListAgentModelsParamsProviderOpencode ListAgentModelsParamsProvider = "opencode"
+)
+
+// Valid indicates whether the value is a known member of the ListAgentModelsParamsProvider enum.
+func (e ListAgentModelsParamsProvider) Valid() bool {
+	switch e {
+	case ListAgentModelsParamsProviderCodex:
+		return true
+	case ListAgentModelsParamsProviderOpencode:
+		return true
+	default:
+		return false
+	}
+}
+
 // AgentActivity defines model for AgentActivity.
 type AgentActivity struct {
 	Kind   AgentActivityKind    `json:"kind"`
@@ -271,6 +553,84 @@ type AgentActivityKind string
 
 // AgentActivityStatus defines model for AgentActivity.Status.
 type AgentActivityStatus string
+
+// AgentConfigApplyResult defines model for AgentConfigApplyResult.
+type AgentConfigApplyResult struct {
+	Config     PublicAgentConfig                 `json:"config"`
+	Downgraded *bool                             `json:"downgraded,omitempty"`
+	Restarted  []AgentConfigApplyResultRestarted `json:"restarted"`
+}
+
+// AgentConfigApplyResultRestarted defines model for AgentConfigApplyResult.Restarted.
+type AgentConfigApplyResultRestarted string
+
+// AgentConfigUpdate defines model for AgentConfigUpdate.
+type AgentConfigUpdate struct {
+	ApiKeys *struct {
+		Codex    *string `json:"codex,omitempty"`
+		Opencode *string `json:"opencode,omitempty"`
+	} `json:"apiKeys,omitempty"`
+	Assignments *struct {
+		Chat     *RoleAssignment `json:"chat,omitempty"`
+		Primary  *RoleAssignment `json:"primary,omitempty"`
+		Reviewer *RoleAssignment `json:"reviewer,omitempty"`
+	} `json:"assignments,omitempty"`
+	ConfirmSingleDowngrade *bool                            `json:"confirmSingleDowngrade,omitempty"`
+	Mode                   *AgentConfigUpdateMode           `json:"mode,omitempty"`
+	SingleProvider         *AgentConfigUpdateSingleProvider `json:"singleProvider,omitempty"`
+}
+
+// AgentConfigUpdateMode defines model for AgentConfigUpdate.Mode.
+type AgentConfigUpdateMode string
+
+// AgentConfigUpdateSingleProvider defines model for AgentConfigUpdate.SingleProvider.
+type AgentConfigUpdateSingleProvider string
+
+// AgentModelInfo defines model for AgentModelInfo.
+type AgentModelInfo struct {
+	Id       string                  `json:"id"`
+	Label    *string                 `json:"label,omitempty"`
+	Provider *AgentModelInfoProvider `json:"provider,omitempty"`
+}
+
+// AgentModelInfoProvider defines model for AgentModelInfo.Provider.
+type AgentModelInfoProvider string
+
+// AgentModelsResponse defines model for AgentModelsResponse.
+type AgentModelsResponse struct {
+	Models   []AgentModelInfo            `json:"models"`
+	Provider AgentModelsResponseProvider `json:"provider"`
+}
+
+// AgentModelsResponseProvider defines model for AgentModelsResponse.Provider.
+type AgentModelsResponseProvider string
+
+// AgentProviderHealth defines model for AgentProviderHealth.
+type AgentProviderHealth struct {
+	Configured bool                        `json:"configured"`
+	Error      *string                     `json:"error,omitempty"`
+	Provider   AgentProviderHealthProvider `json:"provider"`
+	Status     AgentProviderHealthStatus   `json:"status"`
+}
+
+// AgentProviderHealthProvider defines model for AgentProviderHealth.Provider.
+type AgentProviderHealthProvider string
+
+// AgentProviderHealthStatus defines model for AgentProviderHealth.Status.
+type AgentProviderHealthStatus string
+
+// AgentRestartRequest defines model for AgentRestartRequest.
+type AgentRestartRequest struct {
+	Provider AgentRestartRequestProvider `json:"provider"`
+}
+
+// AgentRestartRequestProvider defines model for AgentRestartRequest.Provider.
+type AgentRestartRequestProvider string
+
+// AgentRestartResponse defines model for AgentRestartResponse.
+type AgentRestartResponse struct {
+	Health AgentProviderHealth `json:"health"`
+}
 
 // AppService defines model for AppService.
 type AppService struct {
@@ -321,6 +681,37 @@ type ContinueResult struct {
 	ParentRunId string `json:"parentRunId"`
 }
 
+// CreateAppInput defines model for CreateAppInput.
+type CreateAppInput struct {
+	BaseUrl        *string                `json:"baseUrl,omitempty"`
+	DryRun         *bool                  `json:"dryRun,omitempty"`
+	Env            *map[string]string     `json:"env,omitempty"`
+	Name           *string                `json:"name,omitempty"`
+	NeedsReview    *bool                  `json:"needsReview,omitempty"`
+	Repo           string                 `json:"repo"`
+	Services       *[]OnboardServiceInput `json:"services,omitempty"`
+	Shadow         *bool                  `json:"shadow,omitempty"`
+	Target         *CreateAppInputTarget  `json:"target,omitempty"`
+	TestDataPrefix *string                `json:"testDataPrefix,omitempty"`
+	ValidateOnly   *bool                  `json:"validateOnly,omitempty"`
+	VersionUrl     *string                `json:"versionUrl,omitempty"`
+}
+
+// CreateAppInputTarget defines model for CreateAppInput.Target.
+type CreateAppInputTarget string
+
+// CreateAppResult defines model for CreateAppResult.
+type CreateAppResult struct {
+	EnvApplied *[]string `json:"envApplied,omitempty"`
+	Errors     *[]string `json:"errors,omitempty"`
+	Name       *string   `json:"name,omitempty"`
+	Ok         bool      `json:"ok"`
+	Path       *string   `json:"path,omitempty"`
+	RepoInfo   *RepoInfo `json:"repoInfo,omitempty"`
+	Warnings   *[]string `json:"warnings,omitempty"`
+	Yaml       *string   `json:"yaml,omitempty"`
+}
+
 // CreateRunInput defines model for CreateRunInput.
 type CreateRunInput struct {
 	App      string               `json:"app"`
@@ -354,6 +745,52 @@ type CreateRunResultMode string
 // CreateRunResultTarget defines model for CreateRunResult.Target.
 type CreateRunResultTarget string
 
+// DeleteAppResult defines model for DeleteAppResult.
+type DeleteAppResult struct {
+	Removed []string `json:"removed"`
+}
+
+// OnboardServiceInput defines model for OnboardServiceInput.
+type OnboardServiceInput struct {
+	Openapi    *string `json:"openapi,omitempty"`
+	Repo       string  `json:"repo"`
+	VersionUrl *string `json:"versionUrl,omitempty"`
+}
+
+// PublicAgentConfig defines model for PublicAgentConfig.
+type PublicAgentConfig struct {
+	Assignments struct {
+		Chat     RoleAssignment `json:"chat"`
+		Primary  RoleAssignment `json:"primary"`
+		Reviewer RoleAssignment `json:"reviewer"`
+	} `json:"assignments"`
+	Health *struct {
+		Codex    *AgentProviderHealth `json:"codex,omitempty"`
+		Opencode *AgentProviderHealth `json:"opencode,omitempty"`
+	} `json:"health,omitempty"`
+	Keys struct {
+		Codex    bool `json:"codex"`
+		Opencode bool `json:"opencode"`
+	} `json:"keys"`
+	Mode           PublicAgentConfigMode           `json:"mode"`
+	SingleProvider PublicAgentConfigSingleProvider `json:"singleProvider"`
+	Validation     struct {
+		DowngradeProvider                   *PublicAgentConfigValidationDowngradeProvider `json:"downgradeProvider,omitempty"`
+		Errors                              []string                                      `json:"errors"`
+		Ok                                  bool                                          `json:"ok"`
+		RequiresSingleDowngradeConfirmation *bool                                         `json:"requiresSingleDowngradeConfirmation,omitempty"`
+	} `json:"validation"`
+}
+
+// PublicAgentConfigMode defines model for PublicAgentConfig.Mode.
+type PublicAgentConfigMode string
+
+// PublicAgentConfigSingleProvider defines model for PublicAgentConfig.SingleProvider.
+type PublicAgentConfigSingleProvider string
+
+// PublicAgentConfigValidationDowngradeProvider defines model for PublicAgentConfig.Validation.DowngradeProvider.
+type PublicAgentConfigValidationDowngradeProvider string
+
 // QaCase defines model for QaCase.
 type QaCase struct {
 	Detail     *string      `json:"detail,omitempty"`
@@ -376,6 +813,37 @@ type QueueStatus struct {
 		Id  string `json:"id"`
 	} `json:"running"`
 }
+
+// RepoInfo defines model for RepoInfo.
+type RepoInfo struct {
+	DefaultBranch string  `json:"defaultBranch"`
+	Description   *string `json:"description"`
+	FullName      string  `json:"fullName"`
+	Name          string  `json:"name"`
+	Private       bool    `json:"private"`
+}
+
+// RepoListItem defines model for RepoListItem.
+type RepoListItem struct {
+	Description *string `json:"description"`
+	FullName    string  `json:"fullName"`
+	Private     bool    `json:"private"`
+}
+
+// RepoListResponse defines model for RepoListResponse.
+type RepoListResponse struct {
+	HasMore bool           `json:"hasMore"`
+	Repos   []RepoListItem `json:"repos"`
+}
+
+// RoleAssignment defines model for RoleAssignment.
+type RoleAssignment struct {
+	Model    string                 `json:"model"`
+	Provider RoleAssignmentProvider `json:"provider"`
+}
+
+// RoleAssignmentProvider defines model for RoleAssignment.Provider.
+type RoleAssignmentProvider string
 
 // RunRecord defines model for RunRecord.
 type RunRecord struct {
@@ -422,6 +890,42 @@ type SpecRecord struct {
 	Objective *string `json:"objective,omitempty"`
 }
 
+// UpdateAppInput defines model for UpdateAppInput.
+type UpdateAppInput struct {
+	BaseUrl        *string                `json:"baseUrl,omitempty"`
+	DryRun         *bool                  `json:"dryRun,omitempty"`
+	Env            *map[string]string     `json:"env,omitempty"`
+	NeedsReview    *bool                  `json:"needsReview,omitempty"`
+	Repo           *string                `json:"repo,omitempty"`
+	Services       *[]OnboardServiceInput `json:"services,omitempty"`
+	Shadow         *bool                  `json:"shadow,omitempty"`
+	Target         *UpdateAppInputTarget  `json:"target,omitempty"`
+	TestDataPrefix *string                `json:"testDataPrefix,omitempty"`
+	VersionUrl     *string                `json:"versionUrl,omitempty"`
+}
+
+// UpdateAppInputTarget defines model for UpdateAppInput.Target.
+type UpdateAppInputTarget string
+
+// ListAgentModelsParams defines parameters for ListAgentModels.
+type ListAgentModelsParams struct {
+	Provider ListAgentModelsParamsProvider `form:"provider" json:"provider"`
+}
+
+// ListAgentModelsParamsProvider defines parameters for ListAgentModels.
+type ListAgentModelsParamsProvider string
+
+// DeleteAppParams defines parameters for DeleteApp.
+type DeleteAppParams struct {
+	Purge *bool `form:"purge,omitempty" json:"purge,omitempty"`
+}
+
+// ListReposParams defines parameters for ListRepos.
+type ListReposParams struct {
+	Owner string `form:"owner" json:"owner"`
+	Page  *int   `form:"page,omitempty" json:"page,omitempty"`
+}
+
 // ListRunsParams defines parameters for ListRuns.
 type ListRunsParams struct {
 	App   string `form:"app" json:"app"`
@@ -432,6 +936,18 @@ type ListRunsParams struct {
 type StreamRunEventsParams struct {
 	LastEventID *string `json:"Last-Event-ID,omitempty"`
 }
+
+// UpdateAgentConfigJSONRequestBody defines body for UpdateAgentConfig for application/json ContentType.
+type UpdateAgentConfigJSONRequestBody = AgentConfigUpdate
+
+// RestartAgentProviderJSONRequestBody defines body for RestartAgentProvider for application/json ContentType.
+type RestartAgentProviderJSONRequestBody = AgentRestartRequest
+
+// CreateAppJSONRequestBody defines body for CreateApp for application/json ContentType.
+type CreateAppJSONRequestBody = CreateAppInput
+
+// UpdateAppJSONRequestBody defines body for UpdateApp for application/json ContentType.
+type UpdateAppJSONRequestBody = UpdateAppInput
 
 // HelpJSONRequestBody defines body for Help for application/json ContentType.
 type HelpJSONRequestBody = AskRequest
