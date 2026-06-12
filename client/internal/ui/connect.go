@@ -2,6 +2,8 @@ package ui
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -105,8 +107,10 @@ func (m connectModel) View() string {
 	return screenStyle.Render(b.String())
 }
 
-// connectCmd probes the server with ListApps (which also exercises auth) under a
-// short deadline, returning connectedMsg on success or errMsg on failure.
+// connectCmd negotiates the version/capability handshake first (so a stale binary
+// is told to update before anything else), then probes the server with ListApps
+// (which also exercises auth) under a short deadline — returning connectedMsg on
+// success or errMsg on failure.
 func connectCmd(host, token string) tea.Cmd {
 	return func() tea.Msg {
 		base := host
@@ -116,11 +120,30 @@ func connectCmd(host, token string) tea.Cmd {
 		c := api.New(base, token)
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
+
+		info, err := c.Handshake(ctx)
+		if err != nil {
+			return errMsg{err}
+		}
+		if !info.Compatible {
+			msg := ""
+			if info.Message != nil {
+				msg = *info.Message
+			}
+			if msg == "" {
+				msg = fmt.Sprintf("update panchito: server %s requires client >= %s", info.ServerVersion, info.MinClientVersion)
+			}
+			return errMsg{errors.New(msg)}
+		}
+		if info.ApiVersion != "" && info.ApiVersion != "v1" {
+			return errMsg{fmt.Errorf("update panchito: server speaks API %s, this client speaks v1", info.ApiVersion)}
+		}
+
 		apps, err := c.ListApps(ctx)
 		if err != nil {
 			return errMsg{err}
 		}
 		store.SaveToken(host, token) // remember the working token for next time
-		return connectedMsg{client: c, apps: apps}
+		return connectedMsg{client: c, apps: apps, info: info}
 	}
 }

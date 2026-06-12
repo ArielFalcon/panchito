@@ -38,8 +38,10 @@ import {
   RepoListResponseSchema,
   RunRecordSchema,
   UpdateAppInputSchema,
+  VersionInfoSchema,
 } from "../contract/commands";
 import { RunEventSchema } from "../contract/events";
+import { handshake } from "./version";
 import type { RunEventStore } from "./run-events";
 
 const TARGETS: TestTarget[] = ["e2e", "code"];
@@ -166,6 +168,11 @@ export async function handleApi(
 
   if (req.method === "GET" && path === "/api/health") {
     json(res, 200, { ok: true, openSessions: getOpenSessionCount() });
+    return true;
+  }
+
+  if (req.method === "GET" && path === "/api/version") {
+    contractJson(res, 200, VersionInfoSchema, handshake(url.searchParams.get("client") ?? undefined));
     return true;
   }
 

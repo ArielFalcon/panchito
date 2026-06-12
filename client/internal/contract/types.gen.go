@@ -907,6 +907,16 @@ type UpdateAppInput struct {
 // UpdateAppInputTarget defines model for UpdateAppInput.Target.
 type UpdateAppInputTarget string
 
+// VersionInfo defines model for VersionInfo.
+type VersionInfo struct {
+	ApiVersion       string   `json:"apiVersion"`
+	Capabilities     []string `json:"capabilities"`
+	Compatible       bool     `json:"compatible"`
+	Message          *string  `json:"message,omitempty"`
+	MinClientVersion string   `json:"minClientVersion"`
+	ServerVersion    string   `json:"serverVersion"`
+}
+
 // ListAgentModelsParams defines parameters for ListAgentModels.
 type ListAgentModelsParams struct {
 	Provider ListAgentModelsParamsProvider `form:"provider" json:"provider"`
@@ -935,6 +945,11 @@ type ListRunsParams struct {
 // StreamRunEventsParams defines parameters for StreamRunEvents.
 type StreamRunEventsParams struct {
 	LastEventID *string `json:"Last-Event-ID,omitempty"`
+}
+
+// HandshakeParams defines parameters for Handshake.
+type HandshakeParams struct {
+	Client *string `form:"client,omitempty" json:"client,omitempty"`
 }
 
 // UpdateAgentConfigJSONRequestBody defines body for UpdateAgentConfig for application/json ContentType.

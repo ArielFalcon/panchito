@@ -6,6 +6,33 @@
     "description": "The Channel Gateway contract: queued commands + the RunEvent SSE stream. Source of truth: src/contract/*.ts (zod). GENERATED — do not edit by hand; run `npm run contract:gen`."
   },
   "paths": {
+    "/api/v1/version": {
+      "get": {
+        "operationId": "handshake",
+        "summary": "Version + capability handshake (unauthenticated); ?client lets the server judge compatibility",
+        "parameters": [
+          {
+            "name": "client",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "server version, supported client floor and capabilities",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionInfo"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/runs": {
       "post": {
         "operationId": "createRun",
@@ -1357,6 +1384,40 @@
         "required": [
           "role",
           "text"
+        ],
+        "additionalProperties": false
+      },
+      "VersionInfo": {
+        "type": "object",
+        "properties": {
+          "serverVersion": {
+            "type": "string"
+          },
+          "apiVersion": {
+            "type": "string"
+          },
+          "minClientVersion": {
+            "type": "string"
+          },
+          "compatible": {
+            "type": "boolean"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "serverVersion",
+          "apiVersion",
+          "minClientVersion",
+          "compatible",
+          "capabilities"
         ],
         "additionalProperties": false
       },

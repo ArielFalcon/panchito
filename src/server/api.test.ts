@@ -89,6 +89,24 @@ const parentRec: RunRecord = {
   at: "t",
 };
 
+test("GET /api/v1/version returns the handshake and judges client compatibility", async () => {
+  const ok = await handleApi(mkReq("GET", "/api/v1/version?client=0.0.1"), mkRes(), deps());
+  assert.equal(ok, true);
+
+  const res = mkRes();
+  await handleApi(mkReq("GET", "/api/v1/version?client=0.1.0"), res, deps());
+  assert.equal(res.status, 200);
+  const info = JSON.parse(res.body);
+  assert.equal(info.serverVersion, "0.1.0");
+  assert.equal(info.apiVersion, "v1");
+  assert.equal(info.compatible, true);
+  assert.ok(Array.isArray(info.capabilities) && info.capabilities.includes("agent-runtime"));
+
+  const old = mkRes();
+  await handleApi(mkReq("GET", "/api/v1/version?client=0.0.1"), old, deps());
+  assert.equal(JSON.parse(old.body).compatible, false);
+});
+
 test("GET /api/runs/:id sanitizes logs/cases/note before egress", async () => {
   const leaky: RunRecord = {
     id: "r1", app: "demo", sha: "abc", target: "e2e", mode: "diff", status: "done", verdict: "fail",

@@ -23,6 +23,10 @@ type Client struct {
 	http    *http.Client
 }
 
+// ClientVersion is the wire version this binary reports to the server's handshake.
+// Release builds inject it via -ldflags "-X .../internal/api.ClientVersion=v1.2.3".
+var ClientVersion = "0.1.0"
+
 // New builds a client for baseURL (e.g. "http://localhost:8080"). The http.Client
 // has no global timeout on purpose — the SSE stream is long-lived; per-request
 // deadlines come from the ctx the caller passes.
@@ -104,6 +108,17 @@ func errorMessage(data []byte) string {
 }
 
 // ── Command verbs ─────────────────────────────────────────────────────────────
+
+// Handshake is the unauthenticated version/capability negotiation — the first
+// call the connect screen makes. It reports this binary's version so the server
+// (the compatibility authority) can flag an out-of-date client.
+func (c *Client) Handshake(ctx context.Context) (contract.VersionInfo, error) {
+	q := url.Values{}
+	q.Set("client", ClientVersion)
+	var out contract.VersionInfo
+	err := c.do(ctx, http.MethodGet, "/api/v1/version?"+q.Encode(), nil, &out)
+	return out, err
+}
 
 func (c *Client) CreateRun(ctx context.Context, in contract.CreateRunInput) (contract.CreateRunResult, error) {
 	var out contract.CreateRunResult

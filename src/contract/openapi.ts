@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { RunEventSchema, RunEventBodySchema } from "./events";
 import {
   RunRecordSchema, QaCaseSchema, SpecRecordSchema, AgentActivitySchema,
-  AppViewSchema, AppServiceViewSchema, QueueStatusSchema, ChatEntrySchema,
+  AppViewSchema, AppServiceViewSchema, QueueStatusSchema, ChatEntrySchema, VersionInfoSchema,
   CreateRunInputSchema, CreateRunResultSchema, AskRequestSchema, AskResponseSchema,
   ContinueRequestSchema, ContinueResultSchema,
   CreateAppInputSchema, UpdateAppInputSchema, CreateAppResultSchema,
@@ -38,6 +38,7 @@ const NAMED_SCHEMAS = {
   AppService: AppServiceViewSchema,
   QueueStatus: QueueStatusSchema,
   ChatEntry: ChatEntrySchema,
+  VersionInfo: VersionInfoSchema,
   CreateRunInput: CreateRunInputSchema,
   CreateRunResult: CreateRunResultSchema,
   AskRequest: AskRequestSchema,
@@ -88,6 +89,14 @@ const nameParam = { name: "name", in: "path", required: true, schema: { type: "s
 
 function paths(): Record<string, unknown> {
   return {
+    "/api/v1/version": {
+      get: {
+        operationId: "handshake",
+        summary: "Version + capability handshake (unauthenticated); ?client lets the server judge compatibility",
+        parameters: [{ name: "client", in: "query", schema: { type: "string" } }],
+        responses: { "200": { description: "server version, supported client floor and capabilities", content: jsonBody("VersionInfo") } },
+      },
+    },
     "/api/v1/runs": {
       post: {
         operationId: "createRun", summary: "Enqueue a run",

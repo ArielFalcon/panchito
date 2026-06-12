@@ -92,6 +92,19 @@ export const QueueStatusSchema = z.object({
 
 export const ChatEntrySchema = z.object({ role: z.string(), text: z.string() });
 
+// Version/capability handshake (Phase D). A Homebrew binary lags the server in
+// time, so the server is the single authority on compatibility: it returns its
+// version + the oldest client it supports + what it can do, and decides
+// `compatible` from the client version the connect screen sends.
+export const VersionInfoSchema = z.object({
+  serverVersion: z.string(),
+  apiVersion: z.string(),
+  minClientVersion: z.string(),
+  compatible: z.boolean(),
+  capabilities: z.array(z.string()),
+  message: z.string().optional(),
+});
+
 // ── Command DTOs (request → response) ─────────────────────────────────────────
 export const CreateRunInputSchema = z.object({
   app: z.string(),
@@ -293,6 +306,7 @@ export type RunRecord = z.infer<typeof RunRecordSchema>;
 export type AppView = z.infer<typeof AppViewSchema>;
 export type QueueStatus = z.infer<typeof QueueStatusSchema>;
 export type ChatEntry = z.infer<typeof ChatEntrySchema>;
+export type VersionInfo = z.infer<typeof VersionInfoSchema>;
 export type CreateRunInput = z.infer<typeof CreateRunInputSchema>;
 export type CreateRunResult = z.infer<typeof CreateRunResultSchema>;
 export type AskRequest = z.infer<typeof AskRequestSchema>;

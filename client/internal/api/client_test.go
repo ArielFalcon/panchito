@@ -35,6 +35,31 @@ func TestCreateRunSendsAuthAndDecodes(t *testing.T) {
 	}
 }
 
+func TestHandshakeSendsClientVersionAndDecodes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/version" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.URL.Query().Get("client"); got != ClientVersion {
+			t.Errorf("client version param = %q, want %q", got, ClientVersion)
+		}
+		_, _ = w.Write([]byte(`{"serverVersion":"0.1.0","apiVersion":"v1","minClientVersion":"0.1.0","compatible":true,"capabilities":["runs","agent-runtime"]}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "")
+	info, err := c.Handshake(context.Background())
+	if err != nil {
+		t.Fatalf("Handshake: %v", err)
+	}
+	if info.ServerVersion != "0.1.0" || info.ApiVersion != "v1" || !info.Compatible {
+		t.Fatalf("decoded handshake: %+v", info)
+	}
+	if len(info.Capabilities) != 2 || info.Capabilities[0] != "runs" {
+		t.Fatalf("capabilities: %+v", info.Capabilities)
+	}
+}
+
 func TestNon2xxBecomesAPIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

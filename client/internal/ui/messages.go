@@ -8,10 +8,12 @@ import (
 
 // ── Navigation / lifecycle messages (sub-model → root) ────────────────────────
 
-// connectedMsg: the connect screen reached the control plane.
+// connectedMsg: the connect screen reached the control plane (after a successful
+// version/capability handshake).
 type connectedMsg struct {
 	client *api.Client
 	apps   []contract.AppView
+	info   contract.VersionInfo
 }
 
 // appSelectedMsg: the user picked an app on home → open the launcher.

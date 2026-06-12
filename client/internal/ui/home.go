@@ -11,8 +11,9 @@ import (
 
 // homeModel lists the configured apps; Enter opens the launcher for one.
 type homeModel struct {
-	apps   []contract.AppView
-	cursor int
+	apps          []contract.AppView
+	cursor        int
+	serverVersion string // from the connect handshake; shown in the header when known
 }
 
 func newHomeModel(apps []contract.AppView) homeModel {
@@ -61,7 +62,11 @@ func (m homeModel) Update(msg tea.Msg) (homeModel, tea.Cmd) {
 
 func (m homeModel) View() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("panchito") + "  " + hintStyle.Render(fmt.Sprintf("%d app(s)", len(m.apps))) + "\n\n")
+	header := titleStyle.Render("panchito") + "  " + hintStyle.Render(fmt.Sprintf("%d app(s)", len(m.apps)))
+	if m.serverVersion != "" {
+		header += "  " + hintStyle.Render("· server "+m.serverVersion)
+	}
+	b.WriteString(header + "\n\n")
 	if len(m.apps) == 0 {
 		b.WriteString(hintStyle.Render("no apps configured — press o to onboard one") + "\n")
 	}

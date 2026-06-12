@@ -901,10 +901,13 @@ const server = createServer(async (req, res) => {
   }
 
   if (path.startsWith("/api")) {
-    // The liveness probe is unauthenticated (it exposes only a session count), so
-    // the internal poller and external health checks work without the API token.
-    const isHealthProbe = req.method === "GET" && path === "/api/health";
-    if (!isHealthProbe && !authorized(req)) {
+    // The liveness probe (session count only) and the version/capability handshake
+    // are unauthenticated: the internal poller and external checks need the former,
+    // and the connect screen needs the latter BEFORE auth so a stale binary can be
+    // told to update even with a wrong token. Neither exposes secrets.
+    const apiPath = path.replace(/^\/api\/v1(?=\/|$)/, "/api");
+    const isPublic = req.method === "GET" && (apiPath === "/api/health" || apiPath === "/api/version");
+    if (!isPublic && !authorized(req)) {
       res.writeHead(401, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "unauthorized" }));
       return;

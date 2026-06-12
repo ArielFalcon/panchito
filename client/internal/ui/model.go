@@ -25,9 +25,10 @@ const (
 )
 
 type Model struct {
-	screen   screen
-	client   *api.Client
-	connect  connectModel
+	screen        screen
+	client        *api.Client
+	serverVersion string // from the connect handshake; carried to re-rendered home screens
+	connect       connectModel
 	home     homeModel
 	launcher launcherModel
 	live     liveModel
@@ -59,7 +60,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case connectedMsg:
 		m.client = msg.client
+		m.serverVersion = msg.info.ServerVersion
 		m.home = newHomeModel(msg.apps)
+		m.home.serverVersion = m.serverVersion
 		m.screen = screenHome
 		return m, nil
 	case appSelectedMsg:
@@ -105,6 +108,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.appAdmin.Init()
 	case appsChangedMsg:
 		m.home = newHomeModel(msg.apps)
+		m.home.serverVersion = m.serverVersion
 		m.screen = screenHome
 		return m, nil
 	case watchRunMsg:
