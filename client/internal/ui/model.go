@@ -83,6 +83,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		ch := make(chan events.RunEvent, 64)
 		ctx, cancel := context.WithCancel(context.Background())
 		m.live = newLiveModel(msg.id, m.launcher.app, ch, cancel, m.width, m.height)
+		m.live.client = m.client // enables the embedded assistant
 		m.screen = screenLive
 		return m, tea.Batch(startStreamCmd(ctx, m.client, msg.id, ch), waitForEventCmd(ch), m.live.spin.Tick)
 	case askMsg:
@@ -132,6 +133,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		ch := make(chan events.RunEvent, 64)
 		ctx, cancel := context.WithCancel(context.Background())
 		m.live = newLiveModel(msg.id, msg.app, ch, cancel, m.width, m.height)
+		m.live.client = m.client // enables the embedded assistant
 		m.screen = screenLive
 		return m, tea.Batch(startStreamCmd(ctx, m.client, msg.id, ch), waitForEventCmd(ch), m.live.spin.Tick)
 	}

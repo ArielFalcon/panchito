@@ -284,23 +284,32 @@ func TestQOnlyQuitsOnHome(t *testing.T) {
 	}
 }
 
-func TestLiveAskAndContinueGatedOnDone(t *testing.T) {
+func TestLiveEmbeddedChatAndContinue(t *testing.T) {
 	m := newLiveModel("r", "portfolio", make(chan events.RunEvent, 1), func() {}, 0, 0)
 
-	// Before the run finishes, 'a' and 'c' are inert.
+	// Without a client, 'a' is inert.
 	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}); cmd != nil {
-		t.Fatal("'a' before done must do nothing")
+		t.Fatal("'a' without a client must do nothing")
 	}
 
+	// With a client, 'a' opens the inline assistant (works mid-run, not only when done).
+	m.client = api.New("http://x", "")
+	var cmd tea.Cmd
+	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if !m.chatActive || cmd == nil {
+		t.Fatalf("'a' with a client must open the chat; active=%v cmd=%v", m.chatActive, cmd)
+	}
+	// Keystrokes route to the input; esc closes the chat without leaving the screen.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hi")})
+	if m.chatInput.Value() != "hi" {
+		t.Fatalf("chat input = %q, want hi", m.chatInput.Value())
+	}
+	if m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc}); m.chatActive {
+		t.Fatal("esc must close the chat")
+	}
+
+	// 'c' on a finished run with failures continues them.
 	m.done = true
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
-	if cmd == nil {
-		t.Fatal("'a' when done must emit a command")
-	}
-	if _, ok := cmd().(askMsg); !ok {
-		t.Fatalf("want askMsg, got %T", cmd())
-	}
-
 	m.tests = []testItem{{name: "checkout", status: "fail"}, {name: "nav", status: "pass"}}
 	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
 	cm, ok := cmd().(continueMsg)

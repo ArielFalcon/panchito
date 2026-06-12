@@ -12,7 +12,9 @@ import (
 
 	"github.com/ArielFalcon/panchito/internal/api"
 	"github.com/ArielFalcon/panchito/internal/events"
+	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -79,20 +81,33 @@ type liveModel struct {
 	sumFocus   int    // focused summary section (done view)
 	sumOpen    string // currently expanded summary section id
 	exported   string // path of the exported JSON, once 'e' is pressed
-	spin       spinner.Model
-	vp         viewport.Model
-	ready      bool // a terminal size is known → the viewport is active
-	width      int
-	height     int
-	ch         chan events.RunEvent
-	cancel     context.CancelFunc
+	// Embedded assistant: ask about the run without leaving the live screen.
+	client      *api.Client
+	chatActive  bool
+	chatInput   textinput.Model
+	chatEntries []chatEntry
+	chatLoading bool
+	spin        spinner.Model
+	bar         progress.Model
+	vp          viewport.Model
+	ready       bool // a terminal size is known → the viewport is active
+	width       int
+	height      int
+	ch          chan events.RunEvent
+	cancel      context.CancelFunc
 }
 
 func newLiveModel(runID, app string, ch chan events.RunEvent, cancel context.CancelFunc, width, height int) liveModel {
 	sp := spinner.New()
 	sp.Spinner = spinner.MiniDot
 	sp.Style = infoStyle
-	m := liveModel{runID: runID, app: app, ch: ch, cancel: cancel, spin: sp}
+	ti := textinput.New()
+	ti.Placeholder = "ask about this run…"
+	ti.CharLimit = 400
+	ti.Width = 48
+	bar := progress.New(progress.WithScaledGradient(string(colInfo), string(colSuccess)), progress.WithoutPercentage())
+	bar.Width = 24
+	m := liveModel{runID: runID, app: app, ch: ch, cancel: cancel, spin: sp, chatInput: ti, bar: bar}
 	if width > 0 && height > 0 {
 		m.resize(width, height)
 	}
@@ -123,14 +138,32 @@ func (m liveModel) Update(msg tea.Msg) (liveModel, tea.Cmd) {
 		m.spin, cmd = m.spin.Update(msg)
 		m.refresh() // re-render so the new spinner frame reaches the viewport
 		return m, cmd
+	case answerMsg:
+		m.chatLoading = false
+		m.chatEntries = append(m.chatEntries, chatEntry{role: "a", text: renderMarkdown(msg.text), raw: msg.text})
+		m.refresh()
+		return m, nil
+	case errMsg:
+		// In the live screen, an errMsg can only come from the embedded assistant.
+		m.chatLoading = false
+		m.chatEntries = append(m.chatEntries, chatEntry{role: "err", text: msg.err.Error()})
+		m.refresh()
+		return m, nil
 	case tea.KeyMsg:
+		if m.chatActive {
+			return m.updateChatKey(msg)
+		}
 		switch msg.String() {
 		case "esc":
 			m.cancel() // stop the stream goroutine
 			return m, func() tea.Msg { return backMsg{} }
 		case "a":
-			if m.done {
-				return m, func() tea.Msg { return askMsg{} }
+			// Open the embedded assistant inline (running or finished) — no screen change.
+			if m.client != nil {
+				m.chatActive = true
+				m.chatInput.Focus()
+				m.refresh()
+				return m, textinput.Blink
 			}
 		case "c":
 			if m.done {
@@ -205,6 +238,70 @@ func (m *liveModel) toggleSummary() {
 		m.sumOpen = id
 	}
 	m.refresh()
+}
+
+// updateChatKey routes keystrokes to the embedded assistant input while it is active.
+func (m liveModel) updateChatKey(msg tea.KeyMsg) (liveModel, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.chatActive = false
+		m.chatInput.Blur()
+		m.refresh()
+		return m, nil
+	case "enter":
+		q := strings.TrimSpace(m.chatInput.Value())
+		if q == "" || m.chatLoading || m.client == nil {
+			return m, nil
+		}
+		hist := chatHistory(m.chatEntries)
+		m.chatEntries = append(m.chatEntries, chatEntry{role: "q", text: q, raw: q})
+		m.chatInput.SetValue("")
+		m.chatLoading = true
+		m.refresh()
+		return m, askCmd(m.client, m.runID, q, hist)
+	default:
+		var cmd tea.Cmd
+		m.chatInput, cmd = m.chatInput.Update(msg)
+		m.refresh()
+		return m, cmd
+	}
+}
+
+// renderChat is the inline assistant panel: a divider, the last few exchanges, and
+// the input (when active). Shown on the live view AND the summary.
+func (m liveModel) renderChat() string {
+	if !m.chatActive && len(m.chatEntries) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(hintStyle.Render(strings.Repeat("─", 44)) + "\n")
+	b.WriteString(infoStyle.Render("assistant") + "\n")
+	for _, e := range m.chatEntries[chatStart(len(m.chatEntries)):] {
+		switch e.role {
+		case "q":
+			b.WriteString(okStyle.Render("▶ "+e.text) + "\n")
+		case "err":
+			b.WriteString(errorStyle.Render("✗ "+e.text) + "\n")
+		default:
+			b.WriteString(e.text + "\n")
+		}
+	}
+	if m.chatLoading {
+		b.WriteString(infoStyle.Render(m.spin.View()+" thinking…") + "\n")
+	}
+	if m.chatActive {
+		b.WriteString(m.chatInput.View())
+	} else {
+		b.WriteString(hintStyle.Render("a · ask the assistant about this run"))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func chatStart(n int) int {
+	if n > 4 {
+		return n - 4
+	}
+	return 0
 }
 
 func (m liveModel) failedTests() []string {
@@ -420,6 +517,9 @@ func shortSha(s string) string {
 }
 
 func (m liveModel) footer() string {
+	if m.chatActive {
+		return hintStyle.Render("type to ask · ↵ send · esc close chat")
+	}
 	if m.done {
 		actions := "↑↓ sections · ↵ expand · e export · a ask"
 		if len(m.failedTests()) > 0 {
@@ -427,7 +527,7 @@ func (m liveModel) footer() string {
 		}
 		return hintStyle.Render(actions + " · esc back")
 	}
-	footer := "esc back · ctrl+c quit"
+	footer := "a ask · esc back · ctrl+c quit"
 	if m.ready {
 		footer = "↑↓ scroll · " + footer
 	}
@@ -435,10 +535,16 @@ func (m liveModel) footer() string {
 }
 
 func (m liveModel) body() string {
+	var base string
 	if m.done {
-		return m.summaryBody()
+		base = m.summaryBody()
+	} else {
+		base = m.liveBody()
 	}
-	return m.liveBody()
+	if chat := m.renderChat(); chat != "" {
+		base += "\n\n" + chat
+	}
+	return base
 }
 
 func (m liveModel) liveBody() string {
@@ -489,7 +595,7 @@ func (m liveModel) summarySections() []sumSection {
 func (m liveModel) summaryBody() string {
 	var b strings.Builder
 	icon, vs := verdictBadge(m.verdict)
-	b.WriteString(vs.Bold(true).Render(icon + " " + strings.ToUpper(m.verdict)))
+	badge := lipgloss.NewStyle().Background(vs.GetForeground()).Foreground(lipgloss.Color("#11110f")).Bold(true).Padding(0, 1).Render(icon + " " + strings.ToUpper(m.verdict))
 	counts := okStyle.Render(fmt.Sprintf("%d passed", m.passed))
 	if m.failed > 0 {
 		counts += labelStyle.Render(" · ") + errorStyle.Render(fmt.Sprintf("%d failed", m.failed))
@@ -497,7 +603,7 @@ func (m liveModel) summaryBody() string {
 	if fl := countTests(m.tests).flaky; fl > 0 {
 		counts += labelStyle.Render(" · ") + shadowStyle.Render(fmt.Sprintf("%d flaky", fl))
 	}
-	b.WriteString("   " + counts + "\n\n")
+	b.WriteString(badge + "   " + counts + "\n\n")
 
 	for i, s := range m.summarySections() {
 		arrow := "▸"
@@ -821,21 +927,6 @@ func formatElapsed(d time.Duration) string {
 	return fmt.Sprintf("%dh %dm", s/3600, (s%3600)/60)
 }
 
-// progressBar is the Ink-style filled/empty block bar (green filled, muted empty).
-func progressBar(done, total, width int) string {
-	if total <= 0 {
-		return hintStyle.Render(strings.Repeat("░", width))
-	}
-	filled := done * width / total
-	if filled > width {
-		filled = width
-	}
-	if filled < 0 {
-		filled = 0
-	}
-	return okStyle.Render(strings.Repeat("▓", filled)) + hintStyle.Render(strings.Repeat("░", width-filled))
-}
-
 func (m liveModel) renderSubagents() string {
 	if len(m.subagents) == 0 {
 		return ""
@@ -880,7 +971,7 @@ func (m liveModel) renderTests() string {
 	b.WriteString(infoStyle.Render("tests") + "\n")
 	b.WriteString("  " + labelStyle.Render(formatTestHistory(counts)) + "\n")
 	if total := len(m.tests); total > 0 && (counts.passed+counts.failed+counts.flaky) > 0 {
-		b.WriteString("  " + progressBar(counts.passed, total, 24) + " " + hintStyle.Render(fmt.Sprintf("%d/%d", counts.passed, total)) + "\n")
+		b.WriteString("  " + m.bar.ViewAs(float64(counts.passed)/float64(total)) + " " + hintStyle.Render(fmt.Sprintf("%d/%d", counts.passed, total)) + "\n")
 	}
 
 	if hasCurrent {
