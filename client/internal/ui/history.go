@@ -93,7 +93,7 @@ func (m historyModel) View() string {
 			b.WriteString(marker + line + "\n")
 		}
 	}
-	b.WriteString("\n" + hintStyle.Render("↑↓ move · enter watch · r refresh · esc back"))
+	b.WriteString("\n" + hintStyle.Render("↑↓ move · enter watch · r refresh · esc back · q quit"))
 	return screenStyle.Render(b.String())
 }
 

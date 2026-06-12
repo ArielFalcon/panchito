@@ -319,7 +319,7 @@ func (m agentModel) View() string {
 	b.WriteString(titleStyle.Render("agent runtime"))
 
 	if m.loading {
-		b.WriteString("\n\n" + infoStyle.Render("loading..."))
+		b.WriteString("\n\n" + infoStyle.Render("loading…"))
 		return screenStyle.Render(b.String())
 	}
 
@@ -329,7 +329,7 @@ func (m agentModel) View() string {
 	}
 	if cfg == nil {
 		if m.err != "" {
-			b.WriteString("\n\n" + errorStyle.Render("x "+m.err))
+			b.WriteString("\n\n" + errorStyle.Render("✗ "+m.err))
 		}
 		return screenStyle.Render(b.String())
 	}
@@ -345,7 +345,7 @@ func (m agentModel) View() string {
 
 	mode := string(cfg.Mode)
 	provider := string(cfg.SingleProvider)
-	b.WriteString("  " + labelStyle.Render(fmt.Sprintf("mode: %s · %s", mode, provider)) + "\n\n")
+	b.WriteString("\n\n" + labelStyle.Render(fmt.Sprintf("mode: %s · %s", mode, provider)) + "\n\n")
 
 	b.WriteString(m.renderProviders(cfg))
 	b.WriteString("\n")
@@ -356,13 +356,13 @@ func (m agentModel) View() string {
 		b.WriteString("\n" + shadowStyle.Render(fmt.Sprintf("%d API key(s) staged", len(m.stagedKeys))))
 	}
 	for provider, err := range m.modelErrors {
-		b.WriteString("\n" + errorStyle.Render(fmt.Sprintf("x %s models: %s", provider, err)))
+		b.WriteString("\n" + errorStyle.Render(fmt.Sprintf("✗ %s models: %s", provider, err)))
 	}
 	if m.status != "" {
 		b.WriteString("\n" + okStyle.Render(m.status))
 	}
 	if m.err != "" {
-		b.WriteString("\n" + errorStyle.Render("x "+m.err))
+		b.WriteString("\n" + errorStyle.Render("✗ "+m.err))
 	}
 	b.WriteString("\n\n" + hintStyle.Render("↑↓ move · enter trigger · esc back"))
 	return screenStyle.Render(b.String())

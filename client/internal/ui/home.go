@@ -14,6 +14,7 @@ type homeModel struct {
 	apps          []contract.AppView
 	cursor        int
 	serverVersion string // from the connect handshake; shown in the header when known
+	status        string // success line after onboarding/edit/delete (set by the root on appsChangedMsg)
 }
 
 func newHomeModel(apps []contract.AppView) homeModel {
@@ -62,7 +63,11 @@ func (m homeModel) Update(msg tea.Msg) (homeModel, tea.Cmd) {
 
 func (m homeModel) View() string {
 	var b strings.Builder
-	header := titleStyle.Render("panchito") + "  " + hintStyle.Render(fmt.Sprintf("%d app(s)", len(m.apps)))
+	count := fmt.Sprintf("%d apps", len(m.apps))
+	if len(m.apps) == 1 {
+		count = "1 app"
+	}
+	header := titleStyle.Render("panchito") + "  " + hintStyle.Render(count)
 	if m.serverVersion != "" {
 		header += "  " + hintStyle.Render("· server "+m.serverVersion)
 	}
@@ -86,6 +91,9 @@ func (m homeModel) View() string {
 			line += "  " + shadowStyle.Render("(shadow)")
 		}
 		b.WriteString(line + "\n")
+	}
+	if m.status != "" {
+		b.WriteString("\n" + okStyle.Render("✓ "+m.status))
 	}
 	b.WriteString("\n" + hintStyle.Render("↑↓ move · enter launch · h history · o onboard · e edit · d delete · a agent · q quit"))
 	return screenStyle.Render(b.String())

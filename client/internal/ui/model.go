@@ -113,6 +113,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case appsChangedMsg:
 		m.home = newHomeModel(msg.apps)
 		m.home.serverVersion = m.serverVersion
+		m.home.status = msg.status
 		m.screen = screenHome
 		return m, nil
 	case watchRunMsg:

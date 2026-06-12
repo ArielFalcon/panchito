@@ -295,7 +295,7 @@ func (m appAdminModel) View() string {
 	}
 	b.WriteString(titleStyle.Render(title) + "\n\n")
 	if m.loading {
-		b.WriteString(infoStyle.Render("loading...") + "\n")
+		b.WriteString(infoStyle.Render("loading…") + "\n")
 	} else {
 		switch m.step {
 		case appStepOwner:
@@ -309,7 +309,7 @@ func (m appAdminModel) View() string {
 		}
 	}
 	if m.err != "" {
-		b.WriteString("\n" + errorStyle.Render("x "+m.err))
+		b.WriteString("\n" + errorStyle.Render("✗ "+m.err))
 	}
 	if m.status != "" {
 		b.WriteString("\n" + okStyle.Render(m.status))

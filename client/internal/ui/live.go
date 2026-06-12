@@ -389,7 +389,13 @@ func (m liveModel) renderPhases() string {
 			parts[i] = hintStyle.Render(p)
 		}
 	}
-	return strings.Join(parts, hintStyle.Render(" · "))
+	line := strings.Join(parts, hintStyle.Render(" · "))
+	// A transient/unknown phase (e.g. "retry") matches no canonical step, so cur==-1
+	// and nothing would be highlighted — surface it explicitly instead of going blank.
+	if cur < 0 && m.phase != "" && !m.done {
+		line += "  " + titleStyle.Render("("+m.phase+")")
+	}
+	return line
 }
 
 func (m liveModel) renderActivity() string {
@@ -403,7 +409,7 @@ func (m liveModel) renderActivity() string {
 		if a.status == "running" {
 			marker = m.spin.View()
 		}
-		b.WriteString("  " + marker + " " + labelStyle.Render(activityVerb(a.kind)) + " " + a.target + "\n")
+		b.WriteString("  " + marker + " " + labelStyle.Render(activityVerb(a.kind)) + " " + truncate(a.target, 60) + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -423,7 +429,7 @@ func (m liveModel) renderSubagents() string {
 		if s.worker != "" {
 			line += shadowStyle.Render("[" + s.worker + "] ")
 		}
-		b.WriteString(line + s.target + "\n")
+		b.WriteString(line + truncate(s.target, 56) + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -530,16 +536,24 @@ func countTests(tests []testItem) testCounts {
 }
 
 func formatTestHistory(c testCounts) string {
-	parts := []string{
-		fmt.Sprintf("%d passed", c.passed),
-		fmt.Sprintf("%d failed", c.failed),
-		fmt.Sprintf("%d flaky", c.flaky),
+	var parts []string
+	if c.passed > 0 {
+		parts = append(parts, fmt.Sprintf("%d passed", c.passed))
+	}
+	if c.failed > 0 {
+		parts = append(parts, fmt.Sprintf("%d failed", c.failed))
+	}
+	if c.flaky > 0 {
+		parts = append(parts, fmt.Sprintf("%d flaky", c.flaky))
 	}
 	if c.running > 0 {
 		parts = append(parts, fmt.Sprintf("%d running", c.running))
 	}
 	if c.queued > 0 {
 		parts = append(parts, fmt.Sprintf("%d queued", c.queued))
+	}
+	if len(parts) == 0 {
+		return "history: none yet"
 	}
 	return "history: " + strings.Join(parts, " · ")
 }
@@ -637,8 +651,10 @@ func activityVerb(kind string) string {
 
 func verdictStyle(v string) lipgloss.Style {
 	switch v {
-	case "pass", "skipped":
+	case "pass":
 		return okStyle
+	case "skipped":
+		return infoStyle // a clean no-op is neutral, not a success — don't read as green "pass"
 	case "fail", "invalid":
 		return errorStyle
 	default:
@@ -651,7 +667,7 @@ func verdictBadge(v string) (string, lipgloss.Style) {
 	case "pass":
 		return "✓", okStyle
 	case "skipped":
-		return "•", okStyle
+		return "•", infoStyle
 	case "fail", "invalid":
 		return "✗", errorStyle
 	default:
@@ -668,9 +684,12 @@ func indexOf(xs []string, x string) int {
 	return -1
 }
 
+// truncate clamps to n RUNES (not bytes): test names use " › " (U+203A) and files
+// may be unicode, so byte-slicing would cut mid-rune into mojibake.
 func truncate(s string, n int) string {
-	if len(s) > n {
-		return s[:n] + "…"
+	r := []rune(s)
+	if len(r) > n {
+		return string(r[:n]) + "…"
 	}
 	return s
 }
