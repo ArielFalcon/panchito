@@ -55,6 +55,12 @@ func (m connectModel) Update(msg tea.Msg) (connectModel, tea.Cmd) {
 	case tokenLoadedMsg:
 		if msg.token != "" && m.token.Value() == "" {
 			m.token.SetValue(msg.token)
+			// A token was remembered from a previous session → skip the form and
+			// connect straight away. A stale token just bounces back here with an error.
+			if !m.connecting {
+				m.connecting = true
+				return m, connectCmd(m.host.Value(), m.token.Value())
+			}
 		}
 		return m, nil
 	case tea.KeyMsg:

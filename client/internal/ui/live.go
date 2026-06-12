@@ -2,8 +2,10 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -70,9 +72,13 @@ type liveModel struct {
 	failed     int
 	errs       []string
 	agentErr   string
+	logs       []string
 	verdict    string
 	done       bool
 	closed     bool
+	sumFocus   int    // focused summary section (done view)
+	sumOpen    string // currently expanded summary section id
+	exported   string // path of the exported JSON, once 'e' is pressed
 	spin       spinner.Model
 	vp         viewport.Model
 	ready      bool // a terminal size is known → the viewport is active
@@ -132,7 +138,42 @@ func (m liveModel) Update(msg tea.Msg) (liveModel, tea.Cmd) {
 					return m, func() tea.Msg { return continueMsg{cases: failed} }
 				}
 			}
-		case "up", "down", "pgup", "pgdown", "k", "j":
+		case "e":
+			if m.done {
+				if path, err := m.exportJSON(); err == nil {
+					m.exported = path
+				} else {
+					m.exported = "(export failed: " + err.Error() + ")"
+				}
+				m.refresh()
+				return m, nil
+			}
+		case "enter":
+			if m.done {
+				m.toggleSummary()
+				return m, nil
+			}
+		case "up", "k":
+			if m.done {
+				m.moveSummary(-1)
+				return m, nil
+			}
+			if m.ready {
+				var cmd tea.Cmd
+				m.vp, cmd = m.vp.Update(msg)
+				return m, cmd
+			}
+		case "down", "j":
+			if m.done {
+				m.moveSummary(1)
+				return m, nil
+			}
+			if m.ready {
+				var cmd tea.Cmd
+				m.vp, cmd = m.vp.Update(msg)
+				return m, cmd
+			}
+		case "pgup", "pgdown":
 			if m.ready {
 				var cmd tea.Cmd
 				m.vp, cmd = m.vp.Update(msg)
@@ -141,6 +182,29 @@ func (m liveModel) Update(msg tea.Msg) (liveModel, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m *liveModel) moveSummary(delta int) {
+	secs := m.summarySections()
+	if len(secs) == 0 {
+		return
+	}
+	m.sumFocus = (m.sumFocus + delta + len(secs)) % len(secs)
+	m.refresh()
+}
+
+func (m *liveModel) toggleSummary() {
+	secs := m.summarySections()
+	if m.sumFocus < 0 || m.sumFocus >= len(secs) {
+		return
+	}
+	id := secs[m.sumFocus].id
+	if m.sumOpen == id {
+		m.sumOpen = ""
+	} else {
+		m.sumOpen = id
+	}
+	m.refresh()
 }
 
 func (m liveModel) failedTests() []string {
@@ -197,6 +261,16 @@ func (m *liveModel) fold(ev events.RunEvent) {
 		m.passed = b.Passed
 		m.failed = b.Failed
 		m.done = true
+		if m.sumOpen == "" {
+			m.sumOpen = "results" // open the test results by default, like the Ink summary
+		}
+	case events.LogLine:
+		if b.Text != "" {
+			m.logs = append(m.logs, b.Text)
+			if len(m.logs) > 200 {
+				m.logs = m.logs[len(m.logs)-200:]
+			}
+		}
 	case events.AgentError:
 		// A failed tool call (e.g. a read that the agent retries) is routine and NOT
 		// part of the verdict. The Ink TUI never surfaced these in the live view — it
@@ -346,16 +420,16 @@ func shortSha(s string) string {
 }
 
 func (m liveModel) footer() string {
+	if m.done {
+		actions := "↑↓ sections · ↵ expand · e export · a ask"
+		if len(m.failedTests()) > 0 {
+			actions += " · c continue"
+		}
+		return hintStyle.Render(actions + " · esc back")
+	}
 	footer := "esc back · ctrl+c quit"
 	if m.ready {
 		footer = "↑↓ scroll · " + footer
-	}
-	if m.done {
-		actions := "a ask"
-		if len(m.failedTests()) > 0 {
-			actions += " · c continue failed"
-		}
-		footer = actions + " · " + footer
 	}
 	return hintStyle.Render(footer)
 }
@@ -382,10 +456,40 @@ func (m liveModel) liveBody() string {
 	return joinSections(sections)
 }
 
+type sumSection struct{ id, label string }
+
+// summarySections is the ordered, data-driven list of collapsible recap sections.
+func (m liveModel) summarySections() []sumSection {
+	failedTxt := ""
+	if m.failed > 0 {
+		failedTxt = fmt.Sprintf(", %d failed", m.failed)
+	}
+	secs := []sumSection{
+		{"pipeline", "Pipeline"},
+		{"results", fmt.Sprintf("Test results (%d passed%s)", m.passed, failedTxt)},
+	}
+	if len(m.specs) > 0 {
+		secs = append(secs, sumSection{"specs", fmt.Sprintf("Specs (%d)", len(m.specs))})
+	}
+	if m.coverage != nil && m.coverage.ChangedLines > 0 {
+		secs = append(secs, sumSection{"coverage", "Coverage"})
+	}
+	if m.reviewer != nil {
+		secs = append(secs, sumSection{"reviewer", "Reviewer"})
+	}
+	if len(m.logs) > 0 {
+		secs = append(secs, sumSection{"logs", fmt.Sprintf("Execution logs (%d)", len(m.logs))})
+	}
+	if m.agentErr != "" && m.verdict != "pass" && m.verdict != "skipped" {
+		secs = append(secs, sumSection{"note", "Agent note"})
+	}
+	return secs
+}
+
 func (m liveModel) summaryBody() string {
 	var b strings.Builder
 	icon, vs := verdictBadge(m.verdict)
-	b.WriteString(vs.Bold(true).Render(icon+" "+strings.ToUpper(m.verdict)) + "\n")
+	b.WriteString(vs.Bold(true).Render(icon + " " + strings.ToUpper(m.verdict)))
 	counts := okStyle.Render(fmt.Sprintf("%d passed", m.passed))
 	if m.failed > 0 {
 		counts += labelStyle.Render(" · ") + errorStyle.Render(fmt.Sprintf("%d failed", m.failed))
@@ -393,30 +497,116 @@ func (m liveModel) summaryBody() string {
 	if fl := countTests(m.tests).flaky; fl > 0 {
 		counts += labelStyle.Render(" · ") + shadowStyle.Render(fmt.Sprintf("%d flaky", fl))
 	}
-	b.WriteString(counts + "\n")
+	b.WriteString("   " + counts + "\n\n")
 
-	sections := []string{
-		m.renderSpecs(),
-		m.renderTests(),
-		m.renderCoverage(),
-		m.renderReviewer(),
-		m.renderAgentErr(),
-		m.renderErrs(),
+	for i, s := range m.summarySections() {
+		arrow := "▸"
+		if s.id == m.sumOpen {
+			arrow = "▾"
+		}
+		head := arrow + " " + s.label
+		if i == m.sumFocus {
+			head = lipgloss.NewStyle().Foreground(colInfo).Bold(true).Render(head)
+		} else {
+			head = labelStyle.Render(head)
+		}
+		b.WriteString(head + "\n")
+		if s.id == m.sumOpen {
+			if body := m.renderSummarySection(s.id); body != "" {
+				b.WriteString(indentLines(body, "    ") + "\n")
+			}
+		}
 	}
-	body := joinSections(sections)
-	if body != "" {
-		b.WriteString("\n" + body)
+	if m.exported != "" {
+		b.WriteString("\n" + okStyle.Render("✓ exported → "+m.exported))
 	}
-	return b.String()
+	return strings.TrimRight(b.String(), "\n")
 }
 
-// renderAgentErr shows the last agent tool error, but only in the SUMMARY and only
-// when the run did not pass — context for a failure, never a live alarm.
-func (m liveModel) renderAgentErr() string {
-	if m.agentErr == "" || m.verdict == "pass" || m.verdict == "skipped" {
-		return ""
+func (m liveModel) renderSummarySection(id string) string {
+	switch id {
+	case "pipeline":
+		return okStyle.Render("✓ ") + labelStyle.Render(strings.Join(pipelinePhases, " · "))
+	case "results":
+		return m.renderTests()
+	case "specs":
+		return m.renderSpecs()
+	case "coverage":
+		return m.renderCoverage()
+	case "reviewer":
+		return m.renderReviewer()
+	case "logs":
+		return m.renderLogs()
+	case "note":
+		return hintStyle.Render(truncate(m.agentErr, 88))
 	}
-	return shadowStyle.Render("agent note") + "\n  " + hintStyle.Render(truncate(m.agentErr, 76))
+	return ""
+}
+
+func (m liveModel) renderLogs() string {
+	var b strings.Builder
+	for _, l := range lastN(m.logs, 12) {
+		b.WriteString(hintStyle.Render(truncate(strings.TrimPrefix(l, "[qa] "), 90)) + "\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func indentLines(s, pad string) string {
+	lines := strings.Split(s, "\n")
+	for i := range lines {
+		lines[i] = pad + lines[i]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// ── JSON export (the 'e' key on a finished run) ─────────────────────────────────
+
+type testExport struct {
+	Name       string  `json:"name"`
+	Status     string  `json:"status"`
+	DurationMs float64 `json:"durationMs,omitempty"`
+	Detail     string  `json:"detail,omitempty"`
+	Attempts   int     `json:"attempts,omitempty"`
+}
+
+type runExport struct {
+	RunID    string                   `json:"runId"`
+	App      string                   `json:"app"`
+	Sha      string                   `json:"sha,omitempty"`
+	Target   string                   `json:"target,omitempty"`
+	Mode     string                   `json:"mode,omitempty"`
+	Verdict  string                   `json:"verdict"`
+	Passed   int                      `json:"passed"`
+	Failed   int                      `json:"failed"`
+	Specs    []string                 `json:"specs,omitempty"`
+	Tests    []testExport             `json:"tests,omitempty"`
+	Coverage *events.CoverageComputed `json:"coverage,omitempty"`
+	Reviewer *bool                    `json:"reviewerApproved,omitempty"`
+	Reasons  []string                 `json:"reviewerReasons,omitempty"`
+}
+
+func (m liveModel) exportJSON() (string, error) {
+	exp := runExport{
+		RunID: m.runID, App: m.app, Sha: m.sha, Target: m.target, Mode: m.mode,
+		Verdict: m.verdict, Passed: m.passed, Failed: m.failed,
+		Specs: m.specs, Coverage: m.coverage, Reviewer: m.reviewer, Reasons: m.reasons,
+	}
+	for _, t := range m.tests {
+		exp.Tests = append(exp.Tests, testExport{t.name, t.status, t.durationMs, t.detail, t.attempts})
+	}
+	data, err := json.MarshalIndent(exp, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	id := m.runID
+	if len(id) > 24 {
+		id = id[:24]
+	}
+	path := "qa-run-" + id + ".json"
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func joinSections(sections []string) string {

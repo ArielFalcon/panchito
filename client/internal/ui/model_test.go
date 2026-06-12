@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -178,10 +179,52 @@ func TestLiveRendersDedicatedComponentsAndSummary(t *testing.T) {
 
 	m, _ = m.Update(runEventMsg(events.RunEvent{Type: "run.verdict", Body: events.RunVerdict{Verdict: "fail", Passed: 2, Failed: 1}}))
 	summary := m.View()
-	for _, want := range []string{"FAIL", "2 passed", "1 failed", "reviewer: rejected", "flows/contact.spec.ts"} {
+	for _, want := range []string{"FAIL", "2 passed", "1 failed", "Test results", "Reviewer", "Specs"} {
 		if !strings.Contains(summary, want) {
 			t.Fatalf("summary view missing %q:\n%s", want, summary)
 		}
+	}
+	// Sections are collapsible — expanding Reviewer/Specs reveals their bodies.
+	m.sumOpen = "reviewer"
+	if !strings.Contains(m.View(), "reviewer: rejected") {
+		t.Fatalf("expanded reviewer section missing the verdict:\n%s", m.View())
+	}
+	m.sumOpen = "specs"
+	if !strings.Contains(m.View(), "flows/contact.spec.ts") {
+		t.Fatalf("expanded specs section missing the file:\n%s", m.View())
+	}
+}
+
+func TestLiveSummaryNavigatesSectionsAndExportsJSON(t *testing.T) {
+	m := newLiveModel("exp_test_run", "portfolio", make(chan events.RunEvent, 1), func() {}, 0, 0)
+	for _, ev := range []events.RunEvent{
+		{Type: "spec.written", Body: events.SpecWritten{File: "flows/a.spec.ts"}},
+		{Type: "test.passed", Body: events.TestPassed{Name: "t1", DurationMs: 100}},
+		{Type: "run.verdict", Body: events.RunVerdict{Verdict: "pass", Passed: 1}},
+	} {
+		m, _ = m.Update(runEventMsg(ev))
+	}
+	if m.sumOpen != "results" {
+		t.Fatalf("default open section = %q, want results", m.sumOpen)
+	}
+	// ↓ ↓ focuses the Specs section, Enter expands it.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.sumOpen != "specs" {
+		t.Fatalf("after navigating + Enter, open section = %q, want specs", m.sumOpen)
+	}
+
+	// 'e' exports the run as JSON.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	path := "qa-run-exp_test_run.json"
+	defer os.Remove(path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("export did not write %s: %v", path, err)
+	}
+	if !strings.Contains(string(data), `"verdict": "pass"`) || !strings.Contains(string(data), "flows/a.spec.ts") {
+		t.Fatalf("exported JSON missing expected content:\n%s", data)
 	}
 }
 
