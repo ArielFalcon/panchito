@@ -24,8 +24,13 @@ orchestrator's published `contract/openapi.json` (no hand-written drift).
   to per-screen sub-models, the brand palette in `theme.go`. **connect** (host +
   token, probes ListApps as the auth check) and **home** (app list) screens wired
   to `api.Client`.
-- ⏳ launcher / live (TestList / AgentActivityPane / PlanChecklist / PhaseProgress
-  over the SSE stream) / summary / chat (Glamour); `theme.json` sync; OS token storage.
+- ✅ **launcher** (target → mode → shadow → CreateRun) and a **live** screen that
+  consumes the RunEvent SSE stream end-to-end (a goroutine pushes events onto a
+  channel; a read-next `tea.Cmd` hands each to the loop, so the model mutates only
+  in `Update`). E4b renders a simple event feed + verdict.
+- ⏳ E4c: replace the feed with the dedicated **PhaseProgress / AgentActivityPane /
+  PlanChecklist / TestList** components. Then summary + chat (Glamour), `theme.json`
+  sync, OS token storage.
 
 ## Run
 

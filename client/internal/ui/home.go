@@ -4,21 +4,19 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ArielFalcon/panchito/internal/api"
 	"github.com/ArielFalcon/panchito/internal/contract"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-// homeModel lists the configured apps. (The run launcher hangs off this in E4b.)
+// homeModel lists the configured apps; Enter opens the launcher for one.
 type homeModel struct {
-	client *api.Client
 	apps   []contract.AppView
 	cursor int
 }
 
-func newHomeModel(client *api.Client, apps []contract.AppView) homeModel {
-	return homeModel{client: client, apps: apps}
+func newHomeModel(apps []contract.AppView) homeModel {
+	return homeModel{apps: apps}
 }
 
 func (m homeModel) Update(msg tea.Msg) (homeModel, tea.Cmd) {
@@ -31,6 +29,11 @@ func (m homeModel) Update(msg tea.Msg) (homeModel, tea.Cmd) {
 		case "down", "j":
 			if m.cursor < len(m.apps)-1 {
 				m.cursor++
+			}
+		case "enter":
+			if len(m.apps) > 0 {
+				app := m.apps[m.cursor].Name
+				return m, func() tea.Msg { return appSelectedMsg{app: app} }
 			}
 		}
 	}
@@ -60,6 +63,6 @@ func (m homeModel) View() string {
 		}
 		b.WriteString(line + "\n")
 	}
-	b.WriteString("\n" + hintStyle.Render("↑↓ move · q quit"))
+	b.WriteString("\n" + hintStyle.Render("↑↓ move · enter launch · q quit"))
 	return screenStyle.Render(b.String())
 }
