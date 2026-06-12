@@ -885,7 +885,9 @@ const apiDeps: ApiDeps = {
       fixCases: failed,
       parentRunId: parentId,
       source: "manual",
-    }, { runEvents });
+      // Honor the active agent runtime (Codex/dual) on continuations, exactly like the
+      // webhook path above — otherwise the runner falls back to static OpenCode deps.
+    }, { runEvents, pipeline: currentPipelineDeps() });
   },
 };
 
