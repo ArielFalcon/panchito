@@ -20,8 +20,18 @@ orchestrator's published `contract/openapi.json` (no hand-written drift).
 - ✅ HTTP + SSE client (`internal/api`): typed command verbs over the contract
   DTOs, and a `text/event-stream` reader that decodes RunEvents with `Last-Event-ID`
   reconnect (stops on the terminal `run.verdict`). UI-agnostic, stdlib-only.
-- ⏳ The Bubble Tea screens (connect / home / launcher / live / summary / chat),
-  `theme.json`, OS token storage.
+- ✅ Bubble Tea skeleton (`internal/ui`, `cmd/panchito`): an Elm root model routing
+  to per-screen sub-models, the brand palette in `theme.go`. **connect** (host +
+  token, probes ListApps as the auth check) and **home** (app list) screens wired
+  to `api.Client`.
+- ⏳ launcher / live (TestList / AgentActivityPane / PlanChecklist / PhaseProgress
+  over the SSE stream) / summary / chat (Glamour); `theme.json` sync; OS token storage.
+
+## Run
+
+```bash
+go run ./cmd/panchito     # connects to localhost:8080 by default
+```
 
 ## Commands
 
