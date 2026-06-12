@@ -24,6 +24,7 @@ import {
   askAssistant,
   reviewIndependently,
   startEventStreamWithReconnect,
+  EventStreamManager,
 } from "./opencode-client";
 import type { ArchitectureContext } from "../qa/context";
 
@@ -269,6 +270,53 @@ test("startEventStreamWithReconnect reconnects after a clean stream close", asyn
 
   assert.equal(attempts, 2);
   assert.deepEqual(delays, [5]);
+});
+
+// v2 has no global firehose, so the orchestrator opens ONE scoped event.subscribe
+// per run directory. The manager refcounts them (parallelDiff sessions share a dir)
+// and closes a stream when its last session unregisters. openStream is injected so
+// the demux/lifecycle is unit-tested without the SDK.
+test("EventStreamManager opens one scoped stream per directory (refcounted) and closes on last detach", () => {
+  const opened: Array<{ dir: string; signal: AbortSignal }> = [];
+  const mgr = new EventStreamManager((dir, _onActivity, signal) => { opened.push({ dir, signal }); });
+  mgr.setSink(() => {}, new AbortController().signal);
+
+  mgr.attach("s1", "/m/a");
+  mgr.attach("s2", "/m/a"); // same dir → shares the stream (refcount), no second open
+  mgr.attach("s3", "/m/b");
+
+  assert.deepEqual(opened.map((o) => o.dir).sort(), ["/m/a", "/m/b"]);
+  assert.equal(opened.length, 2);
+
+  const a = opened.find((o) => o.dir === "/m/a")!;
+  mgr.detach("s1"); // /m/a refs 2→1, still open
+  assert.equal(a.signal.aborted, false);
+  mgr.detach("s2"); // /m/a refs 1→0, closed
+  assert.equal(a.signal.aborted, true);
+  assert.equal(opened.find((o) => o.dir === "/m/b")!.signal.aborted, false); // /m/b untouched
+});
+
+test("EventStreamManager defers opening a stream until the sink is set", () => {
+  const opened: string[] = [];
+  const mgr = new EventStreamManager((dir) => { opened.push(dir); });
+  mgr.attach("s1", "/m/a"); // no sink yet → nothing opens
+  assert.deepEqual(opened, []);
+  mgr.setSink(() => {}, new AbortController().signal);
+  assert.deepEqual(opened, ["/m/a"]); // opened once the sink arrives
+});
+
+test("EventStreamManager closes every directory stream on shutdown and ignores later attaches", () => {
+  const opened: Array<{ dir: string; signal: AbortSignal }> = [];
+  const shutdown = new AbortController();
+  const mgr = new EventStreamManager((dir, _oa, signal) => { opened.push({ dir, signal }); });
+  mgr.setSink(() => {}, shutdown.signal);
+  mgr.attach("s1", "/m/a");
+  mgr.attach("s2", "/m/b");
+
+  shutdown.abort();
+  assert.ok(opened.every((o) => o.signal.aborted), "all directory streams aborted on shutdown");
+  mgr.attach("s3", "/m/c"); // after shutdown → no-op
+  assert.equal(opened.length, 2);
 });
 
 test("parseVerdict returns undefined specMetas when absent or empty", () => {

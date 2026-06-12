@@ -3,7 +3,7 @@ import { join } from "node:path";
 import {
   defaultOpencodeDeps,
   disposeSharedClient,
-  startEventStreamWithReconnect,
+  startActivitySink,
   type LiveActivity,
   type OpencodeDeps,
 } from "../integrations/opencode-client";
@@ -55,7 +55,7 @@ export class OpenCodeRuntimeStrategy implements AgentRuntimeStrategy {
   constructor(opts: OpenCodeRuntimeStrategyOptions = {}) {
     this.env = opts.env ?? process.env;
     this.depsFactory = opts.depsFactory ?? defaultOpencodeDeps;
-    this.startEvents = opts.startEvents ?? startEventStreamWithReconnect;
+    this.startEvents = opts.startEvents ?? startActivitySink;
     this.disposeClient = opts.dispose ?? disposeSharedClient;
     this.configPath = opts.configPath ?? join(process.cwd(), "opencode", "opencode.json");
   }

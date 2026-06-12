@@ -117,20 +117,49 @@ async function getSharedClient() {
   return sharedClient;
 }
 
+// Separate v2 SDK client, used ONLY for the live event subscription (observability
+// path). Sessions/verdict stay on the v1 blocking client above — the deliberate
+// split (docs/tui-vnext.md §5 D5): events→v2 scoped subscribe (advisory-only, zero
+// verdict risk), generation/verdict→v1 blocking prompt (the determinism keystone).
+let sharedEventClient: ReturnType<typeof import("@opencode-ai/sdk/v2").createOpencodeClient> | undefined;
+
+async function getEventClient() {
+  checkCircuit();
+  if (sharedEventClient) return sharedEventClient;
+  const { createOpencodeClient } = await import("@opencode-ai/sdk/v2");
+  const serverPassword = process.env.OPENCODE_SERVER_PASSWORD;
+  try {
+    sharedEventClient = createOpencodeClient({
+      baseUrl: process.env.OPENCODE_SERVE_URL ?? "http://opencode:4096",
+      ...(serverPassword
+        ? { headers: { Authorization: `Basic ${Buffer.from(`opencode:${serverPassword}`).toString("base64")}` } }
+        : {}),
+    });
+    recordCircuitSuccess();
+  } catch (err) {
+    recordCircuitFailure();
+    throw err;
+  }
+  return sharedEventClient;
+}
+
 export function disposeSharedClient(): void {
   sharedClient = undefined;
+  sharedEventClient = undefined;
 }
 
 // SSE live activity: routes OpenCode events to RunRecord logs in real time.
 export const activityRouter = new ActivityRouter();
 
 // Maps an OpenCode session to a run so SSE events are routed to the correct RunRecord.
-export function registerRunSession(sessionId: string, runId: string): void {
+export function registerRunSession(sessionId: string, runId: string, directory: string): void {
   activityRouter.register(sessionId, runId);
+  eventStreams.attach(sessionId, directory);
 }
 
 export function unregisterRunSession(sessionId: string): void {
   activityRouter.unregister(sessionId);
+  eventStreams.detach(sessionId);
 }
 
 // One routed, display-ready activity handed to the SSE consumer: the structured
@@ -144,39 +173,35 @@ export interface LiveActivity {
   display: string;
 }
 
-// Subscribes to OpenCode's global SSE event stream and routes every event through
-// the activityRouter. `onActivity` is called for each successfully routed event
-// with the structured activity and a display line. Runs until aborted.
-export async function startEventStream(
+// One scoped v2 subscription for a single run directory. v2 has NO global firehose:
+// event.subscribe({directory}) yields ONLY that workspace's events, each DIRECTLY
+// ({ id, type, properties } — no v1 GlobalEvent { directory, payload } wrapper).
+// Returns on stream close/error; the manager's reconnect loop reopens it.
+export async function startScopedEventStream(
+  directory: string,
   onActivity: (a: LiveActivity) => void,
   signal?: AbortSignal,
-  // The new contract RunEvent stream: each raw event is mapped (preserving
-  // ToolState.title/callID, all tools, todos) and published to the run it belongs
-  // to. Advisory — never authoritative, never allowed to break the stream loop.
+  // Contract RunEvent stream: each raw event is mapped (preserving ToolState.title/
+  // callID, all tools, todos) and published to the run it belongs to. Advisory —
+  // never authoritative, never allowed to break the stream loop.
   onRunEvent?: (runId: string, body: RunEventBody) => void,
 ): Promise<void> {
-  const client = await getSharedClient();
-
-  // The SDK's global.event() returns a Promise<ServerSentEventsResult> whose
-  // `.stream` is an AsyncGenerator yielding GlobalEvent { directory, payload }.
-  const result = await client.global.event();
+  const client = await getEventClient();
+  const result = await client.event.subscribe({ directory });
   const stream = result.stream;
   if (!stream) {
-    console.warn("[qa] SSE event stream returned no stream");
+    console.warn(`[qa] SSE event stream returned no stream (${directory})`);
     return;
   }
-
-  const abortHandler = () => { /* handled by `if (signal?.aborted) break` below */ };
-  signal?.addEventListener("abort", abortHandler, { once: true });
 
   try {
     for await (const event of stream) {
       if (signal?.aborted) break;
 
-      const payload = event.payload;
-      if (!payload?.type) continue;
+      const evt = event as { type?: string; properties?: Record<string, unknown> };
+      if (!evt.type) continue;
 
-      const raw = { type: payload.type, properties: payload.properties };
+      const raw = { type: evt.type, properties: evt.properties };
 
       // Rich contract RunEvents (agent.activity/plan.updated/…) from the RAW event,
       // so ToolState.title/callID survive. Published to the owning run; a malformed
@@ -214,16 +239,113 @@ export async function startEventStream(
     }
   } catch (err) {
     if (!signal?.aborted) {
-      console.warn(`[qa] SSE event stream error: ${err instanceof Error ? err.message : String(err)}`);
+      console.warn(`[qa] SSE event stream error (${directory}): ${err instanceof Error ? err.message : String(err)}`);
     }
   } finally {
-    signal?.removeEventListener("abort", abortHandler);
-    console.log("[qa] SSE event stream closed");
+    console.log(`[qa] SSE event stream closed (${directory})`);
   }
 }
 
+// Opens (and keeps reconnecting) ONE scoped stream for a directory until `signal`
+// aborts. Injectable so the manager is unit-testable without the SDK.
+export type OpenStreamFn = (
+  directory: string,
+  onActivity: (a: LiveActivity) => void,
+  signal: AbortSignal,
+  onRunEvent?: (runId: string, body: RunEventBody) => void,
+) => void;
+
+const defaultOpenStream: OpenStreamFn = (directory, onActivity, signal, onRunEvent) => {
+  void startEventStreamWithReconnect(onActivity, signal, {
+    onRunEvent,
+    start: (oa, sig, ore) => startScopedEventStream(directory, oa, sig, ore),
+    log: (m) => console.log(m),
+  });
+};
+
+// Refcounted per-directory scoped subscriptions. v2 forces per-workspace streams,
+// so the orchestrator opens one scoped stream per run directory (parallelDiff
+// sessions in the same mirror share it) and closes it when the directory's last
+// session unregisters. The sink (set once at boot via startActivitySink) is the
+// same callback pair the single v1 global stream used.
+export class EventStreamManager {
+  private onActivity?: (a: LiveActivity) => void;
+  private onRunEvent?: (runId: string, body: RunEventBody) => void;
+  private shutdown?: AbortSignal;
+  private readonly dirs = new Map<string, { refs: number; abort: AbortController; started: boolean }>();
+  private readonly sessionDir = new Map<string, string>();
+
+  constructor(private readonly openStream: OpenStreamFn = defaultOpenStream) {}
+
+  setSink(onActivity: (a: LiveActivity) => void, shutdown?: AbortSignal, onRunEvent?: (runId: string, body: RunEventBody) => void): void {
+    this.onActivity = onActivity;
+    this.onRunEvent = onRunEvent;
+    this.shutdown = shutdown;
+    shutdown?.addEventListener("abort", () => this.closeAll(), { once: true });
+    // Open any directory attached before the sink was set.
+    for (const dir of this.dirs.keys()) this.ensureStream(dir);
+  }
+
+  attach(sessionId: string, directory: string): void {
+    if (this.shutdown?.aborted) return;
+    this.sessionDir.set(sessionId, directory);
+    const existing = this.dirs.get(directory);
+    if (existing) { existing.refs++; return; }
+    this.dirs.set(directory, { refs: 1, abort: new AbortController(), started: false });
+    this.ensureStream(directory);
+  }
+
+  detach(sessionId: string): void {
+    const directory = this.sessionDir.get(sessionId);
+    if (!directory) return;
+    this.sessionDir.delete(sessionId);
+    const entry = this.dirs.get(directory);
+    if (!entry) return;
+    entry.refs--;
+    if (entry.refs <= 0) {
+      entry.abort.abort();
+      this.dirs.delete(directory);
+    }
+  }
+
+  private ensureStream(directory: string): void {
+    if (!this.onActivity) return; // sink not set yet — opened in setSink
+    const entry = this.dirs.get(directory);
+    if (!entry || entry.started) return;
+    entry.started = true;
+    this.openStream(directory, this.onActivity, entry.abort.signal, this.onRunEvent);
+  }
+
+  private closeAll(): void {
+    for (const entry of this.dirs.values()) entry.abort.abort();
+    this.dirs.clear();
+    this.sessionDir.clear();
+  }
+}
+
+const eventStreams = new EventStreamManager();
+
+// Boot entry (called once by the facade): register the live-activity sink. v2 has
+// no global stream to open here — per-directory streams start lazily as runs
+// register sessions. Resolves when `signal` aborts, mirroring the old long-lived
+// stream's lifetime so the facade's fire-and-forget call stays pending until shutdown.
+export function startActivitySink(
+  onActivity: (a: LiveActivity) => void,
+  signal?: AbortSignal,
+  opts: { onRunEvent?: (runId: string, body: RunEventBody) => void } = {},
+): Promise<void> {
+  eventStreams.setSink(onActivity, signal, opts.onRunEvent);
+  return new Promise<void>((resolve) => {
+    if (!signal) return; // boot always passes the shutdown signal; without it, stay pending
+    if (signal.aborted) return resolve();
+    signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+}
+
 export interface EventStreamReconnectOptions {
-  start?: typeof startEventStream;
+  // The scoped stream opener to keep alive. Required: there is no global default
+  // anymore (v2 has no global firehose). The manager closes over the directory.
+  start: (onActivity: (a: LiveActivity) => void, signal?: AbortSignal, onRunEvent?: (runId: string, body: RunEventBody) => void) => Promise<void>;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   initialDelayMs?: number;
   maxDelayMs?: number;
@@ -251,9 +373,9 @@ function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
 export async function startEventStreamWithReconnect(
   onActivity: (a: LiveActivity) => void,
   signal?: AbortSignal,
-  opts: EventStreamReconnectOptions = {},
+  opts: EventStreamReconnectOptions = { start: () => { throw new Error("startEventStreamWithReconnect requires a scoped `start`"); } },
 ): Promise<void> {
-  const start = opts.start ?? startEventStream;
+  const start = opts.start;
   const sleep = opts.sleep ?? sleepWithAbort;
   const initialDelayMs = opts.initialDelayMs ?? 1_000;
   const maxDelayMs = opts.maxDelayMs ?? 30_000;
@@ -401,7 +523,7 @@ export async function runOpencode(
   // Register this session for SSE live activity so the agent's real-time events
   // (tool calls, file edits, streaming text) are routed to the RunRecord logs.
   if (input.runId) {
-    registerRunSession(session.id, input.runId);
+    registerRunSession(session.id, input.runId, input.mirrorDir);
   }
 
   // Heartbeat: while the agent prompt is blocking, emit periodic progress logs so
@@ -828,7 +950,7 @@ export async function runOpencodeParallel(
 
   // Phase 1 — PLAN (strong model). Heartbeat while it analyses the whole repo.
   const planSession = await deps.open("qa-generator", input.mirrorDir, { signal: opts?.signal, timeoutMs });
-  if (input.runId) registerRunSession(planSession.id, input.runId);
+  if (input.runId) registerRunSession(planSession.id, input.runId, input.mirrorDir);
   const startedAt = Date.now();
   const heartbeat = opts?.onProgress
     ? setInterval(() => opts.onProgress?.(`[qa] planner is analysing the repo... (${Math.round((Date.now() - startedAt) / 1000)}s elapsed)`), 15_000)
