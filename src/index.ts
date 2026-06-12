@@ -770,12 +770,16 @@ function finalizeInterruptedRuns(): void {
       verdict: "infra-error",
       note: "process restarted — run was interrupted",
     });
-    recordIncident({
+    const incident = recordIncident({
       source: "health-check",
       severity: "warn",
       summary: `run ${r.id} (${r.app}@${r.sha.slice(0, 7)}) was interrupted by process restart`,
       detail: `Previous status: ${r.status}, step: ${r.step ?? "unknown"}`,
     });
+    // Dismiss immediately: the maintainer cannot prevent a process restart.
+    // The run was already recovered (infra-error); the incident is purely
+    // informational for the operator.
+    updateIncident(incident.id, { status: "dismissed" });
     console.log(`[qa]   finalized ${r.id} (${r.app}@${r.sha.slice(0, 7)}) as infra-error`);
   }
   console.log(`[qa] recovery complete — ${zombies.length} run(s) marked as infra-error`);
