@@ -108,3 +108,35 @@ func pollSystemCmd(c *api.Client) tea.Cmd {
 		return systemLoadedMsg{queue: q, running: running, apps: apps, agent: agent}
 	}
 }
+
+// queueLoadedMsg carries an on-demand queue fetch (the agent screen reads it to detect a
+// run that locks runtime changes).
+type queueLoadedMsg struct{ queue contract.QueueStatus }
+
+// runCanceledMsg acknowledges a stop request; the ambient poll then reflects the wind-down.
+type runCanceledMsg struct{}
+
+// loadQueueCmd fetches the queue on demand (outside the ambient heartbeat).
+func loadQueueCmd(c *api.Client) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		q, err := c.Queue(ctx)
+		if err != nil {
+			return errMsg{err}
+		}
+		return queueLoadedMsg{queue: q}
+	}
+}
+
+// cancelRunCmd stops the active server-side run. Shared by the NOW panel and the live screen.
+func cancelRunCmd(c *api.Client, id string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := c.Cancel(ctx, id); err != nil {
+			return errMsg{err}
+		}
+		return runCanceledMsg{}
+	}
+}

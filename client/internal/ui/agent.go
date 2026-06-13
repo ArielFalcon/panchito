@@ -295,7 +295,7 @@ func (m agentModel) triggerAction(action agentMenuAction) (agentModel, tea.Cmd) 
 		if m.busyRun != "" {
 			// The server hard-blocks (409) runtime changes while a run is active, and they
 			// must NOT affect the in-flight session anyway. Explain instead of failing late.
-			m.err = "a run is active on '" + m.busyRun + "' — its session keeps its current models; runtime changes are locked until it finishes. Stop it from Active sessions to change now."
+			m.err = "a run is active on '" + m.busyRun + "' — its session keeps its current models; runtime changes are locked until it finishes. Stop the run from the NOW panel to change now."
 			return m, nil
 		}
 		if draftNeedsDowngradeConfirmation(*m.draft) {
@@ -376,7 +376,7 @@ func (m agentModel) View() string {
 	right := renderSegs("", sg("mode ", colFaint), sg(string(cfg.Mode), colFg), sg(" · ", colFaint), sg(string(cfg.SingleProvider), colDim))
 	b.WriteString(accentRule(w, "agent runtime", right) + "\n")
 	if m.busyRun != "" {
-		b.WriteString(shadowStyle.Render(fmt.Sprintf("⚠ a run is active on '%s' — its session keeps its current models; runtime changes are locked until it finishes (stop it from Active sessions)", m.busyRun)) + "\n")
+		b.WriteString(shadowStyle.Render(fmt.Sprintf("⚠ a run is active on '%s' — its session keeps its current models; runtime changes are locked until it finishes (stop the run from the NOW panel)", m.busyRun)) + "\n")
 	}
 	b.WriteString("\n")
 

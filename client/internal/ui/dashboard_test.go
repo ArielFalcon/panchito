@@ -189,15 +189,15 @@ func TestDashboardCursorNavigation(t *testing.T) {
 	m := dashWith([]contract.AppView{{Name: "a"}, {Name: "b"}})
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
 	if m.cursor != 1 {
-		t.Fatalf("cursor after down = %d, want 1", m.cursor)
+		t.Fatalf("cursor after down = %d, want 1 (app b)", m.cursor)
 	}
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}) // clamp at bottom
-	if m.cursor != 1 {
-		t.Fatalf("cursor must clamp at bottom, got %d", m.cursor)
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}) // → the onboard row
+	if m.focus != focusFleet || m.cursor != 2 {
+		t.Fatalf("down past the last project should reach the onboard row (cursor=2); focus=%d cursor=%d", m.focus, m.cursor)
 	}
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
-	if m.cursor != 0 {
-		t.Fatalf("cursor after up = %d, want 0", m.cursor)
+	if m.cursor != 1 {
+		t.Fatalf("cursor after up from onboard = %d, want 1", m.cursor)
 	}
 }
 
@@ -212,7 +212,7 @@ func TestDashboardMenuKeyRetired(t *testing.T) {
 }
 
 // The dashboard is the single home surface now, so its keys must emit the destination
-// messages the retired menu used to (onboard / edit / delete / sessions / agents).
+// messages the retired menu used to (onboard / edit / delete / agents).
 func TestDashboardActionKeysEmitDestinations(t *testing.T) {
 	m := dashWith([]contract.AppView{{Name: "portfolio"}})
 	cases := []struct {
@@ -220,7 +220,6 @@ func TestDashboardActionKeysEmitDestinations(t *testing.T) {
 		want any
 	}{
 		{"o", onboardSelectedMsg{}},
-		{"s", sessionsSelectedMsg{}},
 		{"a", agentSelectedMsg{}},
 		{"e", editAppMsg{}},
 		{"d", deleteAppMsg{}},
@@ -234,10 +233,6 @@ func TestDashboardActionKeysEmitDestinations(t *testing.T) {
 		case onboardSelectedMsg:
 			if _, ok := cmd().(onboardSelectedMsg); !ok {
 				t.Fatalf("key %q → %T, want onboardSelectedMsg", c.key, cmd())
-			}
-		case sessionsSelectedMsg:
-			if _, ok := cmd().(sessionsSelectedMsg); !ok {
-				t.Fatalf("key %q → %T, want sessionsSelectedMsg", c.key, cmd())
 			}
 		case agentSelectedMsg:
 			if _, ok := cmd().(agentSelectedMsg); !ok {

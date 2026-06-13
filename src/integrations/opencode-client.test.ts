@@ -546,6 +546,85 @@ test("runOpencode degrades gracefully when the explorer yields no parseable brie
   assert.deepEqual(res.specs, ["x.spec.ts"]);
 });
 
+// ── Judgment-day fixes ───────────────────────────────────────────────────────
+
+test("runOpencode gives the explorer a TIGHTER timeout than the generator (cannot starve the queue)", async () => {
+  const timeouts: Record<string, number | undefined> = {};
+  const stub: AgentDeps = {
+    open: async (agent, _cwd, o) => {
+      timeouts[agent] = o?.timeoutMs;
+      return {
+        id: agent,
+        prompt: async () =>
+          agent === "qa-explorer"
+            ? '{"builtForSha":"abc123","objective":"o","blastRadius":[{"symbol":"S","file":"f","role":"r"}]}'
+            : '{"approved":true,"specs":["x.spec.ts"]}',
+        dispose: async () => {},
+      };
+    },
+  };
+  await runOpencode({ ...input, explorer: true, needsReview: false }, stub);
+  assert.ok(
+    timeouts["qa-explorer"]! < timeouts["qa-generator"]!,
+    `explorer (${timeouts["qa-explorer"]}) must be shorter than generator (${timeouts["qa-generator"]})`,
+  );
+});
+
+test("runOpencode treats an empty-blastRadius brief as no brief (degrades to inline exploration)", async () => {
+  let generatorPrompt = "";
+  const stub: AgentDeps = {
+    open: async (agent) => ({
+      id: agent,
+      prompt: async (text: string) => {
+        if (agent === "qa-explorer") return '{"builtForSha":"abc123","objective":"o","blastRadius":[]}';
+        if (!generatorPrompt) generatorPrompt = text;
+        return '{"approved":true,"specs":["x.spec.ts"]}';
+      },
+      dispose: async () => {},
+    }),
+  };
+  await runOpencode({ ...input, explorer: true, needsReview: false }, stub);
+  assert.doesNotMatch(generatorPrompt, /Exploration brief/, "an empty brief carries no signal and must not be injected");
+});
+
+test("parsePlan treats a brief with empty blastRadius as no brief", () => {
+  const out = parsePlan('{"objectives":[{"flow":"f","objective":"o","brief":{"builtForSha":"s","objective":"o","blastRadius":[]}}]}');
+  assert.equal(out[0]!.brief, undefined);
+  assert.deepEqual(out[0]!.symbols, []);
+});
+
+test("buildExplorerPrompt sanitizes attacker-influenceable changed-file names", () => {
+  const p = buildExplorerPrompt({
+    ...input,
+    intent: { type: "feat", breaking: false, message: "m", changedFiles: ["src/x.ts", "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"] },
+  });
+  assert.doesNotMatch(p, /ghp_AAAA/, "a token in a changed-file name must be redacted");
+});
+
+test("runOpencodeParallel single-objective fallback reuses the planned brief and skips a redundant explorer", async () => {
+  const opened: string[] = [];
+  let generatorPrompt = "";
+  const stub: AgentDeps = {
+    open: async (agent) => {
+      opened.push(agent);
+      return {
+        id: agent,
+        prompt: async (text: string) => {
+          if (text.includes("PLANNING ONLY")) {
+            return '{"objectives":[{"flow":"f","objective":"o","needsUi":true,"brief":{"builtForSha":"abc123","objective":"o","blastRadius":[{"symbol":"Planned.sym","file":"src/p.ts","role":"the planned role"}]}}]}';
+          }
+          if (!generatorPrompt) generatorPrompt = text;
+          return '{"approved":true,"specs":["x.spec.ts"]}';
+        },
+        dispose: async () => {},
+      };
+    },
+  };
+  await runOpencodeParallel({ ...input, mode: "diff", explorer: true, parallelDiff: true, needsReview: false }, stub);
+  assert.ok(!opened.includes("qa-explorer"), "the planner already explored — no redundant explorer session on the fallback");
+  assert.match(generatorPrompt, /the planned role/, "the planner's brief is reused in the generator prompt");
+});
+
 test("specFileForFlow produces a safe path under flows/", () => {
   assert.equal(specFileForFlow("Check Out / Pay!"), "flows/check-out-pay.spec.ts");
   assert.equal(specFileForFlow("   "), "flows/flow.spec.ts");
