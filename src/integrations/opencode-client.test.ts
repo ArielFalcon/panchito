@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   buildPrompt,
   buildContextTask,
@@ -172,6 +175,19 @@ test("parseVerdict with no verdict fails closed (approved=false) and flags the p
 
 test("parseVerdict flags a successfully parsed verdict", () => {
   assert.equal(parseVerdict('{ "approved": false, "specs": [] }').parsed, true);
+});
+
+test("parseVerdict reads the new generator contract (specs, no approved) — approval is the reviewer's job", () => {
+  // The generator no longer self-reports `approved`: the independent reviewer is the gate.
+  // The closing block is identified by its `specs` array, and a MISSING `approved` must not be
+  // read as a rejection (that would fail-close every run under the new contract).
+  const v = parseVerdict(
+    'done.\n{ "specs": ["login.spec.ts"], "specMetas": [{"file":"login.spec.ts","flow":"login","objective":"valid creds reach the dashboard","targets":[]}], "note": "" }',
+  );
+  assert.equal(v.parsed, true);
+  assert.deepEqual(v.specs, ["login.spec.ts"]);
+  assert.equal(v.approved, true); // default for the specs-only contract; the reviewer decides for real
+  assert.equal(v.specMetas?.length, 1);
 });
 
 test("parseVerdict handles a verdict with a NESTED object (regression: old regex truncated it)", () => {
@@ -757,6 +773,37 @@ test("askAssistant propagates error when deps.open throws", async () => {
   );
 });
 
+test("askAssistant requests text-only output so the model's reasoning never leaks", async () => {
+  let seenOpts: { textOnly?: boolean } | undefined;
+  const deps: OpencodeDeps = {
+    open: async () => ({
+      id: "s1",
+      prompt: async (_text: string, opts?: { textOnly?: boolean }) => {
+        seenOpts = opts;
+        return "**Resumen:** la corrida pasó.";
+      },
+      dispose: async () => {},
+    }),
+  };
+  const answer = await askAssistant({ context: "ctx", question: "¿qué pasó?" }, deps, "/m");
+  assert.equal(answer, "**Resumen:** la corrida pasó.");
+  assert.equal(seenOpts?.textOnly, true);
+});
+
+test("askAssistant opens the requested agent (reflection runs tool-less as qa-reflector; chat is the default)", async () => {
+  let openedAgent: string | undefined;
+  const deps: OpencodeDeps = {
+    open: async (agent: string) => {
+      openedAgent = agent;
+      return { id: "s", prompt: async () => "{}", dispose: async () => {} };
+    },
+  };
+  await askAssistant({ context: "c", question: "q", agent: "qa-reflector" }, deps, "/m");
+  assert.equal(openedAgent, "qa-reflector");
+  await askAssistant({ context: "c", question: "q" }, deps, "/m");
+  assert.equal(openedAgent, "qa-assistant"); // default unchanged for the TUI chat path
+});
+
 test("reviewIndependently propagates error when deps.open throws", async () => {
   const failingDeps: OpencodeDeps = {
     open: async () => { throw new Error("OpenCode auth failure"); },
@@ -782,6 +829,79 @@ test("reviewIndependently propagates error when session.prompt throws", async ()
     ),
     /prompt crashed/,
   );
+});
+
+test("reviewIndependently judges ONLY the artifact in a separate qa-reviewer session (independence guard)", async () => {
+  // Locks in the structural independence of the quality gate: the reviewer is a SEPARATE session
+  // (not the generator's), it is fed only the diff + the spec contents on disk, and it is told it
+  // has no access to the generator's reasoning. If a future change routes the reviewer through the
+  // generator's session or forwards its thread/reasoning, these assertions break.
+  const dir = mkdtempSync(join(tmpdir(), "qa-review-indep-"));
+  const e2eDir = join(dir, "e2e");
+  mkdirSync(e2eDir, { recursive: true });
+  writeFileSync(join(e2eDir, "login.spec.ts"), "// SPEC_SENTINEL_CONTENT\ntest('x', async () => {});");
+  const captured: { prompt?: string; agent?: string } = {};
+  const stub: OpencodeDeps = {
+    open: async (agent: string) => {
+      captured.agent = agent;
+      return {
+        id: "rev",
+        prompt: async (text: string) => {
+          captured.prompt = text;
+          return '{"approved":true,"corrections":[],"rationale":"defends the change"}';
+        },
+        dispose: async () => {},
+      };
+    },
+  };
+  try {
+    await reviewIndependently(
+      { diff: "DIFF_SENTINEL", specs: ["login.spec.ts"], mirrorDir: dir, e2eRelDir: "e2e", appName: "a", mode: "diff" },
+      stub,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const p = captured.prompt ?? "";
+  assert.equal(captured.agent, "qa-reviewer"); // a separate reviewer session, not the generator
+  assert.match(p, /DIFF_SENTINEL/); // judges the real artifact: the diff
+  assert.match(p, /SPEC_SENTINEL_CONTENT/); // ...and the spec contents read from disk
+  assert.match(p, /WITHOUT the generator's reasoning/i); // explicit independence framing
+  assert.match(p, /no access to the\s+generator's thought process/i);
+});
+
+test("reviewIndependently warns the operator when spec contents exceed the inline byte cap", async () => {
+  // The review silently degrades from "judge inline content" to "go read the files yourself" when
+  // the specs are too large to inline. That mode switch must be visible to the operator, not silent.
+  const dir = mkdtempSync(join(tmpdir(), "qa-review-big-"));
+  const e2eDir = join(dir, "e2e");
+  mkdirSync(e2eDir, { recursive: true });
+  writeFileSync(join(e2eDir, "big.spec.ts"), "// " + "x".repeat(45_000)); // > REVIEW_SPECS_MAX_BYTES
+  const warnings: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...a: unknown[]) => { warnings.push(a.map(String).join(" ")); };
+  const captured: { prompt?: string } = {};
+  const stub: OpencodeDeps = {
+    open: async () => ({
+      id: "s1",
+      prompt: async (text: string) => {
+        captured.prompt = text;
+        return '{"approved":true,"corrections":[],"rationale":"ok"}';
+      },
+      dispose: async () => {},
+    }),
+  };
+  try {
+    await reviewIndependently(
+      { diff: "d", specs: ["big.spec.ts"], mirrorDir: dir, e2eRelDir: "e2e", appName: "a", mode: "diff" },
+      stub,
+    );
+  } finally {
+    console.warn = origWarn;
+    rmSync(dir, { recursive: true, force: true });
+  }
+  assert.ok(warnings.some((w) => /exceed/i.test(w)), "a truncation warning must reach the operator");
+  assert.match(captured.prompt ?? "", /read each file with the read tool/); // the fallback path is taken
 });
 
 test("generateParallel collects all errors when every worker fails", async () => {

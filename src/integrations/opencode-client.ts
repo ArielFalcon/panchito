@@ -31,41 +31,23 @@ interface SessionEntry {
 
 const sessionRegistry = new Map<string, SessionEntry>();
 
-// Circuit breaker for the OpenCode client: if consecutive failures exceed the
-// threshold, the circuit opens and requests are rejected for a cooldown period.
-// This prevents cascading failures when the OpenCode server is down or overloaded.
-let circuitFailures = 0;
-let circuitOpen = false;
-let circuitLastFailure = 0;
-const CIRCUIT_THRESHOLD = 5;
-const CIRCUIT_COOLDOWN_MS = 60_000;
-
-function checkCircuit(): void {
-  if (circuitOpen) {
-    const elapsed = Date.now() - circuitLastFailure;
-    if (elapsed < CIRCUIT_COOLDOWN_MS) {
-      throw new Error(`OpenCode circuit breaker is OPEN (cooldown ${Math.round((CIRCUIT_COOLDOWN_MS - elapsed) / 1000)}s remaining)`);
-    }
-    circuitOpen = false;
-    circuitFailures = 0;
-  }
-}
-
-function recordCircuitFailure(): void {
-  circuitFailures++;
-  circuitLastFailure = Date.now();
-  if (circuitFailures >= CIRCUIT_THRESHOLD) {
-    circuitOpen = true;
-    console.warn(`[qa] OpenCode circuit breaker OPENED after ${circuitFailures} consecutive failures`);
-  }
-}
-
-function recordCircuitSuccess(): void {
-  if (circuitFailures > 0) {
-    circuitFailures = 0;
-    circuitOpen = false;
-  }
-}
+// Circuit breaker (extracted to ./circuit-breaker, BND-08). Re-exported so existing importers of
+// resetCircuit keep working.
+import { checkCircuit, recordCircuitFailure, recordCircuitSuccess, resetCircuit } from "./circuit-breaker";
+export { resetCircuit };
+// Verdict/JSON parsing (extracted to ./verdict-parse, BND-08). Re-exported so existing importers
+// (and tests) keep resolving extractJsonObjects/parseVerdict from this module.
+import { type FinalVerdict, extractJsonObjects, lastJsonMatching, parseVerdict } from "./verdict-parse";
+export { extractJsonObjects, parseVerdict };
+// Prompt/task assembly (extracted to ./prompts, BND-08). Re-exported so existing importers (runtime
+// + tests) keep resolving them from this module. The input types are shared via a type-only import
+// on the prompts side, so there is no runtime import cycle.
+import { specFileForFlow, buildWorkerPrompt, buildPlanPrompt, buildPrompt, buildContextTask, renderArchitectureContext } from "./prompts";
+export { specFileForFlow, buildWorkerPrompt, buildPlanPrompt, buildPrompt, buildContextTask, renderArchitectureContext };
+// Typed verdict contract + bounded repair (post-ADR-001, Phase 1 / 3.1). Schema validation of
+// the agent's generator + reviewer output, and the targeted re-prompt used on a contract miss.
+import { checkGeneratorVerdict, repairInstruction, parseReviewerVerdict } from "./verdict-validate";
+import { ManifestEntrySchema } from "../orchestrator/schemas";
 
 // Read fallback model mapping from opencode.json (root-level key). Keeps the
 // fallback logic in one place so the orchestrator can retry with a different
@@ -146,6 +128,9 @@ async function getEventClient() {
 export function disposeSharedClient(): void {
   sharedClient = undefined;
   sharedEventClient = undefined;
+  // The breaker is process-global and decoupled from the client lifecycle; reset it here
+  // so a restart-to-recover does not immediately re-throw "circuit breaker is OPEN".
+  resetCircuit();
 }
 
 // SSE live activity: routes OpenCode events to RunRecord logs in real time.
@@ -404,9 +389,12 @@ export function getOpenSessionCount(): number {
   return sessionRegistry.size;
 }
 
-// Read-only Q&A about a run. Opens a short-lived qa-assistant session.
+// Read-only Q&A about a run. Opens a short-lived session as the requested role.
 export async function askAssistant(
-  input: { context: string; question: string; instruction?: string },
+  // `agent` selects the role this Q&A runs as. It defaults to the read-only chat assistant; the
+  // reflection path passes "qa-reflector" — a tool-less role (no MCP) — so a one-shot reflection
+  // cannot touch engram or the filesystem the way the chat assistant (which keeps engram memory) can.
+  input: { context: string; question: string; instruction?: string; agent?: string },
   deps: OpencodeDeps,
   cwd: string,
 ): Promise<string> {
@@ -418,36 +406,31 @@ export async function askAssistant(
       `  1. One-line summary of what happened (verdict, phase, key numbers)`,
       `  2. Key detail: what failed and why (1-3 sentences, root cause in plain language)`,
       `  3. What to do next (if applicable: wait, re-run, check the issue, continue)`,
-      `  Use "───" to separate sections when the answer covers multiple topics.`,
       ``,
-      `CRITICAL RULES:`,
-      `- Respond in the SAME language as the question (Spanish → Spanish, English → English).`,
-      `  Use neutral, standard language — no regional slang, no colloquialisms.`,
+      `OUTPUT:`,
+      `- Reply with the ANSWER ONLY. Never include your reasoning, planning, or thought`,
+      `  process — no "Let me look at…", no step-by-step deliberation. Just the answer.`,
+      `- Respond in the SAME language as the question (Spanish → Spanish, English → English),`,
+      `  in neutral, standard language — no regional slang. Never use emojis.`,
       ``,
-      `TERMINAL-FRIENDLY FORMATTING (this renders in a TUI via Ink <Text>):`,
-      `  ALLOWED — these render correctly in the terminal:`,
-      `    · Blank lines to separate ideas.`,
-      `    · Indentation (2-3 spaces) for nested detail.`,
-      `    · CAPITALIZED single-word headers for structure (e.g. RESUMEN, CAUSA, ACCIÓN).`,
-      `    · Plain text lists with "-" or "·" as bullet markers.`,
-      `    · "───" (Unicode box-drawing) as visual separators between topics.`,
-      `  FORBIDDEN — these do NOT render in the terminal:`,
-      `    · **bold markdown**, \`inline code\`, # headings, > blockquotes.`,
-      `    · Code fences (\`\`\`), HTML tags, URLs (unless asked for).`,
-      `    · Emojis. Never use emojis.`,
+      `FORMATTING — your answer is rendered as Markdown in the terminal, so use it:`,
+      `  · **bold** for emphasis and key numbers.`,
+      `  · \`inline code\` for file names, commands, selectors and identifiers.`,
+      `  · "-" bullet lists for enumerations; short "##" headings when the answer spans topics.`,
+      `  Keep it concise and scannable — a few short paragraphs, not a wall of text.`,
       ``,
-      `- Translate internal terms to user-friendly language:`,
-      `  · "agent is working" → speak about what the agent is DOING (generating tests, exploring the page)`,
-      `  · "heartbeat" → never mention; instead say "the agent is still active"`,
-      `  · "pipeline phase" → speak about what's HAPPENING (testing, generating, validating)`,
-      `  · "step/status/verdict" → describe the outcome in plain words`,
-      `  · "classify/generate/validate/execute" → explain what the system is doing, not the phase name`,
-      `  · Never mention panchito, the TUI, or pipeline internals. Focus on the user's tests.`,
+      `PLAIN LANGUAGE — talk about the user's tests, not the tool's internals:`,
+      `  · Say what the agent is DOING (generating tests, exploring the page), not phase`,
+      `    names (classify/generate/validate/execute) or pipeline mechanics.`,
+      `  · Never mention "heartbeat"; say "the agent is still active" instead.`,
+      `  · Describe outcomes in plain words rather than raw step/status/verdict tokens.`,
       ``,
-      `- If the context lacks the answer, say: "No tengo suficiente información para responder eso."`,
+      `- If the context lacks the answer, reply (in the question's language): "No tengo suficiente información para responder eso."`,
     ].join("\n");
-  const session = await deps.open("qa-assistant", cwd);
+  const session = await deps.open(input.agent ?? "qa-assistant", cwd);
   try {
+    // textOnly drops the model's reasoning parts: the assistant's return value is shown
+    // verbatim to the operator, so a leaked chain-of-thought would surface in the chat.
     return await session.prompt([
       instruction,
       `Do not use any tools.`,
@@ -455,7 +438,7 @@ export async function askAssistant(
       input.context,
       `---`,
       `Question: ${input.question}`,
-    ].join("\n"));
+    ].join("\n"), { textOnly: true });
   } finally {
     await session.dispose().catch((err) => {
       console.warn(`[qa] session dispose failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -494,22 +477,16 @@ export interface OpencodeRunInput {
 // to avoid memory leaks on the server (sessions are never auto-cleaned).
 export interface OpencodeSession {
   id: string;
-  prompt(text: string): Promise<string>;
+  // textOnly returns only the model's final answer (type:"text" parts), excluding
+  // reasoning parts. Default (false) concatenates every text-bearing part — the
+  // generator/reviewer need that so a closing JSON emitted in a reasoning part survives.
+  prompt(text: string, opts?: { textOnly?: boolean }): Promise<string>;
   dispose(): Promise<void>;
 }
 
 export interface OpencodeDeps {
   open(agent: string, cwd: string, opts?: { signal?: AbortSignal; timeoutMs?: number; model?: string }): Promise<OpencodeSession>;
   cleanupOrphans?(maxAgeMs: number): Promise<number>;
-}
-
-interface FinalVerdict {
-  approved: boolean;
-  specs: string[];
-  specMetas?: SpecMeta[];
-  note?: string;
-  parsed: boolean; // false when NO verdict JSON was found (fail-closed default), so
-                   // callers can distinguish "agent rejected" from "we couldn't parse it".
 }
 
 export async function runOpencode(
@@ -539,7 +516,23 @@ export async function runOpencode(
   }
 
   try {
-    const finalText = await session.prompt(buildPrompt(input));
+    let finalText = await session.prompt(buildPrompt(input));
+
+    // Typed-contract guard (post-ADR-001, Phase 1): if the generator's closing JSON does not
+    // satisfy the contract (missing specs array, malformed specMetas, …), re-prompt ONCE with
+    // the specific issues before accepting it. Recovers good runs otherwise lost to a
+    // formatting slip; bounded to a single retry so a confused agent cannot stall the queue.
+    // Cost note: the repair spends a second prompt under the SAME per-call timeout, so a
+    // persistently-malformed generator can at most ~double this run's worst-case duration
+    // before the sequential queue frees — acceptable on the (rare) error path only.
+    const genCheck = checkGeneratorVerdict(finalText);
+    if (!genCheck.valid) {
+      console.warn(`[qa] generator verdict failed the typed contract (${genCheck.issues.join("; ")}); requesting one repair.`);
+      finalText = await session.prompt(repairInstruction("generator", genCheck.issues));
+      if (!checkGeneratorVerdict(finalText).valid) {
+        console.warn("[qa] generator verdict still invalid after repair — proceeding with best-effort parse (disk reconciliation still applies).");
+      }
+    }
 
     const verdict = parseVerdict(finalText);
     // Surface a parse miss loudly: a good run must not be silently turned into a
@@ -562,23 +555,51 @@ export async function runOpencode(
     // watched repo (same reason measured.json is gated to e2e — M1/D1).
     if (input.target !== "code" && verdict.specMetas && verdict.specMetas.length > 0) {
       const changeType = input.intent?.type ?? "unknown";
-      const entries: ManifestEntry[] = verdict.specMetas.map((m) => {
-        const specPath = join(input.mirrorDir, input.e2eRelDir, m.file);
-        const sha256 = sha256File(specPath);
-        return {
+      // Reconcile the agent's self-reported specMetas against DISK before writing the manifest
+      // ("disk over the agent's word", the same invariant reconcileSpecs and the parallel path
+      // enforce): a meta whose file is NOT on disk is a PHANTOM (the agent named a spec it never
+      // wrote) — drop it instead of committing a metadata entry for a non-existent test. A
+      // present file always yields a sha256, so its absence is the on-disk check AND guarantees
+      // every committed entry carries an integrity checksum.
+      const entries: ManifestEntry[] = verdict.specMetas
+        .map((m) => ({ m, sha256: sha256File(join(input.mirrorDir, input.e2eRelDir, m.file)) }))
+        .filter(({ m, sha256 }) => {
+          if (!sha256) {
+            console.warn(`[qa] WARNING: agent reported spec '${m.file}' in its manifest metadata but it is not on disk — dropping the phantom manifest entry.`);
+            return false;
+          }
+          return true;
+        })
+        .map(({ m, sha256 }) => ({
           id: m.flow,
           objective: m.objective,
           flow: m.flow,
           targets: m.targets,
           changeRef: { sha: input.sha, type: changeType },
-          ...(sha256 ? { sha256 } : {}),
-        };
+          sha256: sha256!,
+        }));
+      // Validate each entry against the SAME schema the read path uses, before writing
+      // (post-ADR-001, Phase 3.1): the orchestrator must never emit a manifest that its own
+      // read-validation would later reject (e.g. an entry whose `targets` are empty — a
+      // deliberate manifest invariant the generator's lenient specMetas can still produce).
+      // The bad entry is dropped here with a warning rather than corrupting the whole
+      // manifest. Complements the on-disk reconciliation above: disk proves the test exists,
+      // this proves its metadata is well-formed.
+      const validEntries = entries.filter((e) => {
+        const r = ManifestEntrySchema.safeParse(e);
+        if (!r.success) {
+          console.warn(`[qa] WARNING: dropping manifest entry '${e.id}' — it fails the manifest schema: ${r.error.issues.map((i) => i.message).join("; ")}`);
+          return false;
+        }
+        return true;
       });
-      upsertManifest(
-        realManifestFs,
-        join(input.mirrorDir, input.e2eRelDir, ".qa", "manifest.json"),
-        entries,
-      );
+      if (validEntries.length > 0) {
+        upsertManifest(
+          realManifestFs,
+          join(input.mirrorDir, input.e2eRelDir, ".qa", "manifest.json"),
+          validEntries,
+        );
+      }
     }
 
     return {
@@ -618,6 +639,10 @@ export interface ReviewInput {
 export interface ReviewResult {
   approved: boolean;
   corrections: string[];
+  // The reviewer's short reasoning for the verdict — captured on APPROVE and reject so a
+  // wrong auto-merge is auditable after the fact. Optional (older verdicts / parse misses
+  // omit it). Persisted on RunOutcome.gateSignals.reviewerRationale.
+  rationale?: string;
   // false ONLY when NO verdict JSON could be parsed (a parse miss, not a real rejection).
   // Absent/true ⇒ a genuine verdict. Lets the caller avoid burning a regeneration round on
   // non-actionable feedback, and distinguish "reviewer is broken" from "tests rejected".
@@ -663,21 +688,37 @@ export async function reviewIndependently(
       `3. Answer: could the changed feature be BROKEN and these tests STILL be green?`,
       `4. Be strict — a single anti-pattern in any spec means rejection.`,
       ``,
-      `Output your verdict as JSON with no text before or after:`,
-      `{"approved":false,"corrections":["file.spec.ts: specific actionable fix"]}`,
+      `Output your verdict as JSON with no text before or after. Always include a one or two`,
+      `sentence "rationale" explaining the verdict — on APPROVAL too (why these tests genuinely`,
+      `defend the change), not only on rejection.`,
+      `Prefix EVERY correction with exactly one class tag from this closed list so the failure`,
+      `is machine-classifiable: [false-positive] (asserts nothing / passes when the feature is`,
+      `broken), [wrong-objective] (does not test the change), [fragile-selector] (ambiguous or`,
+      `brittle locator), [no-cleanup] (leaves test data behind), or [other].`,
+      `{"approved":false,"rationale":"why, in 1-2 sentences","corrections":["[fragile-selector] file.spec.ts: specific actionable fix"]}`,
     ].join("\n");
 
-    const output = await session.prompt(prompt);
-    const json = lastJsonMatching(output, (x) => typeof x.approved === "boolean");
-    if (json) {
+    let output = await session.prompt(prompt);
+    let v = parseReviewerVerdict(output);
+    // The reviewer is the AUTHORITATIVE gate, so a formatting slip must not silently become a
+    // fail-closed rejection (which would burn a regeneration round on non-actionable feedback).
+    // Re-prompt ONCE with the specific issues; bounded so a broken reviewer cannot stall (the
+    // repair reuses REVIEWER_TIMEOUT_MS, so worst case it is spent twice — error path only).
+    if (!v.valid) {
+      console.warn(`[qa] reviewer verdict failed the typed contract (${v.issues.join("; ")}); requesting one repair.`);
+      output = await session.prompt(repairInstruction("reviewer", v.issues));
+      v = parseReviewerVerdict(output);
+    }
+    if (v.parsed && v.valid) {
       return {
-        approved: json.approved === true,
-        corrections: Array.isArray(json.corrections) ? (json.corrections as string[]) : [],
+        approved: v.approved,
+        corrections: v.corrections,
+        ...(v.rationale ? { rationale: v.rationale } : {}),
         parsed: true,
       };
     }
-    // Fail-closed direction (no false green), but flagged as a PARSE MISS so the caller
-    // does not mistake it for an actionable rejection and burn a regeneration round.
+    // Still unusable after one repair. Fail-closed direction (no false green), flagged as a
+    // PARSE MISS so the caller does not mistake it for an actionable rejection.
     return { approved: false, corrections: ["the independent reviewer produced no parseable verdict"], parsed: false };
   } finally {
     await session.dispose().catch((err) => {
@@ -704,6 +745,13 @@ function renderReviewSpecs(input: ReviewInput): string {
     const block = `### ${rel(s)}\n\`\`\`typescript\n${content}\n\`\`\``;
     totalBytes += Buffer.byteLength(block, "utf8");
     if (totalBytes > REVIEW_SPECS_MAX_BYTES) {
+      // The review silently degrades from "judge inline content" (deterministic, what the
+      // orchestrator placed in the prompt) to "agent reads the files itself" (a weaker,
+      // agent-driven path). Surface that mode switch to the operator instead of hiding it.
+      console.warn(
+        `[qa] WARNING: the combined contents of ${input.specs.length} spec(s) exceed the ${REVIEW_SPECS_MAX_BYTES}-byte inline cap — ` +
+          `the reviewer will read files itself instead of judging inlined contents (weaker determinism).`,
+      );
       return `## Specs to review\n\n${input.specs.map((n, i) => `${i + 1}. ${rel(n)}`).join("\n")}\n\n( spec contents exceed ${REVIEW_SPECS_MAX_BYTES} bytes — read each file with the read tool )`;
     }
     contents.push(block);
@@ -755,11 +803,6 @@ export function parsePlan(text: string): PlanObjective[] {
   });
 }
 
-// A spec filename derived from a flow, safe for the filesystem and Playwright's testMatch.
-export function specFileForFlow(flow: string): string {
-  const safe = flow.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "flow";
-  return `flows/${safe}.spec.ts`;
-}
 
 interface ManifestEntry {
   id: string;
@@ -767,6 +810,7 @@ interface ManifestEntry {
   flow: string;
   targets: string[];
   changeRef: { sha: string; type: string };
+  sha256?: string; // content checksum, written by the single-agent path (see ManifestEntrySchema)
 }
 
 // Injected fs for the manifest (the orchestrator owns this file; tested with stubs).
@@ -879,50 +923,6 @@ export async function generateParallel(
   return { results, errors };
 }
 
-// Surgical, self-contained instructions for ONE worker. Adapts based on needsUi:
-// UI workers get the Playwright MCP and explore-before-write instructions; code-only
-// workers use serena exclusively to derive tests from the affected symbols.
-export function buildWorkerPrompt(w: ParallelWorkerInput): string {
-  const rules = w.needsUi
-    ? [
-        w.baseUrl
-          ? `- Explore YOUR flow FIRST with the Playwright MCP: browser_navigate to the LIVE DEV URL, browser_snapshot, and use ONLY selectors verified against the real DOM. Never invent selectors.`
-          : `- No LIVE DEV URL: derive selectors from the code (serena) and note this limitation in a spec comment.`,
-        `- Prefer getByRole/getByLabel/getByTestId; scope to a section; no waitForTimeout; no network mocks.`,
-        `- At least ONE real assertion on the observable OUTCOME (not just a click). Clean up created data via cleanup().`,
-      ]
-    : [
-        `- This is a CODE-ONLY objective (no UI). Read the affected symbols with serena, write unit/integration tests using the repo's test framework.`,
-        `- Assert on BEHAVIOR (the correct output for given inputs), not implementation details. Include edge cases from the objective.`,
-        `- Do NOT attempt to navigate or use browser tools — you have no Playwright MCP.`,
-      ];
-  return [
-    `Write ONE test for this objective. Write ONLY your assigned file.`,
-    ``,
-    `## Objective`,
-    sanitizeText(w.objective).text,
-    ``,
-    `## Context`,
-    `- Flow: ${w.flow}`,
-    `- Affected code symbols (read them with serena): ${w.symbols.join(", ") || "(none specified)"}`,
-    `- Namespace prefix for any data you create: ${w.namespace}`,
-    w.needsUi ? `- LIVE DEV URL: ${w.baseUrl ?? "(not provided)"}` : null,
-    `- Write EXACTLY this file: ${w.e2eRelDir}/${w.specFile}  — do not create or edit any other file.`,
-    w.needsUi ? `- Import the shared harness: import { test, expect } from "../fixtures"` : null,
-    ``,
-    `## Rules`,
-    ...rules,
-    `- Do NOT write to the manifest — the orchestrator records metadata. Do NOT read or edit other workers' files.`,
-    ...(w.learnedRules
-      ? [
-          ``,
-          `## Lessons learned from past runs (avoid repeating these)`,
-          w.learnedRules,
-        ]
-      : []),
-    `- End your reply with ONLY this JSON: {"spec":"${w.specFile}"}`,
-  ].filter((l): l is string => l !== null).join("\n");
-}
 
 // The single routing decision between the single-agent path (runOpencode) and the
 // plan→workers fan-out (runOpencodeParallel). Re-generation passes (fix/review/coverage)
@@ -1018,6 +1018,14 @@ export async function runOpencodeParallel(
   }));
   const { results, errors } = await generateParallel(workers, deps, { signal: opts?.signal, concurrency: opts?.concurrency });
   opts?.onProgress?.(`[qa] workers: ${results.length} spec(s) written, ${errors.length} error(s)`);
+  if (errors.length > 0) {
+    // A failed worker means a PLANNED flow is silently absent from the suite. Surface it loudly
+    // (not only buried in the result note): when review is off, the run can otherwise report
+    // approved over a partial suite, so the missing coverage must be visible to the operator.
+    const writtenFlows = new Set(results.map((r) => r.flow));
+    const failedFlows = objectives.filter((o) => !writtenFlows.has(o.flow)).map((o) => o.flow);
+    console.warn(`[qa] WARNING: ${errors.length} worker(s) failed — these planned flows are NOT in the suite: ${failedFlows.join(", ") || "(unknown)"}. ${errors.join("; ")}`);
+  }
 
   // Phase 3 — CONSOLIDATE: the orchestrator writes the manifest from the plan (no worker race).
   const written = new Set(results.map((r) => r.flow));
@@ -1040,549 +1048,6 @@ export async function runOpencodeParallel(
     approved: specs.length > 0, // overridden by the orchestrator's independent reviewer when enabled
     note: errors.length ? `worker errors: ${errors.join("; ")}` : undefined,
   };
-}
-
-// Phase-1 planning prompt: analyse the whole repo, persist the coverage/importance map, and
-// return STRUCTURED objectives (no spec files). It must question its own list (drop naive flows,
-// keep main use cases + MVP happy paths + relevant edge cases).
-export function buildPlanPrompt(input: OpencodeRunInput): string {
-  const lessonsBlock = input.learnedRules
-    ? [``, `## Lessons learned from past runs (factor these into the objectives you plan)`, input.learnedRules]
-    : [];
-  if (input.mode === "diff") {
-    return [
-      `Plan E2E test objectives for the blast radius of commit ${input.sha} of ${input.repo}.`,
-      ``,
-      `## Phase 1 of 2 — PLANNING ONLY. Do NOT write any .spec.ts in this phase.`,
-      `1. Activate serena (activate_project). Read the commit intent and diff below; derive the`,
-      `   affected user flows (use find_referencing_symbols to widen from the changed symbols).`,
-      `2. Plan one objective per INDEPENDENT affected flow. Do NOT plan flows the commit does not`,
-      `   touch; if everything fits one flow, return a single objective.`,
-      `   Each objective is a concrete acceptance criterion in given/when/then form, with the code`,
-      `   symbols it exercises. Set "needsUi": true when the flow involves page navigation or DOM`,
-      `   interaction, and "needsUi": false for pure logic.`,
-      ``,
-      `## Change intent (Conventional Commits)`,
-      `- Type: ${input.intent?.type ?? "unknown"}${input.intent?.breaking ? " (BREAKING)" : ""}`,
-      `- Message: ${sanitizeText(input.intent?.message ?? "").text}`,
-      `- Changed files: ${input.intent?.changedFiles.join(", ") || "(unknown)"}`,
-      ``,
-      `## Commit diff`,
-      "```diff",
-      sanitizeText(input.diff).text,
-      "```",
-      ...(input.service
-        ? [
-            ``,
-            `## Cross-repo change (microservice)`,
-            `The commit belongs to the microservice ${input.service.repo} (read-only working copy at`,
-            `${input.service.mirrorDir}). Plan objectives for the FRONTEND flows that exercise the`,
-            `changed service behavior through the UI.`,
-          ]
-        : []),
-      ...lessonsBlock,
-      ``,
-      `## Output — end with ONLY this JSON (no spec files):`,
-      `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","symbols":["CheckoutService.pay"],"needsUi":true}]}`,
-      `If the commit's change is not testable through a user flow, output {"objectives":[]}.`,
-    ].join("\n");
-  }
-  const exhaustive = input.mode === "exhaustive";
-  return [
-    exhaustive
-      ? `Audit the ENTIRE E2E suite of ${input.repo} and plan a full regeneration.`
-      : `Analyze the WHOLE repository ${input.repo} and plan where to GROW the E2E suite.`,
-    ``,
-    `## Phase 1 of 2 — PLANNING ONLY. Do NOT write any .spec.ts in this phase.`,
-    `1. Activate serena (activate_project) and build a COVERAGE + IMPORTANCE map: read the existing`,
-    `   specs in ${input.e2eRelDir}/ and the app code (get_symbols_overview, find_symbol,`,
-    `   find_referencing_symbols) to find the important user flows and which are NOT covered.`,
-    `2. Persist this map to ${input.e2eRelDir}/.qa/analysis.json (flows, covered vs uncovered,`,
-    `   importance, lastSha:"${input.sha}"); update it incrementally if it already exists.`,
-    exhaustive
-      ? `3. Plan objectives for EVERY important flow (the suite is regenerated from scratch).`
-      : `3. Plan objectives ONLY for the important UNCOVERED flows (the delta over the existing suite).`,
-    `   QUESTION your own list before finalizing: drop trivial/naive items (a single button, static`,
-    `   content); KEEP the main use cases, the MVP happy paths, AND the relevant edge cases`,
-    `   (boundaries, error paths, negative/invalid input). Each objective is a concrete acceptance`,
-    `   criterion in given/when/then form, with the code symbols it exercises.`,
-    `   For each objective, set "needsUi": true when the flow involves page navigation or DOM`,
-    `   interaction, and "needsUi": false for pure logic (validation, calculation, data transformation).`,
-    ...lessonsBlock,
-    ``,
-    `## Output — end with ONLY this JSON (no spec files):`,
-    `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","symbols":["CheckoutService.pay"],"needsUi":true}]}`,
-    `If every important flow is already well covered, output {"objectives":[]}.`,
-  ].join("\n");
-}
-
-// Assembles the dynamic message for the agent. The "how" lives in
-// opencode/agent/qa-generator.md and the skills; only the task + context go here.
-// The diff/guidance are sanitized (cheap defense in depth).
-export function buildPrompt(input: OpencodeRunInput): string {
-  const isGenerationMode = input.mode !== "context";
-
-  // Review-fix mode: prepend the reviewer's actionable corrections before anything else, so
-  // the agent's first priority is to resolve them (the reviewer→generator feedback loop).
-  const reviewBlock = input.reviewCorrections?.length && isGenerationMode
-    ? [
-        `## Apply reviewer corrections (HIGHEST priority)`,
-        ``,
-        `An independent reviewer REJECTED the previous specs. Fix EACH item below precisely;`,
-        `do NOT rewrite specs that were not flagged. Where a fix concerns a selector or an`,
-        `assertion, re-verify it against the live DOM with the Playwright MCP before editing.`,
-        ``,
-        ...input.reviewCorrections.map((c) => `- ${c}`),
-        ``,
-      ]
-    : [];
-
-  // Coverage-improvement mode: the executed tests did not exercise some changed lines. Tell the
-  // agent exactly which, so it extends/adds tests to cover the change (the change-coverage loop).
-  const coverageBlock = input.coverageGap && isGenerationMode
-    ? [
-        `## Cover the change (HIGH priority)`,
-        ``,
-        `The tests ran green but did NOT exercise all the lines this commit changed. Extend or add`,
-        `tests so those lines are actually executed and asserted (covering ≠ asserting — assert the`,
-        `behavior of the changed code, do not just touch the line):`,
-        ``,
-        input.coverageGap,
-        ``,
-      ]
-    : [];
-
-  const learnedRulesBlock = input.learnedRules && isGenerationMode
-    ? [input.learnedRules, ``]
-    : [];
-
-  // Fix mode: prepend failure feedback before the original task.
-  const fixBlock = input.fixCases?.length && isGenerationMode
-    ? [
-        `## Fix failing tests`,
-        ``,
-        `The following tests FAILED during execution against DEV. Fix ONLY these`,
-        `tests; do NOT rewrite or touch tests that passed.`,
-        ``,
-        `Failed cases:`,
-        ...input.fixCases.map(
-          (c) => `- ${c.name}\n  Error: ${c.detail?.slice(0, 500) ?? "(no detail)"}`,
-        ),
-        ``,
-        `For each failure, use the Playwright MCP to explore the page and verify`,
-        `your fix BEFORE writing it:`,
-        `1. Read the test file to understand what it asserts`,
-        `2. Use browser_navigate + browser_snapshot to see the ACTUAL page structure`,
-        `3. Fix the ROOT CAUSE, guided by the error type:`,
-        `   - "strict mode violation" → scope the selector to a section first`,
-        `   - "locator.click: … not found" → the element doesn't exist; check role/label`,
-        `   - "expect(…).toBeVisible() timed out" → the element exists but isn't visible; check loading states`,
-        `   - "NS_ERROR_…" / network error → the URL or route is wrong; verify with browser_navigate`,
-        `   - "locator resolved to N elements" → use .first() ONLY as last resort; prefer scoping`,
-        `4. PRESERVE each test's objective and assertions — fix only what's broken`,
-      ]
-    : [];
-
-  const changeType = input.intent?.type ?? input.mode;
-  const openapiHint = Array.isArray(input.openapi) ? input.openapi.join(", ") : input.openapi;
-  const isCode = input.target === "code";
-  const memTarget = input.mode === "context" ? "context" : input.target;
-  return [
-    ...reviewBlock,
-    ...coverageBlock,
-    ...learnedRulesBlock,
-    ...fixBlock,
-    ...(fixBlock.length ? [``] : []),
-    buildTask(input),
-    ``,
-    ...(input.contextMap
-      ? [
-          renderArchitectureContext(
-            input.contextMap,
-            input.mode === "diff" ? input.intent?.changedFiles : undefined,
-          ) ?? "",
-          ``,
-        ]
-      : []),
-    `## Working rules`,
-    input.mode === "context"
-      ? [
-          `- This is a CONTEXT mode run: you are building the FE↔BE architecture map, not writing tests.`,
-          `- Your ONLY output is ${input.e2eRelDir}/.qa/context.json — do not create or modify any .spec.ts files.`,
-          `- Use ONLY serena to read code (activate_project, find_symbol, get_symbols_overview) — no Playwright MCP.`,
-          `- Extract from STRUCTURED sources: every route from a routing file, every operation from an OpenAPI spec.`,
-          `- Consult the architecture-mapping skill for detailed extraction patterns per source type.`,
-          `- The task block above has the complete procedure. Follow it precisely.`,
-        ]
-      : isCode
-      ? [
-          `- This is a CODE mode run: you are testing source-code logic, not a deployed web app.`,
-          `- Detect the test framework from the repo's dependencies. Read 2-3 existing test files for conventions. Match them exactly.`,
-          `- Place generated tests alongside existing ones. Use the repo's existing test command. Do not install new dependencies.`,
-          `- In your closing verdict JSON, include specMetas with {file, flow, objective, targets} for each spec so the orchestrator can write the manifest deterministically.`,
-          `- Classify each affected symbol:`,
-          `  * Pure function → unit test: call with inputs, assert outputs`,
-          `  * Module with deps → integration test: real module + test doubles`,
-          `  * Handler/endpoint → integration test: test client, real request, assert status + body`,
-          `  * Trivial delegation/getter/setter → skip`,
-          `- Assert on BEHAVIOR, not implementation. Include edge cases from the diff.`,
-          `- One objective per test, derived from commit intent. Use realistic test data.`,
-          `- Never write a test whose only assertion is "does not throw".`,
-        ]
-      : [
-          `- Work in the repo's tests folder: ${input.e2eRelDir}/ (source of truth in git). Reuse and improve existing fixtures/specs; do not duplicate.`,
-          `- In your closing verdict JSON, include specMetas with {file, flow, objective, targets} for each spec. The orchestrator writes the manifest deterministically from these.`,
-          `- Test-data prefix: ${input.namespace}`,
-          `- LIVE DEV URL: ${input.baseUrl ?? "(not provided — ABORT and report infra-error: no base URL)"}`,
-          `  In the SPEC files, reach the app via the PW_BASE_URL env var (the orchestrator sets it at run time).`,
-          `- Playwright MCP is AVAILABLE and you MUST use it BEFORE writing any test: browser_navigate to`,
-          `  the LIVE DEV URL above, then browser_snapshot to read the ACTUAL DOM. Selectors MUST be verified`,
-          `  against the real DOM, NEVER invented from code analysis alone.`,
-          `- Also inspect runtime signals with the Playwright MCP: browser_console_messages (catch JS errors`,
-          `  and warnings — a console error on the changed flow is a real bug signal) and browser_network_requests`,
-          `  (read the actual API calls/responses the flow makes, and assert against their real shape — status,`,
-          `  required fields, error responses — not invented contracts). Drive the backend through the UI only.`,
-          `- Consult the playwright-authoring skill for robust specs and this app's capabilities.`,
-          ...(openapiHint
-            ? [
-                `- OpenAPI contract(s) for this repo: ${openapiHint}. For any backend endpoint the affected flow touches, read the matching operation and assert against its contract (required fields, enums, validation/error responses). Drive the app through the web UI like a user — never call the API directly.`,
-              ]
-            : []),
-        ],
-    `- engram memory: scoped per app AND per mode (e2e, code, or context). Use project="${input.appName}" on ALL mem_save, mem_search, mem_context, and mem_session_summary calls. Prefix every topic_key with "${memTarget}/" so each mode's memory lives in its own namespace (e.g. topic_key="context/angular-routes" or "e2e/checkout-flow"). When searching, include "${memTarget}" in the query text to filter results to this mode. Never save or search without the mode prefix.`,
-    input.needsReview
-      ? `- An INDEPENDENT reviewer judges your specs after you finish and may return corrections for a follow-up turn. Self-review against the test-value-review criteria BEFORE finishing (every spec must fail if its feature breaks); do not rely on spawning a subagent.`
-      : `- Review disabled for this run.`,
-  ].join("\n");
-}
-
-// ── Architecture context injection ──────────────────────────────────────────
-//
-// The orchestrator loads e2e/.qa/context.json and passes it via contextMap. This
-// function renders the relevant slice as a prompt section so the agent receives
-// the FE↔BE map as a FIRST-CLASS input — no "read it if it exists" ambiguity.
-// For diff mode, it filters to only the routes/operations touched by the changed
-// files. For other modes (complete/exhaustive/manual), it renders the full map.
-
-// context.json is read from the WATCHED repo (and committed by this system's own PRs), so
-// it is attacker-influenceable. Every field is sanitized before it reaches the test-writing
-// agent (prompt-injection / secret-exfil defense), and the map is BOUNDED so a huge file
-// cannot blow the token budget. `s()` redacts; MAX_ITEMS caps each section.
-export function renderArchitectureContext(
-  ctx: ArchitectureContext,
-  changedFiles?: string[],
-): string | null {
-  if (!ctx.routes?.length && !ctx.api?.length) return null;
-
-  const s = (x: unknown): string => sanitizeText(String(x ?? "")).text;
-  const MAX_ITEMS = 200;
-  const MAX_LEN = 20_000;
-
-  const relevantLinks = (changedFiles?.length
-    ? ctx.feBe?.filter((link) => {
-        // Scope by terms specific enough to be meaningful: a route of "/" (or any 1-2 char
-        // term) is a substring of EVERY file path and would defeat the scoping entirely.
-        const terms = [link.route, link.via ?? "", link.operationId].filter((t) => t && t.length >= 3);
-        return changedFiles.some((f) => terms.some((t) => f.includes(t)));
-      }) ?? ctx.feBe ?? []
-    : ctx.feBe ?? []
-  ).slice(0, MAX_ITEMS);
-
-  const lines: string[] = [];
-  lines.push("## Architecture context (from e2e/.qa/context.json)");
-  lines.push(`Built at ${s(ctx.builtAtSha).slice(0, 7)} — the FE↔BE map this app's QA uses to cross the frontend→backend boundary.`);
-  lines.push("");
-
-  if (ctx.routes.length) {
-    lines.push(`### Routes (${ctx.routes.length} entry points)`);
-    for (const r of ctx.routes.slice(0, MAX_ITEMS)) {
-      lines.push(`- \`${s(r.path)}\` → ${s(r.component ?? "(unknown component)")}${r.name ? ` ("${s(r.name)}")` : ""}`);
-    }
-    lines.push("");
-  }
-
-  if (ctx.api.length) {
-    lines.push(`### API operations (${ctx.api.length} endpoints)`);
-    for (const o of ctx.api.slice(0, MAX_ITEMS)) {
-      lines.push(`- \`${s(o.operationId)}\`: ${s(o.method)} ${s(o.path)}${o.service ? ` (${s(o.service)})` : ""}`);
-    }
-    lines.push("");
-  }
-
-  if (relevantLinks.length) {
-    lines.push(`### FE↔BE links (${relevantLinks.length} of ${ctx.feBe?.length ?? 0} total)`);
-    lines.push("Each link tells you which frontend route calls which backend operation — use this to widen the blast radius:");
-    for (const l of relevantLinks) {
-      lines.push(`- Route \`${s(l.route)}\` → \`${s(l.operationId)}\`${l.via ? ` (via ${s(l.via)})` : ""}`);
-    }
-    lines.push("");
-  }
-
-  if (ctx.flows?.length) {
-    lines.push("### Named flows");
-    for (const f of ctx.flows.slice(0, MAX_ITEMS)) {
-      const opList = f.operations?.length ? ` → ${f.operations.slice(0, MAX_ITEMS).map(s).join(", ")}` : "";
-      lines.push(`- **${s(f.id)}**: ${f.routes.slice(0, MAX_ITEMS).map(s).join(", ")}${opList}`);
-    }
-    lines.push("");
-  }
-
-  lines.push("When the blast radius from the diff touches a route, use its FE↔BE links");
-  lines.push("to also consider the backend operations — a frontend change can break backend");
-  lines.push("behaviour and vice-versa.");
-  const out = lines.join("\n");
-  return out.length > MAX_LEN ? out.slice(0, MAX_LEN) + "\n…(context truncated)" : out;
-}
-
-// ── context mode: build the FE↔BE architecture map ──────────────────────────
-//
-// The agent extracts routes from Angular routing, API operations from OpenAPI specs,
-// and joins them via the generated API clients' operationIds. The result is written
-// to e2e/.qa/context.json and validated deterministically by the orchestrator.
-// This map is then consumed by diff-mode runs to cross the FE→BE boundary without
-// re-deriving the architecture from raw code on every run.
-
-export function buildContextTask(input: OpencodeRunInput): string {
-  const openapiHint = Array.isArray(input.openapi) ? input.openapi.join(", ") : input.openapi;
-  const serviceLines = input.services?.length
-    ? [
-        ``,
-        `## Microservice repos (${input.services.length})`,
-        `This app's backend is split into microservices. Each repo below is mirrored READ-ONLY;`,
-        `extract its OpenAPI operations into the SAME context.json, setting each operation's`,
-        `"service" field to the repo name shown here:`,
-        ``,
-        ...input.services.flatMap((s) => {
-          const hint = Array.isArray(s.openapi) ? s.openapi.join(", ") : s.openapi;
-          return [
-            `- **${s.repo}** — working copy at: ${s.mirrorDir}`,
-            ...(hint ? [`  OpenAPI hint: ${hint} (relative to that working copy)`] : [`  No OpenAPI hint — search that working copy for openapi/swagger files.`]),
-          ];
-        }),
-        ``,
-        `The feBe JOIN is still derived from THIS frontend repo's API clients: a client method's`,
-        `operationId must match an operation extracted from one of the services above (or from`,
-        `this repo's own specs). Do not invent links for services the frontend never calls.`,
-      ]
-    : [];
-  return [
-    `Build or refresh the FE↔BE architecture map for ${input.repo}.`,
-    ``,
-    `## Goal`,
-    `Produce a distilled map of the app's architecture so future QA runs can cross the`,
-    `frontend→backend boundary without re-deriving it from raw code.`,
-    ``,
-    `## What to produce`,
-    `Write a single JSON file at ${input.e2eRelDir}/.qa/context.json with these sections:`,
-    ``,
-    `1. **routes** — every frontend entry URL (the unit an E2E targets) + the component it renders.`,
-    `   Extract FROM the Angular routing files (e.g. app.routes.ts, *.routes.ts).`,
-    `   Required per entry: path (e.g. "/checkout"). Optional: name, component, source.`,
-    ``,
-    `2. **api** — every backend operation the app calls.`,
-    `   Extract FROM the OpenAPI specs${openapiHint ? ` (hint: ${openapiHint})` : " (search with serena/glob for openapi or swagger files)"}.`,
-    `   Required per entry: operationId, method (GET/POST/...), path. Optional: service, spec.`,
-    ``,
-    `3. **feBe** — the JOIN between frontend routes and backend operations: which route calls which operation.`,
-    `   Derive BY following each generated API client method to its operationId.`,
-    `   Required per entry: route (a path from routes), operationId (from api). Optional: via (the client method).`,
-    `   THE JOIN IS THE WHOLE POINT: every link must resolve to a known route AND a known operation.`,
-    ``,
-    `4. **flows** (optional) — named user flows grouping routes + operations for readability.`,
-    ...serviceLines,
-    ``,
-    `## Procedure`,
-    `1. Activate serena (activate_project) on the working directory.`,
-    `2. Find ALL Angular routing files (serena glob: **/*routes*.ts, **/app-routing*.ts).`,
-    `   For each route definition (path + component), add an entry to routes.`,
-    `3. Find ALL OpenAPI spec files${openapiHint ? ` (start with ${openapiHint})` : ""}.${input.services?.length ? " Include every microservice repo listed above (their working copies are local paths you can read)." : ""}`,
-    `   For each operation (operationId + method + path), add an entry to api.`,
-    `4. Find the generated API client files (typically src/app/generated/ or similar).`,
-    `   For each client method that calls a backend operation, map its call site to a route`,
-    `   and add the link to feBe. The operationId in the client MUST match an api entry.`,
-    `5. Self-validate: every feBe route exists in routes AND every feBe operationId exists in api.`,
-    `   Remove any dangling link BEFORE writing.`,
-    `6. Write ${input.e2eRelDir}/.qa/context.json with the four sections + "builtAtSha":"${input.sha}".`,
-    ``,
-    `## Rules`,
-    `- Extract from STRUCTURED sources, never invent. Every route comes from a routing file;`,
-    `  every operation from an OpenAPI spec; every link from a generated client.`,
-    `- If no OpenAPI spec is found, leave api and feBe empty (a repo with no backend).`,
-    `- If routing is file-based (not a central Routes array), enumerate the route files.`,
-    `- Do NOT guess or hallucinate paths/operationIds. If a source is missing, leave that section empty.`,
-    `- Keep the map small: this is an E2E authoring aid, not exhaustive documentation.`,
-    ``,
-    `## Output`,
-    `End with ONLY this JSON (no other text):`,
-    `{"approved":true,"specs":["${input.e2eRelDir}/.qa/context.json"],"note":"built architecture map with X routes, Y api operations, Z links"}`,
-  ].join("\n");
-}
-
-// The mode-specific task block.
-function buildTask(input: OpencodeRunInput): string {
-  if (input.mode === "complete" || input.mode === "exhaustive") {
-    return [
-      input.mode === "exhaustive"
-        ? `Audit and REGENERATE the entire E2E suite of ${input.repo} from scratch.`
-        : `Analyze the WHOLE repository ${input.repo} and grow the E2E suite where it matters.`,
-      ``,
-      `1. Read the existing tests in ${input.e2eRelDir}/ and the app code (use serena:`,
-      `   activate_project, get_symbols_overview, find_symbol, find_referencing_symbols) to`,
-      `   build a COVERAGE + IMPORTANCE map: which user flows already have tests and which`,
-      `   important/complex flows do NOT. Until real coverage instrumentation exists,`,
-      `   estimate coverage by reading the existing specs and the code.`,
-      `2. Persist this analysis in ${input.e2eRelDir}/.qa/analysis.json (flows, covered vs`,
-      `   uncovered, importance, lastSha:"${input.sha}") so it need not be redone from`,
-      `   scratch next time; if it already exists, update it incrementally.`,
-      input.mode === "exhaustive"
-        ? `3. Re-evaluate EVERY existing test for correctness, value and necessity (apply the test-value-review criteria): remove or rewrite tests that are trivial, false positives, redundant or obsolete. Ensure every important flow is covered — a fully re-evaluated suite, not a delta.`
-        : `3. Generate tests ONLY for the important UNCOVERED flows (the delta over the existing suite). Do not duplicate existing coverage.`,
-    ].join("\n");
-  }
-  if (input.mode === "manual") {
-    return [
-      `Generate/update E2E tests for ${input.repo}, FOCUSED on the following guidance:`,
-      ``,
-      sanitizeText(input.guidance ?? "(no guidance provided)").text,
-      ``,
-      `Use serena to read the relevant code and the existing ${input.e2eRelDir}/ suite.`,
-      `Stay focused on the guidance; do not generate unrelated tests.`,
-    ].join("\n");
-  }
-  if (input.mode === "context") return buildContextTask(input);
-
-  // diff (default)
-  const intent = input.intent;
-  const svcOpenapi = Array.isArray(input.service?.openapi) ? input.service.openapi.join(", ") : input.service?.openapi;
-  const serviceBlock = input.service
-    ? [
-        ``,
-        `## Cross-repo change (microservice)`,
-        `The commit under test belongs to the microservice ${input.service.repo}, NOT to this frontend repo.`,
-        `- The service's working copy (READ-ONLY) is at: ${input.service.mirrorDir}`,
-        ...(svcOpenapi ? [`- The service's OpenAPI contract(s): ${svcOpenapi} (paths relative to that working copy)`] : []),
-        `- Use the architecture context below (operations whose service matches this repo) plus the`,
-        `  service's code and contract to find which frontend routes and flows this change affects.`,
-        `- Exercise the backend ONLY through the frontend UI at the LIVE DEV URL — never call the service directly.`,
-      ]
-    : [];
-  return [
-    `Generate/update E2E tests for the flows affected by commit ${input.sha} of ${input.repo}.`,
-    ``,
-    `## Change intent (Conventional Commits)`,
-    `- Type: ${intent?.type ?? "unknown"}${intent?.breaking ? " (BREAKING)" : ""}`,
-    `- Message: ${sanitizeText(intent?.message ?? "").text}`,
-    `- Changed files (derive the scope/area from these): ${intent?.changedFiles.join(", ") || "(unknown)"}`,
-    `The message gives the INTENT; derive each test's objective from it. But CROSS-CHECK`,
-    `against the diff: if the code does more than the message claims, cover what the code`,
-    `actually changes, not just what the message promises.`,
-    ``,
-    `## Commit diff`,
-    "```diff",
-    sanitizeText(input.diff).text,
-    "```",
-    ...serviceBlock,
-    ``,
-    `## Architecture context`,
-    `If ${input.e2eRelDir}/.qa/context.json exists, READ it to understand which routes and`,
-    `API operations the changed files belong to. Use the feBe links to widen the blast`,
-    `radius across the frontend→backend boundary: a frontend change may affect the`,
-    `backend behaviour and vice-versa. If the map is missing or stale, note the`,
-    `limitation explicitly in your verdict note.`,
-    ``,
-    `## Scope budget (diff mode — do NOT over-work)`,
-    `The blast radius IS your budget. This is ONE commit, so keep generation fast and focused:`,
-    `- Read ONLY the changed symbols and their direct callers/callees (find_referencing_symbols).`,
-    `- Do NOT read the whole repository, the entire e2e suite, or unrelated flows/files.`,
-    `- Read existing specs ONLY for the one or two flows this commit actually touches.`,
-    `- Explore ONLY the page(s) the change affects — not the whole app.`,
-    `A handful of focused specs is the right output for a single-commit diff, not a suite rewrite.`,
-  ].join("\n");
-}
-
-// Extracts every BALANCED top-level JSON object from free-form agent text, respecting
-// string literals and escapes (so a `}` inside a string, or nested objects, never mis-split
-// the span). Returns them in document order; callers take the last one matching their shape.
-// This replaces brittle regex/lastIndexOf scanning of the agent's closing JSON.
-export function extractJsonObjects(text: string): unknown[] {
-  const objs: unknown[] = [];
-  let depth = 0;
-  let start = -1;
-  let inStr = false;
-  let esc = false;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (ch === "\\") esc = true;
-      else if (ch === '"') inStr = false;
-      continue;
-    }
-    if (ch === '"') inStr = true;
-    else if (ch === "{") {
-      if (depth === 0) start = i;
-      depth++;
-    } else if (ch === "}") {
-      if (depth > 0) {
-        depth--;
-        if (depth === 0 && start >= 0) {
-          try {
-            objs.push(JSON.parse(text.slice(start, i + 1)));
-          } catch {
-            /* not valid JSON; ignore this span */
-          }
-          start = -1;
-        }
-      }
-    }
-  }
-  return objs;
-}
-
-// Returns the LAST extracted JSON object for which `pred` holds, or undefined.
-function lastJsonMatching<T = Record<string, unknown>>(text: string, pred: (o: Record<string, unknown>) => boolean): T | undefined {
-  const objs = extractJsonObjects(text);
-  for (let i = objs.length - 1; i >= 0; i--) {
-    const o = objs[i];
-    if (o && typeof o === "object" && pred(o as Record<string, unknown>)) return o as T;
-  }
-  return undefined;
-}
-
-// Extracts the agent's closing verdict JSON: the LAST balanced object carrying a boolean
-// `approved`. If none is valid, assumes not approved (fail-closed) so nothing publishes by
-// accident, and flags `parsed:false` so callers can tell a parse miss from a real rejection.
-export function parseVerdict(text: string): FinalVerdict {
-  const o = lastJsonMatching(text, (x) => typeof x.approved === "boolean");
-  if (o) {
-    return {
-      approved: o.approved as boolean,
-      specs: Array.isArray(o.specs) ? (o.specs as string[]) : [],
-      specMetas: parseSpecMetas(o.specMetas),
-      note: typeof o.note === "string" ? o.note : undefined,
-      parsed: true,
-    };
-  }
-  return { approved: false, specs: [], note: "the agent emitted no parseable verdict", parsed: false };
-}
-
-function parseSpecMetas(raw: unknown): SpecMeta[] | undefined {
-  if (!Array.isArray(raw)) return undefined;
-  const metas: SpecMeta[] = [];
-  for (const entry of raw) {
-    if (typeof entry !== "object" || entry === null) continue;
-    const e = entry as Record<string, unknown>;
-    const file = typeof e.file === "string" ? e.file.trim() : "";
-    const flow = typeof e.flow === "string" ? e.flow.trim() : "";
-    const objective = typeof e.objective === "string" ? e.objective.trim() : "";
-    const targets = Array.isArray(e.targets)
-      ? e.targets.filter((t): t is string => typeof t === "string")
-      : [];
-    if (file && flow && objective) {
-      metas.push({ file, flow, objective, targets });
-    }
-  }
-  return metas.length > 0 ? metas : undefined;
 }
 
 // Timeout wrapper for a promise: rejects if it elapses. Prevents a hung agent run
@@ -1622,9 +1087,12 @@ const MAX_AGENT_TIMEOUT_MS = Math.max(...Object.values(TIMEOUT_BY_MODE));
 // tests (like the Playwright runner). The SDK is imported lazily so tests do not
 // require the package. OPENCODE_SERVE_URL points to the `opencode` container.
 export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
-  const dispatcherTimeoutMs = Number(process.env.OPENCODE_TIMEOUT_MS) || MAX_AGENT_TIMEOUT_MS;
-  // Raise undici timeouts for the worst-case agent turn (exhaustive = 25 min) so our per-prompt
-  // withTimeout is the effective deadline, and route through any configured HTTP proxy.
+  // The undici transport timeout must exceed EVERY per-prompt withTimeout, or it aborts the
+  // request before our own deadline fires. The reviewer has its OWN budget (REVIEWER_TIMEOUT_MS,
+  // 6 min) that is independent of the generator's; if an operator sets a small OPENCODE_TIMEOUT_MS
+  // it must NOT drag the transport below the reviewer's budget. Take the max of all of them + headroom.
+  const generatorMax = Number(process.env.OPENCODE_TIMEOUT_MS) || MAX_AGENT_TIMEOUT_MS;
+  const dispatcherTimeoutMs = Math.max(generatorMax, REVIEWER_TIMEOUT_MS) + 30_000;
   await installHttpDispatcher(dispatcherTimeoutMs);
 
   const client = await getSharedClient();
@@ -1641,15 +1109,25 @@ export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
       const entry: SessionEntry = { id, agent, cwd, openedAt: Date.now() };
       sessionRegistry.set(id, entry);
 
-      // Wire external abort signal (cancel endpoint) to session deletion.
-      const onAbort = () => client.session.delete({ path: { id } }).catch(() => {});
+      // Wire external abort signal (cancel endpoint) to run interruption + session deletion.
+      // session.delete alone does NOT stop a running turn server-side; abort interrupts the
+      // in-flight run so a cancel actually frees the model/session compute, then we dispose.
+      const onAbort = () => {
+        client.session.abort({ path: { id } }).catch(() => {});
+        client.session.delete({ path: { id } }).catch(() => {});
+      };
       opts?.signal?.addEventListener("abort", onAbort, { once: true });
 
       const promptTimeoutMs = opts?.timeoutMs ?? dispatcherTimeoutMs;
 
+      // Interrupt the in-flight run on the OpenCode server. withTimeout only rejects the
+      // orchestrator's await; without this, a wedged agent turn keeps running (holding a
+      // session, burning model tokens) until its natural end or the 30-min orphan sweep.
+      const abortRun = () => client.session.abort({ path: { id } }).catch(() => {});
+
       return {
         id,
-        prompt: (text) =>
+        prompt: (text, promptOpts) =>
           withTimeout(
             (() => {
               checkCircuit();
@@ -1667,7 +1145,7 @@ export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
                       throw new Error(`OpenCode session.prompt failed: ${JSON.stringify(res.error)}`);
                     }
                     recordCircuitSuccess();
-                    return extractText(res.data?.parts);
+                    return extractText(res.data?.parts, promptOpts);
                   })
                   .catch((err) => {
                     recordCircuitFailure();
@@ -1685,7 +1163,12 @@ export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
             })(),
             promptTimeoutMs,
             "OpenCode prompt",
-          ),
+          ).catch((err: unknown) => {
+            // On timeout (or any failure that left work in flight), interrupt the server run
+            // so it stops consuming compute after the orchestrator has already given up.
+            abortRun();
+            throw err;
+          }),
         dispose: async () => {
           try {
             await client.session.delete({ path: { id } });
@@ -1717,10 +1200,36 @@ export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
   };
 }
 
+// textOf reads the string `text` field of a response part (empty when absent).
+function textOf(p: { type: string }): string {
+  const text = (p as { text?: unknown }).text;
+  return typeof text === "string" ? text : "";
+}
+
+// Strips reasoning wrappers a model may inline in a text part (<think>…</think> etc.) —
+// used only on the textOnly fallback path, so a leaked chain-of-thought is removed.
+function stripReasoningWrappers(s: string): string {
+  return s.replace(/<(think|thought|reasoning)>[\s\S]*?<\/\1>/gi, "").trim();
+}
+
 // Concatenates the text of the text parts in the agent's response.
-function extractText(parts: Array<{ type: string }> | undefined): string {
-  return (parts ?? [])
-    .filter((p): p is { type: "text"; text: string } => p.type === "text")
-    .map((p) => p.text)
-    .join("");
+function extractText(parts: Array<{ type: string }> | undefined, opts?: { textOnly?: boolean }): string {
+  const all = parts ?? [];
+  // Default: concatenate the text of EVERY part that carries a string `text` field, not
+  // only type === "text". A model can emit its closing verdict in a reasoning/other
+  // text-bearing part; restricting to "text" silently dropped it, so the JSON verdict
+  // extractor saw an empty string and the run failed closed. The downstream
+  // lastJsonMatching picks the LAST valid JSON, so any extra prose concatenated here is
+  // harmless for the generator/reviewer.
+  if (!opts?.textOnly) {
+    return all.map(textOf).join("");
+  }
+  // textOnly: keep ONLY the final answer (type === "text"), excluding reasoning parts —
+  // the assistant returns its text verbatim to the operator, so a concatenated
+  // chain-of-thought would leak into the chat. If the model emitted NO plain text part
+  // (unusual), fall back to the full content with reasoning wrappers stripped rather than
+  // returning a blank answer (never swallow into an empty result).
+  const textOnly = all.filter((p) => p.type === "text").map(textOf).join("");
+  if (textOnly.trim() !== "") return textOnly;
+  return stripReasoningWrappers(all.map(textOf).join(""));
 }
