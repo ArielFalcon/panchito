@@ -51,6 +51,10 @@ qa:
                                # (>=2 independent objectives; falls back to single-agent
                                # otherwise). Default off; recommended for apps with services[]
                                # or commits whose blast radius spans several independent flows.
+  # explorer: true             # single-agent diff runs first do a read-only "explorer" pass that
+                               # distills the blast radius into a brief, so the generator gets a
+                               # clean context window instead of re-exploring. Default off; adds one
+                               # cheap session per run. (No effect on parallelDiff fan-out runs.)
   # Change-coverage (the value keystone): does the suite actually exercise the lines the commit
   # changed? Optional; defaults to mode "signal", minRatio 0.7.
   changeCoverage:

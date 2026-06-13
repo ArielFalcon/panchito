@@ -11,6 +11,44 @@ import { test as base, expect, type BrowserContext, type Page } from "@playwrigh
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+// system-owned: do not edit. A V8 coverage entry plus its (best-effort) source map. The
+// orchestrator uses `map` to translate covered bundle bytes back to original source files.
+interface CoverageEntry {
+  url?: string;
+  source?: string;
+  map?: unknown;
+}
+
+// system-owned: do not edit. For each script, parse its `//# sourceMappingURL=` and attach the
+// resolved source map (inline data-URI decoded; external .map fetched from DEV). Best-effort: any
+// failure leaves `map` unset and the orchestrator falls back to URL-suffix resolution.
+async function attachSourceMaps(entries: CoverageEntry[]): Promise<void> {
+  for (const e of entries) {
+    if (!e.source || !e.url) continue;
+    // The LAST sourceMappingURL comment wins (source-map spec): a minified bundle can inline an
+    // earlier library chunk's own `//# sourceMappingURL=` in a string, which must not be mistaken
+    // for the bundle's real (trailing) map reference.
+    const all = e.source.match(/\/\/[#@]\s*sourceMappingURL=(\S+)/g);
+    if (!all || all.length === 0) continue;
+    const ref = /sourceMappingURL=(\S+)/.exec(all[all.length - 1]!)![1]!;
+    try {
+      if (ref.startsWith("data:")) {
+        const comma = ref.indexOf(",");
+        const meta = ref.slice(5, comma);
+        const data = ref.slice(comma + 1);
+        const json = meta.includes("base64") ? Buffer.from(data, "base64").toString("utf8") : decodeURIComponent(data);
+        e.map = JSON.parse(json);
+      } else {
+        const mapUrl = new URL(ref, e.url).toString();
+        const res = await fetch(mapUrl);
+        if (res.ok) e.map = await res.json();
+      }
+    } catch {
+      /* best-effort: no map → URL-suffix fallback */
+    }
+  }
+}
+
 export interface QaFixtures {
   namespace: string; // the run's data prefix (qa-bot-<sha>)
   authenticate: () => Promise<void>; // the app's real login (Keycloak)
@@ -81,6 +119,11 @@ export const test = base.extend<QaFixtures>({
       if (enabled) {
         try {
           const entries = await page.coverage.stopJSCoverage();
+          // Attach each script's SOURCE MAP so the orchestrator can map covered BUNDLE bytes back
+          // to original source files+lines. Without this, a hashed/bundled deploy (Angular/React
+          // prod) is permanently "unknown" — the served URL never matches a repo path. Best-effort:
+          // a missing map just falls back to URL-suffix resolution (unbundled/dev).
+          await attachSourceMaps(entries as unknown as CoverageEntry[]);
           // Per-namespace subdir (qa-bot-<sha>): the orchestrator reads only this run's dumps.
           const dir = join(process.cwd(), ".qa", "coverage", process.env.PW_NAMESPACE ?? "local");
           mkdirSync(dir, { recursive: true });

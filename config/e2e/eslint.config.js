@@ -46,4 +46,16 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    // cleanup.spec.ts is the orchestrator's dedicated teardown pass, not a normal test: it
+    // legitimately has NO assertions (it deletes orphaned data) and uses test.skip() to no-op
+    // in a normal run. Without this exemption the seed file fails its OWN static gate
+    // (playwright/expect-expect → error), marking EVERY validating run `invalid` regardless of
+    // the agent's specs. Exempt only this file.
+    files: ["cleanup.spec.ts"],
+    rules: {
+      "playwright/expect-expect": "off",
+      "playwright/no-skipped-test": "off",
+    },
+  },
 );
