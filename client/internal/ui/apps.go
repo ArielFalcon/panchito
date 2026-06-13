@@ -64,6 +64,7 @@ type appAdminModel struct {
 	needsReview  bool
 	purge        bool
 	app          *contract.AppView
+	width        int
 }
 
 func newOnboardModel(client *api.Client) appAdminModel {
@@ -133,6 +134,9 @@ func (m appAdminModel) Update(msg tea.Msg) (appAdminModel, tea.Cmd) {
 		m.loading = false
 		m.err = msg.err.Error()
 		return m, nil
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		return m, nil
 	case tea.KeyMsg:
 		switch m.step {
 		case appStepOwner:
@@ -189,14 +193,14 @@ func (m appAdminModel) renderOwner() string {
 	meMarker := "  "
 	me := "@me  " + hintStyle.Render("— repos of your github-token user")
 	if m.ownerCursor == 0 {
-		meMarker = okStyle.Render("▸ ")
+		meMarker = lipgloss.NewStyle().Foreground(colEmber).Render("▸ ")
 		me = lipgloss.NewStyle().Bold(true).Render("@me") + "  " + hintStyle.Render("— repos of your github-token user")
 	}
 	b.WriteString(meMarker + me + "\n")
 
 	inMarker := "  "
 	if m.ownerCursor == 1 {
-		inMarker = okStyle.Render("▸ ")
+		inMarker = lipgloss.NewStyle().Foreground(colEmber).Render("▸ ")
 	}
 	b.WriteString(inMarker + labelStyle.Render("owner/org ") + m.ownerInput.View() + "\n")
 	return b.String()
@@ -362,7 +366,7 @@ func (m appAdminModel) View() string {
 	} else if m.mode == appAdminDelete {
 		title = "delete app"
 	}
-	b.WriteString(titleStyle.Render(title) + "  " + m.wizardCrumb() + "\n\n")
+	b.WriteString(accentRule(contentWidth(m.width), title, m.wizardCrumb()) + "\n\n")
 	if m.loading {
 		b.WriteString(infoStyle.Render("loading…") + "\n")
 	} else {
@@ -436,20 +440,19 @@ func (m appAdminModel) renderRepos() string {
 	if len(m.repos) == 0 {
 		return hintStyle.Render("no repos found") + "\n"
 	}
+	w := contentWidth(m.width)
 	var b strings.Builder
-	b.WriteString(infoStyle.Render("repos") + "\n")
+	b.WriteString(labelRule(w, "repos", hintStyle.Render(pluralize(len(m.repos), "repo", "repos"))) + "\n")
 	for i, repo := range m.repos {
-		marker := "  "
-		name := repo.FullName
-		if i == m.repoCursor {
-			marker = okStyle.Render("▸ ")
-			name = lipgloss.NewStyle().Bold(true).Render(name)
-		}
 		privacy := "public"
 		if repo.Private {
 			privacy = "private"
 		}
-		b.WriteString(fmt.Sprintf("%s%s  %s\n", marker, name, hintStyle.Render(privacy)))
+		if i == m.repoCursor {
+			b.WriteString(selectedRow(w, "", repo.FullName, privacy) + "\n")
+		} else {
+			b.WriteString(normalRow(w, "", repo.FullName, privacy) + "\n")
+		}
 	}
 	return b.String()
 }
@@ -475,7 +478,7 @@ func (m appAdminModel) renderForm() string {
 		marker := "  "
 		text := row
 		if i == m.formCursor {
-			marker = okStyle.Render("▸ ")
+			marker = lipgloss.NewStyle().Foreground(colEmber).Render("▸ ")
 			if i == fTarget || i == fShadow || i == fReview || i == fSave {
 				text = lipgloss.NewStyle().Bold(true).Render(text)
 			}
@@ -496,7 +499,7 @@ func (m appAdminModel) renderDelete() string {
 		b.WriteString(labelStyle.Render(m.repo) + "\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(okStyle.Render("▸ ") + purgeBox + " " + purgeWord + "\n")
+	b.WriteString(lipgloss.NewStyle().Foreground(colEmber).Render("▸ ") + purgeBox + " " + purgeWord + "\n")
 	b.WriteString("  " + note)
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

@@ -9,7 +9,6 @@ import (
 	"github.com/ArielFalcon/panchito/internal/api"
 	"github.com/ArielFalcon/panchito/internal/contract"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // sessionsSelectedMsg: the user picked "Active sessions" from the home menu.
@@ -25,6 +24,7 @@ type sessionsModel struct {
 	loading bool
 	err     string
 	status  string
+	width   int
 }
 
 func newSessionsModel(client *api.Client) sessionsModel {
@@ -50,6 +50,9 @@ func (m sessionsModel) Update(msg tea.Msg) (sessionsModel, tea.Cmd) {
 	case errMsg:
 		m.loading = false
 		m.err = msg.err.Error()
+		return m, nil
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
 		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -86,8 +89,9 @@ func (m sessionsModel) running() *struct {
 }
 
 func (m sessionsModel) View() string {
+	w := contentWidth(m.width)
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("◳ active sessions") + "\n\n")
+	b.WriteString(accentRule(w, "active sessions", "") + "\n\n")
 
 	switch {
 	case m.loading:
@@ -96,10 +100,10 @@ func (m sessionsModel) View() string {
 		b.WriteString(errorStyle.Render("✗ "+m.err) + "\n")
 	case m.running() != nil:
 		r := m.running()
-		b.WriteString(okStyle.Render("▸ ") + infoStyle.Render("● running") + "  " +
-			lipgloss.NewStyle().Bold(true).Render(r.App) + "  " + hintStyle.Render(shortSha(r.Id)) + "\n")
+		left := renderSegs("", sg("▌▸ ", colEmber), sg("● running  ", colInfra), sgb(r.App, colFg))
+		b.WriteString(spread(w, left, hintStyle.Render(shortSha(r.Id))) + "\n")
 		if m.queue.Pending > 0 {
-			b.WriteString(hintStyle.Render(fmt.Sprintf("  %d more queued behind it", m.queue.Pending)) + "\n")
+			b.WriteString("\n" + hintStyle.Render(fmt.Sprintf("  %d more queued behind it", m.queue.Pending)) + "\n")
 		}
 		b.WriteString("\n" + hintStyle.Render("enter resume (re-attach the live view) · x stop the run") + "\n")
 	default:

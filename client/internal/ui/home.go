@@ -20,18 +20,18 @@ const (
 	homeViewProjects
 )
 
-type menuItem struct{ icon, label, action string }
+type menuItem struct{ icon, label, action, hint string }
 
 var homeMenuItems = []menuItem{
-	{"▶", "Run QA", "run"},
-	{"◳", "Active sessions", "sessions"},
-	{"✚", "Onboard project", "onboard"},
-	{"✎", "Edit project", "edit"},
-	{"✖", "Delete project", "delete"},
-	{"◈", "Agent runtime", "agent"},
-	{"⊞", "Status", "status"},
-	{"?", "Help", "help"},
-	{"⎋", "Quit", "quit"},
+	{"▶", "Run QA", "run", "run the pipeline on a project"},
+	{"◳", "Active sessions", "sessions", "resume or stop a live run"},
+	{"✚", "Onboard project", "onboard", "add a repo via one yaml"},
+	{"✎", "Edit project", "edit", ""},
+	{"✖", "Delete project", "delete", ""},
+	{"◈", "Agent runtime", "agent", "providers · models · keys"},
+	{"⊞", "Status", "status", "queue · projects"},
+	{"?", "Help", "help", ""},
+	{"⎋", "Quit", "quit", ""},
 }
 
 type homeModel struct {
@@ -42,6 +42,7 @@ type homeModel struct {
 	intent        string // run | edit | delete — what Enter does in the projects view
 	serverVersion string // from the connect handshake; shown in the header when known
 	status        string // success line after onboarding/edit/delete (set by the root)
+	width         int    // terminal width, for the grid (0 → default via contentWidth)
 }
 
 func newHomeModel(apps []contract.AppView) homeModel {
@@ -49,6 +50,10 @@ func newHomeModel(apps []contract.AppView) homeModel {
 }
 
 func (m homeModel) Update(msg tea.Msg) (homeModel, tea.Cmd) {
+	if ws, ok := msg.(tea.WindowSizeMsg); ok {
+		m.width = ws.Width
+		return m, nil
+	}
 	k, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return m, nil
@@ -141,12 +146,17 @@ func (m homeModel) updateProjects(k tea.KeyMsg) (homeModel, tea.Cmd) {
 	return m, nil
 }
 
-func bannerBox() string {
-	inner := titleStyle.Render("◇  panchito") + "\n" + hintStyle.Render("Autonomous E2E QA for every deploy")
+// bannerBox is the single boxed element on the dashboard: an ember rounded box with the
+// brand mark and tagline. Width is clamped so it never outgrows a narrow terminal.
+func bannerBox(width int) string {
+	bw := min(48, width)
+	inner := renderSegs("", sg("◆ ", colEmber), sgb("panchito", colFg)) + "\n" +
+		labelStyle.Render("autonomous e2e qa for every deploy")
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colAccent).
-		Padding(0, 4).
+		BorderForeground(colEmber).
+		Padding(0, 2).
+		Width(bw).
 		Render(inner)
 }
 
@@ -158,20 +168,23 @@ func (m homeModel) View() string {
 }
 
 func (m homeModel) viewMenu() string {
+	w := contentWidth(m.width)
 	var b strings.Builder
-	b.WriteString(bannerBox() + "\n\n")
+	b.WriteString(bannerBox(w) + "\n\n")
 
-	meta := hintStyle.Render(pluralize(len(m.apps), "project", "projects"))
+	meta := renderSegs("", sg(pluralize(len(m.apps), "project", "projects"), colDim))
 	if m.serverVersion != "" {
-		meta += hintStyle.Render("  ·  server " + m.serverVersion)
+		meta += renderSegs("", sg("  ·  ", colFaint), sg("server ", colDim), sg(m.serverVersion, colFg))
 	}
 	b.WriteString(meta + "\n\n")
 
+	b.WriteString(labelRule(w, "menu", hintStyle.Render("↑↓ move  ⏎ select")) + "\n\n")
+
 	for i, it := range homeMenuItems {
 		if i == m.menuCursor {
-			b.WriteString(okStyle.Render("▸ ") + lipgloss.NewStyle().Bold(true).Render(it.icon+"  "+it.label) + "\n")
+			b.WriteString(selectedRow(w, it.icon, it.label, it.hint) + "\n")
 		} else {
-			b.WriteString("  " + labelStyle.Render(it.icon) + "  " + it.label + "\n")
+			b.WriteString(normalRow(w, it.icon, it.label, it.hint) + "\n")
 		}
 	}
 
@@ -183,9 +196,10 @@ func (m homeModel) viewMenu() string {
 }
 
 func (m homeModel) viewProjects() string {
+	w := contentWidth(m.width)
 	var b strings.Builder
 	verb := map[string]string{"run": "run", "edit": "edit", "delete": "delete"}[m.intent]
-	b.WriteString(titleStyle.Render("select a project to "+verb) + "\n\n")
+	b.WriteString(accentRule(w, "select a project to "+verb, hintStyle.Render(pluralize(len(m.apps), "project", "projects"))) + "\n\n")
 
 	if len(m.apps) == 0 {
 		b.WriteString(hintStyle.Render("no projects configured — go back and pick Onboard project") + "\n")
@@ -194,21 +208,18 @@ func (m homeModel) viewProjects() string {
 	}
 
 	for i, a := range m.apps {
-		marker := "  "
-		name := a.Name
-		if i == m.cursor {
-			marker = okStyle.Render("▸ ")
-			name = lipgloss.NewStyle().Bold(true).Render(name)
-		}
 		where := a.BaseUrl
 		if a.Code {
 			where = "code mode"
 		}
-		line := marker + name + "  " + labelStyle.Render(where)
 		if a.Shadow {
-			line += "  " + shadowStyle.Render("(shadow)")
+			where += "  (shadow)"
 		}
-		b.WriteString(line + "\n")
+		if i == m.cursor {
+			b.WriteString(selectedRow(w, "", a.Name, where) + "\n")
+		} else {
+			b.WriteString(normalRow(w, "", a.Name, where) + "\n")
+		}
 	}
 	b.WriteString("\n" + hintStyle.Render("↑↓ move · enter "+verb+" · h history · e edit · d delete · esc back"))
 	return screenStyle.Render(b.String())

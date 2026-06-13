@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/lipgloss"
 )
 
 const maxChatShown = 8
@@ -28,11 +29,13 @@ type chatModel struct {
 	input   textinput.Model
 	entries []chatEntry
 	loading bool
+	width   int
 }
 
 func newChatModel(client *api.Client, runID string) chatModel {
 	ti := textinput.New()
 	ti.Placeholder = "ask about this run…"
+	ti.Prompt = "" // the screen draws its own ember caret
 	ti.CharLimit = 400
 	ti.Width = 50
 	ti.Focus()
@@ -43,6 +46,9 @@ func (m chatModel) Init() tea.Cmd { return textinput.Blink }
 
 func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":
@@ -73,8 +79,9 @@ func (m chatModel) Update(msg tea.Msg) (chatModel, tea.Cmd) {
 }
 
 func (m chatModel) View() string {
+	w := contentWidth(m.width)
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("ask") + "  " + hintStyle.Render(m.runID) + "\n\n")
+	b.WriteString(accentRule(w, "ask", hintStyle.Render(m.runID)) + "\n\n")
 	start := 0
 	if len(m.entries) > maxChatShown {
 		start = len(m.entries) - maxChatShown
@@ -82,7 +89,7 @@ func (m chatModel) View() string {
 	for _, e := range m.entries[start:] {
 		switch e.role {
 		case "q":
-			b.WriteString(okStyle.Render("▶ "+e.text) + "\n")
+			b.WriteString(renderSegs("", sg("▸ ", colEmber)) + lipgloss.NewStyle().Bold(true).Foreground(colFg).Render(e.text) + "\n")
 		case "err":
 			b.WriteString(errorStyle.Render("✗ "+e.text) + "\n")
 		default:
@@ -92,7 +99,7 @@ func (m chatModel) View() string {
 	if m.loading {
 		b.WriteString(infoStyle.Render("thinking…") + "\n")
 	}
-	b.WriteString("\n" + m.input.View() + "\n")
+	b.WriteString("\n" + renderSegs("", sg("› ", colEmber)) + m.input.View() + "\n")
 	b.WriteString("\n" + hintStyle.Render("enter ask · esc back · ctrl+c quit"))
 	return screenStyle.Render(b.String())
 }

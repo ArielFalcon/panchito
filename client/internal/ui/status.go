@@ -9,6 +9,7 @@ import (
 	"github.com/ArielFalcon/panchito/internal/api"
 	"github.com/ArielFalcon/panchito/internal/contract"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // statusSelectedMsg: the user picked "Status" from the home menu.
@@ -22,6 +23,7 @@ type statusModel struct {
 	apps    []contract.AppView
 	loading bool
 	err     string
+	width   int
 }
 
 func newStatusModel(client *api.Client) statusModel {
@@ -48,6 +50,9 @@ func (m statusModel) Update(msg tea.Msg) (statusModel, tea.Cmd) {
 		m.loading = false
 		m.err = msg.err.Error()
 		return m, nil
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":
@@ -64,32 +69,35 @@ func (m statusModel) Update(msg tea.Msg) (statusModel, tea.Cmd) {
 }
 
 func (m statusModel) View() string {
+	w := contentWidth(m.width)
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("⊞ status") + "\n\n")
 
 	switch {
 	case m.loading:
+		b.WriteString(accentRule(w, "status", "") + "\n\n")
 		b.WriteString(infoStyle.Render("loading…") + "\n")
 	case m.err != "":
+		b.WriteString(accentRule(w, "status", "") + "\n\n")
 		b.WriteString(errorStyle.Render("✗ "+m.err) + "\n")
 		b.WriteString(hintStyle.Render("is the orchestrator running?  docker compose up") + "\n")
 	default:
 		q := m.queue
-		qline := fmt.Sprintf("queue: %d pending", q.Pending)
+		qright := okStyle.Render("idle")
 		if q.Running != nil {
-			qline += "  ·  running " + shortSha(q.Running.Id) + " (" + q.Running.App + ")"
-		} else {
-			qline += "  ·  idle"
+			qright = renderSegs("", sg("● running ", colInfra), sg(q.Running.App+" ", colFg), sg(shortSha(q.Running.Id), colFaint))
 		}
-		b.WriteString(infoStyle.Render(qline) + "\n\n")
+		if q.Pending > 0 {
+			qright = renderSegs("", sg(fmt.Sprintf("%d pending", q.Pending), colFlaky), sg("  ·  ", colFaint)) + qright
+		}
+		b.WriteString(accentRule(w, "status", qright) + "\n\n")
 
-		b.WriteString(infoStyle.Render(fmt.Sprintf("projects (%d)", len(m.apps))) + "\n")
+		b.WriteString(labelRule(w, "projects", hintStyle.Render(pluralize(len(m.apps), "project", "projects"))) + "\n")
 		for _, a := range m.apps {
 			where := a.BaseUrl
 			if a.Code {
 				where = "code mode"
 			}
-			row := "  " + padRight(a.Name, 16) + "  " + labelStyle.Render(padRight(a.Repo, 28)) + "  " + hintStyle.Render(where)
+			row := "  " + lipgloss.NewStyle().Foreground(colFg).Render(padRight(a.Name, 16)) + "  " + labelStyle.Render(padRight(a.Repo, 28)) + "  " + hintStyle.Render(where)
 			if a.Shadow {
 				row += "  " + shadowStyle.Render("(shadow)")
 			}

@@ -21,6 +21,7 @@ type historyModel struct {
 	cursor  int
 	loading bool
 	err     string
+	width   int
 }
 
 func newHistoryModel(client *api.Client, app string) historyModel {
@@ -41,6 +42,9 @@ func (m historyModel) Update(msg tea.Msg) (historyModel, tea.Cmd) {
 	case errMsg:
 		m.loading = false
 		m.err = msg.err.Error()
+		return m, nil
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
 		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -72,8 +76,9 @@ func (m historyModel) Update(msg tea.Msg) (historyModel, tea.Cmd) {
 }
 
 func (m historyModel) View() string {
+	w := contentWidth(m.width)
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("history") + "  " + labelStyle.Render(m.app) + "\n\n")
+	b.WriteString(accentRule(w, "history", labelStyle.Render(m.app)+"  "+hintStyle.Render(pluralize(len(m.runs), "run", "runs"))) + "\n\n")
 
 	switch {
 	case m.loading:
@@ -84,13 +89,13 @@ func (m historyModel) View() string {
 		b.WriteString(hintStyle.Render("no runs yet — launch one from home") + "\n")
 	default:
 		for i, r := range m.runs {
-			marker := "  "
-			line := formatRunLine(r)
+			// Run lines carry their own verdict color, so selection is the ember bar (a
+			// wash would fight the per-segment colors), not a re-styling of the line.
+			marker := normalRow(0, "", "", "")
 			if i == m.cursor {
-				marker = okStyle.Render("▸ ")
-				line = lipgloss.NewStyle().Bold(true).Render(line)
+				marker = renderSegs("", sg("▌▸ ", colEmber))
 			}
-			b.WriteString(marker + line + "\n")
+			b.WriteString(marker + formatRunLine(r) + "\n")
 		}
 	}
 	b.WriteString("\n" + hintStyle.Render("↑↓ move · enter watch · r refresh · esc back · q quit"))

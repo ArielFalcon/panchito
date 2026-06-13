@@ -11,6 +11,7 @@ import (
 	"github.com/ArielFalcon/panchito/internal/store"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // connectModel is the first screen: host + token, then a connection probe
@@ -21,11 +22,13 @@ type connectModel struct {
 	focus      int // 0 = host, 1 = token
 	connecting bool
 	err        string
+	width      int
 }
 
 func newConnectModel() connectModel {
 	host := textinput.New()
 	host.Placeholder = "localhost:8080"
+	host.Prompt = "" // the field draws its own ember caret
 	host.SetValue("localhost:8080")
 	host.CharLimit = 200
 	host.Width = 34
@@ -33,6 +36,7 @@ func newConnectModel() connectModel {
 
 	token := textinput.New()
 	token.Placeholder = "(optional)"
+	token.Prompt = ""
 	token.EchoMode = textinput.EchoPassword
 	token.CharLimit = 400
 	token.Width = 34
@@ -87,6 +91,9 @@ func (m connectModel) Update(msg tea.Msg) (connectModel, tea.Cmd) {
 		m.connecting = false
 		m.err = msg.err.Error()
 		return m, nil
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		return m, nil
 	}
 
 	var cmd tea.Cmd
@@ -99,10 +106,12 @@ func (m connectModel) Update(msg tea.Msg) (connectModel, tea.Cmd) {
 }
 
 func (m connectModel) View() string {
+	w := contentWidth(m.width)
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("panchito") + "  " + hintStyle.Render("connect to the control plane") + "\n\n")
-	b.WriteString(labelStyle.Render("host  ") + m.host.View() + "\n")
-	b.WriteString(labelStyle.Render("token ") + m.token.View() + "\n\n")
+	b.WriteString(bannerBox(w) + "\n\n")
+	b.WriteString(labelRule(w, "connect", hintStyle.Render("control plane")) + "\n\n")
+	b.WriteString(connectField("host ", m.focus == 0) + m.host.View() + "\n")
+	b.WriteString(connectField("token", m.focus == 1) + m.token.View() + "\n\n")
 	switch {
 	case m.connecting:
 		b.WriteString(infoStyle.Render("connecting…"))
@@ -111,6 +120,14 @@ func (m connectModel) View() string {
 	}
 	b.WriteString("\n\n" + hintStyle.Render("tab switch · enter connect · ctrl+c quit"))
 	return screenStyle.Render(b.String())
+}
+
+// connectField labels a form input, marking the focused one with an ember caret.
+func connectField(label string, focused bool) string {
+	if focused {
+		return renderSegs("", sg("▸ ", colEmber)) + lipgloss.NewStyle().Foreground(colFg).Render(label+" ")
+	}
+	return "  " + labelStyle.Render(label+" ")
 }
 
 // connectCmd negotiates the version/capability handshake first (so a stale binary

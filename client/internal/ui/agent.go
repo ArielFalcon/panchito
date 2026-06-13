@@ -10,7 +10,6 @@ import (
 	"github.com/ArielFalcon/panchito/internal/contract"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 type agentScreen int
@@ -67,11 +66,13 @@ type agentModel struct {
 	editingRole   string
 	roleCursor    int
 	busyRun       string // app of the active run, if any — the runtime is locked while it runs
+	width         int    // terminal width, for the grid (0 → default via contentWidth)
 }
 
 func newAgentModel(client *api.Client) agentModel {
 	keyInput := textinput.New()
 	keyInput.Placeholder = "paste api key"
+	keyInput.Prompt = "" // the screen draws its own ember caret
 	keyInput.EchoMode = textinput.EchoPassword
 	keyInput.CharLimit = 600
 	keyInput.Width = 42
@@ -155,6 +156,9 @@ func (m agentModel) Update(msg tea.Msg) (agentModel, tea.Cmd) {
 		m.loading = false
 		m.err = msg.err.Error()
 		m.status = ""
+		return m, nil
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
 		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -357,19 +361,20 @@ func (m agentModel) View() string {
 		return m.renderDowngradeConfirm()
 	}
 
-	mode := string(cfg.Mode)
-	provider := string(cfg.SingleProvider)
-	b.WriteString("\n\n" + labelStyle.Render(fmt.Sprintf("mode: %s · %s", mode, provider)) + "\n")
+	w := contentWidth(m.width)
+	// Reset the builder: the redesigned screen leads with a labelled rule, not the
+	// plain title written above (kept only for the loading / error fallbacks).
+	b.Reset()
+	right := renderSegs("", sg("mode ", colFaint), sg(string(cfg.Mode), colFg), sg(" · ", colFaint), sg(string(cfg.SingleProvider), colDim))
+	b.WriteString(accentRule(w, "agent runtime", right) + "\n")
 	if m.busyRun != "" {
 		b.WriteString(shadowStyle.Render(fmt.Sprintf("⚠ a run is active on '%s' — its session keeps its current models; runtime changes are locked until it finishes (stop it from Active sessions)", m.busyRun)) + "\n")
 	}
 	b.WriteString("\n")
 
-	b.WriteString(m.renderProviders(cfg))
-	b.WriteString("\n")
-	b.WriteString(m.renderAssignments(cfg))
-	b.WriteString("\n")
-	b.WriteString(m.renderActions())
+	b.WriteString(m.renderProviders(w, cfg) + "\n\n")
+	b.WriteString(m.renderAssignments(w, cfg) + "\n\n")
+	b.WriteString(m.renderActions(w))
 	if len(m.stagedKeys) > 0 {
 		b.WriteString("\n" + shadowStyle.Render(fmt.Sprintf("%d API key(s) staged", len(m.stagedKeys))))
 	}
@@ -387,73 +392,78 @@ func (m agentModel) View() string {
 }
 
 func (m agentModel) renderKeyInput() string {
+	w := contentWidth(m.width)
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("agent runtime") + "  " + labelStyle.Render(m.keyProvider+" api key") + "\n\n")
-	b.WriteString(m.keyInput.View())
+	b.WriteString(accentRule(w, "agent runtime", labelStyle.Render(m.keyProvider+" api key")) + "\n\n")
+	b.WriteString(renderSegs("", sg("› ", colEmber)) + m.keyInput.View())
 	b.WriteString("\n\n" + hintStyle.Render("enter stage · esc cancel"))
 	return screenStyle.Render(b.String())
 }
 
 func (m agentModel) renderRoleSelect() string {
+	w := contentWidth(m.width)
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("agent runtime") + "  " + labelStyle.Render(m.editingRole+" model") + "\n\n")
+	b.WriteString(accentRule(w, "agent runtime", labelStyle.Render(m.editingRole+" model")) + "\n\n")
 	options := m.roleOptions(m.editingRole)
 	if len(options) == 0 {
-		b.WriteString(errorStyle.Render("x no models available") + "\n")
+		b.WriteString(errorStyle.Render("✗ no models available") + "\n")
 	}
 	for i, opt := range options {
-		marker := "  "
 		text := fmt.Sprintf("%s / %s", opt.provider, opt.model)
 		if i == m.roleCursor {
-			marker = okStyle.Render("▸ ")
-			text = lipgloss.NewStyle().Bold(true).Render(text)
+			b.WriteString(selectedRow(w, "", text, "") + "\n")
+		} else {
+			b.WriteString(normalRow(w, "", text, "") + "\n")
 		}
-		b.WriteString(marker + text + "\n")
 	}
 	b.WriteString("\n" + hintStyle.Render("↑↓ choose · enter stage · esc back"))
 	return screenStyle.Render(b.String())
 }
 
 func (m agentModel) renderDowngradeConfirm() string {
+	w := contentWidth(m.width)
 	provider := uniqueDraftProvider(*m.draft)
 	if provider == "" {
 		provider = string(m.draft.SingleProvider)
 	}
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("agent runtime") + "  " + shadowStyle.Render("confirm") + "\n\n")
+	b.WriteString(accentRule(w, "agent runtime", shadowStyle.Render("confirm")) + "\n\n")
 	b.WriteString(shadowStyle.Render(fmt.Sprintf("dual uses only %s roles", provider)) + "\n")
 	b.WriteString(okStyle.Render("enter/y") + " convert to single/" + provider + "\n")
 	b.WriteString(hintStyle.Render("esc/n cancel"))
 	return screenStyle.Render(b.String())
 }
 
-func (m agentModel) renderProviders(cfg *contract.PublicAgentConfig) string {
+// renderProviders draws the providers as an aligned table under a labelled rule: a
+// faint header row, a hairline, then one row per provider. Status (auth + health) uses
+// the verdict ramp, never ad-hoc color, so the column reads at a glance.
+func (m agentModel) renderProviders(w int, cfg *contract.PublicAgentConfig) string {
 	var b strings.Builder
-	b.WriteString(infoStyle.Render("providers") + "\n")
-	b.WriteString(formatProviderLine("opencode", cfg, m.stagedKeys["opencode"] != ""))
-	b.WriteString(formatProviderLine("codex", cfg, m.stagedKeys["codex"] != ""))
+	b.WriteString(labelRule(w, "providers", hintStyle.Render("2")) + "\n")
+	b.WriteString(hintStyle.Render("  "+padRight("provider", 16)+padRight("auth", 10)+padRight("state", 16)+"health") + "\n")
+	b.WriteString(hairline(w) + "\n")
+	b.WriteString(providerRow("opencode", cfg, m.stagedKeys["opencode"] != "") + "\n")
+	b.WriteString(providerRow("codex", cfg, m.stagedKeys["codex"] != ""))
 	return b.String()
 }
 
-func formatProviderLine(provider string, cfg *contract.PublicAgentConfig, staged bool) string {
+func providerRow(provider string, cfg *contract.PublicAgentConfig, staged bool) string {
 	hasKey := cfg.Keys.Opencode
 	if provider == "codex" {
 		hasKey = cfg.Keys.Codex
 	}
-	keyIcon := okStyle.Render("ok")
-	keyLabel := "configured"
+	authText, authCol := "ok", colPass
+	stateText, stateCol := "configured", colDim
 	if !hasKey {
-		keyIcon = errorStyle.Render("no")
-		keyLabel = "not set"
+		authText, authCol = "—", colFaint
+		stateText, stateCol = "not set", colFaint
 	}
 	if staged {
-		keyIcon = shadowStyle.Render("*")
-		keyLabel = "staged"
+		authText, authCol = "*", colFlaky
+		stateText, stateCol = "staged", colFlaky
 	}
 
-	healthIcon := "○"
-	healthLabel := "unknown"
-	healthStyle := hintStyle
+	icon, healthText, hcol := "○", "unknown", colFaint
 	if cfg.Health != nil {
 		var h *contract.AgentProviderHealth
 		if provider == "opencode" {
@@ -462,54 +472,62 @@ func formatProviderLine(provider string, cfg *contract.PublicAgentConfig, staged
 			h = cfg.Health.Codex
 		}
 		if h != nil {
+			healthText = string(h.Status)
 			switch h.Status {
 			case "healthy":
-				healthIcon, healthStyle = "●", okStyle
+				icon, hcol = "●", colPass
 			case "degraded":
-				healthIcon, healthStyle = "◐", shadowStyle
-			case "failed", "needs_config":
-				healthIcon, healthStyle = "○", errorStyle
+				icon, hcol = "◐", colFlaky
 			case "starting":
-				healthIcon, healthStyle = "◐", infoStyle
+				icon, hcol = "◐", colInfra
+			default: // failed | needs_config
+				icon, hcol = "○", colFlaky
 			}
-			healthLabel = string(h.Status)
 		}
 	}
-
-	return fmt.Sprintf("  %s %s  %s\n",
-		healthStyle.Render(healthIcon+" "+provider),
-		labelStyle.Render(keyIcon+" "+keyLabel),
-		healthStyle.Render(healthLabel),
+	nameCol := colFg
+	if icon != "●" {
+		nameCol = colDim
+	}
+	return renderSegs("",
+		sg(icon+" ", hcol),
+		seg{text: padRight(provider, 14), fg: nameCol, bold: icon == "●"},
+		sg(padRight(authText, 10), authCol),
+		sg(padRight(stateText, 16), stateCol),
+		sg(healthText, hcol),
 	)
 }
 
-func (m agentModel) renderAssignments(cfg *contract.PublicAgentConfig) string {
+func (m agentModel) renderAssignments(w int, cfg *contract.PublicAgentConfig) string {
 	var b strings.Builder
-	b.WriteString(infoStyle.Render("assignments") + "\n")
+	b.WriteString(labelRule(w, "assignments", "") + "\n")
 	for _, role := range agentRoles() {
 		a := roleAssignment(*cfg, role)
-		b.WriteString(fmt.Sprintf("  %s  %s / %s\n",
-			labelStyle.Render(role),
-			labelStyle.Render(string(a.Provider)),
-			hintStyle.Render(a.Model),
-		))
+		b.WriteString(renderSegs("",
+			sg(padRight(role, 11), colDim),
+			sg(string(a.Provider), colFg),
+			sg(" / ", colFaint),
+			sg(a.Model, colDim),
+		) + "\n")
 	}
-	return b.String()
+	return strings.TrimRight(b.String(), "\n")
 }
 
-func (m agentModel) renderActions() string {
+func (m agentModel) renderActions(w int) string {
 	var b strings.Builder
-	b.WriteString(infoStyle.Render("actions") + "\n")
-	for i, item := range m.menuItems() {
-		marker := "  "
-		text := item.label
-		if i == m.cursor {
-			marker = okStyle.Render("▸ ")
-			text = lipgloss.NewStyle().Bold(true).Render(text)
-		}
-		b.WriteString(marker + text + "\n")
+	right := ""
+	if n := len(m.stagedKeys); n > 0 {
+		right = renderSegs("", sg("‹", colFaint), sg(fmt.Sprintf("%d staged", n), colEmber), sg("›", colFaint))
 	}
-	return b.String()
+	b.WriteString(labelRule(w, "actions", right) + "\n")
+	for i, item := range m.menuItems() {
+		if i == m.cursor {
+			b.WriteString(selectedRow(w, "", item.label, "") + "\n")
+		} else {
+			b.WriteString(normalRow(w, "", item.label, "") + "\n")
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func (m agentModel) menuItems() []agentMenuItem {

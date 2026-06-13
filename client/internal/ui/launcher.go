@@ -9,7 +9,6 @@ import (
 	"github.com/ArielFalcon/panchito/internal/contract"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 type launchStep int
@@ -50,11 +49,13 @@ type launcherModel struct {
 	guidance      string
 	guidanceInput textinput.Model
 	err           string
+	width         int
 }
 
 func newLauncherModel(app string) launcherModel {
 	ti := textinput.New()
 	ti.Placeholder = "e.g. test the contact form's validation"
+	ti.Prompt = "" // the screen draws its own ember caret
 	ti.CharLimit = 2000
 	ti.Width = 52
 	return launcherModel{app: app, guidanceInput: ti}
@@ -104,6 +105,9 @@ func (m launcherModel) Update(msg tea.Msg) (launcherModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case errMsg:
 		m.err = msg.err.Error()
+		return m, nil
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
 		return m, nil
 	case tea.KeyMsg:
 		if m.step == stepGuidance {
@@ -198,27 +202,26 @@ func (m launcherModel) updateGuidance(msg tea.KeyMsg) (launcherModel, tea.Cmd) {
 }
 
 func (m launcherModel) View() string {
+	w := contentWidth(m.width)
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("launch") + "  " + labelStyle.Render(m.app) + "  " + m.breadcrumb() + "\n\n")
+	b.WriteString(accentRule(w, "launch", labelStyle.Render(m.app)+"  "+m.breadcrumb()) + "\n\n")
 
 	if m.step == stepGuidance {
-		b.WriteString(infoStyle.Render("Guidance") + "\n")
+		b.WriteString(labelRule(w, "guidance", "") + "\n")
 		b.WriteString(hintStyle.Render("describe what to test — the agent will focus on this") + "\n\n")
-		b.WriteString(m.guidanceInput.View() + "\n")
+		b.WriteString(renderSegs("", sg("› ", colEmber)) + m.guidanceInput.View() + "\n")
 		b.WriteString("\n" + hintStyle.Render("enter continue · esc back"))
 		return screenStyle.Render(b.String())
 	}
 
-	titles := map[launchStep]string{stepTarget: "Test target", stepMode: "Run mode", stepShadow: "Shadow mode"}
-	b.WriteString(infoStyle.Render(titles[m.step]) + "\n")
+	titles := map[launchStep]string{stepTarget: "test target", stepMode: "run mode", stepShadow: "shadow mode"}
+	b.WriteString(labelRule(w, titles[m.step], "") + "\n")
 	for i, o := range m.options() {
-		marker := "  "
-		label := o.label
 		if i == m.cursor {
-			marker = okStyle.Render("▸ ")
-			label = lipgloss.NewStyle().Bold(true).Render(label)
+			b.WriteString(selectedRow(w, "", o.label, "") + "\n")
+		} else {
+			b.WriteString(normalRow(w, "", o.label, "") + "\n")
 		}
-		b.WriteString(marker + label + "\n")
 	}
 	if m.err != "" {
 		b.WriteString("\n" + errorStyle.Render("✗ "+m.err) + "\n")

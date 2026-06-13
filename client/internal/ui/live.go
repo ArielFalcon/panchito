@@ -104,6 +104,7 @@ func newLiveModel(runID, app string, ch chan events.RunEvent, cancel context.Can
 	sp.Style = infoStyle
 	ti := textinput.New()
 	ti.Placeholder = "ask about this run…"
+	ti.Prompt = "" // the chat panel draws its own ember caret
 	ti.CharLimit = 400
 	ti.Width = 48
 	bar := progress.New(progress.WithScaledGradient(string(colInfo), string(colSuccess)), progress.WithoutPercentage())
@@ -285,17 +286,18 @@ func (m liveModel) updateChatKey(msg tea.KeyMsg) (liveModel, tea.Cmd) {
 // renderChat is the inline assistant panel — ALWAYS shown (a left-bordered card):
 // the last exchange only (so it never stacks into scroll), then the input when
 // active. Markdown answers are Glamour-rendered.
+// renderChat is the always-present inline assistant: a heavy rule splits it from the run
+// detail, then a labelled rule, the last exchange (so it never stacks into scroll), and
+// the input line — active (live cursor) or a dimmed prompt advertising the `a` key.
 func (m liveModel) renderChat() string {
+	w := contentWidth(m.width)
 	var b strings.Builder
-	head := infoStyle.Render("assistant")
-	if !m.chatActive {
-		head += hintStyle.Render("   press a to ask about this run")
-	}
-	b.WriteString(head + "\n")
+	b.WriteString(heavyRule(w) + "\n")
+	b.WriteString(labelRule(w, "chat", hintStyle.Render("assistant")) + "\n")
 	for _, e := range lastExchange(m.chatEntries) {
 		switch e.role {
 		case "q":
-			b.WriteString(lipgloss.NewStyle().Foreground(colAccent).Render("▶ "+truncate(e.text, 80)) + "\n")
+			b.WriteString(renderSegs("", sg("▸ ", colEmber)) + labelStyle.Render(truncate(e.text, w-2)) + "\n")
 		case "err":
 			b.WriteString(errorStyle.Render("✗ "+e.text) + "\n")
 		default:
@@ -306,14 +308,11 @@ func (m liveModel) renderChat() string {
 		b.WriteString(infoStyle.Render(m.spin.View()+" thinking…") + "\n")
 	}
 	if m.chatActive {
-		b.WriteString(m.chatInput.View())
+		b.WriteString(renderSegs("", sg("› ", colEmber)) + m.chatInput.View())
+	} else {
+		b.WriteString(renderSegs("", sg("› ", colFaint), sg("ask about this run", colDim)) + hintStyle.Render("   ‹a to ask›"))
 	}
-	content := strings.TrimRight(b.String(), "\n")
-	return lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder(), false, false, false, true).
-		BorderForeground(colAccent).
-		PaddingLeft(1).
-		Render(content)
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // lastExchange returns at most the last question+answer pair, so the chat never
@@ -507,27 +506,74 @@ func (m liveModel) View() string {
 	return screenStyle.Render(m.header() + "\n" + m.vp.View() + "\n" + m.footer())
 }
 
+// header is rendered above the scrolling body: the run identity line, then the pipeline
+// rail and a progress bar tinted by sub-state, fenced by hairlines. It is the fixed
+// masthead the eye returns to; the live detail scrolls beneath it.
 func (m liveModel) header() string {
-	status := infoStyle.Render("running")
-	if m.done {
-		status = verdictStyle(m.verdict).Bold(true).Render(strings.ToUpper(m.verdict))
-	}
-	top := titleStyle.Render("run") + "  " + lipgloss.NewStyle().Bold(true).Render(m.app)
-	if m.sha != "" {
-		top += "  " + hintStyle.Render(shortSha(m.sha))
-	}
+	w := contentWidth(m.width)
+	sc := m.stateColor()
+
+	left := renderSegs("", sgb("run  ", colEmber), sgb(m.app, colFg))
 	if m.target != "" {
-		tgt := infoStyle.Render(m.target)
+		tgtCol := colInfra
 		if m.target == "code" {
-			tgt = shadowStyle.Render(m.target)
+			tgtCol = colFlaky
 		}
-		top += "  " + tgt + hintStyle.Render("/"+m.mode)
+		left += renderSegs("", sg("   target ", colFaint), sg(m.target, tgtCol), sg(" · ", colFaint), sg(m.mode, colDim))
 	}
-	if m.retrying && !m.done {
-		top += "  " + shadowStyle.Render("↻ retrying")
+	word := "running"
+	icon := m.spin.View() + " "
+	if m.done {
+		word = strings.ToUpper(m.verdict)
+		icon = ""
+	} else if m.retrying {
+		word = "↻ retrying"
+		icon = ""
 	}
-	top += "  " + status
-	return top + "\n" + m.renderPhases()
+	left += "   " + renderSegs("", sg(icon, sc)) + lipgloss.NewStyle().Bold(true).Foreground(sc).Render(word)
+
+	right := ""
+	if m.sha != "" {
+		right = hintStyle.Render(shortSha(m.sha))
+	}
+
+	runLine := spread(w, left, right)
+	rail := pipelineRail(w, pipelinePhases, m.phaseIndex(), m.done, sc)
+	if idx := m.phaseIndex(); idx < 0 && m.phase != "" && !m.done {
+		rail += "  " + titleStyle.Render("("+m.phase+")") // a transient phase (e.g. retry)
+	}
+	bar := progressBar(w, m.phaseFraction(), sc)
+	return runLine + "\n" + hairline(w) + "\n" + rail + "\n" + bar + "\n" + hairline(w)
+}
+
+// phaseIndex is the position of the current phase in the canonical pipeline, or -1 for a
+// transient/unknown phase (e.g. "retry") that matches no canonical step.
+func (m liveModel) phaseIndex() int { return indexOf(pipelinePhases, m.phase) }
+
+// phaseFraction drives the header progress bar: how far through the pipeline we are.
+func (m liveModel) phaseFraction() float64 {
+	if m.done {
+		return 1
+	}
+	idx := m.phaseIndex()
+	if idx < 0 {
+		return 0
+	}
+	return float64(idx) / float64(len(pipelinePhases)-1)
+}
+
+// stateColor tints the rail, bar and focus card by sub-state: infra-steel while the
+// suite runs against DEV, the verdict ramp once decided, ember everywhere else.
+func (m liveModel) stateColor() lipgloss.Color {
+	if m.done {
+		return verdictColor(m.verdict)
+	}
+	switch m.phase {
+	case "execute", "health":
+		return colInfra
+	default:
+		return colEmber
+	}
 }
 
 func shortSha(s string) string {
@@ -570,9 +616,14 @@ func (m liveModel) body() string {
 
 func (m liveModel) liveBody() string {
 	view := m.deriveActivity()
+	card := m.renderFocusCard(view)
+	status := ""
+	if card == "" {
+		status = m.renderPhaseStatus() // fill the quiet phases before a card exists
+	}
 	sections := []string{
-		m.renderPhaseStatus(),
-		m.renderFocusCard(view),
+		status,
+		card,
 		m.renderFeed(view),
 		m.renderSubagents(),
 		m.renderSpecs(),
@@ -785,30 +836,6 @@ func joinSections(sections []string) string {
 	return strings.Join(out, "\n")
 }
 
-func (m liveModel) renderPhases() string {
-	cur := indexOf(pipelinePhases, m.phase)
-	parts := make([]string, len(pipelinePhases))
-	for i, p := range pipelinePhases {
-		switch {
-		case m.done:
-			parts[i] = hintStyle.Render(p)
-		case i == cur:
-			parts[i] = okStyle.Bold(true).Render(p)
-		case cur >= 0 && i < cur:
-			parts[i] = labelStyle.Render(p)
-		default:
-			parts[i] = hintStyle.Render(p)
-		}
-	}
-	line := wrapJoin(parts, hintStyle.Render(" · "), m.width-4) // -4: screenStyle horizontal padding
-	// A transient/unknown phase (e.g. "retry") matches no canonical step, so cur==-1
-	// and nothing would be highlighted — surface it explicitly instead of going blank.
-	if cur < 0 && m.phase != "" && !m.done {
-		line += "  " + titleStyle.Render("("+m.phase+")")
-	}
-	return line
-}
-
 // wrapJoin joins styled parts with sep, breaking to a new line whenever the next
 // part would exceed width (measured in display cells, so ANSI styling is ignored).
 // width <= 0 disables wrapping — used before a terminal size is known. Keeps the 8
@@ -898,27 +925,37 @@ func (m liveModel) deriveActivity() activityView {
 	return activityView{focus: focus, plan: m.plan, wrote: wrote, ran: ran}
 }
 
+// renderFocusCard is the single boxed element while a run is live: the one unit of work
+// a reviewer's eye should land on. Border + spinner are tinted by sub-state; the body is
+// verb/value rows derived from the folded activity, never invented.
 func (m liveModel) renderFocusCard(v activityView) string {
 	if v.focus == nil || m.done {
 		return ""
 	}
 	f := v.focus
-	head := infoStyle.Render("now") + "  " + m.spin.View() + "  " + lipgloss.NewStyle().Bold(true).Render(truncate(f.title, 48))
+	w := contentWidth(m.width)
+	sc := m.stateColor()
+	valW := max(12, w-22) // room for glyph + verb + card walls
+
+	title := lipgloss.NewStyle().Bold(true).Foreground(sc).Render(m.phase)
+	rightHead := renderSegs("", sg(m.spin.View()+" ", sc))
 	if f.progress != "" {
-		head += "   " + hintStyle.Render(f.progress)
+		rightHead += hintStyle.Render(f.progress)
 	}
 	if !m.phaseStart.IsZero() {
-		head += "   " + labelStyle.Render(formatElapsed(time.Since(m.phaseStart)))
+		rightHead += "  " + labelStyle.Render(formatElapsed(time.Since(m.phaseStart)))
 	}
-	var b strings.Builder
-	b.WriteString(head)
+
+	var rows []cardKV
 	if f.lastFile != "" {
-		b.WriteString("\n" + hintStyle.Render("✎ "+truncate(f.lastFile, 46)))
+		rows = append(rows, kv("✎", colEmberS, "wrote", labelStyle.Render(truncate(f.lastFile, valW))))
 	}
 	if f.lastCmd != "" {
-		b.WriteString("\n" + hintStyle.Render("⚙ "+truncate(f.lastCmd, 46)))
+		rows = append(rows, kv("⚙", colDim, "ran", labelStyle.Render(truncate(f.lastCmd, valW))))
 	}
-	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colInfo).Padding(0, 1).Render(b.String())
+	rows = append(rows, kv(m.spin.View(), sc, "now", lipgloss.NewStyle().Foreground(colFg).Render(truncate(phaseDescription(m.phase), valW))))
+
+	return focusCard(w, sc, title, rightHead, truncate(f.title, w-10), "", rows)
 }
 
 const feedGutter = 7
@@ -930,26 +967,37 @@ func gutterLabel(s string) string {
 	return s + strings.Repeat(" ", feedGutter-len(s))
 }
 
+// renderFeed is the PLAN checklist (done ✓ / active ▸ / pending ·) under a labelled
+// rule, then the compact wrote / ran summary lines — the agent's forward progress.
 func (m liveModel) renderFeed(v activityView) string {
 	if len(v.plan) == 0 && len(v.wrote) == 0 && len(v.ran) == 0 {
 		return ""
 	}
+	w := contentWidth(m.width)
 	var b strings.Builder
-	for i, t := range v.plan {
-		label := ""
-		if i == 0 {
-			label = "plan"
+	if len(v.plan) > 0 {
+		done := 0
+		for _, t := range v.plan {
+			if t.Status == "completed" {
+				done++
+			}
 		}
-		icon, text := hintStyle.Render("·"), labelStyle
-		switch t.Status {
-		case "completed":
-			icon = okStyle.Render("✓")
-		case "in_progress":
-			icon, text = m.spin.View(), lipgloss.NewStyle()
-		case "cancelled":
-			icon = hintStyle.Render("✗")
+		right := renderSegs("", sg(fmt.Sprintf("%d/%d", done, len(v.plan)), colDim), sg(" done", colFaint))
+		b.WriteString(labelRule(w, "plan", right) + "\n")
+		for _, t := range v.plan {
+			switch t.Status {
+			case "completed":
+				b.WriteString(okStyle.Render("✓ ") + labelStyle.Render(truncate(t.Content, w-2)) + "\n")
+			case "in_progress":
+				left := renderSegs("", sg("▸ ", m.stateColor())) + lipgloss.NewStyle().Bold(true).Foreground(colFg).Render(truncate(t.Content, w-10))
+				b.WriteString(spread(w, left, hintStyle.Render("← now")) + "\n")
+			case "cancelled":
+				b.WriteString(hintStyle.Render("✗ "+truncate(t.Content, w-2)) + "\n")
+			default:
+				b.WriteString(renderSegs("", sg("· ", colFaint), sg(truncate(t.Content, w-2), colFaint)) + "\n")
+			}
 		}
-		b.WriteString(labelStyle.Render(gutterLabel(label)) + icon + " " + text.Render(truncate(t.Content, 52)) + "\n")
+		b.WriteString("\n")
 	}
 	if len(v.wrote) > 0 {
 		shown := lastN(v.wrote, 3)
@@ -957,14 +1005,14 @@ func (m liveModel) renderFeed(v activityView) string {
 		if extra := len(v.wrote) - len(shown); extra > 0 {
 			line += fmt.Sprintf("   +%d", extra)
 		}
-		b.WriteString(labelStyle.Render(gutterLabel("wrote")) + hintStyle.Render(truncate(line, 60)) + "\n")
+		b.WriteString(labelStyle.Render(gutterLabel("wrote")) + hintStyle.Render(truncate(line, w-8)) + "\n")
 	}
 	if len(v.ran) > 0 {
 		var parts []string
 		for _, c := range lastN(v.ran, 2) {
 			parts = append(parts, truncate(c, 40))
 		}
-		b.WriteString(labelStyle.Render(gutterLabel("ran")) + hintStyle.Render(strings.Join(parts, " · ")) + "\n")
+		b.WriteString(labelStyle.Render(gutterLabel("ran")) + hintStyle.Render(truncate(strings.Join(parts, " · "), w-8)) + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -992,7 +1040,7 @@ func (m liveModel) renderSubagents() string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString(infoStyle.Render("subagents") + "\n")
+	b.WriteString(labelRule(contentWidth(m.width), "subagents", "") + "\n")
 	for _, s := range m.subagents {
 		marker := okStyle.Render("✓")
 		if s.status == "running" {
@@ -1012,7 +1060,7 @@ func (m liveModel) renderSpecs() string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString(infoStyle.Render("specs") + "\n")
+	b.WriteString(labelRule(contentWidth(m.width), "specs", "") + "\n")
 	for _, f := range m.specs {
 		b.WriteString("  " + okStyle.Render("✎ ") + f + "  " + labelStyle.Render("written") + "\n")
 	}
@@ -1028,7 +1076,7 @@ func (m liveModel) renderTests() string {
 	next, hasNext := nextQueuedTest(m.tests, currentIdx)
 
 	var b strings.Builder
-	b.WriteString(infoStyle.Render("tests") + "\n")
+	b.WriteString(labelRule(contentWidth(m.width), "tests", "") + "\n")
 	b.WriteString("  " + labelStyle.Render(formatTestHistory(counts)) + "\n")
 	if total := len(m.tests); total > 0 && (counts.passed+counts.failed+counts.flaky) > 0 {
 		b.WriteString("  " + m.bar.ViewAs(float64(counts.passed)/float64(total)) + " " + hintStyle.Render(fmt.Sprintf("%d/%d", counts.passed, total)) + "\n")
@@ -1223,7 +1271,7 @@ func (m liveModel) renderCoverage() string {
 		st = shadowStyle
 	}
 	line := fmt.Sprintf("%d/%d changed lines covered (%.0f%%)", m.coverage.CoveredLines, m.coverage.ChangedLines, pct)
-	return infoStyle.Render("coverage") + "\n  " + st.Render(line)
+	return labelRule(contentWidth(m.width), "coverage", "") + "\n  " + st.Render(line)
 }
 
 func (m liveModel) renderReviewer() string {
@@ -1263,6 +1311,21 @@ func verdictStyle(v string) lipgloss.Style {
 		return errorStyle
 	default:
 		return shadowStyle
+	}
+}
+
+// verdictColor is the raw ramp color (for borders, rails and bars that need a Color, not
+// a Style). Mirrors verdictStyle.
+func verdictColor(v string) lipgloss.Color {
+	switch v {
+	case "pass":
+		return colPass
+	case "skipped":
+		return colInfra
+	case "fail", "invalid":
+		return colFail
+	default:
+		return colFlaky
 	}
 }
 

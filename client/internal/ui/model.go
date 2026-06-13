@@ -73,10 +73,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.serverVersion = msg.info.ServerVersion
 		m.home = newHomeModel(msg.apps)
 		m.home.serverVersion = m.serverVersion
+		m.home.width = m.width
 		m.screen = screenHome
 		return m, nil
 	case appSelectedMsg:
 		m.launcher = newLauncherModel(msg.app)
+		m.launcher.width = m.width
 		m.screen = screenLauncher
 		return m, nil
 	case launchMsg:
@@ -90,6 +92,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(startStreamCmd(ctx, m.client, msg.id, ch), waitForEventCmd(ch), m.live.spin.Tick)
 	case askMsg:
 		m.chat = newChatModel(m.client, m.live.runID)
+		m.chat.width = m.width
 		m.screen = screenChat
 		return m, m.chat.Init()
 	case continueMsg:
@@ -99,39 +102,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case historySelectedMsg:
 		m.history = newHistoryModel(m.client, msg.app)
+		m.history.width = m.width
 		m.screen = screenHistory
 		return m, m.history.Init()
 	case agentSelectedMsg:
 		m.agent = newAgentModel(m.client)
+		m.agent.width = m.width
 		m.screen = screenAgent
 		return m, m.agent.Init()
 	case statusSelectedMsg:
 		m.status = newStatusModel(m.client)
+		m.status.width = m.width
 		m.screen = screenStatus
 		return m, m.status.Init()
 	case helpSelectedMsg:
 		m.help = newHelpModel(m.client)
+		m.help.width = m.width
 		m.screen = screenHelp
 		return m, m.help.Init()
 	case sessionsSelectedMsg:
 		m.sessions = newSessionsModel(m.client)
+		m.sessions.width = m.width
 		m.screen = screenSessions
 		return m, m.sessions.Init()
 	case onboardSelectedMsg:
 		m.appAdmin = newOnboardModel(m.client)
+		m.appAdmin.width = m.width
 		m.screen = screenAppAdmin
 		return m, m.appAdmin.Init()
 	case editAppMsg:
 		m.appAdmin = newEditAppModel(m.client, msg.app)
+		m.appAdmin.width = m.width
 		m.screen = screenAppAdmin
 		return m, m.appAdmin.Init()
 	case deleteAppMsg:
 		m.appAdmin = newDeleteAppModel(m.client, msg.app)
+		m.appAdmin.width = m.width
 		m.screen = screenAppAdmin
 		return m, m.appAdmin.Init()
 	case appsChangedMsg:
 		m.home = newHomeModel(msg.apps)
 		m.home.serverVersion = m.serverVersion
+		m.home.width = m.width
 		m.home.status = msg.status
 		m.screen = screenHome
 		return m, nil

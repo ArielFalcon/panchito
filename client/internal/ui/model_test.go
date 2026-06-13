@@ -141,7 +141,7 @@ func TestLiveFoldsEventsIntoStructuredState(t *testing.T) {
 	}
 	// View renders without panicking and shows the dedicated sections.
 	out := m.View()
-	if !strings.Contains(out, "1 passed") || !strings.Contains(out, "tests") {
+	if !strings.Contains(out, "1 passed") || !strings.Contains(out, "TESTS") {
 		t.Fatalf("view missing test section:\n%s", out)
 	}
 }
@@ -169,7 +169,7 @@ func TestLiveExecutionViewFocusesCurrentTestAndKeepsLargeSuitesCompact(t *testin
 	}))
 
 	out := m.renderTests()
-	for _, want := range []string{"tests", "history", "40 passed", "now", "case-41", "e2e/case-41.spec.ts", "next", "case-42"} {
+	for _, want := range []string{"TESTS", "history", "40 passed", "now", "case-41", "e2e/case-41.spec.ts", "next", "case-42"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("renderTests() missing %q:\n%s", want, out)
 		}
@@ -197,7 +197,7 @@ func TestLiveRendersDedicatedComponentsAndSummary(t *testing.T) {
 	}
 
 	live := m.View()
-	for _, want := range []string{"specs", "flows/contact.spec.ts", "written", "subagents", "explore checkout", "coverage", "70%", "reviewer: rejected", "scope the selector"} {
+	for _, want := range []string{"SPECS", "flows/contact.spec.ts", "written", "SUBAGENTS", "explore checkout", "COVERAGE", "70%", "reviewer: rejected", "scope the selector"} {
 		if !strings.Contains(live, want) {
 			t.Fatalf("live view missing %q:\n%s", want, live)
 		}
@@ -670,7 +670,7 @@ func TestAgentRendersLoadingAndConfig(t *testing.T) {
 	m.loading = false
 	m.config = &cfg
 	out = m.View()
-	if !strings.Contains(out, "mode: single") {
+	if !strings.Contains(out, "AGENT RUNTIME") || !strings.Contains(out, "single") {
 		t.Fatalf("config view missing mode:\n%s", out)
 	}
 	if !strings.Contains(out, "deepseek-v4-pro") {

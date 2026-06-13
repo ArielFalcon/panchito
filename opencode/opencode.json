@@ -28,7 +28,7 @@
     "qa-reviewer": {
       "description": "Independent E2E quality judge. Does not write: emits a JSON verdict.",
       "mode": "subagent",
-      "model": "opencode-go/qwen3.7-max",
+      "model": "opencode-go/minimax-m3",
       "prompt": "{file:./agent/qa-reviewer.md}",
       "tools": { "write": false, "edit": false, "bash": false, "read": true },
       "steps": 10,
