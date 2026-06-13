@@ -80,6 +80,7 @@ export interface GenerateInput {
   coverageGap?: string; // re-generation: changed lines not yet exercised (change-coverage)
   learnedRules?: string; // retrieval: rules from past runs injected into the agent prompt
   parallelDiff?: boolean; // qa.parallelDiff: diff-mode fan-out opt-in
+  explorer?: boolean; // qa.explorer: read-only explorer pass before the generator (single-agent diff)
   runId?: string; // for SSE live activity: maps the OpenCode session to this run record
   contextMap?: ArchitectureContext; // cross-cutting: the FE↔BE map loaded from e2e/.qa/context.json
   service?: { repo: string; mirrorDir: string; openapi?: string | string[] }; // cross-repo: the triggering microservice (read-only working copy)
@@ -190,6 +191,7 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
         learnedRules: input.learnedRules,
         runId: input.runId,
         contextMap: input.contextMap,
+        explorer: input.explorer,
         service: input.service,
         services: input.services,
       };
@@ -735,6 +737,20 @@ export async function runPipeline(
           : { ok: false, errors: ["context.json was not produced by the agent"] };
 
     if (!validated.ok) {
+      // ROOT-CAUSE (#6): in BOOTSTRAP (publish=false) the architecture map is an OPTIMIZATION that
+      // informs generation — NOT the test artifact and NOT a correctness gate. A map the agent
+      // could not build perfectly (e.g. one flow with no routes, like a disabled GenAI chat) must
+      // NEVER fail the actual QA run: that conflates "couldn't draw a perfect map" with "the tests
+      // are invalid". Degrade gracefully — log and proceed WITHOUT the map (the caller already
+      // continues when no map is returned). Only explicit `context` mode (publish=true), where the
+      // map IS the deliverable, fails with an Issue.
+      if (!publish) {
+        log(
+          `[qa] WARNING: context bootstrap produced an INVALID map (${validated.errors.join("; ")}) — ` +
+            `continuing WITHOUT architecture context. The map is an optimization, not a gate; generation proceeds.`,
+        );
+        return { run: undefined };
+      }
       log(`[qa] context validation failed:\n${validated.errors.join("\n")}`);
       await issueOrShadow(
         shadow, deps, log, app.repo,
@@ -865,7 +881,7 @@ export async function runPipeline(
         review = await deps.review(
           // Arm the independent judge with the PROVEN learned rules (active only — never unproven
           // candidates) so it enforces app-specific anti-patterns earned from past failures.
-          { diff: promptDiff, specs: r.specs, mirrorDir, e2eRelDir: isCode ? "" : E2E_DIR, baseUrl: app.dev?.baseUrl, intent, appName: app.name, mode, target: opts.target, learnedRules: renderRulesForReviewer(retrievedRules) },
+          { diff: promptDiff, specs: r.specs, mirrorDir, e2eRelDir: isCode ? "" : E2E_DIR, baseUrl: app.dev?.baseUrl, intent, guidance: opts.guidance, appName: app.name, mode, target: opts.target, learnedRules: renderRulesForReviewer(retrievedRules) },
           signal,
         );
       } catch (err) {
@@ -930,6 +946,7 @@ export async function runPipeline(
     guidance: opts.guidance,
     openapi: app.openapi,
     parallelDiff: app.qa.parallelDiff,
+    explorer: app.qa.explorer,
     contextMap,
     learnedRules: promptSections,
     service: triggerService

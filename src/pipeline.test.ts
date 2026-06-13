@@ -249,6 +249,16 @@ test("the independent reviewer is given the ON-DISK spec list, not the agent's",
   assert.deepEqual(reviewInputs[0], ["flows/real.spec.ts"]); // disk truth, not "ghost.spec.ts"
 });
 
+test("reviewer rationale is persisted on RunOutcome — an approval is auditable after the fact", async () => {
+  const calls: string[] = [];
+  const rationale = "These specs assert the discount path this commit added; the change cannot break green.";
+  const d = deps(passing(), calls, { review: [{ approved: true, corrections: [], rationale }] });
+  await runPipeline(app, "abc1234def", d, "manual", { mode: "diff", runId: "run-rationale" });
+  const outcome = d.savedOutcomes.at(-1)!;
+  assert.ok(outcome, "outcome must be persisted when a runId is provided");
+  assert.equal(outcome.gateSignals.reviewerRationale, rationale);
+});
+
 // Measured persistence (H3/M1): suite-level learning is recorded for e2e with the run's
 // cases + the actually-covered files, and is SKIPPED in code mode (it would pollute the
 // watched repo and there is no per-test coverage there).
@@ -491,6 +501,18 @@ test("change-coverage enforce: unmeasured coverage (null) is 'unknown' and never
   assert.equal(d.issues.length, 0);
 });
 
+test("change-coverage: an UNMEASURED green run persists coverageRatio null, never 0 (no false E-COVERAGE-GAP)", async () => {
+  const calls: string[] = [];
+  // collectCoverage returns null → measured:false; computeChangeCoverage yields ratio 0 with
+  // measured false. Persisting that 0 would mislabel a genuinely-unmeasured green run as a
+  // coverage gap; the persisted ratio MUST be null instead.
+  const d = deps(passing(), calls, { diff: DIFF_4, coverage: [null] });
+  await runPipeline(covApp("signal"), "abc123", d, "manual", { mode: "diff", runId: "run-cov-null" });
+  const outcome = d.savedOutcomes.at(-1)!;
+  assert.ok(outcome, "a runId was provided, so the outcome must be persisted");
+  assert.equal(outcome.gateSignals.coverageRatio, null);
+});
+
 test("change-coverage off: the step is skipped entirely", async () => {
   const calls: string[] = [];
   const d = deps(passing(), calls, { diff: DIFF_4, coverage: [cov([1])] });
@@ -713,6 +735,29 @@ test("diff mode bootstraps missing context map before generating tests", async (
   assert.equal(h.genInputs[1]!.mode, "diff");
   assert.equal(h.genInputs[1]!.contextMap, builtContext);
   assert.ok(!calls.includes("publishContext"), "automatic bootstrap must not publish a separate context PR");
+});
+
+test("diff mode DEGRADES (does not fail invalid) when the bootstrap context map is invalid — the map is an optimization, not a gate", async () => {
+  const calls: string[] = [];
+  const h = deps(passing(), calls, {
+    context: "missing",
+    agents: [
+      { output: "context map built", specs: [".qa/context.json"], reviewed: false, approved: true },
+      generated,
+    ],
+  });
+  // The agent produced a map, but it fails validation (e.g. one flow with no routes — like the
+  // disabled GenAI chat in PetClinic). The QA run must NOT die `invalid` over an imperfect MAP.
+  h.validateContextFn = () => ({ ok: false, errors: ["flows 'genai-chat': empty 'routes'"] });
+
+  const run = await runPipeline(app, "abc123", h, "manual", { mode: "diff" });
+
+  assert.notEqual(run.verdict, "invalid"); // the map is an optimization, not a correctness gate
+  assert.equal(run.verdict, "pass"); // generation proceeded and the specs passed
+  assert.deepEqual(calls.filter((c) => c === "generate"), ["generate", "generate"]); // context agent + the real diff generation
+  assert.equal(h.genInputs[1]!.mode, "diff"); // the actual QA generation still ran...
+  assert.equal(h.genInputs[1]!.contextMap, undefined); // ...just without the (invalid) map
+  assert.ok(!h.issues.some((i) => /context map.*invalid/i.test(i)), "a bootstrap map failure must NOT open an Issue");
 });
 
 test("diff mode refreshes a stale context map before generating tests", async () => {

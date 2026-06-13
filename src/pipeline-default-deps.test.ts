@@ -4,10 +4,10 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { defaultPipelineDeps, type GenerateInput } from "./pipeline";
-import type { OpencodeDeps } from "./integrations/opencode-client";
+import type { AgentDeps } from "./integrations/opencode-client";
 import type { RunOutcome } from "./types";
 
-function fakeAgentDeps(opened: string[], responseFor: (agent: string) => string): OpencodeDeps {
+function fakeAgentDeps(opened: string[], responseFor: (agent: string) => string): AgentDeps {
   return {
     open: async (agent) => {
       opened.push(agent);
@@ -100,6 +100,6 @@ test("defaultPipelineDeps routes reflection through the injected agent deps fact
     outcome: failedOutcome(),
   });
 
-  assert.deepEqual(opened, ["qa-assistant"]);
+  assert.deepEqual(opened, ["qa-reflector"]); // tool-less reflector role, not the engram-backed chat assistant
   assert.equal(result, null);
 });

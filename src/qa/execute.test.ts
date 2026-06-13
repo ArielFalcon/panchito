@@ -6,12 +6,34 @@ import {
   ExecuteDeps,
   parseStreamEvent,
   streamStatusToCase,
+  allFailuresAreRunnerInfra,
   killTree,
   playwrightArgs,
   e2eTimeoutMs,
   DEFAULT_E2E_TIMEOUT_MS,
 } from "./execute";
 import { QaCase } from "../types";
+
+test("allFailuresAreRunnerInfra: a browser-launch failure is infra (runner fault), not a test failure", () => {
+  const launchFail: QaCase[] = [
+    { name: "owner-registration.spec.ts › register owner", status: "fail", detail: "Error: browserType.launch: Executable doesn't exist at /root/.cache/ms-playwright/chromium_headless_shell-1155/chrome-linux/headless_shell" },
+    { name: "cleanup.spec.ts › cleanup", status: "fail", detail: "Error: browserType.launch: Executable doesn't exist" },
+  ];
+  assert.equal(allFailuresAreRunnerInfra(launchFail), true);
+
+  // A GENUINE test failure (assertion/timeout) is NOT infra — it stays `fail`.
+  const realFail: QaCase[] = [
+    { name: "owner › appears in list", status: "fail", detail: "Error: expect(locator).toBeVisible() failed: timed out" },
+  ];
+  assert.equal(allFailuresAreRunnerInfra(realFail), false);
+
+  // A MIX (one infra, one genuine) is conservatively NOT reclassified — stays `fail`.
+  const mixed: QaCase[] = [launchFail[0]!, realFail[0]!];
+  assert.equal(allFailuresAreRunnerInfra(mixed), false);
+
+  // No failures at all → not infra.
+  assert.equal(allFailuresAreRunnerInfra([{ name: "x", status: "pass" }]), false);
+});
 
 test("runs, maps cases and SANITIZES the logs", async () => {
   const deps: ExecuteDeps = {

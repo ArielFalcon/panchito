@@ -47,7 +47,11 @@ export function classifyCommit(message: string, diff: string): CommitClassificat
   const { type, breaking } = parseHeader(message);
   const firstLine = (message.split("\n")[0] ?? "").trim();
   const changedFiles = parseChangedFiles(diff);
+  // Behavior can change in code (logic keywords) OR in config-as-code that the source-extension
+  // logic check is blind to — a Spring application.yml/.properties setting under a chore/build
+  // message changes runtime behavior yet would otherwise be classified skip and go untested.
   const hasLogicChange = genuinelyAddedLogic(diff) > 0;
+  const hasBehaviorConfigChange = genuinelyAddedConfig(diff) > 0;
 
   let action: CommitAction = breaking ? "generate" : DEFAULT_ACTION[type];
   let contradiction = false;
@@ -55,11 +59,12 @@ export function classifyCommit(message: string, diff: string): CommitClassificat
 
   if (breaking) {
     reason = "breaking change → generate";
-  } else if ((action === "skip" || action === "regression") && hasLogicChange) {
-    // The message promises no new behavior, but the diff adds it.
+  } else if ((action === "skip" || action === "regression") && (hasLogicChange || hasBehaviorConfigChange)) {
+    // The message promises no new behavior, but the diff adds it (code logic or behavior config).
     contradiction = true;
     action = "generate";
-    reason = `message '${type}' expected no tests, but the diff adds logic → escalated to generate`;
+    const what = hasLogicChange ? "logic" : "behavior config";
+    reason = `message '${type}' expected no tests, but the diff adds ${what} → escalated to generate`;
   }
 
   return { type, breaking, message: firstLine, changedFiles, hasLogicChange, contradiction, action, reason };
@@ -126,6 +131,51 @@ function genuinelyAddedLogic(diff: string): number {
   }
   // Subtract relocations by content: an added logic line with a matching removed line is
   // a move, not new logic. Each removal can cancel at most one addition.
+  const removedCounts = new Map<string, number>();
+  for (const r of removed) removedCounts.set(r, (removedCounts.get(r) ?? 0) + 1);
+  let net = 0;
+  for (const a of added) {
+    const c = removedCounts.get(a) ?? 0;
+    if (c > 0) removedCounts.set(a, c - 1);
+    else net++;
+  }
+  return net;
+}
+
+// Behavior-config files whose changes alter runtime behavior (Spring app/profile config, Spring
+// Cloud bootstrap). Deliberately NARROW: dependency manifests (pom.xml, package.json, lockfiles)
+// and CI yaml are excluded so routine bumps do not force-escalate.
+const BEHAVIOR_CONFIG = /(^|\/)(application|bootstrap)(-[\w]+)?\.(ya?ml|properties)$/i;
+
+function isBehaviorConfigFile(path: string): boolean {
+  return BEHAVIOR_CONFIG.test(path);
+}
+
+// Net-added meaningful (non-blank, non-comment) lines in behavior-config files. Config carries
+// no code keywords, so any added setting is a potential behavior change; relocations are
+// subtracted by content exactly like genuinelyAddedLogic.
+function genuinelyAddedConfig(diff: string): number {
+  let inConfig = false;
+  const added: string[] = [];
+  const removed: string[] = [];
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+++ ")) {
+      inConfig = isBehaviorConfigFile(line.replace(/^\+\+\+ (?:b\/)?/, ""));
+      continue;
+    }
+    if (line.startsWith("--- ") || line.startsWith("diff --git")) {
+      if (line.startsWith("diff --git")) inConfig = false;
+      continue;
+    }
+    if (!inConfig) continue;
+    if (line.startsWith("+")) {
+      const c = line.slice(1).trim();
+      if (c && !/^#/.test(c)) added.push(c);
+    } else if (line.startsWith("-")) {
+      const c = line.slice(1).trim();
+      if (c && !/^#/.test(c)) removed.push(c);
+    }
+  }
   const removedCounts = new Map<string, number>();
   for (const r of removed) removedCounts.set(r, (removedCounts.get(r) ?? 0) + 1);
   let net = 0;

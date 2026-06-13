@@ -18,7 +18,7 @@ import { pruneMirrors, defaultMirrorPruneDeps } from "./server/mirror-prune";
 import { createMaintainerRuntime } from "./server/maintainer-runtime";
 import { installHttpDispatcher } from "./util/net";
 import { resolveRef, defaultMirrorDeps } from "./integrations/repo-mirror";
-import { askAssistant, OpencodeDeps, getOpenSessionCount } from "./integrations/opencode-client";
+import { askAssistant, AgentDeps, getOpenSessionCount } from "./integrations/opencode-client";
 import { createAgentRuntimeManager } from "./server/agent-runtime";
 import { CodexRuntimeStrategy, OpenCodeRuntimeStrategy } from "./agent-runtime";
 import { appendLog, appendActivity, deleteAppHistory, runVerdictCounts, saveRunEvent, loadRunEvents } from "./server/history";
@@ -97,7 +97,7 @@ const agentRuntime = createAgentRuntimeManager({
   hasOpenSessions: () => getOpenSessionCount() > 0,
 });
 
-function currentAgentDeps(): OpencodeDeps {
+function currentAgentDeps(): AgentDeps {
   return agentRuntime.facade().deps();
 }
 

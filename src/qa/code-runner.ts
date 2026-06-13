@@ -11,11 +11,12 @@
 // Runtime note: the orchestrator image ships Node plus Python, Go, Rust, Maven
 // and Gradle (see the root Dockerfile). A missing runtime (e.g. image built without
 // a language) fails with ENOENT and is reported as infra-error, never a pass.
-// The runtimes live in the ORCHESTRATOR image, not the opencode container — the
+// The runtimes live in the ORCHESTRATOR image, not the agents container — the
 // orchestrator spawns the test commands directly.
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { QaCase, QaRunResult } from "../types";
 import { sanitizeText, containsSecrets, recordAudit } from "../orchestrator/sanitizer";
@@ -39,6 +40,13 @@ const ALLOWED_ENV_EXACT = new Set([
   "GONOSUMCHECK", "GOFLAGS", "GOCACHE", "JAVA_HOME", "M2_HOME", "M2_REPO", "M2", "NVM_DIR", "NODE_PATH", "NODE_OPTIONS",
   "DISPLAY", "SSH_AUTH_SOCK", "COLORTERM", "NO_COLOR", "FORCE_COLOR", "DEBUG",
   "PKG_CONFIG_PATH", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH",
+  // Playwright's browsers are baked at a NON-default path in the orchestrator image
+  // (PLAYWRIGHT_BROWSERS_PATH=/ms-playwright). The e2e execution spawns Playwright through
+  // scrubEnv; without this the child loses the path, falls back to the empty default cache
+  // (/root/.cache/ms-playwright) and EVERY run fails with "Executable doesn't exist" — a false
+  // `fail`, never an actual test result. The value is the orchestrator's own (not attacker
+  // input) and points only at browser binaries, so it is safe to forward.
+  "PLAYWRIGHT_BROWSERS_PATH",
 ]);
 
 // Allowed var FAMILIES (prefix match — each token genuinely names a family of vars the
@@ -78,6 +86,75 @@ export function scrubEnv(extraAllowed?: RegExp): Record<string, string> {
     console.warn(`[qa] scrubEnv dropped ${dropped.length} env var(s) not in allowlist: ${dropped.join(", ")}`);
   }
   return env;
+}
+
+// ── Privilege-drop sandbox for untrusted code execution (§21) ──────────────────
+// scrubEnv() removes SECRETS FROM THE ENVIRONMENT, but the watched repo's install/test/coverage
+// commands still run as the orchestrator's user (root, in the container) with its filesystem. That
+// lets a malicious or buggy test READ the root-owned API token (config/.api_token, 0600), TAMPER
+// with the orchestrator's own files (/app/src, node_modules), write SIBLING repos under
+// /app/.mirrors, or plant a .git hook that later runs as root on the publish `git commit`. We close
+// those by DROPPING PRIVILEGE: the untrusted spawns run as a dedicated unprivileged user (the
+// `sandbox` user baked into the image), and the run's working copy is chowned to it so it can only
+// write its OWN tree. NETWORK is intentionally left intact — Maven/Gradle resolve dependencies
+// during the test phase, so a network namespace would break the JVM target; egress restriction is a
+// deploy-layer control (see docker-compose.yml / docs/code-mode-sandbox.md).
+
+export interface Sandbox {
+  uid: number;
+  gid: number;
+  home: string;
+}
+
+// Resolves the sandbox identity, or null when privilege-drop does not apply (not root, not Linux,
+// explicitly disabled, or the sandbox home is absent → the image wasn't built with the user). When
+// null, spawns run as the current user exactly as before — so local `npm run qa` on macOS still works.
+export function resolveSandbox(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+  getuid: () => number = () => process.getuid?.() ?? -1,
+  homeExists: (p: string) => boolean = existsSync,
+): Sandbox | null {
+  if (env.CODE_SANDBOX === "off") return null; // operator escape hatch
+  if (platform !== "linux") return null; // uid/gid spawn needs POSIX privilege semantics
+  if (getuid() !== 0) return null; // only root can setuid to the sandbox user
+  const uid = Number(env.CODE_SANDBOX_UID ?? 1001);
+  const gid = Number(env.CODE_SANDBOX_GID ?? uid);
+  const home = env.CODE_SANDBOX_HOME ?? "/home/sandbox";
+  if (!Number.isInteger(uid) || uid <= 0 || !Number.isInteger(gid) || gid < 0) return null;
+  if (!homeExists(home)) {
+    console.warn(`[qa] code-mode sandbox DISABLED: home ${home} not found (image built without the sandbox user?). Untrusted code will run as the current user.`);
+    return null;
+  }
+  return { uid, gid, home };
+}
+
+// Spawn options that drop to the sandbox: the uid/gid plus a HOME pointing at the sandbox's own
+// writable home (so toolchain caches — ~/.m2, ~/.gradle, ~/.cache, ~/.cargo — never touch root's),
+// merged onto the scrubbed env. When `sandbox` is null this is just the scrubbed env (unchanged),
+// so the spawn runs exactly as before.
+export function sandboxSpawnOptions(
+  base: Record<string, string>,
+  sandbox: Sandbox | null,
+): { env: Record<string, string>; uid?: number; gid?: number } {
+  if (!sandbox) return { env: base };
+  return {
+    env: { ...base, HOME: sandbox.home, USER: "sandbox", LOGNAME: "sandbox" },
+    uid: sandbox.uid,
+    gid: sandbox.gid,
+  };
+}
+
+// Hand the run's working copy to the sandbox user so its install/test can write ONLY there. The
+// chown runs on the SOURCE tree (before install/deps), so it is cheap. `.git` is kept ROOT-owned: a
+// sandbox-writable `.git/hooks` would run as root on the orchestrator's next `git commit` (a classic
+// sandbox escape). Root retains full access regardless of ownership, so publish/mirror git ops are
+// unaffected. No-op when the sandbox does not apply.
+export function prepareSandboxWorkdir(repoDir: string, sandbox: Sandbox | null = resolveSandbox()): void {
+  if (!sandbox) return;
+  execFileSync("chown", ["-R", `${sandbox.uid}:${sandbox.gid}`, repoDir], { stdio: "ignore" });
+  const gitDir = join(repoDir, ".git");
+  if (existsSync(gitDir)) execFileSync("chown", ["-R", "0:0", gitDir], { stdio: "ignore" });
 }
 
 export type Ecosystem = "node" | "python" | "go" | "rust" | "maven" | "gradle" | "unknown";
@@ -123,10 +200,16 @@ export function detectCodeProject(repoDir: string, deps: DetectDeps = realDetect
         ? "yarn"
         : "npm";
     const pkg = deps.readJson(at("package.json")) ?? {};
+    // `--ignore-scripts`: the watched repo is UNTRUSTED code running in the orchestrator. A
+    // package.json install lifecycle (preinstall/postinstall/prepare) is arbitrary code execution
+    // — the cheapest RCE vector. Skipping it closes that vector (SEC-01). Fail-safe: a repo that
+    // genuinely needs a build script will fail its test command → infra-error (inconclusive), never
+    // a false pass. (Only the code-mode UNTRUSTED install; the e2e seed install is the orchestrator's
+    // own trusted fixtures and keeps its scripts.)
     const install: Command =
       pm === "npm"
-        ? { cmd: "npm", args: [deps.exists(at("package-lock.json")) ? "ci" : "install"] }
-        : { cmd: pm, args: ["install"] };
+        ? { cmd: "npm", args: [deps.exists(at("package-lock.json")) ? "ci" : "install", "--ignore-scripts"] }
+        : { cmd: pm, args: ["install", "--ignore-scripts"] };
     return { ecosystem: "node", install, test: nodeTestCommand(pm, pkg) };
   }
 
@@ -160,7 +243,11 @@ export function detectCodeProject(repoDir: string, deps: DetectDeps = realDetect
 
   // JVM
   if (deps.exists(at("pom.xml"))) {
-    return { ecosystem: "maven", install: null, test: { cmd: "mvn", args: ["-q", "test"] } };
+    // `-B` (batch mode), NOT `-q`: quiet mode suppresses surefire's INFO-level "Tests run: N"
+    // summary, which is the only reliable signal that >=1 test actually executed (so a build
+    // that compiles but collects zero tests cannot be told apart from a real pass). Batch mode
+    // keeps that summary while dropping interactive download-progress noise.
+    return { ecosystem: "maven", install: null, test: { cmd: "mvn", args: ["-B", "test"] } };
   }
   if (deps.exists(at("build.gradle")) || deps.exists(at("build.gradle.kts"))) {
     const gradlew = deps.exists(at("gradlew"));
@@ -194,6 +281,10 @@ function nodeTestCommand(pm: "npm" | "pnpm" | "yarn", pkg: Record<string, unknow
 export interface CodeSetupDeps {
   detect(repoDir: string): CodeProject;
   install(project: CodeProject, repoDir: string, opts?: { signal?: AbortSignal; timeoutMs?: number }): Promise<void>;
+  // Hands the working copy to the unprivileged sandbox user BEFORE any untrusted spawn (§21). Runs
+  // for every code-mode run — including the null-install ecosystems (Maven/Gradle/Rust) whose first
+  // untrusted spawn is the test itself — so it must execute before the install-null early return.
+  prepareWorkdir?(repoDir: string): void;
 }
 
 export async function setupCodeProject(
@@ -202,6 +293,7 @@ export async function setupCodeProject(
   opts?: { signal?: AbortSignal; timeoutMs?: number },
 ): Promise<void> {
   const project = deps.detect(repoDir);
+  deps.prepareWorkdir?.(repoDir); // drop the working copy to the sandbox user before any spawn
   if (!project.install) return;
   if (opts?.signal?.aborted) throw new Error("code-mode install aborted by operator cancel");
 
@@ -222,10 +314,11 @@ export async function setupCodeProject(
 
 export const defaultCodeSetupDeps: CodeSetupDeps = {
   detect: (repoDir) => detectCodeProject(repoDir),
+  prepareWorkdir: (repoDir) => prepareSandboxWorkdir(repoDir),
   install: (project, repoDir, opts) =>
     new Promise((resolve, reject) => {
       const { cmd, args } = project.install!;
-      const child = spawn(cmd, args, { cwd: repoDir, env: scrubEnv(), detached: true });
+      const child = spawn(cmd, args, { cwd: repoDir, detached: true, ...sandboxSpawnOptions(scrubEnv(), resolveSandbox()) });
       let settled = false;
       const settle = (err?: Error) => {
         if (settled) return;
@@ -300,6 +393,20 @@ export function ranZeroTests(project: CodeProject, out: CodeRunOutput): boolean 
 
   // mocha: prints "0 passing" and exits 0 when it ran nothing.
   if (cmd.includes("npx mocha") && out.exitCode === 0 && /\b0 passing\b/.test(log)) return true;
+
+  // rust (cargo test): libtest prints "running N tests" per test binary AND per doctest set,
+  // regardless of verbosity. If the crate compiled (exit 0), reported "running 0 tests", and
+  // NO binary/doctest ran >=1 test, nothing was collected — a green build with zero coverage.
+  if (project.ecosystem === "rust" && out.exitCode === 0 && /running 0 tests/.test(log) && !/running [1-9]\d* tests?/.test(log)) return true;
+
+  // maven (surefire, run with -B so the summary is visible): a successful build that never
+  // printed "Tests run: [1-9]" executed zero tests — no *Test classes matched or surefire was
+  // skipped. Conservative: a real run always prints a non-zero "Tests run" summary.
+  if (project.ecosystem === "maven" && out.exitCode === 0 && !/Tests run: [1-9]/.test(log)) return true;
+
+  // gradle: the test task reports NO-SOURCE (no test sources) or SKIPPED when nothing runs.
+  // Marker-based (never fires on a real run, which prints neither for :test).
+  if (project.ecosystem === "gradle" && out.exitCode === 0 && /> Task :\S*[Tt]est\S*\s+(?:NO-SOURCE|SKIPPED)/.test(log)) return true;
 
   return false;
 }
@@ -416,7 +523,7 @@ export const defaultCodeExecuteDeps: CodeExecuteDeps = {
   runTests: (project, repoDir, opts) =>
     new Promise((resolve) => {
       const { cmd, args } = project.test;
-      const child = spawn(cmd, args, { cwd: repoDir, env: scrubEnv(), detached: true });
+      const child = spawn(cmd, args, { cwd: repoDir, detached: true, ...sandboxSpawnOptions(scrubEnv(), resolveSandbox()) });
       let stdout = "";
       let stderr = "";
       let resolved = false;
@@ -451,3 +558,74 @@ export const defaultCodeExecuteDeps: CodeExecuteDeps = {
       child.on("close", (code) => finish({ exitCode: code, logs: `${stdout}\n${stderr}`.trim() }));
     }),
 };
+
+// ── Code-mode change coverage ─────────────────────────────────────────────────
+// Real change-coverage for code runs (the keystone). The repo's plain test command emits
+// no coverage report, so we re-run the NODE suite under c8 — universal V8 coverage WITH
+// source-map support, so TS/tsx maps back to source lines. This is BEST-EFFORT and fully
+// DECOUPLED from the pass/fail run: it runs after the verdict is decided, its exit code is
+// ignored, and any failure just means "unmeasured" (never a false fail). Other ecosystems
+// are not yet instrumented (→ null → honest "unmeasured"); add them the same way.
+
+// resolveC8Bin finds the c8 CLI bundled with the orchestrator (a devDependency, installed
+// into the image). null when absent — coverage is then simply skipped.
+function resolveC8Bin(): string | null {
+  try {
+    return createRequire(import.meta.url).resolve("c8/bin/c8.js");
+  } catch {
+    return null;
+  }
+}
+
+// coverageCommand wraps a node project's test command with c8 to emit coverage/lcov.info.
+// Pure (the command shape is unit-tested); returns null for ecosystems we don't instrument.
+export function coverageCommand(project: CodeProject, repoDir: string, c8Bin: string): Command | null {
+  if (project.ecosystem !== "node") return null;
+  return {
+    cmd: process.execPath, // node — run the c8 CLI directly so no PATH/npx lookup is needed
+    args: [
+      c8Bin,
+      "--reporter=lcovonly",
+      "--reports-dir",
+      join(repoDir, "coverage"),
+      "--all=false", // measure only files the suite touched, not the whole tree
+      "--",
+      project.test.cmd,
+      ...project.test.args,
+    ],
+  };
+}
+
+// runCodeCoverage produces coverage/lcov.info for the repo's suite, best-effort. Returns
+// without throwing on any failure (missing c8, non-node ecosystem, timeout, crash) so the
+// caller falls back to "unmeasured". It never reports pass/fail — only a side-effect report.
+export async function runCodeCoverage(
+  repoDir: string,
+  opts?: { signal?: AbortSignal; timeoutMs?: number },
+): Promise<void> {
+  if (opts?.signal?.aborted) return;
+  const c8Bin = resolveC8Bin();
+  if (!c8Bin) return;
+  const command = coverageCommand(detectCodeProject(repoDir), repoDir, c8Bin);
+  if (!command) return;
+  await new Promise<void>((resolve) => {
+    const child = spawn(command.cmd, command.args, { cwd: repoDir, detached: true, ...sandboxSpawnOptions(scrubEnv(), resolveSandbox()) });
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      killTree(child);
+      finish();
+    }, opts?.timeoutMs ?? DEFAULT_CODE_MODE_TIMEOUT_MS);
+    opts?.signal?.addEventListener("abort", () => {
+      killTree(child);
+      finish();
+    }, { once: true });
+    child.on("error", finish); // c8 missing or spawn failure → no report, no harm
+    child.on("close", finish); // success OR test failure — we only want the report
+  });
+}

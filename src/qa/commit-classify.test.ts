@@ -23,6 +23,29 @@ const movedLineDiff = [
   "+  doThing(x);",
 ].join("\n");
 
+const springConfigDiff = [
+  "diff --git a/src/main/resources/application.yml b/src/main/resources/application.yml",
+  "+++ b/src/main/resources/application.yml",
+  "+  feature:",
+  "+    new-checkout-flow: true",
+].join("\n");
+
+const pomBumpDiff = [
+  "diff --git a/pom.xml b/pom.xml",
+  "+++ b/pom.xml",
+  "+    <version>2.7.5</version>",
+].join("\n");
+
+test("chore that changes Spring application.yml behavior → escalated to generate", () => {
+  const c = classifyCommit("chore: tweak config", springConfigDiff);
+  assert.equal(c.action, "generate");
+  assert.equal(c.contradiction, true);
+});
+
+test("chore that only bumps a pom.xml dependency version → stays skip (no over-escalation)", () => {
+  assert.equal(classifyCommit("chore: bump spring-boot", pomBumpDiff).action, "skip");
+});
+
 test("feat → generate", () => {
   assert.equal(classifyCommit("feat: new payment screen", logicDiff).action, "generate");
 });

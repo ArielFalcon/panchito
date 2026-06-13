@@ -1,15 +1,33 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import {
   detectCodeProject,
   setupCodeProject,
   runCodeTests,
   scrubEnv,
+  coverageCommand,
+  resolveSandbox,
+  sandboxSpawnOptions,
   DetectDeps,
   CodeProject,
   CodeExecuteDeps,
   CodeSetupDeps,
 } from "./code-runner";
+
+test("coverageCommand wraps a node suite with c8 → coverage/lcov.info", () => {
+  const project: CodeProject = { ecosystem: "node", install: null, test: { cmd: "npm", args: ["test"] } };
+  const cmd = coverageCommand(project, "/repo", "/c8/bin/c8.js");
+  assert.ok(cmd, "node projects must be instrumented");
+  assert.deepEqual(cmd.args, [
+    "/c8/bin/c8.js", "--reporter=lcovonly", "--reports-dir", join("/repo", "coverage"), "--all=false", "--", "npm", "test",
+  ]);
+});
+
+test("coverageCommand returns null for ecosystems not yet instrumented", () => {
+  const go: CodeProject = { ecosystem: "go", install: { cmd: "go", args: ["mod", "download"] }, test: { cmd: "go", args: ["test", "./..."] } };
+  assert.equal(coverageCommand(go, "/repo", "/c8.js"), null);
+});
 
 // A DetectDeps stub from a set of "present" files (+ optional package.json content).
 function fs(present: string[], pkg?: Record<string, unknown>): DetectDeps {
@@ -22,21 +40,22 @@ function fs(present: string[], pkg?: Record<string, unknown>): DetectDeps {
 test("detects a Node project with a real test script (npm)", () => {
   const p = detectCodeProject("/r", fs(["package.json", "package-lock.json"], { scripts: { test: "vitest run" } }));
   assert.equal(p.ecosystem, "node");
-  assert.deepEqual(p.install, { cmd: "npm", args: ["ci"] });
+  // --ignore-scripts: untrusted-repo install must not run arbitrary lifecycle scripts (SEC-01).
+  assert.deepEqual(p.install, { cmd: "npm", args: ["ci", "--ignore-scripts"] });
   assert.deepEqual(p.test, { cmd: "npm", args: ["test"] });
 });
 
-test("Node without a lockfile installs with npm install", () => {
+test("Node without a lockfile installs with npm install (scripts ignored)", () => {
   const p = detectCodeProject("/r", fs(["package.json"], { scripts: { test: "jest" } }));
-  assert.deepEqual(p.install, { cmd: "npm", args: ["install"] });
+  assert.deepEqual(p.install, { cmd: "npm", args: ["install", "--ignore-scripts"] });
 });
 
-test("pnpm/yarn detected from their lockfiles", () => {
+test("pnpm/yarn detected from their lockfiles (scripts ignored)", () => {
   const pnpm = detectCodeProject("/r", fs(["package.json", "pnpm-lock.yaml"], { scripts: { test: "x" } }));
-  assert.deepEqual(pnpm.install, { cmd: "pnpm", args: ["install"] });
+  assert.deepEqual(pnpm.install, { cmd: "pnpm", args: ["install", "--ignore-scripts"] });
   assert.deepEqual(pnpm.test, { cmd: "pnpm", args: ["test"] });
   const yarn = detectCodeProject("/r", fs(["package.json", "yarn.lock"], { scripts: { test: "x" } }));
-  assert.deepEqual(yarn.install, { cmd: "yarn", args: ["install"] });
+  assert.deepEqual(yarn.install, { cmd: "yarn", args: ["install", "--ignore-scripts"] });
 });
 
 test("Node with the npm-default 'no test specified' script falls back to a runner", () => {
@@ -93,6 +112,55 @@ test("setupCodeProject runs install only when there is an install command", asyn
   };
   await setupCodeProject("/r", noInstall);
   assert.equal(installed, 1); // unchanged
+});
+
+test("setupCodeProject prepares the sandbox workdir even for a null-install ecosystem (before the early return)", async () => {
+  // §21: Maven/Gradle/Rust have no install step, but their FIRST untrusted spawn is the test —
+  // so the chown-to-sandbox must still run for them. prepareWorkdir must fire before install-null returns.
+  const prepared: string[] = [];
+  const deps: CodeSetupDeps = {
+    detect: () => ({ ecosystem: "maven", install: null, test: { cmd: "mvn", args: ["-B", "test"] } }),
+    install: async () => { throw new Error("install must not run for a null-install project"); },
+    prepareWorkdir: (repoDir) => prepared.push(repoDir),
+  };
+  await setupCodeProject("/work/repo", deps);
+  assert.deepEqual(prepared, ["/work/repo"]);
+});
+
+// §21 sandbox identity resolver — privilege-drop applies ONLY in the root-on-Linux container with
+// the baked-in user; everywhere else it must degrade to "no sandbox" so local runs are unaffected.
+test("resolveSandbox applies only as root on Linux with an existing home; degrades safely otherwise", () => {
+  const homeOk = () => true;
+  const asRoot = () => 0;
+  const base = { CODE_SANDBOX_UID: "1001" } as NodeJS.ProcessEnv;
+
+  // The shipping case: root + linux + home present → the sandbox identity.
+  assert.deepEqual(resolveSandbox(base, "linux", asRoot, homeOk), { uid: 1001, gid: 1001, home: "/home/sandbox" });
+
+  // Every disqualifier → null (run as the current user, unchanged behavior).
+  assert.equal(resolveSandbox(base, "darwin", asRoot, homeOk), null); // macOS local dev
+  assert.equal(resolveSandbox(base, "linux", () => 1000, homeOk), null); // not root
+  assert.equal(resolveSandbox({ CODE_SANDBOX: "off" }, "linux", asRoot, homeOk), null); // escape hatch
+  assert.equal(resolveSandbox(base, "linux", asRoot, () => false), null); // image lacks the user/home
+  assert.equal(resolveSandbox({ CODE_SANDBOX_UID: "0" }, "linux", asRoot, homeOk), null); // refuse uid 0
+
+  // Configurable uid/gid/home.
+  assert.deepEqual(
+    resolveSandbox({ CODE_SANDBOX_UID: "2000", CODE_SANDBOX_GID: "2001", CODE_SANDBOX_HOME: "/sb" }, "linux", asRoot, homeOk),
+    { uid: 2000, gid: 2001, home: "/sb" },
+  );
+});
+
+test("sandboxSpawnOptions: passthrough env when no sandbox; uid/gid + redirected HOME when sandboxed", () => {
+  const env = { PATH: "/usr/bin", HOME: "/root" };
+  assert.deepEqual(sandboxSpawnOptions(env, null), { env }); // unchanged, runs as current user
+
+  const opts = sandboxSpawnOptions(env, { uid: 1001, gid: 1001, home: "/home/sandbox" });
+  assert.equal(opts.uid, 1001);
+  assert.equal(opts.gid, 1001);
+  assert.equal(opts.env.HOME, "/home/sandbox"); // toolchain caches stay out of root's home
+  assert.equal(opts.env.USER, "sandbox");
+  assert.equal(opts.env.PATH, "/usr/bin"); // base preserved
 });
 
 const nodeProject: CodeProject = { ecosystem: "node", install: { cmd: "npm", args: ["ci"] }, test: { cmd: "npm", args: ["test"] } };
@@ -184,6 +252,60 @@ test("go test that actually ran tests stays a pass (not over-flagged)", async ()
   assert.equal(run.verdict, "pass");
 });
 
+test("detects a Maven project with -B (not -q, so surefire summary stays visible)", () => {
+  const p = detectCodeProject("/r", fs(["pom.xml"]));
+  assert.equal(p.ecosystem, "maven");
+  assert.deepEqual(p.test, { cmd: "mvn", args: ["-B", "test"] });
+});
+
+test("cargo test that compiled but ran zero tests is infra-error, not a false pass", async () => {
+  const project: CodeProject = { ecosystem: "rust", install: null, test: { cmd: "cargo", args: ["test"] } };
+  const log = "   Compiling app v0.1.0\n    Finished test [unoptimized]\n     Running unittests\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored";
+  const deps: CodeExecuteDeps = { detect: () => project, runTests: async () => ({ exitCode: 0, logs: log }) };
+  const run = await runCodeTests("/r", { namespace: "qa-bot-rs0" }, deps);
+  assert.equal(run.verdict, "infra-error");
+  assert.equal(run.passed, false);
+});
+
+test("cargo test that actually ran tests stays a pass (not over-flagged)", async () => {
+  const project: CodeProject = { ecosystem: "rust", install: null, test: { cmd: "cargo", args: ["test"] } };
+  const log = "running 3 tests\ntest tests::adds ... ok\n\ntest result: ok. 3 passed; 0 failed";
+  const deps: CodeExecuteDeps = { detect: () => project, runTests: async () => ({ exitCode: 0, logs: log }) };
+  const run = await runCodeTests("/r", { namespace: "qa-bot-rsok" }, deps);
+  assert.equal(run.verdict, "pass");
+});
+
+test("maven build with no 'Tests run: N' executed zero tests → infra-error, not a false pass", async () => {
+  const project: CodeProject = { ecosystem: "maven", install: null, test: { cmd: "mvn", args: ["-B", "test"] } };
+  const deps: CodeExecuteDeps = { detect: () => project, runTests: async () => ({ exitCode: 0, logs: "[INFO] Building app 1.0\n[INFO] BUILD SUCCESS\n[INFO] Total time: 4.2 s" }) };
+  const run = await runCodeTests("/r", { namespace: "qa-bot-mvn0" }, deps);
+  assert.equal(run.verdict, "infra-error");
+  assert.equal(run.passed, false);
+});
+
+test("maven that ran tests (Tests run: 12) stays a pass", async () => {
+  const project: CodeProject = { ecosystem: "maven", install: null, test: { cmd: "mvn", args: ["-B", "test"] } };
+  const deps: CodeExecuteDeps = { detect: () => project, runTests: async () => ({ exitCode: 0, logs: "[INFO] Results:\n[INFO] Tests run: 12, Failures: 0, Errors: 0, Skipped: 0\n[INFO] BUILD SUCCESS" }) };
+  const run = await runCodeTests("/r", { namespace: "qa-bot-mvnN" }, deps);
+  assert.equal(run.verdict, "pass");
+});
+
+test("gradle :test NO-SOURCE (no test sources) is infra-error, not a false pass", async () => {
+  const project: CodeProject = { ecosystem: "gradle", install: null, test: { cmd: "./gradlew", args: ["test"] } };
+  const log = "> Task :compileTestJava NO-SOURCE\n> Task :test NO-SOURCE\n\nBUILD SUCCESSFUL in 2s";
+  const deps: CodeExecuteDeps = { detect: () => project, runTests: async () => ({ exitCode: 0, logs: log }) };
+  const run = await runCodeTests("/r", { namespace: "qa-bot-gr0" }, deps);
+  assert.equal(run.verdict, "infra-error");
+  assert.equal(run.passed, false);
+});
+
+test("gradle that executed :test stays a pass (no NO-SOURCE/SKIPPED marker)", async () => {
+  const project: CodeProject = { ecosystem: "gradle", install: null, test: { cmd: "./gradlew", args: ["test"] } };
+  const deps: CodeExecuteDeps = { detect: () => project, runTests: async () => ({ exitCode: 0, logs: "> Task :compileTestJava\n> Task :test\n\nBUILD SUCCESSFUL in 6s" }) };
+  const run = await runCodeTests("/r", { namespace: "qa-bot-grok" }, deps);
+  assert.equal(run.verdict, "pass");
+});
+
 test("logs are sanitized before returning", async () => {
   const deps: CodeExecuteDeps = {
     detect: () => nodeProject,
@@ -229,6 +351,24 @@ test("scrubEnv strips secrets but preserves language vars and OS essentials", ()
     assert.equal(env.CI, "true", "CI must be preserved");
   } finally {
     // Restore original env so no side effects leak to other tests.
+    for (const key of Object.keys(process.env)) {
+      if (!(key in saved)) delete process.env[key];
+    }
+    Object.assign(process.env, saved);
+  }
+});
+
+test("scrubEnv preserves PLAYWRIGHT_BROWSERS_PATH so the e2e spawn can find the baked browsers", () => {
+  const saved = { ...process.env };
+  try {
+    // The orchestrator image bakes browsers at a non-default path; dropping this var makes
+    // Playwright fall back to the empty default cache → "Executable doesn't exist" on every run.
+    process.env.PLAYWRIGHT_BROWSERS_PATH = "/ms-playwright";
+    process.env.GITHUB_TOKEN = "ghp_fakeSecretValue123456";
+    const env = scrubEnv(/^DEV_/); // the exact prefix the e2e execution uses
+    assert.equal(env.PLAYWRIGHT_BROWSERS_PATH, "/ms-playwright", "PLAYWRIGHT_BROWSERS_PATH must reach the Playwright spawn");
+    assert.ok(!("GITHUB_TOKEN" in env), "secrets must still be dropped");
+  } finally {
     for (const key of Object.keys(process.env)) {
       if (!(key in saved)) delete process.env[key];
     }

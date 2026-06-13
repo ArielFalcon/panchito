@@ -68,7 +68,15 @@ export function parsePlaywrightReport(json: unknown): ParsedReport {
         cases.push({
           name: [title, spec.title].filter(Boolean).join(" › "),
           status: outcome,
-          detail: outcome === "pass" ? undefined : firstError(spec),
+          // Always record WHY for a non-pass case. A flaky case is quarantined, not Issue-filed,
+          // so its diagnostic trail (the first-attempt failure that the retry masked) is the only
+          // way an operator can tell why it was quarantined — label it explicitly (OBS-08).
+          detail:
+            outcome === "pass"
+              ? undefined
+              : outcome === "flaky"
+                ? `flaky — passed only after a retry; first-attempt failure: ${firstError(spec) ?? "(no error captured in the report)"}`
+                : firstError(spec),
         });
       }
       walk(suite.suites, title);

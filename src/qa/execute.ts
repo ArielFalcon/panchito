@@ -91,6 +91,24 @@ export function streamStatusToCase(status: string): CaseStatus | null {
   return "fail";
 }
 
+// Playwright RUNNER-infrastructure failure signatures: the browser could not launch / is missing /
+// the host lacks deps / the browser died mid-run. These are a `fallo del runner` = INFRASTRUCTURE,
+// NOT a test-logic failure (an assertion, or a timeout against DEV). Matched from Playwright's OWN
+// error strings — the only channel it offers — and kept narrow so a genuine failure is never
+// relabeled as infra.
+const PLAYWRIGHT_INFRA_RE =
+  /browserType\.(?:launch|connect)|Executable doesn't exist|Failed to launch|missing dependencies to run browsers|Host system is missing dependencies|Target (?:page|context|browser) (?:has been|was) closed/i;
+
+// True when the run failed but EVERY failed case is a runner-infrastructure fault (e.g. the browser
+// could not launch), so the run never actually exercised the app. The caller reclassifies it as
+// `infra-error`, never `fail`: a runner fault must not open an Issue blaming the operator's tests
+// (nor burn a regeneration round chasing a phantom bug). Conservative — a single genuine test-logic
+// failure in the mix keeps the verdict `fail`.
+export function allFailuresAreRunnerInfra(cases: QaCase[]): boolean {
+  const failed = cases.filter((c) => c.status === "fail");
+  return failed.length > 0 && failed.every((c) => PLAYWRIGHT_INFRA_RE.test(c.detail ?? ""));
+}
+
 export interface RunOutput {
   report: unknown; // Playwright JSON report
   logs: string;
@@ -233,6 +251,21 @@ export async function runE2E(
       passed: false,
       cases: parsed.cases,
       logs: sanitized.text || "the E2E suite ran but executed zero tests (no tests matched, or all were skipped)",
+    };
+  }
+
+  // A report that PARSED with failures, but where EVERY failure is a runner-infrastructure fault
+  // (the browser could not launch), did not actually test the app — same root principle as the
+  // no-report guard above. Classify it infra-error, NEVER `fail`: a runner fault must not open an
+  // Issue blaming the operator's tests, and must not trigger a (wasted) regeneration round.
+  if (parsed.verdict === "fail" && allFailuresAreRunnerInfra(parsed.cases)) {
+    return {
+      sha: opts.namespace,
+      verdict: "infra-error",
+      passed: false,
+      cases: parsed.cases,
+      logs: sanitized.text,
+      note: "Playwright could not launch the browser — runner infrastructure fault, not a test failure. Check the browser install / PLAYWRIGHT_BROWSERS_PATH.",
     };
   }
 

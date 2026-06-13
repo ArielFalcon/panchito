@@ -9,6 +9,12 @@
 // The map is EXTRACTED from structured sources (Angular routing, OpenAPI specs, the
 // generated API clients), not invented: it is an authoring AID, never a quality gate
 // (so its residual error is bounded — it scopes work, it does not decide what ships).
+// That asymmetry is the safety argument: a stale or incomplete map only degrades RECALL
+// (a flow gets missed or mis-scoped), never PRECISION — it cannot make a bad test ship,
+// because the harness, the independent reviewer and change-coverage are what decide that.
+// So validating FORM only (internal consistency, not truth against the code) is deliberate.
+// The day an artifact GATES what ships instead of only scoping work (e.g. generated system
+// docs), this is no longer enough — it would need semantic verification against ground truth.
 // Here we define the schema and its deterministic VALIDATION — the gate that keeps the
 // (agent-produced) map internally consistent, exactly as metadata.ts gates the test
 // manifest. The builder (agent, "context" mode) and the consumer (diff mode) live

@@ -42,6 +42,7 @@ export interface RunOptions {
   previousNamespace?: string; // cleanup: namespace from an interrupted previous run
   runId?: string; // the tracked run id; scopes the data/coverage namespace per run
   triggerRepo?: string; // cross-repo: the service repo whose commit triggered this run
+  commits?: number; // diff mode: how many commits ending at the SHA the diff spans (default 1)
 }
 
 // Outcome of an OpenCode agent run. The agent writes the E2E tests directly into
@@ -87,6 +88,7 @@ export interface QaRunResult {
   cases: QaCase[];
   logs: string;
   note?: string; // human-readable summary of what happened (reviewer rejection, skip reason, etc.)
+  outcome?: string; // what the run PRODUCED — "suite PR merged · <url>", "Issue filed · <url>", etc.
 }
 
 // A single spec produced by the AI agent with its objective and flow path.
@@ -167,6 +169,13 @@ export interface RunOutcome {
     coverageRatio: number | null;
     valueScore: number | null;
     reviewerCorrections: string[];
+    // The reviewer's one/two-sentence reasoning for its verdict — on APPROVAL too, not only
+    // rejection. The reviewer is the keystone publish gate; without this, a wrong auto-merge
+    // (green-but-meaningless test that ships) leaves no durable record of WHY it was approved.
+    reviewerRationale?: string;
+    // The reviewer's APPROVE/REJECT verdict, persisted so the end-of-run value report (CLI, TUI)
+    // can state it without re-deriving from corrections. Absent when review was disabled/not reached.
+    reviewerApproved?: boolean;
     flaky: boolean;
     retries: number;
   };

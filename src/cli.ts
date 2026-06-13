@@ -13,9 +13,10 @@
 
 import { JobQueue } from "./server/queue";
 import { enqueueTrackedRun } from "./server/runner";
-import { getRecord, listRunOutcomes, listLearningRules, loadCurriculum } from "./server/history";
+import { getRecord, getRunOutcome, listRunOutcomes, listLearningRules, loadCurriculum } from "./server/history";
 import { loadAppConfig } from "./orchestrator/config-loader";
 import { RUN_MODES, RunMode, TestTarget } from "./types";
+import { renderRunReport } from "./qa/value-report";
 
 // Probe the local service's unauthenticated liveness endpoint. A 200 means a long-lived
 // orchestrator owns the queue on this host and a second queue here would race it against DEV.
@@ -51,7 +52,8 @@ async function main(): Promise<void> {
   const queue = new JobQueue();
   // When --target is not given, derive it from the app config: a `code: true` app must run
   // code mode (running e2e against it would hit the no-dev defensive infra-error).
-  const target = args.target ?? (loadAppConfig(args.app).code ? "code" : "e2e");
+  const appCfg = loadAppConfig(args.app);
+  const target = args.target ?? (appCfg.code ? "code" : "e2e");
   const id = enqueueTrackedRun(queue, {
     app: args.app,
     sha: args.sha,
@@ -62,9 +64,45 @@ async function main(): Promise<void> {
   });
   await queue.drain();
   const record = getRecord(id);
+  // The end-of-run value report: a manual run used to print NOTHING (just an exit code), so in
+  // shadow mode — where there is no PR/Issue artifact to inspect — the operator could not tell what
+  // the run was WORTH. Print the deterministic value signals the run already persisted.
+  if (record) printRunReport(record, appCfg);
   // pass and skipped are success; fail/invalid/infra-error/flaky are not.
   const ok = record?.verdict === "pass" || record?.verdict === "skipped";
   process.exit(ok ? 0 : 1);
+}
+
+// Compose the value report from the persisted run record + its RunOutcome (the structured gate
+// signals). Kept in the CLI (not the pure renderer) because it stitches two persistence reads.
+function printRunReport(record: ReturnType<typeof getRecord> & {}, appCfg: ReturnType<typeof loadAppConfig>): void {
+  const outcome = getRunOutcome(record.id);
+  const gs = outcome?.gateSignals;
+  const report = renderRunReport({
+    app: record.app,
+    sha: record.sha,
+    mode: record.mode,
+    target: record.target,
+    shadow: appCfg.qa.shadow ?? false,
+    verdict: record.verdict ?? "infra-error",
+    passed: record.passed ?? 0,
+    failed: record.failed ?? 0,
+    specCount: record.specs?.length ?? 0,
+    specNames: record.specs?.map((s) => s.name),
+    note: record.note,
+    signals: {
+      // A persisted non-null ratio means coverage was actually measured (the pipeline persists
+      // null for an unmeasured run, never a misleading 0). So presence === measured.
+      coverageRatio: gs?.coverageRatio ?? null,
+      coverageMeasured: gs?.coverageRatio !== null && gs?.coverageRatio !== undefined,
+      coveragePolicy: appCfg.qa.changeCoverage?.mode ?? "signal",
+      valueScore: gs?.valueScore ?? null,
+      reviewerApproved: gs?.reviewerApproved ?? null,
+      reviewerRationale: gs?.reviewerRationale,
+    },
+    errorClass: outcome?.errorClass ?? null,
+  }, { color: process.stdout.isTTY === true && !process.env.NO_COLOR });
+  console.log("\n" + report + "\n");
 }
 
 const TARGETS: TestTarget[] = ["e2e", "code"];
