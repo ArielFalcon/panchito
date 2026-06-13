@@ -51,6 +51,7 @@ type appAdminModel struct {
 	status       string
 	repos        []contract.RepoListItem
 	repoCursor   int
+	ownerCursor  int // 0 = @me, 1 = the owner/org text input
 	formCursor   int
 	ownerInput   textinput.Model
 	nameInput    textinput.Model
@@ -68,7 +69,6 @@ type appAdminModel struct {
 func newOnboardModel(client *api.Client) appAdminModel {
 	m := appAdminModel{client: client, mode: appAdminCreate, step: appStepOwner, target: "e2e", shadow: true, needsReview: true}
 	m.ownerInput = appTextInput("owner/org", 28)
-	m.ownerInput.Focus()
 	m.nameInput = appTextInput("app-name", 28)
 	m.baseInput = appTextInput("https://dev.example.com", 42)
 	m.versionInput = appTextInput("https://dev.example.com/version (optional)", 42)
@@ -150,11 +150,22 @@ func (m appAdminModel) Update(msg tea.Msg) (appAdminModel, tea.Cmd) {
 
 func (m appAdminModel) updateOwner(msg tea.KeyMsg) (appAdminModel, tea.Cmd) {
 	switch msg.String() {
+	case "up", "down", "tab":
+		m.ownerCursor = 1 - m.ownerCursor
+		if m.ownerCursor == 1 {
+			m.ownerInput.Focus()
+			return m, textinput.Blink
+		}
+		m.ownerInput.Blur()
+		return m, nil
 	case "enter":
-		owner := strings.TrimSpace(m.ownerInput.Value())
-		if owner == "" {
-			m.err = "owner is required"
-			return m, nil
+		owner := "@me"
+		if m.ownerCursor == 1 {
+			owner = strings.TrimSpace(m.ownerInput.Value())
+			if owner == "" {
+				m.err = "type an owner/org, or pick @me"
+				return m, nil
+			}
 		}
 		m.loading = true
 		m.err = ""
@@ -162,9 +173,33 @@ func (m appAdminModel) updateOwner(msg tea.KeyMsg) (appAdminModel, tea.Cmd) {
 	case "esc":
 		return m, func() tea.Msg { return backMsg{} }
 	}
-	var cmd tea.Cmd
-	m.ownerInput, cmd = m.ownerInput.Update(msg)
-	return m, cmd
+	// Keystrokes only edit the text input when it is the selected choice.
+	if m.ownerCursor == 1 {
+		var cmd tea.Cmd
+		m.ownerInput, cmd = m.ownerInput.Update(msg)
+		return m, cmd
+	}
+	return m, nil
+}
+
+func (m appAdminModel) renderOwner() string {
+	var b strings.Builder
+	b.WriteString(hintStyle.Render("whose repositories?") + "\n\n")
+
+	meMarker := "  "
+	me := "@me  " + hintStyle.Render("— repos of your github-token user")
+	if m.ownerCursor == 0 {
+		meMarker = okStyle.Render("▸ ")
+		me = lipgloss.NewStyle().Bold(true).Render("@me") + "  " + hintStyle.Render("— repos of your github-token user")
+	}
+	b.WriteString(meMarker + me + "\n")
+
+	inMarker := "  "
+	if m.ownerCursor == 1 {
+		inMarker = okStyle.Render("▸ ")
+	}
+	b.WriteString(inMarker + labelStyle.Render("owner/org ") + m.ownerInput.View() + "\n")
+	return b.String()
 }
 
 func (m appAdminModel) updateRepo(msg tea.KeyMsg) (appAdminModel, tea.Cmd) {
@@ -333,7 +368,7 @@ func (m appAdminModel) View() string {
 	} else {
 		switch m.step {
 		case appStepOwner:
-			b.WriteString(labelStyle.Render("owner ") + m.ownerInput.View() + "\n")
+			b.WriteString(m.renderOwner())
 		case appStepRepo:
 			b.WriteString(m.renderRepos())
 		case appStepForm:
@@ -385,7 +420,7 @@ func (m appAdminModel) wizardCrumb() string {
 func (m appAdminModel) footerHint() string {
 	switch m.step {
 	case appStepOwner:
-		return "enter search repos · esc back"
+		return "↑↓ choose · enter load repos · esc back"
 	case appStepRepo:
 		return "↑↓ choose · enter form · esc owner"
 	case appStepForm:

@@ -544,6 +544,26 @@ func TestHomeOnboardEditAndDeleteMessages(t *testing.T) {
 	}
 }
 
+func TestOnboardOwnerOffersMeAndInput(t *testing.T) {
+	m := newOnboardModel(api.New("http://x", ""))
+	if m.ownerCursor != 0 {
+		t.Fatalf("owner step must default to @me (cursor 0), got %d", m.ownerCursor)
+	}
+	// Enter on @me loads the token user's repos.
+	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd == nil {
+		t.Fatal("enter on @me must emit a list-repos command")
+	}
+	// Move to the text input; an empty owner errors instead of loading.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if m.ownerCursor != 1 {
+		t.Fatalf("down must focus the owner input, cursor=%d", m.ownerCursor)
+	}
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil || m.err == "" {
+		t.Fatalf("empty owner input must error, cmd=%v err=%q", cmd, m.err)
+	}
+}
+
 func TestAppAdminRepoSelectionPrefillsCreateForm(t *testing.T) {
 	m := newOnboardModel(nil)
 	m, _ = m.Update(reposLoadedMsg{repos: []contract.RepoListItem{{FullName: "org/shop_front", Private: false}}})
