@@ -85,12 +85,12 @@ test("publishCode: no test changes → no PR", async () => {
   assert.equal(d.pr.created, false);
 });
 
-test("publishCode: commits the whole tree (minus node_modules) on a qa/code- branch", async () => {
+test("publishCode: commits the whole tree on a qa/code- branch", async () => {
   const d = deps(" A src/math.test.ts");
   const res = await publishCode(input, d);
   assert.equal(res?.prUrl, "https://github.com/org/app/pull/7");
   assert.ok(d.gitCalls.some((c) => c[0] === "checkout" && c.includes("qa/code-abc1234")));
-    assert.ok(d.gitCalls.some((c) => c[0] === "add" && c.some((a: string) => a.includes("node_modules"))));
+    assert.ok(d.gitCalls.some((c) => c[0] === "add" && c.some((a: string) => a === ".")));
   assert.ok(d.gitCalls.some((c) => c.includes("commit") && c.includes("test(code): automated QA for abc1234")));
 });
 
