@@ -710,7 +710,9 @@ export async function runPipeline(
 
   const MAX_REVIEW_ROUNDS = 2;
   const generateAndReview = async (genInput: GenerateInput): Promise<AgentResult> => {
+    const genStart = Date.now();
     let r = await reconcileSpecs(await deps.generate(genInput, signal, log));
+    log(`[qa] [timing] generation produced ${r.specs.length} spec(s) in ${Math.round((Date.now() - genStart) / 1000)}s`);
     if (!(app.qa.needsReview && deps.review)) return r;
     for (let round = 0; round < MAX_REVIEW_ROUNDS; round++) {
       if (r.specs.length === 0) {
@@ -720,6 +722,7 @@ export async function runPipeline(
         return round === 0 ? r : { ...r, approved: false, note: "regeneration produced no reviewable specs" };
       }
       let review: ReviewResult;
+      const reviewStart = Date.now();
       try {
         review = await deps.review(
           { diff: promptDiff, specs: r.specs, mirrorDir, e2eRelDir: isCode ? "" : E2E_DIR, baseUrl: app.dev?.baseUrl, intent, appName: app.name, mode, target: opts.target },
@@ -751,7 +754,7 @@ export async function runPipeline(
       }
       // Reset counter on successful reviewer response
       consecutiveReviewerFailures = 0;
-      log(`[qa] independent reviewer round ${round + 1}/${MAX_REVIEW_ROUNDS}: approved=${review.approved} corrections=${review.corrections.length}`);
+      log(`[qa] independent reviewer round ${round + 1}/${MAX_REVIEW_ROUNDS}: approved=${review.approved} corrections=${review.corrections.length} (${Math.round((Date.now() - reviewStart) / 1000)}s)`);
       onReviewer?.(review.approved, review.approved ? [] : review.corrections);
       if (!review.approved) reviewerCorrections.push(...review.corrections);
       if (review.approved) return { ...r, approved: true, note: undefined };
@@ -759,7 +762,9 @@ export async function runPipeline(
       log(`[qa] applying ${review.corrections.length} reviewer correction(s) and regenerating...`);
       onStep?.("retry");
       retries++;
+      const regenStart = Date.now();
       r = await reconcileSpecs(await deps.generate({ ...genInput, reviewCorrections: review.corrections }, signal, log));
+      log(`[qa] [timing] regeneration produced ${r.specs.length} spec(s) in ${Math.round((Date.now() - regenStart) / 1000)}s`);
     }
     return r;
   };

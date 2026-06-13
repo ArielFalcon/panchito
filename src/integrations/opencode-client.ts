@@ -1489,6 +1489,14 @@ function buildTask(input: OpencodeRunInput): string {
     `radius across the frontend→backend boundary: a frontend change may affect the`,
     `backend behaviour and vice-versa. If the map is missing or stale, note the`,
     `limitation explicitly in your verdict note.`,
+    ``,
+    `## Scope budget (diff mode — do NOT over-work)`,
+    `The blast radius IS your budget. This is ONE commit, so keep generation fast and focused:`,
+    `- Read ONLY the changed symbols and their direct callers/callees (find_referencing_symbols).`,
+    `- Do NOT read the whole repository, the entire e2e suite, or unrelated flows/files.`,
+    `- Read existing specs ONLY for the one or two flows this commit actually touches.`,
+    `- Explore ONLY the page(s) the change affects — not the whole app.`,
+    `A handful of focused specs is the right output for a single-commit diff, not a suite rewrite.`,
   ].join("\n");
 }
 
