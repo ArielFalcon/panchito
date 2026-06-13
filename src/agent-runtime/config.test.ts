@@ -46,7 +46,7 @@ test("dual mode with one provider asks for single-mode downgrade confirmation", 
     mode: "dual" as const,
     assignments: {
       primary: { provider: "opencode" as const, model: "opencode-go/deepseek-v4-pro" },
-      reviewer: { provider: "opencode" as const, model: "opencode-go/qwen3.7-max" },
+      reviewer: { provider: "opencode" as const, model: "opencode-go/minimax-m3" },
       chat: { provider: "opencode" as const, model: "opencode-go/deepseek-v4-flash" },
     },
   };

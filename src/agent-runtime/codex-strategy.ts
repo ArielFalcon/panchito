@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { capabilitiesForRole } from "./types";
 import type {
   AgentModelInfo,
   AgentProviderHealth,
@@ -9,6 +10,12 @@ import type {
   AgentRuntimeSession,
   AgentRuntimeStrategy,
 } from "./types";
+
+// Codex's translation of the provider-agnostic capability policy: filesystem write maps to the
+// `codex exec --sandbox` mode. Read-only roles (the judge, the reflector) cannot write the workspace.
+function codexSandboxForRole(role: AgentRole): "read-only" | "workspace-write" {
+  return capabilitiesForRole(role).canWrite ? "workspace-write" : "read-only";
+}
 
 export interface CodexTransportStartInput {
   role: AgentRole;
@@ -65,6 +72,25 @@ export function codexExecEnv(env: Record<string, string | undefined> = process.e
     if (CODEX_EXEC_ENV_EXACT.has(key) || CODEX_EXEC_ENV_PREFIX.test(key)) out[key] = value;
   }
   return out;
+}
+
+// Builds the `codex exec` argv for a session. The sandbox is derived from the role's capability
+// policy (read-only roles cannot write the workspace) — the Codex-side equivalent of OpenCode's
+// per-agent tools.write flag, so a reviewer/reflector is structurally read-only, not prompt-only.
+export function codexExecArgs(input: { role: AgentRole; cwd: string; model?: string }): string[] {
+  return [
+    "exec",
+    "--json",
+    "--cd",
+    input.cwd,
+    "--skip-git-repo-check",
+    "--sandbox",
+    codexSandboxForRole(input.role),
+    "--color",
+    "never",
+    ...(input.model ? ["--model", input.model] : []),
+    "-",
+  ];
 }
 
 export class CodexRuntimeStrategy implements AgentRuntimeStrategy {
@@ -142,19 +168,7 @@ export class CodexExecTransport implements CodexHeadlessTransport {
   }
 
   private runExec(prompt: string, input: CodexTransportStartInput): Promise<string> {
-    const args = [
-      "exec",
-      "--json",
-      "--cd",
-      input.cwd,
-      "--skip-git-repo-check",
-      "--sandbox",
-      "workspace-write",
-      "--color",
-      "never",
-      ...(input.model ? ["--model", input.model] : []),
-      "-",
-    ];
+    const args = codexExecArgs(input);
     return new Promise((resolve, reject) => {
       const child = spawn(this.command, args, {
         cwd: input.cwd,
@@ -233,7 +247,9 @@ export class SupervisorExecTransport implements CodexHeadlessTransport {
     const res = await this.fetchImpl(`${this.baseUrl}/codex/exec`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ cwd: input.cwd, prompt, ...(input.model ? { model: input.model } : {}), ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}) }),
+      // `sandbox` is per-role (read-only roles cannot write): the supervisor must pass it through to
+      // `codex exec --sandbox`. Sent unconditionally so a read-only role is never silently elevated.
+      body: JSON.stringify({ cwd: input.cwd, prompt, sandbox: codexSandboxForRole(input.role), ...(input.model ? { model: input.model } : {}), ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}) }),
       ...(input.signal ? { signal: input.signal } : {}),
     });
     const body = (await res.json().catch(() => ({}))) as { message?: string; error?: string };
@@ -264,6 +280,8 @@ function rolePromptName(role: AgentRole): string {
   if (role === "chat") return "qa-assistant";
   if (role === "worker") return "qa-worker";
   if (role === "workerCode") return "qa-worker";
+  if (role === "reflector") return "qa-reflector";
+  if (role === "explorer") return "qa-explorer";
   return "qa-maintainer";
 }
 

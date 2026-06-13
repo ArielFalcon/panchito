@@ -1,12 +1,83 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { OpenCodeRuntimeStrategy } from "./opencode-strategy";
-import { CodexExecTransport, CodexRuntimeStrategy, SupervisorExecTransport, codexExecEnv, defaultCodexTransport } from "./codex-strategy";
-import type { OpencodeDeps } from "../integrations/opencode-client";
+import { CodexExecTransport, CodexRuntimeStrategy, SupervisorExecTransport, codexExecArgs, codexExecEnv, defaultCodexTransport } from "./codex-strategy";
+import { capabilitiesForRole, roleForLegacyAgent } from "./types";
+import type { AgentDeps } from "../integrations/opencode-client";
+
+// Capability policy is expressed ONCE, provider-agnostic; each strategy enforces it with its own
+// mechanism (OpenCode tools{} map, Codex --sandbox flag). The judge must not be able to write.
+test("capabilitiesForRole: the judge / chat / reflector are read-only; authoring roles can write", () => {
+  for (const role of ["reviewer", "chat", "reflector"] as const) {
+    assert.equal(capabilitiesForRole(role).canWrite, false, `${role} must be read-only`);
+  }
+  for (const role of ["primary", "worker", "workerCode", "maintainer"] as const) {
+    assert.equal(capabilitiesForRole(role).canWrite, true, `${role} must be able to write`);
+  }
+});
+
+test("codexExecArgs sandboxes read-only roles: the reviewer cannot write the workspace on Codex", () => {
+  const reviewer = codexExecArgs({ role: "reviewer", cwd: "/repo" });
+  assert.ok(reviewer.includes("read-only"), "reviewer must run --sandbox read-only");
+  assert.ok(!reviewer.includes("workspace-write"), "reviewer must NOT get workspace-write");
+  const primary = codexExecArgs({ role: "primary", cwd: "/repo", model: "gpt-5.4" });
+  assert.ok(primary.includes("workspace-write"), "the author role keeps workspace-write");
+  assert.ok(primary.includes("gpt-5.4"));
+});
+
+test("SupervisorExecTransport forwards the per-role sandbox so the supervisor can enforce it", async () => {
+  const bodies: string[] = [];
+  const transport = new SupervisorExecTransport({
+    baseUrl: "http://agents:4097",
+    env: { CODEX_API_KEY: "codex-key" },
+    fetchImpl: async (_url, init) => {
+      bodies.push((init?.body as string) ?? "");
+      return { ok: true, status: 200, json: async () => ({ message: "ok" }) };
+    },
+  });
+  const session = await transport.start({ role: "reviewer", cwd: "/repo" });
+  await session.prompt("review");
+  const body = JSON.parse(bodies[0]!) as { sandbox?: string };
+  assert.equal(body.sandbox, "read-only");
+});
+
+test("roleForLegacyAgent maps qa-reflector to the read-only reflector role", () => {
+  assert.equal(roleForLegacyAgent("qa-reflector"), "reflector");
+  assert.equal(capabilitiesForRole("reflector").canWrite, false);
+});
+
+// ── Fase 1: the read-only blast-radius explorer role (both runtimes) ─────────
+
+test("capabilitiesForRole: the explorer is read-only (it distills the blast radius, never writes)", () => {
+  assert.equal(capabilitiesForRole("explorer").canWrite, false);
+});
+
+test("roleForLegacyAgent maps qa-explorer to the read-only explorer role", () => {
+  assert.equal(roleForLegacyAgent("qa-explorer"), "explorer");
+});
+
+test("codexExecArgs sandboxes the explorer read-only on Codex", () => {
+  const args = codexExecArgs({ role: "explorer", cwd: "/repo" });
+  assert.ok(args.includes("read-only"), "explorer must run --sandbox read-only");
+  assert.ok(!args.includes("workspace-write"), "explorer must NOT get workspace-write");
+});
+
+test("OpenCodeRuntimeStrategy maps the explorer role to the qa-explorer agent", async () => {
+  const calls: string[] = [];
+  const deps: AgentDeps = {
+    open: async (agent) => {
+      calls.push(agent);
+      return { id: "s", prompt: async () => "ok", dispose: async () => {} };
+    },
+  };
+  const strategy = new OpenCodeRuntimeStrategy({ env: { OPENCODE_API_KEY: "k" }, depsFactory: async () => deps });
+  await strategy.openSession("explorer", "/repo");
+  assert.deepEqual(calls, ["qa-explorer"]);
+});
 
 test("OpenCodeRuntimeStrategy maps roles to legacy OpenCode agents and forwards model overrides", async () => {
   const calls: Array<{ agent: string; cwd: string; model?: string }> = [];
-  const deps: OpencodeDeps = {
+  const deps: AgentDeps = {
     open: async (agent, cwd, opts) => {
       calls.push({ agent, cwd, model: opts?.model });
       return { id: "s1", prompt: async () => "ok", dispose: async () => {} };
@@ -17,10 +88,10 @@ test("OpenCodeRuntimeStrategy maps roles to legacy OpenCode agents and forwards 
     depsFactory: async () => deps,
   });
 
-  const session = await strategy.openSession("reviewer", "/repo", { model: "opencode-go/qwen3.7-max" });
+  const session = await strategy.openSession("reviewer", "/repo", { model: "opencode-go/minimax-m3" });
   assert.equal(await session.prompt("review"), "ok");
 
-  assert.deepEqual(calls, [{ agent: "qa-reviewer", cwd: "/repo", model: "opencode-go/qwen3.7-max" }]);
+  assert.deepEqual(calls, [{ agent: "qa-reviewer", cwd: "/repo", model: "opencode-go/minimax-m3" }]);
 });
 
 test("OpenCodeRuntimeStrategy reports needs_config without OPENCODE_API_KEY", async () => {
@@ -62,14 +133,14 @@ test("CodexRuntimeStrategy wraps a headless transport as an AgentRuntimeSession"
 });
 
 test("defaultCodexTransport runs Codex over the supervisor when one is configured, else locally", () => {
-  assert.ok(defaultCodexTransport({ AGENT_SUPERVISOR_URL: "http://opencode:4097" }) instanceof SupervisorExecTransport);
+  assert.ok(defaultCodexTransport({ AGENT_SUPERVISOR_URL: "http://agents:4097" }) instanceof SupervisorExecTransport);
   assert.ok(defaultCodexTransport({}) instanceof CodexExecTransport);
 });
 
 test("SupervisorExecTransport posts a prompt to /codex/exec and returns the final message", async () => {
   const calls: Array<{ url: string; init?: { method?: string; body?: string } }> = [];
   const transport = new SupervisorExecTransport({
-    baseUrl: "http://opencode:4097/",
+    baseUrl: "http://agents:4097/",
     env: { CODEX_API_KEY: "codex-key" },
     fetchImpl: async (url, init) => {
       calls.push({ url, init });
@@ -80,7 +151,7 @@ test("SupervisorExecTransport posts a prompt to /codex/exec and returns the fina
   const session = await transport.start({ role: "primary", cwd: "/repo", model: "gpt-5.4" });
   assert.equal(await session.prompt("write tests"), "codex-ok");
 
-  assert.equal(calls[0]!.url, "http://opencode:4097/codex/exec");
+  assert.equal(calls[0]!.url, "http://agents:4097/codex/exec");
   assert.equal(calls[0]!.init?.method, "POST");
   const body = JSON.parse(calls[0]!.init!.body!) as { cwd: string; prompt: string; model: string };
   assert.equal(body.cwd, "/repo");
@@ -90,7 +161,7 @@ test("SupervisorExecTransport posts a prompt to /codex/exec and returns the fina
 
 test("SupervisorExecTransport surfaces a supervisor exec failure instead of swallowing it", async () => {
   const transport = new SupervisorExecTransport({
-    baseUrl: "http://opencode:4097",
+    baseUrl: "http://agents:4097",
     env: { CODEX_API_KEY: "codex-key" },
     fetchImpl: async () => ({ ok: false, status: 400, json: async () => ({ error: "codex exec exited 1" }) }),
   });
@@ -99,11 +170,11 @@ test("SupervisorExecTransport surfaces a supervisor exec failure instead of swal
 });
 
 test("SupervisorExecTransport reports needs_config without a Codex key and reads /providers otherwise", async () => {
-  const noKey = new SupervisorExecTransport({ baseUrl: "http://opencode:4097", env: {}, fetchImpl: async () => { throw new Error("should not call"); } });
+  const noKey = new SupervisorExecTransport({ baseUrl: "http://agents:4097", env: {}, fetchImpl: async () => { throw new Error("should not call"); } });
   assert.deepEqual(await noKey.health(), { provider: "codex", status: "needs_config", configured: false });
 
   const supervised = new SupervisorExecTransport({
-    baseUrl: "http://opencode:4097",
+    baseUrl: "http://agents:4097",
     env: { CODEX_API_KEY: "codex-key" },
     fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ providers: { codex: { provider: "codex", status: "healthy", configured: true } } }) }),
   });

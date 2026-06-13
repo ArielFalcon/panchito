@@ -17,19 +17,23 @@ import {
   runOpencodeParallel,
   buildWorkerPrompt,
   buildPlanPrompt,
+  buildExplorerPrompt,
   renderArchitectureContext,
   shouldFanOut,
   parseModelRef,
   ManifestFs,
   ParallelWorkerInput,
-  OpencodeDeps,
+  AgentDeps,
   OpencodeRunInput,
   askAssistant,
   reviewIndependently,
   startEventStreamWithReconnect,
   EventStreamManager,
+  agentErrorToInfra,
 } from "./opencode-client";
+import { isInfraError } from "../errors";
 import type { ArchitectureContext } from "../qa/context";
+import type { ExplorationBrief } from "../qa/exploration-brief";
 
 // context.json is read from the WATCHED repo and committed by this system's own PRs, so it
 // is attacker-influenceable. It must be sanitized before reaching the test-writing agent.
@@ -73,7 +77,7 @@ const input: OpencodeRunInput = {
   intent: { type: "feat", breaking: false, message: "feat: new screen", changedFiles: ["src/x.ts"] },
 };
 
-function deps(finalText: string, captured?: { prompt?: string; agent?: string }): OpencodeDeps {
+function deps(finalText: string, captured?: { prompt?: string; agent?: string }): AgentDeps {
   return {
     open: async (agent, cwd, _opts) => {
       if (captured) captured.agent = agent;
@@ -403,6 +407,145 @@ test("parsePlan de-dups by resulting filename (distinct strings, same spec file)
   assert.equal(out[0]!.flow, "Check Out");
 });
 
+// ── Fase 2: the planner emits a distilled brief per objective ────────────────
+
+test("parsePlan attaches a per-objective brief and derives symbols from its blast radius", () => {
+  const out = parsePlan(
+    '{"objectives":[{"flow":"checkout","objective":"pay","needsUi":true,"brief":' +
+      '{"builtForSha":"s","objective":"pay","blastRadius":[{"symbol":"CheckoutService.pay","file":"src/c.ts","role":"applies discount"}]}}]}',
+  );
+  assert.equal(out.length, 1);
+  assert.equal(out[0]!.brief?.blastRadius[0]!.symbol, "CheckoutService.pay");
+  assert.deepEqual(out[0]!.symbols, ["CheckoutService.pay"], "symbols derived from the brief when not given explicitly");
+});
+
+test("parsePlan keeps explicit symbols even when a brief is present (no overwrite)", () => {
+  const out = parsePlan(
+    '{"objectives":[{"flow":"f","objective":"o","symbols":["Explicit.sym"],"brief":' +
+      '{"builtForSha":"s","objective":"o","blastRadius":[{"symbol":"Other.sym","file":"x","role":"r"}]}}]}',
+  );
+  assert.deepEqual(out[0]!.symbols, ["Explicit.sym"]);
+});
+
+test("parsePlan without a brief stays back-compatible (no brief key)", () => {
+  const out = parsePlan('{"objectives":[{"flow":"f","objective":"o","symbols":["s"]}]}');
+  assert.equal(out[0]!.brief, undefined);
+});
+
+test("buildWorkerPrompt injects the exploration brief and forbids re-exploring the code", () => {
+  const brief: ExplorationBrief = {
+    builtForSha: "s",
+    objective: "pay",
+    blastRadius: [{ symbol: "CheckoutService.pay", file: "src/c.ts", role: "applies the bulk discount" }],
+  };
+  const w: ParallelWorkerInput = { objective: "pay", flow: "checkout", symbols: ["CheckoutService.pay"], needsUi: true, specFile: "flows/checkout.spec.ts", repo: "r", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "ns", baseUrl: "https://dev", appName: "a", mode: "diff", brief };
+  const p = buildWorkerPrompt(w);
+  assert.match(p, /Exploration brief/);
+  assert.match(p, /applies the bulk discount/);
+  assert.match(p, /do NOT re-(read|explore)/i);
+  assert.match(p, /live DOM/i, "selectors must still be verified against the live DOM");
+});
+
+test("buildWorkerPrompt without a brief is unchanged (serena symbols line, back-compat)", () => {
+  const w: ParallelWorkerInput = { objective: "pay", flow: "checkout", symbols: ["pay"], needsUi: true, specFile: "flows/checkout.spec.ts", repo: "r", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "ns", appName: "a", mode: "complete" };
+  const p = buildWorkerPrompt(w);
+  assert.match(p, /read them with serena/);
+  assert.doesNotMatch(p, /Exploration brief/);
+});
+
+test("buildPlanPrompt asks each objective for a distilled brief (diff and complete)", () => {
+  const diff = buildPlanPrompt(diffPlanInput);
+  assert.match(diff, /brief/);
+  assert.match(diff, /blastRadius/);
+  const complete = buildPlanPrompt({ ...input, mode: "complete", intent: undefined });
+  assert.match(complete, /brief/);
+  assert.match(complete, /blastRadius/);
+});
+
+// ── Fase 3: explorer pass in the single-agent diff path ──────────────────────
+
+test("buildExplorerPrompt asks a read-only explorer to map the diff into an ExplorationBrief", () => {
+  const p = buildExplorerPrompt(input);
+  assert.match(p, /abc123/); // the sha
+  assert.match(p, /feat: new screen/); // intent message
+  assert.match(p, /const x = 1/); // the diff
+  assert.match(p, /read-only|do NOT write/i);
+  assert.match(p, /ExplorationBrief|brief/i);
+});
+
+test("buildPrompt injects the exploration brief and tells the generator not to re-read that code", () => {
+  const brief: ExplorationBrief = {
+    builtForSha: "abc123",
+    objective: "new screen",
+    blastRadius: [{ symbol: "Screen.render", file: "src/x.ts", role: "renders the new screen" }],
+  };
+  const withBrief = buildPrompt({ ...input, contextBrief: brief });
+  assert.match(withBrief, /Exploration brief/);
+  assert.match(withBrief, /renders the new screen/);
+  assert.match(withBrief, /do NOT re-read/i);
+  assert.doesNotMatch(buildPrompt(input), /Exploration brief/, "no brief → no brief section (back-compat)");
+});
+
+test("runOpencode runs the explorer first when the flag is on, and feeds its brief to the generator", async () => {
+  const opened: string[] = [];
+  let generatorPrompt = "";
+  const stub: AgentDeps = {
+    open: async (agent) => {
+      opened.push(agent);
+      return {
+        id: `s-${agent}`,
+        prompt: async (text: string) => {
+          if (agent === "qa-explorer") return '{"builtForSha":"abc123","objective":"new screen","blastRadius":[{"symbol":"Screen.render","file":"src/x.ts","role":"renders it"}]}';
+          if (!generatorPrompt) generatorPrompt = text; // capture the FIRST generator prompt (pre any repair)
+          return '{"approved":true,"specs":["x.spec.ts"]}';
+        },
+        dispose: async () => {},
+      };
+    },
+  };
+  const res = await runOpencode({ ...input, explorer: true, needsReview: false }, stub);
+  assert.equal(opened[0], "qa-explorer", "explorer runs before the generator");
+  assert.equal(opened[1], "qa-generator");
+  assert.match(generatorPrompt, /Exploration brief/);
+  assert.match(generatorPrompt, /renders it/);
+  assert.deepEqual(res.specs, ["x.spec.ts"]);
+});
+
+test("runOpencode skips the explorer when the flag is off (only the generator runs)", async () => {
+  const opened: string[] = [];
+  const stub: AgentDeps = {
+    open: async (agent) => {
+      opened.push(agent);
+      return { id: "s", prompt: async () => '{"approved":true,"specs":["x.spec.ts"]}', dispose: async () => {} };
+    },
+  };
+  await runOpencode({ ...input, needsReview: false }, stub);
+  assert.deepEqual(opened, ["qa-generator"]);
+});
+
+test("runOpencode degrades gracefully when the explorer yields no parseable brief", async () => {
+  const opened: string[] = [];
+  let generatorPrompt = "";
+  const stub: AgentDeps = {
+    open: async (agent) => {
+      opened.push(agent);
+      return {
+        id: "s",
+        prompt: async (text: string) => {
+          if (agent === "qa-explorer") return "sorry, I could not map it";
+          if (!generatorPrompt) generatorPrompt = text;
+          return '{"approved":true,"specs":["x.spec.ts"]}';
+        },
+        dispose: async () => {},
+      };
+    },
+  };
+  const res = await runOpencode({ ...input, explorer: true, needsReview: false }, stub);
+  assert.deepEqual(opened, ["qa-explorer", "qa-generator"]);
+  assert.doesNotMatch(generatorPrompt, /Exploration brief/);
+  assert.deepEqual(res.specs, ["x.spec.ts"]);
+});
+
 test("specFileForFlow produces a safe path under flows/", () => {
   assert.equal(specFileForFlow("Check Out / Pay!"), "flows/check-out-pay.spec.ts");
   assert.equal(specFileForFlow("   "), "flows/flow.spec.ts");
@@ -433,7 +576,7 @@ test("upsertManifest rebuilds from entries when the existing manifest is corrupt
 });
 
 // A deps stub that returns different text depending on the agent (planner vs worker).
-function fanoutDeps(planText: string, workerText: (cwd: string, prompt: string) => string, opened: string[]): OpencodeDeps {
+function fanoutDeps(planText: string, workerText: (cwd: string, prompt: string) => string, opened: string[]): AgentDeps {
   return {
     open: async (agent) => {
       opened.push(agent);
@@ -451,7 +594,7 @@ test("generateParallel isolates worker failures and maps flow→spec", async () 
     { objective: "o1", flow: "checkout", symbols: [], needsUi: true, specFile: "flows/checkout.spec.ts", repo: "r", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "ns", appName: "a", mode: "complete" },
     { objective: "o2", flow: "login", symbols: [], needsUi: true, specFile: "flows/login.spec.ts", repo: "r", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "ns", appName: "a", mode: "complete" },
   ];
-  const deps: OpencodeDeps = {
+  const deps: AgentDeps = {
     open: async () => ({
       id: "w",
       // checkout returns a valid spec; login returns garbage (no JSON) → error
@@ -659,7 +802,7 @@ test("buildPlanPrompt complete/exhaustive variants are unchanged", () => {
 
 test("diff fan-out falls back to the single agent when the plan has <2 objectives", async () => {
   const prompts: string[] = [];
-  const stubDeps: OpencodeDeps = {
+  const stubDeps: AgentDeps = {
     open: async () => ({
       id: "s1",
       prompt: async (text: string) => {
@@ -685,7 +828,7 @@ test("diff fan-out falls back to the single agent when the plan has <2 objective
 
 test("diff fan-out with >=2 objectives dispatches workers (no fallback)", async () => {
   const agents: string[] = [];
-  const stubDeps: OpencodeDeps = {
+  const stubDeps: AgentDeps = {
     open: async (agent: string) => {
       agents.push(agent);
       return {
@@ -733,14 +876,14 @@ test("runOpencodeParallel: PRE_INDEX_SERENA=0 opts out of the serena pre-index s
 // ── Integration tests: OpenCode SDK boundary failure modes ──────────────────
 
 test("runOpencode propagates error when deps.open throws (network timeout / auth failure)", async () => {
-  const failingDeps: OpencodeDeps = {
+  const failingDeps: AgentDeps = {
     open: async () => { throw new Error("OpenCode connection timeout"); },
   };
   await assert.rejects(() => runOpencode(input, failingDeps), /OpenCode connection timeout/);
 });
 
 test("runOpencode propagates error when session.prompt throws", async () => {
-  const failingDeps: OpencodeDeps = {
+  const failingDeps: AgentDeps = {
     open: async () => ({
       id: "s1",
       prompt: async () => { throw new Error("OpenCode prompt failed: 500"); },
@@ -751,7 +894,7 @@ test("runOpencode propagates error when session.prompt throws", async () => {
 });
 
 test("runOpencode still returns result when session.dispose throws (does not crash)", async () => {
-  const failingDeps: OpencodeDeps = {
+  const failingDeps: AgentDeps = {
     open: async () => ({
       id: "s1",
       prompt: async () => '{ "approved": true, "specs": ["a.spec.ts"] }',
@@ -764,7 +907,7 @@ test("runOpencode still returns result when session.dispose throws (does not cra
 });
 
 test("askAssistant propagates error when deps.open throws", async () => {
-  const failingDeps: OpencodeDeps = {
+  const failingDeps: AgentDeps = {
     open: async () => { throw new Error("OpenCode unavailable"); },
   };
   await assert.rejects(
@@ -775,7 +918,7 @@ test("askAssistant propagates error when deps.open throws", async () => {
 
 test("askAssistant requests text-only output so the model's reasoning never leaks", async () => {
   let seenOpts: { textOnly?: boolean } | undefined;
-  const deps: OpencodeDeps = {
+  const deps: AgentDeps = {
     open: async () => ({
       id: "s1",
       prompt: async (_text: string, opts?: { textOnly?: boolean }) => {
@@ -792,7 +935,7 @@ test("askAssistant requests text-only output so the model's reasoning never leak
 
 test("askAssistant opens the requested agent (reflection runs tool-less as qa-reflector; chat is the default)", async () => {
   let openedAgent: string | undefined;
-  const deps: OpencodeDeps = {
+  const deps: AgentDeps = {
     open: async (agent: string) => {
       openedAgent = agent;
       return { id: "s", prompt: async () => "{}", dispose: async () => {} };
@@ -805,7 +948,7 @@ test("askAssistant opens the requested agent (reflection runs tool-less as qa-re
 });
 
 test("reviewIndependently propagates error when deps.open throws", async () => {
-  const failingDeps: OpencodeDeps = {
+  const failingDeps: AgentDeps = {
     open: async () => { throw new Error("OpenCode auth failure"); },
   };
   await assert.rejects(
@@ -815,7 +958,7 @@ test("reviewIndependently propagates error when deps.open throws", async () => {
 });
 
 test("reviewIndependently propagates error when session.prompt throws", async () => {
-  const failingDeps: OpencodeDeps = {
+  const failingDeps: AgentDeps = {
     open: async () => ({
       id: "s1",
       prompt: async () => { throw new Error("prompt crashed"); },
@@ -841,7 +984,7 @@ test("reviewIndependently judges ONLY the artifact in a separate qa-reviewer ses
   mkdirSync(e2eDir, { recursive: true });
   writeFileSync(join(e2eDir, "login.spec.ts"), "// SPEC_SENTINEL_CONTENT\ntest('x', async () => {});");
   const captured: { prompt?: string; agent?: string } = {};
-  const stub: OpencodeDeps = {
+  const stub: AgentDeps = {
     open: async (agent: string) => {
       captured.agent = agent;
       return {
@@ -881,7 +1024,7 @@ test("reviewIndependently warns the operator when spec contents exceed the inlin
   const origWarn = console.warn;
   console.warn = (...a: unknown[]) => { warnings.push(a.map(String).join(" ")); };
   const captured: { prompt?: string } = {};
-  const stub: OpencodeDeps = {
+  const stub: AgentDeps = {
     open: async () => ({
       id: "s1",
       prompt: async (text: string) => {
@@ -904,12 +1047,88 @@ test("reviewIndependently warns the operator when spec contents exceed the inlin
   assert.match(captured.prompt ?? "", /read each file with the read tool/); // the fallback path is taken
 });
 
+test("reviewIndependently in MANUAL mode judges against the guidance, NOT the commit diff", async () => {
+  // The [wrong-objective] bug: a manual (guidance-driven) run was reviewed against the commit diff,
+  // so a good spec got rejected for "not testing the change" when the change was never the objective
+  // (e.g. the run sat on an unrelated CI-only commit). Manual review must frame the objective as the
+  // user's guidance and must NOT inject the commit diff.
+  const dir = mkdtempSync(join(tmpdir(), "qa-review-manual-"));
+  mkdirSync(join(dir, "e2e"), { recursive: true });
+  writeFileSync(join(dir, "e2e", "owner.spec.ts"), "// spec\ntest('x', async () => {});");
+  const captured: { prompt?: string } = {};
+  const stub: AgentDeps = {
+    open: async () => ({
+      id: "rev",
+      prompt: async (text: string) => { captured.prompt = text; return '{"approved":true,"corrections":[],"rationale":"ok"}'; },
+      dispose: async () => {},
+    }),
+  };
+  try {
+    await reviewIndependently(
+      { diff: "DIFF_SENTINEL_ABSENT", specs: ["owner.spec.ts"], mirrorDir: dir, e2eRelDir: "e2e", appName: "petclinic", mode: "manual", guidance: "GUIDANCE_SENTINEL register a new owner" },
+      stub,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const p = captured.prompt ?? "";
+  assert.match(p, /GUIDANCE_SENTINEL register a new owner/); // judged against the guidance...
+  assert.match(p, /the requested behavior/); // ...named as the objective, not "the change"
+  assert.doesNotMatch(p, /DIFF_SENTINEL_ABSENT/); // the unrelated commit diff is NOT injected
+  assert.doesNotMatch(p, /## Commit diff/);
+});
+
+test("reviewIndependently in a whole-repo (complete) run judges each spec's own objective, not a diff", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "qa-review-complete-"));
+  mkdirSync(join(dir, "e2e"), { recursive: true });
+  writeFileSync(join(dir, "e2e", "flow.spec.ts"), "// spec\ntest('x', async () => {});");
+  const captured: { prompt?: string } = {};
+  const stub: AgentDeps = {
+    open: async () => ({
+      id: "rev",
+      prompt: async (text: string) => { captured.prompt = text; return '{"approved":true,"corrections":[],"rationale":"ok"}'; },
+      dispose: async () => {},
+    }),
+  };
+  try {
+    await reviewIndependently(
+      { diff: "DIFF_SENTINEL_ABSENT", specs: ["flow.spec.ts"], mirrorDir: dir, e2eRelDir: "e2e", appName: "a", mode: "complete" },
+      stub,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const p = captured.prompt ?? "";
+  assert.match(p, /the targeted user flow/);
+  assert.match(p, /its OWN stated objective/);
+  assert.doesNotMatch(p, /DIFF_SENTINEL_ABSENT/);
+});
+
+test("agentErrorToInfra classifies an embedded provider fault as infrastructure with an actionable message", () => {
+  // ROOT-CAUSE: a provider fault is embedded in res.data.info.error (NOT res.error). It must throw
+  // a typed InfraError so the run is `infra-error`, never a code verdict that blames the tests.
+  const auth = agentErrorToInfra({ name: "ProviderAuthError", data: { providerID: "opencode-go", message: "insufficient credits" } });
+  assert.equal(isInfraError(auth), true);
+  assert.match(auth.message, /out of credits|OPENCODE_API_KEY/i);
+  assert.match(auth.message, /insufficient credits/);
+  assert.match(auth.message, /not a test failure/i);
+
+  const rate = agentErrorToInfra({ name: "APIError", data: { message: "Too Many Requests", statusCode: 429 } });
+  assert.equal(isInfraError(rate), true);
+  assert.match(rate.message, /429|rate-limited/i);
+
+  // An unknown/future variant still classifies as infra, never a code verdict.
+  const unknown = agentErrorToInfra({ name: "UnknownError", data: { message: "boom" } });
+  assert.equal(isInfraError(unknown), true);
+  assert.match(unknown.message, /not a test failure/i);
+});
+
 test("generateParallel collects all errors when every worker fails", async () => {
   const workers: ParallelWorkerInput[] = [
     { objective: "o1", flow: "a", symbols: [], needsUi: true, specFile: "flows/a.spec.ts", repo: "r", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "ns", appName: "a", mode: "complete" },
     { objective: "o2", flow: "b", symbols: [], needsUi: true, specFile: "flows/b.spec.ts", repo: "r", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "ns", appName: "a", mode: "complete" },
   ];
-  const failingDeps: OpencodeDeps = {
+  const failingDeps: AgentDeps = {
     open: async () => { throw new Error("OpenCode down"); },
   };
   const { results, errors } = await generateParallel(workers, failingDeps, { concurrency: 2 });
@@ -919,7 +1138,7 @@ test("generateParallel collects all errors when every worker fails", async () =>
 });
 
 test("runOpencodeParallel propagates planner failure", async () => {
-  const failingDeps: OpencodeDeps = {
+  const failingDeps: AgentDeps = {
     open: async (agent) => {
       if (agent === "qa-generator") throw new Error("planner timeout");
       return { id: "w", prompt: async () => '{"spec":"x"}', dispose: async () => {} };
@@ -935,7 +1154,7 @@ test("runOpencodeParallel continues when pre-index serena fails (best-effort)", 
   const prevEnv = process.env.PRE_INDEX_SERENA;
   process.env.PRE_INDEX_SERENA = "1";
   try {
-    const failingDeps: OpencodeDeps = {
+    const failingDeps: AgentDeps = {
       open: async (agent) => {
         if (agent === "qa-worker-code") throw new Error("serena pre-index failed");
         return {

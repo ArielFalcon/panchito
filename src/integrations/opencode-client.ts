@@ -15,7 +15,7 @@ import { createHash } from "node:crypto";
 import { AgentResult, QaCase, RunMode, TestTarget, SpecMeta, ActivityKind } from "../types";
 import { CommitIntent } from "../qa/commit-classify";
 import type { ArchitectureContext } from "../qa/context";
-import { coerceExplorationBrief, type ExplorationBrief } from "../qa/exploration-brief";
+import { coerceExplorationBrief, parseExplorationBrief, type ExplorationBrief } from "../qa/exploration-brief";
 import { sanitizeText } from "../orchestrator/sanitizer";
 import { ActivityRouter } from "./agent-activity";
 import { mapOpencodeEvent, eventRunId } from "./activity-mapper";
@@ -43,12 +43,13 @@ export { extractJsonObjects, parseVerdict };
 // Prompt/task assembly (extracted to ./prompts, BND-08). Re-exported so existing importers (runtime
 // + tests) keep resolving them from this module. The input types are shared via a type-only import
 // on the prompts side, so there is no runtime import cycle.
-import { specFileForFlow, buildWorkerPrompt, buildPlanPrompt, buildPrompt, buildContextTask, renderArchitectureContext } from "./prompts";
-export { specFileForFlow, buildWorkerPrompt, buildPlanPrompt, buildPrompt, buildContextTask, renderArchitectureContext };
+import { specFileForFlow, buildWorkerPrompt, buildPlanPrompt, buildPrompt, buildExplorerPrompt, buildContextTask, renderArchitectureContext } from "./prompts";
+export { specFileForFlow, buildWorkerPrompt, buildPlanPrompt, buildPrompt, buildExplorerPrompt, buildContextTask, renderArchitectureContext };
 // Typed verdict contract + bounded repair (post-ADR-001, Phase 1 / 3.1). Schema validation of
 // the agent's generator + reviewer output, and the targeted re-prompt used on a contract miss.
 import { checkGeneratorVerdict, repairInstruction, parseReviewerVerdict } from "./verdict-validate";
 import { ManifestEntrySchema } from "../orchestrator/schemas";
+import { AgentUnavailableError } from "../errors";
 
 // Read fallback model mapping from opencode.json (root-level key). Keeps the
 // fallback logic in one place so the orchestrator can retry with a different
@@ -468,6 +469,8 @@ export interface OpencodeRunInput {
   learnedRules?: string; // retrieval: rules from past runs injected into the agent prompt
   runId?: string; // maps the session to a RunRecord for SSE live activity
   contextMap?: ArchitectureContext; // cross-cutting: the FE↔BE map, injected by the orchestrator
+  explorer?: boolean; // Fase 3: run a read-only explorer pass before the generator (diff single-agent, opt-in)
+  contextBrief?: ExplorationBrief; // the distilled blast radius from the explorer pass (set internally → buildPrompt)
   service?: { repo: string; mirrorDir: string; openapi?: string | string[] }; // cross-repo: the triggering microservice (read-only working copy)
   services?: Array<{ repo: string; mirrorDir: string; openapi?: string | string[] }>; // context mode: every declared service, mirrored read-only
 }
@@ -490,12 +493,50 @@ export interface AgentDeps {
   cleanupOrphans?(maxAgeMs: number): Promise<number>;
 }
 
+// Runs the read-only explorer ONCE for a first-pass diff e2e generation when opted in, returning the
+// distilled brief (or null to degrade silently). Gated tightly: never on code mode, never on a
+// re-generation pass (fix/review/coverage already carry context), and only when input.explorer is set.
+async function maybeExplore(
+  input: OpencodeRunInput,
+  deps: AgentDeps,
+  opts?: { signal?: AbortSignal; onProgress?: (msg: string) => void },
+): Promise<ExplorationBrief | null> {
+  const isReGen = Boolean(input.fixCases?.length || input.reviewCorrections?.length || input.coverageGap);
+  if (!input.explorer || input.mode !== "diff" || input.target === "code" || isReGen) return null;
+  let session: AgentSession | undefined;
+  try {
+    session = await deps.open("qa-explorer", input.mirrorDir, { signal: opts?.signal, timeoutMs: agentTimeout(input.mode) });
+    if (input.runId) registerRunSession(session.id, input.runId, input.mirrorDir, "explorer");
+    const text = await session.prompt(buildExplorerPrompt(input));
+    const brief = parseExplorationBrief(text);
+    opts?.onProgress?.(
+      brief
+        ? `[qa] explorer: distilled ${brief.blastRadius.length} symbol(s) — generator gets a clean window`
+        : `[qa] explorer: no parseable brief — generator will explore inline`,
+    );
+    return brief;
+  } catch (err) {
+    console.warn(`[qa] explorer pass failed (${err instanceof Error ? err.message : String(err)}) — generator will explore inline.`);
+    return null;
+  } finally {
+    if (session) {
+      if (input.runId) unregisterRunSession(session.id);
+      await session.dispose().catch(() => {});
+    }
+  }
+}
+
 export async function runOpencode(
   input: OpencodeRunInput,
   deps: AgentDeps,
   opts?: { signal?: AbortSignal; onProgress?: (msg: string) => void },
 ): Promise<AgentResult> {
   const timeoutMs = agentTimeout(input.mode);
+  // Fase 3: optional read-only explorer pass — distill the blast radius in an isolated session so the
+  // generator gets a clean window. Best-effort: a failure/unparseable brief degrades to the generator
+  // exploring inline (never fails the run).
+  const explorerBrief = await maybeExplore(input, deps, opts);
+  const effectiveInput = explorerBrief ? { ...input, contextBrief: explorerBrief } : input;
   const session = await deps.open("qa-generator", input.mirrorDir, { signal: opts?.signal, timeoutMs });
 
   // Register this session for SSE live activity so the agent's real-time events
@@ -517,7 +558,7 @@ export async function runOpencode(
   }
 
   try {
-    let finalText = await session.prompt(buildPrompt(input));
+    let finalText = await session.prompt(buildPrompt(effectiveInput));
 
     // Typed-contract guard (post-ADR-001, Phase 1): if the generator's closing JSON does not
     // satisfy the contract (missing specs array, malformed specMetas, …), re-prompt ONCE with
@@ -632,6 +673,7 @@ export interface ReviewInput {
   e2eRelDir: string;
   baseUrl?: string;
   intent?: CommitIntent;
+  guidance?: string; // manual mode: the user instruction the tests must satisfy (the review objective)
   appName: string;
   mode: RunMode;
   target?: TestTarget; // "e2e" (default) or "code" — adjusts wording and spec paths
@@ -669,6 +711,13 @@ export async function reviewIndependently(
     const changeType = input.intent?.type ?? input.mode;
     const specBlock = renderReviewSpecs(input);
     const kind = input.target === "code" ? "tests" : "E2E tests";
+    // What these tests must defend — and how to name it — depends on the run mode. A diff run is
+    // judged against the commit's changed code; a MANUAL run against the user's guidance; a
+    // whole-repo (complete/exhaustive) run against each spec's own stated objective. Judging a
+    // manual/whole-repo run against the commit diff is the [wrong-objective] bug: it rejects good
+    // tests for "not testing the change" when the change was never the objective (e.g. a guided run
+    // that happens to sit on an unrelated commit).
+    const obj = reviewObjective(input);
     // Arm the judge with PROVEN app-specific rules (when present) as extra reject criteria.
     const rulesBlock = input.learnedRules ? [``, input.learnedRules] : [];
     const rulesInstruction = input.learnedRules
@@ -677,18 +726,16 @@ export async function reviewIndependently(
     const prompt = [
       `## Independent review — judge these ${kind} WITHOUT the generator's reasoning`,
       ``,
-      `You are reviewing tests written for this commit, but you have NO access to the`,
+      `You are reviewing tests written for ${obj.subject}, but you have NO access to the`,
       `generator's thought process. Judge the tests on their own merit using the`,
       `test-value-review skill.`,
       ``,
-      `## Change context`,
-      `- Commit type: ${changeType}`,
+      `## Review context`,
+      `- Run type: ${changeType}`,
       `- Base URL: ${input.baseUrl ?? "(not provided)"}`,
       ``,
-      `## Commit diff`,
-      "```diff",
-      sanitizeText(input.diff).text,
-      "```",
+      obj.heading,
+      ...obj.body,
       ``,
       specBlock,
       ...rulesBlock,
@@ -696,16 +743,16 @@ export async function reviewIndependently(
       `## Instructions`,
       `1. The spec contents are provided above — no need to read files.`,
       `2. Apply the test-value-review skill from BOTH perspectives (value + robustness).`,
-      `3. Answer: could the changed feature be BROKEN and these tests STILL be green?`,
+      `3. Answer: could ${obj.targetNoun} be BROKEN and these tests STILL be green?`,
       `4. Be strict — a single anti-pattern in any spec means rejection.`,
       ...rulesInstruction,
       ``,
       `Output your verdict as JSON with no text before or after. Always include a one or two`,
       `sentence "rationale" explaining the verdict — on APPROVAL too (why these tests genuinely`,
-      `defend the change), not only on rejection.`,
+      `defend ${obj.targetNoun}), not only on rejection.`,
       `Prefix EVERY correction with exactly one class tag from this closed list so the failure`,
       `is machine-classifiable: [false-positive] (asserts nothing / passes when the feature is`,
-      `broken), [wrong-objective] (does not test the change), [fragile-selector] (ambiguous or`,
+      `broken), [wrong-objective] (does not test ${obj.targetNoun}), [fragile-selector] (ambiguous or`,
       `brittle locator), [no-cleanup] (leaves test data behind), or [other].`,
       `{"approved":false,"rationale":"why, in 1-2 sentences","corrections":["[fragile-selector] file.spec.ts: specific actionable fix"]}`,
     ].join("\n");
@@ -737,6 +784,41 @@ export async function reviewIndependently(
       console.warn(`[qa] reviewer session dispose failed: ${err instanceof Error ? err.message : String(err)}`);
     });
   }
+}
+
+// The "what must these tests defend?" framing for the independent review, per run mode. Diff runs
+// judge against the commit's changed code; MANUAL runs against the user's guidance; whole-repo
+// (complete/exhaustive) runs against each spec's own stated objective (there is no single commit).
+// `targetNoun` flows into the question, the rationale ask, and the [wrong-objective] definition so
+// the judge measures the spec against the RIGHT goal.
+function reviewObjective(input: ReviewInput): { subject: string; heading: string; body: string[]; targetNoun: string } {
+  if (input.mode === "manual") {
+    const g = sanitizeText(((input.guidance ?? "").trim() || "(no guidance was provided)")).text;
+    return {
+      subject: "a guided (manual) run",
+      heading: `## Objective — the requested behavior (judge against THIS, NOT any commit diff)`,
+      body: [g],
+      targetNoun: "the requested behavior",
+    };
+  }
+  if (input.mode === "complete" || input.mode === "exhaustive") {
+    return {
+      subject: `a whole-repo ${input.mode} run`,
+      heading: `## Objective — there is no single commit; judge each spec against its OWN stated objective`,
+      body: [
+        `Each spec declares the user flow it targets (in its header comment / the manifest). Judge`,
+        `whether it meaningfully exercises that flow, or could the flow break while the test stays green.`,
+      ],
+      targetNoun: "the targeted user flow",
+    };
+  }
+  // diff (and any commit-driven run): the commit's changed code is the objective.
+  return {
+    subject: "this commit",
+    heading: `## Commit diff`,
+    body: ["```diff", sanitizeText(input.diff).text, "```"],
+    targetNoun: "the change",
+  };
 }
 
 const REVIEW_SPECS_MAX_BYTES = 40_000;
@@ -1164,6 +1246,17 @@ export async function defaultAgentDeps(): Promise<AgentDeps> {
                       recordCircuitFailure();
                       throw new Error(`OpenCode session.prompt failed: ${JSON.stringify(res.error)}`);
                     }
+                    // ROOT-CAUSE FIX: a provider/agent fault (out of credits, auth, rate-limit,
+                    // output-length) is embedded in the assistant message (info.error), NOT in
+                    // res.error. extractText only reads text parts, so without this the fault
+                    // degrades into an EMPTY response that downstream misreads as a code verdict
+                    // (`invalid`/`fail`) — an out-of-credits run then blamed the operator's tests.
+                    // Detect it at the source and throw it as a typed infra error.
+                    const agentErr = (res.data?.info as { error?: AgentErrorPayload } | undefined)?.error;
+                    if (agentErr) {
+                      recordCircuitFailure();
+                      throw agentErrorToInfra(agentErr);
+                    }
                     recordCircuitSuccess();
                     return extractText(res.data?.parts, promptOpts);
                   })
@@ -1218,6 +1311,43 @@ export async function defaultAgentDeps(): Promise<AgentDeps> {
       return cleaned;
     },
   };
+}
+
+// Minimal shape of an OpenCode AssistantMessage.error (res.data.info.error). A provider/agent
+// fault is embedded HERE, NOT in the HTTP-level res.error — which is exactly why an out-of-credits
+// run slipped past the old res.error-only check and degraded into an empty response.
+type AgentErrorPayload = { name: string; data?: { message?: string; statusCode?: number; providerID?: string } };
+
+// ROOT-CAUSE classifier: map an embedded agent/provider fault to a typed, actionable
+// AgentUnavailableError (an InfraError) so the run surfaces as `infra-error` with a clear operator
+// message — never a code verdict (`invalid`/`fail`) that blames the user's tests. Exported so the
+// classification is unit-tested without standing up the SDK.
+export function agentErrorToInfra(error: AgentErrorPayload): AgentUnavailableError {
+  const d = error.data ?? {};
+  const detail = d.message ? `: ${d.message}` : "";
+  const tail = "INCONCLUSIVE (infrastructure), not a test failure";
+  switch (error.name) {
+    case "ProviderAuthError":
+      return new AgentUnavailableError(
+        `OpenCode provider '${d.providerID ?? "?"}' rejected the request (auth / out of credits)${detail}. ` +
+          `${tail} — check OPENCODE_API_KEY and your OpenCode credit balance.`,
+      );
+    case "APIError": {
+      const code = d.statusCode ? ` ${d.statusCode}` : "";
+      const hint =
+        d.statusCode === 429 ? " — rate-limited, retry later" :
+        d.statusCode === 402 ? " — out of credits / billing" :
+        d.statusCode === 401 || d.statusCode === 403 ? " — auth (check OPENCODE_API_KEY)" :
+        "";
+      return new AgentUnavailableError(`OpenCode API error${code}${detail}${hint}. ${tail}.`);
+    }
+    case "MessageOutputLengthError":
+      return new AgentUnavailableError(`the model hit its output-length limit before finishing the turn. ${tail}.`);
+    case "MessageAbortedError":
+      return new AgentUnavailableError(`the agent turn was aborted${detail}. ${tail}.`);
+    default: // UnknownError, or any future variant
+      return new AgentUnavailableError(`OpenCode agent error (${error.name})${detail}. ${tail}.`);
+  }
 }
 
 // textOf reads the string `text` field of a response part (empty when absent).

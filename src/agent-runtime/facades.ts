@@ -1,4 +1,4 @@
-import type { OpencodeDeps } from "../integrations/opencode-client";
+import type { AgentDeps } from "../integrations/opencode-client";
 import type { LiveActivity } from "../integrations/opencode-client";
 import type { RunEventBody } from "../contract/events";
 import {
@@ -19,8 +19,8 @@ export class SingleAgentFacade implements AgentFacade {
     readonly config: AgentRuntimeConfig,
   ) {}
 
-  deps(): OpencodeDeps {
-    const deps: OpencodeDeps = {
+  deps(): AgentDeps {
+    const deps: AgentDeps = {
       open: (agent, cwd, opts) => {
         const role = roleForLegacyAgent(agent);
         const model = assignmentForRole(this.config, role).model;
@@ -55,7 +55,7 @@ export class DualAgentFacade implements AgentFacade {
     readonly config: AgentRuntimeConfig,
   ) {}
 
-  deps(): OpencodeDeps {
+  deps(): AgentDeps {
     return {
       open: (agent, cwd, opts) => {
         const role = roleForLegacyAgent(agent);

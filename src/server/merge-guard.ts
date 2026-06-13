@@ -17,21 +17,39 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-// Files whose modification must ALWAYS go through a human. Two groups:
+// Files whose modification must ALWAYS go through a human. Four groups:
 //  1. The recovery net — if a fix could rewrite these, a bad change could disable the very
 //     mechanism that rolls it back (the irrecoverable state we forbid).
-//  2. Build/topology the in-process canary cannot verify — the hot-swap only replaces src/ +
+//  2. The secret boundary — what scrubs data leaving the system; a fix must never weaken it.
+//  3. The gate integrity surface — the maintainer's OWN pre-deploy gate is `npm test` +
+//     `npm run typecheck`. If a fix could edit the test suite or the tsconfig, a BROKEN fix could
+//     make itself "pass" by weakening the very gate that is supposed to reject it. The entrypoint
+//     (index.ts) sequences the safety layers + the canary swap, and code-runner.ts executes
+//     untrusted (agent-authored) code; an autonomous rewrite of either is too dangerous to ship
+//     unreviewed. A fix that legitimately needs to touch these is significant enough for a human.
+//  4. Build/topology the in-process canary cannot verify — the hot-swap only replaces src/ +
 //     package files; a Dockerfile/compose change takes effect only on an image rebuild, so
 //     the canary would pass while the real effect ships unverified.
+//
+// A leading "*" is a suffix glob (e.g. "*.test.ts" matches any test file anywhere); a trailing
+// "/" is a directory prefix; otherwise the entry is an exact repo-relative path.
 export const PROTECTED_PATHS: string[] = [
+  // 1. recovery net
   "boot-guard.mjs",
   "src/server/self-update.ts",
   "src/server/merge-guard.ts",
+  // 2. secret boundary
   "src/util/redact.ts",
   "src/orchestrator/sanitizer.ts",
+  // 3. gate integrity (the fix must not weaken what decides whether it deploys)
+  "*.test.ts",
+  "tsconfig.json",
+  "src/index.ts",
+  "src/qa/code-runner.ts",
+  // 4. build/topology the canary cannot verify (image rebuild only)
   ".github/",
   "Dockerfile",
-  "opencode/Dockerfile",
+  "agents/Dockerfile",
   "docker-compose.yml",
   "docker-compose.override.yml",
   "package.json",
@@ -40,7 +58,11 @@ export const PROTECTED_PATHS: string[] = [
 
 export function isProtectedPath(file: string): boolean {
   const f = file.replace(/^\.\//, "").replace(/\\/g, "/");
-  return PROTECTED_PATHS.some((p) => (p.endsWith("/") ? f.startsWith(p) : f === p));
+  return PROTECTED_PATHS.some((p) => {
+    if (p.startsWith("*")) return f.endsWith(p.slice(1)); // suffix glob, e.g. *.test.ts
+    if (p.endsWith("/")) return f.startsWith(p); // directory prefix
+    return f === p; // exact repo-relative path
+  });
 }
 
 export interface ChangeStat {

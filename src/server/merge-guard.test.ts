@@ -22,7 +22,20 @@ test("isProtectedPath flags the recovery net and build/topology, exact and prefi
   assert.equal(isProtectedPath(".github/workflows/ci.yml"), true);
   // ordinary source is NOT protected — the maintainer may fix it autonomously
   assert.equal(isProtectedPath("src/pipeline.ts"), false);
-  assert.equal(isProtectedPath("src/index.ts"), false);
+  assert.equal(isProtectedPath("src/server/api.ts"), false);
+});
+
+test("isProtectedPath flags the gate-integrity surface (the fix must not weaken its own gate)", () => {
+  // *.test.ts (suffix glob, anywhere) — the npm-test gate the pre-deploy self-test runs.
+  assert.equal(isProtectedPath("src/qa/change-coverage.test.ts"), true);
+  assert.equal(isProtectedPath("src/pipeline.test.ts"), true);
+  assert.equal(isProtectedPath("./src/server/merge-guard.test.ts"), true); // leading ./ normalized
+  // the typecheck gate config, the safety-layer entrypoint, and the untrusted-code runner.
+  assert.equal(isProtectedPath("tsconfig.json"), true);
+  assert.equal(isProtectedPath("src/index.ts"), true);
+  assert.equal(isProtectedPath("src/qa/code-runner.ts"), true);
+  // a non-test source file next to tests is still editable (glob is a strict .test.ts suffix).
+  assert.equal(isProtectedPath("src/qa/change-coverage.ts"), false);
 });
 
 test("assessChange blocks a fix that touches a protected file", () => {

@@ -1,10 +1,26 @@
-import type { OpencodeDeps, OpencodeSession } from "../integrations/opencode-client";
+import type { AgentDeps, AgentSession } from "../integrations/opencode-client";
 import type { LiveActivity } from "../integrations/opencode-client";
 import type { RunEventBody } from "../contract/events";
 
 export type AgentProvider = "opencode" | "codex";
 export type AgentMode = "single" | "dual";
-export type AgentRole = "primary" | "reviewer" | "chat" | "worker" | "workerCode" | "maintainer";
+export type AgentRole = "primary" | "reviewer" | "chat" | "worker" | "workerCode" | "maintainer" | "reflector" | "explorer";
+
+// What a role is structurally allowed to do, independent of the runtime provider — the single,
+// provider-agnostic capability policy. Each AgentRuntimeStrategy translates it to its own mechanism
+// (OpenCode: the agent's tools{} map in opencode.json, checked against this policy by the
+// agent-tool-surface tripwire; Codex: the `codex exec --sandbox` flag, see codexSandboxForRole).
+// This is the security-boundary principle applied to quality: trust what a role CAN do, not that its
+// prompt behaves. The judge, the read-only chat and the one-shot reflector never mutate the workspace.
+export interface RoleCapabilities {
+  canWrite: boolean;
+}
+
+const READ_ONLY_ROLES: ReadonlySet<AgentRole> = new Set<AgentRole>(["reviewer", "chat", "reflector", "explorer"]);
+
+export function capabilitiesForRole(role: AgentRole): RoleCapabilities {
+  return { canWrite: !READ_ONLY_ROLES.has(role) };
+}
 
 export interface RoleAssignment {
   provider: AgentProvider;
@@ -36,7 +52,7 @@ export interface AgentModelInfo {
   provider?: AgentProvider;
 }
 
-export interface AgentRuntimeSession extends OpencodeSession {}
+export interface AgentRuntimeSession extends AgentSession {}
 
 export interface AgentRuntimeStrategy {
   provider: AgentProvider;
@@ -53,7 +69,7 @@ export interface AgentRuntimeStrategy {
   dispose?(): void | Promise<void>;
 }
 
-export interface AgentFacadeDeps extends OpencodeDeps {}
+export interface AgentFacadeDeps extends AgentDeps {}
 
 export interface AgentFacade {
   config: AgentRuntimeConfig;
@@ -74,6 +90,8 @@ const LEGACY_AGENT_TO_ROLE: Record<string, AgentRole> = {
   "qa-worker": "worker",
   "qa-worker-code": "workerCode",
   "qa-maintainer": "maintainer",
+  "qa-reflector": "reflector",
+  "qa-explorer": "explorer",
 };
 
 export function roleForLegacyAgent(agent: string): AgentRole {
@@ -83,6 +101,9 @@ export function roleForLegacyAgent(agent: string): AgentRole {
 export function assignmentForRole(config: AgentRuntimeConfig, role: AgentRole): RoleAssignment {
   if (role === "reviewer") return config.assignments.reviewer;
   if (role === "chat") return config.assignments.chat;
+  // The one-shot reflector is a cheap read-only transform: it rides the chat tier (same provider
+  // and small model), not the expensive primary author.
+  if (role === "reflector") return config.assignments.chat;
   // Parallel workers and self-maintainer inherit the primary provider/model by design.
   return config.assignments.primary;
 }

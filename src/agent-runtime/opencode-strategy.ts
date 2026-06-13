@@ -1,11 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  defaultOpencodeDeps,
+  defaultAgentDeps,
   disposeSharedClient,
   startActivitySink,
   type LiveActivity,
-  type OpencodeDeps,
+  type AgentDeps,
 } from "../integrations/opencode-client";
 import type { RunEventBody } from "../contract/events";
 import type {
@@ -18,7 +18,7 @@ import type {
 
 interface OpenCodeRuntimeStrategyOptions {
   env?: Record<string, string | undefined>;
-  depsFactory?: () => Promise<OpencodeDeps>;
+  depsFactory?: () => Promise<AgentDeps>;
   startEvents?: (
     onActivity: (a: LiveActivity) => void,
     signal?: AbortSignal,
@@ -28,36 +28,38 @@ interface OpenCodeRuntimeStrategyOptions {
   configPath?: string;
 }
 
-const ROLE_TO_OPENCODE_AGENT: Record<AgentRole, string> = {
+export const ROLE_TO_OPENCODE_AGENT: Record<AgentRole, string> = {
   primary: "qa-generator",
   reviewer: "qa-reviewer",
   chat: "qa-assistant",
   worker: "qa-worker",
   workerCode: "qa-worker-code",
   maintainer: "qa-maintainer",
+  reflector: "qa-reflector",
+  explorer: "qa-explorer",
 };
 
 const FALLBACK_MODELS: AgentModelInfo[] = [
   { id: "opencode-go/deepseek-v4-pro", label: "DeepSeek V4 Pro" },
-  { id: "opencode-go/qwen3.7-max", label: "Qwen 3.7 Max" },
+  { id: "opencode-go/minimax-m3", label: "MiniMax M3" },
   { id: "opencode-go/deepseek-v4-flash", label: "DeepSeek V4 Flash" },
 ];
 
 export class OpenCodeRuntimeStrategy implements AgentRuntimeStrategy {
   readonly provider = "opencode" as const;
-  private depsPromise: Promise<OpencodeDeps> | undefined;
+  private depsPromise: Promise<AgentDeps> | undefined;
   private readonly env: Record<string, string | undefined>;
-  private readonly depsFactory: () => Promise<OpencodeDeps>;
+  private readonly depsFactory: () => Promise<AgentDeps>;
   private readonly startEvents: NonNullable<OpenCodeRuntimeStrategyOptions["startEvents"]>;
   private readonly disposeClient: () => void;
   private readonly configPath: string;
 
   constructor(opts: OpenCodeRuntimeStrategyOptions = {}) {
     this.env = opts.env ?? process.env;
-    this.depsFactory = opts.depsFactory ?? defaultOpencodeDeps;
+    this.depsFactory = opts.depsFactory ?? defaultAgentDeps;
     this.startEvents = opts.startEvents ?? startActivitySink;
     this.disposeClient = opts.dispose ?? disposeSharedClient;
-    this.configPath = opts.configPath ?? join(process.cwd(), "opencode", "opencode.json");
+    this.configPath = opts.configPath ?? join(process.cwd(), "agents", "opencode.json");
   }
 
   async health(): Promise<AgentProviderHealth> {
@@ -107,7 +109,7 @@ export class OpenCodeRuntimeStrategy implements AgentRuntimeStrategy {
     this.disposeClient();
   }
 
-  private deps(): Promise<OpencodeDeps> {
+  private deps(): Promise<AgentDeps> {
     this.depsPromise ??= this.depsFactory();
     return this.depsPromise;
   }
