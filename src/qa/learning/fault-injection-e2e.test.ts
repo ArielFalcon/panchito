@@ -33,6 +33,17 @@ describe("computeFaultInjectionScore", () => {
     assert.equal(r.killed, 1);
     assert.equal(r.valueScore, 0.5);
   });
+
+  it("a failure caused by the corruption BREAKING the flow (navigation/network) is NOT a kill", () => {
+    const corrupted: QaCase[] = [
+      { name: "a", status: "fail", detail: "expect(locator).toHaveText: Expected '10' Received '-10'" }, // assertion caught it
+      { name: "b", status: "fail", detail: "page.goto: net::ERR_CONNECTION_REFUSED at /orders/-1" }, // flow broke
+    ];
+    const r = computeFaultInjectionScore(["a", "b"], corrupted);
+    assert.equal(r.killed, 1); // only the assertion-based catch counts
+    assert.equal(r.total, 2);
+    assert.equal(r.valueScore, 0.5);
+  });
 });
 
 describe("runFaultInjectionOracle", () => {

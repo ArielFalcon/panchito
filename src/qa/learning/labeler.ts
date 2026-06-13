@@ -13,6 +13,8 @@ export interface LabelerInput {
   coverageRatio: number | null;
   minCoverageRatio: number;
   reviewerCorrections: string[];
+  reviewerRationale?: string;
+  reviewerApproved?: boolean | null;
   flaky: boolean;
   retries: number;
   valueScore?: number | null;
@@ -35,6 +37,8 @@ export function labelRunOutcome(input: LabelerInput): RunOutcome {
       coverageRatio: input.coverageRatio,
       valueScore: null,
       reviewerCorrections: input.reviewerCorrections,
+      ...(input.reviewerRationale !== undefined ? { reviewerRationale: input.reviewerRationale } : {}),
+      ...(input.reviewerApproved !== undefined && input.reviewerApproved !== null ? { reviewerApproved: input.reviewerApproved } : {}),
       flaky: input.flaky,
       retries: input.retries,
     },

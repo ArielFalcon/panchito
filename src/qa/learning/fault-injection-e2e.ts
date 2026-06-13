@@ -17,18 +17,34 @@ import { runE2E, defaultExecuteDeps } from "../execute";
 import type { OracleInput, ValueOracleResult } from "./oracle-types";
 import type { QaCase, QaRunResult } from "../../types";
 
+// A failure caused by the corrupted value BREAKING the flow (navigation/network/context death)
+// rather than an assertion NOTICING wrong data — it would have failed regardless of assertion
+// strength, so it is noise, not a real "kill". Deliberately NARROW: only unambiguous flow-breaks.
+// A plain assertion timeout ("expect(locator).toBeVisible timed out") is a genuine catch and is
+// intentionally NOT matched here.
+const FLOW_BREAK = /net::ERR|\bERR_[A-Z_]+|page\.goto|Target (?:closed|page, context or browser has been closed)|Execution context was destroyed|ECONNREFUSED/i;
+
+function isFlowBreak(c: QaCase): boolean {
+  return FLOW_BREAK.test(`${c.detail ?? ""} ${c.reason ?? ""}`);
+}
+
 // Pure: of the specs that passed at baseline, how many flipped to fail/flaky under corrupted
-// responses? A flip means the spec's oracle was strong enough to catch wrong data.
+// responses BECAUSE AN ASSERTION CAUGHT IT (not because the corruption broke navigation)? A clean
+// flip means the spec's oracle was strong enough to catch wrong data.
 export function computeFaultInjectionScore(
   baselinePass: string[],
   corrupted: QaCase[],
 ): { valueScore: number | null; killed: number; total: number } {
   if (baselinePass.length === 0) return { valueScore: null, killed: 0, total: 0 };
-  const statusByName = new Map(corrupted.map((c) => [c.name, c.status]));
+  const byName = new Map(corrupted.map((c) => [c.name, c]));
   let killed = 0;
   for (const name of baselinePass) {
-    const st = statusByName.get(name);
-    if (st === "fail" || st === "flaky") killed++; // noticed the corruption
+    const c = byName.get(name);
+    if (!c) continue;
+    if (c.status === "fail" || c.status === "flaky") {
+      if (isFlowBreak(c)) continue; // the corruption broke the flow, not a strong-assertion catch
+      killed++; // noticed the corruption via an assertion
+    }
   }
   return { valueScore: killed / baselinePass.length, killed, total: baselinePass.length };
 }

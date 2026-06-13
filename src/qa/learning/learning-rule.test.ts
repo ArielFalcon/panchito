@@ -34,6 +34,12 @@ describe("ruleKey", () => {
   it("produces stable key from trigger + action", () => {
     assert.equal(ruleKey({ trigger: "a", action: "b" }), "a::b");
   });
+  it("normalizes casing, whitespace and trailing punctuation so near-duplicates collide", () => {
+    assert.equal(
+      ruleKey({ trigger: "Fragile  selector", action: "Scope the locator." }),
+      ruleKey({ trigger: "fragile selector", action: "scope the locator" }),
+    );
+  });
 });
 
 describe("preventionOutcome (governance signal without an oracle)", () => {

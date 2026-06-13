@@ -107,3 +107,38 @@ describe("errorClassFromCorrections", () => {
     assert.equal(result, "E-FRAGILE-SELECTOR");
   });
 });
+
+describe("errorClassFromCorrections — closed-vocabulary reviewer tags (PROMPT-05)", () => {
+  it("classifies by the leading [tag] even when the prose contains no legacy keyword", () => {
+    // The realistic reviewer correction: tagged, but the description is free-form and matches
+    // none of the keyword regexes. Before the tag, every such correction collapsed to the
+    // catch-all E-REVIEWER-REJECTED, making the fine-grained taxonomy dead.
+    assert.equal(
+      errorClassFromCorrections(["[fragile-selector] checkout.spec.ts: replace page.getByText('Pay') with a section-scoped getByRole"]),
+      "E-FRAGILE-SELECTOR",
+    );
+    assert.equal(
+      errorClassFromCorrections(["[false-positive] login.spec.ts: add an assertion on the welcome message"]),
+      "E-FALSE-POSITIVE",
+    );
+    assert.equal(
+      errorClassFromCorrections(["[wrong-objective] foo.spec.ts: exercises the header, not the changed code"]),
+      "E-WRONG-OBJECTIVE",
+    );
+    assert.equal(
+      errorClassFromCorrections(["[no-cleanup] order.spec.ts: the created order is never removed"]),
+      "E-NO-CLEANUP",
+    );
+  });
+
+  it("[other] means the reviewer chose none of the buckets → null (caller uses E-REVIEWER-REJECTED)", () => {
+    assert.equal(errorClassFromCorrections(["[other] an issue the buckets do not cover"]), null);
+  });
+
+  it("an unrecognized tag falls through to the keyword heuristics", () => {
+    assert.equal(
+      errorClassFromCorrections(["[typo-tag] uses a fragile selector with nth-child"]),
+      "E-FRAGILE-SELECTOR",
+    );
+  });
+});

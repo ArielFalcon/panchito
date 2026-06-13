@@ -8,6 +8,10 @@ export type StructuralPattern =
   | { kind: "data-list"; hasFilter: boolean; hasPagination: boolean; hasEmptyState: boolean }
   | { kind: "generic" };
 
+// A static catalog of authoring templates keyed by structural pattern. This is NOT a learned
+// store: it was previously dressed with status/valueScore/usageCount lifecycle fields that were
+// never persisted, mutated, or read (selection is purely pattern-shape based), which falsely
+// implied an evolving "skill" that promotes/deprecates exemplars. Honest shape: pattern → template.
 export interface SkillExemplar {
   id: string;
   name: string;
@@ -15,11 +19,6 @@ export interface SkillExemplar {
   pattern: StructuralPattern;
   template: string;
   archetype: ScenarioArchetype;
-  valueScore: number | null;
-  usageCount: number;
-  status: "candidate" | "active" | "deprecated";
-  source: string;
-  at: string;
 }
 
 const BUILT_IN_EXEMPLARS: SkillExemplar[] = [
@@ -30,11 +29,6 @@ const BUILT_IN_EXEMPLARS: SkillExemplar[] = [
     pattern: { kind: "form", hasOnSubmit: true, hasValidation: true },
     template: "Generate a test that submits the form with invalid data (empty required field, wrong format, too long) and asserts that the error message is visible and the form was NOT submitted successfully.",
     archetype: "invalid-input",
-    valueScore: null,
-    usageCount: 0,
-    status: "candidate",
-    source: "built-in",
-    at: new Date().toISOString(),
   },
   {
     id: "ex-form-happy-path",
@@ -43,11 +37,6 @@ const BUILT_IN_EXEMPLARS: SkillExemplar[] = [
     pattern: { kind: "form", hasOnSubmit: true, hasValidation: false },
     template: "Generate a test that fills the form with valid data, submits it, and asserts the success outcome (redirect, confirmation message, or data appearing in the UI).",
     archetype: "happy-path",
-    valueScore: null,
-    usageCount: 0,
-    status: "candidate",
-    source: "built-in",
-    at: new Date().toISOString(),
   },
   {
     id: "ex-api-error-handling",
@@ -56,11 +45,6 @@ const BUILT_IN_EXEMPLARS: SkillExemplar[] = [
     pattern: { kind: "api-call", method: "POST", hasRequestBody: true, hasErrorHandling: true },
     template: "Generate a test that triggers the API call and asserts that: (1) on success the UI reflects the result, (2) on error the UI shows an error message (not a blank page or console error). For the error case, verify the network response shape if the OpenAPI contract defines error responses.",
     archetype: "network-error",
-    valueScore: null,
-    usageCount: 0,
-    status: "candidate",
-    source: "built-in",
-    at: new Date().toISOString(),
   },
   {
     id: "ex-stateful-re-query",
@@ -69,11 +53,6 @@ const BUILT_IN_EXEMPLARS: SkillExemplar[] = [
     pattern: { kind: "stateful-cache", sourceType: "any", hasIndependentWritePath: true },
     template: "Generate a test that: (1) reads the current state, (2) performs a mutation through a DIFFERENT write path, (3) re-reads and asserts the state reflects the mutation. This catches stale caches, missing invalidations, and derived data that was not recomputed.",
     archetype: "re-query-after-mutation",
-    valueScore: null,
-    usageCount: 0,
-    status: "candidate",
-    source: "built-in",
-    at: new Date().toISOString(),
   },
   {
     id: "ex-data-list-empty",
@@ -82,11 +61,6 @@ const BUILT_IN_EXEMPLARS: SkillExemplar[] = [
     pattern: { kind: "data-list", hasFilter: false, hasPagination: false, hasEmptyState: true },
     template: "Generate a test that navigates to the list view when there is no data and asserts that the empty state message is shown (not a blank page, not a loading spinner forever, not a crash).",
     archetype: "empty-state",
-    valueScore: null,
-    usageCount: 0,
-    status: "candidate",
-    source: "built-in",
-    at: new Date().toISOString(),
   },
   {
     id: "ex-data-list-boundary",
@@ -95,19 +69,8 @@ const BUILT_IN_EXEMPLARS: SkillExemplar[] = [
     pattern: { kind: "data-list", hasFilter: true, hasPagination: true, hasEmptyState: false },
     template: "Generate a test that: (1) tests the list with exactly one item (boundary), (2) tests pagination (navigate to page 2, verify different data), (3) applies a filter and asserts the results match the filter criteria.",
     archetype: "boundary-value",
-    valueScore: null,
-    usageCount: 0,
-    status: "candidate",
-    source: "built-in",
-    at: new Date().toISOString(),
   },
 ];
-
-export function listExemplars(status?: "candidate" | "active" | "deprecated"): SkillExemplar[] {
-  const all = [...BUILT_IN_EXEMPLARS];
-  if (status) return all.filter((e) => e.status === status);
-  return all;
-}
 
 export function matchExemplars(pattern: StructuralPattern): SkillExemplar[] {
   return BUILT_IN_EXEMPLARS.filter((e) => {
