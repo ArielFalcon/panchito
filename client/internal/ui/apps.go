@@ -457,6 +457,15 @@ func (m appAdminModel) renderRepos() string {
 	return b.String()
 }
 
+// yesNo renders a boolean as a styled yes/no, matching the design language rather than
+// leaking Go's raw true/false into the form.
+func yesNo(b bool) string {
+	if b {
+		return okStyle.Render("yes")
+	}
+	return hintStyle.Render("no")
+}
+
 func (m appAdminModel) renderForm() string {
 	nameRow := labelStyle.Render("name    ") + m.nameInput.View()
 	if m.mode == appAdminEdit {
@@ -466,9 +475,9 @@ func (m appAdminModel) renderForm() string {
 		nameRow,
 		labelStyle.Render("url     ") + m.baseInput.View(),
 		labelStyle.Render("version ") + m.versionInput.View(),
-		fmt.Sprintf("target   %s", m.target),
-		fmt.Sprintf("shadow   %t", m.shadow),
-		fmt.Sprintf("review   %t", m.needsReview),
+		labelStyle.Render("target  ") + m.target,
+		labelStyle.Render("shadow  ") + yesNo(m.shadow),
+		labelStyle.Render("review  ") + yesNo(m.needsReview),
 		labelStyle.Render("prefix  ") + m.prefixInput.View(),
 		"save",
 	}
@@ -485,7 +494,35 @@ func (m appAdminModel) renderForm() string {
 		}
 		b.WriteString(marker + text + "\n")
 	}
+	// An inline explanation of the focused field, so onboarding is self-explanatory
+	// without reaching for the docs.
+	if help := appFieldHelp(m.formCursor); help != "" {
+		b.WriteString("\n" + hintStyle.Render(help))
+	}
 	return b.String()
+}
+
+// appFieldHelp is the one-line explanation shown under the form for the focused field.
+func appFieldHelp(cursor int) string {
+	switch cursor {
+	case fName:
+		return "a short id for this app — lowercase, used in commands and config paths"
+	case fURL:
+		return "the DEV base URL the suite runs against (required for e2e) — where the deployed app lives"
+	case fVersion:
+		return "optional /version endpoint; when set, the deploy gate waits until DEV serves the commit"
+	case fTarget:
+		return "e2e = browser tests against DEV · code = source-logic tests in the repo's own framework"
+	case fShadow:
+		return "shadow = run the full pipeline but publish nothing — safe to onboard without touching the repo"
+	case fReview:
+		return "require the independent reviewer agent to approve before a suite is committed via PR"
+	case fPrefix:
+		return "optional prefix the agent uses to namespace any test data it creates"
+	case fSave:
+		return "write config/apps/<name>.yaml and start watching this repo"
+	}
+	return ""
 }
 
 func (m appAdminModel) renderDelete() string {
@@ -584,7 +621,11 @@ func deleteAppCmd(c *api.Client, name string, purge bool) tea.Cmd {
 	}
 }
 
-func reloadAppsMsg(c *api.Client, ctx context.Context, status string) tea.Msg {
+func reloadAppsMsg(c *api.Client, _ context.Context, status string) tea.Msg {
+	// The create/delete already consumed most of the caller's deadline; give the reload its
+	// own budget so a slow mutation doesn't make the refresh time out and look like a failure.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	apps, err := c.ListApps(ctx)
 	if err != nil {
 		return errMsg{err}

@@ -88,6 +88,12 @@ func (m historyModel) View() string {
 	case len(m.runs) == 0:
 		b.WriteString(hintStyle.Render("no runs yet — launch one from home") + "\n")
 	default:
+		// A trend header: recent pass rate + a fixed-scale quality sparkline, so the
+		// shape of this app's history reads at a glance above the per-run list.
+		st := computeFleetStats(m.runs, 24)
+		trend := passRateStyle(st.passRate, st.total).Render(fmt.Sprintf("%.0f%% pass", st.passRate*100)) +
+			"  " + lipgloss.NewStyle().Foreground(colDim).Render(st.spark)
+		b.WriteString(labelRule(w, "trend", trend) + "\n")
 		for i, r := range m.runs {
 			// Run lines carry their own verdict color, so selection is the ember bar (a
 			// wash would fight the per-segment colors), not a re-styling of the line.

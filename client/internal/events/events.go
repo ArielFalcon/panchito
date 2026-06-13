@@ -96,6 +96,7 @@ type RunVerdict struct {
 	Verdict string `json:"verdict"`
 	Passed  int    `json:"passed"`
 	Failed  int    `json:"failed"`
+	Outcome string `json:"outcome"` // what the run produced — "suite PR merged · <url>", "Issue filed · <url>"
 }
 
 type AgentError struct {

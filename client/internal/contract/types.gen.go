@@ -315,6 +315,51 @@ func (e CreateRunResultTarget) Valid() bool {
 	}
 }
 
+// Defines values for LearningRuleViewConfidence.
+const (
+	High   LearningRuleViewConfidence = "high"
+	Low    LearningRuleViewConfidence = "low"
+	Medium LearningRuleViewConfidence = "medium"
+)
+
+// Valid indicates whether the value is a known member of the LearningRuleViewConfidence enum.
+func (e LearningRuleViewConfidence) Valid() bool {
+	switch e {
+	case High:
+		return true
+	case Low:
+		return true
+	case Medium:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for LearningRuleViewStatus.
+const (
+	Active     LearningRuleViewStatus = "active"
+	Candidate  LearningRuleViewStatus = "candidate"
+	Deprecated LearningRuleViewStatus = "deprecated"
+	Superseded LearningRuleViewStatus = "superseded"
+)
+
+// Valid indicates whether the value is a known member of the LearningRuleViewStatus enum.
+func (e LearningRuleViewStatus) Valid() bool {
+	switch e {
+	case Active:
+		return true
+	case Candidate:
+		return true
+	case Deprecated:
+		return true
+	case Superseded:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for PublicAgentConfigMode.
 const (
 	PublicAgentConfigModeDual   PublicAgentConfigMode = "dual"
@@ -715,6 +760,7 @@ type CreateAppResult struct {
 // CreateRunInput defines model for CreateRunInput.
 type CreateRunInput struct {
 	App      string               `json:"app"`
+	Commits  *int                 `json:"commits,omitempty"`
 	Guidance *string              `json:"guidance,omitempty"`
 	Mode     CreateRunInputMode   `json:"mode"`
 	Ref      *string              `json:"ref,omitempty"`
@@ -745,10 +791,46 @@ type CreateRunResultMode string
 // CreateRunResultTarget defines model for CreateRunResult.Target.
 type CreateRunResultTarget string
 
+// CurriculumView defines model for CurriculumView.
+type CurriculumView struct {
+	Archetypes []struct {
+		Archetype      string `json:"archetype"`
+		CaughtRealBug  bool   `json:"caughtRealBug"`
+		PromotionCount int    `json:"promotionCount"`
+	} `json:"archetypes"`
+	UpdatedAt string `json:"updatedAt"`
+}
+
 // DeleteAppResult defines model for DeleteAppResult.
 type DeleteAppResult struct {
 	Removed []string `json:"removed"`
 }
+
+// IntelligenceView defines model for IntelligenceView.
+type IntelligenceView struct {
+	App        string             `json:"app"`
+	Curriculum *CurriculumView    `json:"curriculum"`
+	Rules      []LearningRuleView `json:"rules"`
+	Scorecard  *ScorecardView     `json:"scorecard"`
+}
+
+// LearningRuleView defines model for LearningRuleView.
+type LearningRuleView struct {
+	Action       string                     `json:"action"`
+	Confidence   LearningRuleViewConfidence `json:"confidence"`
+	ErrorClass   string                     `json:"errorClass"`
+	OutcomeCount int                        `json:"outcomeCount"`
+	Status       LearningRuleViewStatus     `json:"status"`
+	SuccessRate  *float32                   `json:"successRate"`
+	Trigger      string                     `json:"trigger"`
+	UsageCount   int                        `json:"usageCount"`
+}
+
+// LearningRuleViewConfidence defines model for LearningRuleView.Confidence.
+type LearningRuleViewConfidence string
+
+// LearningRuleViewStatus defines model for LearningRuleView.Status.
+type LearningRuleViewStatus string
 
 // OnboardServiceInput defines model for OnboardServiceInput.
 type OnboardServiceInput struct {
@@ -882,6 +964,39 @@ type RunRecordTarget string
 
 // RunRecordVerdict defines model for RunRecord.Verdict.
 type RunRecordVerdict string
+
+// ScorecardView defines model for ScorecardView.
+type ScorecardView struct {
+	AvgValueScore *float32 `json:"avgValueScore"`
+	Entries       []struct {
+		At          string   `json:"at"`
+		KilledCount int      `json:"killedCount"`
+		MutantCount int      `json:"mutantCount"`
+		Target      string   `json:"target"`
+		ValueScore  *float32 `json:"valueScore"`
+	} `json:"entries"`
+	LastValueScore *float32 `json:"lastValueScore"`
+	MeasuredRuns   int      `json:"measuredRuns"`
+	TotalRuns      int      `json:"totalRuns"`
+	UpdatedAt      string   `json:"updatedAt"`
+}
+
+// SignalsView defines model for SignalsView.
+type SignalsView struct {
+	Coverage struct {
+		Measured bool `json:"measured"`
+	} `json:"coverage"`
+	Reviewer struct {
+		PassRate *float32 `json:"passRate"`
+		Runs     int      `json:"runs"`
+	} `json:"reviewer"`
+	ValueOracle struct {
+		AvgScore     *float32 `json:"avgScore"`
+		Measured     bool     `json:"measured"`
+		MeasuredRuns int      `json:"measuredRuns"`
+		TotalRuns    int      `json:"totalRuns"`
+	} `json:"valueOracle"`
+}
 
 // SpecRecord defines model for SpecRecord.
 type SpecRecord struct {

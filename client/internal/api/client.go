@@ -155,6 +155,22 @@ func (c *Client) GetApp(ctx context.Context, name string) (contract.AppView, err
 	return out, err
 }
 
+// GetIntelligence fetches the read-only learning ledger, value-oracle scorecard and
+// curriculum for an app — what the system has actually learned.
+func (c *Client) GetIntelligence(ctx context.Context, app string) (contract.IntelligenceView, error) {
+	var out contract.IntelligenceView
+	err := c.do(ctx, http.MethodGet, "/api/v1/apps/"+url.PathEscape(app)+"/intelligence", nil, &out)
+	return out, err
+}
+
+// GetSignals fetches the fleet-wide integrity readout (ground-truth value-oracle vs.
+// proxy pass-rate) that backs the dashboard's SIGNALS panel.
+func (c *Client) GetSignals(ctx context.Context) (contract.SignalsView, error) {
+	var out contract.SignalsView
+	err := c.do(ctx, http.MethodGet, "/api/v1/signals", nil, &out)
+	return out, err
+}
+
 func (c *Client) CreateApp(ctx context.Context, in contract.CreateAppInput) (contract.CreateAppResult, error) {
 	var out contract.CreateAppResult
 	err := c.do(ctx, http.MethodPost, "/api/v1/apps", in, &out)

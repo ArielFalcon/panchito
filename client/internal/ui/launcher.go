@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -50,7 +51,10 @@ type launcherModel struct {
 	guidanceInput textinput.Model
 	err           string
 	width         int
+	diffCommits   int // diff mode: how many commits the diff spans (1–20, ← → to adjust)
 }
+
+const maxDiffCommits = 20
 
 func newLauncherModel(app string) launcherModel {
 	ti := textinput.New()
@@ -58,7 +62,7 @@ func newLauncherModel(app string) launcherModel {
 	ti.Prompt = "" // the screen draws its own ember caret
 	ti.CharLimit = 2000
 	ti.Width = 52
-	return launcherModel{app: app, guidanceInput: ti}
+	return launcherModel{app: app, guidanceInput: ti, diffCommits: 1}
 }
 
 // createRunCmd performs CreateRun (the root holds the client) and reports the new
@@ -123,6 +127,15 @@ func (m launcherModel) Update(msg tea.Msg) (launcherModel, tea.Cmd) {
 			if m.cursor < len(opts)-1 {
 				m.cursor++
 			}
+		case "left", "h":
+			// On the diff option, ← narrows the commit window (the diff blast radius).
+			if m.step == stepMode && opts[m.cursor].value == "diff" && m.diffCommits > 1 {
+				m.diffCommits--
+			}
+		case "right", "l":
+			if m.step == stepMode && opts[m.cursor].value == "diff" && m.diffCommits < maxDiffCommits {
+				m.diffCommits++
+			}
 		case "esc":
 			return m.back()
 		case "enter":
@@ -180,6 +193,10 @@ func (m launcherModel) choose(value string) (launcherModel, tea.Cmd) {
 			g := m.guidance
 			in.Guidance = &g
 		}
+		if m.mode == "diff" && m.diffCommits > 1 {
+			c := m.diffCommits
+			in.Commits = &c
+		}
 		return m, func() tea.Msg { return launchMsg{input: in} }
 	}
 }
@@ -216,17 +233,27 @@ func (m launcherModel) View() string {
 
 	titles := map[launchStep]string{stepTarget: "test target", stepMode: "run mode", stepShadow: "shadow mode"}
 	b.WriteString(labelRule(w, titles[m.step], "") + "\n")
-	for i, o := range m.options() {
+	opts := m.options()
+	for i, o := range opts {
+		hint := ""
+		if m.step == stepMode && o.value == "diff" {
+			// The adjustable commit window — ‹ … › signals ← → editability.
+			hint = fmt.Sprintf("‹ %s ›", pluralize(m.diffCommits, "commit", "commits"))
+		}
 		if i == m.cursor {
-			b.WriteString(selectedRow(w, "", o.label, "") + "\n")
+			b.WriteString(selectedRow(w, "", o.label, hint) + "\n")
 		} else {
-			b.WriteString(normalRow(w, "", o.label, "") + "\n")
+			b.WriteString(normalRow(w, "", o.label, hint) + "\n")
 		}
 	}
 	if m.err != "" {
 		b.WriteString("\n" + errorStyle.Render("✗ "+m.err) + "\n")
 	}
-	b.WriteString("\n" + hintStyle.Render("↑↓ choose · enter next · esc back"))
+	foot := "↑↓ choose · enter next · esc back"
+	if m.step == stepMode && opts[m.cursor].value == "diff" {
+		foot = "↑↓ choose · ← → commits · enter next · esc back"
+	}
+	b.WriteString("\n" + hintStyle.Render(foot))
 	return screenStyle.Render(b.String())
 }
 

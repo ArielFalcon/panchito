@@ -25,9 +25,6 @@ type launchMsg struct{ input contract.CreateRunInput }
 // runCreatedMsg: CreateRun succeeded → open the live screen for this run.
 type runCreatedMsg struct{ id string }
 
-// askMsg: open the chat (Q&A) for the current run.
-type askMsg struct{}
-
 // continueMsg: re-run the named failed cases as a continuation.
 type continueMsg struct{ cases []string }
 

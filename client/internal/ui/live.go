@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -54,37 +53,41 @@ type testItem struct {
 // view; once a verdict arrives it renders a Summary recap. A viewport scrolls the
 // body and absorbs terminal resizes.
 type liveModel struct {
-	runID      string
-	app        string
-	sha        string
-	target     string
-	mode       string
-	phase      string
-	phaseStart time.Time
-	retrying   bool
-	activity   []activityItem
-	lastFile   string   // most recent file written — sticky, so the focus card row never blinks
-	lastCmd    string   // most recent command run — sticky
-	wroteAll   []string // every file written, in order (monotonic; for the feed summary)
-	ranAll     []string // every command run, in order
-	subagents  []subagentItem
-	plan       []events.PlanTodo
-	specs      []string
-	tests      []testItem
-	reviewer   *bool
-	reasons    []string
-	coverage   *events.CoverageComputed
-	passed     int
-	failed     int
-	errs       []string
-	agentErr   string
-	logs       []string
-	verdict    string
-	done       bool
-	closed     bool
-	sumFocus   int    // focused summary section (done view)
-	sumOpen    string // currently expanded summary section id
-	exported   string // path of the exported JSON, once 'e' is pressed
+	runID          string
+	app            string
+	sha            string
+	target         string
+	mode           string
+	phase          string
+	phaseStart     time.Time
+	runStartTs     int64     // server ts (ms) of run.started — anchors the elapsed clock
+	lastTs         int64     // server ts (ms) of the most recent event
+	lastTsWall     time.Time // wall time we received lastTs — lets elapsed tick between events
+	retrying       bool
+	activity       []activityItem
+	lastFile       string   // most recent file written — sticky, so the focus card row never blinks
+	lastCmd        string   // most recent command run — sticky
+	wroteAll       []string // every file written, in order (monotonic; for the feed summary)
+	ranAll         []string // every command run, in order
+	subagents      []subagentItem
+	plan           []events.PlanTodo
+	specs          []string
+	tests          []testItem
+	reviewer       *bool
+	reasons        []string
+	coverage       *events.CoverageComputed
+	passed         int
+	failed         int
+	errs           []string
+	agentErr       string
+	logs           []string
+	verdict        string
+	verdictOutcome string // what the run produced (PR/Issue URL + state) — from run.verdict
+	done           bool
+	closed         bool
+	sumFocus       int    // focused summary section (done view)
+	sumOpen        string // currently expanded summary section id
+	exported       string // path of the exported JSON, once 'e' is pressed
 	// Embedded assistant: ask about the run without leaving the live screen.
 	client      *api.Client
 	chatActive  bool
@@ -92,6 +95,8 @@ type liveModel struct {
 	chatEntries []chatEntry
 	chatLoading bool
 	stopArmed   bool // 'x' pressed once; a second 'x' cancels the server-side run
+	chatReveal  int  // runes of the latest answer revealed so far (typewriter effect)
+	chatStream  bool // the latest answer is still being revealed
 	spin        spinner.Model
 	bar         progress.Model
 	vp          viewport.Model
@@ -137,18 +142,25 @@ func (m liveModel) Update(msg tea.Msg) (liveModel, tea.Cmd) {
 		m.resize(msg.Width, msg.Height)
 		return m, nil
 	case spinner.TickMsg:
-		if m.done {
-			return m, nil // stop animating once the run finished
+		if m.done && !m.chatStream {
+			return m, nil // nothing left to animate (run finished, answer fully revealed)
 		}
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
-		m.refresh() // re-render so the new spinner frame reaches the viewport
+		if m.chatStream {
+			m.advanceChatReveal()
+		}
+		m.refresh() // re-render so the new spinner frame / revealed text reaches the viewport
 		return m, cmd
 	case answerMsg:
 		m.chatLoading = false
-		m.chatEntries = append(m.chatEntries, chatEntry{role: "a", text: renderMarkdown(msg.text), raw: msg.text})
+		m.chatEntries = append(m.chatEntries, chatEntry{role: "a", text: renderMarkdown(msg.text, contentWidth(m.width)), raw: msg.text})
+		// Reveal the answer progressively (typewriter), like the example. Kick the spinner
+		// so the reveal animates even when the run has already finished (ticks were stopped).
+		m.chatReveal = 0
+		m.chatStream = true
 		m.refresh()
-		return m, nil
+		return m, m.spin.Tick
 	case errMsg:
 		// In the live screen, an errMsg can only come from the embedded assistant.
 		m.chatLoading = false
@@ -207,17 +219,17 @@ func (m liveModel) Update(msg tea.Msg) (liveModel, tea.Cmd) {
 				return m, nil
 			}
 		case "up", "k":
-			if m.done {
-				m.moveSummary(-1)
+			if m.done && len(m.tests) > 0 {
+				m.moveSummary(-1) // a navigable test list → ↑↓ picks a case
 				return m, nil
 			}
 			if m.ready {
 				var cmd tea.Cmd
-				m.vp, cmd = m.vp.Update(msg)
+				m.vp, cmd = m.vp.Update(msg) // otherwise ↑↓ scrolls the recap (e.g. code/context runs)
 				return m, cmd
 			}
 		case "down", "j":
-			if m.done {
+			if m.done && len(m.tests) > 0 {
 				m.moveSummary(1)
 				return m, nil
 			}
@@ -237,46 +249,61 @@ func (m liveModel) Update(msg tea.Msg) (liveModel, tea.Cmd) {
 	return m, nil
 }
 
+// moveSummary moves the cursor through the test list in the recap (↑↓). The rest of the
+// recap is always visible — only individual tests expand — so navigation == picking a test.
 func (m *liveModel) moveSummary(delta int) {
-	secs := m.summarySections()
-	if len(secs) == 0 {
+	n := len(m.tests)
+	if n == 0 {
 		return
 	}
-	m.sumFocus = (m.sumFocus + delta + len(secs)) % len(secs)
+	m.sumFocus = (m.sumFocus + delta + n) % n
 	m.refresh()
 }
 
+// toggleSummary expands/collapses the focused test's detail (file · duration · failure tail).
 func (m *liveModel) toggleSummary() {
-	secs := m.summarySections()
-	if m.sumFocus < 0 || m.sumFocus >= len(secs) {
+	if m.sumFocus < 0 || m.sumFocus >= len(m.tests) {
 		return
 	}
-	id := secs[m.sumFocus].id
-	if m.sumOpen == id {
+	name := m.tests[m.sumFocus].name
+	if m.sumOpen == name {
 		m.sumOpen = ""
 	} else {
-		m.sumOpen = id
+		m.sumOpen = name
 	}
 	m.refresh()
 }
 
 // updateChatKey routes keystrokes to the embedded assistant input while it is active.
 func (m liveModel) updateChatKey(msg tea.KeyMsg) (liveModel, tea.Cmd) {
-	// When the run is done (summary screen), section navigation keys must work
-	// even while chat is open — they were previously swallowed by the text input.
+	// On the summary screen ↑↓ still scan the test list while chat is open (a glance, not
+	// a focus change); with no test list they scroll the recap instead so a long answer
+	// stays reachable. Enter is NOT intercepted here — it must SEND the typed message;
+	// only an EMPTY enter falls through to expand the focused test (handled below).
 	if m.done {
 		switch msg.String() {
 		case "up", "k":
-			m.moveSummary(-1)
-			m.refresh()
-			return m, nil
+			if len(m.tests) > 0 {
+				m.moveSummary(-1)
+				m.refresh()
+				return m, nil
+			}
+			if m.ready {
+				var cmd tea.Cmd
+				m.vp, cmd = m.vp.Update(msg)
+				return m, cmd
+			}
 		case "down", "j":
-			m.moveSummary(1)
-			m.refresh()
-			return m, nil
-		case "enter":
-			m.toggleSummary()
-			return m, nil
+			if len(m.tests) > 0 {
+				m.moveSummary(1)
+				m.refresh()
+				return m, nil
+			}
+			if m.ready {
+				var cmd tea.Cmd
+				m.vp, cmd = m.vp.Update(msg)
+				return m, cmd
+			}
 		}
 	}
 	switch msg.String() {
@@ -287,13 +314,20 @@ func (m liveModel) updateChatKey(msg tea.KeyMsg) (liveModel, tea.Cmd) {
 		return m, nil
 	case "enter":
 		q := strings.TrimSpace(m.chatInput.Value())
-		if q == "" || m.chatLoading || m.client == nil {
+		if q == "" {
+			if m.done {
+				m.toggleSummary() // nothing to send → expand/collapse the focused test
+			}
+			return m, nil
+		}
+		if m.chatLoading || m.client == nil {
 			return m, nil
 		}
 		hist := chatHistory(m.chatEntries)
 		m.chatEntries = append(m.chatEntries, chatEntry{role: "q", text: q, raw: q})
 		m.chatInput.SetValue("")
 		m.chatLoading = true
+		m.chatStream = false // a new question ends any in-flight reveal
 		m.refresh()
 		return m, askCmd(m.client, m.runID, q, hist)
 	default:
@@ -304,25 +338,28 @@ func (m liveModel) updateChatKey(msg tea.KeyMsg) (liveModel, tea.Cmd) {
 	}
 }
 
-// renderChat is the inline assistant panel — ALWAYS shown (a left-bordered card):
-// the last exchange only (so it never stacks into scroll), then the input when
-// active. Markdown answers are Glamour-rendered.
 // renderChat is the always-present inline assistant: a heavy rule splits it from the run
 // detail, then a labelled rule, the last exchange (so it never stacks into scroll), and
-// the input line — active (live cursor) or a dimmed prompt advertising the `a` key.
+// the input line. The latest answer is revealed progressively (typewriter) like the
+// example; once fully revealed it switches to the Glamour-rendered markdown.
 func (m liveModel) renderChat() string {
 	w := contentWidth(m.width)
 	var b strings.Builder
 	b.WriteString(heavyRule(w) + "\n")
 	b.WriteString(labelRule(w, "chat", hintStyle.Render("assistant")) + "\n")
-	for _, e := range lastExchange(m.chatEntries) {
+	entries := lastExchange(m.chatEntries)
+	for i, e := range entries {
 		switch e.role {
 		case "q":
 			b.WriteString(renderSegs("", sg("▸ ", colEmber)) + labelStyle.Render(truncate(e.text, w-2)) + "\n")
 		case "err":
 			b.WriteString(errorStyle.Render("✗ "+e.text) + "\n")
 		default:
-			b.WriteString(e.text + "\n")
+			if i == len(entries)-1 && m.chatStream {
+				b.WriteString(m.renderStreamingAnswer(e.raw, w) + "\n")
+			} else {
+				b.WriteString(e.text + "\n")
+			}
 		}
 	}
 	if m.chatLoading {
@@ -334,6 +371,43 @@ func (m liveModel) renderChat() string {
 		b.WriteString(renderSegs("", sg("› ", colFaint), sg("ask about this run", colDim)) + hintStyle.Render("   ‹a to ask›"))
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// renderStreamingAnswer shows the first chatReveal runes of the answer, word-wrapped and
+// indented, with a trailing ember cursor — the live typewriter.
+func (m liveModel) renderStreamingAnswer(raw string, w int) string {
+	r := []rune(raw)
+	n := min(m.chatReveal, len(r))
+	wrapped := lipgloss.NewStyle().Width(w - 2).Foreground(colFg).Render(string(r[:n]))
+	lines := strings.Split(wrapped, "\n")
+	for i := range lines {
+		lines[i] = "  " + lines[i]
+	}
+	return strings.Join(lines, "\n") + renderSegs("", sg("█", colEmber))
+}
+
+// advanceChatReveal moves the typewriter forward; it ends the stream once the latest
+// answer is fully shown. ~6 runes/tick (≈60/s at the spinner's cadence).
+func (m *liveModel) advanceChatReveal() {
+	total := len([]rune(m.lastAnswerRaw()))
+	if total == 0 {
+		m.chatStream = false
+		return
+	}
+	m.chatReveal += 6
+	if m.chatReveal >= total {
+		m.chatReveal = total
+		m.chatStream = false
+	}
+}
+
+// lastAnswerRaw is the raw text of the most recent assistant answer (the one being
+// revealed), or "" if the last entry is not an answer.
+func (m liveModel) lastAnswerRaw() string {
+	if n := len(m.chatEntries); n > 0 && m.chatEntries[n-1].role == "a" {
+		return m.chatEntries[n-1].raw
+	}
+	return ""
 }
 
 // lastExchange returns at most the last question+answer pair, so the chat never
@@ -356,9 +430,18 @@ func (m liveModel) failedTests() []string {
 }
 
 func (m *liveModel) fold(ev events.RunEvent) {
+	// Track the server clock so the run-elapsed timer stays accurate across re-attach and
+	// keeps ticking between events (via the wall delta since this event).
+	if ev.Ts > 0 {
+		m.lastTs = ev.Ts
+		m.lastTsWall = time.Now()
+	}
 	switch b := ev.Body.(type) {
 	case events.RunStarted:
 		m.sha, m.target, m.mode = b.Sha, b.Target, b.Mode
+		if ev.Ts > 0 {
+			m.runStartTs = ev.Ts
+		}
 	case events.StepChanged:
 		if b.Step != m.phase {
 			m.phaseStart = time.Now() // reset the elapsed clock when the phase advances
@@ -410,12 +493,15 @@ func (m *liveModel) fold(ev events.RunEvent) {
 		m.verdict = b.Verdict
 		m.passed = b.Passed
 		m.failed = b.Failed
+		m.verdictOutcome = b.Outcome
 		m.done = true
-		if m.sumOpen == "" {
-			if b.Verdict == "infra-error" {
-				m.sumOpen = "note" // surface the error immediately, don't make the user hunt for it
-			} else {
-				m.sumOpen = "results"
+		// Land the cursor on the first failure (and pre-expand it) so the problem is
+		// front-and-center in the recap instead of buried.
+		for i, t := range m.tests {
+			if t.status == "fail" {
+				m.sumFocus = i
+				m.sumOpen = t.name
+				break
 			}
 		}
 	case events.LogLine:
@@ -573,6 +659,12 @@ func (m liveModel) header() string {
 	if m.sha != "" {
 		right = hintStyle.Render(shortSha(m.sha))
 	}
+	if el, ok := m.runElapsed(); ok {
+		if right != "" {
+			right += "  "
+		}
+		right += labelStyle.Render(mmss(el))
+	}
 
 	runLine := spread(w, left, right)
 	rail := pipelineRail(w, pipelinePhases, m.phaseIndex(), m.done, sc)
@@ -581,6 +673,27 @@ func (m liveModel) header() string {
 	}
 	bar := progressBar(w, m.phaseFraction(), sc)
 	return runLine + "\n" + hairline(w) + "\n" + rail + "\n" + bar + "\n" + hairline(w)
+}
+
+// runElapsed is the wall time since run.started: the server delta to the last event,
+// plus the wall time since — so it ticks smoothly even between events while live.
+func (m liveModel) runElapsed() (time.Duration, bool) {
+	if m.runStartTs == 0 || m.lastTs == 0 {
+		return 0, false
+	}
+	d := time.Duration(m.lastTs-m.runStartTs) * time.Millisecond
+	if !m.done && !m.lastTsWall.IsZero() {
+		d += time.Since(m.lastTsWall)
+	}
+	if d < 0 {
+		d = 0
+	}
+	return d, true
+}
+
+func mmss(d time.Duration) string {
+	s := int(d.Seconds())
+	return fmt.Sprintf("%d:%02d", s/60, s%60)
 }
 
 // phaseIndex is the position of the current phase in the canonical pipeline, or -1 for a
@@ -623,12 +736,19 @@ func shortSha(s string) string {
 func (m liveModel) footer() string {
 	if m.chatActive {
 		if m.done {
-			return hintStyle.Render("↑↓ sections · ↵ expand · type to ask · esc close chat")
+			if len(m.tests) > 0 {
+				return hintStyle.Render("↑↓ tests · ↵ expand · type to ask · esc close chat")
+			}
+			return hintStyle.Render("↑↓ scroll · type to ask · esc close chat")
 		}
 		return hintStyle.Render("type to ask · ↵ send · esc close chat")
 	}
 	if m.done {
-		actions := "↑↓ sections · ↵ expand · e export · a ask"
+		nav := "↑↓ scroll"
+		if len(m.tests) > 0 {
+			nav = "↑↓ tests · ↵ expand"
+		}
+		actions := nav + " · e export · a ask"
 		if len(m.failedTests()) > 0 {
 			actions += " · c continue"
 		}
@@ -651,20 +771,21 @@ func (m liveModel) body() string {
 	} else {
 		base = m.liveBody()
 	}
-	return base + "\n\n" + m.renderChat() // the assistant panel is always present
+	// A blank line under the fixed header gives the body the example's breathing room.
+	return "\n" + base + "\n\n" + m.renderChat() // the assistant panel is always present
 }
 
 func (m liveModel) liveBody() string {
 	view := m.deriveActivity()
 	card := m.renderFocusCard(view)
-	status := ""
-	if card == "" {
-		status = m.renderPhaseStatus() // fill the quiet phases before a card exists
-	}
+	// The horizontal pipeline rail lives in the fixed header; here the body carries the
+	// live "what is happening now" line (renderPhaseStatus) plus the agent's work — no
+	// second, vertical copy of the pipeline.
 	sections := []string{
-		status,
+		m.renderPhaseStatus(),
 		card,
 		m.renderFeed(view),
+		m.renderLogTail(),
 		m.renderSubagents(),
 		m.renderSpecs(),
 		m.renderTests(),
@@ -673,6 +794,30 @@ func (m liveModel) liveBody() string {
 		m.renderErrs(),
 	}
 	return joinSections(sections)
+}
+
+// renderLogTail surfaces the orchestrator's own narration (the log.line stream) right in
+// the live view — the detail the user previously had to ask the chat for (phase work,
+// runner output, heartbeats). The last few lines only, tinted by level.
+func (m liveModel) renderLogTail() string {
+	if len(m.logs) == 0 {
+		return ""
+	}
+	w := contentWidth(m.width)
+	var b strings.Builder
+	b.WriteString(labelRule(w, "log", "") + "\n")
+	for _, l := range lastN(m.logs, 6) {
+		text := strings.TrimPrefix(l, "[qa] ")
+		st := hintStyle
+		switch {
+		case strings.Contains(l, "✗") || strings.Contains(strings.ToLower(l), "error") || strings.Contains(strings.ToLower(l), "fail"):
+			st = errorStyle
+		case strings.Contains(l, "⚠") || strings.Contains(strings.ToLower(l), "warn") || strings.Contains(l, "flaky"):
+			st = shadowStyle
+		}
+		b.WriteString("  " + st.Render(truncate(text, w-2)) + "\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // renderPhaseStatus is the always-present, animated "what is happening now" line.
@@ -715,40 +860,17 @@ func phaseDescription(phase string) string {
 	}
 }
 
-type sumSection struct{ id, label string }
-
-// summarySections is the ordered, data-driven list of collapsible recap sections.
-func (m liveModel) summarySections() []sumSection {
-	failedTxt := ""
-	if m.failed > 0 {
-		failedTxt = fmt.Sprintf(", %d failed", m.failed)
-	}
-	secs := []sumSection{
-		{"pipeline", "Pipeline"},
-		{"results", fmt.Sprintf("Test results (%d passed%s)", m.passed, failedTxt)},
-	}
-	if len(m.specs) > 0 {
-		secs = append(secs, sumSection{"specs", fmt.Sprintf("Specs (%d)", len(m.specs))})
-	}
-	if m.coverage != nil && m.coverage.ChangedLines > 0 {
-		secs = append(secs, sumSection{"coverage", "Coverage"})
-	}
-	if m.reviewer != nil {
-		secs = append(secs, sumSection{"reviewer", "Reviewer"})
-	}
-	if len(m.logs) > 0 {
-		secs = append(secs, sumSection{"logs", fmt.Sprintf("Execution logs (%d)", len(m.logs))})
-	}
-	if m.agentErr != "" && m.verdict != "pass" && m.verdict != "skipped" {
-		secs = append(secs, sumSection{"note", "Agent note"})
-	}
-	return secs
-}
-
+// summaryBody is the finished-run recap. It answers "what did this run do and was it
+// worth it" at a glance: a verdict badge + counts, a plain-English OUTCOME line, an
+// always-visible "what happened" block (specs / files / commands / plan / reviewer /
+// coverage), a NAVIGABLE test list (↑↓ move · ↵ expand a case's file · duration · failure
+// detail), and a log tail. Only per-test detail hides behind expansion — nothing else.
 func (m liveModel) summaryBody() string {
+	w := contentWidth(m.width)
 	var b strings.Builder
+
 	icon, vs := verdictBadge(m.verdict)
-	badge := lipgloss.NewStyle().Background(vs.GetForeground()).Foreground(lipgloss.Color("#11110f")).Bold(true).Padding(0, 1).Render(icon + " " + strings.ToUpper(m.verdict))
+	badge := lipgloss.NewStyle().Background(vs.GetForeground()).Foreground(colBg).Bold(true).Padding(0, 1).Render(icon + " " + strings.ToUpper(m.verdict))
 	counts := okStyle.Render(fmt.Sprintf("%d passed", m.passed))
 	if m.failed > 0 {
 		counts += labelStyle.Render(" · ") + errorStyle.Render(fmt.Sprintf("%d failed", m.failed))
@@ -756,24 +878,21 @@ func (m liveModel) summaryBody() string {
 	if fl := countTests(m.tests).flaky; fl > 0 {
 		counts += labelStyle.Render(" · ") + shadowStyle.Render(fmt.Sprintf("%d flaky", fl))
 	}
-	b.WriteString(badge + "   " + counts + "\n\n")
+	right := ""
+	if el, ok := m.runElapsed(); ok {
+		right = labelStyle.Render(mmss(el))
+	}
+	b.WriteString(spread(w, badge+"   "+counts, right) + "\n")
+	b.WriteString(hintStyle.Render(truncate(m.outcomeLine(), w)) + "\n\n")
 
-	for i, s := range m.summarySections() {
-		arrow := "▸"
-		if s.id == m.sumOpen {
-			arrow = "▾"
-		}
-		head := arrow + " " + s.label
-		if i == m.sumFocus {
-			head = lipgloss.NewStyle().Foreground(colInfo).Bold(true).Render(head)
-		} else {
-			head = labelStyle.Render(head)
-		}
-		b.WriteString(head + "\n")
-		if s.id == m.sumOpen {
-			if body := m.renderSummarySection(s.id); body != "" {
-				b.WriteString(indentLines(body, "    ") + "\n")
-			}
+	b.WriteString(m.renderWhatHappened(w) + "\n\n")
+	if tl := m.renderTestList(w); tl != "" {
+		b.WriteString(tl + "\n\n")
+	}
+	if len(m.logs) > 0 {
+		b.WriteString(labelRule(w, "log", hintStyle.Render(pluralize(len(m.logs), "line", "lines"))) + "\n")
+		for _, l := range lastN(m.logs, 10) {
+			b.WriteString("  " + hintStyle.Render(truncate(strings.TrimPrefix(l, "[qa] "), w-2)) + "\n")
 		}
 	}
 	if m.exported != "" {
@@ -782,40 +901,184 @@ func (m liveModel) summaryBody() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func (m liveModel) renderSummarySection(id string) string {
-	switch id {
-	case "pipeline":
-		return okStyle.Render("✓ ") + labelStyle.Render(strings.Join(pipelinePhases, " · "))
-	case "results":
-		return m.renderTests()
-	case "specs":
-		return m.renderSpecs()
-	case "coverage":
-		return m.renderCoverage()
-	case "reviewer":
-		return m.renderReviewer()
-	case "logs":
-		return m.renderLogs()
-	case "note":
-		return hintStyle.Render(truncate(m.agentErr, 88))
+// outcomeLine explains, in one plain sentence, what the verdict means and what the
+// pipeline did with it — the "what value did this run provide" the recap must answer.
+// Prefer the REAL outcome from the backend (the actual PR/Issue URL + merged state);
+// fall back to a verdict-derived sentence when the run carried none.
+func (m liveModel) outcomeLine() string {
+	if m.verdictOutcome != "" {
+		return m.verdictOutcome
 	}
-	return ""
+	switch m.verdict {
+	case "pass":
+		if m.reviewer != nil && !*m.reviewer {
+			return "tests are green, but the reviewer rejected the suite — a GitHub Issue is filed instead of a PR"
+		}
+		return "tests are green and the reviewer approved — the suite is committed via an auto-merge PR"
+	case "fail":
+		return "a test failed against DEV — a GitHub Issue is filed with the human-readable cause"
+	case "invalid":
+		return "the generated specs failed the static gate (tsc · eslint · playwright --list) — nothing was run"
+	case "flaky":
+		return "a case only passed on retry — it is quarantined as flaky, not merged"
+	case "infra-error":
+		if m.agentErr != "" {
+			return "infrastructure error (not a code fault): " + truncate(m.agentErr, 64)
+		}
+		return "infrastructure error — a DEV / runner / git problem, not a code fault"
+	case "skipped":
+		return "no test-worthy change — nothing was generated or published"
+	default:
+		return ""
+	}
 }
 
-func (m liveModel) renderLogs() string {
+// renderWhatHappened is the always-visible recap of the agent's work and the gates. It
+// lists what the run produced BY NAME — specs, other written files, commands — which is
+// the entire substance of the recap for code/context runs that carry no Playwright list.
+func (m liveModel) renderWhatHappened(w int) string {
 	var b strings.Builder
-	for _, l := range lastN(m.logs, 12) {
-		b.WriteString(hintStyle.Render(truncate(strings.TrimPrefix(l, "[qa] "), 90)) + "\n")
+	b.WriteString(labelRule(w, "what happened", "") + "\n")
+	row := func(label, val string) {
+		b.WriteString(renderSegs("", sg(padRight(label, 11), colDim)) + val + "\n")
+	}
+	// list prints a "label  summary" row, then each item on its own indented line
+	// (bounded), so files/commands are visible by name rather than as a bare count.
+	list := func(label, summary string, items []string, max int) {
+		row(label, summary)
+		for i, it := range items {
+			if i >= max {
+				b.WriteString(strings.Repeat(" ", 11) + hintStyle.Render(fmt.Sprintf("+%d more", len(items)-max)) + "\n")
+				break
+			}
+			b.WriteString(strings.Repeat(" ", 11) + hintStyle.Render("· "+truncate(it, w-13)) + "\n")
+		}
+	}
+	specSet := map[string]bool{}
+	if len(m.specs) > 0 {
+		var names []string
+		for _, f := range m.specs {
+			n := baseName(f)
+			names = append(names, n)
+			specSet[n] = true
+		}
+		list("generated", okStyle.Render(pluralize(len(m.specs), "spec", "specs")), names, 8)
+	}
+	// "wrote" lists the non-spec files (config, fixtures, context.json, code-mode tests)
+	// — anything written that the "generated" row did not already name.
+	var wrote []string
+	for _, f := range m.wroteAll {
+		if n := baseName(f); !specSet[n] {
+			wrote = append(wrote, n)
+		}
+	}
+	if len(wrote) > 0 {
+		list("wrote", labelStyle.Render(pluralize(len(wrote), "file", "files")), wrote, 8)
+	}
+	if len(m.ranAll) > 0 {
+		list("ran", labelStyle.Render(pluralize(len(m.ranAll), "command", "commands")), m.ranAll, 6)
+	}
+	if len(m.plan) > 0 {
+		done := 0
+		for _, t := range m.plan {
+			if t.Status == "completed" {
+				done++
+			}
+		}
+		row("plan", labelStyle.Render(fmt.Sprintf("%d/%d done", done, len(m.plan))))
+	}
+	if m.reviewer != nil {
+		if *m.reviewer {
+			row("reviewer", okStyle.Render("approved"))
+		} else {
+			row("reviewer", errorStyle.Render("rejected"))
+			for _, r := range m.reasons {
+				b.WriteString("             " + hintStyle.Render("- "+truncate(r, w-15)) + "\n")
+			}
+		}
+	}
+	if txt, ok := m.coverageText(); ok {
+		row("coverage", txt)
+	}
+	if m.agentErr != "" && m.verdict != "pass" && m.verdict != "skipped" {
+		row("note", hintStyle.Render(truncate(m.agentErr, w-13)))
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func indentLines(s, pad string) string {
-	lines := strings.Split(s, "\n")
-	for i := range lines {
-		lines[i] = pad + lines[i]
+// renderTestList is the navigable per-test recap: one row per case (glyph · name ·
+// duration), the focused one carrying the ember bar; the expanded one reveals its file,
+// flaky attempts and failure detail.
+func (m liveModel) renderTestList(w int) string {
+	if len(m.tests) == 0 {
+		return ""
 	}
-	return strings.Join(lines, "\n")
+	c := countTests(m.tests)
+	var b strings.Builder
+	b.WriteString(labelRule(w, "tests", hintStyle.Render(formatTestHistory(c))) + "\n")
+	for i, t := range m.tests {
+		gi, st := testGlyph(t.status)
+		dur := ""
+		if t.durationMs > 0 {
+			dur = hintStyle.Render(formatDuration(t.durationMs))
+		}
+		var left string
+		if i == m.sumFocus {
+			left = renderSegs("", sg("▌▸ ", colEmber), sg(gi+" ", st)) + lipgloss.NewStyle().Bold(true).Foreground(colFg).Render(truncate(t.name, w-24))
+		} else {
+			left = "   " + renderSegs("", sg(gi+" ", st)) + labelStyle.Render(truncate(t.name, w-24))
+		}
+		b.WriteString(spread(w, left, dur) + "\n")
+		if m.sumOpen == t.name {
+			if t.file != "" {
+				b.WriteString("       " + hintStyle.Render(truncate(t.file, w-9)) + "\n")
+			}
+			if t.attempts > 0 {
+				b.WriteString("       " + shadowStyle.Render(fmt.Sprintf("passed only after %d attempts", t.attempts)) + "\n")
+			}
+			if t.detail != "" {
+				b.WriteString("       " + errorStyle.Render(truncate(t.detail, w-9)) + "\n")
+			}
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func testGlyph(status string) (string, lipgloss.Color) {
+	switch status {
+	case "pass":
+		return "✓", colPass
+	case "fail":
+		return "✗", colFail
+	case "flaky":
+		return "~", colFlaky
+	case "running":
+		return "◐", colInfra
+	default:
+		return "·", colFaint
+	}
+}
+
+// coverageText is the change-coverage line, shared by the live section and the recap. ok
+// is false when no coverage was measured, so callers omit it rather than show a 0%.
+func (m liveModel) coverageText() (string, bool) {
+	if m.coverage == nil || m.coverage.ChangedLines == 0 {
+		return "", false
+	}
+	pct := float64(m.coverage.CoveredLines) / float64(m.coverage.ChangedLines) * 100
+	st := okStyle
+	if pct < 100 {
+		st = shadowStyle
+	}
+	return st.Render(fmt.Sprintf("%d/%d changed lines (%.0f%%)", m.coverage.CoveredLines, m.coverage.ChangedLines, pct)), true
+}
+
+// baseName is the trailing path segment (the file name) for compact spec listing.
+func baseName(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[i+1:]
+	}
+	return p
 }
 
 // ── JSON export (the 'e' key on a finished run) ─────────────────────────────────
@@ -875,7 +1138,7 @@ func joinSections(sections []string) string {
 			out = append(out, s)
 		}
 	}
-	return strings.Join(out, "\n")
+	return strings.Join(out, "\n\n") // a blank line between sections — the example's rhythm
 }
 
 // wrapJoin joins styled parts with sep, breaking to a new line whenever the next
@@ -1124,6 +1387,8 @@ func (m liveModel) renderTests() string {
 		b.WriteString("  " + m.bar.ViewAs(float64(counts.passed)/float64(total)) + " " + hintStyle.Render(fmt.Sprintf("%d/%d", counts.passed, total)) + "\n")
 	}
 
+	// renderTests is the LIVE test section (liveBody runs only while !m.done); the finished
+	// recap is rendered separately by renderTestList. So there is no done-branch here.
 	if hasCurrent {
 		b.WriteString("  " + infoStyle.Bold(true).Render(m.spin.View()+" now "+current.name) + "\n")
 		detail := current.file
@@ -1131,15 +1396,6 @@ func (m liveModel) renderTests() string {
 			detail = "executing current Playwright case"
 		}
 		b.WriteString("    " + hintStyle.Render(truncate(detail, 76)) + "\n")
-	} else if m.done {
-		b.WriteString("  " + verdictStyle(m.verdict).Render("finished") + "\n")
-		if failed, ok := firstFailedTest(m.tests); ok {
-			b.WriteString("    " + errorStyle.Render("first failed: "+failed.name) + "\n")
-			if failed.detail != "" {
-				b.WriteString("    " + hintStyle.Render(truncate(failed.detail, 76)) + "\n")
-			}
-		}
-		b.WriteString(m.summaryTestDetail())
 	} else {
 		b.WriteString("  " + hintStyle.Render("waiting for test runner") + "\n")
 	}
@@ -1231,68 +1487,6 @@ func nextQueuedTest(tests []testItem, currentIdx int) (testItem, bool) {
 	return testItem{}, false
 }
 
-func firstFailedTest(tests []testItem) (testItem, bool) {
-	for _, t := range tests {
-		if t.status == "fail" {
-			return t, true
-		}
-	}
-	return testItem{}, false
-}
-
-// summaryTestDetail is the recap-only block (rendered under "finished"): flaky
-// cases with their retry count, then the slowest cases with durations. Both are
-// bounded so an 80-test suite never overflows the summary.
-func (m liveModel) summaryTestDetail() string {
-	var b strings.Builder
-	if flaky := flakyTests(m.tests); len(flaky) > 0 {
-		b.WriteString("  " + shadowStyle.Render("flaky") + "\n")
-		for i, t := range flaky {
-			if i >= 5 {
-				b.WriteString("    " + hintStyle.Render(fmt.Sprintf("+%d more", len(flaky)-5)) + "\n")
-				break
-			}
-			line := "~ " + truncate(t.name, 56)
-			if t.attempts > 0 {
-				line += fmt.Sprintf(" (%d attempts)", t.attempts)
-			}
-			b.WriteString("    " + shadowStyle.Render(line) + "\n")
-		}
-	}
-	if slow := slowestTests(m.tests, 3); len(slow) > 0 {
-		b.WriteString("  " + labelStyle.Render("slowest") + "\n")
-		for _, t := range slow {
-			b.WriteString("    " + labelStyle.Render(truncate(t.name, 56)) + " " + hintStyle.Render(formatDuration(t.durationMs)) + "\n")
-		}
-	}
-	return b.String()
-}
-
-func flakyTests(tests []testItem) []testItem {
-	var out []testItem
-	for _, t := range tests {
-		if t.status == "flaky" {
-			out = append(out, t)
-		}
-	}
-	return out
-}
-
-// slowestTests returns the n cases with the longest recorded duration, descending.
-func slowestTests(tests []testItem, n int) []testItem {
-	withDur := make([]testItem, 0, len(tests))
-	for _, t := range tests {
-		if t.durationMs > 0 {
-			withDur = append(withDur, t)
-		}
-	}
-	sort.SliceStable(withDur, func(i, j int) bool { return withDur[i].durationMs > withDur[j].durationMs })
-	if len(withDur) > n {
-		withDur = withDur[:n]
-	}
-	return withDur
-}
-
 func formatDuration(ms float64) string {
 	if ms <= 0 {
 		return ""
@@ -1343,21 +1537,8 @@ func (m liveModel) renderErrs() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func verdictStyle(v string) lipgloss.Style {
-	switch v {
-	case "pass":
-		return okStyle
-	case "skipped":
-		return infoStyle // a clean no-op is neutral, not a success — don't read as green "pass"
-	case "fail", "invalid":
-		return errorStyle
-	default:
-		return shadowStyle
-	}
-}
-
 // verdictColor is the raw ramp color (for borders, rails and bars that need a Color, not
-// a Style). Mirrors verdictStyle.
+// a Style).
 func verdictColor(v string) lipgloss.Color {
 	switch v {
 	case "pass":

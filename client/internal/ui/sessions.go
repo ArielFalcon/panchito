@@ -19,12 +19,13 @@ type sessionsSelectedMsg struct{}
 // view) or STOP it. This is the recovery path: detaching with esc or quitting the
 // client leaves the server-side run going — here you can find it again and cancel it.
 type sessionsModel struct {
-	client  *api.Client
-	queue   *contract.QueueStatus
-	loading bool
-	err     string
-	status  string
-	width   int
+	client    *api.Client
+	queue     *contract.QueueStatus
+	loading   bool
+	err       string
+	status    string
+	stopArmed bool // 'x' pressed once; a second 'x' confirms the cancel
+	width     int
 }
 
 func newSessionsModel(client *api.Client) sessionsModel {
@@ -55,6 +56,9 @@ func (m sessionsModel) Update(msg tea.Msg) (sessionsModel, tea.Cmd) {
 		m.width = msg.Width
 		return m, nil
 	case tea.KeyMsg:
+		if msg.String() != "x" {
+			m.stopArmed = false // any other key disarms the stop confirmation
+		}
 		switch msg.String() {
 		case "esc":
 			return m, func() tea.Msg { return backMsg{} }
@@ -69,9 +73,15 @@ func (m sessionsModel) Update(msg tea.Msg) (sessionsModel, tea.Cmd) {
 				return m, func() tea.Msg { return watchRunMsg{id: r.Id, app: r.App} }
 			}
 		case "x":
+			// Stopping a live run is destructive — require a second press to confirm.
 			if r := m.running(); r != nil {
-				m.status = ""
-				return m, cancelRunCmd(m.client, r.Id)
+				if m.stopArmed {
+					m.stopArmed = false
+					m.status = ""
+					return m, cancelRunCmd(m.client, r.Id)
+				}
+				m.stopArmed = true
+				return m, nil
 			}
 		}
 	}
@@ -105,7 +115,11 @@ func (m sessionsModel) View() string {
 		if m.queue.Pending > 0 {
 			b.WriteString("\n" + hintStyle.Render(fmt.Sprintf("  %d more queued behind it", m.queue.Pending)) + "\n")
 		}
-		b.WriteString("\n" + hintStyle.Render("enter resume (re-attach the live view) · x stop the run") + "\n")
+		if m.stopArmed {
+			b.WriteString("\n" + errorStyle.Render("press x again to STOP the run") + hintStyle.Render("  ·  any other key keeps it running") + "\n")
+		} else {
+			b.WriteString("\n" + hintStyle.Render("enter resume (re-attach the live view) · x stop the run") + "\n")
+		}
 	default:
 		b.WriteString(hintStyle.Render("no active runs") + "\n")
 		if m.queue != nil && m.queue.Pending > 0 {

@@ -120,9 +120,17 @@ func (m agentModel) Update(msg tea.Msg) (agentModel, tea.Cmd) {
 		}
 		return m, nil
 	case agentConfigAppliedMsg:
-		m.status = fmt.Sprintf("applied - restarted %v", msg.result.Restarted)
+		restarted := make([]string, len(msg.result.Restarted))
+		for i, r := range msg.result.Restarted {
+			restarted[i] = string(r)
+		}
+		if len(restarted) > 0 {
+			m.status = "applied · restarted " + strings.Join(restarted, ", ")
+		} else {
+			m.status = "applied · no restart needed"
+		}
 		if msg.result.Downgraded != nil && *msg.result.Downgraded {
-			m.status += " (downgraded to single)"
+			m.status += " · downgraded to single"
 		}
 		cfg := msg.result.Config
 		draft := cloneAgentConfig(cfg)
@@ -134,7 +142,7 @@ func (m agentModel) Update(msg tea.Msg) (agentModel, tea.Cmd) {
 		m.err = ""
 		return m, nil
 	case agentRestartedMsg:
-		m.status = fmt.Sprintf("%s restarted - %s", msg.provider, msg.health.Status)
+		m.status = fmt.Sprintf("%s restarted · %s", msg.provider, msg.health.Status)
 		if m.config != nil && m.config.Health != nil {
 			switch msg.provider {
 			case "opencode":
@@ -421,6 +429,9 @@ func (m agentModel) renderRoleSelect() string {
 }
 
 func (m agentModel) renderDowngradeConfirm() string {
+	if m.draft == nil {
+		return screenStyle.Render(errorStyle.Render("agent config not loaded"))
+	}
 	w := contentWidth(m.width)
 	provider := uniqueDraftProvider(*m.draft)
 	if provider == "" {

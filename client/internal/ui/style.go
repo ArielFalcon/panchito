@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -14,7 +15,10 @@ import (
 // status always uses the verdict ramp. Every helper is width-aware so the 84-column
 // grid holds its proportions on wider terminals and gracefully narrows below it.
 
-const maxContentWidth = 84
+// 90 (not 80) so the 9-phase pipeline rail — gate · classify · setup · generate ·
+// validate · health · execute · coverage · decide — fits on one line at " · " spacing
+// (~85 cells) instead of wrapping a lone "decide" onto a second row.
+const maxContentWidth = 90
 
 // contentWidth is the inner grid width: the terminal minus the screen gutter, capped so
 // wide terminals don't stretch rules edge-to-edge, with a floor — and a sane default
@@ -266,4 +270,35 @@ func progressBar(width int, frac float64, color lipgloss.Color) string {
 func spread(width int, left, right string) string {
 	fill := max(1, width-lipgloss.Width(left)-lipgloss.Width(right))
 	return left + strings.Repeat(" ", fill) + right
+}
+
+// pluralize renders a count with its singular/plural noun ("1 project" / "3 projects").
+func pluralize(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", n, many)
+}
+
+// padRight pads s with spaces to n display runes (no-op if already wider).
+func padRight(s string, n int) string {
+	r := []rune(s)
+	if len(r) >= n {
+		return s
+	}
+	return s + strings.Repeat(" ", n-len(r))
+}
+
+// bannerBox is the brand mark: an ember rounded box with the name and tagline, used on the
+// connect screen. Width is clamped so it never outgrows a narrow terminal.
+func bannerBox(width int) string {
+	bw := min(48, width)
+	inner := renderSegs("", sg("◆ ", colEmber), sgb("panchito", colFg)) + "\n" +
+		labelStyle.Render("autonomous e2e qa for every deploy")
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colEmber).
+		Padding(0, 2).
+		Width(bw).
+		Render(inner)
 }

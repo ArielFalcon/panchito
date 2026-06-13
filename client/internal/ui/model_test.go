@@ -14,20 +14,20 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func TestConnectedMsgSwitchesToHome(t *testing.T) {
+func TestConnectedMsgSwitchesToDashboard(t *testing.T) {
 	m := New()
 	updated, _ := m.Update(connectedMsg{client: api.New("http://x", ""), apps: []contract.AppView{{Name: "portfolio"}}})
 	m = updated.(Model)
-	if m.screen != screenHome {
-		t.Fatalf("screen = %v, want home", m.screen)
+	if m.screen != screenDashboard {
+		t.Fatalf("screen = %v, want dashboard", m.screen)
 	}
-	if len(m.home.apps) != 1 || m.home.apps[0].Name != "portfolio" {
-		t.Fatalf("home apps: %+v", m.home.apps)
+	if len(m.dashboard.sys.apps) != 1 || m.dashboard.sys.apps[0].Name != "portfolio" {
+		t.Fatalf("dashboard apps: %+v", m.dashboard.sys.apps)
 	}
 }
 
 func TestAppSelectedOpensLauncher(t *testing.T) {
-	m := Model{screen: screenHome, home: newHomeModel([]contract.AppView{{Name: "portfolio"}})}
+	m := Model{screen: screenDashboard}
 	updated, _ := m.Update(appSelectedMsg{app: "portfolio"})
 	m = updated.(Model)
 	if m.screen != screenLauncher || m.launcher.app != "portfolio" {
@@ -60,6 +60,43 @@ func TestLauncherWalksToLaunchMsg(t *testing.T) {
 	}
 	if lm.input.Shadow == nil || *lm.input.Shadow {
 		t.Fatalf("shadow = %v, want false", lm.input.Shadow)
+	}
+}
+
+func TestLauncherDiffCommitsAdjustableWithArrows(t *testing.T) {
+	m := newLauncherModel("portfolio")
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // target → e2e, now stepMode (cursor on diff)
+	if m.step != stepMode || m.diffCommits != 1 {
+		t.Fatalf("want stepMode + diffCommits 1, got step=%d commits=%d", m.step, m.diffCommits)
+	}
+	// ← at the floor stays 1
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if m.diffCommits != 1 {
+		t.Fatalf("left at floor: diffCommits=%d want 1", m.diffCommits)
+	}
+	// → → → widens the diff window to 4
+	for i := 0; i < 3; i++ {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	}
+	if m.diffCommits != 4 {
+		t.Fatalf("after 3×right: diffCommits=%d want 4", m.diffCommits)
+	}
+	// arrows only adjust on the diff option — move to 'complete' and → is a no-op
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if m.diffCommits != 4 {
+		t.Fatalf("→ on a non-diff option must not change commits: %d", m.diffCommits)
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp}) // back to diff
+	// choose diff → shadow → launch; the launch input carries commits=4
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})    // mode diff → stepShadow
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // shadow false → launch
+	lm, ok := cmd().(launchMsg)
+	if !ok {
+		t.Fatalf("expected launchMsg, got %T", cmd())
+	}
+	if lm.input.Commits == nil || *lm.input.Commits != 4 {
+		t.Fatalf("launch input commits = %v, want 4", lm.input.Commits)
 	}
 }
 
@@ -205,23 +242,20 @@ func TestLiveRendersDedicatedComponentsAndSummary(t *testing.T) {
 
 	m, _ = m.Update(runEventMsg(events.RunEvent{Type: "run.verdict", Body: events.RunVerdict{Verdict: "fail", Passed: 2, Failed: 1}}))
 	summary := m.View()
-	for _, want := range []string{"FAIL", "2 passed", "1 failed", "Test results", "Reviewer", "Specs"} {
+	// The recap is at-a-glance: verdict, counts, a plain-English outcome, and an
+	// always-visible "what happened" block (specs, reviewer + reasons, coverage) — no
+	// digging through collapsed accordions.
+	for _, want := range []string{
+		"FAIL", "2 passed", "1 failed", "GitHub Issue", // verdict + outcome line
+		"WHAT HAPPENED", "contact.spec.ts", "rejected", "scope the selector", "70%",
+	} {
 		if !strings.Contains(summary, want) {
 			t.Fatalf("summary view missing %q:\n%s", want, summary)
 		}
 	}
-	// Sections are collapsible — expanding Reviewer/Specs reveals their bodies.
-	m.sumOpen = "reviewer"
-	if !strings.Contains(m.View(), "reviewer: rejected") {
-		t.Fatalf("expanded reviewer section missing the verdict:\n%s", m.View())
-	}
-	m.sumOpen = "specs"
-	if !strings.Contains(m.View(), "flows/contact.spec.ts") {
-		t.Fatalf("expanded specs section missing the file:\n%s", m.View())
-	}
 }
 
-func TestSummaryDefaultsToNoteOnInfraError(t *testing.T) {
+func TestSummarySurfacesInfraErrorNote(t *testing.T) {
 	m := newLiveModel("r", "app", make(chan events.RunEvent, 1), func() {}, 0, 0)
 	// Simulate an infra-error run: note is populated before the verdict fires.
 	m.agentErr = "git add failed: node_modules in .gitignore"
@@ -229,18 +263,42 @@ func TestSummaryDefaultsToNoteOnInfraError(t *testing.T) {
 		Type: "run.verdict",
 		Body: events.RunVerdict{Verdict: "infra-error", Passed: 0, Failed: 0},
 	}))
-	if m.sumOpen != "note" {
-		t.Fatalf("infra-error must auto-expand 'note' section; sumOpen=%q", m.sumOpen)
+	// The note must be visible in the recap (outcome line + "what happened"), not buried.
+	out := m.View()
+	if !strings.Contains(out, "infrastructure error") || !strings.Contains(out, "git add failed") {
+		t.Fatalf("infra-error recap must surface the note:\n%s", out)
+	}
+}
+
+// A code/context run carries no Playwright test list, so the recap's substance is the
+// files it wrote and commands it ran — these must be listed BY NAME, not as bare counts.
+func TestSummaryListsWrittenFilesByNameForCodeRun(t *testing.T) {
+	m := newLiveModel("r", "panchito", make(chan events.RunEvent, 1), func() {}, 0, 0)
+	for _, ev := range []events.RunEvent{
+		{Type: "run.started", Body: events.RunStarted{Sha: "abc", Target: "code", Mode: "context"}},
+		{Type: "agent.activity", Body: events.AgentActivity{Kind: "writing", Target: "e2e/.qa/context.json", Status: "completed"}},
+		{Type: "agent.activity", Body: events.AgentActivity{Kind: "writing", Target: "src/auth/login.test.ts", Status: "completed"}},
+		{Type: "agent.activity", Body: events.AgentActivity{Kind: "command", Target: "npm test", Status: "completed"}},
+	} {
+		m, _ = m.Update(runEventMsg(ev))
+	}
+	m, _ = m.Update(runEventMsg(events.RunEvent{Type: "run.verdict", Body: events.RunVerdict{Verdict: "pass"}}))
+
+	out := m.View()
+	for _, want := range []string{"WHAT HAPPENED", "context.json", "login.test.ts", "npm test"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("code-run recap must list what it produced by name, missing %q:\n%s", want, out)
+		}
 	}
 }
 
 func TestLiveSummaryNavigationWorksWithChatOpen(t *testing.T) {
 	m := newLiveModel("r", "portfolio", make(chan events.RunEvent, 1), func() {}, 0, 0)
 	m.client = api.New("http://x", "")
-	// Set up a finished run so summary sections are navigable.
+	// Set up a finished run with a couple of cases so the test list is navigable.
 	m.done = true
 	m.verdict = "pass"
-	m.tests = []testItem{{name: "t1", status: "pass"}}
+	m.tests = []testItem{{name: "t1", status: "pass"}, {name: "t2", status: "fail", detail: "boom"}}
 	m.passed = 1
 
 	// Open chat with 'a'.
@@ -250,7 +308,7 @@ func TestLiveSummaryNavigationWorksWithChatOpen(t *testing.T) {
 		t.Fatalf("'a' must open the chat; active=%v cmd=%v", m.chatActive, cmd)
 	}
 
-	// Navigate sections with 'j' even though chat is open.
+	// Navigate the test list with 'j' even though chat is open.
 	prev := m.sumFocus
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	if m.sumFocus != prev+1 {
@@ -269,16 +327,11 @@ func TestLiveSummaryNavigationWorksWithChatOpen(t *testing.T) {
 		t.Fatalf("down arrow must advance: %d → want %d", m.sumFocus, prev+1)
 	}
 
-	// Enter toggles the summary section while chat is open.
-	m.sumFocus = 0 // focus "results" section
-	prevOpen := m.sumOpen
+	// Enter expands the focused test while chat is open.
+	m.sumFocus = 0
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if m.sumOpen != "" && prevOpen == "results" {
-		// Enter toggles — if was "results", now collapsed to ""
-	} else if m.sumOpen != "results" && prevOpen == "" {
-		// Expanded to "results"
-	} else {
-		t.Fatalf("enter must toggle the section; sumOpen=%q (was %q)", m.sumOpen, prevOpen)
+	if m.sumOpen != "t1" {
+		t.Fatalf("enter must expand the focused test; sumOpen=%q want t1", m.sumOpen)
 	}
 
 	// Typing text still routes to the chat input.
@@ -294,6 +347,44 @@ func TestLiveSummaryNavigationWorksWithChatOpen(t *testing.T) {
 	}
 }
 
+func TestLiveSummaryShowsRealOutcomeFromBackend(t *testing.T) {
+	m := newLiveModel("r", "app", make(chan events.RunEvent, 1), func() {}, 0, 0)
+	m, _ = m.Update(runEventMsg(events.RunEvent{Type: "run.verdict", Body: events.RunVerdict{
+		Verdict: "pass", Passed: 3, Outcome: "suite PR merged · https://github.com/org/app/pull/7",
+	}}))
+	out := m.View()
+	// The recap shows the ACTUAL outcome (PR URL) from the backend, not a generic guess.
+	if !strings.Contains(out, "suite PR merged") || !strings.Contains(out, "pull/7") {
+		t.Fatalf("summary must show the backend outcome:\n%s", out)
+	}
+}
+
+func TestLiveSummaryChatEnterSendsMessageNotToggle(t *testing.T) {
+	m := newLiveModel("r", "app", make(chan events.RunEvent, 1), func() {}, 0, 0)
+	m.client = api.New("http://x", "")
+	m.done = true
+	m.verdict = "fail"
+	m.tests = []testItem{{name: "t1", status: "fail", detail: "boom"}}
+
+	// Focus the chat and type a question.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("why did it fail")})
+	openBefore := m.sumOpen
+
+	// Enter with text must SEND the message — not expand the focused test (the reported bug).
+	var cmd tea.Cmd
+	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.chatLoading || cmd == nil {
+		t.Fatalf("enter with text must send the chat message (loading=%v cmd=%v)", m.chatLoading, cmd)
+	}
+	if m.sumOpen != openBefore {
+		t.Fatalf("enter with text must NOT toggle a test; sumOpen changed %q→%q", openBefore, m.sumOpen)
+	}
+	if last := m.chatEntries[len(m.chatEntries)-1]; last.role != "q" || last.raw != "why did it fail" {
+		t.Fatalf("the question must be recorded; got %+v", last)
+	}
+}
+
 func TestLiveSummaryNavigatesSectionsAndExportsJSON(t *testing.T) {
 	m := newLiveModel("exp_test_run", "portfolio", make(chan events.RunEvent, 1), func() {}, 0, 0)
 	for _, ev := range []events.RunEvent{
@@ -303,15 +394,14 @@ func TestLiveSummaryNavigatesSectionsAndExportsJSON(t *testing.T) {
 	} {
 		m, _ = m.Update(runEventMsg(ev))
 	}
-	if m.sumOpen != "results" {
-		t.Fatalf("default open section = %q, want results", m.sumOpen)
+	// A passing run expands nothing by default (only a failure pre-opens its detail).
+	if m.sumOpen != "" {
+		t.Fatalf("passing run should not auto-expand a test; sumOpen=%q", m.sumOpen)
 	}
-	// ↓ ↓ focuses the Specs section, Enter expands it.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	// Enter expands the focused test's detail.
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if m.sumOpen != "specs" {
-		t.Fatalf("after navigating + Enter, open section = %q, want specs", m.sumOpen)
+	if m.sumOpen != "t1" {
+		t.Fatalf("after Enter, expanded test = %q, want t1", m.sumOpen)
 	}
 
 	// 'e' exports the run as JSON.
@@ -373,7 +463,7 @@ func TestCtrlCQuits(t *testing.T) {
 	}
 }
 
-func TestQOnlyQuitsOnHome(t *testing.T) {
+func TestQDoesNotQuitOnConnect(t *testing.T) {
 	m := New() // connect screen
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	if cmd != nil {
@@ -414,68 +504,6 @@ func TestLiveEmbeddedChatAndContinue(t *testing.T) {
 	cm, ok := cmd().(continueMsg)
 	if !ok || len(cm.cases) != 1 || cm.cases[0] != "checkout" {
 		t.Fatalf("continue cases = %#v", cmd())
-	}
-}
-
-func TestChatAppendsQuestionAndRendersAnswer(t *testing.T) {
-	m := newChatModel(nil, "run_1")
-	m.input.SetValue("why did it fail?")
-
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if len(m.entries) != 1 || m.entries[0].role != "q" || !m.loading {
-		t.Fatalf("after enter: entries=%+v loading=%v", m.entries, m.loading)
-	}
-
-	m, _ = m.Update(answerMsg{text: "Because **the selector** broke."})
-	if len(m.entries) != 2 || m.entries[1].role != "a" || m.loading {
-		t.Fatalf("after answer: entries=%d loading=%v", len(m.entries), m.loading)
-	}
-	if !strings.Contains(m.View(), "why did it fail?") {
-		t.Fatalf("view missing the question:\n%s", m.View())
-	}
-}
-
-func TestHomeMenuRunOpensProjectsThenSelectsApp(t *testing.T) {
-	m := newHomeModel([]contract.AppView{{Name: "portfolio"}})
-	// "Run QA" is the first menu item → Enter drops into the projects sub-view.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if m.view != homeViewProjects || m.intent != "run" {
-		t.Fatalf("view=%v intent=%q, want projects/run", m.view, m.intent)
-	}
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if cmd == nil {
-		t.Fatal("Enter on a project must emit a command")
-	}
-	if msg, ok := cmd().(appSelectedMsg); !ok || msg.app != "portfolio" {
-		t.Fatalf("expected appSelectedMsg{app:portfolio}, got %T %+v", cmd(), cmd())
-	}
-}
-
-func TestHomeProjectsHEmitsHistorySelectedMsg(t *testing.T) {
-	m := newHomeModel([]contract.AppView{{Name: "portfolio"}})
-	m.view = homeViewProjects
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
-	if cmd == nil {
-		t.Fatal("'h' must emit a command in the projects view")
-	}
-	if msg, ok := cmd().(historySelectedMsg); !ok || msg.app != "portfolio" {
-		t.Fatalf("expected historySelectedMsg{app:portfolio}, got %T %+v", cmd(), cmd())
-	}
-}
-
-func TestHomeMenuStatusAndHelpEmitMsgs(t *testing.T) {
-	m := newHomeModel(nil)
-	m.menuCursor = 6 // ⊞ Status
-	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd == nil {
-		t.Fatal("Status must emit a command")
-	} else if _, ok := cmd().(statusSelectedMsg); !ok {
-		t.Fatalf("expected statusSelectedMsg, got %T", cmd())
-	}
-	m.menuCursor = 7 // ? Help
-	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd == nil {
-		t.Fatal("Help must emit a command")
-	} else if _, ok := cmd().(helpSelectedMsg); !ok {
-		t.Fatalf("expected helpSelectedMsg, got %T", cmd())
 	}
 }
 
@@ -580,52 +608,6 @@ func TestWatchRunMsgOpensLiveScreen(t *testing.T) {
 	m = updated.(Model)
 	if m.screen != screenLive {
 		t.Fatal("watchRunMsg must switch to live screen")
-	}
-}
-
-func TestHomeMenuAgentEmitsAgentSelectedMsg(t *testing.T) {
-	m := newHomeModel([]contract.AppView{{Name: "portfolio"}})
-	m.menuCursor = 5 // ◈ Agent runtime
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if cmd == nil {
-		t.Fatal("agent menu item must emit a command")
-	}
-	if _, ok := cmd().(agentSelectedMsg); !ok {
-		t.Fatalf("expected agentSelectedMsg, got %T", cmd())
-	}
-}
-
-func TestHomeMenuSessionsEmitsMsg(t *testing.T) {
-	m := newHomeModel(nil)
-	m.menuCursor = 1 // ◳ Active sessions
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if cmd == nil {
-		t.Fatal("sessions menu item must emit a command")
-	}
-	if _, ok := cmd().(sessionsSelectedMsg); !ok {
-		t.Fatalf("expected sessionsSelectedMsg, got %T", cmd())
-	}
-}
-
-func TestHomeOnboardEditAndDeleteMessages(t *testing.T) {
-	app := contract.AppView{Name: "portfolio", Repo: "org/portfolio", BaseUrl: "https://dev", VersionUrl: "", Services: []contract.AppService{}}
-	m := newHomeModel([]contract.AppView{app})
-
-	// Onboard is a menu item (index 2, after Run QA and Active sessions).
-	m.menuCursor = 2
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if _, ok := cmd().(onboardSelectedMsg); !ok {
-		t.Fatalf("expected onboardSelectedMsg, got %T", cmd())
-	}
-	// Edit/Delete are 'e'/'d' shortcuts inside the projects sub-view.
-	m.view = homeViewProjects
-	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	if msg, ok := cmd().(editAppMsg); !ok || msg.app.Name != "portfolio" {
-		t.Fatalf("expected editAppMsg, got %T %+v", cmd(), cmd())
-	}
-	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-	if msg, ok := cmd().(deleteAppMsg); !ok || msg.app.Name != "portfolio" {
-		t.Fatalf("expected deleteAppMsg, got %T %+v", cmd(), cmd())
 	}
 }
 
