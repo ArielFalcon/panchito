@@ -687,6 +687,7 @@
                   "validate",
                   "health",
                   "execute",
+                  "coverage",
                   "retry",
                   "decide",
                   "done"

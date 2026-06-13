@@ -21,7 +21,7 @@ type RunStepEvent = Extract<RunEventBody, { type: "step.changed" }>;
 type RunStep = RunStepEvent["step"];
 
 const RUN_EVENT_STEPS = new Set<RunStep>([
-  "gate", "classify", "setup", "generate", "validate", "health", "execute", "retry", "decide", "done",
+  "gate", "classify", "setup", "generate", "validate", "health", "execute", "coverage", "retry", "decide", "done",
 ]);
 
 function isRunStep(value: string): value is RunStep {

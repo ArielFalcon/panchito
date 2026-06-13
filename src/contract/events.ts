@@ -21,7 +21,7 @@ export const RunVerdictSchema = z.enum(["pass", "fail", "flaky", "invalid", "inf
 // `onStep` callback is a loose string today; the producer adapter normalizes it
 // onto this enum (an unknown step is omitted, never invented).
 export const RunStepSchema = z.enum([
-  "gate", "classify", "setup", "generate", "validate", "health", "execute", "retry", "decide", "done",
+  "gate", "classify", "setup", "generate", "validate", "health", "execute", "coverage", "retry", "decide", "done",
 ]);
 
 // What the agent is doing — derived from OpenCode's ToolPart, never from prose.

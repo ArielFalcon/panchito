@@ -11,6 +11,7 @@ export interface OracleInput {
   changedFiles?: string[]; // code: scope mutation to the diff (not the whole repo)
   baseUrl?: string; // e2e fault-injection: the live DEV URL to re-run the suite against
   baselineCases?: string[]; // e2e fault-injection: spec names that passed at baseline (the green run)
+  onProgress?: (msg: string) => void; // heartbeat during long-running oracle (Stryker output)
 }
 
 export interface ValueOracleResult {

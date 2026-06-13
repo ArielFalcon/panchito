@@ -152,6 +152,32 @@ test("a continuation forces generation (no skip) and records the parent run", as
   assert.equal(r.verdict, "pass");
 });
 
+test("the coverage step event reaches the event store (was silently dropped before fix)", async () => {
+  const queue = new JobQueue();
+  const runEvents = createRunEventStore({ now: () => 456 });
+  // Simulate a pipeline with collectCoverage wired — the orchestrator must emit
+  // step.changed { step: "coverage" } instead of silently dropping it.
+  const id = enqueueTrackedRun(
+    queue,
+    { app: "runner-cov", sha: "cov1234", target: "e2e", mode: "diff", source: "manual" },
+    {
+      pipeline: stubDeps({
+        // A valid unified diff with +++ header → parseDiffHunks finds changed lines
+        prepare: async () => ({ mirrorDir: makeMirror(), diff: "diff --git a/src/a.ts b/src/a.ts\nindex 0000000..1111111 100644\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,3 +1,4 @@\n+new line", message: "feat: add coverage" }),
+        collectCoverage: async () => new Map(),
+      }),
+      loadApp: cfg,
+      runEvents,
+    },
+  );
+  await queue.drain();
+  const bodies = runEvents.replay(id).map((event) => event.body);
+  assert.ok(
+    bodies.some((body) => body.type === "step.changed" && body.step === "coverage"),
+    "step.changed { step: 'coverage' } must be present in the event stream",
+  );
+});
+
 test("a bad app name is finalized (not a zombie) — loadApp throwing is caught", async () => {
   const queue = new JobQueue();
   const id = enqueueTrackedRun(

@@ -171,6 +171,17 @@ export async function runMutationOracle(
     let stderr = "";
     let settled = false;
 
+    // Emit progress lines from Stryker's stdout so the TUI has live feedback
+    // during long mutation runs (can take 10+ minutes for large diffs).
+    if (input.onProgress && child.stdout) {
+      child.stdout.on("data", (chunk: Buffer) => {
+        for (const line of chunk.toString().split("\n")) {
+          const trimmed = line.trim();
+          if (trimmed) input.onProgress!(trimmed);
+        }
+      });
+    }
+
     const finish = (result: ValueOracleResult) => {
       if (settled) return;
       settled = true;

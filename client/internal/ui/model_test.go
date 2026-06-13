@@ -221,6 +221,79 @@ func TestLiveRendersDedicatedComponentsAndSummary(t *testing.T) {
 	}
 }
 
+func TestSummaryDefaultsToNoteOnInfraError(t *testing.T) {
+	m := newLiveModel("r", "app", make(chan events.RunEvent, 1), func() {}, 0, 0)
+	// Simulate an infra-error run: note is populated before the verdict fires.
+	m.agentErr = "git add failed: node_modules in .gitignore"
+	m, _ = m.Update(runEventMsg(events.RunEvent{
+		Type: "run.verdict",
+		Body: events.RunVerdict{Verdict: "infra-error", Passed: 0, Failed: 0},
+	}))
+	if m.sumOpen != "note" {
+		t.Fatalf("infra-error must auto-expand 'note' section; sumOpen=%q", m.sumOpen)
+	}
+}
+
+func TestLiveSummaryNavigationWorksWithChatOpen(t *testing.T) {
+	m := newLiveModel("r", "portfolio", make(chan events.RunEvent, 1), func() {}, 0, 0)
+	m.client = api.New("http://x", "")
+	// Set up a finished run so summary sections are navigable.
+	m.done = true
+	m.verdict = "pass"
+	m.tests = []testItem{{name: "t1", status: "pass"}}
+	m.passed = 1
+
+	// Open chat with 'a'.
+	var cmd tea.Cmd
+	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if !m.chatActive || cmd == nil {
+		t.Fatalf("'a' must open the chat; active=%v cmd=%v", m.chatActive, cmd)
+	}
+
+	// Navigate sections with 'j' even though chat is open.
+	prev := m.sumFocus
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if m.sumFocus != prev+1 {
+		t.Fatalf("'j' must advance sumFocus even with chat open: %d → %d", prev, m.sumFocus)
+	}
+
+	// Navigate back with 'k'.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	if m.sumFocus != prev {
+		t.Fatalf("'k' must go back: got %d, want %d", m.sumFocus, prev)
+	}
+
+	// Arrow keys should also work.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if m.sumFocus != prev+1 {
+		t.Fatalf("down arrow must advance: %d → want %d", m.sumFocus, prev+1)
+	}
+
+	// Enter toggles the summary section while chat is open.
+	m.sumFocus = 0 // focus "results" section
+	prevOpen := m.sumOpen
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.sumOpen != "" && prevOpen == "results" {
+		// Enter toggles — if was "results", now collapsed to ""
+	} else if m.sumOpen != "results" && prevOpen == "" {
+		// Expanded to "results"
+	} else {
+		t.Fatalf("enter must toggle the section; sumOpen=%q (was %q)", m.sumOpen, prevOpen)
+	}
+
+	// Typing text still routes to the chat input.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hi")})
+	if m.chatInput.Value() != "hi" {
+		t.Fatalf("typing must reach chat input: got %q", m.chatInput.Value())
+	}
+
+	// esc still closes the chat.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.chatActive {
+		t.Fatal("esc must close the chat")
+	}
+}
+
 func TestLiveSummaryNavigatesSectionsAndExportsJSON(t *testing.T) {
 	m := newLiveModel("exp_test_run", "portfolio", make(chan events.RunEvent, 1), func() {}, 0, 0)
 	for _, ev := range []events.RunEvent{
@@ -832,4 +905,38 @@ func cursorForAgentAction(m agentModel, action agentMenuAction) int {
 		}
 	}
 	panic("agent action not found: " + string(action))
+}
+
+func TestPipelinePhasesIncludesCoverage(t *testing.T) {
+	if !hasString(pipelinePhases, "coverage") {
+		t.Fatalf("pipelinePhases must include 'coverage': got %v", pipelinePhases)
+	}
+}
+
+func TestCoveragePhaseDescription(t *testing.T) {
+	got := phaseDescription("coverage")
+	if got == "coverage" {
+		t.Fatalf("phaseDescription(coverage) must return a human label, not the raw string %q", got)
+	}
+}
+
+func TestCoveragePhaseIndexIsValid(t *testing.T) {
+	m := newLiveModel("r", "app", make(chan events.RunEvent, 1), func() {}, 0, 0)
+	m, _ = m.Update(runEventMsg(events.RunEvent{Type: "step.changed", Body: events.StepChanged{Step: "coverage"}}))
+	idx := m.phaseIndex()
+	if idx < 0 {
+		t.Fatalf("phaseIndex() for 'coverage' = %d, want >= 0; pipelinePhases = %v", idx, pipelinePhases)
+	}
+	if got := m.phaseFraction(); got <= 0 {
+		t.Fatalf("phaseFraction() for 'coverage' = %v, must be > 0", got)
+	}
+}
+
+func hasString(slice []string, s string) bool {
+	for _, v := range slice {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }

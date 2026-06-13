@@ -5,6 +5,7 @@ import {
   RunEventSchema,
   RunEventBodySchema,
   RunModeSchema,
+  RunStepSchema,
   RunVerdictSchema,
   TestTargetSchema,
 } from "./events";
@@ -55,4 +56,15 @@ test("enums stay in lockstep with src/types.ts (drift guard during migration)", 
   assert.deepEqual([...RunModeSchema.options], [...RUN_MODES]);
   assert.deepEqual([...RunVerdictSchema.options], ["pass", "fail", "flaky", "invalid", "infra-error", "skipped"]);
   assert.deepEqual([...TestTargetSchema.options], ["e2e", "code"]);
+});
+
+test("RunStepSchema accepts 'coverage' — needed by the coverage phase stepper", () => {
+  // The pipeline emits onStep?.("coverage") but the step was missing from the
+  // schema allowlist, so step.changed events for coverage were silently dropped.
+  assert.doesNotThrow(() => RunStepSchema.parse("coverage"));
+  // Also verify all known steps from the pipeline are accepted.
+  const steps = ["gate", "classify", "setup", "generate", "validate", "health", "execute", "retry", "coverage", "decide", "done"];
+  for (const s of steps) {
+    assert.doesNotThrow(() => RunStepSchema.parse(s), `RunStepSchema must accept "${s}"`);
+  }
 });

@@ -24,7 +24,7 @@ const maxActivity = 6
 
 // Canonical pipeline phases for the PhaseProgress stepper (mirrors RunStepSchema;
 // the transient "retry" is folded into the current phase by simply not matching).
-var pipelinePhases = []string{"gate", "classify", "setup", "generate", "validate", "health", "execute", "decide"}
+var pipelinePhases = []string{"gate", "classify", "setup", "generate", "validate", "health", "execute", "coverage", "decide"}
 
 type activityItem struct {
 	callID string
@@ -262,6 +262,23 @@ func (m *liveModel) toggleSummary() {
 
 // updateChatKey routes keystrokes to the embedded assistant input while it is active.
 func (m liveModel) updateChatKey(msg tea.KeyMsg) (liveModel, tea.Cmd) {
+	// When the run is done (summary screen), section navigation keys must work
+	// even while chat is open — they were previously swallowed by the text input.
+	if m.done {
+		switch msg.String() {
+		case "up", "k":
+			m.moveSummary(-1)
+			m.refresh()
+			return m, nil
+		case "down", "j":
+			m.moveSummary(1)
+			m.refresh()
+			return m, nil
+		case "enter":
+			m.toggleSummary()
+			return m, nil
+		}
+	}
 	switch msg.String() {
 	case "esc":
 		m.chatActive = false
@@ -395,7 +412,11 @@ func (m *liveModel) fold(ev events.RunEvent) {
 		m.failed = b.Failed
 		m.done = true
 		if m.sumOpen == "" {
-			m.sumOpen = "results" // open the test results by default, like the Ink summary
+			if b.Verdict == "infra-error" {
+				m.sumOpen = "note" // surface the error immediately, don't make the user hunt for it
+			} else {
+				m.sumOpen = "results"
+			}
 		}
 	case events.LogLine:
 		if b.Text != "" {
@@ -601,6 +622,9 @@ func shortSha(s string) string {
 
 func (m liveModel) footer() string {
 	if m.chatActive {
+		if m.done {
+			return hintStyle.Render("↑↓ sections · ↵ expand · type to ask · esc close chat")
+		}
 		return hintStyle.Render("type to ask · ↵ send · esc close chat")
 	}
 	if m.done {
@@ -682,6 +706,8 @@ func phaseDescription(phase string) string {
 		return "DEV health pre-flight"
 	case "execute":
 		return "running tests against DEV"
+	case "coverage":
+		return "measuring change coverage"
 	case "decide":
 		return "deciding the verdict"
 	default:

@@ -1003,6 +1003,7 @@ export async function runPipeline(
   //    (pass/fail/flaky). code: the repo's own suite by exit code (pass/fail).
   let run: QaRunResult;
   if (isCode) {
+    onStep?.("execute");
     log("[qa] running the repo's own test suite (code mode)...");
     run = await deps.executeCode(mirrorDir, { namespace: ns, onCase, signal });
   } else if (!app.dev) {
@@ -1201,6 +1202,7 @@ export async function runPipeline(
         baseUrl: app.dev?.baseUrl,
         baselineCases: run.cases.filter((c) => c.status === "pass").map((c) => c.name),
         signal,
+        onProgress: (msg) => log(`[qa] ${msg}`),
       });
       valueScore = oracleResult.valueScore;
       if (valueScore !== null) {

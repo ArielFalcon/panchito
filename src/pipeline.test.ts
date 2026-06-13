@@ -615,6 +615,14 @@ test("code mode green: no gate/validate/health; setupCode → generate → execu
   assert.equal(d.published, true);
 });
 
+test("code mode emits onStep('execute') so the TUI stepper advances from generate", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls);
+  const onStepCalls: string[] = [];
+  await runPipeline(codeApp, "abc123", d, "manual", { mode: "diff", target: "code" }, (step) => { onStepCalls.push(step); });
+  assert.ok(onStepCalls.includes("execute"), "code mode must call onStep('execute') for the TUI stepper");
+});
+
 test("code mode failure: opens a 'code tests failed' Issue, does not publish", async () => {
   const calls: string[] = [];
   const d = deps(
