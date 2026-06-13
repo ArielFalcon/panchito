@@ -41,7 +41,6 @@ const E2E_PATHSPEC = ["e2e", ":(exclude)e2e/.qa/coverage", ":(exclude)e2e/.qa/co
 // conventions) — commit the whole tree, but never the installed dependencies.
 const CODE_PATHSPEC = [
   ".",
-  ":(exclude)node_modules/",
   ":(exclude)e2e/.qa/coverage/",
   ":(exclude).env",
   ":(exclude).env.*",
