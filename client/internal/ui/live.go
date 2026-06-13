@@ -267,19 +267,20 @@ func (m liveModel) updateChatKey(msg tea.KeyMsg) (liveModel, tea.Cmd) {
 	}
 }
 
-// renderChat is the inline assistant panel: a divider, the last few exchanges, and
-// the input (when active). Shown on the live view AND the summary.
+// renderChat is the inline assistant panel — ALWAYS shown (a left-bordered card):
+// the last exchange only (so it never stacks into scroll), then the input when
+// active. Markdown answers are Glamour-rendered.
 func (m liveModel) renderChat() string {
-	if !m.chatActive && len(m.chatEntries) == 0 {
-		return ""
-	}
 	var b strings.Builder
-	b.WriteString(hintStyle.Render(strings.Repeat("─", 44)) + "\n")
-	b.WriteString(infoStyle.Render("assistant") + "\n")
-	for _, e := range m.chatEntries[chatStart(len(m.chatEntries)):] {
+	head := infoStyle.Render("assistant")
+	if !m.chatActive {
+		head += hintStyle.Render("   press a to ask about this run")
+	}
+	b.WriteString(head + "\n")
+	for _, e := range lastExchange(m.chatEntries) {
 		switch e.role {
 		case "q":
-			b.WriteString(okStyle.Render("▶ "+e.text) + "\n")
+			b.WriteString(lipgloss.NewStyle().Foreground(colAccent).Render("▶ "+truncate(e.text, 80)) + "\n")
 		case "err":
 			b.WriteString(errorStyle.Render("✗ "+e.text) + "\n")
 		default:
@@ -291,17 +292,22 @@ func (m liveModel) renderChat() string {
 	}
 	if m.chatActive {
 		b.WriteString(m.chatInput.View())
-	} else {
-		b.WriteString(hintStyle.Render("a · ask the assistant about this run"))
 	}
-	return strings.TrimRight(b.String(), "\n")
+	content := strings.TrimRight(b.String(), "\n")
+	return lipgloss.NewStyle().
+		Border(lipgloss.NormalBorder(), false, false, false, true).
+		BorderForeground(colAccent).
+		PaddingLeft(1).
+		Render(content)
 }
 
-func chatStart(n int) int {
-	if n > 4 {
-		return n - 4
+// lastExchange returns at most the last question+answer pair, so the chat never
+// piles up and forces scroll.
+func lastExchange(entries []chatEntry) []chatEntry {
+	if len(entries) > 2 {
+		return entries[len(entries)-2:]
 	}
-	return 0
+	return entries
 }
 
 func (m liveModel) failedTests() []string {
@@ -528,8 +534,8 @@ func (m liveModel) footer() string {
 		return hintStyle.Render(actions + " · esc back")
 	}
 	footer := "a ask · esc back · ctrl+c quit"
-	if m.ready {
-		footer = "↑↓ scroll · " + footer
+	if m.ready && m.vp.TotalLineCount() > m.vp.Height {
+		footer = "↑↓ scroll · " + footer // only advertise scroll when there is overflow
 	}
 	return hintStyle.Render(footer)
 }
@@ -541,15 +547,13 @@ func (m liveModel) body() string {
 	} else {
 		base = m.liveBody()
 	}
-	if chat := m.renderChat(); chat != "" {
-		base += "\n\n" + chat
-	}
-	return base
+	return base + "\n\n" + m.renderChat() // the assistant panel is always present
 }
 
 func (m liveModel) liveBody() string {
 	view := m.deriveActivity()
 	sections := []string{
+		m.renderPhaseStatus(),
 		m.renderFocusCard(view),
 		m.renderFeed(view),
 		m.renderSubagents(),
@@ -560,6 +564,44 @@ func (m liveModel) liveBody() string {
 		m.renderErrs(),
 	}
 	return joinSections(sections)
+}
+
+// renderPhaseStatus is the always-present, animated "what is happening now" line.
+// It guarantees there is live content (and a moving spinner → continuous repaints)
+// below the header even during quiet phases like gate/classify/setup, before the
+// agent emits any activity.
+func (m liveModel) renderPhaseStatus() string {
+	if m.done || m.phase == "" {
+		return ""
+	}
+	line := m.spin.View() + " " + infoStyle.Render(phaseDescription(m.phase))
+	if !m.phaseStart.IsZero() {
+		line += "  " + labelStyle.Render(formatElapsed(time.Since(m.phaseStart)))
+	}
+	return line
+}
+
+func phaseDescription(phase string) string {
+	switch phase {
+	case "gate":
+		return "waiting for DEV to serve this commit"
+	case "classify":
+		return "classifying the commit"
+	case "setup":
+		return "installing the e2e project"
+	case "generate":
+		return "the agent is generating tests"
+	case "validate":
+		return "validating specs (tsc · eslint · playwright --list)"
+	case "health":
+		return "DEV health pre-flight"
+	case "execute":
+		return "running tests against DEV"
+	case "decide":
+		return "deciding the verdict"
+	default:
+		return phase
+	}
 }
 
 type sumSection struct{ id, label string }
