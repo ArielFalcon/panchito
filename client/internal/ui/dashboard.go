@@ -23,7 +23,8 @@ const fleetWindow = 10
 type dashFocus int
 
 const (
-	focusFleet  dashFocus = iota // pick a project · ← → mode · t target · ↵ launch
+	focusNow    dashFocus = iota // the active run · ↵ watch · x stop (only when one is running)
+	focusFleet                   // pick a project · ← → mode · t target · ↵ launch
 	focusModels                  // pick a role · ↵ open the model switcher
 	dashFocusCount
 )
@@ -55,6 +56,7 @@ type dashboardModel struct {
 	launchMode   string // one of launchModes
 	launchTarget string // "" → the app's natural target; t toggles to an explicit e2e/code
 	launchArmed  bool   // a heavy mode needs a second Enter to confirm (whole-suite/repo runs)
+	stopArmed    bool   // 'x' on the active run pressed once; a second 'x' confirms the stop
 	modelCursor  int    // MODELS: selected role row
 
 	// Command palette (':'): a fuzzy launcher over the board, scoped to the dashboard
@@ -69,7 +71,7 @@ func newDashboardModel(client *api.Client) dashboardModel {
 	ti.Placeholder = "run · watch · onboard · agents · history…"
 	ti.Prompt = "" // the palette draws its own ember caret
 	ti.CharLimit = 80
-	return dashboardModel{client: client, fleet: map[string][]contract.RunRecord{}, loading: true, paletteInput: ti, launchMode: "diff"}
+	return dashboardModel{client: client, fleet: map[string][]contract.RunRecord{}, loading: true, paletteInput: ti, launchMode: "diff", focus: focusFleet}
 }
 
 func (m dashboardModel) Init() tea.Cmd {
@@ -140,9 +142,16 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 }
 
 func (m dashboardModel) handleKey(k tea.KeyMsg) (dashboardModel, tea.Cmd) {
-	// Any key other than a second Enter cancels a pending heavy-launch confirmation.
+	// A run that ended invalidates a NOW focus; fall back to FLEET so keys act on something.
+	if m.focus == focusNow && !m.hasNow() {
+		m.focus = focusFleet
+	}
+	// A key other than a second Enter / second x cancels a pending confirmation.
 	if k.String() != "enter" {
 		m.launchArmed = false
+	}
+	if k.String() != "x" {
+		m.stopArmed = false
 	}
 	// Global keys work regardless of which panel is focused.
 	switch k.String() {
@@ -153,10 +162,16 @@ func (m dashboardModel) handleKey(k tea.KeyMsg) (dashboardModel, tea.Cmd) {
 		m.paletteInput.Focus()
 		return m, textinput.Blink
 	case "tab":
-		m.focus = (m.focus + 1) % dashFocusCount
+		m.cycleFocus(+1)
 		return m, nil
 	case "shift+tab":
-		m.focus = (m.focus + dashFocusCount - 1) % dashFocusCount
+		m.cycleFocus(-1)
+		return m, nil
+	case "up", "k":
+		m.navUp()
+		return m, nil
+	case "down", "j":
+		m.navDown()
 		return m, nil
 	case "r":
 		if !m.loading {
@@ -168,32 +183,118 @@ func (m dashboardModel) handleKey(k tea.KeyMsg) (dashboardModel, tea.Cmd) {
 		return m, func() tea.Msg { return onboardSelectedMsg{} }
 	case "a":
 		return m, func() tea.Msg { return agentSelectedMsg{} }
-	case "s":
-		return m, func() tea.Msg { return sessionsSelectedMsg{} }
 	case "?":
 		return m, func() tea.Msg { return helpSelectedMsg{} }
 	}
 	// Panel-scoped keys.
-	if m.focus == focusModels {
+	switch m.focus {
+	case focusNow:
+		return m.handleNowKey(k)
+	case focusModels:
 		return m.handleModelsKey(k)
 	}
 	return m.handleFleetKey(k)
+}
+
+// hasNow reports whether the NOW panel is an actionable focus — i.e. a run is in flight.
+func (m dashboardModel) hasNow() bool { return m.sys.queue.Running != nil }
+
+// onboardRow is the cursor index of the "+ onboard" row, which sits just past the last
+// project so it is reachable with ↓ (not only the global 'o').
+func (m dashboardModel) onboardRow() int { return len(m.sys.apps) }
+
+// navDown / navUp move the selection down / up, crossing panel boundaries at the edges so ↑↓
+// flow through NOW → projects → onboard → model roles as one continuous list (no Tab needed).
+func (m *dashboardModel) navDown() {
+	switch m.focus {
+	case focusNow:
+		m.focus = focusFleet
+		m.cursor = 0
+	case focusFleet:
+		if m.cursor < m.onboardRow() {
+			m.cursor++
+		} else {
+			m.focus = focusModels
+			m.modelCursor = 0
+		}
+	case focusModels:
+		if m.modelCursor < len(m.modelRoleList())-1 {
+			m.modelCursor++
+		}
+	}
+}
+
+func (m *dashboardModel) navUp() {
+	switch m.focus {
+	case focusNow:
+		// already at the top of the board
+	case focusFleet:
+		if m.cursor > 0 {
+			m.cursor--
+		} else if m.hasNow() {
+			m.focus = focusNow
+		}
+	case focusModels:
+		if m.modelCursor > 0 {
+			m.modelCursor--
+		} else {
+			m.focus = focusFleet
+			m.cursor = m.onboardRow() // re-enter FLEET at its bottom (the onboard row)
+		}
+	}
+}
+
+// focusOrder is the Tab cycle of actionable panels — NOW only while a run is active.
+func (m dashboardModel) focusOrder() []dashFocus {
+	if m.hasNow() {
+		return []dashFocus{focusNow, focusFleet, focusModels}
+	}
+	return []dashFocus{focusFleet, focusModels}
+}
+
+// cycleFocus advances Tab focus through focusOrder, clamping a stale FLEET cursor back in range.
+func (m *dashboardModel) cycleFocus(dir int) {
+	order := m.focusOrder()
+	idx := 0
+	for i, f := range order {
+		if f == m.focus {
+			idx = i
+			break
+		}
+	}
+	m.focus = order[(idx+dir+len(order))%len(order)]
+	if m.focus == focusFleet && m.cursor > m.onboardRow() {
+		m.cursor = m.onboardRow()
+	}
+}
+
+// handleNowKey drives the focused NOW panel: resume (re-attach) the active run, or stop it
+// with a two-press confirm. NOW is focusable only while a run is in flight.
+func (m dashboardModel) handleNowKey(k tea.KeyMsg) (dashboardModel, tea.Cmd) {
+	r := m.sys.queue.Running
+	if r == nil {
+		return m, nil
+	}
+	switch k.String() {
+	case "enter":
+		id, app := r.Id, r.App
+		return m, func() tea.Msg { return watchRunMsg{id: id, app: app} }
+	case "x":
+		if m.stopArmed {
+			m.stopArmed = false
+			return m, cancelRunCmd(m.client, r.Id)
+		}
+		m.stopArmed = true
+		return m, nil
+	}
+	return m, nil
 }
 
 // handleFleetKey drives the FLEET panel: pick a project (↑↓), edit its quick-launch
 // config in place (← → mode · t target), and launch or watch it (↵). The per-app actions
 // (history/intelligence/edit/delete) act on the selected project.
 func (m dashboardModel) handleFleetKey(k tea.KeyMsg) (dashboardModel, tea.Cmd) {
-	apps := m.sys.apps
 	switch k.String() {
-	case "up", "k":
-		if m.cursor > 0 {
-			m.cursor--
-		}
-	case "down", "j":
-		if m.cursor < len(apps)-1 {
-			m.cursor++
-		}
 	case "left":
 		m.launchMode = cycleMode(m.launchMode, -1)
 	case "right":
@@ -206,7 +307,23 @@ func (m dashboardModel) handleFleetKey(k tea.KeyMsg) (dashboardModel, tea.Cmd) {
 				m.launchTarget = "e2e"
 			}
 		}
+	case "x":
+		// Stop the active run when its project is the selection (the running row surfaces
+		// "x stop"); two-press confirm, shared with the NOW panel.
+		if r := m.sys.queue.Running; r != nil {
+			if a, ok := m.selectedApp(); ok && a.Name == r.App {
+				if m.stopArmed {
+					m.stopArmed = false
+					return m, cancelRunCmd(m.client, r.Id)
+				}
+				m.stopArmed = true
+				return m, nil
+			}
+		}
 	case "enter":
+		if m.cursor == m.onboardRow() {
+			return m, func() tea.Msg { return onboardSelectedMsg{} }
+		}
 		return m.launchSelected()
 	case "h":
 		if a, ok := m.selectedApp(); ok {
@@ -231,16 +348,7 @@ func (m dashboardModel) handleFleetKey(k tea.KeyMsg) (dashboardModel, tea.Cmd) {
 // handleModelsKey drives the MODELS panel: pick a role (↑↓), then ↵ opens the full agent
 // switcher (provider, model, dual mode, restart) — the existing screen, not a duplicate.
 func (m dashboardModel) handleModelsKey(k tea.KeyMsg) (dashboardModel, tea.Cmd) {
-	switch k.String() {
-	case "up", "k":
-		if m.modelCursor > 0 {
-			m.modelCursor--
-		}
-	case "down", "j":
-		if m.modelCursor < len(m.modelRoleList())-1 {
-			m.modelCursor++
-		}
-	case "enter":
+	if k.String() == "enter" {
 		return m, func() tea.Msg { return agentSelectedMsg{} }
 	}
 	return m, nil
@@ -363,7 +471,6 @@ func (m dashboardModel) paletteActions() []paletteAction {
 	return append(as,
 		paletteAction{"onboard project", func() tea.Msg { return onboardSelectedMsg{} }},
 		paletteAction{"agents — runtime & models", func() tea.Msg { return agentSelectedMsg{} }},
-		paletteAction{"sessions — active runs", func() tea.Msg { return sessionsSelectedMsg{} }},
 		paletteAction{"help", func() tea.Msg { return helpSelectedMsg{} }},
 	)
 }
@@ -493,6 +600,21 @@ func pipelineFraction(step string) float64 {
 		return 0
 	}
 	return float64(idx) / float64(len(pipelinePhases)-1)
+}
+
+// runningPhase reports whether app is the active run and, if its polled record has landed,
+// its live phase and pipeline fraction — so a FLEET row can show progress instead of a
+// stale pass-rate. ok is true the moment the queue says the app is running, even before the
+// step record arrives (phase=="" → the row shows a bare "● running").
+func (m dashboardModel) runningPhase(app string) (phase string, frac float64, ok bool) {
+	r := m.sys.queue.Running
+	if r == nil || r.App != app {
+		return "", 0, false
+	}
+	if rec := m.sys.running; rec != nil && rec.App == app && rec.Step != nil {
+		return *rec.Step, pipelineFraction(*rec.Step), true
+	}
+	return "", 0, true
 }
 
 // ── View ───────────────────────────────────────────────────────────────────
@@ -658,22 +780,39 @@ func (m dashboardModel) renderFleet(w int) string {
 		if a.Code {
 			target, tcol = "code", colFlaky
 		}
-		rate := "  —"
-		if st.total > 0 {
-			rate = fmt.Sprintf("%3.0f%%", st.passRate*100)
-		}
-
 		selected := i == m.cursor
 		bar, name := "   ", labelStyle.Render(padRight(a.Name, 14))
 		if selected {
 			bar = renderSegs("", sg("▌▸ ", colEmber))
 			name = renderSegs("", sgb(padRight(a.Name, 14), colFg))
 		}
+		// A running project shows its LIVE pipeline progress (the same metric NOW shows, so
+		// the two never disagree); an idle one shows its run history — last verdicts, the
+		// pass-rate (labelled "pass", so it never reads as progress) and the quality trend.
+		var status string
+		if phase, frac, running := m.runningPhase(a.Name); running {
+			label := "running"
+			if phase != "" {
+				label = phase
+			}
+			status = renderSegs("", sg("● ", colInfra), sg(label, colInfra))
+			// Append the progress % only once the pipeline has actually advanced; the first
+			// phase ("gate", frac 0) shows a bare "● gate" rather than a bare 0%.
+			if phase != "" && frac > 0 {
+				status += lipgloss.NewStyle().Foreground(colInfra).Render(fmt.Sprintf("  %d%%", int(frac*100+0.5)))
+			}
+		} else {
+			rate := "  —"
+			if st.total > 0 {
+				rate = fmt.Sprintf("%3.0f%% pass", st.passRate*100)
+			}
+			status = padGlyphs(lastVerdictGlyphs(st.last, 5), 5) + "  " +
+				passRateStyle(st.passRate, st.total).Render(rate) + "  " +
+				lipgloss.NewStyle().Foreground(colDim).Render(st.spark)
+		}
 		row := bar + name + " " +
 			renderSegs("", sg(padRight(target, 5), tcol)) + " " +
-			padGlyphs(lastVerdictGlyphs(st.last, 5), 5) + "  " +
-			passRateStyle(st.passRate, st.total).Render(rate) + "  " +
-			lipgloss.NewStyle().Foreground(colDim).Render(st.spark)
+			status
 		if a.Shadow {
 			row += "  " + shadowStyle.Render("shadow")
 		}

@@ -24,7 +24,6 @@ const (
 	screenAgent
 	screenAppAdmin
 	screenHelp
-	screenSessions
 	screenIntelligence
 )
 
@@ -42,7 +41,6 @@ type Model struct {
 	agent         agentModel
 	appAdmin      appAdminModel
 	help          helpModel
-	sessions      sessionsModel
 	intelligence  intelligenceModel
 
 	// sys is the ambient control-plane snapshot the shell polls in the background;
@@ -129,6 +127,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.live = newLiveModel(msg.id, m.launcher.app, ch, cancel, m.width, m.bodyHeight())
 		m.live.client = m.client // enables the embedded assistant
 		m.screen = screenLive
+		// A brand-new run starts empty and the stream delivers it from seq 0, so no snapshot
+		// backfill is needed here — only the re-attach path (watchRunMsg) seeds from a record.
 		return m, tea.Batch(startStreamCmd(ctx, m.client, msg.id, ch), waitForEventCmd(ch), m.live.spin.Tick)
 	case continueMsg:
 		return m, continueCmd(m.client, m.live.runID, msg.cases)
@@ -152,11 +152,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.screen = screenHelp
 		return m, m.help.Init()
-	case sessionsSelectedMsg:
-		m.sessions = newSessionsModel(m.client)
-		m.sessions.width = m.width
-		m.screen = screenSessions
-		return m, m.sessions.Init()
 	case intelligenceSelectedMsg:
 		m.intelligence = newIntelligenceModel(m.client, msg.app)
 		if m.width > 0 && m.height > 0 {
@@ -193,7 +188,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.live = newLiveModel(msg.id, msg.app, ch, cancel, m.width, m.bodyHeight())
 		m.live.client = m.client // enables the embedded assistant
 		m.screen = screenLive
-		return m, tea.Batch(startStreamCmd(ctx, m.client, msg.id, ch), waitForEventCmd(ch), m.live.spin.Tick)
+		return m, tea.Batch(fetchRunSnapshotCmd(m.client, msg.id), startStreamCmd(ctx, m.client, msg.id, ch), waitForEventCmd(ch), m.live.spin.Tick)
 	}
 
 	var cmd tea.Cmd
@@ -214,8 +209,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appAdmin, cmd = m.appAdmin.Update(msg)
 	case screenHelp:
 		m.help, cmd = m.help.Update(msg)
-	case screenSessions:
-		m.sessions, cmd = m.sessions.Update(msg)
 	case screenIntelligence:
 		m.intelligence, cmd = m.intelligence.Update(msg)
 	}
@@ -267,8 +260,6 @@ func (m Model) screenView() string {
 		return m.appAdmin.View()
 	case screenHelp:
 		return m.help.View()
-	case screenSessions:
-		return m.sessions.View()
 	case screenIntelligence:
 		return m.intelligence.View()
 	default:

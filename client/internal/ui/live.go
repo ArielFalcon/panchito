@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ArielFalcon/panchito/internal/api"
+	"github.com/ArielFalcon/panchito/internal/contract"
 	"github.com/ArielFalcon/panchito/internal/events"
 	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -131,6 +132,12 @@ func (m liveModel) Update(msg tea.Msg) (liveModel, tea.Cmd) {
 		m.fold(events.RunEvent(msg))
 		m.refresh()
 		return m, waitForEventCmd(m.ch) // read the next event
+	case runSnapshotMsg:
+		// Paint the run's current state on attach so a re-attach never shows an empty rail /
+		// 0%; the SSE replay+tail then reconciles. No re-arm: this is a one-shot seed.
+		m.seedFromRecord(msg.rec)
+		m.refresh()
+		return m, nil
 	case streamClosedMsg:
 		m.closed = true
 		if msg.err != nil && !errors.Is(msg.err, context.Canceled) && !m.done {
@@ -591,6 +598,121 @@ func appendUnique(xs []string, s string) []string {
 		}
 	}
 	return append(xs, s)
+}
+
+// seedFromRecord folds a run-record snapshot into the live state on attach, filling only
+// what the (fresher) event stream has not already established — so a re-attach paints the
+// current phase, identity, work-so-far and, if the run finished while detached, the verdict,
+// without ever regressing live state. The stream's upsert helpers reconcile any overlap.
+func (m *liveModel) seedFromRecord(rec contract.RunRecord) {
+	if m.sha == "" {
+		m.sha = rec.Sha
+	}
+	if m.target == "" {
+		m.target = string(rec.Target)
+	}
+	if m.mode == "" {
+		m.mode = string(rec.Mode)
+	}
+	if rec.Retrying != nil && *rec.Retrying {
+		m.retrying = true
+	}
+	// Phase drives the rail, the header progress bar and the animated status line; seed it
+	// only if the stream has not already moved the run forward (the snapshot may be staler).
+	if m.phase == "" && rec.Step != nil && *rec.Step != "" {
+		m.phase = *rec.Step
+		if rec.StepStartedAt != nil {
+			if t, err := time.Parse(time.RFC3339, *rec.StepStartedAt); err == nil {
+				m.phaseStart = t
+			}
+		}
+	}
+	if m.phaseStart.IsZero() {
+		m.phaseStart = time.Now()
+	}
+	// Anchor the elapsed clock to the run's age so the header shows real time-on-task right
+	// away (corrected by the first stream event's authoritative server ts).
+	if m.runStartTs == 0 {
+		if t, err := time.Parse(time.RFC3339, rec.At); err == nil {
+			m.runStartTs = t.UnixMilli()
+			if m.lastTs == 0 {
+				m.lastTs = time.Now().UnixMilli()
+				m.lastTsWall = time.Now()
+			}
+		}
+	}
+	// Sticky focus-card rows: the most recent file written / command run. Seed them only
+	// when the stream has not already established a focus card, so a snapshot that lands
+	// after live events never clobbers a fresher file/command with a staler one.
+	if rec.Activity != nil && m.lastFile == "" && m.lastCmd == "" {
+		for _, a := range *rec.Activity {
+			switch a.Kind {
+			case contract.File:
+				if a.Text != "" {
+					m.lastFile = a.Text
+					m.wroteAll = appendUnique(m.wroteAll, a.Text)
+				}
+			case contract.Command:
+				if a.Text != "" {
+					m.lastCmd = a.Text
+					m.ranAll = appendUnique(m.ranAll, a.Text)
+				}
+			}
+		}
+	}
+	if len(m.specs) == 0 && rec.Specs != nil {
+		for _, s := range *rec.Specs {
+			m.specs = appendUnique(m.specs, s.Name)
+		}
+	}
+	if len(m.tests) == 0 {
+		for _, c := range rec.Cases {
+			dur := 0.0
+			if c.DurationMs != nil {
+				dur = float64(*c.DurationMs)
+			}
+			detail := ""
+			if c.Detail != nil {
+				detail = *c.Detail
+			}
+			m.tests = upsertTest(m.tests, c.Name, caseStatusToTest(c.Status), dur, detail, 0)
+		}
+	}
+	// If the run finished between detach and resume, land directly on the recap.
+	if rec.Verdict != nil {
+		m.verdict = string(*rec.Verdict)
+		m.done = true
+		if rec.Passed != nil {
+			m.passed = *rec.Passed
+		}
+		if rec.Failed != nil {
+			m.failed = *rec.Failed
+		}
+		// Land the cursor on the first failure (and pre-expand it), mirroring the live
+		// RunVerdict handler, so the recap opens on the problem rather than on test 0.
+		for i, t := range m.tests {
+			if t.status == "fail" {
+				m.sumFocus = i
+				m.sumOpen = t.name
+				break
+			}
+		}
+	}
+}
+
+// caseStatusToTest maps a persisted QaCase status onto the live test-item vocabulary. A case
+// with no terminal status yet is treated as discovered (queued).
+func caseStatusToTest(status contract.QaCaseStatus) string {
+	switch status {
+	case contract.QaCaseStatusPass:
+		return "pass"
+	case contract.QaCaseStatusFail:
+		return "fail"
+	case contract.QaCaseStatusFlaky:
+		return "flaky"
+	default:
+		return "discovered"
+	}
 }
 
 // ── Layout ────────────────────────────────────────────────────────────────────
@@ -1587,6 +1709,30 @@ func truncate(s string, n int) string {
 // ── Stream plumbing: a goroutine reads the SSE stream and pushes events onto a
 // channel; a read-next tea.Cmd hands each one to the main loop. The model is
 // mutated only in Update — the goroutine never touches it (review note #7).
+
+// runSnapshotMsg carries the authoritative run-record fetched once on attach. The live view
+// rebuilds its state from the SSE stream starting empty, so on a re-attach mid-run there is a
+// window (a quiet phase, a slow replay) where the rail is blank and the bar reads 0%. Seeding
+// from this snapshot closes that window — the view is correct from the first frame.
+type runSnapshotMsg struct{ rec contract.RunRecord }
+
+// fetchRunSnapshotCmd loads the run record so the live view can seed its state on mount.
+// Best-effort: the SSE stream is the primary, fresher source, so a failed or absent snapshot
+// is silently ignored (it must never surface as an errMsg — that path is the chat assistant).
+func fetchRunSnapshotCmd(c *api.Client, id string) tea.Cmd {
+	return func() tea.Msg {
+		if c == nil {
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		rec, err := c.GetRun(ctx, id)
+		if err != nil {
+			return nil
+		}
+		return runSnapshotMsg{rec: rec}
+	}
+}
 
 func startStreamCmd(ctx context.Context, c *api.Client, id string, ch chan events.RunEvent) tea.Cmd {
 	return func() tea.Msg {
