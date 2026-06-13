@@ -36,6 +36,7 @@ let getActivityStmt!: Database.Statement;
 let capActivityStmt!: Database.Statement;
 let insertOutcome!: Database.Statement;
 let listOutcomesStmt!: Database.Statement;
+let getOutcomeStmt!: Database.Statement;
 let upsertRuleStmt!: Database.Statement;
 let listRulesStmt!: Database.Statement;
 let listAllRulesStmt!: Database.Statement;
@@ -56,6 +57,10 @@ function ensureDb(): void {
   db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
+  // Wait up to 5s for a held lock instead of throwing SQLITE_BUSY immediately. WAL allows
+  // concurrent readers, but the 24h online backup and any external reader (CLI, inspection)
+  // can still briefly contend with a writer; without this a contended write throws.
+  db.pragma("busy_timeout = 5000");
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS runs (
@@ -128,6 +133,18 @@ function ensureDb(): void {
     CREATE INDEX IF NOT EXISTS idx_outcomes_app ON run_outcomes(app);
     CREATE INDEX IF NOT EXISTS idx_outcomes_error_class ON run_outcomes(error_class);
 
+    -- Durable backing for the live RunEvent (SSE) stream (OBS-01). The in-memory store keeps a
+    -- bounded replay buffer; persisting here lets replay survive a restart (e.g. the maintainer
+    -- hot-swap's process.exit) and eviction of an old run from the 200-run ring.
+    CREATE TABLE IF NOT EXISTS run_events (
+      run_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      ts INTEGER NOT NULL,
+      body TEXT NOT NULL,
+      PRIMARY KEY (run_id, seq)
+    );
+    CREATE INDEX IF NOT EXISTS idx_run_events_run_id ON run_events(run_id);
+
     CREATE TABLE IF NOT EXISTS learning_rules (
       id TEXT PRIMARY KEY,
       app TEXT NOT NULL,
@@ -141,6 +158,7 @@ function ensureDb(): void {
       last_verified TEXT,
       source TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'candidate',
+      archetype TEXT,
       at TEXT NOT NULL
     );
 
@@ -167,6 +185,9 @@ function ensureDb(): void {
   }
   if (!columnExists("learning_rules", "outcome_count")) {
     db.exec("ALTER TABLE learning_rules ADD COLUMN outcome_count INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!columnExists("learning_rules", "archetype")) {
+    db.exec("ALTER TABLE learning_rules ADD COLUMN archetype TEXT");
   }
   if (!columnExists("runs", "trigger_repo")) {
     db.exec("ALTER TABLE runs ADD COLUMN trigger_repo TEXT");
@@ -198,11 +219,12 @@ function ensureDb(): void {
     VALUES (@id, @app, @sha, @mode, @target, @verdict, @errorClass, @gateSignals, @rulesRetrieved, @reflection, @at)
   `);
   listOutcomesStmt = db.prepare("SELECT * FROM run_outcomes WHERE app = ? ORDER BY at DESC, rowid DESC LIMIT ?");
+  getOutcomeStmt = db.prepare("SELECT * FROM run_outcomes WHERE id = ?");
 
   // learning_rules (Phase 2 — placeholder for Graphiti)
   upsertRuleStmt = db.prepare(`
-    INSERT INTO learning_rules (id, app, trigger_text, action_text, error_class, confidence, usage_count, outcome_count, success_rate, last_verified, source, status, at)
-    VALUES (@id, @app, @trigger, @action, @errorClass, @confidence, @usageCount, @outcomeCount, @successRate, @lastVerified, @source, @status, @at)
+    INSERT INTO learning_rules (id, app, trigger_text, action_text, error_class, archetype, confidence, usage_count, outcome_count, success_rate, last_verified, source, status, at)
+    VALUES (@id, @app, @trigger, @action, @errorClass, @archetype, @confidence, @usageCount, @outcomeCount, @successRate, @lastVerified, @source, @status, @at)
     ON CONFLICT(id) DO UPDATE SET
       confidence = excluded.confidence,
       usage_count = excluded.usage_count,
@@ -210,6 +232,9 @@ function ensureDb(): void {
       success_rate = excluded.success_rate,
       last_verified = excluded.last_verified,
       status = excluded.status
+      -- archetype, trigger, action, error_class are intentionally NOT updated: they are set-once at
+      -- insert (a rule's identity/shape never changes). Distilled IDs are random so this branch only
+      -- fires on an explicit stable-ID re-upsert (tests), where preserving the original is correct.
   `);
   listRulesStmt = db.prepare("SELECT * FROM learning_rules WHERE app = ? AND status IN ('active', 'candidate') ORDER BY (status = 'active') DESC, COALESCE(success_rate, 0) DESC, at DESC LIMIT ?");
   listAllRulesStmt = db.prepare("SELECT * FROM learning_rules WHERE app = ? ORDER BY at DESC LIMIT ?");
@@ -221,6 +246,8 @@ function ensureDb(): void {
 
   // Prune old runs once on first use.
   db.prepare(`DELETE FROM runs WHERE at < datetime('now', '-${DELETE_MAX_AGE_DAYS} days')`).run();
+  // Bound the durable event log: drop events older than the run retention window (ts is epoch ms).
+  db.prepare("DELETE FROM run_events WHERE ts < ?").run(Date.now() - DELETE_MAX_AGE_DAYS * 24 * 60 * 60 * 1000);
 
   initialized = true;
 }
@@ -466,10 +493,8 @@ export function saveRunOutcome(outcome: RunOutcome): void {
   });
 }
 
-export function listRunOutcomes(app: string, limit = 50): RunOutcome[] {
-  ensureDb();
-  const rows = listOutcomesStmt.all(app, limit) as Array<Record<string, unknown>>;
-  return rows.map((row) => ({
+function rowToOutcome(row: Record<string, unknown>): RunOutcome {
+  return {
     runId: row.id as string,
     app: row.app as string,
     sha: row.sha as string,
@@ -481,7 +506,22 @@ export function listRunOutcomes(app: string, limit = 50): RunOutcome[] {
     rulesRetrieved: safeJsonParse(row.rules_retrieved as string, []),
     reflection: row.reflection ? safeJsonParse(row.reflection as string, undefined) : undefined,
     at: row.at as string,
-  }));
+  };
+}
+
+export function listRunOutcomes(app: string, limit = 50): RunOutcome[] {
+  ensureDb();
+  const rows = listOutcomesStmt.all(app, limit) as Array<Record<string, unknown>>;
+  return rows.map(rowToOutcome);
+}
+
+// The persisted RunOutcome for a single run — the structured value signals (change-coverage,
+// oracle score, reviewer rationale, errorClass) the CLI prints in its end-of-run value report.
+// Returns undefined for a run that produced no outcome row (no runId, or saveOutcome disabled).
+export function getRunOutcome(runId: string): RunOutcome | undefined {
+  ensureDb();
+  const row = getOutcomeStmt.get(runId) as Record<string, unknown> | undefined;
+  return row ? rowToOutcome(row) : undefined;
 }
 
 function safeJsonParse<T>(raw: string, fallback: T): T {
@@ -500,6 +540,7 @@ export function upsertLearningRule(rule: RuleUpsert & { app: string; id: string 
     trigger: rule.trigger,
     action: rule.action,
     errorClass: rule.errorClass,
+    archetype: rule.archetype ?? null,
     confidence: "low" as Confidence,
     usageCount: 0,
     outcomeCount: 0,
@@ -517,6 +558,7 @@ function rowToRule(row: Record<string, unknown>): LearningRule {
     trigger: row.trigger_text as string,
     action: row.action_text as string,
     errorClass: row.error_class as ErrorClass,
+    archetype: (row.archetype as string | null) ?? null,
     confidence: row.confidence as Confidence,
     usageCount: row.usage_count as number,
     outcomeCount: (row.outcome_count as number) ?? 0,
@@ -563,6 +605,63 @@ export function recordRuleOutcome(ruleId: string, score: number): void {
   db.prepare(
     "UPDATE learning_rules SET success_rate = ?, outcome_count = ?, confidence = ?, status = ?, last_verified = ? WHERE id = ?",
   ).run(updated.successRate, updated.outcomeCount, updated.confidence, updated.status, new Date().toISOString(), ruleId);
+}
+
+// Human-initiated governance override: veto a rule (force it to 'deprecated') or restore a
+// previously-vetoed one ('active'). This is the highest-authority signal in the ledger — stronger
+// than the oracle — and the ONLY write to learning_rules that originates outside the deterministic
+// distiller. It is reached by an operator via the ledger CLI, never by the agent (the read-only
+// boundary holds). A veto STICKS: 'deprecated' rules are excluded from retrieval, so a vetoed rule
+// is never injected, never accrues outcomes, and therefore never auto-resurrects through the
+// outcome loop. Returns false when the rule id is unknown (no silent success).
+export function setRuleStatusByHuman(ruleId: string, status: "deprecated" | "active"): boolean {
+  ensureDb();
+  const info = db
+    .prepare("UPDATE learning_rules SET status = ?, last_verified = ? WHERE id = ?")
+    .run(status, new Date().toISOString(), ruleId);
+  return info.changes > 0;
+}
+
+// Back-fill the structured reflection onto an already-saved run outcome. The outcome row is
+// written at verdict time, BEFORE the async best-effort reflection exists; without this the
+// `reflection` column is permanently null and the (expensive, LLM-produced) reflection is
+// computed once to distill a rule and then discarded — unqueryable forever.
+export function updateRunOutcomeReflection(runId: string, reflection: import("../types").StructuredReflection): void {
+  ensureDb();
+  db.prepare("UPDATE run_outcomes SET reflection = ? WHERE id = ?").run(JSON.stringify(reflection), runId);
+}
+
+// Completed-run counts grouped by verdict — the backing data for the Prometheus runs_total
+// counter (OBS-05). Lets an operator alert on a fail/invalid/infra-error rate shift, which the
+// two instantaneous gauges (queue depth, open sessions) cannot express.
+export function runVerdictCounts(): Record<string, number> {
+  ensureDb();
+  const rows = db
+    .prepare("SELECT verdict, COUNT(*) AS cnt FROM runs WHERE status = 'done' AND verdict IS NOT NULL GROUP BY verdict")
+    .all() as Array<{ verdict: string; cnt: number }>;
+  const out: Record<string, number> = {};
+  for (const r of rows) out[r.verdict] = r.cnt;
+  return out;
+}
+
+// Durable RunEvent persistence (OBS-01). INSERT OR IGNORE keeps it idempotent if the in-memory
+// store and a re-publish ever collide on (run_id, seq).
+export function saveRunEvent(event: { runId: string; seq: number; ts: number; body: unknown }): void {
+  ensureDb();
+  db.prepare("INSERT OR IGNORE INTO run_events (run_id, seq, ts, body) VALUES (?, ?, ?, ?)").run(
+    event.runId,
+    event.seq,
+    event.ts,
+    JSON.stringify(event.body),
+  );
+}
+
+export function loadRunEvents(runId: string, afterSeq = -1): Array<{ runId: string; seq: number; ts: number; body: unknown }> {
+  ensureDb();
+  const rows = db
+    .prepare("SELECT run_id, seq, ts, body FROM run_events WHERE run_id = ? AND seq > ? ORDER BY seq")
+    .all(runId, afterSeq) as Array<{ run_id: string; seq: number; ts: number; body: string }>;
+  return rows.map((r) => ({ runId: r.run_id, seq: r.seq, ts: r.ts, body: safeJsonParse(r.body, {}) }));
 }
 
 export function loadCurriculum(app: string): Curriculum | null {

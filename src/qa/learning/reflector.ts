@@ -42,12 +42,12 @@ export function buildReflectionPrompt(input: ReflectionInput): string {
     `1. Identify the ROOT CAUSE of why this run failed or produced low-quality tests.`,
     `2. The errorClass "${input.errorClass}" is already determined by the gates — do NOT change it.`,
     `3. Write a preventiveRule that would have caught this BEFORE the run:`,
-    `   - trigger: a CONDITION that, if present in the change, should trigger this rule (e.g. "the diff adds a form with onSubmit but no test for invalid input")`,
+    `   - trigger: a CONDITION phrased as an "Applies when …" sentence describing the change that should fire this rule (e.g. "Applies when the diff adds a form with onSubmit but no test for invalid input"). Start with "Applies when ".`,
     `   - action: a CONCRETE instruction the agent should follow (e.g. "generate a test that submits the form with invalid data and asserts the error message")`,
     `4. The rule must be RECUPERABLE — specific enough to match future changes, general enough to apply across apps.`,
     `5. Anchor every field to the gate signals above — evidence must reference actual numbers/output.`,
     ``,
     `## Output — ONLY this JSON:`,
-    `{"goal":"why the run happened","decision":"what the agent chose","assumption":"what the agent assumed that was wrong","errorClass":"${input.errorClass}","gateSignal":"the specific signal that flagged this","evidence":"the actual assert/lines/output","rootCause":"why the gate caught this","preventiveRule":{"trigger":"condition","action":"instruction"}}`,
+    `{"goal":"why the run happened","decision":"what the agent chose","assumption":"what the agent assumed that was wrong","errorClass":"${input.errorClass}","gateSignal":"the specific signal that flagged this","evidence":"the actual assert/lines/output","rootCause":"why the gate caught this","preventiveRule":{"trigger":"Applies when <condition>","action":"instruction"}}`,
   ].join("\n");
 }

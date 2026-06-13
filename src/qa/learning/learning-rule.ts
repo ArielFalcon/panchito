@@ -8,6 +8,10 @@ export interface LearningRule {
   trigger: string;
   action: string;
   errorClass: ErrorClass;
+  // The diff's structural shape this rule applies to (form, api-call, data-list, …), captured at
+  // distill time from detectStructuralPatterns. Lets retrieval bias toward rules matching the
+  // CURRENT change's shape, not just its error class. null/undefined when the rule is untagged.
+  archetype?: string | null;
   confidence: Confidence;
   usageCount: number; // times this rule was retrieved into a prompt
   outcomeCount: number; // times an objective outcome (valueScore) was folded in
@@ -22,6 +26,7 @@ export interface RuleUpsert {
   trigger: string;
   action: string;
   errorClass: ErrorClass;
+  archetype?: string | null;
   source: string;
 }
 
@@ -97,8 +102,16 @@ export function applyOutcome(rule: LearningRule, score: number): LearningRule {
   };
 }
 
+// Triggers/actions are free-form LLM text, so near-identical rules differ only by casing,
+// surrounding whitespace, or trailing punctuation ("Fragile selector" vs "fragile selector.").
+// Normalize before keying so those collapse to one rule instead of accumulating as distinct
+// candidates — exact byte-equality let the store grow unbounded with semantic duplicates.
+function normalizeRuleText(s: string): string {
+  return s.toLowerCase().replace(/\s+/g, " ").replace(/[.;,\s]+$/, "").trim();
+}
+
 export function ruleKey(rule: { trigger: string; action: string }): string {
-  return `${rule.trigger}::${rule.action}`;
+  return `${normalizeRuleText(rule.trigger)}::${normalizeRuleText(rule.action)}`;
 }
 
 export function deduplicateRules(
@@ -127,21 +140,26 @@ export function selectForRetrieval(
   opts: {
     app: string;
     errorClass?: ErrorClass | null;
+    archetypes?: string[]; // the current diff's structural shapes (form, api-call, …) — biases relevance
     maxRules?: number;
   },
 ): LearningRule[] {
   // Only proven (active) or still-exploring (candidate) rules are eligible; deprecated and
   // superseded rules are never injected. Ranking: ACTIVE rules first (exploit what has earned
   // its place), then by successRate (the attribution signal), then relevance to this run's
-  // errorClass. Candidates fill the remaining slots as a bounded exploration tail so they can
-  // accumulate the outcomes that earn — or deny — promotion.
+  // errorClass AND the diff's structural shape. Candidates fill the remaining slots as a bounded
+  // exploration tail so they can accumulate the outcomes that earn — or deny — promotion.
   const eligible = rules.filter((r) => r.status === "active" || r.status === "candidate");
 
   const score = (r: LearningRule): number => {
     let s = 0;
     if (r.status === "active") s += 100; // exploit before explore
     s += (r.successRate ?? 0) * 10; // earned-from-outcomes signal
-    if (opts.errorClass && r.errorClass === opts.errorClass) s += 3; // relevance
+    if (opts.errorClass && r.errorClass === opts.errorClass) s += 3; // relevance to the recent failure class
+    // Relevance to the current change's shape. Additive with the errorClass term and weighted
+    // below the successRate signal, so a strongly-proven rule is never displaced by a mere
+    // shape match — relevance breaks ties, it does not override earned proof.
+    if (opts.archetypes?.length && r.archetype && opts.archetypes.includes(r.archetype)) s += 3;
     return s;
   };
 
@@ -185,5 +203,26 @@ export function renderRulesForPrompt(rules: LearningRule[]): string {
     lines.push("");
   }
 
+  return lines.join("\n");
+}
+
+// Render the PROVEN learned rules as additional reject-on-sight criteria for the INDEPENDENT
+// reviewer. Only `active` rules are enforced: unproven candidates exist for the generator to
+// explore, never for the judge to gate on — rejecting tests over speculative rules would be a
+// false-positive gate. This arms the judge with app-specific knowledge earned from real failures
+// without leaking the generator's reasoning (the rules are objective, governed ledger state).
+export function renderRulesForReviewer(rules: LearningRule[]): string {
+  const proven = rules.filter((r) => r.status === "active");
+  if (proven.length === 0) return "";
+
+  const lines = [
+    "## App-specific reject-on-sight rules (earned from past runs on this app)",
+    "Each was learned from a real failure and proven by the value oracle or sustained prevention.",
+    "Treat them as an extension of the anti-pattern catalog: if a spec violates one, REJECT.",
+    "",
+  ];
+  for (const r of proven) {
+    lines.push(`- ${r.trigger} → ${r.action} (${r.errorClass})`);
+  }
   return lines.join("\n");
 }

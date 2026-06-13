@@ -5,7 +5,7 @@
 // folder (a git repo: the source of truth). We collect no artifacts: the harness
 // runs over `e2e/` and publishing commits the git diff.
 //
-// The SDK is injected via OpencodeDeps: the verifiable logic (prompt building,
+// The SDK is injected via AgentDeps: the verifiable logic (prompt building,
 // verdict parsing, orchestration) is tested with stubs; the real connection to
 // `opencode serve` is the boundary not covered by unit tests.
 
@@ -15,6 +15,7 @@ import { createHash } from "node:crypto";
 import { AgentResult, QaCase, RunMode, TestTarget, SpecMeta, ActivityKind } from "../types";
 import { CommitIntent } from "../qa/commit-classify";
 import type { ArchitectureContext } from "../qa/context";
+import { coerceExplorationBrief, type ExplorationBrief } from "../qa/exploration-brief";
 import { sanitizeText } from "../orchestrator/sanitizer";
 import { ActivityRouter } from "./agent-activity";
 import { mapOpencodeEvent, eventRunId } from "./activity-mapper";
@@ -55,7 +56,7 @@ import { ManifestEntrySchema } from "../orchestrator/schemas";
 // (the default) means no fallback — the primary error propagates unchanged.
 function getFallbackModel(agent: string): string | undefined {
   try {
-    const configPath = join(process.cwd(), "opencode", "opencode.json");
+    const configPath = join(process.cwd(), "agents", "opencode.json");
     if (!existsSync(configPath)) return undefined;
     const raw = JSON.parse(readFileSync(configPath, "utf8"));
     return raw.model_fallback?.[agent] as string | undefined;
@@ -86,7 +87,7 @@ async function getSharedClient() {
   const serverPassword = process.env.OPENCODE_SERVER_PASSWORD;
   try {
     sharedClient = createOpencodeClient({
-      baseUrl: process.env.OPENCODE_SERVE_URL ?? "http://opencode:4096",
+      baseUrl: process.env.OPENCODE_SERVE_URL ?? "http://agents:4096",
       ...(serverPassword
         ? { headers: { Authorization: `Basic ${Buffer.from(`opencode:${serverPassword}`).toString("base64")}` } }
         : {}),
@@ -112,7 +113,7 @@ async function getEventClient() {
   const serverPassword = process.env.OPENCODE_SERVER_PASSWORD;
   try {
     sharedEventClient = createOpencodeClient({
-      baseUrl: process.env.OPENCODE_SERVE_URL ?? "http://opencode:4096",
+      baseUrl: process.env.OPENCODE_SERVE_URL ?? "http://agents:4096",
       ...(serverPassword
         ? { headers: { Authorization: `Basic ${Buffer.from(`opencode:${serverPassword}`).toString("base64")}` } }
         : {}),
@@ -395,7 +396,7 @@ export async function askAssistant(
   // reflection path passes "qa-reflector" — a tool-less role (no MCP) — so a one-shot reflection
   // cannot touch engram or the filesystem the way the chat assistant (which keeps engram memory) can.
   input: { context: string; question: string; instruction?: string; agent?: string },
-  deps: OpencodeDeps,
+  deps: AgentDeps,
   cwd: string,
 ): Promise<string> {
   const instruction = input.instruction ??
@@ -475,7 +476,7 @@ export interface OpencodeRunInput {
 // `qa-generator` agent and returns its final text (including the closing JSON).
 // dispose() cleans up the session; call it when the session is no longer needed
 // to avoid memory leaks on the server (sessions are never auto-cleaned).
-export interface OpencodeSession {
+export interface AgentSession {
   id: string;
   // textOnly returns only the model's final answer (type:"text" parts), excluding
   // reasoning parts. Default (false) concatenates every text-bearing part — the
@@ -484,14 +485,14 @@ export interface OpencodeSession {
   dispose(): Promise<void>;
 }
 
-export interface OpencodeDeps {
-  open(agent: string, cwd: string, opts?: { signal?: AbortSignal; timeoutMs?: number; model?: string }): Promise<OpencodeSession>;
+export interface AgentDeps {
+  open(agent: string, cwd: string, opts?: { signal?: AbortSignal; timeoutMs?: number; model?: string }): Promise<AgentSession>;
   cleanupOrphans?(maxAgeMs: number): Promise<number>;
 }
 
 export async function runOpencode(
   input: OpencodeRunInput,
-  deps: OpencodeDeps,
+  deps: AgentDeps,
   opts?: { signal?: AbortSignal; onProgress?: (msg: string) => void },
 ): Promise<AgentResult> {
   const timeoutMs = agentTimeout(input.mode);
@@ -634,6 +635,10 @@ export interface ReviewInput {
   appName: string;
   mode: RunMode;
   target?: TestTarget; // "e2e" (default) or "code" — adjusts wording and spec paths
+  // PROVEN learned rules (pre-rendered by the orchestrator) injected as extra reject-on-sight
+  // criteria. This is objective ledger state, NOT the generator's reasoning, so the reviewer's
+  // independence is preserved while the judge gains app-specific anti-patterns earned from failures.
+  learnedRules?: string;
 }
 
 export interface ReviewResult {
@@ -656,7 +661,7 @@ const REVIEWER_TIMEOUT_MS = Number(process.env.OPENCODE_REVIEWER_TIMEOUT_MS) || 
 
 export async function reviewIndependently(
   input: ReviewInput,
-  deps: OpencodeDeps,
+  deps: AgentDeps,
   opts?: { signal?: AbortSignal },
 ): Promise<ReviewResult> {
   const session = await deps.open("qa-reviewer", input.mirrorDir, { signal: opts?.signal, timeoutMs: REVIEWER_TIMEOUT_MS });
@@ -664,6 +669,11 @@ export async function reviewIndependently(
     const changeType = input.intent?.type ?? input.mode;
     const specBlock = renderReviewSpecs(input);
     const kind = input.target === "code" ? "tests" : "E2E tests";
+    // Arm the judge with PROVEN app-specific rules (when present) as extra reject criteria.
+    const rulesBlock = input.learnedRules ? [``, input.learnedRules] : [];
+    const rulesInstruction = input.learnedRules
+      ? [`5. Also REJECT if any spec violates an app-specific reject-on-sight rule listed above.`]
+      : [];
     const prompt = [
       `## Independent review — judge these ${kind} WITHOUT the generator's reasoning`,
       ``,
@@ -681,12 +691,14 @@ export async function reviewIndependently(
       "```",
       ``,
       specBlock,
+      ...rulesBlock,
       ``,
       `## Instructions`,
       `1. The spec contents are provided above — no need to read files.`,
       `2. Apply the test-value-review skill from BOTH perspectives (value + robustness).`,
       `3. Answer: could the changed feature be BROKEN and these tests STILL be green?`,
       `4. Be strict — a single anti-pattern in any spec means rejection.`,
+      ...rulesInstruction,
       ``,
       `Output your verdict as JSON with no text before or after. Always include a one or two`,
       `sentence "rationale" explaining the verdict — on APPROVAL too (why these tests genuinely`,
@@ -775,6 +787,7 @@ export interface PlanObjective {
   objective: string; // concrete acceptance criterion (given/when/then)
   symbols: string[]; // code symbols the spec should exercise (serena blast radius)
   needsUi: boolean; // true when the flow involves page navigation or DOM interaction
+  brief?: ExplorationBrief; // Fase 2: distilled blast radius so the worker need not re-explore the code (optional → back-compat)
 }
 
 // Parse the planner's output: the LAST balanced object carrying an `objectives` array. Each
@@ -790,9 +803,14 @@ export function parsePlan(text: string): PlanObjective[] {
     const flow = typeof r.flow === "string" ? r.flow.trim() : "";
     const objective = typeof r.objective === "string" ? r.objective.trim() : "";
     if (!flow || !objective) continue;
-    const symbols = Array.isArray(r.symbols) ? r.symbols.filter((s): s is string => typeof s === "string") : [];
+    const brief = coerceExplorationBrief(r.brief);
+    const symbols = Array.isArray(r.symbols)
+      ? r.symbols.filter((s): s is string => typeof s === "string")
+      : brief
+        ? brief.blastRadius.map((n) => n.symbol).filter((s) => s.length > 0) // derive from the brief when not given explicitly
+        : [];
     const needsUi = typeof r.needsUi === "boolean" ? r.needsUi : true; // default true: safe fallback
-    out.push({ flow, objective, symbols, needsUi });
+    out.push({ flow, objective, symbols, needsUi, ...(brief ? { brief } : {}) });
   }
   // De-duplicate by the RESULTING spec filename, so two distinct flow strings that normalize to
   // the same file (e.g. "Check Out" and "check-out") never have two workers write the same file.
@@ -867,6 +885,7 @@ export interface ParallelWorkerInput {
   flow: string;
   symbols: string[];
   needsUi: boolean; // selects qa-worker (with Playwright MCP) vs qa-worker-code (serena only)
+  brief?: ExplorationBrief; // Fase 2: the distilled blast radius for this objective (rendered into the worker prompt)
   specFile: string; // orchestrator-assigned path under e2eRelDir (e.g. "flows/checkout.spec.ts")
   repo: string;
   mirrorDir: string;
@@ -885,7 +904,7 @@ export interface ParallelWorkerInput {
 // for objectives that don't need UI navigation, reducing DEV pressure and browser overhead.
 export async function generateParallel(
   workers: ParallelWorkerInput[],
-  deps: OpencodeDeps,
+  deps: AgentDeps,
   opts?: { signal?: AbortSignal; concurrency?: number },
 ): Promise<{ results: Array<{ flow: string; spec: string }>; errors: string[] }> {
   if (workers.length === 0) return { results: [], errors: [] };
@@ -945,7 +964,7 @@ export function shouldFanOut(input: {
 // shaped like runOpencode's, so the pipeline reviews/validates/executes it identically.
 export async function runOpencodeParallel(
   input: OpencodeRunInput,
-  deps: OpencodeDeps,
+  deps: AgentDeps,
   opts?: { signal?: AbortSignal; onProgress?: (msg: string) => void; concurrency?: number },
   fs: ManifestFs = realManifestFs,
 ): Promise<AgentResult> {
@@ -1005,6 +1024,7 @@ export async function runOpencodeParallel(
     flow: o.flow,
     symbols: o.symbols,
     needsUi: o.needsUi,
+    ...(o.brief ? { brief: o.brief } : {}),
     specFile: specFileForFlow(o.flow),
     repo: input.repo,
     mirrorDir: input.mirrorDir,
@@ -1086,7 +1106,7 @@ const MAX_AGENT_TIMEOUT_MS = Math.max(...Object.values(TIMEOUT_BY_MODE));
 // Integration boundary: real connection to `opencode serve`. Not covered by unit
 // tests (like the Playwright runner). The SDK is imported lazily so tests do not
 // require the package. OPENCODE_SERVE_URL points to the `opencode` container.
-export async function defaultOpencodeDeps(): Promise<OpencodeDeps> {
+export async function defaultAgentDeps(): Promise<AgentDeps> {
   // The undici transport timeout must exceed EVERY per-prompt withTimeout, or it aborts the
   // request before our own deadline fires. The reviewer has its OWN budget (REVIEWER_TIMEOUT_MS,
   // 6 min) that is independent of the generator's; if an operator sets a small OPENCODE_TIMEOUT_MS

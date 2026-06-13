@@ -20,7 +20,9 @@ function reflection(trigger: string, action: string): StructuredReflection {
 describe("distillReflection dedup against ALL rule statuses", () => {
   it("does NOT insert a duplicate when a DEPRECATED rule with the same trigger::action exists", () => {
     const app = "distill-dep-1";
-    const trigger = "endpoint flow without a response assert";
+    // Canonical "Applies when …" form: distilled candidates are normalized to this shape, so the
+    // seeded rule must share it for dedup (which keys on the normalized trigger) to recognize the match.
+    const trigger = "Applies when endpoint flow without a response assert";
     const action = "assert the response body matches the submitted input";
 
     // Create a rule, promote it to active, then demote it to 'deprecated' via sustained bad outcomes.
@@ -57,6 +59,86 @@ describe("correctionToRuleUpsert", () => {
     assert.equal(generic?.errorClass, "E-REVIEWER-REJECTED");
 
     assert.equal(correctionToRuleUpsert({ correction: "   ", runId: "run-1" }), null);
+  });
+});
+
+import { normalizeTrigger, isWellFormedTrigger, reflectionToRuleUpsert } from "./distiller";
+
+describe("normalizeTrigger — canonical 'Applies when …' form", () => {
+  it("prefixes bare prose and decapitalizes an ordinary leading word", () => {
+    assert.equal(normalizeTrigger("the diff adds a form"), "Applies when the diff adds a form");
+    assert.equal(normalizeTrigger("The diff adds a form"), "Applies when the diff adds a form");
+  });
+
+  it("preserves acronyms and code identifiers in the leading position", () => {
+    assert.equal(normalizeTrigger("API returns 500 on submit"), "Applies when API returns 500 on submit");
+    assert.equal(normalizeTrigger("getByRole misses the dialog"), "Applies when getByRole misses the dialog");
+    // TitleCase class names (internal capital) must be preserved — only single Title-case words decapitalize.
+    assert.equal(normalizeTrigger("FormData is sent without encoding"), "Applies when FormData is sent without encoding");
+  });
+
+  it("is idempotent and normalizes prefix casing + whitespace", () => {
+    assert.equal(normalizeTrigger("Applies when the diff adds a form"), "Applies when the diff adds a form");
+    assert.equal(normalizeTrigger("applies WHEN the diff changes"), "Applies when the diff changes");
+    assert.equal(normalizeTrigger("  the   diff   changes  "), "Applies when the diff changes");
+  });
+
+  it("returns empty for empty or prefix-only input", () => {
+    assert.equal(normalizeTrigger(""), "");
+    assert.equal(normalizeTrigger("   "), "");
+    assert.equal(normalizeTrigger("Applies when"), "");
+    assert.equal(normalizeTrigger("applies when   "), "");
+  });
+});
+
+describe("isWellFormedTrigger", () => {
+  it("accepts a prefixed trigger with a body and rejects everything else", () => {
+    assert.equal(isWellFormedTrigger("Applies when the diff adds X"), true);
+    assert.equal(isWellFormedTrigger("the diff adds X"), false);
+    assert.equal(isWellFormedTrigger(""), false);
+    assert.equal(isWellFormedTrigger("Applies when"), false);
+  });
+});
+
+describe("distilled candidates carry a canonical trigger", () => {
+  it("reflectionToRuleUpsert normalizes the trigger to 'Applies when …'", () => {
+    const up = reflectionToRuleUpsert({
+      app: "x",
+      runId: "run-canon-1",
+      reflection: reflection("the diff adds a form with no invalid-input test", "submit invalid data and assert the error"),
+    });
+    assert.equal(up.trigger, "Applies when the diff adds a form with no invalid-input test");
+    assert.equal(isWellFormedTrigger(up.trigger), true);
+  });
+
+  it("correctionToRuleUpsert produces a canonical trigger", () => {
+    const up = correctionToRuleUpsert({ correction: "uses a fragile selector on the cart row", runId: "run-canon-2" });
+    assert.equal(isWellFormedTrigger(up!.trigger), true);
+  });
+});
+
+describe("distilled candidates carry the run's structural archetype", () => {
+  it("reflectionToRuleUpsert threads the archetype onto the candidate", () => {
+    const up = reflectionToRuleUpsert({
+      app: "x",
+      runId: "run-arch-1",
+      archetype: "form",
+      reflection: reflection("the diff adds a form", "submit invalid data and assert the error"),
+    });
+    assert.equal(up.archetype, "form");
+  });
+
+  it("correctionToRuleUpsert threads the archetype onto the candidate", () => {
+    const up = correctionToRuleUpsert({ correction: "uses a fragile selector on the cart row", runId: "run-arch-2", archetype: "data-list" });
+    assert.equal(up?.archetype, "data-list");
+  });
+
+  it("distillReflection persists the archetype end-to-end (DB round-trip)", () => {
+    const app = `arch-rt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const res = distillReflection({ app, runId: "run-rt-1", archetype: "form", reflection: reflection("the diff adds a form", "assert the error") });
+    assert.equal(res.inserted, true);
+    const stored = listAllLearningRules(app, 10).find((r) => r.id === res.ruleId);
+    assert.equal(stored?.archetype, "form", "archetype survives the upsert → read-back");
   });
 });
 
