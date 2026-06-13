@@ -3,7 +3,16 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadAppConfigsByRepo } from "./config-loader";
+import { loadAppConfigsByRepo, expandEnv } from "./config-loader";
+
+test("expandEnv resolves mixed-case ${Var} names, not just UPPERCASE", () => {
+  const out = expandEnv("a: ${myToken}\nb: ${UPPER}", { myToken: "x", UPPER: "y" });
+  assert.equal(out, "a: x\nb: y");
+});
+
+test("expandEnv throws on an unset var (never passes ${...} through literally)", () => {
+  assert.throws(() => expandEnv("k: ${missingVar}", {}), /unset env var \$\{missingVar\}/);
+});
 
 function makeRoot(files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), "cfg-"));

@@ -7,6 +7,8 @@
 // branching, best-effort auto-merge) is verifiable with stubs; the real push/PR
 // is the integration boundary.
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { Git, realGit, authHeaderArgs } from "./repo-mirror";
 import { github, PullRequest } from "./github";
 import { shortSha } from "../qa/test-data";
@@ -26,45 +28,60 @@ export interface PublishDeps {
   createPullRequest(repo: string, args: { title: string; head: string; base: string; body: string }): Promise<PullRequest>;
   enableAutoMerge(nodeId: string): Promise<void>;
   mergePullRequest(repo: string, number: number): Promise<void>; // direct-merge fallback
+  writeExcludes?(mirrorDir: string, patterns: string[]): void | Promise<void>; // local ignore patterns
   log?(msg: string): void;
 }
 
 // `merged` reports whether the tests will actually land: auto-merge enabled OR a direct
 // merge succeeded. false means the PR is open but unmerged — the "commit tests back"
 // promise is unmet for this run (surfaced loudly).
-export type PublishResult = { prUrl: string; merged: boolean };
+// `error` is set when the push/PR step itself FAILED (e.g. a same-head 422, a rejected
+// push). In that case prUrl is null: the run still PASSED, the side-effect just did not
+// land, and the caller must NOT let it masquerade as an infra-error that erases the verdict.
+export type PublishResult = { prUrl: string | null; merged: boolean; error?: string };
 
-// Commit e2e/ EXCEPT the volatile change-coverage dumps (e2e/.qa/coverage/*): committing them
-// would bloat PRs and, worse, make the "did anything change?" check think every run has changes.
-const E2E_PATHSPEC = ["e2e", ":(exclude)e2e/.qa/coverage", ":(exclude)e2e/.qa/coverage/**"];
-// Code-mode tests can live anywhere in the repo (the agent matches the repo's
-// conventions) — commit the whole tree, but never the installed dependencies.
-const CODE_PATHSPEC = [
-  ".",
-  ":(exclude)node_modules/",
-  ":(exclude)e2e/.qa/coverage/",
-  ":(exclude).env",
-  ":(exclude).env.*",
-  ":(exclude)*.env",
-  ":(exclude)dist/",
-  ":(exclude)build/",
-  ":(exclude)__pycache__/",
-  ":(exclude)*.pyc",
-  ":(exclude).venv/",
-  ":(exclude)venv/",
-  ":(exclude)target/",
-  ":(exclude).next/",
-  ":(exclude)coverage/",
+// We stage with a PLAIN directory pathspec and keep unwanted paths out via local ignore
+// patterns (.git/info/exclude), NOT a `:(exclude)` pathspec. A `:(exclude)` that names an
+// already-gitignored path makes `git add` fail with "ignored … use -f" — that is the
+// node_modules/.gitignore infra-error. gitignore semantics also catch NESTED node_modules
+// (monorepos) that a root-anchored `:(exclude)node_modules/` missed.
+
+// e2e/: stage the suite; exclude installed deps + the volatile change-coverage / measured
+// fields (committing them would bloat PRs and make "did anything change?" always true).
+const E2E_ADD = ["e2e"];
+const E2E_EXCLUDES = ["node_modules/", ".qa/coverage/", ".qa/measured.json"];
+
+// Code mode: tests can live anywhere (the agent matches the repo's conventions) — commit
+// the whole tree, minus installed deps, build output and run artifacts.
+const CODE_ADD = ["."];
+const CODE_EXCLUDES = [
+  "node_modules/",
+  ".env",
+  ".env.*",
+  "*.env",
+  "dist/",
+  "build/",
+  "__pycache__/",
+  "*.pyc",
+  ".venv/",
+  "venv/",
+  "target/",
+  ".next/",
+  "coverage/",
+  "e2e/.qa/coverage/",
   // Mutation-oracle artifacts (qa/learning/mutation-code.ts) — cleaned up best-effort after
   // the pass, but a crash between Stryker and publish must never commit them into the PR.
-  ":(exclude).stryker-tmp/",
-  ":(exclude)stryker.conf.json",
-  ":(exclude)reports/mutation/",
+  ".stryker-tmp/",
+  "stryker.conf.json",
+  "reports/mutation/",
 ];
 
+// Context map: stage ONLY the context file — never seed fixtures or specs.
+const CONTEXT_ADD = ["e2e/.qa/context.json"];
+
 interface PublishShape {
-  statusPathspec: string[]; // pathspec for the "did anything change?" check
-  addPathspec: string[]; // pathspec to stage
+  addDir: string[]; // dir/file pathspec to stage (plain — exclusions live in .git/info/exclude)
+  excludes: string[]; // gitignore-style patterns written to .git/info/exclude before staging
   branch: string;
   commitMsg: string;
   title: string;
@@ -77,7 +94,11 @@ interface PublishShape {
 async function publishChanges(input: PublishInput, deps: PublishDeps, shape: PublishShape): Promise<PublishResult | null> {
   const { mirrorDir, repo, baseBranch } = input;
 
-  const status = await deps.git(["status", "--porcelain", "--", ...shape.statusPathspec], mirrorDir);
+  // Apply local ignore patterns first, so both the change check and the `git add` below
+  // silently skip installed deps / artifacts instead of failing on an ignored path.
+  await deps.writeExcludes?.(mirrorDir, shape.excludes);
+
+  const status = await deps.git(["status", "--porcelain", "--", ...shape.addDir], mirrorDir);
   if (!status.trim()) {
     deps.log?.(shape.noChangeLog);
     return null;
@@ -86,15 +107,27 @@ async function publishChanges(input: PublishInput, deps: PublishDeps, shape: Pub
   const name = process.env.GIT_AUTHOR_NAME ?? "ai-pipeline-qa";
   const email = process.env.GIT_AUTHOR_EMAIL ?? "ai-pipeline-qa@users.noreply.github.com";
 
-  await deps.git(["checkout", "-B", shape.branch], mirrorDir);
-  await deps.git(["add", "--", ...shape.addPathspec], mirrorDir);
-  await deps.git(
-    ["-c", `user.name=${name}`, "-c", `user.email=${email}`, "commit", "-m", shape.commitMsg],
-    mirrorDir,
-  );
-  await deps.git([...authHeaderArgs(), "push", "--force-with-lease", "-u", "origin", shape.branch], mirrorDir);
-
-  const pr = await deps.createPullRequest(repo, { title: shape.title, head: shape.branch, base: baseBranch, body: shape.body });
+  // The branch/commit/push/open-PR side-effect can fail for reasons unrelated to the run's
+  // verdict: a rejected push (force-with-lease conflict, transient network/auth) or a
+  // same-head 422 from createPullRequest when a prior PR for this SHA is still open. The run
+  // already PASSED; a failure here must surface loudly but must NOT throw out of the pipeline,
+  // where the runner catch-all would overwrite the real verdict with "infra-error" and skip
+  // persisting the green outcome. Return a published:false result instead.
+  let pr: PullRequest;
+  try {
+    await deps.git(["checkout", "-B", shape.branch], mirrorDir);
+    await deps.git(["add", "--", ...shape.addDir], mirrorDir);
+    await deps.git(
+      ["-c", `user.name=${name}`, "-c", `user.email=${email}`, "commit", "-m", shape.commitMsg],
+      mirrorDir,
+    );
+    await deps.git([...authHeaderArgs(), "push", "--force-with-lease", "-u", "origin", shape.branch], mirrorDir);
+    pr = await deps.createPullRequest(repo, { title: shape.title, head: shape.branch, base: baseBranch, body: shape.body });
+  } catch (e) {
+    const error = String(e);
+    deps.log?.(`[qa] WARNING: the run PASSED but publishing the suite (${shape.branch}) FAILED: ${error}. The tests are committed in the working copy but were NOT pushed/PR'd — verdict preserved; re-run or publish manually.`);
+    return { prUrl: null, merged: false, error };
+  }
 
   // Land the tests. Prefer native auto-merge; if the repo does not allow it (no branch
   // protection / not enabled), fall back to a DIRECT merge — the harness already proved
@@ -121,8 +154,8 @@ async function publishChanges(input: PublishInput, deps: PublishDeps, shape: Pub
 export async function publishE2e(input: PublishInput, deps: PublishDeps): Promise<PublishResult | null> {
   const short = shortSha(input.sha);
   return publishChanges(input, deps, {
-    statusPathspec: E2E_PATHSPEC,
-    addPathspec: E2E_PATHSPEC,
+    addDir: E2E_ADD,
+    excludes: E2E_EXCLUDES,
     branch: `qa/e2e-${short}`,
     commitMsg: `test(e2e): automated QA for ${short}`,
     title: `QA E2E for ${short}`,
@@ -131,17 +164,13 @@ export async function publishE2e(input: PublishInput, deps: PublishDeps): Promis
   });
 }
 
-// Code mode: publish whatever tests the agent wrote anywhere in the repo (plus the
-// e2e/.qa manifest). The whole tree minus node_modules is committed.
-// Context mode: publish the FE↔BE architecture map (e2e/.qa/context.json). Only
-// the context file is staged — seed fixtures and test specs are NEVER included.
-const CONTEXT_PATHSPEC = ["e2e/.qa/context.json"];
-
+// Context mode: publish the FE↔BE architecture map (e2e/.qa/context.json). Only the
+// context file is staged — seed fixtures and test specs are NEVER included.
 export async function publishContext(input: PublishInput, deps: PublishDeps): Promise<PublishResult | null> {
   const short = shortSha(input.sha);
   return publishChanges(input, deps, {
-    statusPathspec: CONTEXT_PATHSPEC,
-    addPathspec: CONTEXT_PATHSPEC,
+    addDir: CONTEXT_ADD,
+    excludes: [],
     branch: `qa/context-${short}`,
     commitMsg: `docs(context): architecture map for ${short}`,
     title: `QA context map for ${short}`,
@@ -153,8 +182,8 @@ export async function publishContext(input: PublishInput, deps: PublishDeps): Pr
 export async function publishCode(input: PublishInput, deps: PublishDeps): Promise<PublishResult | null> {
   const short = shortSha(input.sha);
   return publishChanges(input, deps, {
-    statusPathspec: CODE_PATHSPEC,
-    addPathspec: CODE_PATHSPEC,
+    addDir: CODE_ADD,
+    excludes: CODE_EXCLUDES,
     branch: `qa/code-${short}`,
     commitMsg: `test(code): automated QA for ${short}`,
     title: `QA code tests for ${short}`,
@@ -168,5 +197,13 @@ export const defaultPublishDeps: PublishDeps = {
   createPullRequest: (repo, args) => github.createPullRequest(repo, args),
   enableAutoMerge: (nodeId) => github.enableAutoMerge(nodeId),
   mergePullRequest: (repo, number) => github.mergePullRequest(repo, number),
+  // Write our managed local-exclude file (the mirror's .git is system-owned/regenerable).
+  // gitignore-style patterns here make `git add` skip installed deps + artifacts WITHOUT a
+  // :(exclude) pathspec, which is the fix for the node_modules/.gitignore add failure.
+  writeExcludes: (mirrorDir, patterns) => {
+    const dir = join(mirrorDir, ".git", "info");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "exclude"), patterns.map((p) => p + "\n").join(""));
+  },
   log: (m) => console.log(m),
 };

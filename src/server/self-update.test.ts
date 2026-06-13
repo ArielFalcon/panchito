@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   performSwap,
   confirmSwapHealthy,
@@ -8,7 +11,24 @@ import {
   SwapFs,
   SwapMarker,
   MAX_BOOT_ATTEMPTS,
+  writePendingPromote,
+  readPendingPromote,
+  clearPendingPromote,
 } from "./self-update";
+
+test("pending-promote survives the swap marker being cleared, and is cleared on terminal outcome (SELF-03)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "promote-"));
+  try {
+    assert.equal(readPendingPromote(dir), null);
+    const p = { promote: { repo: "o/r", prNumber: 7, nodeId: "PR_node" }, prUrl: "https://x/pull/7", at: "t" };
+    writePendingPromote(dir, p);
+    assert.deepEqual(readPendingPromote(dir), p); // durable across the marker clear / a restart
+    clearPendingPromote(dir);
+    assert.equal(readPendingPromote(dir), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 // An in-memory fake fs that records copy/remove operations and holds a marker.
 function fakeFs(present: Set<string> = new Set()): SwapFs & { ops: string[]; marker: SwapMarker | null } {

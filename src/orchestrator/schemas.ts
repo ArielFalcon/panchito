@@ -44,6 +44,9 @@ export const AppConfigSchema = z
       // and dispatches parallel qa-workers (>=2 objectives; single-agent otherwise).
       // Default off: protects cost/determinism for simple apps.
       parallelDiff: z.boolean().optional(),
+      // Fase 3: run a read-only explorer pass before the generator on single-agent diff runs, so the
+      // generator gets a distilled blast-radius brief instead of re-exploring. Default off (cost/opt-in).
+      explorer: z.boolean().optional(),
       // Change-coverage policy (the value keystone). off = skip; signal (default) = measure +
       // record only; enforce = also try to close the gap and block publishing if it stays low.
       changeCoverage: z
@@ -96,6 +99,11 @@ export const ManifestEntrySchema = z.object({
     pr: z.number().optional(),
     ticket: z.string().optional(),
   }),
+  // Content checksum of the spec file, written by the orchestrator at manifest time for
+  // integrity verification. Declared here (optional) so the schema matches what the write
+  // path actually emits and the read path preserves it instead of silently stripping it
+  // (post-ADR-001, Phase 3.1 — write↔read expressed as one schema).
+  sha256: z.string().optional(),
   criticality: z.enum(["critical", "normal"]).optional(),
   owner: z.string().optional(),
   createdAt: z.string().optional(),
@@ -143,20 +151,43 @@ export const WebhookPayloadSchema = z.object({
 
 export type ValidatedWebhookPayload = z.infer<typeof WebhookPayloadSchema>;
 
-// ── Final verdict schema ──────────────────────────────────────────────────────
-// Extracted from the AI agent's closing JSON. Used in parseVerdict.
+// ── Agent verdict contract (post-ADR-001, Phase 1) ────────────────────────────
+// The agent emits TWO distinct verdicts, validated against these schemas (see
+// integrations/verdict-validate.ts). The ADR-001 evaluation rejected MCP-ifying the
+// orchestrator↔agent boundary but kept its real improvement: make the agent's output a
+// typed, validated contract instead of JSON scraped best-effort from free text.
+
+// Per-spec metadata in the generator's closing JSON (and, post-reconciliation, the manifest).
 export const SpecMetaSchema = z.object({
-  file: z.string().min(1),
-  flow: z.string().min(1),
-  objective: z.string().min(1),
-  targets: z.array(z.string()),
+  file: z.string().trim().min(1),
+  flow: z.string().trim().min(1),
+  objective: z.string().trim().min(1),
+  // targets may be empty: a spec need not name specific code symbols. Defaulting keeps the
+  // contract as lenient here as parseSpecMetas is on extraction.
+  targets: z.array(z.string()).default([]),
 });
 
-export const FinalVerdictSchema = z.object({
-  approved: z.boolean(),
+// The GENERATOR's deliverable. It no longer self-reports `approved` — the independent
+// reviewer is the authoritative gate — so its closing JSON is just the specs it wrote plus
+// optional per-spec metadata. An EMPTY specs array is a valid no-op (nothing worth testing),
+// so `specs` is required-but-may-be-empty. A stray legacy `approved` is ignored (stripped).
+export const GeneratorVerdictSchema = z.object({
   specs: z.array(z.string()),
   specMetas: z.array(SpecMetaSchema).optional(),
   note: z.string().optional(),
 });
 
-export type ValidatedFinalVerdict = z.infer<typeof FinalVerdictSchema>;
+export type ValidatedGeneratorVerdict = z.infer<typeof GeneratorVerdictSchema>;
+
+// The REVIEWER's verdict — the AUTHORITATIVE gate. Only `approved` is load-bearing for the
+// publish decision, so it is the only strict field; `rationale` and `corrections` are
+// tolerant (`.catch`) so a formatting slip in advisory fields can NEVER turn a genuine
+// approval into a fail-closed rejection. A missing/non-boolean `approved` is the one thing
+// worth a repair re-prompt.
+export const ReviewerVerdictSchema = z.object({
+  approved: z.boolean(),
+  rationale: z.string().optional().catch(undefined),
+  corrections: z.array(z.string()).catch([]),
+});
+
+export type ValidatedReviewerVerdict = z.infer<typeof ReviewerVerdictSchema>;

@@ -48,6 +48,43 @@ function mockDeps(response: { ok: boolean; status: number; statusText?: string; 
   };
 }
 
+function routedDeps(routes: (url: string) => unknown): GitHubDeps {
+  return {
+    fetch: async (url: string) =>
+      ({
+        ok: true, status: 200, statusText: "",
+        headers: { get: () => null },
+        text: async () => JSON.stringify(routes(url) ?? {}),
+        json: async () => routes(url) ?? {},
+      }) as unknown as Response,
+  };
+}
+
+test("getPrStatus(requiredContext): aggregate that LACKS the named 'ci' check → 'none' (fail-safe, never promotes)", async () => {
+  const deps = routedDeps((url) =>
+    url.includes("/pulls/")
+      ? { merged: false, state: "open", head: { sha: "abc" } }
+      : url.includes("/check-runs")
+        ? { check_runs: [{ name: "lint", status: "completed", conclusion: "success" }] } // 'ci' absent
+        : { state: "success", total_count: 0, statuses: [] });
+  const s = await github.getPrStatus("o/r", 1, deps, "ci");
+  assert.equal(s.checks, "none"); // the required 'ci' check never ran → never treated as green
+});
+
+test("getPrStatus(requiredContext): only the named 'ci' decides — an unrelated red check is ignored", async () => {
+  const deps = routedDeps((url) =>
+    url.includes("/pulls/")
+      ? { merged: false, state: "open", head: { sha: "abc" } }
+      : url.includes("/check-runs")
+        ? { check_runs: [
+            { name: "ci", status: "completed", conclusion: "success" },
+            { name: "preview-deploy", status: "completed", conclusion: "failure" },
+          ] }
+        : { state: "failure", total_count: 1, statuses: [{ context: "preview-deploy", state: "failure" }] });
+  const s = await github.getPrStatus("o/r", 1, deps, "ci");
+  assert.equal(s.checks, "success"); // 'ci' passed; the unrelated preview-deploy failure does not block
+});
+
 test("openIssue throws on GitHub 500 error", async () => {
   const deps = mockDeps({ ok: false, status: 500, statusText: "Internal Server Error", json: { message: "boom" } });
   await assert.rejects(() => github.openIssue("org/app", "title", "body", deps), /GitHub error 500/);

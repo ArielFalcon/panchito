@@ -114,9 +114,11 @@ export const github = {
     }
   },
 
-  // Deterministically merge a PR via the REST API (used by the maintainer self-update
-  // AFTER the orchestrator's own typecheck+test gate passes — so the merge does not
-  // depend on the repo having branch protection / "Allow auto-merge" configured).
+  // UNCONDITIONAL merge via the REST API — it waits for NO GitHub check or branch protection.
+  // The safety it relies on is UPSTREAM, not GitHub's: the maintainer self-update uses it only
+  // after the orchestrator's own typecheck+test gate, and the e2e/code publish path uses it as a
+  // fallback only after the harness already proved the test-only PR green. Do NOT use it where a
+  // server-side required check is the intended gate — prefer enableAutoMerge there.
   async mergePullRequest(repo: string, number: number, mergeMethod = "squash", deps: GitHubDeps = defaultGitHubDeps): Promise<void> {
     const res = await deps.fetch(`https://api.github.com/repos/${repo}/pulls/${number}/merge`, {
       method: "PUT",
@@ -143,6 +145,13 @@ export const github = {
     repo: string,
     number: number,
     deps: GitHubDeps = defaultGitHubDeps,
+    // When set, the `checks` verdict reflects ONLY the named required check (e.g. "ci") — not an
+    // aggregate of EVERY check on the head. The outer guard for the self-maintainer must gate on
+    // the SPECIFIC required check: an aggregate "success" could pass while the real `ci` check
+    // never ran (only unrelated checks did), and an unrelated flaky check could falsely block a
+    // good fix. If the named check is absent, `checks` is "none" → the promote loop never treats
+    // it as green and times out (fail-safe: a missing required check never promotes).
+    requiredContext?: string,
   ): Promise<{ merged: boolean; state: string; checks: "pending" | "success" | "failure" | "none" }> {
     const prRes = await deps.fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, { headers: ghHeaders() });
     if (!prRes.ok) throw new Error(`GitHub get PR error ${prRes.status}: ${await prRes.text()}`);
@@ -155,21 +164,36 @@ export const github = {
     ]);
     if (!crRes.ok) throw new Error(`GitHub check-runs error ${crRes.status}: ${await crRes.text()}`);
     if (!stRes.ok) throw new Error(`GitHub status error ${stRes.status}: ${await stRes.text()}`);
-    const cr = (await crRes.json()) as { check_runs?: Array<{ status: string; conclusion: string | null }> };
-    const st = (await stRes.json()) as { state: string; total_count: number };
+    const cr = (await crRes.json()) as { check_runs?: Array<{ name?: string; status: string; conclusion: string | null }> };
+    const st = (await stRes.json()) as { state: string; total_count: number; statuses?: Array<{ context?: string; state: string }> };
 
-    const runs = cr.check_runs ?? [];
+    // Scope to the named required check when one is given (Actions reports it as a check_run named
+    // after the job id; legacy integrations report a commit status whose `context` matches).
+    const runs = (cr.check_runs ?? []).filter((r) => !requiredContext || r.name === requiredContext);
+    const statuses = (st.statuses ?? []).filter((s) => !requiredContext || s.context === requiredContext);
     let pending = false;
     let failure = false;
     for (const run of runs) {
       if (run.status !== "completed") pending = true;
       else if (run.conclusion && !["success", "neutral", "skipped"].includes(run.conclusion)) failure = true;
     }
-    if (st.total_count > 0) {
-      if (st.state === "pending") pending = true;
-      if (st.state === "failure" || st.state === "error") failure = true;
+    let statusTotal: number;
+    if (requiredContext) {
+      // Only the named commit-status contexts count toward the verdict.
+      for (const s of statuses) {
+        if (s.state === "pending") pending = true;
+        if (s.state === "failure" || s.state === "error") failure = true;
+      }
+      statusTotal = statuses.length;
+    } else {
+      // Aggregate combined status (backward-compatible behavior).
+      if (st.total_count > 0) {
+        if (st.state === "pending") pending = true;
+        if (st.state === "failure" || st.state === "error") failure = true;
+      }
+      statusTotal = st.total_count;
     }
-    const total = runs.length + st.total_count;
+    const total = runs.length + statusTotal;
     const checks = failure ? "failure" : pending ? "pending" : total === 0 ? "none" : "success";
     return { merged: pr.merged, state: pr.state, checks };
   },

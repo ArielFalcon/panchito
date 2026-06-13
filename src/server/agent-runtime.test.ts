@@ -21,7 +21,7 @@ function strategy(
   const models = provider === "opencode"
     ? [
         { id: "opencode-go/deepseek-v4-pro" },
-        { id: "opencode-go/qwen3.7-max" },
+        { id: "opencode-go/minimax-m3" },
         { id: "opencode-go/deepseek-v4-flash" },
       ]
     : [

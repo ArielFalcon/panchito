@@ -1,28 +1,23 @@
 // Renders the GitHub markdown for a run: the Issue body for a failing/invalid run
 // and the PR body for a green publish. The goal is REVIEWER-FACING DOCUMENTATION —
 // a concise, high-level account of what was tested, what was found, and what to do —
-// NOT a log dump. The high-level narrative is assembled deterministically from what
-// the agent already emits (per-spec objective/flow + the reviewer's note/corrections
-// + the commit intent); raw logs are demoted to a collapsed, truncated appendix.
+// NOT a log dump. The narrative is assembled deterministically from what the agent
+// already emits (per-spec objective/flow + the reviewer's note/corrections + the commit
+// intent + each failing case's one-line cause). Raw run logs are NOT embedded: they are
+// noise in a human-facing Issue — the full trace lives in the run artifacts, and the
+// structured cause/findings carry the actionable signal.
 //
-// Everything embedded is re-sanitized defensively: execution logs are already
-// sanitized, but the static-gate "invalid" errors, per-case details and the agent's
-// note/objectives are NOT — and a secret the agent embedded in a spec could otherwise
-// reach a public Issue/PR.
+// Everything embedded is re-sanitized defensively: the static-gate "invalid" errors,
+// per-case details and the agent's note/objectives are NOT pre-sanitized — and a secret
+// the agent embedded in a spec could otherwise reach a public Issue/PR.
 //
-// Length is BUDGETED so the body stays under GitHub's 65536-char hard limit (a 422
-// otherwise). The unbounded part is the logs; they get whatever budget is left after
-// the structured part, truncated head+tail (the failure is usually at the tail). The
-// boundary guard in github.ts (clampBody) is the final net.
+// github.ts (clampBody) is the final length net under GitHub's 65536-char hard limit.
 
 import { QaRunResult, QaCase } from "../types";
 import { sanitizeText } from "../orchestrator/sanitizer";
 
 const s = (v: string | undefined): string => (v ? sanitizeText(v).text : "");
 
-// Target comfortably under GitHub's 65536 so markdown/multibyte overhead never
-// pushes the final body over the hard limit.
-const BODY_BUDGET = 60000;
 const MAX_ITEMS = 50; // cap a flood of cases/flows; the rest are summarized as a count
 const CAP_NAME = 200;
 const CAP_CAUSE = 200; // a failing case's cause is ONE line, not the whole stack
@@ -49,18 +44,6 @@ export interface IssueContext {
 
 const cap = (v: string, max: number): string =>
   v.length <= max ? v : v.slice(0, max).trimEnd() + ` …(+${v.length - max} chars)`;
-
-// Truncate keeping head AND tail — for a failing run the error is usually at the
-// tail of the log, but the head (what ran) is useful context too.
-function headTail(text: string, budget: number): string {
-  if (text.length <= budget) return text;
-  if (budget <= 0) return "";
-  const marker = `\n\n…(${text.length - budget} chars omitted — see the run artifacts for the full log)…\n\n`;
-  const keep = Math.max(0, budget - marker.length);
-  const head = Math.floor(keep * 0.4);
-  const tail = keep - head;
-  return text.slice(0, head) + marker + text.slice(text.length - tail);
-}
 
 // Collapse a multi-line, often-technical detail into a single high-level cause line:
 // prefer the line that names the error/assertion, fall back to the first line.
@@ -155,19 +138,10 @@ export function renderIssue(run: QaRunResult, ctx: IssueContext = {}): string {
   }
 
   const head = blocks.join("\n\n");
-  const footer = "\n\n_Trace available in the run artifacts (trace on-first-retry)._";
+  // The full trace/logs live in the run artifacts — the Issue stays human-readable.
+  const footer = "\n\n_Full trace + logs in the run artifacts (trace on-first-retry)._";
 
-  // Raw logs: a collapsed, truncated debugging appendix — present but never dominant.
-  const logsText = s(run.logs);
-  let logsBlock = "";
-  if (logsText.trim()) {
-    const open = "\n\n<details>\n<summary>Run logs (sanitized, truncated)</summary>\n\n```\n";
-    const close = "\n```\n</details>";
-    const logBudget = Math.max(0, BODY_BUDGET - head.length - footer.length - open.length - close.length);
-    logsBlock = `${open}${headTail(logsText, logBudget)}${close}`;
-  }
-
-  return `${head}${logsBlock}${footer}`;
+  return `${head}${footer}`;
 }
 
 // The PR body for a green publish: documents what the new/updated suite covers and

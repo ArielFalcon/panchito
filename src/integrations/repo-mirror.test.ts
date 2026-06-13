@@ -144,6 +144,15 @@ test("getCommitDiff of a single-parent commit uses plain git show", async () => 
   assert.deepEqual(d.calls[1], ["show", "--format=", "abc1234"]); // single parent → plain diff
 });
 
+test("getCommitDiff with commits>1 diffs the last N commits ending at the SHA (sha~N..sha)", async () => {
+  const d = gitStub(() => "multi-commit-diff");
+  const diff = await getCommitDiff("/dir", "abc1234", d, 3);
+  assert.equal(diff, "multi-commit-diff");
+  // a single `git diff sha~3 sha` — no per-commit %P probe, the whole window in one shot
+  assert.deepEqual(d.calls[0], ["diff", "abc1234~3", "abc1234"]);
+  assert.equal(d.calls.length, 1);
+});
+
 test("getCommitDiff diffs a MERGE commit against its first parent (not an empty diff)", async () => {
   const d = gitStub((args) => (args.includes("--format=%P") ? "p1aaaa p2bbbb" : "real-merge-diff"));
   const diff = await getCommitDiff("/dir", "abc1234", d);
@@ -169,6 +178,17 @@ test("listChangedSpecs returns e2e-relative spec paths from git status, excludin
 test("listChangedSpecs follows a rename to the new path", async () => {
   const d = gitStub(() => "R  e2e/flows/old.spec.ts -> e2e/flows/new.spec.ts\n");
   assert.deepEqual(await listChangedSpecs("/dir", "e2e", d), ["flows/new.spec.ts"]);
+});
+
+test("listChangedSpecs passes --untracked-files=all so first-run specs in an untracked e2e/ are seen", async () => {
+  // FIRST run on a newly-onboarded app: the seed e2e/ is entirely untracked, so plain
+  // `git status --porcelain` collapses it to one `?? e2e/` line and hides the specs inside,
+  // which made the agent's real tests read as "0 on disk" → a false `skipped`. -uall recurses
+  // into the untracked directory and names each file. This test guards that flag.
+  const d = gitStub(() => "?? e2e/flows/login.spec.ts\n");
+  const specs = await listChangedSpecs("/dir", "e2e", d);
+  assert.deepEqual(specs, ["flows/login.spec.ts"]);
+  assert.ok(d.calls[0]?.includes("--untracked-files=all"), "git status must pass --untracked-files=all");
 });
 
 test("getCommitsBehind rejects a non-hex sha before spawning git (injection defense)", async () => {

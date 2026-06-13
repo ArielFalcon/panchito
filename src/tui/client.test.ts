@@ -131,7 +131,7 @@ test("getAgentConfig GETs /api/agent/config", async () => {
     singleProvider: "opencode",
     assignments: {
       primary: { provider: "opencode", model: "opencode-go/deepseek-v4-pro" },
-      reviewer: { provider: "opencode", model: "opencode-go/qwen3.7-max" },
+      reviewer: { provider: "opencode", model: "opencode-go/minimax-m3" },
       chat: { provider: "opencode", model: "opencode-go/deepseek-v4-flash" },
     },
     keys: { opencode: true, codex: false },

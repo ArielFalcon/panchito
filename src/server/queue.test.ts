@@ -79,3 +79,25 @@ test("cancel returns false when no job is running", () => {
   const q = new JobQueue();
   assert.equal(q.cancel(), false);
 });
+
+test("cancel(runId) aborts only when the id matches the running job (no wrong-run kill)", async () => {
+  const q = new JobQueue();
+  let aborted = false;
+  q.enqueue(async (signal) => {
+    await new Promise<void>((_resolve, reject) => {
+      signal.addEventListener("abort", () => { aborted = true; reject(new Error("aborted")); }, { once: true });
+    });
+  }, "run-A");
+
+  await tick(5);
+  // A stale cancel naming a DIFFERENT run must NOT abort the run that is actually executing
+  // (this is the guard the cancelRun fix in index.ts relies on).
+  assert.equal(q.cancel("run-B"), false);
+  await tick(5);
+  assert.equal(aborted, false, "cancel('run-B') must not abort run-A");
+
+  // Cancelling the run that is actually current succeeds.
+  assert.equal(q.cancel("run-A"), true);
+  await tick(5);
+  assert.equal(aborted, true);
+});

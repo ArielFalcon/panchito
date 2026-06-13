@@ -41,7 +41,15 @@ function pruneOldLogs(): void {
   }
 }
 
-export function logJson(level: "info" | "warn" | "error", message: string, meta?: Record<string, unknown>): void {
+export function logJson(
+  level: "info" | "warn" | "error",
+  message: string,
+  meta?: Record<string, unknown>,
+  // mirrorToConsole=false writes ONLY to the shipped JSON file. Used by the per-run pipeline log
+  // sink, which already prints a human-readable plain line to stdout — so the structured,
+  // runId-tagged copy goes to the log stream without duplicating console output.
+  mirrorToConsole = true,
+): void {
   const entry = {
     t: new Date().toISOString(),
     l: level,
@@ -51,7 +59,8 @@ export function logJson(level: "info" | "warn" | "error", message: string, meta?
   const line = JSON.stringify(entry) + "\n";
   const s = ensureStream();
   s.write(line);
-  // Also mirror to console for local dev visibility
-  const consoleFn = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
-  consoleFn(line.trimEnd());
+  if (mirrorToConsole) {
+    const consoleFn = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
+    consoleFn(line.trimEnd());
+  }
 }

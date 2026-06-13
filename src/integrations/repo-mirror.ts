@@ -111,8 +111,13 @@ export async function ensureMirrorAtBranch(repo: string, branch: string, deps: M
 // radius. Merging a PR into the default branch is the canonical "commit deployed to DEV"
 // event, so this case is the rule, not the exception: diff against the FIRST parent so
 // the net change the merge introduced is visible.
-export async function getCommitDiff(dir: string, sha: string, deps: MirrorDeps): Promise<string> {
+export async function getCommitDiff(dir: string, sha: string, deps: MirrorDeps, commits = 1): Promise<string> {
   assertHexSha(sha);
+  // Multi-commit window: the cumulative diff of the last `commits` commits ending at sha
+  // (sha~N..sha) — analyze a short series as one blast radius instead of just the tip.
+  if (commits > 1) {
+    return deps.git(["diff", `${sha}~${commits}`, sha], dir);
+  }
   const parents = (await deps.git(["show", "-s", "--format=%P", sha], dir)).trim().split(/\s+/).filter(Boolean);
   if (parents.length > 1) {
     return deps.git(["show", "--format=", "-m", "--first-parent", sha], dir);
@@ -125,8 +130,15 @@ export async function getCommitDiff(dir: string, sha: string, deps: MirrorDeps):
 // "flows/login.spec.ts"), excluding the seed `cleanup.spec.ts`. This is the
 // AUTHORITATIVE spec set: the orchestrator trusts the working copy, never the agent's
 // self-reported list (which can name files it did not write, or omit files it did).
+//
+// `--untracked-files=all` is REQUIRED, not cosmetic: when the whole e2e/ folder is itself
+// untracked — every FIRST run on a newly-onboarded app, where the seed was just bootstrapped
+// into a repo that has no committed e2e/ — plain `git status --porcelain` collapses it to a
+// single `?? e2e/` line and never names the .spec.ts files inside, so the agent's real specs
+// read as "0 on disk" and the run falsely returns `skipped`. `-uall` recurses into untracked
+// directories and lists each file, so the specs are seen on the first run too.
 export async function listChangedSpecs(dir: string, e2eRelDir: string, deps: MirrorDeps): Promise<string[]> {
-  const out = await deps.git(["status", "--porcelain", "--", e2eRelDir], dir);
+  const out = await deps.git(["status", "--porcelain", "--untracked-files=all", "--", e2eRelDir], dir);
   return out
     .split("\n")
     .filter((l) => l.length > 3) // "XY path" — 2 status chars + a space + the path
@@ -147,7 +159,14 @@ export async function getCommitMessage(dir: string, sha: string, deps: MirrorDep
 
 export const realGit: Git = (args, cwd) =>
   new Promise((resolve, reject) => {
-    execFile("git", args, { cwd, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }, (err, stdout) =>
+    // SECURITY: the orchestrator operates on UNTRUSTED working copies (watched repos, and — in
+    // code mode — trees that an unprivileged sandbox user has written to). A commit/push/checkout
+    // would otherwise run that repo's hooks AS THE ORCHESTRATOR (root): a sandbox-planted
+    // `.git/hooks/pre-commit` is a root-RCE escape. `-c core.hooksPath=/dev/null` on the COMMAND
+    // LINE disables all hooks and cannot be overridden by the repo's own .git/config. The
+    // orchestrator never relies on a repo's hooks, so this is uniformly safe.
+    const hardened = ["-c", "core.hooksPath=/dev/null", ...args];
+    execFile("git", hardened, { cwd, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }, (err, stdout) =>
       err ? reject(err) : resolve(stdout.toString()),
     );
   });

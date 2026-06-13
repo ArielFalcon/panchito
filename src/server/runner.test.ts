@@ -113,7 +113,27 @@ test("a green run publishes live RunEvents for steps, tests and final verdict", 
   assert.ok(bodies.some((body) => body.type === "step.changed" && body.step === "execute"));
   assert.ok(bodies.some((body) => body.type === "test.started" && body.name === "checkout"));
   assert.ok(bodies.some((body) => body.type === "test.passed" && body.name === "checkout"));
-  assert.deepEqual(bodies.at(-1), { type: "run.verdict", verdict: "pass", passed: 1, failed: 0 });
+  const last = bodies.at(-1) as { type: string; verdict: string; passed: number; failed: number; outcome?: string };
+  assert.equal(last.type, "run.verdict");
+  assert.equal(last.verdict, "pass");
+  assert.equal(last.passed, 1);
+  assert.equal(last.failed, 0);
+  // The verdict event carries what the run PRODUCED (here: a shadow run → no PR).
+  assert.ok(typeof last.outcome === "string" && last.outcome.length > 0, "run.verdict must carry the outcome");
+});
+
+test("pipeline log lines are emitted as log.line events for the TUI's log tail", async () => {
+  const queue = new JobQueue();
+  const runEvents = createRunEventStore({ now: () => 789 });
+  const id = enqueueTrackedRun(
+    queue,
+    { app: "runner-logs", sha: "log1234", target: "e2e", mode: "diff", source: "manual" },
+    { pipeline: stubDeps(), loadApp: cfg, runEvents },
+  );
+  await queue.drain();
+  const logs = runEvents.replay(id).map((e) => e.body).filter((b) => b.type === "log.line");
+  assert.ok(logs.length > 0, "the pipeline's log() narration must reach the stream as log.line events");
+  assert.ok(logs.every((b) => "text" in b && typeof b.text === "string" && b.text.length > 0 && !b.text.includes("\n")));
 });
 
 test("a crashing pipeline finalizes the record as infra-error with the message (no zombie)", async () => {

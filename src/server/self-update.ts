@@ -19,6 +19,39 @@ import { join } from "node:path";
 export const SWAP_MARKER_FILE = "pending-swap.json";
 export const MAX_BOOT_ATTEMPTS = 3;
 
+// Durable record of a promote that is IN FLIGHT (SELF-03). confirmSwapAfterBoot clears the swap
+// marker BEFORE the (up-to-10-min) promote poll, so a crash during the poll would otherwise lose
+// the promote entirely. This record, written before the poll and cleared after a terminal outcome,
+// is re-driven on the next boot. Kept separate from the swap marker so it can survive the marker
+// being cleared without arming a spurious boot-guard rollback.
+export const PENDING_PROMOTE_FILE = "pending-promote.json";
+
+export interface PendingPromote {
+  promote: { repo: string; prNumber: number; nodeId: string };
+  prUrl?: string;
+  fix?: { prTitle?: string; changes?: string[]; rootCause?: string };
+  at: string;
+}
+
+export function writePendingPromote(dataDir: string, p: PendingPromote): void {
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(join(dataDir, PENDING_PROMOTE_FILE), JSON.stringify(p));
+}
+
+export function readPendingPromote(dataDir: string): PendingPromote | null {
+  const path = join(dataDir, PENDING_PROMOTE_FILE);
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as PendingPromote;
+  } catch {
+    return null;
+  }
+}
+
+export function clearPendingPromote(dataDir: string): void {
+  rmSync(join(dataDir, PENDING_PROMOTE_FILE), { force: true });
+}
+
 export interface SwapMarker {
   at: string;
   attempt: number;
@@ -84,17 +117,43 @@ export function performSwap(
   //    mid-swap, the marker exists → boot-guard.mjs detects it and can roll back.
   //    Without this, a crash after `rm(src)` but before the marker leaves src/ absent
   //    with no recovery armed → unbootable loop.
+  const markerPath = join(dataDir, SWAP_MARKER_FILE);
   const marker: SwapMarker = { at: opts.at, attempt: 0, prUrl: opts.prUrl, promote: opts.promote, fix: opts.fix };
-  fs.writeMarker(join(dataDir, SWAP_MARKER_FILE), marker);
+  fs.writeMarker(markerPath, marker);
 
-  // 2. Backup the currently-running (known-good) tree.
-  if (fs.exists(srcBak)) fs.rm(srcBak);
-  fs.cp(liveSrc, srcBak);
-  fs.cp(join(appDir, pkg), join(appDir, `${pkg}.bak`));
-  if (fs.exists(join(appDir, lock))) fs.cp(join(appDir, lock), join(appDir, `${lock}.bak`));
+  // Cleanup used when a failure happens BEFORE the live tree is destroyed: the marker would
+  // otherwise leak and boot-guard could roll back a tree that was never swapped (the dev
+  // bind-mount EBUSY case — fs ops throw but src/ stays intact). Best-effort.
+  const unwind = () => {
+    try { fs.removeMarker(markerPath); } catch { /* best-effort */ }
+    for (const b of [srcBak, join(appDir, `${pkg}.bak`), join(appDir, `${lock}.bak`)]) {
+      try { if (fs.exists(b)) fs.rm(b); } catch { /* best-effort */ }
+    }
+  };
 
-  // 3. Swap in the new code.
-  fs.rm(liveSrc);
+  // 2. Backup the currently-running (known-good) tree. src/ is still intact here, so a failure
+  //    needs no recovery → unwind the marker rather than leaking it.
+  try {
+    if (fs.exists(srcBak)) fs.rm(srcBak);
+    fs.cp(liveSrc, srcBak);
+    fs.cp(join(appDir, pkg), join(appDir, `${pkg}.bak`));
+    if (fs.exists(join(appDir, lock))) fs.cp(join(appDir, lock), join(appDir, `${lock}.bak`));
+  } catch (err) {
+    unwind();
+    throw err;
+  }
+
+  // 3a. Remove the live src. If THIS throws (e.g. EBUSY on a bind-mounted dev src/), the tree
+  //     is still intact → unwind the marker so no spurious rollback is armed.
+  try {
+    fs.rm(liveSrc);
+  } catch (err) {
+    unwind();
+    throw err;
+  }
+
+  // 3b. POINT OF NO RETURN: src/ is now gone. A failure from here MUST leave the marker armed so
+  //     boot-guard.mjs can restore src.bak after repeated failed boots.
   fs.cp(join(sourceDir, "src"), liveSrc);
   fs.cp(join(sourceDir, pkg), join(appDir, pkg));
   if (fs.exists(join(sourceDir, lock))) fs.cp(join(sourceDir, lock), join(appDir, lock));

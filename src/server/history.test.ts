@@ -4,7 +4,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, existsSync, rmSync 
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 import Database from "better-sqlite3";
-import { createRecord, getRecord, listRecords, currentRun, updateRecord, addCase, continuationDepth, clearDatabase, appendActivity, upsertLearningRule, listLearningRules, recordRuleOutcome, saveScorecardEntry, loadScorecard, deleteAppHistory, interruptedRecords, backupDatabase } from "./history";
+import { createRecord, getRecord, listRecords, currentRun, updateRecord, addCase, continuationDepth, clearDatabase, appendActivity, upsertLearningRule, listLearningRules, recordRuleOutcome, saveScorecardEntry, loadScorecard, deleteAppHistory, interruptedRecords, backupDatabase, saveRunOutcome, getRunOutcome, listRunOutcomes, updateRunOutcomeReflection } from "./history";
+import type { RunOutcome, StructuredReflection } from "../types";
 
 test("createRecord stores an enqueued record findable by id", () => {
   const r = createRecord({ target: "e2e",  app: "hist-a", sha: "abcdef1234", mode: "diff" });
@@ -204,6 +205,54 @@ test("backupDatabase writes a consistent, openable snapshot containing committed
     if (prevRoot === undefined) delete process.env.AI_PIPELINE_ROOT;
     else process.env.AI_PIPELINE_ROOT = prevRoot;
     rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("updateRunOutcomeReflection back-fills the reflection that was null at verdict time", () => {
+  const app = "reflect-app";
+  deleteAppHistory(app); // self-isolate: the history DB is a module-global singleton
+  try {
+    const outcome: RunOutcome = {
+      runId: "run-reflect-1", app, sha: "abc1234", mode: "diff", target: "e2e",
+      verdict: "fail", errorClass: "E-EXEC-FAIL",
+      gateSignals: { static: true, coverageRatio: null, valueScore: null, reviewerCorrections: [], flaky: false, retries: 0 },
+      rulesRetrieved: [], at: "2026-06-13T00:00:00.000Z",
+    };
+    saveRunOutcome(outcome); // persisted at verdict time WITHOUT a reflection
+    assert.equal(listRunOutcomes(app)[0]?.reflection, undefined);
+
+    const reflection: StructuredReflection = {
+      goal: "test the discount", decision: "asserted only visibility", assumption: "button present",
+      errorClass: "E-EXEC-FAIL", gateSignal: "fail", evidence: "selector timed out",
+      rootCause: "wrong selector", preventiveRule: { trigger: "discount flow", action: "scope the locator" },
+    };
+    updateRunOutcomeReflection("run-reflect-1", reflection);
+    assert.deepEqual(listRunOutcomes(app)[0]?.reflection, reflection);
+  } finally {
+    deleteAppHistory(app);
+  }
+});
+
+test("getRunOutcome returns the single run's outcome and round-trips the reviewer verdict", () => {
+  const app = "value-report-app";
+  deleteAppHistory(app); // self-isolate: the history DB is a module-global singleton
+  try {
+    const outcome: RunOutcome = {
+      runId: "run-value-1", app, sha: "deadbeef0", mode: "diff", target: "e2e",
+      verdict: "pass", errorClass: null,
+      gateSignals: { static: true, coverageRatio: 0.82, valueScore: null, reviewerCorrections: [], reviewerRationale: "covers the new validation branch", reviewerApproved: true, flaky: false, retries: 0 },
+      rulesRetrieved: [], at: "2026-06-13T00:00:00.000Z",
+    };
+    saveRunOutcome(outcome);
+
+    const got = getRunOutcome("run-value-1");
+    assert.ok(got, "expected an outcome for the known runId");
+    assert.equal(got!.gateSignals.coverageRatio, 0.82);
+    assert.equal(got!.gateSignals.reviewerApproved, true);
+    assert.equal(got!.gateSignals.reviewerRationale, "covers the new validation branch");
+    assert.equal(getRunOutcome("does-not-exist"), undefined);
+  } finally {
+    deleteAppHistory(app);
   }
 });
 

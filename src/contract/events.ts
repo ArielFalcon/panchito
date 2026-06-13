@@ -57,7 +57,7 @@ export const RunEventBodySchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("test.flaky"), name: z.string(), attempts: z.number().int().positive() }),
   z.object({ type: z.literal("reviewer.verdict"), approved: z.boolean(), reasons: z.array(z.string()) }),
   z.object({ type: z.literal("coverage.computed"), changedLines: z.number().int().nonnegative(), coveredLines: z.number().int().nonnegative() }),
-  z.object({ type: z.literal("run.verdict"), verdict: RunVerdictSchema, passed: z.number().int().nonnegative().optional(), failed: z.number().int().nonnegative().optional() }),
+  z.object({ type: z.literal("run.verdict"), verdict: RunVerdictSchema, passed: z.number().int().nonnegative().optional(), failed: z.number().int().nonnegative().optional(), outcome: z.string().optional() }),
   z.object({ type: z.literal("agent.error"), detail: z.string() }),
   z.object({ type: z.literal("log.line"), level: LogLevelSchema, text: z.string() }), // fallback: only what is NOT a domain event
 ]);

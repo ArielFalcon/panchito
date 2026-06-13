@@ -18,7 +18,7 @@ export interface SecretDetection {
 // Named secret patterns — the regex + a short stable identifier for the audit
 // trail. Order matters: more specific patterns run first to avoid subsumption
 // (e.g. Slack webhook URLs are more specific than the generic credential pattern).
-const NAMED_SECRET_PATTERNS: Array<{ name: string; p: RegExp }> = [
+const NAMED_SECRET_PATTERNS: Array<{ name: string; p: RegExp; skip?: (m: string) => boolean }> = [
   // Slack webhook URLs — very specific; match before generic URL patterns
   { name: "slack-webhook", p: /https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/]+/g },
   // Stripe keys: sk_/pk_ prefixed, test or live
@@ -29,6 +29,16 @@ const NAMED_SECRET_PATTERNS: Array<{ name: string; p: RegExp }> = [
   { name: "github-token", p: /\bgh[pousr]_[A-Za-z0-9]{36,}\b/g },
   // GitHub fine-grained tokens: github_pat_ with 36+ chars
   { name: "github-token-fg", p: /\bgithub_pat_[A-Za-z0-9_]{36,}\b/g },
+  // LLM-provider keys: OpenAI/Anthropic `sk-...` (sk-proj-…, sk-ant-api03-…). Bare-value
+  // form (no adjacent credential keyword), which the assignment patterns below miss. The
+  // {20,} body keeps it off short hyphenated identifiers while every real key is far longer.
+  { name: "llm-api-key", p: /\bsk-[A-Za-z0-9_-]{20,}\b/g },
+  // Slack tokens: xoxb-/xoxp-/xoxa-/xoxr-/xoxs-
+  { name: "slack-token", p: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g },
+  // Credentials embedded in a connection string / URL: scheme://user:password@host. Match
+  // only the user:password span (lookbehind ://, lookahead @) so the host stays readable;
+  // requires the inner ':' so a bare scheme://host@ (no password) is left intact.
+  { name: "url-credentials", p: /(?<=:\/\/)[^\s:/@]+:[^\s:/@]+(?=@)/g },
   // Bearer tokens leaking in command output (git http.extraHeader, curl -H, etc.)
   { name: "bearer-token", p: /(?:Authorization|auth)\s*[:=]\s*Bearer\s+\S+/gi },
   // JWT: three base64url segments separated by dots
@@ -49,8 +59,18 @@ const NAMED_SECRET_PATTERNS: Array<{ name: string; p: RegExp }> = [
   // api_key/token/secret/password assignments — catch‑all; keep LAST among
   // assignment patterns so the more specific ones fire first.
   { name: "api-key-assignment", p: /(?:api[_-]?key|token|secret|password|passwd|pwd)[\"']?\s*[:=]\s*\S+/gi },
-  // base64‑encoded secrets (>40 chars of base64 chars), with data‑URI filter
-  { name: "base64-secret", p: /(?<![A-Za-z0-9+/=])[A-Za-z0-9+/=]{40,}(?![A-Za-z0-9+/=])/g },
+  // base64‑encoded secrets (>40 chars of base64 chars), with data‑URI filter.
+  // skip: a run of pure hex is a git SHA / digest (commit ids, lockfile hashes), NOT a
+  // secret — redacting it turned the run header's SHA into "[REDACT" (the launcher omits
+  // the sha, so the server resolves the full 40‑hex HEAD, which matched this pattern).
+  {
+    // The negative lookbehinds exclude lockfile INTEGRITY hashes (npm/yarn `sha512-<base64>`,
+    // `sha1-`, …): their base64 body is not a secret, and redacting it corrupts the diff the
+    // model reads. The skip still drops pure-hex runs (git SHAs / digests).
+    name: "base64-secret",
+    p: /(?<![A-Za-z0-9+/=])(?<!sha1-)(?<!sha256-)(?<!sha384-)(?<!sha512-)[A-Za-z0-9+/=]{40,}(?![A-Za-z0-9+/=])/g,
+    skip: (m) => /^[0-9a-f]+$/i.test(m),
+  },
 ];
 
 const INTERNAL_HOST_PATTERNS: RegExp[] = [
@@ -78,12 +98,16 @@ export function sanitizeText(input: string): { text: string; detection: SecretDe
   });
 
   // secret patterns
-  for (const { name, p } of NAMED_SECRET_PATTERNS) {
-    const matches = out.match(p);
-    if (matches && matches.length > 0) {
+  for (const { name, p, skip } of NAMED_SECRET_PATTERNS) {
+    let redactions = 0;
+    out = out.replace(p, (m) => {
+      if (skip?.(m)) return m; // a recognised non-secret (e.g. a git SHA) — leave it intact
+      redactions++;
+      return "[REDACTED_SECRET]";
+    });
+    if (redactions > 0) {
       matchedPatterns.push(name);
-      totalRedactions += matches.length;
-      out = out.replace(p, "[REDACTED_SECRET]");
+      totalRedactions += redactions;
     }
   }
 
@@ -107,20 +131,34 @@ export function sanitizeText(input: string): { text: string; detection: SecretDe
 export function containsSecrets(text: string): boolean {
   if (!text) return false;
   let masked = text.replace(/data:[^;]+;base64,[A-Za-z0-9+/=]+/gi, "");
-  for (const { p } of NAMED_SECRET_PATTERNS) {
-    // These are module-level /g regexes; .test() advances and persists lastIndex, which
-    // would make repeated calls alternate true/false. Reset it so detection is deterministic.
+  for (const { p, skip } of NAMED_SECRET_PATTERNS) {
+    // These are module-level /g regexes; .test()/.exec() advance and persist lastIndex,
+    // which would make repeated calls alternate — reset so detection is deterministic.
     p.lastIndex = 0;
-    if (p.test(masked)) return true;
+    if (skip) {
+      // Only a non-skipped match counts as a real secret (a git SHA must not trip this).
+      const ms = masked.match(p);
+      if (ms?.some((m) => !skip(m))) return true;
+    } else if (p.test(masked)) {
+      return true;
+    }
   }
   return false;
 }
 
 export const SECRET_AUDIT = new Map<string, number>();
+// The audit map is an in-memory diagnostic that nothing reads back into a decision, so it must
+// not grow without bound over a long-lived process. Cap it and evict in insertion order.
+export const SECRET_AUDIT_MAX = 500;
 
 export function recordAudit(runId: string, detection: SecretDetection): void {
   if (detection.redacted) {
     SECRET_AUDIT.set(runId, detection.count);
+    while (SECRET_AUDIT.size > SECRET_AUDIT_MAX) {
+      const oldest = SECRET_AUDIT.keys().next().value;
+      if (oldest === undefined) break;
+      SECRET_AUDIT.delete(oldest);
+    }
   }
 }
 

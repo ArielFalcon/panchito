@@ -14,6 +14,8 @@ import { testDataNamespace } from "../qa/test-data";
 import { RunMode, TestTarget, TriggerSource, QaCase } from "../types";
 import { activityRouter } from "../integrations/opencode-client";
 import { redactError } from "../util/redact";
+import { isInfraError } from "../errors";
+import { logJson } from "../integrations/logger";
 import type { RunEventStore } from "./run-events";
 import type { RunEventBody } from "../contract/events";
 
@@ -28,6 +30,14 @@ function isRunStep(value: string): value is RunStep {
   return RUN_EVENT_STEPS.has(value as RunStep);
 }
 
+// Classify a pipeline log line for the TUI's log tail. Heuristic on content — the
+// pipeline logs plain strings, so there is no structured level to read.
+function logLevelFor(text: string): "info" | "warn" | "error" {
+  if (/✗|\berror\b|\bfailed\b|crash/i.test(text)) return "error";
+  if (/⚠|\bwarn(?:ing)?\b|flaky|quarantin/i.test(text)) return "warn";
+  return "info";
+}
+
 export interface RunRequest {
   app: string;
   sha: string;
@@ -40,6 +50,7 @@ export interface RunRequest {
   parentRunId?: string; // continuation: the run this continues
   triggerRepo?: string; // cross-repo runs: the service repo whose commit originated this run
   previousNamespace?: string; // cleanup: namespace from an interrupted previous run
+  commits?: number; // diff mode: how many commits ending at the SHA the diff spans (default 1)
 }
 
 // Side-effecting collaborators, injected so the funnel is unit-testable with stubs.
@@ -89,24 +100,32 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
         appConfig.qa.shadow = req.shadow;
       }
       const pipeline = deps.pipeline ?? defaultPipelineDeps();
+      // Pipe every pipeline log line into THREE sinks: the console, the RunRecord (the
+      // chat assistant's context) and — the missing link — a `log.line` event per line so
+      // the TUI surfaces real-time progress instead of the user having to ask the chat.
+      // Multi-line blobs (e.g. test-runner stdout) are split so each renders as its own row.
+      const emitLog = (msg: string) => {
+        console.log(msg); // human-readable plain line for local/stdout visibility
+        // Structured, runId-correlated copy into the SHIPPED JSON stream (OBS-03): the per-run
+        // verdict reasoning was previously console-only / SQLite-blob-only and absent from the
+        // log stream an operator scrapes. file-only (mirrorToConsole=false) so console isn't doubled.
+        logJson(logLevelFor(msg), msg, { runId: record.id, app: req.app, sha: req.sha }, false);
+        appendLog(record.id, msg);
+        for (const raw of String(msg).split("\n")) {
+          const text = raw.replace(/\s+$/, "");
+          if (text) deps.runEvents?.publish(record.id, { type: "log.line", level: logLevelFor(text), text });
+        }
+      };
       const run = await runPipeline(
         appConfig,
         req.sha,
         {
           ...pipeline,
-          // Pipe every log message into the RunRecord so the chat assistant and
-          // TUI have real-time context on what the pipeline is doing.
-          log: (msg: string) => {
-            console.log(msg);
-            appendLog(record.id, msg);
-          },
+          log: emitLog,
           // During generation, emit a heartbeat every 15s so the TUI and chat
           // have live feedback while the agent is working (blocking prompt call).
           generate: async (input, signal) => {
-            const onProgress = (msg: string) => {
-              console.log(msg);
-              appendLog(record.id, msg);
-            };
+            const onProgress = emitLog;
             return pipeline.generate({ ...input, runId: record.id }, signal, (msg) => {
               // Enrich heartbeat messages with live agent context.
               const m = msg.match(/agent is working... \((\d+)s elapsed\)/);
@@ -122,7 +141,7 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
           },
         },
         req.source ?? "webhook",
-        { mode: req.mode, target: req.target, guidance: req.guidance, fixCases: req.fixCases, parentRunId: req.parentRunId, triggerRepo: req.triggerRepo, previousNamespace, runId: record.id },
+        { mode: req.mode, target: req.target, guidance: req.guidance, fixCases: req.fixCases, parentRunId: req.parentRunId, triggerRepo: req.triggerRepo, previousNamespace, runId: record.id, commits: req.commits },
         (step, detail) => {
           updateRecord(record.id, { step, stepDetail: detail, retrying: step === "retry" });
           const normalized = step === "publish" ? "decide" : step;
@@ -167,6 +186,9 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
         verdict: run.verdict,
         passed: run.cases.filter((x) => x.status === "pass").length,
         failed: run.cases.filter((x) => x.status === "fail").length,
+        // What the run PRODUCED (PR/Issue URL + merged state, or the reason note) — so the
+        // TUI summary shows the real outcome, not a generic guess.
+        ...(run.outcome || run.note ? { outcome: run.outcome ?? run.note } : {}),
       });
       updateRecord(record.id, {
         status: "done",
@@ -174,26 +196,32 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
         step: "done",
         retrying: false,
         note: run.note || undefined,
-        passed: run.cases.filter((x) => x.status === "pass").length,
-        failed: run.cases.filter((x) => x.status === "fail").length,
+        // passed/failed are NOT written here: addCase() is the single source of truth — it dedups
+        // by name and recomputes both columns from the cases table on every streamed case (A18).
+        // Writing them again from the in-memory run.cases gave two writers for one derived value
+        // that could silently disagree with the table they are supposed to summarize.
       });
       console.log(`[qa] run finished ${req.app}@${req.sha}: verdict=${run.verdict}`);
     } catch (err) {
       // A crash MUST finalize the record (status=done) — otherwise it stays
       // "running" forever and `qa run --watch` hangs waiting for a verdict.
       const msg = redactError(err);
-      updateRecord(record.id, { status: "done", step: "done", verdict: "infra-error", note: msg });
-      deps.runEvents?.publish(record.id, { type: "agent.error", detail: msg });
+      // Classify by TYPE, not by substring. Genuine INFRASTRUCTURE (DeployTimeout, operator
+      // cancel, anything wrapped in InfraError) is a transient, non-code condition. Anything else
+      // thrown out of the pipeline (an OpenCode 500, a rejected git push, a JSON.parse that threw,
+      // an open circuit breaker) is an UNEXPECTED INTERNAL ERROR — still inconclusive, but a defect
+      // to surface, NOT silently laundered into a benign "infrastructure, ignore".
+      const infra = isInfraError(err);
+      const note = infra ? msg : `unexpected internal error (not infrastructure — investigate): ${msg}`;
+      updateRecord(record.id, { status: "done", step: "done", verdict: "infra-error", note });
+      deps.runEvents?.publish(record.id, { type: "agent.error", detail: note });
       deps.runEvents?.publish(record.id, { type: "run.verdict", verdict: "infra-error" });
-      console.error(`[qa] run crashed ${req.app}@${req.sha}: ${msg}`);
+      console.error(`[qa] run ${infra ? "infra-error" : "CRASHED (internal error)"} ${req.app}@${req.sha}: ${msg}`);
 
-      // Infrastructure errors (DEV deploy timeout, operator cancel, network) are
-      // transient conditions — they must NOT create maintainer-eligible incidents
-      // that could trigger an autonomous self-modification for a non-code fault.
-      const isInfra =
-        (err instanceof Error && err.name === "DeployTimeoutError") ||
-        (msg.includes("run cancelled by operator"));
-      if (!isInfra) {
+      // Only a genuine infrastructure condition is exempt from a maintainer-eligible incident
+      // (it must not trigger an autonomous self-modification for a non-code fault). An unexpected
+      // internal error DOES record an incident so the failure is visible and not swallowed.
+      if (!infra) {
         recordIncident({ source: "qa-generator", severity: "error", summary: `pipeline crash for ${req.app}: ${msg}` });
       }
     }

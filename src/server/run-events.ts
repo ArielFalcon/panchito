@@ -15,6 +15,11 @@ interface RunEventStoreOptions {
   maxEventsPerRun?: number;
   maxRuns?: number;
   now?: () => number;
+  // Optional durable backing (OBS-01). When provided, every event is also persisted, and replay
+  // falls back to the durable copy when the in-memory buffer was evicted or wiped by a restart.
+  // Additive: absent ⇒ the store is purely in-memory as before.
+  persist?: (event: RunEvent) => void;
+  loadPersisted?: (runId: string, afterSeq: number) => RunEvent[];
 }
 
 function sanitizeUnknown(value: unknown): unknown {
@@ -58,12 +63,30 @@ export function createRunEventStore(opts: RunEventStoreOptions = {}): RunEventSt
       buf.push(event);
       if (buf.length > maxEventsPerRun) buf.splice(0, buf.length - maxEventsPerRun);
       buffers.set(runId, buf);
+      if (opts.persist) {
+        try {
+          opts.persist(event);
+        } catch {
+          /* best-effort durability — never block the live stream */
+        }
+      }
       bus.emit(eventKey(runId), event);
       return event;
     },
 
     replay(runId, afterSeq = -1) {
-      return [...(buffers.get(runId) ?? [])].filter((event) => event.seq > afterSeq);
+      const inMem = [...(buffers.get(runId) ?? [])].filter((event) => event.seq > afterSeq);
+      if (!opts.loadPersisted) return inMem;
+      // If the in-memory buffer is empty (run evicted from the ring, or wiped by a restart) or has
+      // a gap right after afterSeq, backfill from the durable copy so replay survives restarts.
+      const needsBackfill = inMem.length === 0 || (inMem[0]?.seq ?? Infinity) > afterSeq + 1;
+      if (!needsBackfill) return inMem;
+      const persisted = opts.loadPersisted(runId, afterSeq);
+      if (persisted.length === 0) return inMem;
+      const bySeq = new Map<number, RunEvent>();
+      for (const e of persisted) bySeq.set(e.seq, e);
+      for (const e of inMem) bySeq.set(e.seq, e); // in-memory wins (freshest)
+      return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
     },
 
     subscribe(runId, handler) {

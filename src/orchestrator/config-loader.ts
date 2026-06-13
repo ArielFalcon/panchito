@@ -20,6 +20,21 @@ export function loadAppConfig(name: string, root = ROOT): ValidatedAppConfig {
   return AppConfigSchema.parse(parse(raw));
 }
 
+// An unset ${VAR} is an OPERATOR error that silently un-watches an app (no webhooks for it),
+// which reads very differently from a genuinely malformed YAML — surface it as an ERROR so it
+// is not lost in the noise.
+function logConfigSkip(file: string, err: unknown): void {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/unset env var/.test(msg)) {
+    console.error(
+      `[qa] CONFIG ERROR: ${file} references an unset env var — this app will NOT be watched ` +
+        `(no webhooks processed for it) until the variable is set in the environment: ${msg}`,
+    );
+  } else {
+    console.warn(`[qa] skipping malformed config ${file}: ${msg}`);
+  }
+}
+
 export type RepoRole = "primary" | "service";
 
 export interface RepoMatch {
@@ -41,7 +56,7 @@ export function loadAppConfigsByRepo(repo: string, root = ROOT): RepoMatch[] {
     try {
       cfg = loadAppConfig(file.replace(/\.yaml$/, ""), root);
     } catch (err) {
-      console.warn(`[qa] skipping malformed config ${file}: ${err instanceof Error ? err.message : String(err)}`);
+      logConfigSkip(file, err);
       continue;
     }
     if (cfg.repo === repo) out.push({ app: cfg, role: "primary" });
@@ -61,14 +76,17 @@ export function listAppConfigs(root = ROOT): AppConfig[] {
     try {
       out.push(loadAppConfig(f.replace(/\.yaml$/, ""), root));
     } catch (err) {
-      console.warn(`[qa] skipping malformed config ${f}: ${err instanceof Error ? err.message : String(err)}`);
+      logConfigSkip(f, err);
     }
   }
   return out;
 }
 
 export function expandEnv(s: string, env: Record<string, string | undefined> = process.env): string {
-  return s.replace(/\$\{([A-Z0-9_]+)\}/g, (_, key) => {
+  // Match any valid shell-style identifier (NOT uppercase-only): a mis-cased ${myToken}
+  // previously slipped through the uppercase regex unexpanded and reached the parser as the
+  // literal string "${myToken}" — a silently broken config instead of a clear "unset" error.
+  return s.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, key) => {
     const val = env[key];
     if (val === undefined) throw new Error(`config references unset env var \${${key}}`);
     return val;

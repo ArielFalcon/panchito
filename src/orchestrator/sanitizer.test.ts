@@ -8,6 +8,31 @@ test("redacts secrets (api key, token)", () => {
   assert.doesNotMatch(out, /sk-abc123XYZ/);
 });
 
+test("redacts a bare LLM provider key (sk-...) with no adjacent keyword", () => {
+  const key = "sk-proj-abcDEF0123456789ghijKLMNopqrstuvWX";
+  const { text: out } = sanitizeText(`const k = "${key}"; // committed by mistake`);
+  assert.doesNotMatch(out, /sk-proj-/);
+  assert.match(out, /\[REDACTED_SECRET\]/);
+});
+
+test("redacts a bare Slack token (xoxb-...)", () => {
+  const { text: out } = sanitizeText("notify('xoxb-1234567890-ABCDEFghijkl')");
+  assert.doesNotMatch(out, /xoxb-1234567890/);
+  assert.match(out, /\[REDACTED_SECRET\]/);
+});
+
+test("redacts the password in a DB connection string but keeps the host", () => {
+  const { text: out } = sanitizeText("DATABASE_URL=postgres://admin:s3cr3tP4ss@db.internal:5432/app");
+  assert.doesNotMatch(out, /s3cr3tP4ss/);
+  assert.match(out, /\[REDACTED_SECRET\]/);
+  assert.match(out, /db\.internal/); // host left readable
+});
+
+test("does not mangle a credential-free URL (no user:pass@)", () => {
+  const code = "fetch('https://api.example.com/v1/users?page=2')";
+  assert.equal(sanitizeText(code).text, code);
+});
+
 test("redacts JWT", () => {
   const jwt = "eyJhbGciOi.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2QT4";
   const { text: out } = sanitizeText(`Authorization: Bearer ${jwt}`);
@@ -25,6 +50,13 @@ test("redacts email (PII)", () => {
   const { text: out } = sanitizeText("user: ana.perez@company.com created the order");
   assert.match(out, /\[REDACTED_PII\]/);
   assert.doesNotMatch(out, /ana\.perez@company\.com/);
+});
+
+test("does not mangle npm/yarn lockfile integrity hashes (sha512-<base64>)", () => {
+  const line = '"integrity": "sha512-Vd1njGZNqVKbpZ3HsKv2DiQGfx7Yz3mXk0pq9rStUvWxYzAbCdEfGh=="';
+  const { text } = sanitizeText(line);
+  assert.match(text, /sha512-Vd1njGZNqVKbpZ3HsKv2DiQGfx7Yz3mXk0pq9rStUvWxYzAbCdEfGh==/);
+  assert.doesNotMatch(text, /REDACTED/);
 });
 
 test("does not mangle normal code", () => {
@@ -115,6 +147,20 @@ test("redacts base64 secret", () => {
   const { text: out } = sanitizeText(`data: ${long64}`);
   assert.match(out, /\[REDACTED_SECRET\]/);
   assert.doesNotMatch(out, new RegExp(long64));
+});
+
+test("does NOT redact a git SHA / hex digest as a base64 secret", () => {
+  // A 40-char lowercase hex commit SHA matched the base64 pattern and became "[REDACT"
+  // in the run header. Hex runs are commit ids / lockfile digests, not secrets.
+  const sha = "9f6edf0a1b2c3d4e5f60718293a4b5c6d7e8f901";
+  const { text: out, detection } = sanitizeText(`sha ${sha} done`);
+  assert.match(out, new RegExp(sha), "the SHA must survive sanitization");
+  assert.doesNotMatch(out, /\[REDACTED_SECRET\]/);
+  assert.equal(detection.redacted, false);
+  assert.equal(containsSecrets(sha), false);
+  // A 64-char hex digest (sha256) is likewise not a secret.
+  const sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+  assert.doesNotMatch(sanitizeText(sha256).text, /\[REDACTED_SECRET\]/);
 });
 
 test("preserves data URIs (not redacted as base64)", () => {

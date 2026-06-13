@@ -30,14 +30,14 @@ test("Issue leads with a high-level headline, what-was-tested and findings — n
   assert.match(body, /- login\.spec\.ts: scope the Pay selector/); // "; " corrections split into bullets
   // the cause is ONE line — the stack tail is not inlined
   assert.doesNotMatch(body, /\*\*checkout\*\* —[^\n]*call log/);
-  // logs are demoted to a collapsed appendix, not the headline
-  assert.match(body, /<details>\s*\n<summary>Run logs/);
-  assert.match(body, /verbose playwright output/);
+  // raw run logs are NOT embedded — the Issue stays human-readable (the trace has them)
+  assert.doesNotMatch(body, /<details>/);
+  assert.doesNotMatch(body, /verbose playwright output/);
   // passing case is not listed
   assert.doesNotMatch(body, /login ok/);
 });
 
-test("sanitizes secrets in logs, case details and the note before they reach a public Issue", () => {
+test("sanitizes secrets in case details and the note before they reach a public Issue", () => {
   const body = renderIssue(
     {
       sha: "abc123",
@@ -60,20 +60,18 @@ test("a run with no cases, no note and no logs still renders a valid headline", 
   assert.doesNotMatch(body, /<details>/); // no empty logs appendix
 });
 
-test("budgets an oversized log so the body stays under GitHub's 65536-char limit, keeping the tail", () => {
-  // Realistic log shape: many short lines (not one giant contiguous base64-char run,
-  // which would be flagged by the sanitizer's base64-secret rule). The marker lives
-  // at the tail so we can prove head+tail truncation keeps the failing region.
+test("does NOT embed raw run logs — the cause comes from the structured fields, not a dump", () => {
   const huge = "verbose log line\n".repeat(20_000) + "FINAL_ERROR_MARKER";
   const body = renderIssue(
     { sha: "abc123", verdict: "fail", passed: false, cases: [{ name: "c", status: "fail", detail: "boom" }], logs: huge },
     { note: "the run did not converge" },
   );
   assert.ok(body.length <= 65536, `body length ${body.length} should be <= 65536`);
-  assert.match(body, /FINAL_ERROR_MARKER/); // the tail (where the failure is) survives
-  assert.match(body, /chars omitted/); // truncation is signalled, not silent
-  assert.match(body, /abc123/); // structure preserved
-  assert.match(body, /Trace available in the run artifacts/);
+  assert.doesNotMatch(body, /FINAL_ERROR_MARKER/); // logs are not embedded at all
+  assert.doesNotMatch(body, /verbose log line/);
+  assert.match(body, /\*\*c\*\* — boom/); // the case's one-line cause is the actionable signal
+  assert.match(body, /abc123/);
+  assert.match(body, /Full trace \+ logs in the run artifacts/);
 });
 
 test("caps a flood of failed cases instead of letting the body balloon", () => {

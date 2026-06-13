@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AppConfigSchema } from "./schemas";
+import { AppConfigSchema, ManifestEntrySchema } from "./schemas";
 
 const base = {
   name: "shop",
@@ -59,4 +59,27 @@ test("qa.parallelDiff parses and defaults to undefined", () => {
   assert.equal(on.qa.parallelDiff, true);
   const off = AppConfigSchema.parse(base);
   assert.equal(off.qa.parallelDiff, undefined);
+});
+
+// ── manifest entry: write↔read alignment (post-ADR-001, Phase 3.1) ─────────────
+
+const manifestEntry = {
+  id: "login",
+  objective: "valid credentials reach the dashboard",
+  flow: "login",
+  targets: ["AuthService.login"],
+  changeRef: { sha: "abc123", type: "feat" },
+};
+
+test("ManifestEntrySchema accepts a well-formed entry", () => {
+  assert.equal(ManifestEntrySchema.safeParse(manifestEntry).success, true);
+});
+
+test("ManifestEntrySchema rejects empty targets / empty objective — write uses the read invariant (Phase 3.1)", () => {
+  // The write path (opencode-client) validates each entry with THIS schema before writing,
+  // so it can never emit a manifest that read-validation would later reject (empty targets
+  // is a deliberate invariant — see qa/metadata.test.ts). The bad entry is dropped at write
+  // with a warning rather than corrupting e2e/.qa/manifest.json.
+  assert.equal(ManifestEntrySchema.safeParse({ ...manifestEntry, targets: [] }).success, false);
+  assert.equal(ManifestEntrySchema.safeParse({ ...manifestEntry, objective: "" }).success, false);
 });
