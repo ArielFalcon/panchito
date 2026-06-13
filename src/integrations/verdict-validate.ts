@@ -1,0 +1,96 @@
+// Typed verdict contract (post-ADR-001, Phase 1). The ADR-001 evaluation rejected turning
+// the orchestrator↔agent boundary into an MCP server, but kept its one real improvement:
+// make the agent's output a TYPED, validated contract instead of JSON scraped best-effort
+// from free text. This module validates the two verdicts the agent emits — the generator's
+// deliverable and the reviewer's authoritative gate — against the zod schemas, and builds the
+// targeted re-prompt used by the bounded repair loop in opencode-client.
+//
+// Separation of concerns: verdict-parse.ts EXTRACTS data from the agent's free-form text
+// (the balanced-brace scanner); this module JUDGES shape against the contract and explains
+// what is wrong so the agent can fix the format rather than re-reason the whole task.
+
+import { z } from "zod";
+import { GeneratorVerdictSchema, ReviewerVerdictSchema } from "../orchestrator/schemas";
+import { lastJsonMatching, isClosingVerdict } from "./verdict-parse";
+
+// Render zod issues as compact, prompt-ready strings ("path: message").
+function formatIssues(error: z.ZodError): string[] {
+  return error.issues.map((i) => `${i.path.map(String).join(".") || "(root)"}: ${i.message}`);
+}
+
+export interface VerdictCheck {
+  valid: boolean;
+  issues: string[]; // empty when valid
+}
+
+// Validate the GENERATOR's closing JSON: { specs[], specMetas?, note? }. We locate the LAST
+// balanced object that looks like the verdict block (carries a `specs` array — the
+// deliverable — or a boolean `approved` from older/other modes) and validate it. A missing
+// block is invalid (the agent forgot its closing JSON); the repair loop can recover it.
+export function checkGeneratorVerdict(text: string): VerdictCheck {
+  const candidate = lastJsonMatching(text, isClosingVerdict);
+  if (!candidate) {
+    return { valid: false, issues: ["no closing verdict JSON found (expected a block with a `specs` array)"] };
+  }
+  const r = GeneratorVerdictSchema.safeParse(candidate);
+  return r.success ? { valid: true, issues: [] } : { valid: false, issues: formatIssues(r.error) };
+}
+
+export interface ReviewerVerdict {
+  approved: boolean;
+  rationale?: string;
+  corrections: string[];
+  valid: boolean; // the reviewer JSON satisfied the schema (i.e. `approved` is a clean boolean)
+  parsed: boolean; // an object carrying an `approved` field was found at all
+  issues: string[];
+}
+
+// Parse the REVIEWER's verdict: { approved, rationale?, corrections[] } — the AUTHORITATIVE
+// gate. Fail-closed: a missing/invalid verdict yields approved=false so nothing publishes by
+// accident, but `valid`/`issues` let the caller repair once before giving up.
+//
+// The candidate predicate matches any object carrying an `approved` KEY (not only a boolean
+// one) so that a mistyped gate (`"approved":"true"`, `1`, `null`) is caught by the schema and
+// surfaced as a precise repair issue — rather than being missed entirely and mislabelled "no
+// verdict". This is what makes the schema validation meaningful for the authoritative gate.
+export function parseReviewerVerdict(text: string): ReviewerVerdict {
+  const candidate = lastJsonMatching(text, (x) => "approved" in x);
+  if (!candidate) {
+    return {
+      approved: false,
+      corrections: [],
+      valid: false,
+      parsed: false,
+      issues: ["no reviewer verdict JSON (an object with an `approved` field) was found"],
+    };
+  }
+  const r = ReviewerVerdictSchema.safeParse(candidate);
+  if (r.success) {
+    return {
+      approved: r.data.approved,
+      ...(r.data.rationale && r.data.rationale.trim() ? { rationale: r.data.rationale.trim() } : {}),
+      corrections: r.data.corrections,
+      valid: true,
+      parsed: true,
+      issues: [],
+    };
+  }
+  // An `approved` field was present but did not satisfy the schema (e.g. it is a string/number,
+  // not a boolean). Fail closed and flag the precise issue so the bounded repair can fix it.
+  return { approved: false, corrections: [], valid: false, parsed: true, issues: formatIssues(r.error) };
+}
+
+// The targeted re-prompt for the bounded repair loop. Names the exact shape and the specific
+// issues so the agent fixes the format rather than re-running the whole task.
+export function repairInstruction(kind: "generator" | "reviewer", issues: string[]): string {
+  const shape =
+    kind === "generator"
+      ? `{"specs": string[], "specMetas"?: [{"file","flow","objective","targets": string[]}], "note"?: string}`
+      : `{"approved": boolean, "rationale": string, "corrections": string[]}`;
+  return [
+    `Your previous response did not end with a valid ${kind} verdict JSON.`,
+    `Problems: ${issues.join("; ")}.`,
+    `Re-emit ONLY the closing JSON block — exactly this shape, with no text after it:`,
+    shape,
+  ].join("\n");
+}
