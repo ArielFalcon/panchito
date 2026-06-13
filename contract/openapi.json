@@ -426,6 +426,52 @@
         }
       }
     },
+    "/api/v1/apps/{name}/intelligence": {
+      "get": {
+        "operationId": "getAppIntelligence",
+        "summary": "Learning ledger, value-oracle scorecard and curriculum for an app (read-only)",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "intelligence view",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntelligenceView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/signals": {
+      "get": {
+        "operationId": "getSignals",
+        "summary": "Fleet-wide integrity readout: ground-truth value-oracle vs. proxy pass-rate (read-only)",
+        "responses": {
+          "200": {
+            "description": "signals view",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignalsView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/repos": {
       "get": {
         "operationId": "listRepos",
@@ -1005,6 +1051,9 @@
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 9007199254740991
+              },
+              "outcome": {
+                "type": "string"
               }
             },
             "required": [
@@ -1456,6 +1505,11 @@
           },
           "shadow": {
             "type": "boolean"
+          },
+          "commits": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
           }
         },
         "required": [
@@ -2143,6 +2197,279 @@
         "required": [
           "provider",
           "model"
+        ],
+        "additionalProperties": false
+      },
+      "LearningRuleView": {
+        "type": "object",
+        "properties": {
+          "trigger": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          },
+          "errorClass": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "usageCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "outcomeCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "successRate": {
+            "nullable": true,
+            "type": "number"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "candidate",
+              "active",
+              "deprecated",
+              "superseded"
+            ]
+          }
+        },
+        "required": [
+          "trigger",
+          "action",
+          "errorClass",
+          "confidence",
+          "usageCount",
+          "outcomeCount",
+          "successRate",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "ScorecardView": {
+        "type": "object",
+        "properties": {
+          "updatedAt": {
+            "type": "string"
+          },
+          "totalRuns": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "measuredRuns": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "avgValueScore": {
+            "nullable": true,
+            "type": "number"
+          },
+          "lastValueScore": {
+            "nullable": true,
+            "type": "number"
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "valueScore": {
+                  "nullable": true,
+                  "type": "number"
+                },
+                "mutantCount": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "killedCount": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "target": {
+                  "type": "string"
+                },
+                "at": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "valueScore",
+                "mutantCount",
+                "killedCount",
+                "target",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "updatedAt",
+          "totalRuns",
+          "measuredRuns",
+          "avgValueScore",
+          "lastValueScore",
+          "entries"
+        ],
+        "additionalProperties": false
+      },
+      "CurriculumView": {
+        "type": "object",
+        "properties": {
+          "updatedAt": {
+            "type": "string"
+          },
+          "archetypes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "archetype": {
+                  "type": "string"
+                },
+                "caughtRealBug": {
+                  "type": "boolean"
+                },
+                "promotionCount": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "archetype",
+                "caughtRealBug",
+                "promotionCount"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "updatedAt",
+          "archetypes"
+        ],
+        "additionalProperties": false
+      },
+      "IntelligenceView": {
+        "type": "object",
+        "properties": {
+          "app": {
+            "type": "string"
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LearningRuleView"
+            }
+          },
+          "scorecard": {
+            "nullable": true,
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ScorecardView"
+              }
+            ]
+          },
+          "curriculum": {
+            "nullable": true,
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CurriculumView"
+              }
+            ]
+          }
+        },
+        "required": [
+          "app",
+          "rules",
+          "scorecard",
+          "curriculum"
+        ],
+        "additionalProperties": false
+      },
+      "SignalsView": {
+        "type": "object",
+        "properties": {
+          "valueOracle": {
+            "type": "object",
+            "properties": {
+              "measured": {
+                "type": "boolean"
+              },
+              "avgScore": {
+                "nullable": true,
+                "type": "number"
+              },
+              "measuredRuns": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "totalRuns": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "measured",
+              "avgScore",
+              "measuredRuns",
+              "totalRuns"
+            ],
+            "additionalProperties": false
+          },
+          "reviewer": {
+            "type": "object",
+            "properties": {
+              "passRate": {
+                "nullable": true,
+                "type": "number"
+              },
+              "runs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "passRate",
+              "runs"
+            ],
+            "additionalProperties": false
+          },
+          "coverage": {
+            "type": "object",
+            "properties": {
+              "measured": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "measured"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "valueOracle",
+          "reviewer",
+          "coverage"
         ],
         "additionalProperties": false
       }

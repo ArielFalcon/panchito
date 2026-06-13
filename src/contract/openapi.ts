@@ -21,6 +21,8 @@ import {
   PublicAgentConfigSchema, AgentConfigUpdateSchema, AgentConfigApplyResultSchema,
   AgentModelsResponseSchema, AgentRestartRequestSchema, AgentRestartResponseSchema,
   AgentProviderHealthSchema, AgentModelInfoSchema, RoleAssignmentSchema,
+  LearningRuleViewSchema, ScorecardViewSchema, CurriculumViewSchema, IntelligenceViewSchema,
+  SignalsViewSchema,
 } from "./commands";
 
 export const API_VERSION = "1.0.0";
@@ -62,6 +64,11 @@ const NAMED_SCHEMAS = {
   AgentProviderHealth: AgentProviderHealthSchema,
   AgentModelInfo: AgentModelInfoSchema,
   RoleAssignment: RoleAssignmentSchema,
+  LearningRuleView: LearningRuleViewSchema,
+  ScorecardView: ScorecardViewSchema,
+  CurriculumView: CurriculumViewSchema,
+  IntelligenceView: IntelligenceViewSchema,
+  SignalsView: SignalsViewSchema,
 } as const;
 
 function componentSchemas(): Record<string, unknown> {
@@ -171,6 +178,21 @@ function paths(): Record<string, unknown> {
         operationId: "deleteApp",
         parameters: [nameParam, { name: "purge", in: "query", schema: { type: "boolean" } }],
         responses: { "200": { description: "deleted app config", content: jsonBody("DeleteAppResult") } },
+      },
+    },
+    "/api/v1/apps/{name}/intelligence": {
+      get: {
+        operationId: "getAppIntelligence",
+        summary: "Learning ledger, value-oracle scorecard and curriculum for an app (read-only)",
+        parameters: [nameParam],
+        responses: { "200": { description: "intelligence view", content: jsonBody("IntelligenceView") } },
+      },
+    },
+    "/api/v1/signals": {
+      get: {
+        operationId: "getSignals",
+        summary: "Fleet-wide integrity readout: ground-truth value-oracle vs. proxy pass-rate (read-only)",
+        responses: { "200": { description: "signals view", content: jsonBody("SignalsView") } },
       },
     },
     "/api/v1/repos": {

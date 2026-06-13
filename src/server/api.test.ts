@@ -107,6 +107,25 @@ test("GET /api/v1/version returns the handshake and judges client compatibility"
   assert.equal(JSON.parse(old.body).compatible, false);
 });
 
+test("GET /api/signals returns the fleet integrity view, or 501 when not wired", async () => {
+  const notWired = mkRes();
+  await handleApi(mkReq("GET", "/api/v1/signals"), notWired, deps());
+  assert.equal(notWired.status, 501);
+
+  const res = mkRes();
+  await handleApi(mkReq("GET", "/api/v1/signals"), res, deps({
+    signals: () => ({
+      valueOracle: { measured: true, avgScore: 0.8, measuredRuns: 10, totalRuns: 20 },
+      reviewer: { passRate: 0.5, runs: 4 },
+      coverage: { measured: false },
+    }),
+  }));
+  assert.equal(res.status, 200);
+  const view = JSON.parse(res.body);
+  assert.equal(view.valueOracle.avgScore, 0.8);
+  assert.equal(view.coverage.measured, false);
+});
+
 test("GET /api/runs/:id sanitizes logs/cases/note before egress", async () => {
   const leaky: RunRecord = {
     id: "r1", app: "demo", sha: "abc", target: "e2e", mode: "diff", status: "done", verdict: "fail",
@@ -311,7 +330,7 @@ const publicAgentConfig = {
   singleProvider: "opencode" as const,
   assignments: {
     primary: { provider: "opencode" as const, model: "opencode-go/deepseek-v4-pro" },
-    reviewer: { provider: "opencode" as const, model: "opencode-go/qwen3.7-max" },
+    reviewer: { provider: "opencode" as const, model: "opencode-go/minimax-m3" },
     chat: { provider: "opencode" as const, model: "opencode-go/deepseek-v4-flash" },
   },
   keys: { opencode: true, codex: false },

@@ -37,6 +37,8 @@ import {
   QueueStatusSchema,
   RepoListResponseSchema,
   RunRecordSchema,
+  IntelligenceViewSchema,
+  SignalsViewSchema,
   UpdateAppInputSchema,
   VersionInfoSchema,
 } from "../contract/commands";
@@ -48,13 +50,19 @@ const TARGETS: TestTarget[] = ["e2e", "code"];
 
 export interface ApiDeps {
   queue: { readonly size: number };
-  enqueue(app: string, sha: string, target: TestTarget, mode: RunMode, guidance?: string, shadow?: boolean): string;
+  enqueue(app: string, sha: string, target: TestTarget, mode: RunMode, guidance?: string, shadow?: boolean, commits?: number): string;
   loadApp(name: string): AppConfig; // throws if the app is not configured
   listApps(): AppConfig[];
   resolveRef(repo: string, ref: string): Promise<string>;
   getRecord(id: string): RunRecord | undefined;
   listRecords(app: string, limit: number): RunRecord[];
   currentRun(): RunRecord | undefined;
+  // Read-only intelligence projection (learning ledger + oracle scorecard + curriculum)
+  // for an app. Absent ⇒ the /intelligence route returns 501.
+  intelligence?: (app: string) => z.infer<typeof IntelligenceViewSchema>;
+  // Read-only fleet-wide integrity readout (ground-truth value-oracle vs. proxy pass-rate).
+  // Absent ⇒ the /signals route returns 501.
+  signals?: () => z.infer<typeof SignalsViewSchema>;
   ask?: (input: { context: string; question: string; instruction?: string }) => Promise<string>;
   cancelRun?: (id: string) => boolean;
   // Continuation (human-in-the-loop): re-run fixing the parent run's failed cases.
@@ -154,6 +162,15 @@ export async function handleApi(
     return handleGetApp(res, deps, appMatch[1]!);
   }
 
+  const intelMatch = path.match(/^\/api\/apps\/([^/]+)\/intelligence$/);
+  if (req.method === "GET" && intelMatch) {
+    return handleAppIntelligence(res, deps, intelMatch[1]!);
+  }
+
+  if (req.method === "GET" && path === "/api/signals") {
+    return handleSignals(res, deps);
+  }
+
   if (req.method === "GET" && path === "/api/apps") {
     return handleListApps(res, deps);
   }
@@ -239,6 +256,10 @@ async function handleCreateRun(req: IncomingMessage, res: ServerResponse, deps: 
     typeof body.mode === "string" && (RUN_MODES as readonly string[]).includes(body.mode) ? (body.mode as RunMode) : "diff";
   const guidance = typeof body.guidance === "string" ? body.guidance.slice(0, 2000) : undefined;
   const shadow = typeof body.shadow === "boolean" ? body.shadow : undefined;
+  const commits =
+    typeof body.commits === "number" && Number.isInteger(body.commits) && body.commits >= 1 && body.commits <= 20
+      ? body.commits
+      : undefined;
 
   let sha: string;
   if (typeof body.sha === "string" && /^[0-9a-f]{7,40}$/i.test(body.sha)) {
@@ -262,7 +283,7 @@ async function handleCreateRun(req: IncomingMessage, res: ServerResponse, deps: 
 
   let id: string;
   try {
-    id = deps.enqueue(appConfig.name, sha, target, mode, guidance, shadow);
+    id = deps.enqueue(appConfig.name, sha, target, mode, guidance, shadow, commits);
   } catch (err) {
     json(res, 500, { error: `failed to enqueue run: ${err instanceof Error ? err.message : String(err)}` });
     return true;
@@ -361,8 +382,14 @@ function handleCancelRun(res: ServerResponse, deps: ApiDeps, id: string): boolea
   const cancelled = deps.cancelRun(id);
   if (cancelled) {
     json(res, 200, { id, status: "cancelled" });
+  } else if (deps.getRecord(id)?.status === "done") {
+    // It was enqueued (not yet running): cancelRun finalized the record and pulled it
+    // from the queue before it could start.
+    json(res, 200, { id, status: "cancelled", message: "run was enqueued, not running — removed from queue" });
   } else {
-    json(res, 200, { id, status: "enqueued", message: "run was enqueued, not running — removed from queue" });
+    // Running per the (stale) record, but it is no longer the run holding the queue —
+    // it already finished or a successor is now executing. Do NOT report it cancelled.
+    json(res, 409, { id, status: "running", message: "run is no longer the active run (it finished or a successor is now running)" });
   }
   return true;
 }
@@ -401,6 +428,30 @@ function handleGetApp(res: ServerResponse, deps: ApiDeps, name: string): boolean
   } catch {
     json(res, 404, { error: `app not found: '${name}'` });
   }
+  return true;
+}
+
+function handleAppIntelligence(res: ServerResponse, deps: ApiDeps, name: string): boolean {
+  if (!deps.intelligence) {
+    json(res, 501, { error: "intelligence is not available" });
+    return true;
+  }
+  try {
+    deps.loadApp(name); // 404 when the app isn't configured
+  } catch {
+    json(res, 404, { error: `app not found: '${name}'` });
+    return true;
+  }
+  contractJson(res, 200, IntelligenceViewSchema, deps.intelligence(name));
+  return true;
+}
+
+function handleSignals(res: ServerResponse, deps: ApiDeps): boolean {
+  if (!deps.signals) {
+    json(res, 501, { error: "signals is not available" });
+    return true;
+  }
+  contractJson(res, 200, SignalsViewSchema, deps.signals());
   return true;
 }
 

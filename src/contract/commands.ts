@@ -114,6 +114,9 @@ export const CreateRunInputSchema = z.object({
   ref: z.string().optional(),
   guidance: z.string().optional(),
   shadow: z.boolean().optional(),
+  // diff mode only: how many commits ending at the run's SHA the diff spans (default 1).
+  // Lets a run analyze a short series as one blast radius, not just the tip commit.
+  commits: z.number().int().min(1).max(20).optional(),
 });
 
 export const CreateRunResultSchema = z.object({
@@ -331,3 +334,81 @@ export type AgentModelInfo = z.infer<typeof AgentModelInfoSchema>;
 export type AgentConfigApplyResult = z.infer<typeof AgentConfigApplyResultSchema>;
 export type AgentRestartRequest = z.infer<typeof AgentRestartRequestSchema>;
 export type AgentRestartResponse = z.infer<typeof AgentRestartResponseSchema>;
+
+// ── Intelligence (read-only projections of the persisted learning artifacts) ──────
+// The operator console renders these; they are honest views of what the ledger, the
+// value-oracle scorecard and the curriculum actually hold — no signal is invented.
+
+export const LearningRuleViewSchema = z.object({
+  trigger: z.string(),
+  action: z.string(),
+  errorClass: z.string(),
+  confidence: z.enum(["low", "medium", "high"]),
+  usageCount: z.number().int().nonnegative(),
+  outcomeCount: z.number().int().nonnegative(),
+  successRate: z.number().nullable(),
+  status: z.enum(["candidate", "active", "deprecated", "superseded"]),
+});
+
+export const ScorecardViewSchema = z.object({
+  updatedAt: z.string(),
+  totalRuns: z.number().int().nonnegative(),
+  measuredRuns: z.number().int().nonnegative(),
+  avgValueScore: z.number().nullable(),
+  lastValueScore: z.number().nullable(),
+  entries: z.array(
+    z.object({
+      valueScore: z.number().nullable(),
+      mutantCount: z.number().int().nonnegative(),
+      killedCount: z.number().int().nonnegative(),
+      target: z.string(),
+      at: z.string(),
+    }),
+  ),
+});
+
+export const CurriculumViewSchema = z.object({
+  updatedAt: z.string(),
+  archetypes: z.array(
+    z.object({
+      archetype: z.string(),
+      caughtRealBug: z.boolean(),
+      promotionCount: z.number().int().nonnegative(),
+    }),
+  ),
+});
+
+export const IntelligenceViewSchema = z.object({
+  app: z.string(),
+  rules: z.array(LearningRuleViewSchema),
+  scorecard: ScorecardViewSchema.nullable(),
+  curriculum: CurriculumViewSchema.nullable(),
+});
+
+export type IntelligenceView = z.infer<typeof IntelligenceViewSchema>;
+
+// ── Signals (fleet-wide integrity readout — the anti-Goodhart panel) ───────────────
+// The honest answer to "can I trust the fleet's green?". It juxtaposes the ground-truth
+// value-oracle (◆, real, from the aggregated scorecards) against the proxy the rest of
+// the console shows everywhere (◇ pass rate), and states plainly that change-coverage is
+// not measured yet (⚠). Every field is derived from persisted data — nothing is invented.
+export const SignalsViewSchema = z.object({
+  // ◆ ground truth: do the tests actually catch injected bugs? (value-oracle scorecard)
+  valueOracle: z.object({
+    measured: z.boolean(),
+    avgScore: z.number().nullable(), // 0..1, weighted by measured runs; null when unmeasured
+    measuredRuns: z.number().int().nonnegative(),
+    totalRuns: z.number().int().nonnegative(),
+  }),
+  // ◇ proxy: the LLM reviewer + harness produce a green/red verdict — useful, but circular.
+  reviewer: z.object({
+    passRate: z.number().nullable(), // fraction of quality-verdict runs that passed
+    runs: z.number().int().nonnegative(), // runs that produced a quality verdict (pass/fail/flaky/invalid)
+  }),
+  // ⚠ keystone, not built yet: does executing the test cover the changed lines?
+  coverage: z.object({
+    measured: z.boolean(),
+  }),
+});
+
+export type SignalsView = z.infer<typeof SignalsViewSchema>;
