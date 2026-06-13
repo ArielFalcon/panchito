@@ -541,7 +541,7 @@ function buildTask(input: OpencodeRunInput): string {
     `## Change intent (Conventional Commits)`,
     `- Type: ${intent?.type ?? "unknown"}${intent?.breaking ? " (BREAKING)" : ""}`,
     `- Message: ${sanitizeText(intent?.message ?? "").text}`,
-    `- Changed files (derive the scope/area from these): ${intent?.changedFiles.join(", ") || "(unknown)"}`,
+    `- Changed files (derive the scope/area from these): ${sanitizeText(intent?.changedFiles.join(", ") ?? "").text || "(unknown)"}`,
     `The message gives the INTENT; derive each test's objective from it. But CROSS-CHECK`,
     `against the diff: if the code does more than the message claims, cover what the code`,
     `actually changes, not just what the message promises.`,

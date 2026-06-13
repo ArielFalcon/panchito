@@ -505,16 +505,19 @@ async function maybeExplore(
   if (!input.explorer || input.mode !== "diff" || input.target === "code" || isReGen) return null;
   let session: AgentSession | undefined;
   try {
-    session = await deps.open("qa-explorer", input.mirrorDir, { signal: opts?.signal, timeoutMs: agentTimeout(input.mode) });
+    session = await deps.open("qa-explorer", input.mirrorDir, { signal: opts?.signal, timeoutMs: EXPLORER_TIMEOUT_MS });
     if (input.runId) registerRunSession(session.id, input.runId, input.mirrorDir, "explorer");
     const text = await session.prompt(buildExplorerPrompt(input));
     const brief = parseExplorationBrief(text);
+    // An empty blast radius carries no signal: treat it as no brief, so the generator explores inline
+    // rather than being told "don't re-read the code" with nothing to go on.
+    const usable = brief && brief.blastRadius.length > 0 ? brief : null;
     opts?.onProgress?.(
-      brief
-        ? `[qa] explorer: distilled ${brief.blastRadius.length} symbol(s) — generator gets a clean window`
-        : `[qa] explorer: no parseable brief — generator will explore inline`,
+      usable
+        ? `[qa] explorer: distilled ${usable.blastRadius.length} symbol(s) — generator gets a clean window`
+        : `[qa] explorer: no usable brief — generator will explore inline`,
     );
-    return brief;
+    return usable;
   } catch (err) {
     console.warn(`[qa] explorer pass failed (${err instanceof Error ? err.message : String(err)}) — generator will explore inline.`);
     return null;
@@ -700,6 +703,9 @@ export interface ReviewResult {
 // it must never inherit the generator's 25-minute worst-case budget: a hung reviewer would
 // add that whole window to the run before the loop fails closed.
 const REVIEWER_TIMEOUT_MS = Number(process.env.OPENCODE_REVIEWER_TIMEOUT_MS) || 6 * 60 * 1000;
+// The explorer is a cheap read-only PRE-pass; cap it well below the generator/diff budget so a hung
+// explorer cannot hold the sequential queue for the full window before the generator even starts.
+const EXPLORER_TIMEOUT_MS = Number(process.env.OPENCODE_EXPLORER_TIMEOUT_MS) || 90 * 1000;
 
 export async function reviewIndependently(
   input: ReviewInput,
@@ -885,11 +891,14 @@ export function parsePlan(text: string): PlanObjective[] {
     const flow = typeof r.flow === "string" ? r.flow.trim() : "";
     const objective = typeof r.objective === "string" ? r.objective.trim() : "";
     if (!flow || !objective) continue;
-    const brief = coerceExplorationBrief(r.brief);
+    const coerced = coerceExplorationBrief(r.brief);
+    // An empty blast radius is not a usable brief — drop it so the worker is not told to trust a brief
+    // that maps nothing (and symbols fall back to []).
+    const brief = coerced && coerced.blastRadius.length > 0 ? coerced : undefined;
     const symbols = Array.isArray(r.symbols)
       ? r.symbols.filter((s): s is string => typeof s === "string")
       : brief
-        ? brief.blastRadius.map((n) => n.symbol).filter((s) => s.length > 0) // derive from the brief when not given explicitly
+        ? brief.blastRadius.map((n) => n.symbol) // coerce guarantees each symbol is non-empty
         : [];
     const needsUi = typeof r.needsUi === "boolean" ? r.needsUi : true; // default true: safe fallback
     out.push({ flow, objective, symbols, needsUi, ...(brief ? { brief } : {}) });
@@ -1079,7 +1088,10 @@ export async function runOpencodeParallel(
   // single-agent prompt's full context (diff, fix/review blocks). Fall back.
   if (input.mode === "diff" && objectives.length < 2) {
     opts?.onProgress?.(`[qa] plan: ${objectives.length} objective(s) — falling back to the single-agent path`);
-    return runOpencode(input, deps, opts);
+    // The planner already explored the repo (and may have distilled a brief for the single objective).
+    // Reuse that brief and DISABLE the explorer pass so the fallback does not re-explore from scratch.
+    const plannedBrief = objectives[0]?.brief;
+    return runOpencode({ ...input, explorer: false, ...(plannedBrief ? { contextBrief: plannedBrief } : {}) }, deps, opts);
   }
 
   // Pre-index Serena so every worker inherits a warm index instead of paying

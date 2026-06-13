@@ -620,7 +620,7 @@ test("runOpencodeParallel single-objective fallback reuses the planned brief and
       };
     },
   };
-  await runOpencodeParallel({ ...input, mode: "diff", explorer: true, parallelDiff: true, needsReview: false }, stub);
+  await runOpencodeParallel({ ...input, mode: "diff", explorer: true, needsReview: false }, stub);
   assert.ok(!opened.includes("qa-explorer"), "the planner already explored — no redundant explorer session on the fallback");
   assert.match(generatorPrompt, /the planned role/, "the planner's brief is reused in the generator prompt");
 });

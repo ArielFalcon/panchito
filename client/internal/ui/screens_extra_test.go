@@ -4,10 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ArielFalcon/panchito/internal/api"
 	"github.com/ArielFalcon/panchito/internal/contract"
 	"github.com/ArielFalcon/panchito/internal/events"
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 // The live body must carry the one-line "what's happening now" status (the horizontal
@@ -33,29 +31,18 @@ func TestLivePhaseStatusNoDuplicateSpine(t *testing.T) {
 	}
 }
 
-func TestSessionsStopRequiresTwoPresses(t *testing.T) {
-	q := contract.QueueStatus{}
-	q.Running = &struct {
-		App string `json:"app"`
-		Id  string `json:"id"`
-	}{App: "portfolio", Id: "run_1"}
+// Stopping the active run from the NOW panel disarms if any other key intervenes between the
+// two x presses (the stop is folded into NOW now that the separate sessions screen is gone).
+func TestNowStopDisarmsOnOtherKey(t *testing.T) {
+	m := dashWith([]contract.AppView{{Name: "portfolio"}})
+	setRunning(&m, "portfolio", "run_1")
+	m.focus = focusNow
 
-	m := newSessionsModel(api.New("http://x", ""))
-	m.loading = false
-	m.queue = &q
-
-	var cmd tea.Cmd
-	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
-	if !m.stopArmed || cmd != nil {
-		t.Fatalf("first x must arm without cancelling (armed=%v, cmd!=nil=%v)", m.stopArmed, cmd != nil)
+	m, _ = m.Update(keyRune("x")) // arm
+	if !m.stopArmed {
+		t.Fatal("first x must arm the stop confirmation")
 	}
-	if _, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}); cmd == nil {
-		t.Fatal("second x must cancel the run")
-	}
-
-	// A non-x key disarms.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	m, _ = m.Update(keyRune("r")) // any other key disarms
 	if m.stopArmed {
 		t.Fatal("a non-x key must disarm the stop confirmation")
 	}
