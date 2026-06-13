@@ -2,6 +2,7 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const PROVIDERS = ["opencode", "codex"];
 // OpenCode runs as a long-lived `opencode serve`. Codex is exec-per-prompt: the
@@ -206,10 +207,35 @@ async function restartProvider(provider, apiKey, runtimeEnv) {
   return state.get(provider);
 }
 
+const ALLOWED_SANDBOXES = new Set(["read-only", "workspace-write"]);
+
+// Validate the per-role sandbox the orchestrator sends: read-only roles (the reviewer judge, the
+// reflector) must run read-only. Default to workspace-write when absent (an older orchestrator that
+// omits it keeps today's behavior). Throw on an unknown value so it can never become a `--sandbox`
+// flag-injection. Exported (with buildCodexExecArgs) so this security-relevant logic is unit-tested
+// without booting the HTTP server.
+export function resolveSandbox(sandbox) {
+  if (sandbox === undefined) return "workspace-write";
+  if (!ALLOWED_SANDBOXES.has(sandbox)) {
+    throw new Error("sandbox must be 'read-only' or 'workspace-write'");
+  }
+  return sandbox;
+}
+
+// Build the `codex exec` argv for one turn. Throws (via resolveSandbox) on an invalid sandbox.
+export function buildCodexExecArgs({ cwd, model, sandbox }) {
+  return [
+    "exec", "--json", "--cd", cwd, "--skip-git-repo-check",
+    "--sandbox", resolveSandbox(sandbox), "--color", "never",
+    ...(model ? ["--model", model] : []),
+    "-",
+  ];
+}
+
 // Runs one `codex exec` turn in the agent container and resolves with Codex's
 // final assistant message. This is the execution half of the orchestrator's
 // CodexRuntimeStrategy → SupervisorExecTransport HTTP boundary.
-function runCodexExec({ cwd, prompt, model, timeoutMs }) {
+function runCodexExec({ cwd, prompt, model, timeoutMs, sandbox }) {
   return new Promise((resolve, reject) => {
     if (!process.env.CODEX_API_KEY) return reject(new Error("CODEX_API_KEY is not configured"));
     if (typeof cwd !== "string" || !cwd.startsWith("/") || !existsSync(cwd)) return reject(new Error("cwd must be an existing absolute path"));
@@ -218,13 +244,14 @@ function runCodexExec({ cwd, prompt, model, timeoutMs }) {
     if (model !== undefined && (typeof model !== "string" || model.startsWith("-"))) {
       return reject(new Error("model must be a string that does not start with '-'"));
     }
-
-    const args = [
-      "exec", "--json", "--cd", cwd, "--skip-git-repo-check",
-      "--sandbox", "workspace-write", "--color", "never",
-      ...(model ? ["--model", model] : []),
-      "-",
-    ];
+    // The per-role sandbox (read-only roles cannot write the workspace) is validated + defaulted in
+    // buildCodexExecArgs; an invalid value throws, which we surface as a 400 rather than a spawn.
+    let args;
+    try {
+      args = buildCodexExecArgs({ cwd, model, sandbox });
+    } catch (err) {
+      return reject(err);
+    }
     const child = spawn(CODEX_BIN, args, {
       cwd,
       env: codexExecEnv(process.env),
@@ -317,10 +344,16 @@ async function shutdown() {
   server.close(() => process.exit(0));
 }
 
-process.on("SIGTERM", () => void shutdown());
-process.on("SIGINT", () => void shutdown());
+// Bootstrap only when run as the entrypoint (`node agent-supervisor.mjs`), NOT when imported by a
+// test. Importing the module must be side-effect-free so the exported pure helpers can be unit-tested
+// without binding the port or registering signal handlers.
+const isMainModule = process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1];
+if (isMainModule) {
+  process.on("SIGTERM", () => void shutdown());
+  process.on("SIGINT", () => void shutdown());
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`[agent-supervisor] listening on :${PORT}`);
-  void ensureDesired();
-});
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log(`[agent-supervisor] listening on :${PORT}`);
+    void ensureDesired();
+  });
+}

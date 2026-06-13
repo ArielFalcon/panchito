@@ -8,9 +8,15 @@ produce reliable end-to-end tests for the change you are given.
 
 - Your working directory is a working copy of the repo, already checked out at the
   commit (SHA) to verify.
-- The `serena` MCP is your PRIMARY way to read code: semantic, symbol-level
-  navigation via a language server. **Start by activating the project** on your
-  current directory (`activate_project`). Then, instead of reading whole files
+- **Orient before you dive — cheap terrain map first.** Before any symbol-level
+  navigation, skim the file TREE and NAMES (glob/grep/`find`: the diff's own paths,
+  plus `*routes*`, `*client*`, `*.service.*`, `*controller*`, test folders). Names and
+  structure reveal the architecture and tell you WHICH symbol to look up next —
+  semantic tools are a scalpel, not a way to discover what exists. Spend them on
+  targets you have already located.
+- The `serena` MCP (when available) is your PRIMARY way to read code: semantic,
+  symbol-level navigation via a language server. Once oriented, activate the project on
+  your current directory (`activate_project`). Then, instead of reading whole files
   (expensive and noisy, especially in Java):
   - `get_symbols_overview` → a file's "skeleton" (signatures, not bodies);
   - `find_symbol` → only the symbol you need;

@@ -54,11 +54,13 @@ architecture map. Follow this procedure:
 
 ### All other modes
 
-### 1. Understand the change (Serena + engram)
+### 1. Understand the change (orient, then go deep)
 
-Activate the project in `serena` (`activate_project`) and use
-`find_referencing_symbols` (blast radius) and `get_symbols_overview` /
-`find_symbol` to read only what you need. Query `engram` for the repo's memory —
+First ORIENT cheaply: skim the file tree and names (glob/grep — the diff's own paths,
+`*routes*`, `*client*`, `*.service.*`) to form the architecture hypothesis and locate the
+symbols worth reading (see AGENTS.md). Only THEN activate the project in `serena`
+(`activate_project`) and use `find_referencing_symbols` (blast radius) and
+`get_symbols_overview` / `find_symbol` to read only what you need. Query `engram` for the repo's memory —
 search by the project name from the prompt to scope results to this app. If the
 affected flow calls a backend endpoint, read the matching OpenAPI operation (see
 AGENTS.md) for contract-aware assertions.
@@ -148,7 +150,6 @@ End with a single JSON block, with no text after it:
 
 ```json
 {
-  "approved": true,
   "specs": ["login.spec.ts"],
   "specMetas": [
     { "file": "login.spec.ts", "flow": "user-login", "objective": "given valid credentials, the dashboard is visible after login", "targets": ["AuthService.login"] }
@@ -157,6 +158,10 @@ End with a single JSON block, with no text after it:
 }
 ```
 
-- `approved`: the reviewer's final verdict (`false` if it did not converge).
-- `specs`: names of the files you wrote/updated in `e2e/`.
-- `note`: the reason when `approved` is `false`, or any limitation (e.g. "DEV unreachable, wrote tests from code analysis only").
+- Do **NOT** report an `approved` field. You do not judge your own work: the orchestrator runs the
+  separate, independent `qa-reviewer` (see step 6) and ITS verdict is authoritative. Self-approving
+  here would be ignored, so don't spend effort (or a self-review subagent) trying to produce it.
+- `specs`: names of the files you wrote/updated in `e2e/`. An EMPTY list is a valid no-op (nothing
+  in this change is worth an E2E test) — never invent tests to fill it.
+- `note`: any limitation worth surfacing (e.g. "DEV unreachable, wrote tests from code analysis
+  only"), otherwise "".

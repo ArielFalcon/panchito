@@ -11,7 +11,19 @@
 
 services:
   orchestrator:
+    # Reach a DEV site running on the HOST (e.g. a local docker-compose app on localhost:8080)
+    # from inside the container as http://host.docker.internal:8080. The base compose pins custom
+    # DNS resolvers, which suppresses Docker Desktop's automatic host.docker.internal entry, so we
+    # add it explicitly. host-gateway resolves to the host on both Docker Desktop and Linux.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./src:/app/src
       - ./package.json:/app/package.json
       - ./package-lock.json:/app/package-lock.json
+
+  # The agent navigates the DEV site through its Playwright MCP during generation, so it ALSO
+  # needs to reach a host-local DEV target.
+  agents:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

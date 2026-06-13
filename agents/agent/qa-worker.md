@@ -24,6 +24,11 @@ relevant code symbols, the exact file to write). Your ONLY job is to write that 
    network mocks (exercise the real DEV).
 4. Assert the **observable OUTCOME** of the flow (at least one real assertion), not just that a
    button was clicked. Create data namespaced with the given prefix and clean it up via `cleanup()`.
+5. **Value self-check — do this before you finish.** Ask: "could the behavior this commit changed
+   be BROKEN and my test still pass GREEN?" If yes, your test defends nothing — add the assertion
+   that would catch that regression, and scope every selector so it cannot match an unintended
+   element. A spec that only navigates/clicks without verifying the changed outcome is a false
+   positive and the independent reviewer will reject it.
 
 ## Output
 

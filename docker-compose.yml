@@ -1,9 +1,9 @@
 # Two long-lived services:
 #   orchestrator → the Node infrastructure (webhook, gate, working copy, execution, reporting)
-#   opencode     → dual agent container: supervisor + OpenCode/Codex runtimes + MCPs
+#   agents       → dual agent container: supervisor + OpenCode/Codex runtimes + MCPs
 #
 # They share the `mirrors` volume: the orchestrator clones/checks out the repo
-# working copy and the OpenCode agent reads/writes there (the session cwd). Since
+# working copy and the agent reads/writes there (the session cwd). Since
 # both services are persistent, memory (engram) and the working copies persist.
 #
 # Doppler injects the secrets (`doppler run -- docker compose up`); the env_file
@@ -22,6 +22,16 @@ services:
     build: .
     env_file: .env
     restart: always
+    # Defense-in-depth for the untrusted code the orchestrator executes (code-mode runs the
+    # watched repo's own install/test command; e2e runs agent-authored specs). The orchestrator
+    # DROPS PRIVILEGE for those spawns to the unprivileged `sandbox` user (uid 1001) and chowns the
+    # working copy to it (src/qa/code-runner.ts → resolveSandbox), so untrusted code cannot read the
+    # root-owned API token, tamper with the orchestrator's files, or write sibling repos — see
+    # docs/code-mode-sandbox.md. no-new-privileges blocks the dropped child from re-acquiring root via
+    # setuid. NETWORK egress restriction (the one isolation kept out-of-app so Maven/Gradle can resolve
+    # deps) remains a deploy-layer control: add an egress firewall / network policy in production.
+    security_opt:
+      - no-new-privileges:true
     # The graceful-shutdown drain (src/index.ts) needs up to 25s to close the in-flight run;
     # Docker's default 10s grace would SIGKILL it mid-drain on every `docker stop`/redeploy.
     stop_grace_period: 35s
@@ -32,20 +42,20 @@ services:
       - 1.1.1.1
       - 8.8.8.8
     depends_on:
-      opencode:
+      agents:
         condition: service_healthy
     ports:
       - "${PORT:-8080}:8080" # receives the post-deploy webhooks
     environment:
-      OPENCODE_SERVE_URL: http://opencode:4096
-      AGENT_SUPERVISOR_URL: http://opencode:4097
+      OPENCODE_SERVE_URL: http://agents:4096
+      AGENT_SUPERVISOR_URL: http://agents:4097
       MIRROR_DIR: /app/.mirrors
     volumes:
       - ./config:/app/config # app configs + the config/e2e seed (read-mostly; not hot-swapped)
       # NOTE: src/ and package files are NOT bind-mounted here on purpose — the hot-swap must be
       # able to rewrite them (a bind mount → EBUSY). They ship baked in the image. The dev
       # override re-adds them for live editing. The E2E suite is NOT in a volume: it lives in git.
-      - mirrors:/app/.mirrors # local working copies (shared with opencode); the harness runs over <repo>/e2e here
+      - mirrors:/app/.mirrors # local working copies (shared with the agents container); the harness runs over <repo>/e2e here
       - qa-data:/app/data # run history + maintainer state (markers/ledger/failure memory) — persists across restarts
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
@@ -64,8 +74,8 @@ services:
           memory: 4G
           cpus: "2.0"
 
-  opencode:
-    build: ./opencode # dual agent runtime: OpenCode + Codex + uv/JDK (Serena) + engram
+  agents:
+    build: ./agents # dual agent runtime: OpenCode + Codex + uv/JDK (Serena) + engram
     restart: always
     # Same explicit resolvers as the orchestrator: the agent must reach the model gateway and
     # the live DEV site (Playwright MCP) regardless of host/VPN DNS quirks.
@@ -99,7 +109,7 @@ services:
       DEV_TEST_USER: ${DEV_TEST_USER:-}
       DEV_TEST_PASS: ${DEV_TEST_PASS:-}
     volumes:
-      - ./opencode:/root/.config/opencode:ro # opencode.json + agents + AGENTS.md + skills (read-only: agents must NOT rewrite their own prompts)
+      - ./agents:/root/.config/opencode:ro # opencode.json + agents + AGENTS.md + skills (read-only: agents must NOT rewrite their own prompts)
       - ./agent:/root/.config/agent:ro # provider-neutral prompts/skills for Codex and future OpenCode config
       - mirrors:/app/.mirrors # SAME path as the orchestrator: the agent reads/writes here (Serena caches in <repo>/.serena)
       - serena-cache:/root/.cache/uv # uv/Serena cache (avoids re-downloading on each boot)

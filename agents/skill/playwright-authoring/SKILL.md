@@ -13,6 +13,13 @@ adapted from [TestDino playwright-skill](https://github.com/testdino-hq/playwrig
 > here. In particular: **no network mocks** (we exercise the real DEV), namespaced
 > data, mandatory `cleanup`, role/testid locators.
 
+> **Examples are ILLUSTRATIVE, never literal.** This engine is app-agnostic; the concrete
+> example domains in the reference files (a map/photo app, login forms, etc.) exist only to
+> show a PATTERN. NEVER copy their literal routes (`/map`), labels (`/photo/i`), or selectors
+> into a spec — they almost certainly do not exist in the app under test. Always translate the
+> pattern to the watched app's REAL flows and selectors, verified against the live DOM (or the
+> app's own code) — copied example selectors are a top cause of green-but-meaningless specs.
+
 ## Hard rules (always)
 
 - **Locators**: `getByRole` (preferred), `getByLabel`, `getByTestId`. Never fragile

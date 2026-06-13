@@ -54,6 +54,15 @@
       "steps": 10,
       "temperature": 0.1
     },
+    "qa-reflector": {
+      "description": "One-shot failure reflector: turns a sanitized failure context into a StructuredReflection JSON. Tool-less by design (no MCP) so it cannot read/write/recall anything beyond the prompt — a pure transform for the learning ledger.",
+      "mode": "primary",
+      "model": "opencode-go/deepseek-v4-flash",
+      "prompt": "{file:./agent/qa-reflector.md}",
+      "tools": { "write": false, "edit": false, "read": false, "bash": false },
+      "steps": 5,
+      "temperature": 0.1
+    },
     "qa-worker": {
       "description": "Parallel worker for cheap per-flow test generation in complete/exhaustive mode. Writes ONE spec file per session, scoped to a single flow.",
       "mode": "primary",
@@ -73,6 +82,16 @@
       "mcp": ["serena"],
       "steps": 25,
       "temperature": 0.3
+    },
+    "qa-explorer": {
+      "description": "Read-only blast-radius explorer. Maps a change's affected symbols, FE↔BE links and contracts into a distilled ExplorationBrief JSON so the test-writer need not re-read the code. Writes nothing; emits only the brief.",
+      "mode": "primary",
+      "model": "opencode-go/deepseek-v4-flash",
+      "prompt": "{file:./agent/qa-explorer.md}",
+      "tools": { "write": false, "edit": false, "read": true, "bash": false },
+      "mcp": ["serena", "engram"],
+      "steps": 25,
+      "temperature": 0.2
     }
   },
   "mcp": {
