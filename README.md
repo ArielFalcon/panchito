@@ -245,11 +245,11 @@ The project uses provider-neutral role assignments. Configure them from the Dash
 | Item | Where | Notes |
 |---|---|---|
 | Provider-neutral prompts and procedures | `agent/` | Shared by Codex and future OpenCode config |
-| OpenCode compatibility prompts | `opencode/agent/*.md` | Kept during migration |
+| OpenCode compatibility prompts | `agents/agent/*.md` | Kept during migration |
 | Playwright authoring skills | `agent/skills/playwright-authoring/` | Login, geolocation, mobile, uploads |
 | Quality review criteria | `agent/skills/test-value-review/` | False-positive pattern catalog |
-| MCP servers (Serena, Engram, Playwright) | `opencode/opencode.json` and agent container | Code navigation + persistent memory |
-| Docker images | `Dockerfile`, `opencode/Dockerfile` | Both services build from these |
+| MCP servers (Serena, Engram, Playwright) | `agents/opencode.json` and agent container | Code navigation + persistent memory |
+| Docker images | `Dockerfile`, `agents/Dockerfile` | Both services build from these |
 
 </details>
 

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `ai-pipeline` is an **app-agnostic, centralized AI-assisted E2E QA engine** (a
 template — no app is bundled). It watches a team's repos; when a commit is
-deployed to DEV, an OpenCode agent generates Playwright E2E tests for the
+deployed to DEV, an AI agent (OpenCode and/or Codex) generates Playwright E2E tests for the
 change's blast radius, runs them **against the live DEV site** (the app is never
 built or started here), and — when green and reviewer-approved — commits the
 tests into the app repo's `e2e/` folder via a **PR with auto-merge**. Failures
@@ -21,7 +21,7 @@ No build step — the service runs TypeScript directly via `tsx`.
 
 ```bash
 npm install                 # required once (root has no node_modules until you do)
-npm test                    # node:test via tsx; 616 tests, network/OpenCode/Playwright stubbed
+npm test                    # node:test via tsx; 900+ tests, network/OpenCode/Codex/Playwright stubbed
 npm run typecheck           # tsc --noEmit (strict, noUncheckedIndexedAccess)
 
 # Run a single test file or filter by name:
@@ -64,10 +64,10 @@ First boot is slow (Serena installs via `uvx`). For a shadow run only
 | Service | What it is | Lives in |
 |---|---|---|
 | `orchestrator` | **Deterministic infrastructure** — webhook, sequential queue, deploy gate, working copy, harness (validate + execute), publish/report. Node/TS via `tsx`. | this repo, `src/` |
-| `opencode` | **The agentic engine** — `opencode serve` running the agents + MCPs (Serena for code nav; engram for memory). Writes `.spec.ts` files into the working copy. | `opencode/` |
+| `agents` | **The agentic engine** — a supervisor fronting both runtimes (OpenCode via `opencode serve`; Codex via `codex exec`) + MCPs (Serena for code nav; engram for memory). Writes `.spec.ts` files into the working copy. | `agents/` |
 
 The **fundamental split**: deterministic infra (`src/`) is kept rigorously
-separate from the non-deterministic agent (`opencode/`). They communicate over
+separate from the non-deterministic agent (`agents/`). They communicate over
 one HTTP boundary (`src/integrations/opencode-client.ts` ↔ `opencode serve`).
 
 ### The run flow — start here
@@ -84,7 +84,7 @@ serves both triggers (webhook `src/index.ts`, manual `src/cli.ts`), default
    `skip` → returns `skipped` without spending a token.
 3. **Setup** — bootstrap the `config/e2e/` seed into the repo's `e2e/` if missing,
    then `npm ci`. Runs **before** generation so the agent has the fixtures/config.
-4. **Generate** — OpenCode session; the agent derives the objective from the
+4. **Generate** — agent session (OpenCode or Codex per the role assignment); the agent derives the objective from the
    commit intent, writes/improves specs + `e2e/.qa/manifest.json`, invokes the
    reviewer. **If the agent approves with zero specs → no-op → `skipped`** (clean).
 5. **Validate (Filter B)** — static gate: `tsc` + ESLint (`eslint-plugin-playwright`)
@@ -92,9 +92,13 @@ serves both triggers (webhook `src/index.ts`, manual `src/cli.ts`), default
 6. **Health pre-flight** — DEV down now → `infra-error` (not a code bug).
 7. **Execute (Filter C)** — run with Playwright against DEV; classify
    `pass`/`fail`/`flaky` (a pass only after retry = flaky → quarantine).
-8. **Decide** — green + reviewer-approved → PR w/ auto-merge. Green but reviewer
-   rejected, or `fail`/`invalid` → Issue. Failure with DEV down → `infra-error`.
-   `flaky` → quarantine. Green with no `e2e/` changes → nothing.
+8. **Change-coverage (the value keystone)** — measure whether the green run actually
+   exercised the diff's changed lines (`src/qa/change-coverage.ts`). `signal` records
+   only; `enforce` regenerates once at the uncovered lines and, if still short of
+   `minRatio`, holds the PR. `unknown` (no usable coverage / cross-repo) never blocks.
+9. **Decide** — green + reviewer-approved (+ coverage not blocking) → PR w/ auto-merge.
+   Green but reviewer rejected, or `fail`/`invalid` → Issue. Failure with DEV down →
+   `infra-error`. `flaky` → quarantine. Green with no `e2e/` changes → nothing.
 
 **Verdicts** (`src/types.ts` `RunVerdict`): `pass | fail | flaky | invalid | infra-error | skipped`.
 
@@ -141,17 +145,23 @@ anywhere in the repo (`publishCode`), not just `e2e/`.
 Every side-effecting step in `runPipeline` is injected via `PipelineDeps`
 (`defaultPipelineDeps()` wires the real ones). The orchestration logic — ordering,
 branches, verdict decisions — is unit-tested with stubs. The **real integrations
-are the deliberately-uncovered boundaries**: the OpenCode SDK call, the Playwright
-runner, git operations. Each integration module exports its own `*Deps` and a
+are the deliberately-uncovered boundaries**: the agent-runtime call (OpenCode SDK /
+Codex exec), the Playwright runner, git operations. Each integration module exports its own `*Deps` and a
 `default*Deps` in the same pattern (`opencode-client`, `repo-mirror`, `validate`,
 `execute`, `setup`, `publish`). Follow this pattern for any new side-effecting code.
 
-### The agent (opencode/) — three prompt layers
+### The agent (agents/) — three prompt layers
 
-Generation, the reviewer subagent, and the MCP tools all live **inside** OpenCode.
-Config in `opencode/opencode.json`. Two **different models** guarantee independent
-judgment, via a **single** OpenCode Go key (`OPENCODE_API_KEY`); models are named
-with the `opencode-go/` prefix (no per-provider keys):
+The runtime is **provider-agnostic** (`src/agent-runtime/`, `AgentProvider = "opencode" | "codex"`):
+each role (primary / reviewer / chat) is assigned a provider + model, in `single` mode (one provider
+for all roles) or `dual` mode (e.g. primary on one runtime, reviewer on the other — two different
+runtimes guarantee independent judgment). The description below is the **OpenCode runtime's** roster;
+Codex runs the same roles via `codex exec` with the provider-neutral prompts in `agent/`.
+
+For the OpenCode runtime: generation, the reviewer subagent, and the MCP tools all live **inside**
+OpenCode. Config in `agents/opencode.json`. Two **different models** guarantee independent judgment,
+via a **single** OpenCode Go key (`OPENCODE_API_KEY`); models are named with the `opencode-go/`
+prefix (no per-provider keys):
 
 - `qa-generator` (primary, `deepseek-v4-pro`) — writes tests, can read/edit/bash.
 - `qa-reviewer` (subagent, `qwen3.7-max`) — read-only quality judge, emits a JSON verdict.
@@ -167,9 +177,11 @@ with the `opencode-go/` prefix (no per-provider keys):
 
 (The model ids are OpenCode-Go names that should be confirmed against `opencode models`.)
 
-Prompts are layered: `opencode/AGENTS.md` (shared rules + anti-degradation
-protocols) → `opencode/agent/*.md` (per-role procedure + JSON output contract) →
-`opencode/skill/` (on-demand craft: `playwright-authoring`, `test-value-review`).
+Prompts are layered: `agents/AGENTS.md` (shared rules + anti-degradation
+protocols) → `agents/agent/*.md` (per-role procedure + JSON output contract) →
+`agents/skill/` (on-demand craft: `playwright-authoring`, `test-value-review`).
+Codex consumes the **provider-neutral** mirror of these under `agent/` (`agent/roles/*.md`,
+`agent/skills/`), assembled into a role preamble by `withCodexRolePreamble`.
 
 ### Persistence & onboarding surface
 
@@ -185,14 +197,14 @@ protocols) → `opencode/agent/*.md` (per-role procedure + JSON output contract)
 - **Security boundary:** the LLM agent is **read-only** on watched repos. Only the
   deterministic orchestrator does git writes (push/PR). Never give the agent (or
   any future chat/operator layer) direct write to a watched repo.
-- **App-specificity lives only in `config/`; agents/models only in `opencode/`;
+- **App-specificity lives only in `config/`; agents/models only in `agents/`;
   nothing app-specific in `src/`.**
 - **Sequential queue** — one run at a time; never run concurrent QA against DEV.
 - **Honor the agent's no-op decision** — approved + zero specs is a *valid*
   `skipped`, never `invalid`.
-- **Surface integration errors loudly** — never swallow OpenCode SDK / runner / git
-  errors into an empty result (a swallowed error once looked like "no tests
-  written"). Throw and log.
+- **Surface integration errors loudly** — never swallow agent-runtime (OpenCode SDK /
+  Codex exec) / runner / git errors into an empty result (a swallowed error once
+  looked like "no tests written"). Throw and log.
 - **Sanitize data leaving the system** — diff → model, and execution logs → Issue,
   both pass through `src/orchestrator/sanitizer.ts`.
 - Everything in **English**; comments describe the final state, not the process.
@@ -219,23 +231,39 @@ protocols) → `opencode/agent/*.md` (per-role procedure + JSON output contract)
   (no response until the agent finishes). `defaultOpencodeDeps` raises undici's
   global `headersTimeout`/`bodyTimeout` above `OPENCODE_TIMEOUT_MS` so the
   `withTimeout` wrapper is the real deadline, not a transport-level abort.
-- **Serena needs a language server per watched-repo language.** The `opencode` image
+- **Serena needs a language server per watched-repo language.** The `agents` image
   bakes in JDK (Java/Spring), python3, and the TypeScript LS (Angular); add the
-  runtime in `opencode/Dockerfile` when onboarding a new language.
+  runtime in `agents/Dockerfile` when onboarding a new language.
 
 ## The value/trust risk — read before adding "quality" logic
 
 The quality loop is **circular**: one LLM generates, another LLM reviews, and the
-only objective gate (the harness) checks a test *runs green*, not that it is
-*meaningful*. There is no ground-truth signal yet, so the system optimizes a proxy
-and can drift into a large suite that never catches anything (Goodhart). The work
-that breaks this is **change-coverage gating** (does executing the test cover the
-lines the diff changed?) — the keystone of the upcoming change-coverage work — **not
-more prompt tuning**. Keep this front of mind before expanding the agent or the
-reviewer.
+green/red harness checks a test *runs*, not that it is *meaningful*. Left alone the
+system optimizes a proxy and drifts into a large suite that never catches anything
+(Goodhart). The objective signal that breaks the circularity is **change-coverage**
+(does executing the test actually cover the lines the diff changed?) — and it is now
+**implemented**, in `src/qa/change-coverage.ts`, wired into the pipeline's decide step:
+
+- Three policy modes (`qa.changeCoverage.mode`, default `signal`): `off` (skip),
+  `signal` (measure + record only), `enforce` (gate). `minRatio` default `0.7`.
+- `decideCoverage` → `pass | fail | unknown`. **`unknown` NEVER blocks** (no usable
+  coverage, or cross-repo runs where browser coverage can't map service lines) —
+  determinism over zeal.
+- In `enforce`, a `fail` triggers **one** targeted regeneration at the uncovered
+  lines, then a re-run; still `fail` ⇒ `blocksPublish` holds the PR.
+
+So the keystone exists — the remaining work is *strengthening* it (better line
+mapping, raising apps from `signal` to `enforce` as they earn trust), **not more
+prompt tuning**. Keep this front of mind before expanding the agent or the reviewer:
+new "quality" logic should lean on the coverage signal, not add another LLM proxy.
 
 ## Current state
 
 `main` runs end-to-end against `ArielFalcon/portfolio` (a public Astro static site
 on Vercel) in **shadow mode** with the deploy gate skipped (no `/version`). engram
 is enabled for persistent agent memory across runs.
+
+The agent runtime is **provider-agnostic** (`src/agent-runtime/`): OpenCode and Codex,
+in `single` or `dual` mode, behind one facade (the `agents` container's supervisor
+fronts both). Change-coverage is implemented and defaults to `signal` (measured, not
+yet blocking) — see [The value/trust risk](#the-valuetrust-risk-read-before-adding-quality-logic).

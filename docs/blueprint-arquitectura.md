@@ -375,7 +375,7 @@ El mismo `runPipeline` activa o desactiva pasos:
 `pipeline.ts` (`generateAndReview`).
 
 El generador (`qa-generator`, modelo DeepSeek V4 Pro) escribe los tests. Un
-**segundo modelo distinto** (`qa-reviewer`, Qwen 3.7 Max) los juzga en una
+**segundo modelo distinto** (`qa-reviewer`, MiniMax M3) los juzga en una
 **sesión separada** (no como subagente del generador), de modo que el generador
 no pueda influir en el veredicto controlando el contexto.
 
@@ -667,7 +667,7 @@ sequenceDiagram
 | Agente | Modelo | Rol | Tools | MCP | Salida |
 |---|---|---|---|---|---|
 | **qa-generator** | DeepSeek V4 Pro | Escribe/mejora specs (primary) | write,edit,read,bash | serena, engram, playwright | `{approved, specs, note}` |
-| **qa-reviewer** | Qwen 3.7 Max | Juez independiente (subagent) | read-only | — | `{approved, corrections, perspectives}` |
+| **qa-reviewer** | MiniMax M3 | Juez independiente (subagent) | read-only | — | `{approved, corrections, perspectives}` |
 | **qa-maintainer** | DeepSeek V4 Pro | Auto-reparación del repo propio | write,edit,read,bash | serena, engram | `{fixed, changes, prTitle, justification}` |
 | **qa-assistant** | DeepSeek V4 Flash | Q&A read-only del run (TUI) | — | engram | texto streaming |
 | **qa-worker** | DeepSeek V4 Flash | Un spec por flujo (fan-out) | write,read | serena, playwright | `{spec}` |

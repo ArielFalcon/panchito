@@ -43,8 +43,12 @@ never change how the suite runs.
   (`config/e2e/fixtures.ts`) collects Chromium V8 coverage per test and dumps it to
   `e2e/.qa/coverage/<namespace>/` (per-run, so stale dumps never pollute a later run). The
   orchestrator maps the covered byte ranges to source lines and resolves script URLs to repo files
-  by longest path suffix (works for unbundled dev servers; bundled-without-sourcemaps → the file is
-  simply unmeasured, never falsely covered).
+  **two ways**: (1) a direct longest-path-suffix match (unbundled dev servers), or (2) — for a
+  **hashed, bundled production deploy** (Angular/React, `main.a1b2c3.js`) whose URL never matches a
+  repo path — by decoding the script's **source map** (`src/qa/source-map.ts`, a dependency-free
+  base64-VLQ consumer) and translating covered bundle positions back to the original source files +
+  lines. A bundle served **without** a source map still degrades to `unknown` (never falsely
+  covered) — see *Activating the keystone* below.
 - **e2e backend through the UI (microservices)** — line coverage of a remote DEV server is not
   available to the runner. This is the open frontier: a network-linkage proxy (the test caused the
   changed endpoint to be called + asserted its response) and an optional per-app DEV coverage
@@ -52,6 +56,34 @@ never change how the suite runs.
 
 The raw dumps are **gitignored** and excluded from the publish pathspec, so they never bloat a PR
 or trigger a false "the suite changed" commit. The committed metadata stays in `e2e/.qa/manifest.json`.
+
+## Activating the keystone on a watched app (Angular + Spring)
+
+The machinery is app-agnostic, but a real microservice system must serve the **one artifact** each
+provider needs, or the keystone silently degrades to `unknown`. When the orchestrator detects this
+(Playwright produced coverage but nothing mapped to a changed file), it logs a loud
+`CHANGE-COVERAGE INACTIVE` diagnostic with the fix below — it never blocks the run.
+
+- **Angular frontend (e2e) → enable source maps on the DEV build.** Production `ng build` sets
+  `"sourceMap": false`, so the hashed bundle the keystone needs to map back to `*.component.ts` is
+  absent. Enable it **for the DEV configuration only** — `ng build --source-map`, or in
+  `angular.json` set `configurations.development.sourceMap: true` (or `{ "scripts": true, "vendor":
+  false }` to keep the map small). The bundle stays minified/hashed (a realistic deploy); the map
+  rides alongside and is fetched non-invasively. No production change is required.
+- **Spring microservice (code mode) → add the JaCoCo plugin.** Native line coverage comes from
+  `jacoco.xml`, which Maven/Gradle emit only when the plugin's report goal is bound. Maven: add
+  `jacoco-maven-plugin` with the `prepare-agent` + `report` executions (report bound to `test`).
+  Gradle: apply `jacoco` and run `test jacocoTestReport`. The orchestrator reads
+  `target/site/jacoco/jacoco.xml` (Maven) or `build/reports/jacoco/test/jacocoTestReport.xml`
+  (Gradle) automatically; no config change in `ai-pipeline` is needed.
+- **Then turn on the gate.** Once a real run reports a **measured** ratio (not `unknown`), set
+  `qa.changeCoverage.mode: enforce` for that app so a test that does not exercise the change blocks
+  publishing. Keep `signal` while you confirm the false-positive rate is acceptable.
+
+The global default stays `signal` deliberately: `enforce` blocks publishing, so it is opted into
+**per app** once that app's coverage is proven measurable — promoting it to a global default before
+a representative app proves measurability would surprise operators with unrequested gating, against
+the project's "stable/deterministic over features" priority.
 
 ## What it is and is NOT
 
@@ -70,9 +102,12 @@ when the change breaks — is the roadmap's end state.
 
 ## Code map
 
-- `src/qa/change-coverage.ts` — the pure core (diff parsing, intersection, decision, lcov/Istanbul/V8
-  parsers) + the default provider. Fully unit-tested.
-- `src/pipeline.ts` — Filter D + the `enforce` gap-closing loop + the publish gate.
-- `config/e2e/fixtures.ts` — the system-owned V8 collection fixture.
+- `src/qa/change-coverage.ts` — the pure core (diff parsing, intersection, decision, lcov/Istanbul/V8/
+  JaCoCo-XML parsers) + the default provider. Fully unit-tested, incl. an end-to-end test that maps a
+  minified bundle's coverage back to the changed source through a real-shaped source map.
+- `src/qa/source-map.ts` — the dependency-free base64-VLQ source-map consumer (bundled-deploy keystone).
+- `src/pipeline.ts` — Filter D + the `enforce` gap-closing loop + the publish gate + the
+  `CHANGE-COVERAGE INACTIVE` activation diagnostic.
+- `config/e2e/fixtures.ts` — the system-owned V8 collection fixture (also captures each script's source map).
 - `src/integrations/publish.ts` — excludes `e2e/.qa/coverage/**` from commits.
 - `src/orchestrator/schemas.ts` — `qa.changeCoverage` config.

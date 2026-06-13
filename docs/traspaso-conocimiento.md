@@ -169,7 +169,7 @@ El sistema está diseñado para que **dos runs consecutivos del mismo SHA produz
 ### Configuración de modelos
 
 - El generador usa un modelo principal (por ejemplo, `deepseek-v4-pro`).
-- El reviewer **debe usar un modelo diferente** (por ejemplo, `qwen3.7-max`) para garantizar independencia real.
+- El reviewer **debe usar un modelo diferente** (por ejemplo, `minimax-m3`) para garantizar independencia real.
 - Si un modelo no está disponible, se puede sustituir editando la configuración del agente.
 
 ### Seguridad y fronteras

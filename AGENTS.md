@@ -2,7 +2,7 @@
 
 ## What this is
 
-`ai-pipeline` is an **app-agnostic, centralized AI-assisted E2E QA engine**. It watches team repos; when a commit is deployed to DEV, an OpenCode agent generates Playwright E2E tests for the blast radius, runs them against the live DEV site, and — when green + reviewer-approved — commits them into the app repo's `e2e/` folder via a PR with auto-merge. Failures open a GitHub Issue.
+`ai-pipeline` is an **app-agnostic, centralized AI-assisted E2E QA engine**. It watches team repos; when a commit is deployed to DEV, an AI agent (OpenCode and/or Codex) generates Playwright E2E tests for the blast radius, runs them against the live DEV site, and — when green + reviewer-approved — commits them into the app repo's `e2e/` folder via a PR with auto-merge. Failures open a GitHub Issue.
 
 **Priority: stable, reliable, deterministic > features.** The hardest problem is trust — see [the value/trust risk](#the-valuetrust-risk).
 
@@ -43,9 +43,9 @@ doppler run -- docker compose up --build   # prod: Doppler injects secrets
 | Service | What | Lives in |
 |---|---|---|
 | `orchestrator` | Deterministic infra: webhook, sequential queue, deploy gate, working copy, harness (validate + execute), publish/report. Node/TS via `tsx`. | `src/` |
-| `opencode` | Agentic engine: `opencode serve` running agents + MCPs (Serena for code nav, engram for memory). Writes `.spec.ts` into working copy. | `opencode/` |
+| `agents` | Agentic engine: supervisor fronting both runtimes (OpenCode `opencode serve` + Codex `codex exec`) + MCPs (Serena for code nav, engram for memory). Writes `.spec.ts` into working copy. | `agents/` |
 
-**Fundamental split**: deterministic infra (`src/`) is rigorously separated from the non-deterministic agent (`opencode/`). They communicate over one HTTP boundary: `src/integrations/opencode-client.ts` ↔ `opencode serve`.
+**Fundamental split**: deterministic infra (`src/`) is rigorously separated from the non-deterministic agent (`agents/`). They communicate over one HTTP boundary: `src/integrations/opencode-client.ts` ↔ `opencode serve`.
 
 ### Run flow (`src/pipeline.ts` — read first)
 
@@ -71,18 +71,20 @@ doppler run -- docker compose up --build   # prod: Doppler injects secrets
 
 Every side-effecting step is injected via `*Deps` interfaces (`PipelineDeps`, etc.) with `default*Deps()` wiring the real ones. Orchestration logic is unit-tested with stubs. Real integrations are the deliberately-uncovered boundaries. New side-effecting code → follow the `*Deps` + `default*Deps` pattern.
 
-### Agent layers (`opencode/`)
+### Agent layers (`agents/`)
 
-Config: `opencode/opencode.json`. Two models, single `OPENCODE_API_KEY` (opencode-go/ prefix):
+Provider-agnostic runtime (`src/agent-runtime/`, `AgentProvider = "opencode" | "codex"`): each role
+(primary / reviewer / chat) gets a provider + model, in `single` or `dual` mode. Below is the
+**OpenCode runtime's** roster — Config: `agents/opencode.json`, single `OPENCODE_API_KEY` (opencode-go/ prefix):
 - `qa-generator` (primary, `deepseek-v4-pro`) — writes tests, read/edit/bash
 - `qa-reviewer` (subagent, `qwen3.7-max`) — read-only, emits JSON verdict
 
-Prompt layers: `opencode/AGENTS.md` (shared rules) → `opencode/agent/*.md` (per-role) → `opencode/skill/` (on-demand: `playwright-authoring`, `test-value-review`).
+Prompt layers: `agents/AGENTS.md` (shared rules) → `agents/agent/*.md` (per-role) → `agents/skill/` (on-demand: `playwright-authoring`, `test-value-review`). Codex uses the provider-neutral mirror under `agent/` (`agent/roles/*.md`, `agent/skills/`).
 
 ## Invariants
 
 - **Security boundary**: LLM agent is read-only on watched repos. Only the orchestrator does git writes. Never give the agent direct write to a watched repo.
-- **App-specificity only in `config/`**; agents/models only in `opencode/`; nothing app-specific in `src/`.
+- **App-specificity only in `config/`**; agents/models only in `agents/`; nothing app-specific in `src/`.
 - **Sequential queue** — one run at a time. Never run concurrent QA against DEV.
 - **Honor agent's no-op**: approved + zero specs is a valid `skipped`, never `invalid`.
 - **Surface integration errors loudly** — never swallow OpenCode SDK / runner / git errors. Throw and log.
@@ -97,7 +99,7 @@ Prompt layers: `opencode/AGENTS.md` (shared rules) → `opencode/agent/*.md` (pe
 - **Tests use `node:test` + `node:assert/strict`**, colocated `*.test.ts`.
 - **OpenAPI is authoring context, agent-resolved.** Agent locates and reads specs (Serena/glob). Optional `openapi:` glob hint in app config. Agent exercises backend through the UI, never by calling the API directly.
 - **Long agent turns vs. undici.** `defaultOpencodeDeps` raises global `headersTimeout`/`bodyTimeout` above `OPENCODE_TIMEOUT_MS` so the `withTimeout` wrapper is the real deadline.
-- **Serena needs a language server per watched-repo language.** `opencode/Dockerfile` bakes in JDK, python3, TypeScript LS. Add runtime when onboarding a new language.
+- **Serena needs a language server per watched-repo language.** `agents/Dockerfile` bakes in JDK, python3, TypeScript LS. Add runtime when onboarding a new language.
 
 ## The value/trust risk
 
@@ -137,6 +139,6 @@ The quality loop is circular: one LLM generates, another reviews, and the harnes
 | `src/server/webhook.ts` | Webhook receiver |
 | `config/apps/*.yaml` | Watched-app configurations |
 | `config/e2e/` | Seed: Playwright config, shared fixtures, lint rules |
-| `opencode/opencode.json` | Agent + MCP definitions |
-| `opencode/agent/*.md` | Per-role agent prompts |
-| `opencode/skill/` | On-demand craft knowledge |
+| `agents/opencode.json` | Agent + MCP definitions |
+| `agents/agent/*.md` | Per-role agent prompts |
+| `agents/skill/` | On-demand craft knowledge |
