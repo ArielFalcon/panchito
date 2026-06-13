@@ -66,6 +66,7 @@ type agentModel struct {
 	stagedKeys    map[string]string
 	editingRole   string
 	roleCursor    int
+	busyRun       string // app of the active run, if any — the runtime is locked while it runs
 }
 
 func newAgentModel(client *api.Client) agentModel {
@@ -84,7 +85,7 @@ func newAgentModel(client *api.Client) agentModel {
 }
 
 func (m agentModel) Init() tea.Cmd {
-	return tea.Batch(fetchAgentConfigCmd(m.client), fetchAgentModelsCmd(m.client, "opencode"), fetchAgentModelsCmd(m.client, "codex"))
+	return tea.Batch(fetchAgentConfigCmd(m.client), fetchAgentModelsCmd(m.client, "opencode"), fetchAgentModelsCmd(m.client, "codex"), loadQueueCmd(m.client))
 }
 
 func (m agentModel) Update(msg tea.Msg) (agentModel, tea.Cmd) {
@@ -96,6 +97,13 @@ func (m agentModel) Update(msg tea.Msg) (agentModel, tea.Cmd) {
 		m.config = &cfg
 		m.draft = &draft
 		m.err = ""
+		return m, nil
+	case queueLoadedMsg:
+		if msg.queue.Running != nil {
+			m.busyRun = msg.queue.Running.App
+		} else {
+			m.busyRun = ""
+		}
 		return m, nil
 	case agentModelsLoadedMsg:
 		m.modelsLoading = false
@@ -272,6 +280,12 @@ func (m agentModel) triggerAction(action agentMenuAction) (agentModel, tea.Cmd) 
 	case agentActionRestartCodex:
 		return m, restartAgentProviderCmd(m.client, "codex")
 	case agentActionApply:
+		if m.busyRun != "" {
+			// The server hard-blocks (409) runtime changes while a run is active, and they
+			// must NOT affect the in-flight session anyway. Explain instead of failing late.
+			m.err = "a run is active on '" + m.busyRun + "' — its session keeps its current models; runtime changes are locked until it finishes. Stop it from Active sessions to change now."
+			return m, nil
+		}
 		if draftNeedsDowngradeConfirmation(*m.draft) {
 			m.screen = agentScreenConfirmDowngrade
 			return m, nil
@@ -345,7 +359,11 @@ func (m agentModel) View() string {
 
 	mode := string(cfg.Mode)
 	provider := string(cfg.SingleProvider)
-	b.WriteString("\n\n" + labelStyle.Render(fmt.Sprintf("mode: %s · %s", mode, provider)) + "\n\n")
+	b.WriteString("\n\n" + labelStyle.Render(fmt.Sprintf("mode: %s · %s", mode, provider)) + "\n")
+	if m.busyRun != "" {
+		b.WriteString(shadowStyle.Render(fmt.Sprintf("⚠ a run is active on '%s' — its session keeps its current models; runtime changes are locked until it finishes (stop it from Active sessions)", m.busyRun)) + "\n")
+	}
+	b.WriteString("\n")
 
 	b.WriteString(m.renderProviders(cfg))
 	b.WriteString("\n")
