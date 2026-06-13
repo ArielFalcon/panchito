@@ -63,6 +63,10 @@ type liveModel struct {
 	phaseStart time.Time
 	retrying   bool
 	activity   []activityItem
+	lastFile   string   // most recent file written — sticky, so the focus card row never blinks
+	lastCmd    string   // most recent command run — sticky
+	wroteAll   []string // every file written, in order (monotonic; for the feed summary)
+	ranAll     []string // every command run, in order
 	subagents  []subagentItem
 	plan       []events.PlanTodo
 	specs      []string
@@ -351,6 +355,18 @@ func (m *liveModel) fold(ev events.RunEvent) {
 			m.subagents = upsertSubagent(m.subagents, b)
 		} else {
 			m.activity = upsertActivity(m.activity, b)
+			// Remember the latest file/command stickily — the focus card reads these, so a
+			// row stays put instead of blinking as items slide out of the rolling window.
+			if b.Target != "" {
+				switch b.Kind {
+				case "writing":
+					m.lastFile = b.Target
+					m.wroteAll = appendUnique(m.wroteAll, b.Target)
+				case "command":
+					m.lastCmd = b.Target
+					m.ranAll = appendUnique(m.ranAll, b.Target)
+				}
+			}
 		}
 	case events.PlanUpdated:
 		m.plan = b.Todos
@@ -887,17 +903,8 @@ type activityView struct {
 }
 
 func (m liveModel) deriveActivity() activityView {
-	var wrote, ran []string
-	var lastFile, lastCmd, lastRunning string
+	lastRunning := ""
 	for _, a := range m.activity {
-		switch a.kind {
-		case "writing":
-			wrote = appendUnique(wrote, a.target)
-			lastFile = a.target
-		case "command":
-			ran = appendUnique(ran, a.target)
-			lastCmd = a.target
-		}
 		if a.status == "running" && a.target != "" {
 			lastRunning = a.target
 		}
@@ -914,15 +921,20 @@ func (m liveModel) deriveActivity() activityView {
 	if title == "" {
 		title = lastRunning
 	}
+	if title == "" {
+		title = m.lastFile
+	}
+	// Keep the card present for the whole live run once there's any work to show, so it
+	// doesn't blink out between events; the wrote/ran/title come from sticky state.
 	var focus *focusItem
-	if title != "" {
-		f := focusItem{title: title, lastFile: lastFile, lastCmd: lastCmd}
+	if title != "" || len(m.plan) > 0 || m.lastCmd != "" {
+		f := focusItem{title: title, lastFile: m.lastFile, lastCmd: m.lastCmd}
 		if len(m.plan) > 0 {
 			f.progress = fmt.Sprintf("%d/%d", completed, len(m.plan))
 		}
 		focus = &f
 	}
-	return activityView{focus: focus, plan: m.plan, wrote: wrote, ran: ran}
+	return activityView{focus: focus, plan: m.plan, wrote: m.wroteAll, ran: m.ranAll}
 }
 
 // renderFocusCard is the single boxed element while a run is live: the one unit of work
@@ -955,7 +967,11 @@ func (m liveModel) renderFocusCard(v activityView) string {
 	}
 	rows = append(rows, kv(m.spin.View(), sc, "now", lipgloss.NewStyle().Foreground(colFg).Render(truncate(phaseDescription(m.phase), valW))))
 
-	return focusCard(w, sc, title, rightHead, truncate(f.title, w-10), "", rows)
+	headline := f.title
+	if headline == "" {
+		headline = phaseDescription(m.phase) // never collapse the card's height mid-run
+	}
+	return focusCard(w, sc, title, rightHead, truncate(headline, w-10), "", rows)
 }
 
 const feedGutter = 7

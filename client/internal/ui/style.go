@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Design system — the shared visual language of the TUI redesign mock. Structure is
@@ -170,7 +171,9 @@ func focusCard(width int, border lipgloss.Color, title, rightHead, headline, hea
 	bs := lipgloss.NewStyle().Foreground(border)
 
 	// Top border with the woven header: ┌─ title ───── rightHead ─┐
-	usedTop := 6 + lipgloss.Width(title) + lipgloss.Width(rightHead) // "┌─ " + " " + " " + " ─┐"
+	// Fixed glyphs: "┌─ "(3) + " "(1) + " "(1) + " ─┐"(3) = 8, so the dashes fill the
+	// rest — anything less leaves the top row wider than the body walls (a broken corner).
+	usedTop := 8 + lipgloss.Width(title) + lipgloss.Width(rightHead)
 	dashes := max(1, width-usedTop)
 	top := bs.Render("┌─ ") + title + bs.Render(" "+strings.Repeat("─", dashes)+" ") + rightHead + bs.Render(" ─┐")
 
@@ -188,9 +191,13 @@ func focusCard(width int, border lipgloss.Color, title, rightHead, headline, hea
 	return b.String()
 }
 
-// cardLine wraps one body line in the card walls, padding the content to the inner width.
+// cardLine wraps one body line in the card walls, clipping (ANSI-aware) then padding the
+// content to the inner width — so an over-long value can never push the right wall out.
 func cardLine(inner int, border lipgloss.Color, content string) string {
 	bs := lipgloss.NewStyle().Foreground(border)
+	if lipgloss.Width(content) > inner {
+		content = ansi.Truncate(content, inner, "…")
+	}
 	fill := max(0, inner-lipgloss.Width(content))
 	return bs.Render("│ ") + content + strings.Repeat(" ", fill) + bs.Render(" │")
 }
