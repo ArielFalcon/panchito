@@ -24,6 +24,7 @@ const (
 	screenAppAdmin
 	screenStatus
 	screenHelp
+	screenSessions
 )
 
 type Model struct {
@@ -42,6 +43,7 @@ type Model struct {
 	appAdmin      appAdminModel
 	status        statusModel
 	help          helpModel
+	sessions      sessionsModel
 }
 
 func New() Model {
@@ -111,6 +113,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.help = newHelpModel(m.client)
 		m.screen = screenHelp
 		return m, m.help.Init()
+	case sessionsSelectedMsg:
+		m.sessions = newSessionsModel(m.client)
+		m.screen = screenSessions
+		return m, m.sessions.Init()
 	case onboardSelectedMsg:
 		m.appAdmin = newOnboardModel(m.client)
 		m.screen = screenAppAdmin
@@ -160,6 +166,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status, cmd = m.status.Update(msg)
 	case screenHelp:
 		m.help, cmd = m.help.Update(msg)
+	case screenSessions:
+		m.sessions, cmd = m.sessions.Update(msg)
 	}
 	return m, cmd
 }
@@ -184,6 +192,8 @@ func (m Model) View() string {
 		return m.status.View()
 	case screenHelp:
 		return m.help.View()
+	case screenSessions:
+		return m.sessions.View()
 	default:
 		return m.connect.View()
 	}

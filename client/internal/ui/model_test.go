@@ -392,13 +392,13 @@ func TestHomeProjectsHEmitsHistorySelectedMsg(t *testing.T) {
 
 func TestHomeMenuStatusAndHelpEmitMsgs(t *testing.T) {
 	m := newHomeModel(nil)
-	m.menuCursor = 5 // ⊞ Status
+	m.menuCursor = 6 // ⊞ Status
 	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd == nil {
 		t.Fatal("Status must emit a command")
 	} else if _, ok := cmd().(statusSelectedMsg); !ok {
 		t.Fatalf("expected statusSelectedMsg, got %T", cmd())
 	}
-	m.menuCursor = 6 // ? Help
+	m.menuCursor = 7 // ? Help
 	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd == nil {
 		t.Fatal("Help must emit a command")
 	} else if _, ok := cmd().(helpSelectedMsg); !ok {
@@ -512,7 +512,7 @@ func TestWatchRunMsgOpensLiveScreen(t *testing.T) {
 
 func TestHomeMenuAgentEmitsAgentSelectedMsg(t *testing.T) {
 	m := newHomeModel([]contract.AppView{{Name: "portfolio"}})
-	m.menuCursor = 4 // ◈ Agent runtime
+	m.menuCursor = 5 // ◈ Agent runtime
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd == nil {
 		t.Fatal("agent menu item must emit a command")
@@ -522,12 +522,24 @@ func TestHomeMenuAgentEmitsAgentSelectedMsg(t *testing.T) {
 	}
 }
 
+func TestHomeMenuSessionsEmitsMsg(t *testing.T) {
+	m := newHomeModel(nil)
+	m.menuCursor = 1 // ◳ Active sessions
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("sessions menu item must emit a command")
+	}
+	if _, ok := cmd().(sessionsSelectedMsg); !ok {
+		t.Fatalf("expected sessionsSelectedMsg, got %T", cmd())
+	}
+}
+
 func TestHomeOnboardEditAndDeleteMessages(t *testing.T) {
 	app := contract.AppView{Name: "portfolio", Repo: "org/portfolio", BaseUrl: "https://dev", VersionUrl: "", Services: []contract.AppService{}}
 	m := newHomeModel([]contract.AppView{app})
 
-	// Onboard is a menu item (index 1).
-	m.menuCursor = 1
+	// Onboard is a menu item (index 2, after Run QA and Active sessions).
+	m.menuCursor = 2
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if _, ok := cmd().(onboardSelectedMsg); !ok {
 		t.Fatalf("expected onboardSelectedMsg, got %T", cmd())

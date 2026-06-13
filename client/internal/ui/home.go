@@ -24,6 +24,7 @@ type menuItem struct{ icon, label, action string }
 
 var homeMenuItems = []menuItem{
 	{"▶", "Run QA", "run"},
+	{"◳", "Active sessions", "sessions"},
 	{"✚", "Onboard project", "onboard"},
 	{"✎", "Edit project", "edit"},
 	{"✖", "Delete project", "delete"},
@@ -86,6 +87,8 @@ func (m homeModel) trigger(action string) (homeModel, tea.Cmd) {
 		return m, func() tea.Msg { return onboardSelectedMsg{} }
 	case "agent":
 		return m, func() tea.Msg { return agentSelectedMsg{} }
+	case "sessions":
+		return m, func() tea.Msg { return sessionsSelectedMsg{} }
 	case "status":
 		return m, func() tea.Msg { return statusSelectedMsg{} }
 	case "help":

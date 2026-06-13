@@ -87,6 +87,7 @@ type liveModel struct {
 	chatInput   textinput.Model
 	chatEntries []chatEntry
 	chatLoading bool
+	stopArmed   bool // 'x' pressed once; a second 'x' cancels the server-side run
 	spin        spinner.Model
 	bar         progress.Model
 	vp          viewport.Model
@@ -153,10 +154,24 @@ func (m liveModel) Update(msg tea.Msg) (liveModel, tea.Cmd) {
 		if m.chatActive {
 			return m.updateChatKey(msg)
 		}
+		if msg.String() != "x" {
+			m.stopArmed = false // any other key disarms the stop confirmation
+		}
 		switch msg.String() {
 		case "esc":
-			m.cancel() // stop the stream goroutine
+			m.cancel() // detach: stop watching, but the run keeps going server-side
 			return m, func() tea.Msg { return backMsg{} }
+		case "x":
+			// Stop the SERVER-SIDE run (two-press confirm), not just the view.
+			if m.client != nil && !m.done {
+				if m.stopArmed {
+					m.stopArmed = false
+					return m, cancelRunCmd(m.client, m.runID)
+				}
+				m.stopArmed = true
+				m.refresh()
+				return m, nil
+			}
 		case "a":
 			// Open the embedded assistant inline (running or finished) — no screen change.
 			if m.client != nil {
@@ -533,7 +548,10 @@ func (m liveModel) footer() string {
 		}
 		return hintStyle.Render(actions + " · esc back")
 	}
-	footer := "a ask · esc back · ctrl+c quit"
+	if m.stopArmed {
+		return errorStyle.Render("press x again to STOP the run") + hintStyle.Render("  ·  any other key keeps it running")
+	}
+	footer := "a ask · x stop · esc detach · ctrl+c quit"
 	if m.ready && m.vp.TotalLineCount() > m.vp.Height {
 		footer = "↑↓ scroll · " + footer // only advertise scroll when there is overflow
 	}
