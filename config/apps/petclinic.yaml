@@ -1,0 +1,54 @@
+# Spring PetClinic Microservices — a REAL local target to validate the engine against
+# something far richer than a static site. Angular SPA frontend + several Spring Boot
+# services (customers / vets / visits) behind a Spring Cloud Gateway, all brought up with
+# one `docker compose up`. This is the stack the change-coverage keystone was designed for
+# (see docs/change-coverage.md → "Activating the keystone on a watched app (Angular + Spring)").
+#
+# Setup & how to run: docs/local-target-petclinic.md
+#
+# NOTE — monorepo: PetClinic keeps every service in ONE repo, so this config does NOT use the
+# cross-repo `services:` feature (that is for microservices that each live in their own repo).
+# It DOES exercise: the e2e flow against a live local DEV, the Angular+Spring coverage keystone,
+# the deploy-gate skip, and shadow mode.
+
+name: "petclinic"
+repo: "spring-petclinic/spring-petclinic-microservices"   # upstream is public → clonable read-only.
+                                                          # Fork it if you want to push commits and
+                                                          # trigger real diff-mode webhook runs.
+baseBranch: "main"
+
+# PetClinic exposes springdoc OpenAPI per service. Optional authoring hint — the AGENT locates and
+# reads these to write contract-aware assertions; the orchestrator never parses them. Adjust/remove
+# if your fork does not ship the specs in-repo.
+# openapi:
+#   - "**/src/main/resources/**/openapi*.yaml"
+#   - "**/api-docs.json"
+
+dev:
+  baseUrl: "http://host.docker.internal:8080"   # the Spring Cloud Gateway — the single UI entrypoint.
+  # host.docker.internal = the HOST's localhost as seen from inside the orchestrator/agent
+  # containers (Docker Desktop). If you instead run the CLI on the host, change to localhost:8080.
+  # no versionUrl → the deploy gate is SKIPPED (you bring DEV up yourself with docker compose).
+  # If you later want the gate, point it at an actuator endpoint returning { sha, healthy }.
+
+qa:
+  needsReview: true
+  shadow: true                # validate end-to-end WITHOUT opening PRs/Issues — only logs what it
+                              # WOULD do. The CLI prints a value report at the end (coverage, reviewer,
+                              # would-do action). Lift to false only once you trust the output.
+  testDataPrefix: "qa-bot"    # owners/pets created by the bot are namespaced per SHA
+
+  # Change-coverage — the value keystone. "signal" measures + records without ever blocking.
+  # To make it MEASURE (not "unknown") on PetClinic's bundled Angular deploy, enable DEV source
+  # maps — see docs/local-target-petclinic.md. Move to "enforce" only after a run reports a real %.
+  changeCoverage:
+    mode: signal
+    minRatio: 0.7
+
+  # Value oracle (fault-injection) re-runs the suite against DEV once per green diff (≈2× exec). It
+  # is OFF by default while shadow:true (don't double-hit your local DEV during onboarding). Set to
+  # "signal" explicitly once you want ground-truth on the backend-through-UI assertions.
+  # valueOracle: signal
+
+report:
+  onFailure: "github-issue"
