@@ -139,6 +139,59 @@ test("buildPrompt joins multiple OpenAPI globs and omits the line when no hint i
   assert.doesNotMatch(buildPrompt(input), /OpenAPI contract/); // input has no openapi → no line
 });
 
+// ── A' (commit body context) + B' (shared acceptance criterion): the diff/manual objective sharpening ──
+
+test("A' buildPrompt (diff) renders the commit body as stated intent when present", () => {
+  const withBody = { ...input, intent: { ...input.intent!, body: "Owners with >10 pets were overcharged because the cart re-queried after the discount." } };
+  const p = buildPrompt(withBody);
+  assert.match(p, /Why this change \(commit body/);
+  assert.match(p, /Owners with >10 pets were overcharged/);
+});
+
+test("A' buildPrompt (diff) omits the body section when the commit has no body", () => {
+  assert.doesNotMatch(buildPrompt(input), /Why this change \(commit body/); // input.intent has no body
+});
+
+test("A' buildPrompt sanitizes the commit body (defense in depth — the body is attacker-influenceable prose)", () => {
+  const withSecret = { ...input, intent: { ...input.intent!, body: "deploy with token=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } };
+  const p = buildPrompt(withSecret);
+  assert.doesNotMatch(p, /ghp_aaaaaaaaaaaa/);
+  assert.match(p, /\[REDACTED_SECRET\]/);
+});
+
+test("A' buildPrompt caps a huge commit body so it cannot blow the prompt budget", () => {
+  const huge = "behavioral note. ".repeat(1000); // ~17k chars, well over the 4k cap
+  const p = buildPrompt({ ...input, intent: { ...input.intent!, body: huge } });
+  assert.match(p, /body truncated/);
+  assert.ok(!p.includes(huge), "the full uncapped body must not appear in the prompt");
+});
+
+test("A' buildPrompt does NOT render the body on a re-generation pass (objective already established; protects the largest prompts)", () => {
+  const reGen = { ...input, intent: { ...input.intent!, body: "first-pass-only body marker" }, fixCases: [{ name: "owners", status: "fail" as const, detail: "boom" }] };
+  assert.doesNotMatch(buildPrompt(reGen), /first-pass-only body marker/);
+});
+
+test("B' buildPrompt (diff) states a concrete acceptance criterion tied to the change before writing", () => {
+  const p = buildPrompt(input);
+  assert.match(p, /commit to this BEFORE writing/);
+  assert.match(p, /observable OUTCOME/);
+  assert.match(p, /must fail if this specific behavior regresses/i);
+});
+
+test("B' buildPrompt (manual) carries the SAME acceptance criterion — manual is a first-class focused path", () => {
+  const p = buildPrompt({ ...input, mode: "manual", guidance: "test the contact form submits and shows a thank-you" });
+  assert.match(p, /test the contact form submits/); // the guidance IS the objective
+  assert.match(p, /commit to this BEFORE writing/);
+  assert.match(p, /observable OUTCOME/);
+});
+
+test("A' buildExplorerPrompt renders the commit body so the explorer infers a concrete objective", () => {
+  const withBody = { ...input, intent: { ...input.intent!, body: "the discount must persist after the cart re-queries" } };
+  const e = buildExplorerPrompt(withBody);
+  assert.match(e, /Why this change \(commit body/);
+  assert.match(e, /discount must persist/);
+});
+
 test("buildPrompt complete mode: whole-repo analysis + persisted coverage", () => {
   const p = buildPrompt({ ...input, mode: "complete", intent: undefined });
   assert.match(p, /WHOLE repository/);

@@ -26,6 +26,7 @@ const (
 	focusNow    dashFocus = iota // the active run · ↵ watch · x stop (only when one is running)
 	focusFleet                   // pick a project · ← → mode · t target · ↵ launch
 	focusModels                  // pick a role · ↵ open the model switcher
+	focusRecent                  // pick a recent run · ↵ open it (only when the feed is non-empty)
 	dashFocusCount
 )
 
@@ -58,6 +59,7 @@ type dashboardModel struct {
 	launchArmed  bool   // a heavy mode needs a second Enter to confirm (whole-suite/repo runs)
 	stopArmed    bool   // 'x' on the active run pressed once; a second 'x' confirms the stop
 	modelCursor  int    // MODELS: selected role row
+	recentCursor int    // RECENT: selected run row
 
 	// Command palette (':'): a fuzzy launcher over the board, scoped to the dashboard
 	// so it never eats keystrokes meant for a text field on another screen.
@@ -128,6 +130,24 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 		m.fleet = msg.fleet
 		m.signals = msg.signals
 		m.err = ""
+		if n := len(m.recentRuns()); m.recentCursor >= n {
+			m.recentCursor = max(0, n-1)
+		}
+		return m, nil
+	case cancelErrMsg:
+		// A stop the server rejected (or that timed out). Show it on the error line — a swallowed
+		// cancel error is exactly what made "press x to STOP" look like it did nothing — and
+		// disarm so the next 'x' re-arms a fresh attempt.
+		m.err = msg.err.Error()
+		m.status = ""
+		m.stopArmed = false
+		return m, nil
+	case errMsg:
+		// Any other failed dashboard command must SURFACE too, never be swallowed (the same
+		// "never silently swallow" rule the other screens follow). Show it and clear stale status.
+		m.err = msg.err.Error()
+		m.status = ""
+		m.stopArmed = false
 		return m, nil
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -144,6 +164,9 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 func (m dashboardModel) handleKey(k tea.KeyMsg) (dashboardModel, tea.Cmd) {
 	// A run that ended invalidates a NOW focus; fall back to FLEET so keys act on something.
 	if m.focus == focusNow && !m.hasNow() {
+		m.focus = focusFleet
+	}
+	if m.focus == focusRecent && !m.hasRecent() {
 		m.focus = focusFleet
 	}
 	// A key other than a second Enter / second x cancels a pending confirmation.
@@ -192,12 +215,17 @@ func (m dashboardModel) handleKey(k tea.KeyMsg) (dashboardModel, tea.Cmd) {
 		return m.handleNowKey(k)
 	case focusModels:
 		return m.handleModelsKey(k)
+	case focusRecent:
+		return m.handleRecentKey(k)
 	}
 	return m.handleFleetKey(k)
 }
 
 // hasNow reports whether the NOW panel is an actionable focus — i.e. a run is in flight.
 func (m dashboardModel) hasNow() bool { return m.sys.queue.Running != nil }
+
+// hasRecent reports whether the RECENT feed has any runs to act on (so it can be focused).
+func (m dashboardModel) hasRecent() bool { return len(m.recentRuns()) > 0 }
 
 // onboardRow is the cursor index of the "+ onboard" row, which sits just past the last
 // project so it is reachable with ↓ (not only the global 'o').
@@ -218,8 +246,15 @@ func (m *dashboardModel) navDown() {
 			m.modelCursor = 0
 		}
 	case focusModels:
-		if m.modelCursor < len(m.modelRoleList())-1 {
+		if m.modelCursor < len(m.modelRoleList()) { // len roles + 1 for the "all settings" row
 			m.modelCursor++
+		} else if m.hasRecent() {
+			m.focus = focusRecent
+			m.recentCursor = 0
+		}
+	case focusRecent:
+		if m.recentCursor < len(m.recentRuns())-1 {
+			m.recentCursor++
 		}
 	}
 }
@@ -241,26 +276,48 @@ func (m *dashboardModel) navUp() {
 			m.focus = focusFleet
 			m.cursor = m.onboardRow() // re-enter FLEET at its bottom (the onboard row)
 		}
+	case focusRecent:
+		if m.recentCursor > 0 {
+			m.recentCursor--
+		} else {
+			m.focus = focusModels
+			m.modelCursor = len(m.modelRoleList()) // re-enter MODELS at its bottom (the all-settings row)
+		}
 	}
 }
 
 // focusOrder is the Tab cycle of actionable panels — NOW only while a run is active.
 func (m dashboardModel) focusOrder() []dashFocus {
+	order := make([]dashFocus, 0, 4)
 	if m.hasNow() {
-		return []dashFocus{focusNow, focusFleet, focusModels}
+		order = append(order, focusNow)
 	}
-	return []dashFocus{focusFleet, focusModels}
+	order = append(order, focusFleet, focusModels)
+	if m.hasRecent() {
+		order = append(order, focusRecent)
+	}
+	return order
 }
 
 // cycleFocus advances Tab focus through focusOrder, clamping a stale FLEET cursor back in range.
 func (m *dashboardModel) cycleFocus(dir int) {
 	order := m.focusOrder()
-	idx := 0
+	idx, found := 0, false
 	for i, f := range order {
 		if f == m.focus {
-			idx = i
+			idx, found = i, true
 			break
 		}
+	}
+	if !found {
+		// The current focus is not actionable right now (e.g. NOW after the run ended); land
+		// on the first (Tab) or last (Shift+Tab) actionable panel, by direction.
+		if dir < 0 {
+			m.focus = order[len(order)-1]
+		} else {
+			m.focus = order[0]
+		}
+		return
 	}
 	m.focus = order[(idx+dir+len(order))%len(order)]
 	if m.focus == focusFleet && m.cursor > m.onboardRow() {
@@ -348,10 +405,32 @@ func (m dashboardModel) handleFleetKey(k tea.KeyMsg) (dashboardModel, tea.Cmd) {
 // handleModelsKey drives the MODELS panel: pick a role (↑↓), then ↵ opens the full agent
 // switcher (provider, model, dual mode, restart) — the existing screen, not a duplicate.
 func (m dashboardModel) handleModelsKey(k tea.KeyMsg) (dashboardModel, tea.Cmd) {
-	if k.String() == "enter" {
-		return m, func() tea.Msg { return agentSelectedMsg{} }
+	if k.String() != "enter" {
+		return m, nil
 	}
-	return m, nil
+	// ↵ on a role opens the agent screen focused on THAT model; ↵ on the row beneath the roster
+	// opens the full screen with no role pre-selected.
+	roles := []string{"primary", "reviewer", "chat"}
+	if m.modelCursor >= 0 && m.modelCursor < len(roles) {
+		role := roles[m.modelCursor]
+		return m, func() tea.Msg { return agentSelectedMsg{role: role} }
+	}
+	return m, func() tea.Msg { return agentSelectedMsg{} }
+}
+
+// handleRecentKey drives the focused RECENT feed: ↵ opens the selected run in the live screen
+// (which shows the recap for a finished run, seeded from its record).
+func (m dashboardModel) handleRecentKey(k tea.KeyMsg) (dashboardModel, tea.Cmd) {
+	if k.String() != "enter" {
+		return m, nil
+	}
+	runs := m.recentRuns()
+	if m.recentCursor < 0 || m.recentCursor >= len(runs) {
+		return m, nil
+	}
+	r := runs[m.recentCursor]
+	id, app := r.Id, r.App
+	return m, func() tea.Msg { return watchRunMsg{id: id, app: app} }
 }
 
 // cycleMode steps the FLEET quick-launch mode forward/back through launchModes.
@@ -625,7 +704,7 @@ func (m dashboardModel) View() string {
 		return screenStyle.Render(m.renderPalette(w))
 	}
 	var b strings.Builder
-	b.WriteString(m.renderNow(w) + "\n\n")
+	b.WriteString(m.renderNow(w, m.focus == focusNow) + "\n\n")
 	b.WriteString(m.renderFleet(w) + "\n\n")
 
 	// Two columns when there's room; stack them on narrow terminals so neither the
@@ -642,7 +721,7 @@ func (m dashboardModel) View() string {
 		)
 		b.WriteString(cols + "\n\n")
 	}
-	b.WriteString(m.renderRecent(w))
+	b.WriteString(m.renderRecent(w, m.focus == focusRecent))
 
 	switch {
 	case m.launchArmed:
@@ -659,12 +738,20 @@ func (m dashboardModel) View() string {
 // footerHints adapts the key legend to the focused panel, so the actions a panel offers
 // are always visible rather than memorised. Tab moves focus; the palette (':') and help
 // ('?') are the always-available escape hatches.
+// footerHints lists only the focused panel's PRIMARY keys plus the always-present trio (more · help ·
+// quit). The less-common board-wide keys (o onboard · : palette · a agents) live behind "? more" so
+// the bar stays scannable instead of stacking nine actions on one line.
 func (m dashboardModel) footerHints() string {
+	const tail = " · ? help · q quit"
 	switch m.focus {
+	case focusNow:
+		return "tab panel · ↑↓ move · ↵ watch · x stop" + tail
 	case focusModels:
-		return "tab panel · ↑↓ role · ↵ change model · o onboard · a agents · s sessions · : cmd · ? help · q quit"
+		return "tab panel · ↑↓ role · ↵ edit model" + tail
+	case focusRecent:
+		return "tab panel · ↑↓ run · ↵ open" + tail
 	default:
-		return "tab panel · ↑↓ project · ← → mode · t target · ↵ launch · h history · i intel · e edit · d delete · o onboard · : cmd · q quit"
+		return "tab panel · ↑↓ move · ← → mode · t target · ↵ launch" + tail
 	}
 }
 
@@ -694,14 +781,14 @@ func (m dashboardModel) renderPalette(w int) string {
 
 // renderNow is the active-run banner — the board's pulse. It reads the live queue and,
 // when a run is in flight, the running record's step and pipeline position.
-func (m dashboardModel) renderNow(w int) string {
+func (m dashboardModel) renderNow(w int, focused bool) string {
 	q := m.sys.queue
 	if q.Running == nil {
 		body := hintStyle.Render("no active run")
 		if len(m.sys.apps) > 0 {
 			body = hintStyle.Render("pick a project below · ↵ run · o onboard")
 		}
-		return accentRule(w, "now", okStyle.Render("idle")) + "\n  " + body
+		return labelRule(w, "now", okStyle.Render("idle")) + "\n  " + body
 	}
 
 	app := q.Running.App
@@ -725,11 +812,25 @@ func (m dashboardModel) renderNow(w int) string {
 	if step != "" {
 		line += renderSegs("", sg("   ", colFaint), sg(phaseDescription(step), colDim))
 	}
-	out := accentRule(w, "now", right) + "\n  " + line + "\n  " + progressBar(w-2, frac, colInfra)
+	out := panelRule(w, focused, "now", right) + "\n  " + line + "\n  " + progressBar(w-2, frac, colInfra)
 	if tail := m.runActivityTail(w); tail != "" {
 		out += "\n" + tail
 	}
-	return out + "\n  " + hintStyle.Render("↵ watch this run · s sessions")
+	if q.Pending > 0 {
+		out += "\n  " + hintStyle.Render(pluralize(q.Pending, "run queued behind it", "runs queued behind it"))
+	}
+	// Action line: NOW is the run-control surface now that the sessions screen is gone —
+	// focused it offers the live controls (with the stop-arm warning); otherwise it nudges
+	// the operator to focus it.
+	switch {
+	case focused && m.stopArmed:
+		out += "\n  " + errorStyle.Render("press x again to STOP the run") + hintStyle.Render("  ·  any other key keeps it running")
+	case focused:
+		out += "\n  " + hintStyle.Render("↵ watch · x stop")
+	default:
+		out += "\n  " + hintStyle.Render("↑ focus to watch or stop")
+	}
+	return out
 }
 
 // runActivityTail surfaces the active run's last few activity lines — a live-ish event
@@ -772,7 +873,11 @@ func (m dashboardModel) renderFleet(w int) string {
 	var b strings.Builder
 	b.WriteString(panelRule(w, focused, "fleet", hintStyle.Render(pluralize(len(m.sys.apps), "project", "projects"))) + "\n")
 	if len(m.sys.apps) == 0 {
-		return b.String() + "  " + renderSegs("", sg("＋ ", colEmber)) + hintStyle.Render("no projects yet — press o to onboard one")
+		obar := "   "
+		if focused {
+			obar = renderSegs("", sg("▌▸ ", colEmber))
+		}
+		return b.String() + obar + renderSegs("", sg("＋ ", colEmber)) + hintStyle.Render("no projects yet — ↵ or o to onboard one")
 	}
 	for i, a := range m.sys.apps {
 		st := computeFleetStats(m.fleet[a.Name], fleetWindow)
@@ -782,7 +887,7 @@ func (m dashboardModel) renderFleet(w int) string {
 		}
 		selected := i == m.cursor
 		bar, name := "   ", labelStyle.Render(padRight(a.Name, 14))
-		if selected {
+		if selected && focused {
 			bar = renderSegs("", sg("▌▸ ", colEmber))
 			name = renderSegs("", sgb(padRight(a.Name, 14), colFg))
 		}
@@ -801,13 +906,11 @@ func (m dashboardModel) renderFleet(w int) string {
 			if phase != "" && frac > 0 {
 				status += lipgloss.NewStyle().Foreground(colInfra).Render(fmt.Sprintf("  %d%%", int(frac*100+0.5)))
 			}
+		} else if st.total == 0 {
+			status = hintStyle.Render("· no runs yet")
 		} else {
-			rate := "  —"
-			if st.total > 0 {
-				rate = fmt.Sprintf("%3.0f%% pass", st.passRate*100)
-			}
 			status = padGlyphs(lastVerdictGlyphs(st.last, 5), 5) + "  " +
-				passRateStyle(st.passRate, st.total).Render(rate) + "  " +
+				passRateStyle(st.passRate, st.total).Render(fmt.Sprintf("%3.0f%% pass", st.passRate*100)) + "  " +
 				lipgloss.NewStyle().Foreground(colDim).Render(st.spark)
 		}
 		row := bar + name + " " +
@@ -816,13 +919,39 @@ func (m dashboardModel) renderFleet(w int) string {
 		if a.Shadow {
 			row += "  " + shadowStyle.Render("shadow")
 		}
-		// On the focused selection, surface the launch config the ← → t keys edit in place.
+		// On the focused selection: a running project offers watch/stop (you resume or stop
+		// it, never launch a second run on top); an idle one edits its launch config in place.
 		if selected && focused {
-			row += "   " + renderSegs("", sg("‹ ", colEmber), sgb(m.launchMode, colFg), sg(" · ", colFaint), sgb(m.effectiveTarget(a), colFg), sg(" ›", colEmber))
+			if _, _, running := m.runningPhase(a.Name); running {
+				if m.stopArmed {
+					row += "   " + errorStyle.Render("press x again to STOP") + hintStyle.Render(" · any other key keeps it")
+				} else {
+					row += "   " + hintStyle.Render("↵ watch · x stop")
+				}
+			} else {
+				row += "   " + renderSegs("", sg("‹ ", colEmber), sgb(m.launchMode, colFg), sg(" · ", colFaint), sgb(m.effectiveTarget(a), colFg), sg(" ›", colEmber))
+			}
 		}
 		b.WriteString(row + "\n")
+		// Progressive disclosure: the focused selection reveals its secondary actions inline,
+		// so they are discoverable on the row rather than memorised from the footer.
+		if selected && focused {
+			actions := "h history · i intel"
+			if _, _, running := m.runningPhase(a.Name); !running {
+				actions += " · e edit · d delete"
+			}
+			b.WriteString("     " + hintStyle.Render(actions) + "\n")
+		}
 	}
-	b.WriteString("  " + renderSegs("", sg("＋ ", colEmber), sg("onboard project", colDim)) + hintStyle.Render("  ‹o›"))
+	// The onboard row is a real cursor stop (reachable with ↓), so it carries the selection
+	// caret when it is the focused selection. ‹ › is reserved for editable values (the launch
+	// config), so the shortcut is shown footer-style, not as a ‹o› here.
+	obar, olabel, otail := "   ", sg("onboard project", colDim), ""
+	if focused && m.cursor == m.onboardRow() {
+		obar, olabel = renderSegs("", sg("▌▸ ", colEmber)), sgb("onboard project", colFg)
+		otail = hintStyle.Render("   ↵ onboard")
+	}
+	b.WriteString(obar + renderSegs("", sg("＋ ", colEmber), olabel) + otail)
 	return strings.TrimRight(b.String(), "\n")
 }
 
@@ -888,8 +1017,16 @@ func (m dashboardModel) renderModels(w int) string {
 		}
 		b.WriteString(marker + " " + m.providerDot(prov) + " " + label + " " + hintStyle.Render(padRight(prov, 9)+" "+model) + "\n")
 	}
+	// A row beneath the roster opens the FULL agent screen (every role, provider, keys, restart) —
+	// distinct from ↵ on a role, which edits THAT model directly.
+	allMarker, allLabel := "  ", labelStyle.Render("all models · runtime settings")
+	if focused && m.modelCursor == len(m.modelRoleList()) {
+		allMarker = renderSegs("", sg("▌", colEmber))
+		allLabel = renderSegs("", sgb("all models · runtime settings", colFg))
+	}
+	b.WriteString(allMarker + "   " + allLabel + hintStyle.Render(" →") + "\n")
 	if focused {
-		b.WriteString("  " + hintStyle.Render("↵ change model · provider"))
+		b.WriteString("  " + hintStyle.Render("↵ edit the focused model · or open all settings"))
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -918,7 +1055,8 @@ func (m dashboardModel) providerDot(provider string) string {
 // the keystone. Every number is real or honestly absent; nothing inert is dressed up.
 func (m dashboardModel) renderSignals(w int) string {
 	var b strings.Builder
-	b.WriteString(labelRule(w, "signals", renderSegs("", sg("◆ truth ", colPass), sg("◇ proxy", colFlaky))) + "\n")
+	b.WriteString(labelRule(w, "integrity", renderSegs("", sg("◆ truth ", colPass), sg("◇ proxy", colFlaky))) + "\n")
+	b.WriteString("  " + hintStyle.Render("does the suite catch real bugs, or only pass review?") + "\n")
 
 	// ◆ value oracle — ground truth.
 	oracle := shadowStyle.Render("not measured yet ⚠")
@@ -943,23 +1081,36 @@ func (m dashboardModel) renderSignals(w int) string {
 }
 
 // renderRecent is the cross-fleet outcome feed: the most recent runs, newest first.
-func (m dashboardModel) renderRecent(w int) string {
+// recentRuns is the cross-fleet outcome feed: every app's runs, newest first, capped. It
+// backs both the RECENT render and its ↑↓/↵ interaction, so they index the same list.
+func (m dashboardModel) recentRuns() []contract.RunRecord {
 	var all []contract.RunRecord
 	for _, runs := range m.fleet {
 		all = append(all, runs...)
 	}
 	sort.SliceStable(all, func(i, j int) bool { return all[i].At > all[j].At })
+	if len(all) > 6 {
+		all = all[:6]
+	}
+	return all
+}
 
+func (m dashboardModel) renderRecent(w int, focused bool) string {
+	runs := m.recentRuns()
 	var b strings.Builder
-	b.WriteString(labelRule(w, "recent", "") + "\n")
-	if len(all) == 0 {
+	b.WriteString(panelRule(w, focused, "recent", "") + "\n")
+	if len(runs) == 0 {
 		return b.String() + "  " + hintStyle.Render("no runs yet")
 	}
-	for i, r := range all {
-		if i >= 6 {
-			break
+	for i, r := range runs {
+		marker := "  "
+		if focused && i == m.recentCursor {
+			marker = renderSegs("", sg("▌ ", colEmber))
 		}
-		b.WriteString("  " + recentLine(r) + "\n")
+		b.WriteString(marker + recentLine(r) + "\n")
+	}
+	if focused {
+		b.WriteString("  " + hintStyle.Render("↵ open this run"))
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

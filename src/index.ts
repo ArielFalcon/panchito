@@ -1,18 +1,24 @@
 import { createServer, IncomingMessage } from "node:http";
 import { join } from "node:path";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { writeFileSync, readFileSync, chmodSync, rmSync, unlinkSync } from "node:fs";
 import { JobQueue } from "./server/queue";
 import { handleWebhook } from "./server/webhook";
 import { loadAppConfig, loadAppConfigsByRepo, listAppConfigs } from "./orchestrator/config-loader";
 import { handleApi, ApiDeps } from "./server/api";
+import { authorizeBearer, issueSession } from "./server/auth";
+import { verifyGithubIdentity, authorizeUser } from "./server/github-auth";
+import { createFixedWindowLimiter } from "./server/rate-limit";
 import { toIntelligenceView } from "./server/intelligence-view";
 import { toSignalsView } from "./server/signals-view";
-import { createRunEventStore } from "./server/run-events";
-import type { RunEvent } from "./contract/events";
+import { toTrendsView } from "./server/trends-view";
+import { toReportView } from "./server/report-view";
+import { toRunReportView } from "./server/run-report-view";
+import { createDurableRunEventStore } from "./server/durable-run-events";
+import { serveDashboard } from "./server/static";
 import { handleMaintainerApi, recordIncident, getMaintainerStatus, getIncidents } from "./server/maintainer";
-import { getRecord, listRecords, currentRun, updateRecord, interruptedRecords, continuationDepth, MAX_CONTINUATION_DEPTH, listLearningRules, loadScorecard, loadCurriculum } from "./server/history";
-import { enqueueTrackedRun } from "./server/runner";
+import { getRecord, listRecords, currentRun, updateRecord, interruptedRecords, continuationDepth, MAX_CONTINUATION_DEPTH, listLearningRules, loadScorecard, loadCurriculum, listRunOutcomes, getRunOutcome } from "./server/history";
+import { enqueueTrackedRun, cancelTrackedRun } from "./server/runner";
 import { defaultPipelineDeps } from "./pipeline";
 import { pruneMirrors, defaultMirrorPruneDeps } from "./server/mirror-prune";
 import { createMaintainerRuntime } from "./server/maintainer-runtime";
@@ -21,7 +27,7 @@ import { resolveRef, defaultMirrorDeps } from "./integrations/repo-mirror";
 import { askAssistant, AgentDeps, getOpenSessionCount } from "./integrations/opencode-client";
 import { createAgentRuntimeManager } from "./server/agent-runtime";
 import { CodexRuntimeStrategy, OpenCodeRuntimeStrategy } from "./agent-runtime";
-import { appendLog, appendActivity, deleteAppHistory, runVerdictCounts, saveRunEvent, loadRunEvents } from "./server/history";
+import { appendLog, appendActivity, deleteAppHistory, runVerdictCounts } from "./server/history";
 import { type RunMode, type TestTarget } from "./types";
 import { github } from "./integrations/github";
 import { createApp as adminCreateApp, updateApp as adminUpdateApp, deleteApp as adminDeleteApp, type AppAdminDeps } from "./server/app-admin";
@@ -32,13 +38,10 @@ import { logJson } from "./integrations/logger";
 const SELF_REPO = process.env.AI_PIPELINE_REPO ?? "ArielFalcon/ai-pipeline";
 const ROOT = process.env.AI_PIPELINE_ROOT ?? process.cwd();
 const TOKEN_FILE = join(ROOT, "config", ".api_token");
-const runEvents = createRunEventStore({
-  // Durable backing (OBS-01): the live SSE stream survives a restart (e.g. the maintainer
-  // hot-swap's process.exit) and eviction from the in-memory ring.
-  persist: (e) => saveRunEvent({ runId: e.runId, seq: e.seq, ts: e.ts, body: e.body }),
-  loadPersisted: (runId, afterSeq) =>
-    loadRunEvents(runId, afterSeq).map((r) => ({ seq: r.seq, runId: r.runId, ts: r.ts, body: r.body }) as RunEvent),
-});
+// Durable backing (OBS-01) lives in createDurableRunEventStore, shared with the CLI so every
+// trigger persists events identically: the live SSE stream survives a restart (e.g. the
+// maintainer hot-swap's process.exit) and eviction from the in-memory ring.
+const runEvents = createDurableRunEventStore();
 // The maintainer's autonomous merge+hot-swap is OFF by default. Opt-in with
 // SELF_MAINTAINER_AUTOMERGE=true (requires branch protection on the self-repo).
 const AUTONOMOUS_MAINTAINER = process.env.SELF_MAINTAINER_AUTOMERGE === "true";
@@ -63,6 +66,27 @@ if (process.env.QA_API_TOKEN) {
     chmodSync(TOKEN_FILE, 0o600);
     console.log(`[qa] auto-generated QA_API_TOKEN → ${TOKEN_FILE}`);
   }
+}
+
+// Session signing secret for GitHub-user logins. Reuses QA_API_TOKEN by default (one secret
+// to manage), or a dedicated AUTH_SIGNING_KEY when an operator wants to rotate sessions
+// independently of the machine token. Sessions live AUTH_SESSION_TTL_SECONDS (default 24h).
+const signingSecret = process.env.AUTH_SIGNING_KEY ?? apiToken;
+const AUTH_SESSION_TTL_SECONDS = Number(process.env.AUTH_SESSION_TTL_SECONDS ?? 24 * 60 * 60);
+
+// Per-IP throttle for the public login endpoint (20 attempts / minute), guarding against a
+// flood that would amplify into GitHub API calls from this server's address.
+const loginLimiter = createFixedWindowLimiter({ limit: 20, windowMs: 60_000 });
+
+// The set of repos a GitHub user must be able to push to in order to log in: every watched
+// app's primary repo plus its service repos. A collaborator on any one earns a session.
+function watchedRepos(): string[] {
+  const repos = new Set<string>();
+  for (const app of listAppConfigs()) {
+    repos.add(app.repo);
+    for (const svc of app.services ?? []) repos.add(svc.repo);
+  }
+  return [...repos];
 }
 
 // Fail closed on the webhook surface: without a configured secret, signatures cannot
@@ -304,15 +328,12 @@ function finalizeInterruptedRuns(): void {
   console.log(`[qa] recovery complete — ${zombies.length} run(s) marked as infra-error`);
 }
 
+// A request is authorized if it carries EITHER the static machine token (CI/automation) OR a
+// valid user-session JWT minted by POST /api/auth/login. authorizeBearer does the constant-time
+// static compare and the signature/expiry check; both paths are unit-tested in auth.test.ts.
 function authorized(req: IncomingMessage): boolean {
-  if (!apiToken) return false;
   const header = req.headers["authorization"];
-  if (typeof header !== "string") return false;
-  const expected = `Bearer ${apiToken}`;
-  // Constant-time comparison (avoid leaking the token via response timing).
-  const a = Buffer.from(header);
-  const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual(a, b);
+  return authorizeBearer(typeof header === "string" ? header : undefined, apiToken, signingSecret) !== null;
 }
 
 const ASSISTANT_CWD = "/tmp";
@@ -331,6 +352,13 @@ const appAdminDeps: AppAdminDeps = {
   env: process.env,
 };
 
+// Build the period-over-period TrendsView for an app from one outcomes read. The trends and report
+// deps both route through this so the read logic — and the `100` window literal — live in one place
+// instead of being duplicated at each site; each call performs its own read (trends and report are
+// separate HTTP requests, so there is no cross-request reuse).
+const buildTrends = (app: string, window?: number) =>
+  toTrendsView({ app, outcomes: listRunOutcomes(app, 100), records: listRecords(app, 100), now: new Date().toISOString(), window });
+
 const apiDeps: ApiDeps = {
   queue,
   enqueue: enqueueApiRun,
@@ -346,29 +374,60 @@ const apiDeps: ApiDeps = {
   listRecords,
   currentRun,
   intelligence: (app) => toIntelligenceView(app, listLearningRules(app), loadScorecard(app), loadCurriculum(app)),
-  signals: () => toSignalsView(listAppConfigs().map((a) => ({ scorecard: loadScorecard(a.name), runs: listRecords(a.name, 50) }))),
-  ask: async (input) => askAssistant(input, currentAgentDeps(), ASSISTANT_CWD),
-  agentRuntime,
-  cancelRun: (id) => {
-    const record = getRecord(id);
-    if (!record) return false;
-    if (record.status === "enqueued") {
-      // Mark it cancelled. The queued job re-checks this before running (runner.ts)
-      // and skips, so a cancelled-while-enqueued run does NOT execute later.
-      updateRecord(id, { status: "done", step: "done", verdict: "infra-error", note: "cancelled by operator" });
-      return false;
+  signals: () => toSignalsView(listAppConfigs().map((a) => ({ scorecard: loadScorecard(a.name), runs: listRecords(a.name, 50), outcomes: listRunOutcomes(a.name, 50) }))),
+  // Each handler builds its own TrendsView via buildTrends (one SQLite read per request); report
+  // then feeds that view to toReportView. buildTrends is the single home for the read + the 100
+  // window literal — it does NOT dedup across the (separate) trends and report requests.
+  trends: (app, window) => buildTrends(app, window),
+  report: (app, window) => toReportView(buildTrends(app, window), { weights: loadAppConfig(app).qa.reports?.weights }),
+  // The run-scoped report: TWO analyses for the post-run summary view. `current` is the
+  // self-describing report about the run that just finished (its verdict, case mix, this run's
+  // change-coverage/value/duration). `evolution` is the period-over-period report of the same app
+  // as it stood at this run (outcomes/records up to the run's timestamp), so a recent execution can
+  // open the trends exactly as they were then — null until there is a prior run to compare against.
+  // Outer null ⇒ 404 (no such run).
+  reportForRun: (runId, window) => {
+    const rec = getRecord(runId);
+    if (!rec) return null;
+    let weights: Record<string, number> | undefined;
+    let minRatio: number | undefined;
+    try {
+      const cfg = loadAppConfig(rec.app);
+      weights = cfg.qa.reports?.weights;
+      minRatio = cfg.qa.changeCoverage?.minRatio;
+    } catch {
+      // app config gone but the run survives — still produce its report from defaults
     }
-    if (record.status !== "running") return false;
-    // Abort ONLY when `id` is the run currently holding the queue controller. Passing the
-    // id (not a bare cancel()) means a stale cancel — issued from a view where this record
-    // still reads "running" while it has actually finished and a successor is now executing —
-    // returns false instead of killing the innocent successor's live QA against DEV.
-    const aborted = queue.cancel(id);
-    if (aborted) {
-      updateRecord(id, { status: "done", step: "done", verdict: "infra-error", note: "cancelled by operator" });
-    }
-    return aborted;
+    const current = toRunReportView({ record: rec, outcome: getRunOutcome(runId) ?? null, minRatio, weights });
+    const outcomes = listRunOutcomes(rec.app, 200).filter((o) => o.at <= rec.at);
+    const records = listRecords(rec.app, 200).filter((r) => r.at <= rec.at);
+    const evolution =
+      outcomes.length >= 2
+        ? toReportView(toTrendsView({ app: rec.app, outcomes, records, now: rec.at, window }), { weights })
+        : null;
+    return { current, evolution };
   },
+  ask: async (input) => askAssistant(input, currentAgentDeps(), ASSISTANT_CWD),
+  // Advertise the OAuth App client id (public) in the version handshake so the console can run
+  // the device flow without baking it in — configure GitHub login once, here on the server.
+  githubClientId: process.env.GITHUB_OAUTH_CLIENT_ID,
+  // GitHub-user login: verify the token's identity, confirm push access to a watched repo,
+  // then mint a session. Failures are tagged so the route returns 401 (bad token) vs 403
+  // (authenticated but not a collaborator). The static QA_API_TOKEN remains the machine path.
+  login: async (githubToken) => {
+    const username = await verifyGithubIdentity(githubToken);
+    if (!username) return { ok: false, reason: "identity" };
+    if (!(await authorizeUser(githubToken, watchedRepos()))) return { ok: false, reason: "forbidden" };
+    const now = Date.now();
+    const token = issueSession(username, signingSecret, AUTH_SESSION_TTL_SECONDS, now);
+    return { ok: true, token, username, expiresAt: new Date(now + AUTH_SESSION_TTL_SECONDS * 1000).toISOString() };
+  },
+  agentRuntime,
+  // Cancel through the single funnel (runner.ts): aborts a live run we hold, and ALSO finalizes
+  // an enqueued or stale "running" record so the operator's stop always clears the run — never
+  // leaving a zombie stuck at "0%" answering 409 to every stop press. queue.cancel(id) inside it
+  // protects an innocent successor (it aborts only when the id matches the active run).
+  cancelRun: (id) => cancelTrackedRun(queue, id),
   continueRun: (parentId, cases, guidance) => {
     if (shuttingDown) return "";
     const parent = getRecord(parentId);
@@ -418,10 +477,23 @@ const server = createServer(async (req, res) => {
     // and the connect screen needs the latter BEFORE auth so a stale binary can be
     // told to update even with a wrong token. Neither exposes secrets.
     const apiPath = path.replace(/^\/api\/v1(?=\/|$)/, "/api");
-    const isPublic = req.method === "GET" && (apiPath === "/api/health" || apiPath === "/api/version");
+    // Public (pre-auth) surface: liveness, the version handshake, and login. Login MUST be
+    // public — it is how a client with no token yet obtains one (it presents a GitHub token,
+    // not the API credential). None of these expose secrets.
+    const isLogin = req.method === "POST" && apiPath === "/api/auth/login";
+    const isPublic =
+      (req.method === "GET" && (apiPath === "/api/health" || apiPath === "/api/version")) || isLogin;
     if (!isPublic && !authorized(req)) {
       res.writeHead(401, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+    // Throttle the public login endpoint per client IP: it is unauthenticated and each attempt
+    // fans out to the GitHub API, so an unbounded flood would amplify into GitHub traffic from
+    // this server's address. Over-limit attempts get 429 before any GitHub call is made.
+    if (isLogin && !loginLimiter.allow(req.socket.remoteAddress ?? "")) {
+      res.writeHead(429, { "Content-Type": "application/json", "Retry-After": "60" });
+      res.end(JSON.stringify({ error: "too many login attempts — try again in a minute" }));
       return;
     }
     if (path === "/api/metrics") {
@@ -442,6 +514,13 @@ const server = createServer(async (req, res) => {
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "not found" }));
     return;
+  }
+
+  // The web dashboard (a static SPA build) is served same-origin at /app, so it shares the
+  // orchestrator's origin and the operator's credentials (no CORS). Until web/dist exists this
+  // no-ops to a placeholder. The /api surface above stays Bearer-protected.
+  if (req.method === "GET" && (path === "/app" || path.startsWith("/app/"))) {
+    if (await serveDashboard(req, res, { distDir: join(ROOT, "web", "dist") })) return;
   }
 
   if (req.method === "POST") {

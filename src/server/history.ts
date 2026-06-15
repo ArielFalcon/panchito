@@ -176,6 +176,15 @@ function ensureDb(): void {
       data TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    -- A one-shot "rebuild the architecture map next run" flag, set by the process-audit context-heal.
+    -- DB-backed because the mirror's e2e/.qa/context.json is wiped/restored by git checkout -f +
+    -- git clean -fd on every run, so a file-level invalidation never survives to the next run. This
+    -- flag does, and is CONSUMED (cleared) by the next generating run for the app.
+    CREATE TABLE IF NOT EXISTS context_stale (
+      app TEXT PRIMARY KEY,
+      at TEXT NOT NULL
+    );
   `);
 
   // Migration: add columns introduced after the initial schema to DBs that already
@@ -403,7 +412,12 @@ export function updateRecord(id: string, patch: Partial<RunRecord>): void {
   if (patch.specs) {
     db.prepare("DELETE FROM specs WHERE run_id = ?").run(id);
     const insertSpec = db.prepare("INSERT INTO specs (run_id, name, objective, flow) VALUES (?, ?, ?, ?)");
+    // De-dup by spec FILE name: a list built per-test (a 3-test file appearing 3×) must not report
+    // "5 specs" for 2 files — the run record + value report count spec FILES, not test cases.
+    const seenSpec = new Set<string>();
     for (const s of patch.specs) {
+      if (seenSpec.has(s.name)) continue;
+      seenSpec.add(s.name);
       insertSpec.run(id, s.name, s.objective ?? null, s.flow ?? null);
     }
   }
@@ -620,6 +634,24 @@ export function setRuleStatusByHuman(ruleId: string, status: "deprecated" | "act
     .prepare("UPDATE learning_rules SET status = ?, last_verified = ? WHERE id = ?")
     .run(status, new Date().toISOString(), ruleId);
   return info.changes > 0;
+}
+
+// Mark an app's architecture map as stale so the next generating run rebuilds it. Used by the
+// process-audit context-heal: a file-level invalidation of e2e/.qa/context.json does NOT survive
+// the next run's `git checkout -f`/`git clean -fd`, but this DB flag does. Idempotent (latest wins).
+export function markContextStale(app: string): void {
+  ensureDb();
+  db.prepare("INSERT OR REPLACE INTO context_stale (app, at) VALUES (?, ?)").run(app, new Date().toISOString());
+}
+
+// Consume the staleness flag: returns true (and CLEARS the flag) when the app was marked stale,
+// false otherwise. One-shot by design — the next generating run reads it once to force a rebuild.
+export function consumeContextStale(app: string): boolean {
+  ensureDb();
+  const row = db.prepare("SELECT app FROM context_stale WHERE app = ?").get(app) as { app: string } | undefined;
+  if (!row) return false;
+  db.prepare("DELETE FROM context_stale WHERE app = ?").run(app);
+  return true;
 }
 
 // Back-fill the structured reflection onto an already-saved run outcome. The outcome row is

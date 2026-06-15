@@ -196,3 +196,14 @@ test("coerceExplorationBrief drops feBe entries missing route or operationId (no
   assert.equal(brief!.feBe!.length, 1);
   assert.equal(brief!.feBe![0]!.operationId, "op");
 });
+
+test("coerceExplorationBrief drops contract entries missing method or path (no blank hints)", () => {
+  const brief = coerceExplorationBrief({
+    builtForSha: "a",
+    objective: "o",
+    blastRadius: [{ symbol: "S", file: "f", role: "r" }],
+    contracts: [{ operationId: "op", method: "POST", path: "/x" }, { operationId: "incomplete" }],
+  });
+  assert.equal(brief!.contracts!.length, 1);
+  assert.equal(brief!.contracts![0]!.operationId, "op");
+});

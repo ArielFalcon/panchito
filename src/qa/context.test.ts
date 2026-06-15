@@ -70,8 +70,12 @@ test("an api operation needs method and path", () => {
   assert.match(v.errors.join("\n"), /api 'x': missing 'path'/);
 });
 
-test("a flow must carry at least one route", () => {
-  const v = validateContext({ ...valid, flows: [{ id: "empty", routes: [] }] });
-  assert.equal(v.ok, false);
-  assert.match(v.errors.join("\n"), /flows 'empty': empty 'routes'/);
+test("a flow with NO routes is TOLERATED (a real feature can have no mapped frontend routes — e.g. a disabled service)", () => {
+  // Regression: an empty-routes flow (PetClinic's disabled GenAI chat) used to invalidate the WHOLE
+  // map and discard a good architecture context every run. It is now tolerated — only a MALFORMED
+  // `routes` (present but not an array) is a real error.
+  assert.equal(validateContext({ ...valid, flows: [{ id: "empty", routes: [] }] }).ok, true);
+  const malformed = validateContext({ ...valid, flows: [{ id: "bad", routes: "nope" as never }] });
+  assert.equal(malformed.ok, false);
+  assert.match(malformed.errors.join("\n"), /flows 'bad': 'routes' must be an array/);
 });

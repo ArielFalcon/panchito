@@ -13,6 +13,7 @@ import { RunEventSchema, RunEventBodySchema } from "./events";
 import {
   RunRecordSchema, QaCaseSchema, SpecRecordSchema, AgentActivitySchema,
   AppViewSchema, AppServiceViewSchema, QueueStatusSchema, ChatEntrySchema, VersionInfoSchema,
+  LoginRequestSchema, LoginResponseSchema,
   CreateRunInputSchema, CreateRunResultSchema, AskRequestSchema, AskResponseSchema,
   ContinueRequestSchema, ContinueResultSchema,
   CreateAppInputSchema, UpdateAppInputSchema, CreateAppResultSchema,
@@ -23,6 +24,8 @@ import {
   AgentProviderHealthSchema, AgentModelInfoSchema, RoleAssignmentSchema,
   LearningRuleViewSchema, ScorecardViewSchema, CurriculumViewSchema, IntelligenceViewSchema,
   SignalsViewSchema,
+  TrendWindowSchema, CoverageTrendSchema, ValueTrendSchema, FlakyTrendSchema, ErrorClassCountSchema,
+  TrendsViewSchema, ReportInsightSchema, ReportViewSchema, RunReportViewSchema,
 } from "./commands";
 
 export const API_VERSION = "1.0.0";
@@ -41,6 +44,8 @@ const NAMED_SCHEMAS = {
   QueueStatus: QueueStatusSchema,
   ChatEntry: ChatEntrySchema,
   VersionInfo: VersionInfoSchema,
+  LoginRequest: LoginRequestSchema,
+  LoginResponse: LoginResponseSchema,
   CreateRunInput: CreateRunInputSchema,
   CreateRunResult: CreateRunResultSchema,
   AskRequest: AskRequestSchema,
@@ -69,6 +74,15 @@ const NAMED_SCHEMAS = {
   CurriculumView: CurriculumViewSchema,
   IntelligenceView: IntelligenceViewSchema,
   SignalsView: SignalsViewSchema,
+  TrendWindow: TrendWindowSchema,
+  CoverageTrend: CoverageTrendSchema,
+  ValueTrend: ValueTrendSchema,
+  FlakyTrend: FlakyTrendSchema,
+  ErrorClassCount: ErrorClassCountSchema,
+  TrendsView: TrendsViewSchema,
+  ReportInsight: ReportInsightSchema,
+  ReportView: ReportViewSchema,
+  RunReportView: RunReportViewSchema,
 } as const;
 
 function componentSchemas(): Record<string, unknown> {
@@ -93,6 +107,8 @@ const jsonBody = (id: string): unknown => ({ "application/json": { schema: ref(i
 const jsonArray = (id: string): unknown => ({ "application/json": { schema: { type: "array", items: ref(id) } } });
 const idParam = { name: "id", in: "path", required: true, schema: { type: "string" } };
 const nameParam = { name: "name", in: "path", required: true, schema: { type: "string" } };
+const windowParam = { name: "window", in: "query", schema: { type: "integer", minimum: 1, maximum: 50 } };
+const formatParam = { name: "format", in: "query", schema: { type: "string", enum: ["json", "csv"] } };
 
 function paths(): Record<string, unknown> {
   return {
@@ -102,6 +118,19 @@ function paths(): Record<string, unknown> {
         summary: "Version + capability handshake (unauthenticated); ?client lets the server judge compatibility",
         parameters: [{ name: "client", in: "query", schema: { type: "string" } }],
         responses: { "200": { description: "server version, supported client floor and capabilities", content: jsonBody("VersionInfo") } },
+      },
+    },
+    "/api/v1/auth/login": {
+      post: {
+        operationId: "login",
+        summary: "Exchange a GitHub user token (from the OAuth device flow) for a server session (unauthenticated)",
+        requestBody: { required: true, content: jsonBody("LoginRequest") },
+        responses: {
+          "200": { description: "session minted", content: jsonBody("LoginResponse") },
+          "401": { description: "the GitHub token was rejected" },
+          "403": { description: "authenticated, but not a collaborator on any watched repo" },
+          "501": { description: "GitHub login is not configured on this server" },
+        },
       },
     },
     "/api/v1/runs": {
@@ -186,6 +215,33 @@ function paths(): Record<string, unknown> {
         summary: "Learning ledger, value-oracle scorecard and curriculum for an app (read-only)",
         parameters: [nameParam],
         responses: { "200": { description: "intelligence view", content: jsonBody("IntelligenceView") } },
+      },
+    },
+    "/api/v1/runs/{id}/report": {
+      get: {
+        operationId: "getRunReport",
+        summary: "Run-scoped report: the current-execution analysis plus the evolution-as-of-the-run (read-only)",
+        parameters: [idParam, windowParam, formatParam],
+        responses: {
+          "200": { description: "run report view (current + evolution)", content: jsonBody("RunReportView") },
+          "404": { description: "run not found" },
+        },
+      },
+    },
+    "/api/v1/apps/{name}/trends": {
+      get: {
+        operationId: "getAppTrends",
+        summary: "Period-over-period trends for an app: coverage, value-oracle, verdicts, error classes (read-only)",
+        parameters: [nameParam, windowParam, formatParam],
+        responses: { "200": { description: "trends view", content: jsonBody("TrendsView") } },
+      },
+    },
+    "/api/v1/apps/{name}/report": {
+      get: {
+        operationId: "getAppReport",
+        summary: "Ad-hoc report: interestingness-ranked insights with a recommended chart per metric (read-only)",
+        parameters: [nameParam, windowParam, formatParam],
+        responses: { "200": { description: "report view", content: jsonBody("ReportView") } },
       },
     },
     "/api/v1/signals": {

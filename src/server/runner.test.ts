@@ -4,8 +4,8 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { JobQueue } from "./queue";
-import { enqueueTrackedRun } from "./runner";
-import { getRecord } from "./history";
+import { enqueueTrackedRun, cancelTrackedRun } from "./runner";
+import { getRecord, createRecord, updateRecord } from "./history";
 import { PipelineDeps } from "../pipeline";
 import { AppConfig } from "../orchestrator/config-loader";
 import { QaCase } from "../types";
@@ -209,4 +209,60 @@ test("a bad app name is finalized (not a zombie) — loadApp throwing is caught"
   const r = getRecord(id)!;
   assert.equal(r.status, "done");
   assert.equal(r.verdict, "infra-error");
+});
+
+// ── cancelTrackedRun ──────────────────────────────────────────────────────────
+// The operator's stop control. Two close-together but distinct failures used to make a run
+// "impossible to stop" from the dashboard: a stale "running" record the live queue no longer
+// held would answer 409 and never clear. These pin the funnel's cancel behavior.
+
+test("cancelTrackedRun aborts a LIVE run and finalizes its record (returns true)", async () => {
+  const queue = new JobQueue();
+  let aborted = false;
+  const rec = createRecord({ app: "cancel-live", sha: "aaa1111", target: "e2e", mode: "diff" });
+  updateRecord(rec.id, { status: "running" });
+  // A job that blocks until its signal aborts — stands in for an in-flight agent turn.
+  queue.enqueue(async (signal) => {
+    await new Promise<void>((resolve) => {
+      if (signal.aborted) return resolve();
+      signal.addEventListener("abort", () => { aborted = true; resolve(); }, { once: true });
+    });
+  }, rec.id);
+  await new Promise((r) => setImmediate(r)); // let the job claim the queue controller
+  assert.equal(cancelTrackedRun(queue, rec.id), true);
+  await queue.drain();
+  assert.equal(aborted, true, "the live turn must be interrupted via the signal");
+  assert.equal(getRecord(rec.id)?.status, "done");
+});
+
+test("cancelTrackedRun finalizes a STALE running record the queue no longer holds (the stuck-at-0% bug)", () => {
+  const queue = new JobQueue(); // empty: nothing is actually executing
+  const rec = createRecord({ app: "cancel-zombie", sha: "bbb2222", target: "e2e", mode: "diff" });
+  updateRecord(rec.id, { status: "running" }); // a zombie left "running" by a restart/crash race
+  // Not the live queue job, so nothing is aborted (false) — but the stuck record MUST be
+  // finalized so the operator's stop actually clears it (the old path left it "running" → 409).
+  assert.equal(cancelTrackedRun(queue, rec.id), false);
+  const r = getRecord(rec.id)!;
+  assert.equal(r.status, "done");
+  assert.equal(r.verdict, "infra-error");
+});
+
+test("cancelTrackedRun dequeues an enqueued run so it never executes", () => {
+  const queue = new JobQueue();
+  const rec = createRecord({ app: "cancel-enq", sha: "ccc3333", target: "e2e", mode: "diff" });
+  // status stays "enqueued" (createRecord default) — never started
+  assert.equal(cancelTrackedRun(queue, rec.id), false);
+  assert.equal(getRecord(rec.id)?.status, "done");
+});
+
+test("cancelTrackedRun is a no-op on an already-terminal record", () => {
+  const queue = new JobQueue();
+  const rec = createRecord({ app: "cancel-done", sha: "ddd4444", target: "e2e", mode: "diff" });
+  updateRecord(rec.id, { status: "done", verdict: "pass" });
+  assert.equal(cancelTrackedRun(queue, rec.id), false);
+  assert.equal(getRecord(rec.id)?.verdict, "pass"); // untouched, not overwritten to infra-error
+});
+
+test("cancelTrackedRun returns false for an unknown run id", () => {
+  assert.equal(cancelTrackedRun(new JobQueue(), "does-not-exist"), false);
 });

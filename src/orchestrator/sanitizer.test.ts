@@ -1,11 +1,23 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sanitizeText, containsSecrets, SECRET_AUDIT, recordAudit } from "./sanitizer";
+import { sanitizeText, containsSecrets, SECRET_AUDIT, recordAudit, capText, MAX_PROMPT_BODY_CHARS } from "./sanitizer";
 
 test("redacts secrets (api key, token)", () => {
   const { text: out } = sanitizeText("const apiKey = sk-abc123XYZ\ntoken: ghs_supersecretvalue");
   assert.match(out, /\[REDACTED_SECRET\]/);
   assert.doesNotMatch(out, /sk-abc123XYZ/);
+});
+
+test("capText passes short prose through unchanged", () => {
+  assert.equal(capText("a short commit body", MAX_PROMPT_BODY_CHARS), "a short commit body");
+});
+
+test("capText caps long prose with a visible truncation marker and keeps the head", () => {
+  const long = "x".repeat(5000);
+  const out = capText(long, 4000);
+  assert.ok(out.length < long.length, "capped output is shorter than the input");
+  assert.match(out, /body truncated/);
+  assert.ok(out.startsWith("x".repeat(4000)), "the first maxChars are preserved");
 });
 
 test("redacts a bare LLM provider key (sk-...) with no adjacent keyword", () => {

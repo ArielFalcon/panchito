@@ -4,8 +4,16 @@ import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, existsSync, rmSync 
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 import Database from "better-sqlite3";
-import { createRecord, getRecord, listRecords, currentRun, updateRecord, addCase, continuationDepth, clearDatabase, appendActivity, upsertLearningRule, listLearningRules, recordRuleOutcome, saveScorecardEntry, loadScorecard, deleteAppHistory, interruptedRecords, backupDatabase, saveRunOutcome, getRunOutcome, listRunOutcomes, updateRunOutcomeReflection } from "./history";
+import { createRecord, getRecord, listRecords, currentRun, updateRecord, addCase, continuationDepth, clearDatabase, appendActivity, upsertLearningRule, listLearningRules, recordRuleOutcome, saveScorecardEntry, loadScorecard, deleteAppHistory, interruptedRecords, backupDatabase, saveRunOutcome, getRunOutcome, listRunOutcomes, updateRunOutcomeReflection, markContextStale, consumeContextStale } from "./history";
 import type { RunOutcome, StructuredReflection } from "../types";
+
+test("markContextStale then consumeContextStale is one-shot: first consume true, second false", () => {
+  const app = "hist-ctx-stale";
+  assert.equal(consumeContextStale(app), false); // nothing marked yet
+  markContextStale(app);
+  assert.equal(consumeContextStale(app), true); // the flag is read…
+  assert.equal(consumeContextStale(app), false); // …and cleared (survives only until consumed once)
+});
 
 test("createRecord stores an enqueued record findable by id", () => {
   const r = createRecord({ target: "e2e",  app: "hist-a", sha: "abcdef1234", mode: "diff" });

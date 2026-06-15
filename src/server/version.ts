@@ -36,7 +36,7 @@ function readServerVersion(): string {
   }
 }
 
-export function handshake(clientVersion?: string): VersionInfo {
+export function handshake(clientVersion?: string, githubClientId?: string): VersionInfo {
   const compatible = clientVersion ? versionGte(clientVersion, MIN_CLIENT_VERSION) : true;
   return {
     serverVersion: SERVER_VERSION,
@@ -44,6 +44,9 @@ export function handshake(clientVersion?: string): VersionInfo {
     minClientVersion: MIN_CLIENT_VERSION,
     compatible,
     capabilities: [...CAPABILITIES],
+    // Advertise the OAuth App client id (public, not a secret) so the console can run the GitHub
+    // device flow WITHOUT it being baked into the binary — configure it once on the server.
+    ...(githubClientId ? { githubClientId } : {}),
     ...(compatible ? {} : { message: `Update panchito: this server requires client >= ${MIN_CLIENT_VERSION} (you have ${clientVersion}).` }),
   };
 }

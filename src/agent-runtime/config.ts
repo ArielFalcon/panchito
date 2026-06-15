@@ -23,7 +23,8 @@ export interface PublicAgentConfig {
 
 const DEFAULT_MODELS: Record<AgentProvider, Record<keyof AgentRuntimeConfig["assignments"], string>> = {
   opencode: {
-    primary: "opencode-go/deepseek-v4-pro",
+    // MUST match opencode/opencode.json's qa-generator model (the primary that actually runs).
+    primary: "opencode-go/kimi-k2.7-code",
     // MUST match opencode/opencode.json's qa-reviewer model (the file that actually runs the
     // reviewer on the e2e path) AND differ from `primary` — two different models guarantee
     // independent judgment. A guard test (model-config.test.ts) asserts both, so this can

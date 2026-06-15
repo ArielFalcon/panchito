@@ -1,0 +1,10 @@
+{
+  "name": "@ai-pipeline/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Operator/value web dashboard for ai-pipeline. Built to web/dist and served same-origin by the orchestrator at /app. Consumes @ai-pipeline/sdk. Implementation is delegated — this package is the prepared slot.",
+  "dependencies": {
+    "@ai-pipeline/sdk": "*"
+  }
+}

@@ -9,6 +9,25 @@ Adapted from [TestDino playwright-skill](https://github.com/testdino-hq/playwrig
 3. `getByTestId("...")` — when there is no clear role (`data-testid` attribute).
 4. ❌ Raw CSS/XPath, auto-generated classes, `nth-child` — fragile, forbidden.
 
+## ⚠ CRITICAL: `getByRole` matches the ACCESSIBILITY TREE, not the HTML tag
+
+A role-locator resolves ONLY if that role is present in the **live accessibility tree** — which
+is NOT the same as the HTML element's implied role. CSS (`display:block/flex/grid` on a `<table>`,
+Bootstrap's `.table`, custom widgets) routinely STRIPS or changes implicit ARIA roles, so an
+element that "should" have a role often does not:
+
+- A `<th>` is frequently **NOT** exposed as `columnheader` (very common with `.table`/styled tables).
+- `<table>`/`<tr>`/`<td>` may lose `table`/`row`/`cell`; `<ul>`/`<li>` may lose `list`/`listitem`.
+
+So **NEVER infer a role from the HTML tag.** With the Playwright MCP, take a `browser_snapshot` of
+the page under test and use ONLY the roles + accessible names that LITERALLY appear in that snapshot.
+If the role you want is absent there, do NOT use `getByRole` for it — fall back (in order) to
+`getByText` / `getByLabel`, or a SCOPED stable locator (`page.getByRole("table").locator("td")`,
+`section.locator("th")`), anchored to a heading/landmark first. A `getByRole` that matches **0**
+elements is the single most common cause of a spec that looks green in review but TIMES OUT on
+execution (observed: `getByRole("columnheader", { name: /name/i })` matched 0 on a Bootstrap table
+whose `<th>Name</th>` was real but not exposed as a columnheader).
+
 ## Hard rules for selectors (MANDATORY)
 
 - **Always scope to a section.** Never use `page.getByText("X")` without first

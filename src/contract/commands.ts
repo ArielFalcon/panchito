@@ -103,6 +103,23 @@ export const VersionInfoSchema = z.object({
   compatible: z.boolean(),
   capabilities: z.array(z.string()),
   message: z.string().optional(),
+  // The server's GitHub OAuth App client id (public). Present when GitHub login is configured,
+  // so the console can run the device flow without the id being baked into the binary.
+  githubClientId: z.string().optional(),
+});
+
+// ── Auth (GitHub device flow → server session) ────────────────────────────────
+// The client runs the GitHub OAuth device flow itself, then exchanges the resulting
+// GitHub user token for a short-lived server session. The server verifies the token's
+// identity and that the user can push to a watched repo before issuing the session.
+export const LoginRequestSchema = z.object({
+  githubToken: z.string().min(1),
+});
+
+export const LoginResponseSchema = z.object({
+  token: z.string(), // the server session (JWT) the client stores and sends as Bearer
+  username: z.string(), // the authenticated GitHub login, for display
+  expiresAt: z.string(), // ISO-8601 session expiry, so the client can refresh ahead of time
 });
 
 // ── Command DTOs (request → response) ─────────────────────────────────────────
@@ -310,6 +327,8 @@ export type AppView = z.infer<typeof AppViewSchema>;
 export type QueueStatus = z.infer<typeof QueueStatusSchema>;
 export type ChatEntry = z.infer<typeof ChatEntrySchema>;
 export type VersionInfo = z.infer<typeof VersionInfoSchema>;
+export type LoginRequest = z.infer<typeof LoginRequestSchema>;
+export type LoginResponse = z.infer<typeof LoginResponseSchema>;
 export type CreateRunInput = z.infer<typeof CreateRunInputSchema>;
 export type CreateRunResult = z.infer<typeof CreateRunResultSchema>;
 export type AskRequest = z.infer<typeof AskRequestSchema>;
@@ -405,10 +424,151 @@ export const SignalsViewSchema = z.object({
     passRate: z.number().nullable(), // fraction of quality-verdict runs that passed
     runs: z.number().int().nonnegative(), // runs that produced a quality verdict (pass/fail/flaky/invalid)
   }),
-  // ⚠ keystone, not built yet: does executing the test cover the changed lines?
+  // ◆/⚠ change-coverage: of runs that produced coverage data, what fraction of the changed
+  // lines did the tests actually exercise? avgRatio is null (→ "not measured") when no run
+  // carried a ratio — never a hard 0 painted as a reading.
   coverage: z.object({
     measured: z.boolean(),
+    avgRatio: z.number().nullable(),
+    measuredRuns: z.number().int().nonnegative(),
+    totalRuns: z.number().int().nonnegative(),
   }),
 });
 
 export type SignalsView = z.infer<typeof SignalsViewSchema>;
+
+// ── Trends & report (period-over-period analytics the report surface renders) ──────────────
+// Derived from persisted run outcomes (change-coverage ratio, value-oracle score, verdict,
+// error class) split into a current vs previous window — nothing invented. The report ranks
+// these by how much they MOVED (interestingness) and picks a chart per metric shape.
+export const TrendWindowSchema = z.object({
+  current: z.number().int().nonnegative(),
+  previous: z.number().int().nonnegative(),
+});
+
+export const CoverageTrendSchema = z.object({
+  measured: z.boolean(),
+  ratio: z.number().nullable(),
+  previousRatio: z.number().nullable(),
+  minRatio: z.number(),
+  series: z.array(z.number()),
+});
+
+export const ValueTrendSchema = z.object({
+  measured: z.boolean(),
+  avgScore: z.number().nullable(),
+  previousAvgScore: z.number().nullable(),
+  series: z.array(z.number()),
+});
+
+export const FlakyTrendSchema = z.object({
+  rate: z.number().nullable(),
+  previousRate: z.number().nullable(),
+  runs: z.number().int().nonnegative(),
+});
+
+export const ErrorClassCountSchema = z.object({
+  errorClass: z.string(),
+  count: z.number().int().nonnegative(),
+  previousCount: z.number().int().nonnegative(),
+  multiplier: z.number().nullable(),
+});
+
+// Suite execution time (sum of case durations per run), averaged per window — a perf trend.
+export const DurationTrendSchema = z.object({
+  avgMs: z.number().nullable(),
+  previousMs: z.number().nullable(),
+  runs: z.number().int().nonnegative(),
+});
+
+// Per-flow stability: of the cases tagged with a user flow, how many flaked/failed in the window —
+// shows WHERE the instability concentrates. Only unstable flows are surfaced.
+export const FlowStabilitySchema = z.object({
+  flow: z.string(),
+  runs: z.number().int().nonnegative(),
+  flaky: z.number().int().nonnegative(),
+  fail: z.number().int().nonnegative(),
+});
+
+export const TrendsViewSchema = z.object({
+  app: z.string(),
+  generatedAt: z.string(),
+  window: TrendWindowSchema,
+  coverage: CoverageTrendSchema,
+  valueOracle: ValueTrendSchema,
+  verdictMix: z.record(z.string(), z.number().int().nonnegative()),
+  reviewerPassRate: z.number().nullable(),
+  flaky: FlakyTrendSchema,
+  errorClasses: z.array(ErrorClassCountSchema),
+  duration: DurationTrendSchema,
+  flows: z.array(FlowStabilitySchema),
+});
+
+export type TrendsView = z.infer<typeof TrendsViewSchema>;
+
+export const ReportChartSchema = z.enum([
+  "big-number", "gauge", "paired-bars", "ranked-bars", "stacked-bar", "line", "area", "donut",
+]);
+
+// The data SHAPE of an insight. Clients render BY INTENT: a client that cannot draw the preferred
+// `chart` (e.g. a terminal has no good pie) falls back to the best native form for the intent
+// (terminal composition → stacked bar / percentages; web composition → donut). This keeps the
+// contract multi-client without the backend knowing which client consumes it.
+export const InsightIntentSchema = z.enum([
+  "single-value", "comparison", "trend", "composition", "distribution",
+]);
+
+// How `value` should be read/formatted, so every client formats it consistently.
+export const InsightUnitSchema = z.enum(["ratio", "percent", "count", "ms", "score"]);
+
+// One slice of a composition/distribution. `semantic` lets the backend say "this slice is good/bad"
+// (pass=good, fail=bad) so every client colours it identically without hardcoding domain names.
+export const BreakdownItemSchema = z.object({
+  label: z.string(),
+  value: z.number(),
+  semantic: z.enum(["good", "bad", "neutral"]).optional(),
+});
+
+// One ranked insight in an ad-hoc report: a metric that moved, fully SELF-DESCRIBING so any client
+// can render it without domain knowledge. `intent` + `chart` drive the visual; `score` is the
+// interestingness ranking; `goodWhen` lets the client colour the direction (a coverage rise is
+// good, a flaky rise is not).
+export const ReportInsightSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  intent: InsightIntentSchema,
+  chart: ReportChartSchema, // preferred chart; clients may fall back to the intent's native form
+  value: z.number().nullable(),
+  unit: InsightUnitSchema.optional(),
+  target: z.number().nullable().optional(), // a threshold line (e.g. coverage minRatio) for gauge/line
+  delta: z.number().nullable(),
+  multiplier: z.number().nullable(),
+  direction: z.enum(["up", "down", "flat"]),
+  goodWhen: z.enum(["up", "down", "neutral"]),
+  caption: z.string().optional(), // a short human one-liner the client can show under the chart
+  series: z.array(z.number()).optional(),
+  breakdown: z.array(BreakdownItemSchema).optional(),
+  score: z.number(),
+});
+
+export const ReportViewSchema = z.object({
+  app: z.string(),
+  generatedAt: z.string(),
+  window: TrendWindowSchema,
+  headline: z.string(),
+  insights: z.array(ReportInsightSchema),
+});
+
+export type ReportView = z.infer<typeof ReportViewSchema>;
+
+// A run-scoped report bundles the TWO analyses the post-run summary surface shows: `current` — the
+// self-describing report about THE RUN THAT FINISHED (its verdict, case mix, this run's
+// change-coverage / value-oracle / duration) — and `evolution` — the period-over-period report of
+// the same app as it stood at that run, or null when there is not yet enough history to compare
+// against. Both halves are the SAME ReportView shape, so a client renders them with one renderer.
+export const RunReportViewSchema = z.object({
+  current: ReportViewSchema,
+  evolution: ReportViewSchema.nullable(),
+});
+
+export type RunReportView = z.infer<typeof RunReportViewSchema>;

@@ -15,10 +15,10 @@ test("the OpenAPI document is well-formed and exposes the v1 surface", () => {
   const doc = buildOpenApiDocument() as Doc;
   assert.equal(doc.openapi, "3.0.3");
   assert.ok(doc.info.version);
-  for (const p of ["/api/v1/version", "/api/v1/runs", "/api/v1/runs/{id}", "/api/v1/runs/{id}/events", "/api/v1/queue", "/api/v1/apps", "/api/v1/apps/{name}", "/api/v1/repos", "/api/v1/agent/config", "/api/v1/agent/models", "/api/v1/agent/restart"]) {
+  for (const p of ["/api/v1/version", "/api/v1/auth/login", "/api/v1/runs", "/api/v1/runs/{id}", "/api/v1/runs/{id}/events", "/api/v1/queue", "/api/v1/apps", "/api/v1/apps/{name}", "/api/v1/repos", "/api/v1/agent/config", "/api/v1/agent/models", "/api/v1/agent/restart"]) {
     assert.ok(doc.paths[p], `missing path ${p}`);
   }
-  for (const c of ["RunEvent", "RunRecord", "QaCase", "AppView", "QueueStatus", "VersionInfo", "CreateRunInput", "CreateAppInput", "UpdateAppInput", "CreateAppResult", "DeleteAppResult", "RepoListItem", "RepoListResponse", "PublicAgentConfig", "AgentConfigUpdate", "AgentConfigApplyResult"]) {
+  for (const c of ["RunEvent", "RunRecord", "QaCase", "AppView", "QueueStatus", "VersionInfo", "LoginRequest", "LoginResponse", "CreateRunInput", "CreateAppInput", "UpdateAppInput", "CreateAppResult", "DeleteAppResult", "RepoListItem", "RepoListResponse", "PublicAgentConfig", "AgentConfigUpdate", "AgentConfigApplyResult"]) {
     assert.ok(doc.components.schemas[c], `missing component ${c}`);
   }
 });

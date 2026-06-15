@@ -200,3 +200,18 @@ export function capDiff(diff: string, maxChars: number = MAX_PROMPT_DIFF_CHARS):
     ` Read the full change in the working copy with \`git show <sha>\`.]\n`
   );
 }
+
+export const MAX_PROMPT_BODY_CHARS = 4_000;
+
+// Caps free-form prose (e.g. a commit body) before it enters a prompt. Unlike capDiff there is no
+// per-file structure to preserve, so a single hard slice with a visible marker is correct. The
+// commit body is fully attacker-influenceable (any contributor writes it) and, unlike the first
+// line, has no natural length bound — so it MUST be capped before reaching the agent, exactly as
+// the diff is. Local consumers keep the raw text; only the prompt is bounded.
+export function capText(text: string, maxChars: number = MAX_PROMPT_BODY_CHARS): string {
+  if (text.length <= maxChars) return text;
+  return (
+    text.slice(0, maxChars) +
+    `\n[…body truncated: ${text.length - maxChars} more chars; read the full message with \`git show <sha>\`.]`
+  );
+}

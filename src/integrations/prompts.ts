@@ -6,10 +6,26 @@
 // The input types are imported TYPE-ONLY from opencode-client (erased at runtime), so although
 // opencode-client imports these functions as values, there is no runtime import cycle.
 
-import { sanitizeText } from "../orchestrator/sanitizer";
+import { sanitizeText, capText } from "../orchestrator/sanitizer";
 import type { ArchitectureContext } from "../qa/context";
 import type { OpencodeRunInput, ParallelWorkerInput } from "./opencode-client";
 import { renderExplorationBrief } from "../qa/exploration-brief";
+
+// The single source of the "commit to a concrete objective BEFORE writing" rule, shared by the
+// single-agent diff task AND the manual task so the wording cannot drift (judgment-day finding: the
+// single-agent diff path delegated the objective with no acceptance criterion, while the planner
+// already required one — the rigor existed in one path and not the other). Phrased as the OBSERVABLE
+// OUTCOME the change introduces — deliberately NOT full given/when/then ceremony, which over-constrains
+// a trivial diff (the planner keeps G/W/T for structured multi-objective planning, a different surface).
+// It ties the assertion to the CHANGE: the verifiable half of "does the change do what it should" — the
+// spec must FAIL if the new behavior regresses (change-coverage then measures this deterministically).
+// This is intentionally NOT the unverifiable "your assertion must fail on the pre-commit build" framing
+// (the agent only ever runs against live DEV — it cannot check that), which would be an LLM proxy.
+const ACCEPTANCE_CRITERION_RULE =
+  `Before writing, state in ONE line the concrete, user-observable OUTCOME this change introduces — ` +
+  `the specific thing a user can see that proves it works (e.g. "the discounted total shows after the ` +
+  `cart re-queries"). Write the test to ASSERT that outcome, not merely that the flow runs: the spec ` +
+  `MUST fail if this specific behavior regresses.`;
 
 // ── (functions appended below from the original module, verbatim) ────────────────────────────
 // A spec filename derived from a flow, safe for the filesystem and Playwright's testMatch.
@@ -205,6 +221,9 @@ export function buildExplorerPrompt(input: OpencodeRunInput): string {
     `- Type: ${input.intent?.type ?? "unknown"}${input.intent?.breaking ? " (BREAKING)" : ""}`,
     `- Message: ${sanitizeText(input.intent?.message ?? "").text}`,
     `- Changed files: ${sanitizeText(input.intent?.changedFiles?.join(", ") ?? "").text || "(unknown)"}`,
+    ...(input.intent?.body
+      ? [``, `## Why this change (commit body — the author's stated intent)`, sanitizeText(capText(input.intent.body)).text]
+      : []),
     ``,
     `## Commit diff`,
     "```diff",
@@ -646,6 +665,9 @@ function buildTask(input: OpencodeRunInput): string {
       ``,
       sanitizeText(input.guidance ?? "(no guidance provided)").text,
       ``,
+      `## Objective — commit to this BEFORE writing`,
+      ACCEPTANCE_CRITERION_RULE,
+      ``,
       `Use serena to read the relevant code and the existing ${input.e2eRelDir}/ suite.`,
       `Stay focused on the guidance; do not generate unrelated tests.`,
     ].join("\n");
@@ -654,6 +676,10 @@ function buildTask(input: OpencodeRunInput): string {
 
   // diff (default)
   const intent = input.intent;
+  // The body is richest on the FIRST pass; the re-generation passes (fix / reviewer-corrections /
+  // coverage-gap) already carry a sharper established objective, so rendering it again would only
+  // re-spend tokens on the system's largest prompts. capText bounds it on the first pass either way.
+  const isReGen = Boolean(input.fixCases?.length || input.reviewCorrections?.length || input.coverageGap);
   const svcOpenapi = Array.isArray(input.service?.openapi) ? input.service.openapi.join(", ") : input.service?.openapi;
   const serviceBlock = input.service
     ? [
@@ -677,12 +703,18 @@ function buildTask(input: OpencodeRunInput): string {
     `The message gives the INTENT; derive each test's objective from it. But CROSS-CHECK`,
     `against the diff: if the code does more than the message claims, cover what the code`,
     `actually changes, not just what the message promises.`,
+    ...(intent?.body && !isReGen
+      ? [``, `## Why this change (commit body — the author's stated intent)`, sanitizeText(capText(intent.body)).text]
+      : []),
     ``,
     `## Commit diff`,
     "```diff",
     sanitizeText(input.diff).text,
     "```",
     ...serviceBlock,
+    ``,
+    `## Objective — commit to this BEFORE writing`,
+    ACCEPTANCE_CRITERION_RULE,
     ``,
     `## Architecture context`,
     `If ${input.e2eRelDir}/.qa/context.json exists, READ it to understand which routes and`,

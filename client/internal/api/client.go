@@ -171,6 +171,31 @@ func (c *Client) GetSignals(ctx context.Context) (contract.SignalsView, error) {
 	return out, err
 }
 
+// GetTrends fetches the period-over-period trends for an app (change-coverage, value-oracle,
+// verdict mix, flaky rate, error classes) — the source data the report ranks.
+func (c *Client) GetTrends(ctx context.Context, app string) (contract.TrendsView, error) {
+	var out contract.TrendsView
+	err := c.do(ctx, http.MethodGet, "/api/v1/apps/"+url.PathEscape(app)+"/trends", nil, &out)
+	return out, err
+}
+
+// GetReport fetches the ad-hoc report for an app: interestingness-ranked, self-describing
+// insights (each declares its chart intent + unit + semantic) the TUI renders as charts.
+func (c *Client) GetReport(ctx context.Context, app string) (contract.ReportView, error) {
+	var out contract.ReportView
+	err := c.do(ctx, http.MethodGet, "/api/v1/apps/"+url.PathEscape(app)+"/report", nil, &out)
+	return out, err
+}
+
+// GetRunReport fetches the run-scoped report for a finished run: `Current` — the report about that
+// execution (verdict, case mix, this run's change-coverage/value/duration) — plus `Evolution`, the
+// app's period-over-period report as it stood at that run (nil until there is history to compare).
+func (c *Client) GetRunReport(ctx context.Context, runID string) (contract.RunReportView, error) {
+	var out contract.RunReportView
+	err := c.do(ctx, http.MethodGet, "/api/v1/runs/"+url.PathEscape(runID)+"/report", nil, &out)
+	return out, err
+}
+
 func (c *Client) CreateApp(ctx context.Context, in contract.CreateAppInput) (contract.CreateAppResult, error) {
 	var out contract.CreateAppResult
 	err := c.do(ctx, http.MethodPost, "/api/v1/apps", in, &out)

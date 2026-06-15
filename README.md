@@ -250,6 +250,42 @@ The project uses provider-neutral role assignments. Configure them from the Dash
 | Quality review criteria | `agent/skills/test-value-review/` | False-positive pattern catalog |
 | MCP servers (Serena, Engram, Playwright) | `agents/opencode.json` and agent container | Code navigation + persistent memory |
 | Docker images | `Dockerfile`, `agents/Dockerfile` | Both services build from these |
+| Control-plane API token | `config/.api_token` (auto-generated on first boot) | The machine credential — protects the API (`Bearer` auth on every non-public route). On the same machine the `panchito` console auto-loads it from `$QA_API_TOKEN` or this file; people sign in with GitHub instead (see below). Set `QA_API_TOKEN` to pin your own. |
+
+</details>
+
+### Signing in to the console
+
+The `panchito` console reaches the orchestrator over its HTTP control plane, which is `Bearer`-authenticated. There are two ways to authenticate, for two different callers:
+
+- **People → "Log in with GitHub" (default).** On the connect screen, press <kbd>enter</kbd>. The console runs GitHub's OAuth **device flow**: it shows a short code, opens `github.com/login/device`, and you approve *this terminal* with your own GitHub account — nothing to copy or paste. The orchestrator checks that you are a **collaborator with push access on a watched repo**, then issues a short-lived session. No shared secret ever touches a person's machine.
+- **Machines / CI → a static token.** Press <kbd>^T</kbd> on the connect screen to paste the control-plane token, or export `QA_API_TOKEN`. On the orchestrator's own host the console auto-discovers `config/.api_token`, so a local operator never types anything.
+
+<details>
+<summary>Enabling GitHub login (one-time, on the server)</summary>
+
+GitHub login needs a **GitHub OAuth App** with the device flow enabled. The app's *client id* is public — you configure it **once on the server**, which advertises it in the (unauthenticated) version handshake, so the console picks it up automatically. No per-user setup, no rebuilding the client, and the orchestrator holds **no GitHub app secret** (it verifies each user with the user's own token).
+
+1. Create an OAuth App at **GitHub → Settings → Developer settings → OAuth Apps → New** and tick **"Enable Device Flow"**. (Any homepage/callback URL is fine — the device flow doesn't use the callback.)
+2. Set the client id on the **server** (it's the only place needed):
+
+   ```
+   GITHUB_OAUTH_CLIENT_ID=Iv1.your_client_id
+   ```
+
+   Any `panchito` console that connects now offers "Log in with GitHub" — nothing to install client-side. (A client may still override with `PANCHITO_GITHUB_CLIENT_ID`, or bake a fallback in at build time with `-ldflags "-X github.com/ArielFalcon/panchito/internal/auth.BakedClientID=Iv1.…"`, but neither is required.)
+
+3. Other server-side session settings (all optional):
+
+   | Env var | Default | Purpose |
+   |---|---|---|
+   | `AUTH_SIGNING_KEY` | reuses `QA_API_TOKEN` | HMAC secret that signs sessions. Set a dedicated value to rotate sessions independently of the machine token. |
+   | `AUTH_SESSION_TTL_SECONDS` | `86400` (24 h) | How long a GitHub session lasts before the console asks the user to sign in again. |
+
+> [!IMPORTANT]
+> Expose the orchestrator over **HTTPS** in production. During login the user's GitHub token transits to the orchestrator (which uses it read-only and immediately discards it — it is never stored or logged); HTTP would expose it in transit. Note also that rotating `QA_API_TOKEN` invalidates all active GitHub sessions when `AUTH_SIGNING_KEY` is not set, since they share the same signing secret.
+
+If no client id is configured anywhere, the console reports it when you try to log in and falls back to token entry (<kbd>^T</kbd>).
 
 </details>
 

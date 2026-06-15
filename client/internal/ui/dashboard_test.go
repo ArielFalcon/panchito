@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -73,7 +74,7 @@ func TestDashboardRendersSections(t *testing.T) {
 		"portfolio": {{App: "portfolio", Verdict: vptr(contract.RunRecordVerdictPass), At: "2026-06-13T14:00:00Z"}},
 	}
 	out := m.View()
-	for _, want := range []string{"FLEET", "portfolio", "panchito", "MODELS", "SIGNALS", "RECENT", "proxy", "⚠"} {
+	for _, want := range []string{"FLEET", "portfolio", "panchito", "MODELS", "INTEGRITY", "RECENT", "proxy", "⚠"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("dashboard missing %q:\n%s", want, out)
 		}
@@ -167,6 +168,36 @@ func TestDashboardSignalsRenderGroundTruthVsProxy(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("signals readout missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// A stop the server rejects (e.g. the run was no longer the active run) arrives as a cancelErrMsg.
+// The dashboard must show it — never swallow it — otherwise "press x to STOP" looks inert.
+// Regression: the dashboard had no error case, so cancel failures vanished silently.
+func TestDashboardSurfacesCancelError(t *testing.T) {
+	m := dashWith([]contract.AppView{{Name: "petclinic"}})
+	m.stopArmed = true
+	m, cmd := m.Update(cancelErrMsg{err: errors.New("run is no longer the active run")})
+	if cmd != nil {
+		t.Fatalf("a cancelErrMsg should not emit a command, got %#v", cmd())
+	}
+	if m.err == "" {
+		t.Fatal("a cancelErrMsg must set the dashboard error line, not be swallowed")
+	}
+	if m.stopArmed {
+		t.Fatal("a failed stop must disarm the confirmation so the next 'x' re-arms")
+	}
+	if out := m.View(); !strings.Contains(out, "run is no longer the active run") {
+		t.Fatalf("the cancel error must be visible in the dashboard view; got:\n%s", out)
+	}
+}
+
+// Any other failed dashboard command (a plain errMsg) must also surface, never be swallowed.
+func TestDashboardSurfacesGenericError(t *testing.T) {
+	m := dashWith([]contract.AppView{{Name: "petclinic"}})
+	m, _ = m.Update(errMsg{err: errors.New("something broke")})
+	if out := m.View(); !strings.Contains(out, "something broke") {
+		t.Fatalf("a generic errMsg must remain visible (never swallowed); got:\n%s", out)
 	}
 }
 
@@ -302,7 +333,7 @@ func TestDashboardColumnsRenderNarrow(t *testing.T) {
 	m := dashWith([]contract.AppView{{Name: "portfolio"}})
 	m.width = 50 // contentWidth ~46, below the 72 threshold → columns stack
 	out := m.View()
-	for _, want := range []string{"MODELS", "SIGNALS", "FLEET"} {
+	for _, want := range []string{"MODELS", "INTEGRITY", "FLEET"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("narrow dashboard missing %q:\n%s", want, out)
 		}

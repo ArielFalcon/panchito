@@ -13,6 +13,10 @@
 
 import { JobQueue } from "./server/queue";
 import { enqueueTrackedRun } from "./server/runner";
+import { createDurableRunEventStore } from "./server/durable-run-events";
+import { delegateRun, type DelegateRunResult } from "./server/run-delegate";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { getRecord, getRunOutcome, listRunOutcomes, listLearningRules, loadCurriculum } from "./server/history";
 import { loadAppConfig } from "./orchestrator/config-loader";
 import { RUN_MODES, RunMode, TestTarget } from "./types";
@@ -30,6 +34,56 @@ async function localServiceIsRunning(): Promise<boolean> {
   }
 }
 
+// The control-plane token, discovered the same way the server resolves it (env wins, then the
+// persisted config/.api_token file) so delegation authenticates without the operator typing it.
+function discoverApiToken(): string | undefined {
+  if (process.env.QA_API_TOKEN) return process.env.QA_API_TOKEN;
+  try {
+    const root = process.env.AI_PIPELINE_ROOT ?? process.cwd();
+    const token = readFileSync(join(root, "config", ".api_token"), "utf8").trim();
+    return token || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Delegate the run to the already-running service and wait for its verdict, mirroring the
+// standalone CLI's contract (wait, report, exit with the verdict's code). The run executes IN the
+// server process, so the TUI streams it live and the single-queue invariant holds.
+async function runViaService(args: { app: string; sha: string; mode: RunMode; target?: TestTarget; guidance?: string }): Promise<void> {
+  const port = Number(process.env.PORT ?? 8080);
+  const baseUrl = `http://localhost:${port}`;
+  const appCfg = loadAppConfig(args.app);
+  const target = args.target ?? (appCfg.code ? "code" : "e2e");
+  console.log("[qa] the service is running — delegating this run to it (one queue against DEV; watch it live in the TUI).");
+  // Explicitly typed: the catch terminates via process.exit, so result is always assigned past the
+  // try/catch — the annotation enforces that invariant instead of relying on process.exit narrowing.
+  let result: DelegateRunResult;
+  try {
+    result = await delegateRun(
+      { app: args.app, sha: args.sha, target, mode: args.mode, guidance: args.guidance },
+      {
+        fetch,
+        baseUrl,
+        token: discoverApiToken(),
+        onUpdate: (r) => process.stdout.write(`\r[qa] ${r.status}${r.step ? " · " + r.step : ""}                    `),
+      },
+    );
+  } catch (err) {
+    console.error(`\n[qa] ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+  if (result.timedOut) {
+    console.log(`\n[qa] run ${result.id} is still running server-side (stopped waiting) — watch it in the TUI.`);
+    process.exit(0);
+  }
+  console.log(`\n[qa] run ${result.id} finished: verdict=${result.verdict ?? "?"} (${result.passed} passed, ${result.failed} failed)`);
+  if (result.note) console.log(`[qa] ${result.note}`);
+  // pass and skipped are success; everything else is not.
+  const ok = result.verdict === "pass" || result.verdict === "skipped";
+  process.exit(ok ? 0 : 1);
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
@@ -39,17 +93,20 @@ async function main(): Promise<void> {
   }
 
   if (!args.allowConcurrent && (await localServiceIsRunning())) {
-    console.error(
-      "[qa] the long-lived service is running on this host (responded on /api/health).\n" +
-        "      A manual CLI run uses a SEPARATE queue and could run QA concurrently against DEV,\n" +
-        "      breaking the sequential-queue invariant. Trigger the run through the service instead\n" +
-        "      (TUI, or POST /api/runs), or stop the service.\n" +
-        "      To override and accept the risk, re-run with --allow-concurrent.",
-    );
-    process.exit(2);
+    // The service owns the only queue against DEV. Rather than refuse (or race it with a second
+    // queue), hand the run to it: it then executes IN the server process, so a TUI attached to
+    // that server streams it live, and the sequential-queue invariant is preserved.
+    // --allow-concurrent forces the standalone path below.
+    await runViaService(args);
+    return; // runViaService always exits the process with the verdict's code
   }
 
   const queue = new JobQueue();
+  // Persist run events to the SAME durable store the server uses. A standalone CLI run lives in
+  // its own process, so the server's in-process event bus never sees it — persisting here is what
+  // lets the TUI (attached to the server) replay and tail this run's progress instead of freezing
+  // on an empty stream.
+  const runEvents = createDurableRunEventStore();
   // When --target is not given, derive it from the app config: a `code: true` app must run
   // code mode (running e2e against it would hit the no-dev defensive infra-error).
   const appCfg = loadAppConfig(args.app);
@@ -61,7 +118,7 @@ async function main(): Promise<void> {
     mode: args.mode,
     guidance: args.guidance,
     source: "manual",
-  });
+  }, { runEvents });
   await queue.drain();
   const record = getRecord(id);
   // The end-of-run value report: a manual run used to print NOTHING (just an exit code), so in
@@ -96,6 +153,9 @@ function printRunReport(record: ReturnType<typeof getRecord> & {}, appCfg: Retur
       coverageRatio: gs?.coverageRatio ?? null,
       coverageMeasured: gs?.coverageRatio !== null && gs?.coverageRatio !== undefined,
       coveragePolicy: appCfg.qa.changeCoverage?.mode ?? "signal",
+      // Resolve the oracle policy exactly as the pipeline does, so the report distinguishes a
+      // genuinely-off oracle from one that was enabled but had no passing specs to score.
+      oraclePolicy: appCfg.qa.valueOracle ?? (appCfg.qa.shadow ? "off" : "signal"),
       valueScore: gs?.valueScore ?? null,
       reviewerApproved: gs?.reviewerApproved ?? null,
       reviewerRationale: gs?.reviewerRationale,

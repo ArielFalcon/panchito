@@ -39,8 +39,11 @@ export const ROLE_TO_OPENCODE_AGENT: Record<AgentRole, string> = {
   explorer: "qa-explorer",
 };
 
+// Used ONLY when opencode.json is missing/unreadable (otherwise the live agent catalog wins). Kept
+// aligned with the models actually assigned in opencode.json so a fallback never rejects a valid
+// default (Config A: generator=kimi, reviewer=minimax, chat/workers=flash).
 const FALLBACK_MODELS: AgentModelInfo[] = [
-  { id: "opencode-go/deepseek-v4-pro", label: "DeepSeek V4 Pro" },
+  { id: "opencode-go/kimi-k2.7-code", label: "Kimi K2.7 Code" },
   { id: "opencode-go/minimax-m3", label: "MiniMax M3" },
   { id: "opencode-go/deepseek-v4-flash", label: "DeepSeek V4 Flash" },
 ];

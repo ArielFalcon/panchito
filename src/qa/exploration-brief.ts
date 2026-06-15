@@ -154,7 +154,7 @@ export function coerceExplorationBrief(raw: unknown): ExplorationBrief | null {
   if (Array.isArray(r.contracts)) {
     brief.contracts = arr(r.contracts)
       .map(asObj)
-      .filter((e): e is Record<string, unknown> => e !== null && nonEmpty(e.operationId))
+      .filter((e): e is Record<string, unknown> => e !== null && nonEmpty(e.operationId) && nonEmpty(e.method) && nonEmpty(e.path))
       .map((e) => ({
         operationId: str(e.operationId),
         method: str(e.method),

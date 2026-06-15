@@ -2,6 +2,7 @@ package ui
 
 import (
 	"github.com/ArielFalcon/panchito/internal/api"
+	"github.com/ArielFalcon/panchito/internal/auth"
 	"github.com/ArielFalcon/panchito/internal/contract"
 	"github.com/ArielFalcon/panchito/internal/events"
 )
@@ -34,8 +35,29 @@ type backMsg struct{}
 // errMsg carries a command failure to the active screen for display.
 type errMsg struct{ err error }
 
-// tokenLoadedMsg carries the token loaded from the OS keyring for the default host.
-type tokenLoadedMsg struct{ token string }
+// savedLoadedMsg carries the connection the screen should start from: the host plus a token
+// resolved from the keyring or auto-discovered (env / config/.api_token), with a short source
+// label for the UI. Any field may be empty.
+type savedLoadedMsg struct{ host, token, source string }
+
+// ── GitHub device-flow login (connect screen) ─────────────────────────────────
+
+// deviceCodeMsg: GitHub issued a device + user code; show it and start polling. clientID is the
+// OAuth client id resolved for this login (carried so polling uses the same one).
+type deviceCodeMsg struct {
+	code     auth.DeviceCode
+	clientID string
+}
+
+// devicePollTickMsg: the inter-poll wait elapsed — time to poll GitHub once more.
+type devicePollTickMsg struct{}
+
+// devicePollMsg: the result of one token-poll attempt (pending / slow_down / done / denied / expired).
+type devicePollMsg struct{ result auth.PollResult }
+
+// loginExchangedMsg: the orchestrator accepted the GitHub token and minted a session — the
+// connect screen now probes the control plane with it (handshake + apps) to finish signing in.
+type loginExchangedMsg struct{ session contract.LoginResponse }
 
 // ── Live stream messages (SSE goroutine → main loop, via a channel) ───────────
 
