@@ -1,6 +1,6 @@
 # Agentic engine image: the OpenCode CLI + Serena (baked at build time) and the
 # language runtimes its language servers need.
-FROM node:22-bookworm
+FROM node:24-bookworm
 
 # - opencode/codex: agent CLIs (npm global → PATH at /usr/local/bin).
 # - engram: persistent episodic memory MCP (Go binary, single-file, no runtime deps).

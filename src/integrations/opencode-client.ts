@@ -49,7 +49,7 @@ export { specFileForFlow, buildWorkerPrompt, buildPlanPrompt, buildPrompt, build
 // the agent's generator + reviewer output, and the targeted re-prompt used on a contract miss.
 import { checkGeneratorVerdict, repairInstruction, parseReviewerVerdict } from "./verdict-validate";
 import { ManifestEntrySchema } from "../orchestrator/schemas";
-import { AgentUnavailableError } from "../errors";
+import { AgentUnavailableError, isInfraError } from "../errors";
 
 // Read fallback model mapping from opencode.json (root-level key). Keeps the
 // fallback logic in one place so the orchestrator can retry with a different
@@ -466,7 +466,14 @@ export interface OpencodeRunInput {
   fixCases?: QaCase[]; // re-generation: failed cases from a previous execution to fix
   reviewCorrections?: string[]; // re-generation: actionable corrections from a reviewer rejection
   coverageGap?: string; // re-generation: changed lines not yet exercised (change-coverage gap)
+  // Lever-2 deterministic selector contradictions for the fix prompt (W1): each string is a verified
+  // absent/ambiguous finding against the captured failure-point tree ("role:name is NOT in the tree;
+  // present roles: …" or "matches MULTIPLE nodes …"). Rendered as its OWN un-truncated prompt section
+  // (NEVER folded into the 500-char-sliced fixCases detail, where verbose PW errors would cut it off).
+  selectorContradictions?: string[];
   learnedRules?: string; // retrieval: rules from past runs injected into the agent prompt
+  domSnapshot?: string; // live DEV a11y snapshot of the target routes — grounds the GENERATOR's selectors
+  failureSourced?: boolean; // true when domSnapshot is the failure-point capture — switches to "GROUND TRUTH AT FAILURE" framing
   runId?: string; // maps the session to a RunRecord for SSE live activity
   contextMap?: ArchitectureContext; // cross-cutting: the FE↔BE map, injected by the orchestrator
   explorer?: boolean; // Fase 3: run a read-only explorer pass before the generator (diff single-agent, opt-in)
@@ -684,6 +691,12 @@ export interface ReviewInput {
   // criteria. This is objective ledger state, NOT the generator's reasoning, so the reviewer's
   // independence is preserved while the judge gains app-specific anti-patterns earned from failures.
   learnedRules?: string;
+  // A DETERMINISTIC snapshot of the live DEV DOM (roles + accessible names of the routes the spec
+  // targets), captured by the ORCHESTRATOR — not the generator, so independence holds. It grounds
+  // the reviewer's UI-fact claims (labels, button/link text) in reality instead of its training
+  // memory of "similar apps", which is what made it hallucinate corrections (e.g. "the button says
+  // Add Owner" when DEV says "Submit"). Absent for code mode / when capture is unavailable.
+  domSnapshot?: string;
 }
 
 export interface ReviewResult {
@@ -724,10 +737,26 @@ export async function reviewIndependently(
     // tests for "not testing the change" when the change was never the objective (e.g. a guided run
     // that happens to sit on an unrelated commit).
     const obj = reviewObjective(input);
+    // Ground the reviewer's UI-fact claims in the REAL DEV DOM (captured deterministically by the
+    // ORCHESTRATOR — not the generator, so independence holds). Without this the reviewer judged
+    // labels/routes from its training memory of "similar apps" and hallucinated corrections (it
+    // claimed PetClinic's button says "Add Owner" when DEV says "Submit"), burning regeneration
+    // rounds and poisoning the ledger with rules built on false facts.
+    const domBlock = input.domSnapshot
+      ? [
+          ``,
+          `## Live DEV DOM — the ACTUAL roles + accessible names on the routes this spec targets`,
+          `Captured by the orchestrator from ${input.baseUrl ?? "DEV"}. Judge EVERY concrete UI fact`,
+          `(button/link labels, headings, routes) against THIS, never against prior knowledge of similar apps.`,
+          "```",
+          input.domSnapshot,
+          "```",
+        ]
+      : [];
     // Arm the judge with PROVEN app-specific rules (when present) as extra reject criteria.
     const rulesBlock = input.learnedRules ? [``, input.learnedRules] : [];
     const rulesInstruction = input.learnedRules
-      ? [`5. Also REJECT if any spec violates an app-specific reject-on-sight rule listed above.`]
+      ? [`6. Also REJECT if any spec violates an app-specific reject-on-sight rule listed above.`]
       : [];
     const prompt = [
       `## Independent review — judge these ${kind} WITHOUT the generator's reasoning`,
@@ -742,6 +771,7 @@ export async function reviewIndependently(
       ``,
       obj.heading,
       ...obj.body,
+      ...domBlock,
       ``,
       specBlock,
       ...rulesBlock,
@@ -751,6 +781,12 @@ export async function reviewIndependently(
       `2. Apply the test-value-review skill from BOTH perspectives (value + robustness).`,
       `3. Answer: could ${obj.targetNoun} be BROKEN and these tests STILL be green?`,
       `4. Be strict — a single anti-pattern in any spec means rejection.`,
+      `5. STAY IN YOUR LANE — judge VALUE and ROBUSTNESS. The GENERATOR owns ground-truth against the`
+        + ` live app (it navigated DEV). Judge a concrete UI fact (exact label, button/link text, route)`
+        + ` ONLY when the ${input.domSnapshot ? "Live DEV DOM above" : "spec itself"} confirms it. NEVER`
+        + ` assert a UI fact from memory: an unconfirmed guess that a label/route "should be" something is`
+        + ` NOT a valid correction — omit it. Reject on what you can SEE (no assertions, fragile selectors,`
+        + ` wrong objective, missing cleanup), not on guessed app specifics.`,
       ...rulesInstruction,
       ``,
       `Output your verdict as JSON with no text before or after. Always include a one or two`,
@@ -818,13 +854,19 @@ function reviewObjective(input: ReviewInput): { subject: string; heading: string
       targetNoun: "the targeted user flow",
     };
   }
-  // diff (and any commit-driven run): the commit's changed code is the objective.
-  return {
+  const commitDiffObjective = () => ({
     subject: "this commit",
     heading: `## Commit diff`,
     body: ["```diff", sanitizeText(input.diff).text, "```"],
     targetNoun: "the change",
-  };
+  });
+  // diff and code-mode runs are commit-driven: the commit's changed code is the objective.
+  if (input.mode === "diff" || input.target === "code") return commitDiffObjective();
+  // Any other (unexpected) mode reached the reviewer. Fall back to the commit-diff framing so the
+  // reviewer still has a concrete objective, but log it: a future mode must not silently
+  // mis-objective the independent judge.
+  console.warn(`[qa] reviewObjective: unhandled review mode ${JSON.stringify(input.mode)} — defaulting to the commit-diff objective`);
+  return commitDiffObjective();
 }
 
 const REVIEW_SPECS_MAX_BYTES = 40_000;
@@ -838,7 +880,11 @@ function renderReviewSpecs(input: ReviewInput): string {
     let content: string;
     try {
       content = readFileSync(join(input.mirrorDir, input.e2eRelDir, s), "utf8");
-    } catch {
+    } catch (err) {
+      // A spec the independent reviewer NEVER sees can otherwise ship inside an approved batch — that
+      // silently bypasses the quality gate. Surface it loudly (CLAUDE.md: never swallow), like the
+      // byte-cap branch below does for its own mode switch.
+      console.warn(`[qa] WARNING: could not read spec '${rel(s)}' for review (${err instanceof Error ? err.message : String(err)}) — it will be judged from a placeholder, NOT its real content.`);
       contents.push(`### ${rel(s)}\n( could not read file — review skipped for this spec )`);
       continue;
     }
@@ -910,6 +956,16 @@ export function parsePlan(text: string): PlanObjective[] {
     const key = specFileForFlow(o.flow);
     return seen.has(key) ? false : (seen.add(key), true);
   });
+}
+
+// True when the planner's response INTENDED objectives (its text carries an `objectives` array with
+// at least one object entry) but NONE parsed — i.e. the JSON was malformed/over-nested, not a
+// genuine "nothing uncovered". Distinguishes a PARSE FAILURE (→ repair re-prompt, like the
+// generator/reviewer get) from a legitimate empty plan (`{"objectives":[]}` or no array at all,
+// which must be honored as a real no-op). Without this, a malformed whole-repo plan silently
+// produced 0 objectives → a false `skipped` after a full planner run.
+export function planNeedsRepair(planText: string): boolean {
+  return parsePlan(planText).length === 0 && /"objectives"\s*:\s*\[\s*\{/.test(planText);
 }
 
 
@@ -986,6 +1042,7 @@ export interface ParallelWorkerInput {
   appName: string;
   mode: RunMode;
   learnedRules?: string; // anti-pattern rules from past runs — injected so workers don't repeat them
+  domSnapshot?: string; // live DEV a11y tree of this flow's routes — the worker transcribes, not guesses
   runId?: string; // set on fan-out so the worker's live activity routes + carries a workerId
 }
 
@@ -996,8 +1053,9 @@ export interface ParallelWorkerInput {
 export async function generateParallel(
   workers: ParallelWorkerInput[],
   deps: AgentDeps,
-  opts?: { signal?: AbortSignal; concurrency?: number },
+  opts?: { signal?: AbortSignal; concurrency?: number; specExists?: (path: string) => boolean },
 ): Promise<{ results: Array<{ flow: string; spec: string }>; errors: string[] }> {
+  const exists = opts?.specExists ?? existsSync; // injectable for tests; defaults to the real FS check
   if (workers.length === 0) return { results: [], errors: [] };
   const concurrency = opts?.concurrency ?? Math.min(workers.length, 5);
   const results: Array<{ flow: string; spec: string }> = [];
@@ -1011,8 +1069,18 @@ export async function generateParallel(
       try {
         const output = await session.prompt(buildWorkerPrompt(w));
         const json = lastJsonMatching(output, (x) => typeof x.spec === "string");
-        if (json?.spec) results.push({ flow: w.flow, spec: json.spec as string });
-        else errors.push(`${w.flow}: worker produced no parseable spec name`);
+        const spec = json?.spec as string | undefined;
+        // VERIFY on disk — a parsed spec NAME is the worker's CLAIM, not proof it wrote the file. A
+        // worker that reports a spec it never persisted (phantom) must count as a FAILURE, so the
+        // fan-out's "N written" is honest (the global reconcile drops phantoms later, but the
+        // per-worker count must not over-report; this was hiding that 1 of 4 workers actually landed).
+        if (spec && exists(join(w.mirrorDir, w.e2eRelDir, spec))) {
+          results.push({ flow: w.flow, spec });
+        } else if (spec) {
+          errors.push(`${w.flow}: worker reported spec '${spec}' but it is NOT on disk (phantom)`);
+        } else {
+          errors.push(`${w.flow}: worker produced no parseable spec name`);
+        }
       } finally {
         if (w.runId) unregisterRunSession(session.id);
         await session.dispose().catch(() => {});
@@ -1056,7 +1124,16 @@ export function shouldFanOut(input: {
 export async function runOpencodeParallel(
   input: OpencodeRunInput,
   deps: AgentDeps,
-  opts?: { signal?: AbortSignal; onProgress?: (msg: string) => void; concurrency?: number },
+  opts?: {
+    signal?: AbortSignal;
+    onProgress?: (msg: string) => void;
+    concurrency?: number;
+    specExists?: (path: string) => boolean;
+    // Deterministic DOM grounding for the workers — the orchestrator captures the live a11y tree of
+    // the planned routes (Playwright lives on the orchestrator side, so it is injected here, keeping
+    // this agent boundary free of browser code). Best-effort: undefined → workers explore themselves.
+    captureRoutesDom?: (routes: string[]) => Promise<string | undefined>;
+  },
   fs: ManifestFs = realManifestFs,
 ): Promise<AgentResult> {
   const timeoutMs = agentTimeout(input.mode);
@@ -1071,6 +1148,19 @@ export async function runOpencodeParallel(
   let planText: string;
   try {
     planText = await planSession.prompt(buildPlanPrompt(input));
+    // Typed-contract repair (parity with the generator/reviewer): a plan whose response INTENDED
+    // objectives but parsed to NONE was malformed/over-nested JSON — re-prompt ONCE for a clean,
+    // minimal plan before accepting a false "0 objectives" that would wrongly SKIP a whole-repo run
+    // (a real bug seen on exhaustive mode: the planner found 11 flows, the nested JSON did not parse,
+    // and the run skipped). A genuinely empty plan is left untouched.
+    if (planNeedsRepair(planText)) {
+      console.warn("[qa] planner plan did not parse (objectives intended but 0 extracted); requesting one repair.");
+      planText = await planSession.prompt(
+        'Your previous plan did not parse. Output ONLY a single JSON object — no prose, no markdown fences — ' +
+          'of the form {"objectives":[{"flow":"...","objective":"...","needsUi":true}, ...]}. ' +
+          "Keep it MINIMAL: omit the optional `brief`/blast-radius detail if it risks malforming the JSON.",
+      );
+    }
   } finally {
     if (heartbeat) clearInterval(heartbeat);
     if (input.runId) unregisterRunSession(planSession.id);
@@ -1111,6 +1201,23 @@ export async function runOpencodeParallel(
     }
   }
 
+  // Ground the workers BEFORE they write: capture the live a11y tree of the planned routes ONCE and
+  // hand it to each worker, so a worker TRANSCRIBES real selectors instead of guessing (the #1 failure
+  // class: getByRole roles / nav names that don't exist live). Best-effort — undefined when capture is
+  // unavailable or a route isn't navigable, and the worker falls back to its own Playwright MCP.
+  let workerDom: string | undefined;
+  if (opts?.captureRoutesDom) {
+    // ONLY verified routes (the explorer actually navigated the live DOM) — buildPlanPrompt promises
+    // the orchestrator renders verified routes as ground truth, so an unverified speculative route
+    // must not be rendered and injected as if it were real (it would re-introduce the hallucinated-
+    // selector failure class this grounding exists to prevent).
+    const routes = [...new Set(objectives.flatMap((o) => o.brief?.routes?.filter((r) => r.verified).map((r) => r.path) ?? []).filter((r): r is string => Boolean(r)))];
+    if (routes.length > 0) {
+      workerDom = await opts.captureRoutesDom(routes).catch(() => undefined);
+      if (workerDom) opts?.onProgress?.(`[qa] grounding: captured the live a11y tree for ${routes.length} route(s) → injected into the workers`);
+    }
+  }
+
   // Phase 2 — FAN-OUT to workers (one spec each).
   const changeType = input.intent?.type ?? input.mode;
   const workers: ParallelWorkerInput[] = objectives.map((o) => ({
@@ -1128,9 +1235,10 @@ export async function runOpencodeParallel(
     appName: input.appName,
     mode: input.mode,
     learnedRules: input.learnedRules,
+    ...(workerDom ? { domSnapshot: workerDom } : {}),
     runId: input.runId,
   }));
-  const { results, errors } = await generateParallel(workers, deps, { signal: opts?.signal, concurrency: opts?.concurrency });
+  const { results, errors } = await generateParallel(workers, deps, { signal: opts?.signal, concurrency: opts?.concurrency, ...(opts?.specExists ? { specExists: opts.specExists } : {}) });
   opts?.onProgress?.(`[qa] workers: ${results.length} spec(s) written, ${errors.length} error(s)`);
   if (errors.length > 0) {
     // A failed worker means a PLANNED flow is silently absent from the suite. Surface it loudly
@@ -1202,11 +1310,11 @@ const MAX_AGENT_TIMEOUT_MS = Math.max(...Object.values(TIMEOUT_BY_MODE));
 // require the package. OPENCODE_SERVE_URL points to the `opencode` container.
 export async function defaultAgentDeps(): Promise<AgentDeps> {
   // The undici transport timeout must exceed EVERY per-prompt withTimeout, or it aborts the
-  // request before our own deadline fires. The reviewer has its OWN budget (REVIEWER_TIMEOUT_MS,
-  // 6 min) that is independent of the generator's; if an operator sets a small OPENCODE_TIMEOUT_MS
-  // it must NOT drag the transport below the reviewer's budget. Take the max of all of them + headroom.
+  // request before our own deadline fires. The reviewer and the explorer each have their OWN budget
+  // (REVIEWER_TIMEOUT_MS, EXPLORER_TIMEOUT_MS) independent of the generator's; if an operator sets a
+  // small OPENCODE_TIMEOUT_MS it must NOT drag the transport below any of them. Take the max + headroom.
   const generatorMax = Number(process.env.OPENCODE_TIMEOUT_MS) || MAX_AGENT_TIMEOUT_MS;
-  const dispatcherTimeoutMs = Math.max(generatorMax, REVIEWER_TIMEOUT_MS) + 30_000;
+  const dispatcherTimeoutMs = Math.max(generatorMax, REVIEWER_TIMEOUT_MS, EXPLORER_TIMEOUT_MS) + 30_000;
   await installHttpDispatcher(dispatcherTimeoutMs);
 
   const client = await getSharedClient();
@@ -1255,7 +1363,6 @@ export async function defaultAgentDeps(): Promise<AgentDeps> {
                   })
                   .then((res) => {
                     if (res.error) {
-                      recordCircuitFailure();
                       throw new Error(`OpenCode session.prompt failed: ${JSON.stringify(res.error)}`);
                     }
                     // ROOT-CAUSE FIX: a provider/agent fault (out of credits, auth, rate-limit,
@@ -1266,18 +1373,26 @@ export async function defaultAgentDeps(): Promise<AgentDeps> {
                     // Detect it at the source and throw it as a typed infra error.
                     const agentErr = (res.data?.info as { error?: AgentErrorPayload } | undefined)?.error;
                     if (agentErr) {
-                      recordCircuitFailure();
                       throw agentErrorToInfra(agentErr);
                     }
                     recordCircuitSuccess();
                     return extractText(res.data?.parts, promptOpts);
                   })
+                  // Record the circuit failure in EXACTLY one place per attempt. The error
+                  // branches above throw without counting; this single trailing catch counts
+                  // the attempt once (a previous double-count opened the breaker after ~3
+                  // instead of CIRCUIT_THRESHOLD failures), then re-throws to the fallback retry.
                   .catch((err) => {
                     recordCircuitFailure();
                     throw err;
                   });
               };
               return runPrompt(opts?.model).catch((err) => {
+                // Only retry a TRANSIENT primary-model fault on the fallback model. Skip the
+                // retry (re-throw) on operator-abort (a cancel must not be defeated by a retry)
+                // and on infra errors like AgentUnavailableError (out-of-credits/auth hits the
+                // SAME OpenCode key — re-spending on the fallback is pointless and surfaces late).
+                if (opts?.signal?.aborted || isInfraError(err)) throw err;
                 const fallback = getFallbackModel(agent);
                 if (fallback) {
                   console.warn(`[qa] primary model failed for ${agent}, retrying with fallback ${fallback}: ${err instanceof Error ? err.message : String(err)}`);

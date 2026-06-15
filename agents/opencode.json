@@ -18,7 +18,7 @@
     "qa-generator": {
       "description": "Generates Playwright E2E tests for a commit's blast radius and writes them in e2e/.",
       "mode": "primary",
-      "model": "opencode-go/deepseek-v4-pro",
+      "model": "opencode-go/kimi-k2.7-code",
       "prompt": "{file:./agent/qa-generator.md}",
       "tools": { "write": true, "edit": true, "read": true, "bash": true, "webfetch": false },
       "mcp": ["serena", "engram", "playwright"],
@@ -37,7 +37,7 @@
     "qa-maintainer": {
       "description": "Self-maintenance agent for ai-pipeline itself. Diagnoses and fixes incidents; never touches watched app repos.",
       "mode": "primary",
-      "model": "opencode-go/deepseek-v4-pro",
+      "model": "opencode-go/kimi-k2.7-code",
       "prompt": "{file:./agent/qa-maintainer.md}",
       "tools": { "write": true, "edit": true, "read": true, "bash": true },
       "mcp": ["serena", "engram"],
@@ -64,13 +64,13 @@
       "temperature": 0.1
     },
     "qa-worker": {
-      "description": "Parallel worker for cheap per-flow test generation in complete/exhaustive mode. Writes ONE spec file per session, scoped to a single flow.",
+      "description": "Parallel worker for per-flow test generation in complete/exhaustive mode. Writes ONE spec file per session, scoped to a single flow. Q2 brute work: transcribes the injected a11y tree into a spec — no browser navigation, minimal judgment. A cheap (flash) tier suffices because the deterministic gates (tsc/eslint static gate + Lever-2 selector check) catch transcription errors; the worker only assembles REAL selectors from the injected tree.",
       "mode": "primary",
       "model": "opencode-go/deepseek-v4-flash",
       "prompt": "{file:./agent/qa-worker.md}",
-      "tools": { "write": true, "edit": false, "read": true, "bash": false },
-      "mcp": ["serena", "playwright"],
-      "steps": 25,
+      "tools": { "write": true, "edit": true, "read": true, "bash": false },
+      "mcp": ["serena"],
+      "steps": 30,
       "temperature": 0.3
     },
     "qa-worker-code": {
@@ -78,9 +78,9 @@
       "mode": "primary",
       "model": "opencode-go/deepseek-v4-flash",
       "prompt": "{file:./agent/qa-worker.md}",
-      "tools": { "write": true, "edit": false, "read": true, "bash": false },
+      "tools": { "write": true, "edit": true, "read": true, "bash": false },
       "mcp": ["serena"],
-      "steps": 25,
+      "steps": 30,
       "temperature": 0.3
     },
     "qa-explorer": {

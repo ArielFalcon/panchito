@@ -39,14 +39,31 @@ import {
   RunRecordSchema,
   IntelligenceViewSchema,
   SignalsViewSchema,
+  TrendsViewSchema,
+  ReportViewSchema,
+  RunReportViewSchema,
   UpdateAppInputSchema,
   VersionInfoSchema,
+  LoginRequestSchema,
+  LoginResponseSchema,
 } from "../contract/commands";
-import { RunEventSchema } from "../contract/events";
+import { RunEventSchema, type RunEvent } from "../contract/events";
 import { handshake } from "./version";
+import { reportToCsv, trendsToCsv } from "./report-view";
 import type { RunEventStore } from "./run-events";
 
 const TARGETS: TestTarget[] = ["e2e", "code"];
+
+// SSE durable-poll cadence: how often an open run-event stream re-reads the durable store
+// for events produced out-of-process and re-checks the record for a terminal state. Small
+// enough to feel live, large enough not to hammer SQLite per open connection.
+const DEFAULT_SSE_POLL_MS = 1000;
+
+// Outcome of exchanging a GitHub user token for a server session: a minted session on
+// success, or a tagged failure the route maps to 401 (bad token) vs 403 (not a collaborator).
+export type LoginOutcome =
+  | { ok: true; token: string; username: string; expiresAt: string }
+  | { ok: false; reason: "identity" | "forbidden" };
 
 export interface ApiDeps {
   queue: { readonly size: number };
@@ -63,6 +80,13 @@ export interface ApiDeps {
   // Read-only fleet-wide integrity readout (ground-truth value-oracle vs. proxy pass-rate).
   // Absent ⇒ the /signals route returns 501.
   signals?: () => z.infer<typeof SignalsViewSchema>;
+  // Read-only period-over-period trends + the ad-hoc interestingness-ranked report for an app.
+  // Absent ⇒ the /trends and /report routes return 501.
+  trends?: (app: string, window?: number) => z.infer<typeof TrendsViewSchema>;
+  report?: (app: string, window?: number) => z.infer<typeof ReportViewSchema>;
+  // The run-scoped report: the current-execution analysis plus the evolution-as-of-the-run, for the
+  // post-run summary view. Outer null ⇒ 404 (no such run); `evolution` null ⇒ not enough history yet.
+  reportForRun?: (runId: string, window?: number) => z.infer<typeof RunReportViewSchema> | null;
   ask?: (input: { context: string; question: string; instruction?: string }) => Promise<string>;
   cancelRun?: (id: string) => boolean;
   // Continuation (human-in-the-loop): re-run fixing the parent run's failed cases.
@@ -74,6 +98,15 @@ export interface ApiDeps {
   deleteApp?: (name: string, purge: boolean) => { removed: string[] };
   listRepos?: (owner: string, page: number) => Promise<{ repos: Array<{ fullName: string; private: boolean; description: string | null }>; hasMore: boolean }>;
   runEvents?: RunEventStore;
+  // Cadence (ms) of the SSE durable-poll loop in handleRunEvents. Injected so tests can drive
+  // the poll fast; production uses DEFAULT_SSE_POLL_MS.
+  ssePollMs?: number;
+  // Exchange a GitHub user token for a server session (POST /api/auth/login). Absent ⇒ the
+  // route returns 501 (GitHub login not configured); the static QA_API_TOKEN still works.
+  login?: (githubToken: string) => Promise<LoginOutcome>;
+  // The OAuth App client id (public) advertised in the version handshake, so the console can run
+  // the device flow without baking it in. Absent ⇒ not advertised (client falls back to its own).
+  githubClientId?: string;
   agentRuntime?: {
     getConfig(): PublicAgentConfig | Promise<PublicAgentConfig>;
     applyConfig(input: unknown): { config: PublicAgentConfig; restarted: AgentProvider[]; downgraded?: boolean } | Promise<{ config: PublicAgentConfig; restarted: AgentProvider[]; downgraded?: boolean }>;
@@ -167,6 +200,21 @@ export async function handleApi(
     return handleAppIntelligence(res, deps, intelMatch[1]!);
   }
 
+  const trendsMatch = path.match(/^\/api\/apps\/([^/]+)\/trends$/);
+  if (req.method === "GET" && trendsMatch) {
+    return handleAppTrends(res, deps, trendsMatch[1]!, parseWindow(url.searchParams.get("window")), url.searchParams.get("format"));
+  }
+
+  const reportMatch = path.match(/^\/api\/apps\/([^/]+)\/report$/);
+  if (req.method === "GET" && reportMatch) {
+    return handleAppReport(res, deps, reportMatch[1]!, parseWindow(url.searchParams.get("window")), url.searchParams.get("format"));
+  }
+
+  const runReportMatch = path.match(/^\/api\/runs\/([^/]+)\/report$/);
+  if (req.method === "GET" && runReportMatch) {
+    return handleRunReport(res, deps, runReportMatch[1]!, parseWindow(url.searchParams.get("window")), url.searchParams.get("format"));
+  }
+
   if (req.method === "GET" && path === "/api/signals") {
     return handleSignals(res, deps);
   }
@@ -189,8 +237,12 @@ export async function handleApi(
   }
 
   if (req.method === "GET" && path === "/api/version") {
-    contractJson(res, 200, VersionInfoSchema, handshake(url.searchParams.get("client") ?? undefined));
+    contractJson(res, 200, VersionInfoSchema, handshake(url.searchParams.get("client") ?? undefined, deps.githubClientId));
     return true;
+  }
+
+  if (req.method === "POST" && path === "/api/auth/login") {
+    return await handleLogin(req, res, deps);
   }
 
   if (req.method === "GET" && path === "/api/agent/config") {
@@ -304,7 +356,13 @@ function sanitizeRecord(record: RunRecord): RunRecord {
     ...record,
     note: record.note ? sanitizeText(record.note).text : record.note,
     logs: record.logs.map((l) => sanitizeText(l).text),
-    cases: record.cases.map((c) => (c.detail ? { ...c, detail: sanitizeText(c.detail).text } : c)),
+    cases: record.cases.map((c) => {
+      // Omit `detail` entirely when absent. A DB-backed record yields detail:null (history stores
+      // `c.detail ?? null`), but the contract is z.string().optional() (string|undefined, NOT null),
+      // so passing null through here 500s the run-status API. Strip it (and sanitize when present).
+      const { detail, ...rest } = c;
+      return detail ? { ...rest, detail: sanitizeText(detail).text } : rest;
+    }),
     activity: record.activity?.map((a) => ({ ...a, text: sanitizeText(a.text).text })),
   };
 }
@@ -335,9 +393,17 @@ function handleRunEvents(req: IncomingMessage, res: ServerResponse, deps: ApiDep
   res.setHeader("Connection", "keep-alive");
   res.writeHead(200);
 
-  for (const event of deps.runEvents.replay(id, parseLastEventId(req))) {
+  const runEvents = deps.runEvents; // narrowed past the 501 guard; stable for the closures below
+
+  // Track the high-water seq streamed so the durable poll never re-sends an event the live
+  // bus already delivered (and vice-versa).
+  let lastSentSeq = parseLastEventId(req);
+  const send = (event: RunEvent): void => {
     sseWrite(res, event);
-  }
+    if (event.seq > lastSentSeq) lastSentSeq = event.seq;
+  };
+
+  for (const event of runEvents.replay(id, lastSentSeq)) send(event);
 
   // A terminated run emits nothing more: replay, then close so the client stops
   // waiting on a stream that will never produce another event.
@@ -346,19 +412,44 @@ function handleRunEvents(req: IncomingMessage, res: ServerResponse, deps: ApiDep
     return true;
   }
 
+  let closed = false;
+  let timer: ReturnType<typeof setInterval> | undefined;
   let unsubscribe: () => void = () => {};
-  unsubscribe = deps.runEvents.subscribe(id, (event) => {
-    sseWrite(res, event);
+  const finish = (): void => {
+    if (closed) return;
+    closed = true;
+    if (timer) clearInterval(timer);
+    unsubscribe();
+    if (!res.writableEnded) res.end();
+  };
+
+  // Live tail for a run executing IN THIS process: the in-process bus delivers each publish.
+  unsubscribe = runEvents.subscribe(id, (event) => {
+    send(event);
     // run.verdict is terminal — close the stream once the run finishes so the
     // connection (and its bus listener) is not held open indefinitely.
-    if (event.body.type === "run.verdict") {
-      unsubscribe();
-      res.end();
-    }
+    if (event.body.type === "run.verdict") finish();
   });
-  // Client disconnect → drop the bus listener. The write-after-close race is also
-  // guarded centrally in sseWrite (writableEnded), so a late event is a no-op.
-  req.on("close", () => unsubscribe());
+
+  // Durable poll — the robustness net. The bus above only sees SAME-PROCESS publishes, so a
+  // run produced by another process (e.g. the CLI's own queue) would otherwise stream nothing
+  // and never close. Each tick (a) flushes events persisted since lastSentSeq — surfacing an
+  // out-of-process run's progress through the shared store — then (b) ends the stream once the
+  // record is terminal, so a missed/absent run.verdict can never leave the connection hanging.
+  const pollMs = deps.ssePollMs ?? DEFAULT_SSE_POLL_MS;
+  timer = setInterval(() => {
+    if (closed) return;
+    for (const event of runEvents.replay(id, lastSentSeq)) send(event);
+    // Close only on an EXPLICIT terminal record. getRecord is durable (SQLite), so a missing
+    // record mid-stream is anomalous — treating it as terminal could drop a healthy stream, so
+    // we don't; the run record reaching "done" is the single close trigger here.
+    if (deps.getRecord(id)?.status === "done") finish();
+  }, pollMs);
+  timer.unref?.();
+
+  // Client disconnect → tear everything down. The write-after-close race is also guarded
+  // centrally in sseWrite (writableEnded), so a late event is a no-op.
+  req.on("close", () => finish());
   return true;
 }
 
@@ -383,9 +474,10 @@ function handleCancelRun(res: ServerResponse, deps: ApiDeps, id: string): boolea
   if (cancelled) {
     json(res, 200, { id, status: "cancelled" });
   } else if (deps.getRecord(id)?.status === "done") {
-    // It was enqueued (not yet running): cancelRun finalized the record and pulled it
-    // from the queue before it could start.
-    json(res, 200, { id, status: "cancelled", message: "run was enqueued, not running — removed from queue" });
+    // cancelRun returned false but finalized the record: it was either still enqueued (pulled
+    // from the queue before it could start) or a stale "running" record the live queue no longer
+    // held (finalized so the operator's stop clears it). Either way it is no longer active.
+    json(res, 200, { id, status: "cancelled", message: "run was not actively executing — finalized and removed from the queue" });
   } else {
     // Running per the (stale) record, but it is no longer the run holding the queue —
     // it already finished or a successor is now executing. Do NOT report it cancelled.
@@ -452,6 +544,99 @@ function handleSignals(res: ServerResponse, deps: ApiDeps): boolean {
     return true;
   }
   contractJson(res, 200, SignalsViewSchema, deps.signals());
+  return true;
+}
+
+// A client-supplied trends window (?window=N), clamped to [1,50] — listRunOutcomes caps the read at
+// 100 rows, so the current + previous windows (window*2) must stay within it. Invalid/absent →
+// undefined (the view falls back to its default of 20).
+function parseWindow(raw: string | null): number | undefined {
+  if (!raw) return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) return undefined;
+  return Math.min(n, 50);
+}
+
+function handleAppTrends(
+  res: ServerResponse,
+  deps: ApiDeps,
+  name: string,
+  window?: number,
+  format?: string | null,
+): boolean {
+  if (!deps.trends) {
+    json(res, 501, { error: "trends is not available" });
+    return true;
+  }
+  try {
+    deps.loadApp(name); // 404 when the app isn't configured
+  } catch {
+    json(res, 404, { error: `app not found: '${name}'` });
+    return true;
+  }
+  const trends = deps.trends(name, window);
+  if (format === "csv") {
+    res.writeHead(200, { "Content-Type": "text/csv; charset=utf-8" });
+    res.end(trendsToCsv(trends));
+    return true;
+  }
+  contractJson(res, 200, TrendsViewSchema, trends);
+  return true;
+}
+
+function handleAppReport(
+  res: ServerResponse,
+  deps: ApiDeps,
+  name: string,
+  window?: number,
+  format?: string | null,
+): boolean {
+  if (!deps.report) {
+    json(res, 501, { error: "report is not available" });
+    return true;
+  }
+  try {
+    deps.loadApp(name);
+  } catch {
+    json(res, 404, { error: `app not found: '${name}'` });
+    return true;
+  }
+  const report = deps.report(name, window);
+  // ?format=csv → a spreadsheet-friendly flat table (one row per insight); default stays the
+  // contract-validated JSON ReportView.
+  if (format === "csv") {
+    res.writeHead(200, { "Content-Type": "text/csv; charset=utf-8" });
+    res.end(reportToCsv(report));
+    return true;
+  }
+  contractJson(res, 200, ReportViewSchema, report);
+  return true;
+}
+
+function handleRunReport(
+  res: ServerResponse,
+  deps: ApiDeps,
+  runId: string,
+  window?: number,
+  format?: string | null,
+): boolean {
+  if (!deps.reportForRun) {
+    json(res, 501, { error: "report is not available" });
+    return true;
+  }
+  const report = deps.reportForRun(runId, window);
+  if (!report) {
+    json(res, 404, { error: `run not found: '${runId}'` });
+    return true;
+  }
+  // CSV exports the run's OWN facts (the current-execution report); the evolution half belongs to a
+  // chart, not a flat table, and the app-level /report?format=csv already exports the trend table.
+  if (format === "csv") {
+    res.writeHead(200, { "Content-Type": "text/csv; charset=utf-8" });
+    res.end(reportToCsv(report.current));
+    return true;
+  }
+  contractJson(res, 200, RunReportViewSchema, report);
   return true;
 }
 
@@ -702,6 +887,52 @@ async function handleHelp(req: IncomingMessage, res: ServerResponse, deps: ApiDe
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     json(res, 502, { error: `assistant failed: ${msg}` });
+  }
+  return true;
+}
+
+// Exchange a GitHub user token (obtained by the client via the OAuth device flow) for a
+// short-lived server session. The deps.login closure does the GitHub verification + repo
+// authorization + session minting; this handler is pure validation + status mapping:
+// 400 malformed, 401 bad/unknown GitHub token, 403 authenticated-but-not-a-collaborator.
+async function handleLogin(req: IncomingMessage, res: ServerResponse, deps: ApiDeps): Promise<boolean> {
+  if (!deps.login) {
+    json(res, 501, { error: "GitHub login is not configured on this server" });
+    return true;
+  }
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(await readBody(req));
+  } catch {
+    json(res, 400, { error: "invalid JSON" });
+    return true;
+  }
+
+  const parsed = LoginRequestSchema.safeParse(raw);
+  if (!parsed.success) {
+    json(res, 400, { error: "'githubToken' is required" });
+    return true;
+  }
+
+  try {
+    const outcome = await deps.login(parsed.data.githubToken);
+    if (outcome.ok) {
+      contractJson(res, 200, LoginResponseSchema, {
+        token: outcome.token,
+        username: outcome.username,
+        expiresAt: outcome.expiresAt,
+      });
+    } else if (outcome.reason === "forbidden") {
+      json(res, 403, { error: "this GitHub account cannot push to any watched repo" });
+    } else {
+      json(res, 401, { error: "the GitHub token was rejected" });
+    }
+  } catch (err) {
+    // A GitHub API outage is infra, not a credential problem — surface it loudly, don't
+    // masquerade it as a 401 (which would send the operator chasing a non-existent token bug).
+    const msg = err instanceof Error ? err.message : String(err);
+    json(res, 502, { error: `GitHub login failed: ${msg}` });
   }
   return true;
 }

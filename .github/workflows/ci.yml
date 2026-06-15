@@ -17,7 +17,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          # Node 24 to match the production orchestrator image (Dockerfile installs Node 24 over the
+          # Playwright base). better-sqlite3 12.10.1's prebuilt is ABI v137 (Node 24); on Node 22 CI
+          # would validate a DIFFERENT native build than ships, defeating the point of the outer guard.
+          node-version: "24"
           cache: npm
       - run: npm ci
       - run: npm run typecheck

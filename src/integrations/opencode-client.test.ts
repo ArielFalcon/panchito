@@ -11,6 +11,7 @@ import {
   runOpencode,
   withTimeout,
   parsePlan,
+  planNeedsRepair,
   specFileForFlow,
   upsertManifest,
   generateParallel,
@@ -401,6 +402,21 @@ test("parsePlan returns [] when there is no objectives object", () => {
   assert.deepEqual(parsePlan('{"approved":true}'), []);
 });
 
+test("planNeedsRepair distinguishes a MALFORMED plan from a genuinely empty one", () => {
+  // Malformed: the response intended objectives (array with object entries) but the JSON is
+  // unbalanced (the truncated/over-nested case that made an exhaustive run falsely skip). → repair.
+  const malformed = 'Here is the plan.\n```json\n{"objectives":[{"flow":"owner-management","objective":"register an owner","needsUi":true, "brief": {"blastRadius": [';
+  assert.equal(parsePlan(malformed).length, 0);
+  assert.equal(planNeedsRepair(malformed), true);
+
+  // Genuinely empty plan (well-formed empty array) → NOT a parse failure, honor the no-op.
+  assert.equal(planNeedsRepair('{"objectives":[]}'), false);
+  // A well-formed plan with objectives parses fine → no repair.
+  assert.equal(planNeedsRepair('{"objectives":[{"flow":"login","objective":"valid creds reach the dashboard"}]}'), false);
+  // No objectives array at all (prose "no uncovered flows") → no repair.
+  assert.equal(planNeedsRepair("I found no important uncovered flows."), false);
+});
+
 test("parsePlan de-dups by resulting filename (distinct strings, same spec file)", () => {
   const out = parsePlan('{"objectives":[{"flow":"Check Out","objective":"a"},{"flow":"check-out","objective":"b"}]}');
   assert.equal(out.length, 1, "both normalize to flows/check-out.spec.ts → only one survives");
@@ -681,7 +697,8 @@ test("generateParallel isolates worker failures and maps flow→spec", async () 
       dispose: async () => {},
     }),
   };
-  const { results, errors } = await generateParallel(workers, deps, { concurrency: 2 });
+  // specExists: the checkout spec "landed" on disk, the login one did not (stubbed — no real FS).
+  const { results, errors } = await generateParallel(workers, deps, { concurrency: 2, specExists: (p) => p.includes("checkout") });
   assert.deepEqual(results, [{ flow: "checkout", spec: "flows/checkout.spec.ts" }]);
   assert.equal(errors.length, 1);
   assert.match(errors[0]!, /login/);
@@ -696,7 +713,7 @@ test("runOpencodeParallel: plan → workers → orchestrator writes the manifest
   );
   const store = new Map<string, string>();
   const fs: ManifestFs = { read: (p) => store.get(p) ?? null, write: (p, c) => void store.set(p, c) };
-  const res = await runOpencodeParallel({ ...input, mode: "complete", intent: undefined }, deps, {}, fs);
+  const res = await runOpencodeParallel({ ...input, mode: "complete", intent: undefined }, deps, { specExists: () => true }, fs);
   assert.deepEqual(res.specs.sort(), ["flows/checkout.spec.ts", "flows/login.spec.ts"]);
   assert.equal(res.approved, true);
   assert.equal(opened[0], "qa-generator"); // planner first
@@ -723,11 +740,19 @@ test("runOpencodeParallel: empty plan is a clean no-op (approved, no specs, no m
   assert.deepEqual(opened, ["qa-generator"]); // only the planner ran
 });
 
-test("buildWorkerPrompt is surgical: exact file, explore-first, no manifest writes", () => {
+test("buildWorkerPrompt is surgical: exact file, write-early discipline, no manifest writes (Q2: workers do NOT navigate)", () => {
   const w: ParallelWorkerInput = { objective: "pay", flow: "checkout", symbols: ["pay"], needsUi: true, specFile: "flows/checkout.spec.ts", repo: "r", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "ns", baseUrl: "https://dev", appName: "a", mode: "complete" };
   const p = buildWorkerPrompt(w);
   assert.match(p, /Write EXACTLY this file: e2e\/flows\/checkout\.spec\.ts/);
-  assert.match(p, /Explore YOUR flow FIRST with the Playwright MCP/);
+  // Q2: workers no longer explore (browser_navigate/browser_snapshot removed from qa-worker MCP).
+  // They transcribe the injected a11y tree instead. No LIVE DEV URL line in needsUi branch.
+  assert.doesNotMatch(p, /browser_navigate/);
+  assert.doesNotMatch(p, /browser_snapshot/);
+  assert.doesNotMatch(p, /Explore EFFICIENTLY, then STOP/);
+  assert.match(p, /You have NO browser/);
+  // The write-early discipline block makes "the file exists" the one required outcome.
+  assert.match(p, /required outcome: the file exists on disk/);
+  assert.match(p, /TOTAL FAILURE/);
   assert.match(p, /Do NOT write to the manifest/);
   assert.match(p, /\{"spec":"flows\/checkout\.spec\.ts"\}/);
 });
@@ -749,6 +774,17 @@ test("buildWorkerPrompt injects learnedRules so fan-out workers don't repeat pas
   assert.match(withRules, /Lessons learned from past runs/);
   assert.match(withRules, /avoid waitForTimeout/);
   assert.ok(withRules.indexOf("Lessons learned") < withRules.indexOf('{"spec"'), "lessons precede the JSON contract");
+});
+
+// v5 grounding: when the orchestrator captures the live a11y tree for the flow's routes, the worker
+// gets it as GROUND TRUTH and TRANSCRIBES real selectors instead of guessing/exploring blind.
+test("buildWorkerPrompt injects the live a11y tree as GROUND TRUTH when provided (worker transcribes, not guesses)", () => {
+  const base: ParallelWorkerInput = { objective: "list vets", flow: "vets", symbols: [], needsUi: true, specFile: "flows/vets.spec.ts", repo: "r", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "ns", baseUrl: "https://dev", appName: "a", mode: "exhaustive" };
+  assert.doesNotMatch(buildWorkerPrompt(base), /GROUND TRUTH/); // no snapshot → no block
+  const grounded = buildWorkerPrompt({ ...base, domSnapshot: "route /#!/vets:\n  cell: Helen Leary\n  cell: radiology" });
+  assert.match(grounded, /GROUND TRUTH/);
+  assert.match(grounded, /cell: Helen Leary/);
+  assert.match(grounded, /do NOT need to navigate/i); // it stops the worker from burning budget exploring
 });
 
 test("buildPlanPrompt injects learnedRules in both diff and complete variants", () => {
@@ -926,7 +962,7 @@ test("diff fan-out with >=2 objectives dispatches workers (no fallback)", async 
       repo: "r", sha: "a1b2c3d", diff: "+x", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "n",
       needsReview: false, target: "e2e", mode: "diff", appName: "a",
     },
-    stubDeps, undefined, fakeFs,
+    stubDeps, { specExists: () => true }, fakeFs,
   );
   assert.deepEqual(agents.filter((a) => a === "qa-worker"), ["qa-worker", "qa-worker"]);
   assert.equal(result.specs.length, 2);
@@ -1126,6 +1162,36 @@ test("reviewIndependently warns the operator when spec contents exceed the inlin
   assert.match(captured.prompt ?? "", /read each file with the read tool/); // the fallback path is taken
 });
 
+test("reviewIndependently injects the live DEV DOM snapshot and tells the reviewer to stay in its lane", async () => {
+  // Grounding fix: the reviewer hallucinated UI labels from training memory. When the orchestrator
+  // captures the real DOM, it must be inlined and the reviewer told to judge UI facts against THIS,
+  // not its prior knowledge — and never to assert an unverifiable label as a correction.
+  const dir = mkdtempSync(join(tmpdir(), "qa-review-dom-"));
+  mkdirSync(join(dir, "e2e"), { recursive: true });
+  writeFileSync(join(dir, "e2e", "owner.spec.ts"), "// spec\ntest('x', async () => {});");
+  const captured: { prompt?: string } = {};
+  const stub: AgentDeps = {
+    open: async () => ({
+      id: "rev",
+      prompt: async (text: string) => { captured.prompt = text; return '{"approved":true,"corrections":[],"rationale":"ok"}'; },
+      dispose: async () => {},
+    }),
+  };
+  try {
+    await reviewIndependently(
+      { diff: "d", specs: ["owner.spec.ts"], mirrorDir: dir, e2eRelDir: "e2e", appName: "petclinic", mode: "diff", domSnapshot: "route /#!/owners/new:\n  button: Submit\n  link: Register owner" },
+      stub,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const p = captured.prompt ?? "";
+  assert.match(p, /Live DEV DOM/);
+  assert.match(p, /button: Submit/); // the REAL label is in front of the judge
+  assert.match(p, /STAY IN YOUR LANE/);
+  assert.match(p, /NEVER\s+assert a UI fact from memory/);
+});
+
 test("reviewIndependently in MANUAL mode judges against the guidance, NOT the commit diff", async () => {
   // The [wrong-objective] bug: a manual (guidance-driven) run was reviewed against the commit diff,
   // so a good spec got rejected for "not testing the change" when the change was never the objective
@@ -1250,7 +1316,7 @@ test("runOpencodeParallel continues when pre-index serena fails (best-effort)", 
     const result = await runOpencodeParallel(
       { ...input, mode: "complete", intent: undefined },
       failingDeps,
-      {},
+      { specExists: () => true },
       fakeFs,
     );
     assert.equal(result.specs.length, 1);
@@ -1258,4 +1324,201 @@ test("runOpencodeParallel continues when pre-index serena fails (best-effort)", 
     process.env.PRE_INDEX_SERENA = prevEnv ?? "";
     if (!prevEnv) delete process.env.PRE_INDEX_SERENA;
   }
+});
+
+// ── Task 3.11: Prompt-framing tests (Unit 3 — Q2 worker + GROUND TRUTH block + Lever-3 route) ──
+
+test("3.11(a) buildWorkerPrompt with needsUi:true + non-empty domSnapshot does NOT contain browser_navigate or browser_snapshot", () => {
+  const w: ParallelWorkerInput = {
+    objective: "list owners",
+    flow: "owners",
+    symbols: [],
+    needsUi: true,
+    specFile: "flows/owners.spec.ts",
+    repo: "r",
+    mirrorDir: "/m",
+    e2eRelDir: "e2e",
+    namespace: "ns",
+    baseUrl: "https://dev",
+    appName: "a",
+    mode: "complete",
+    domSnapshot: "button: Add Owner\ntextbox: First Name",
+  };
+  const p = buildWorkerPrompt(w);
+  assert.doesNotMatch(p, /browser_navigate/);
+  assert.doesNotMatch(p, /browser_snapshot/);
+  // Must say to use the injected tree (not the live DOM)
+  assert.match(p, /GROUND TRUTH/);
+  assert.match(p, /You have NO browser/);
+  assert.match(p, /do NOT need to navigate/i);
+});
+
+test("3.11(a) buildWorkerPrompt with needsUi:true and NO domSnapshot still has no browser_navigate", () => {
+  const w: ParallelWorkerInput = {
+    objective: "list owners",
+    flow: "owners",
+    symbols: [],
+    needsUi: true,
+    specFile: "flows/owners.spec.ts",
+    repo: "r",
+    mirrorDir: "/m",
+    e2eRelDir: "e2e",
+    namespace: "ns",
+    baseUrl: "https://dev",
+    appName: "a",
+    mode: "complete",
+  };
+  const p = buildWorkerPrompt(w);
+  assert.doesNotMatch(p, /browser_navigate/);
+  assert.doesNotMatch(p, /browser_snapshot/);
+  // Without a domSnapshot, the worker gets a "mark selectors unverified" instruction
+  assert.match(p, /unverified/);
+});
+
+test("3.11(b) fix-pass prompt with failureSourced:true contains GROUND TRUTH AT FAILURE heading and source-framing", () => {
+  const failInput: OpencodeRunInput = {
+    ...input,
+    domSnapshot: "button: Submit\ntextbox: Email",
+    failureSourced: true,
+    fixCases: [{ name: "owners list", status: "fail", detail: "expected 'Admin' received 'User'" }],
+  };
+  const p = buildPrompt(failInput);
+  // (1) Heading present
+  assert.match(p, /GROUND TRUTH AT FAILURE/);
+  // (2) Source-framing: "ONLY source of truth"
+  assert.match(p, /ONLY source of truth/);
+  // (3) Counterfactual: mentions role convention (columnheader)
+  assert.match(p, /columnheader/);
+  assert.match(p, /trust the tree/i);
+  // (4) Quote-then-assert contract
+  assert.match(p, /cite the EXACT/i);
+  // (5) Block is at the TOP (before the fix block and the task)
+  const domIdx = p.indexOf("GROUND TRUTH AT FAILURE");
+  const fixIdx = p.indexOf("Fix failing tests");
+  const taskIdx = p.indexOf("Write") > -1 ? p.indexOf("Write") : Infinity;
+  assert.ok(domIdx < fixIdx, `GROUND TRUTH block (${domIdx}) must appear before fix block (${fixIdx})`);
+  assert.ok(domIdx < taskIdx, `GROUND TRUTH block (${domIdx}) must appear before task (${taskIdx})`);
+});
+
+test("3.11(b) fix-pass prompt with failureSourced:true does NOT instruct browser_navigate in the fix block", () => {
+  const failInput: OpencodeRunInput = {
+    ...input,
+    domSnapshot: "button: Submit",
+    failureSourced: true,
+    fixCases: [{ name: "submit test", status: "fail", detail: "locator not found" }],
+  };
+  const p = buildPrompt(failInput);
+  // With failureSourced, the fix block must NOT say browser_navigate or browser_snapshot.
+  assert.doesNotMatch(p, /Use browser_navigate \+ browser_snapshot/);
+  // Instead it must reference the GROUND TRUTH tree.
+  assert.match(p, /GROUND TRUTH/);
+});
+
+test("3.11(b) fix-pass prompt WITHOUT failureSourced retains browser_navigate instruction (non-failure-sourced path)", () => {
+  const fixInput: OpencodeRunInput = {
+    ...input,
+    fixCases: [{ name: "owners list", status: "fail", detail: "locator not found" }],
+  };
+  const p = buildPrompt(fixInput);
+  // Without failureSourced (pre-capture blind fix), the old navigation instructions stay.
+  assert.match(p, /browser_navigate/);
+  assert.match(p, /browser_snapshot/);
+  assert.doesNotMatch(p, /GROUND TRUTH AT FAILURE/);
+});
+
+// W1: the Lever-2 selector contradiction must be rendered in FULL, even when the case detail is long
+// (a verbose PW 1.60 error). Previously the contradiction was appended to `c.detail` and the fix block
+// renders `c.detail?.slice(0, 500)`, so the contradiction was truncated away exactly when an absent
+// selector was found. It is now its OWN un-truncated section, threaded via input.selectorContradictions.
+test("W1: buildPrompt renders the selector contradiction in FULL even when the case detail is long", () => {
+  const longDetail = "Error: expect(locator).toBeVisible() failed\n" + "x".repeat(900); // > 500 chars → detail is sliced
+  const contradiction =
+    'row: "Bob Smith DISTINCTIVE-MARKER-9f3a" is NOT in the captured failure-point tree. Present roles: button, link, heading, table';
+  const failInput: OpencodeRunInput = {
+    ...input,
+    domSnapshot: "button: Add Owner\nlink: Home\nheading: Find Owners\ntable: (present)",
+    failureSourced: true,
+    fixCases: [{ name: "owners list", status: "fail", detail: longDetail }],
+    selectorContradictions: [contradiction],
+  };
+  const p = buildPrompt(failInput);
+  // The WHOLE contradiction string survives (its distinctive tail is past where a 500-char detail slice ends).
+  assert.ok(p.includes(contradiction), "the full contradiction text must be present, un-truncated");
+  assert.match(p, /Lever-2 selector contradictions/i);
+  assert.match(p, /is NOT in the captured failure-point tree/);
+  assert.match(p, /DISTINCTIVE-MARKER-9f3a/);
+  // It is NOT folded into the truncated detail: the fix block still slices detail to 500, so the long
+  // detail's tail is gone, but the contradiction (its own section) is intact.
+  const fixBlockIdx = p.indexOf("Fix failing tests");
+  const contradictionIdx = p.indexOf(contradiction);
+  assert.ok(contradictionIdx > -1);
+  // The contradiction section sits right after the GROUND TRUTH block, before the fix block.
+  const groundIdx = p.indexOf("GROUND TRUTH AT FAILURE");
+  assert.ok(groundIdx > -1 && groundIdx < contradictionIdx, "contradictions come after the GROUND TRUTH tree");
+  assert.ok(contradictionIdx < fixBlockIdx, "contradictions come before the fix-cases block");
+});
+
+test("W1: buildPrompt renders MULTIPLE contradictions, each as its own bullet", () => {
+  const cs = [
+    'textbox: "Owner name" matches MULTIPLE nodes (strict-mode ambiguity — scope to a unique parent)',
+    'columnheader: "Name" is NOT in the captured failure-point tree. Present roles: cell, row',
+  ];
+  const p = buildPrompt({
+    ...input,
+    failureSourced: true,
+    domSnapshot: "cell: x\nrow: y\ntextbox: Owner name\ntextbox: Owner name",
+    fixCases: [{ name: "t", status: "fail", detail: "short" }],
+    selectorContradictions: cs,
+  });
+  for (const c of cs) assert.ok(p.includes(c), `missing contradiction: ${c}`);
+  assert.match(p, /matches MULTIPLE nodes/);
+});
+
+// W1: no contradictions → no contradiction section (clean prompt for the happy path).
+test("W1: buildPrompt omits the contradiction section when none are provided", () => {
+  const p = buildPrompt({
+    ...input,
+    failureSourced: true,
+    domSnapshot: "button: Submit",
+    fixCases: [{ name: "t", status: "fail", detail: "x" }],
+  });
+  assert.doesNotMatch(p, /Lever-2 selector contradictions/i);
+});
+
+test("3.11(c) buildPlanPrompt diff mode instructs verified-route declaration via Playwright MCP", () => {
+  const p = buildPlanPrompt(diffPlanInput);
+  // The planner must discover and verify post-interaction routes (Lever-3).
+  assert.match(p, /verified.*true/i);
+  assert.match(p, /Lever-3 route verification/i);
+  // The instruction explicitly says to use the Playwright MCP.
+  assert.match(p, /Playwright MCP/i);
+});
+
+test("3.11(c) buildPlanPrompt complete mode does NOT have the Lever-3 route instruction (diff-mode only)", () => {
+  // The Lever-3 route verification step is only in the diff-mode plan prompt.
+  const p = buildPlanPrompt({ ...diffPlanInput, mode: "complete" as const });
+  // complete mode should NOT have the Lever-3 instruction (only diff has it)
+  assert.doesNotMatch(p, /Lever-3 route verification/);
+});
+
+test("3.11(d) all existing prompt tests remain green (worker code path unaffected)", () => {
+  // Code-only worker (needsUi: false): unchanged behavior, no browser tools ever.
+  const codeWorker: ParallelWorkerInput = {
+    objective: "test checkout logic",
+    flow: "checkout",
+    symbols: ["checkout"],
+    needsUi: false,
+    specFile: "flows/checkout.spec.ts",
+    repo: "r",
+    mirrorDir: "/m",
+    e2eRelDir: "e2e",
+    namespace: "ns",
+    appName: "a",
+    mode: "complete",
+  };
+  const p = buildWorkerPrompt(codeWorker);
+  assert.doesNotMatch(p, /browser_navigate/);
+  assert.doesNotMatch(p, /browser_snapshot/);
+  assert.match(p, /CODE-ONLY/);
+  assert.match(p, /serena/);
 });

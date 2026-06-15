@@ -59,6 +59,20 @@ export const AppConfigSchema = z
       // green suite with corrupted responses and record the catch-rate. NEVER blocks publish, and
       // it DOUBLES the DEV run — so it is opt-in.
       valueOracle: z.enum(["off", "signal"]).optional(),
+      // Run-intelligence report tuning. `weights` overrides the ranker's per-insight interestingness
+      // weight by insight id (e.g. { "change-coverage": 1.5 }); ids left out keep their defaults.
+      reports: z
+        .object({
+          weights: z.record(z.string(), z.number().nonnegative()).optional(),
+        })
+        .optional(),
+      // Fix-loop budget: cap the number of grounded regeneration retries (default 2, max 5).
+      // Set 0 to disable the loop entirely. The progress gate may stop sooner; this is the hard cap.
+      fixLoop: z
+        .object({
+          maxRetries: z.number().int().min(0).max(5).optional(),
+        })
+        .optional(),
     }),
     code: z.boolean().optional(),
     report: z.object({

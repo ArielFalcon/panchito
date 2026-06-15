@@ -5,7 +5,7 @@
   "description": "e2e project seed (harness Filter A): config, fixtures and tooling. Copied into the app repo's e2e/ folder the first time; from then on the repo owns it.",
   "type": "module",
   "devDependencies": {
-    "@playwright/test": "1.50.0",
+    "@playwright/test": "1.60.0",
     "@types/node": "^22.0.0",
     "eslint": "^9.0.0",
     "eslint-plugin-playwright": "^2.0.0",

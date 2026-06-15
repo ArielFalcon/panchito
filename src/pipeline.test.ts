@@ -3,11 +3,12 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { runPipeline, PipelineDeps, GenerateInput } from "./pipeline";
+import { runPipeline, PipelineDeps, GenerateInput, buildFailureDom, buildFailureDomLines } from "./pipeline";
+import { parseAriaSnapshot } from "./qa/dom-snapshot";
 import { ReviewResult } from "./integrations/opencode-client";
 import { CoveredLines } from "./qa/change-coverage";
 import { AppConfig } from "./orchestrator/config-loader";
-import { AgentResult, QaRunResult, RunMode, RunOutcome } from "./types";
+import { AgentResult, QaCase, QaRunResult, RunMode, RunOutcome } from "./types";
 import type { OracleInput, ValueOracleResult } from "./qa/learning/oracle-types";
 import type { RetrievalResult } from "./qa/learning/retrieval";
 
@@ -43,6 +44,7 @@ interface Harness extends PipelineDeps {
   genInputs: GenerateInput[];
   savedOutcomes: RunOutcome[];
   oracleCalls: OracleInput[];
+  mirrorDir: string; // the working-copy dir prepare() returns (e2e/ lives under it)
 }
 
 function deps(
@@ -69,7 +71,7 @@ function deps(
     mkdirSync(join(mirrorDir, "e2e", ".qa"), { recursive: true });
     writeFileSync(join(mirrorDir, "e2e", ".qa", "context.json"), JSON.stringify({ builtAtSha: "abc123", routes: [], api: [], feBe: [] }));
   }
-  const h = { issues, published: false, genInputs: [], savedOutcomes, oracleCalls } as unknown as Harness;
+  const h = { issues, published: false, genInputs: [], savedOutcomes, oracleCalls, mirrorDir } as unknown as Harness;
   const healthSeq = Array.isArray(opts.healthy) ? [...opts.healthy] : null;
   const agentSeq = opts.agents ? [...opts.agents] : null;
   const reviewSeq = opts.review ? [...opts.review] : null;
@@ -391,6 +393,25 @@ test("invalid specs: does NOT execute or publish, opens a validation Issue", asy
   assert.ok(!calls.includes("publish"));
   assert.equal(d.issues.length, 1);
   assert.match(d.issues[0]!, /could not validate/);
+});
+
+// Static-repair loop: a single trivial gate error (e.g. an unused var) must NOT discard the whole
+// suite on the first miss — it gets a bounded regeneration with the exact errors as feedback, exactly
+// like an execution failure does. Observed on PetClinic: one `no-unused-vars` failed 7 good specs.
+test("static-repair loop: a failing static gate regenerates and re-validates instead of dying invalid on the first miss", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { diff: DIFF_4, coverage: [cov([1, 2, 3, 4])], message: "feat: x" });
+  let n = 0;
+  d.validate = async () => {
+    calls.push("validate");
+    return n++ === 0
+      ? { ok: false, errors: ["39:11  error  'specialtyCell' is assigned a value but never used"], infra: false }
+      : { ok: true, errors: [], infra: false }; // the agent fixed it on the repair round
+  };
+  const run = await runPipeline(app, "abc1234def", d, "manual", { mode: "diff", runId: "run-static-fix" });
+  assert.notEqual(run.verdict, "invalid"); // the trivial error was repaired, not fatal
+  assert.ok(calls.filter((c) => c === "validate").length >= 2, "must re-validate after the repair");
+  assert.ok(calls.filter((c) => c === "generate").length >= 2, "the static failure must trigger regeneration");
 });
 
 test("green but the reviewer did NOT approve: does not publish, opens a review Issue", async () => {
@@ -959,6 +980,53 @@ test("oracle: valueScore=null when oracle returns null", async () => {
   assert.equal(o.gateSignals.valueScore, null);
 });
 
+// THE ORACLE-GAP FIX. The e2e fault-injection oracle scores the assertion strength of the
+// baseline-PASSING specs, so in the heavy whole-suite modes (complete/exhaustive/manual) it must
+// run on the passing SUBSET even when sibling specs failed — otherwise an exhaustive run that
+// generated dozens of specs but ended partially-red would never reach the oracle, and its retrieved
+// candidate rules would never accumulate an outcome and never promote (the production blocker).
+test("oracle: e2e oracle runs in EXHAUSTIVE mode on the passing subset of a partially-red run (gap fix)", async () => {
+  const calls: string[] = [];
+  const partialRed = {
+    sha: "s", verdict: "fail" as const, passed: false,
+    cases: [{ name: "a", status: "pass" as const }, { name: "b", status: "fail" as const }], logs: "",
+  };
+  const d = deps(partialRed, calls, { diff: DIFF_4, coverage: [cov([1, 2, 3, 4])], message: "feat: x" });
+  await runPipeline(app, "exh0001", d, "manual", { mode: "exhaustive", runId: "run-orc-exh" });
+
+  assert.equal(d.oracleCalls.length, 1, "the oracle must run on the passing subset even though the run is fail");
+  assert.equal(d.oracleCalls[0]!.target, "e2e");
+  assert.deepEqual(d.oracleCalls[0]!.baselineCases, ["a"], "only the baseline-passing spec is scoreable");
+});
+
+// The frequent diff path stays conservative: a diff run that already ended fail (it caught a
+// regression) must NOT also pay the 2× re-run cost — only a fully-green diff reaches the oracle.
+test("oracle: e2e oracle does NOT run in DIFF mode on a partially-red run (hot-path stays full-pass)", async () => {
+  const calls: string[] = [];
+  const partialRed = {
+    sha: "s", verdict: "fail" as const, passed: false,
+    cases: [{ name: "a", status: "pass" as const }, { name: "b", status: "fail" as const }], logs: "",
+  };
+  const d = deps(partialRed, calls, { diff: DIFF_4, coverage: [cov([1, 2, 3, 4])], message: "feat: x" });
+  await runPipeline(app, "diff001", d, "manual", { mode: "diff", runId: "run-orc-diff-red" });
+
+  assert.equal(d.oracleCalls.length, 0, "a partially-red diff run does not trigger the oracle");
+});
+
+// A fully-green whole-suite (complete) run reaches the oracle too — the mode no longer gates it.
+test("oracle: e2e oracle runs in COMPLETE mode on a fully-green run", async () => {
+  const calls: string[] = [];
+  const green = {
+    sha: "s", verdict: "pass" as const, passed: true,
+    cases: [{ name: "a", status: "pass" as const }], logs: "",
+  };
+  const d = deps(green, calls, { diff: DIFF_4, coverage: [cov([1, 2, 3, 4])], message: "feat: x" });
+  await runPipeline(app, "cmp0001", d, "manual", { mode: "complete", runId: "run-orc-cmp" });
+
+  assert.equal(d.oracleCalls.length, 1, "complete mode now reaches the e2e oracle");
+  assert.equal(d.oracleCalls[0]!.target, "e2e");
+});
+
 test("learning layer: retrieveRules is called before generation in diff mode", async () => {
   const calls: string[] = [];
   const d = deps(passing(), calls, { diff: DIFF_4, coverage: [cov([1, 2, 3, 4])], message: "feat: add x" });
@@ -1220,4 +1288,300 @@ test("reviewer-corrections distillation: a thrown error never fails the run", as
   };
   const r = await runPipeline(appWithReview, "abc1234def", h, "webhook", { mode: "diff", runId: "r1" });
   assert.notEqual(r.verdict, "infra-error");
+});
+
+// ── Unit 3: fix-loop + progress gate + buildFailureDom ──────────────────────
+
+test("3.3 buildFailureDom: concatenates failureDom from failed cases into labelled fenced blocks", () => {
+  const cases: QaCase[] = [
+    { name: "owners list", status: "fail", failureDom: "button: Add Owner\ntextbox: Last Name" },
+    { name: "owner create", status: "fail", failureDom: "heading: New Owner\ntextbox: First Name" },
+  ];
+  const result = buildFailureDom(cases);
+  assert.ok(result);
+  assert.match(result, /### owners list/);
+  assert.match(result, /button: Add Owner/);
+  assert.match(result, /### owner create/);
+  assert.match(result, /heading: New Owner/);
+});
+
+test("3.3 buildFailureDom: returns undefined when no cases have failureDom", () => {
+  const cases: QaCase[] = [
+    { name: "test A", status: "fail" },
+    { name: "test B", status: "fail", detail: "timed out" },
+  ];
+  assert.equal(buildFailureDom(cases), undefined);
+});
+
+// CROSS-BOUNDARY (C1): execute.ts now stores failureDom as RAW parseAriaSnapshot output ("role:
+// name" lines, NO "- " markers). buildFailureDomLines must split that back into lines WITHOUT
+// re-parsing — re-parsing the already-parsed form yields [] (the dead-Lever-2 bug). Feed the exact
+// shape parseAriaSnapshot produces and assert the role:name lines survive.
+test("3.3 buildFailureDomLines: splits stored parseAriaSnapshot output into its role:name lines", () => {
+  // This is exactly what parseAriaSnapshot(...).join("\n") yields (what execute.ts stores).
+  const stored = parseAriaSnapshot('- button "Submit"\n- textbox "Email"\n- heading "Login"').join("\n");
+  assert.ok(stored.includes("button: Submit"), "precondition: stored value is parsed role:name form");
+  const lines = buildFailureDomLines(stored);
+  assert.ok(lines.length >= 3, `expected non-empty role:name lines, got ${JSON.stringify(lines)}`);
+  assert.ok(lines.some((l) => l === "button: Submit"));
+  assert.ok(lines.some((l) => l === "textbox: Email"));
+  // Crucially NOT empty — the double-parse bug returned [] here.
+  assert.notDeepEqual(lines, []);
+});
+
+test("3.3 buildFailureDomLines: drops blank lines", () => {
+  assert.deepEqual(buildFailureDomLines("button: Save\n\n  \ntextbox: Name"), ["button: Save", "textbox: Name"]);
+});
+
+test("3.3 buildFailureDomLines: returns [] when failureDom is absent", () => {
+  assert.deepEqual(buildFailureDomLines(undefined), []);
+});
+
+test("3.2 fix-loop: maxRetries=0 disables the loop entirely (no second generate/execute)", async () => {
+  const calls: string[] = [];
+  const failingRun: QaRunResult = { sha: "s", verdict: "fail", passed: false, cases: [{ name: "x", status: "fail" }], logs: "" };
+  const zeroRetryApp: AppConfig = { ...app, qa: { ...app.qa, fixLoop: { maxRetries: 0 } } };
+  const d = deps(failingRun, calls);
+  // Override execute to always return failing so we can count calls
+  let executeCount = 0;
+  d.execute = async () => { calls.push("execute"); executeCount++; return failingRun; };
+  const run = await runPipeline(zeroRetryApp, "abc123", d);
+  // With maxRetries=0, only the initial execute (no retry execute)
+  assert.equal(executeCount, 1, `with maxRetries=0, execute should be called once (initial only); got ${executeCount}`);
+  // The run should still be fail (no fix attempted)
+  assert.equal(run.verdict, "fail");
+  // generate called once (initial only), not for a retry
+  const generateCount = calls.filter((c) => c === "generate").length;
+  assert.equal(generateCount, 1, `generate should be called once (initial only); got ${generateCount}`);
+});
+
+test("3.2 fix-loop: maxRetries=2 allows up to 2 retries on persistent failure", async () => {
+  const calls: string[] = [];
+  const failingRun: QaRunResult = { sha: "s", verdict: "fail", passed: false, cases: [{ name: "x", status: "fail" }], logs: "" };
+  // App with 2 retries configured (the new default)
+  const twoRetryApp: AppConfig = { ...app, qa: { ...app.qa, fixLoop: { maxRetries: 2 } } };
+  const d = deps(failingRun, calls);
+  // Progress gate fires on changing failing names to allow spending
+  const failingNames = [["x"], ["y"], ["z"]]; // names change each round → gate passes
+  let callIdx = 0;
+  d.execute = async () => {
+    calls.push("execute");
+    const names = failingNames[callIdx++ % failingNames.length]!;
+    return { sha: "s", verdict: "fail", passed: false, cases: names.map((n) => ({ name: n, status: "fail" as const })), logs: "" };
+  };
+  await runPipeline(twoRetryApp, "abc123", d);
+  const executeCount = calls.filter((c) => c === "execute").length;
+  // initial execute + up to 2 retries = up to 3 total executes
+  assert.ok(executeCount >= 1 && executeCount <= 3, `execute count should be 1-3; got ${executeCount}`);
+});
+
+test("3.6 fix-loop: failureDom is threaded to domSnapshot in the retry generate call", async () => {
+  const calls: string[] = [];
+  const caseWithDom: QaCase = { name: "owners list", status: "fail", failureDom: "button: Add Owner\ntextbox: Last Name" };
+  const failingRun: QaRunResult = { sha: "s", verdict: "fail", passed: false, cases: [caseWithDom], logs: "" };
+  const fixedRun: QaRunResult = { sha: "s", verdict: "pass", passed: true, cases: [], logs: "" };
+  const oneRetryApp: AppConfig = { ...app, qa: { ...app.qa, fixLoop: { maxRetries: 1 } } };
+  const d = deps(failingRun, calls);
+  let executeCall = 0;
+  d.execute = async () => {
+    calls.push("execute");
+    return executeCall++ === 0 ? failingRun : fixedRun;
+  };
+  await runPipeline(oneRetryApp, "abc123", d);
+  // Find the retry generate input (second generate call)
+  const retryGenInput = d.genInputs.find((gi) => gi.fixCases && gi.fixCases.length > 0);
+  assert.ok(retryGenInput, "there should be a retry generate call with fixCases");
+  // failureDom from the case should be threaded into domSnapshot
+  assert.ok(retryGenInput.domSnapshot, "retry generate input should have domSnapshot from failureDom");
+  assert.match(retryGenInput.domSnapshot!, /Add Owner/, "domSnapshot should contain the failure-point DOM");
+  // failureSourced should be true since domSnapshot came from failure captures
+  assert.equal(retryGenInput.failureSourced, true, "failureSourced should be true when domSnapshot is from failureDom");
+});
+
+test("3.6 fix-loop: absent failureDom degrades gracefully (no domSnapshot, blind fix fallback)", async () => {
+  const calls: string[] = [];
+  const caseWithoutDom: QaCase = { name: "owners list", status: "fail", detail: "element not found" };
+  const failingRun: QaRunResult = { sha: "s", verdict: "fail", passed: false, cases: [caseWithoutDom], logs: "" };
+  const oneRetryApp: AppConfig = { ...app, qa: { ...app.qa, fixLoop: { maxRetries: 1 } } };
+  const d = deps(failingRun, calls);
+  let executeCall = 0;
+  d.execute = async () => {
+    calls.push("execute");
+    executeCall++;
+    return failingRun; // always fail so the loop runs
+  };
+  await runPipeline(oneRetryApp, "abc123", d);
+  const retryGenInput = d.genInputs.find((gi) => gi.fixCases && gi.fixCases.length > 0);
+  assert.ok(retryGenInput, "there should be a retry generate call with fixCases");
+  // Without failureDom, domSnapshot should be absent (blind fix)
+  assert.ok(!retryGenInput.domSnapshot, "without failureDom, domSnapshot should be absent (blind fix)");
+  assert.ok(!retryGenInput.failureSourced, "failureSourced should be absent/falsy when no failureDom available");
+});
+
+// CROSS-BOUNDARY (W1): the regression guard must keep the BEST executed run, not the terminal one.
+// Sequence: initial 2 failures → retry1 1 failure (better) → retry2 3 failures (worse). The earlier
+// 1-failure run must be restored as the verdict — the worse final retry is discarded. Before the
+// fix, the guard ran at the loop TOP comparing the already-assigned `run`, so the terminal regression
+// shipped.
+test("3.x fix-loop W1: a worse final retry is discarded for an earlier better run", async () => {
+  const calls: string[] = [];
+  const noReviewApp: AppConfig = { ...app, qa: { ...app.qa, needsReview: false, fixLoop: { maxRetries: 2 } } };
+  const runs: QaRunResult[] = [
+    { sha: "s", verdict: "fail", passed: false, cases: [{ name: "x", status: "fail" }, { name: "y", status: "fail" }], logs: "" }, // initial: 2
+    { sha: "s", verdict: "fail", passed: false, cases: [{ name: "x", status: "fail" }], logs: "" }, // retry1: 1 (BEST)
+    { sha: "s", verdict: "fail", passed: false, cases: [{ name: "x", status: "fail" }, { name: "y", status: "fail" }, { name: "z", status: "fail" }], logs: "" }, // retry2: 3 (worse)
+  ];
+  const d = deps(runs[0]!, calls, { agents: [generated, generated, generated] });
+  let i = 0;
+  d.execute = async () => { calls.push("execute"); return runs[Math.min(i++, runs.length - 1)]!; };
+  const final = await runPipeline(noReviewApp, "abc123", d);
+  // The restored run is the 1-failure round, NOT the 3-failure terminal retry.
+  assert.equal(final.cases.filter((c) => c.status === "fail").length, 1, `expected the best (1-failure) run restored, got ${final.cases.length} failing`);
+  assert.ok(final.cases.some((c) => c.name === "x"));
+  assert.ok(!final.cases.some((c) => c.name === "z"), "the worse terminal retry (with z) must not ship");
+});
+
+// CROSS-BOUNDARY (C4): the real-bug branch must NOT fire when a checked selector is ABSENT from the
+// failure tree. An absent selector means the test may simply be looking at the wrong element — not a
+// proven app defect. We give a failed case a real failureDom (button role present, but no "Submit")
+// and a value-mismatch detail, write a spec that uses the absent getByRole, and assert the loop
+// REGENERATES (threading the absent contradiction into the prompt via the dedicated, un-truncated
+// selectorContradictions field — W1, NOT folded into the 500-char-sliced fixCases detail) instead of
+// short-circuiting to an Issue via the real-bug branch.
+test("3.x fix-loop C4: real-bug branch does NOT fire when a selector is verifiably absent", async () => {
+  const calls: string[] = [];
+  const logs: string[] = [];
+  // failureDom is the stored parseAriaSnapshot form: button role IS present (Cancel), but no "Submit".
+  const failureDom = parseAriaSnapshot('- button "Cancel"\n- heading "Owner"').join("\n");
+  const failing: QaRunResult = {
+    sha: "s", verdict: "fail", passed: false,
+    cases: [{ name: "owners.spec.ts › create", status: "fail", detail: "expect(received).toBe(expected)\nExpected: 'Saved'\nReceived: 'Error'", failureDom }],
+    logs: "",
+  };
+  const noReviewApp: AppConfig = { ...app, qa: { ...app.qa, needsReview: false, fixLoop: { maxRetries: 1 } } };
+  const d = deps(failing, calls, { agents: [generated, generated] });
+  d.log = (m: string) => logs.push(m);
+  // Write the spec the Lever-2 check reads (result.specs = ["a.spec.ts"]): it uses an ABSENT selector
+  // — getByRole("button", { name: "Submit" }) — whose role IS in the tree (button) but whose name is
+  // not, so the check classifies it verifiable-absent (not unverifiable, not present-and-unique).
+  writeFileSync(join(d.mirrorDir, "e2e", "a.spec.ts"), `import { test } from "./fixtures";\ntest("create", async ({ page }) => {\n  await page.getByRole("button", { name: "Submit" }).click();\n});\n`);
+  d.execute = async () => { calls.push("execute"); return failing; };
+  await runPipeline(noReviewApp, "abc123", d);
+  // The loop reached regeneration with the absent contradiction threaded in (so it did NOT break early
+  // via the real-bug branch). W1: the contradiction now travels in its OWN selectorContradictions field
+  // (un-truncated), NOT folded into the fixCases detail (which the prompt slices to 500 chars).
+  const retryGen = d.genInputs.find((gi) => gi.selectorContradictions?.some((c) => c.includes("is NOT in the captured")));
+  assert.ok(retryGen, `expected a regeneration carrying the absent-selector contradiction in selectorContradictions; gen inputs: ${d.genInputs.length}`);
+  // The contradiction must NOT be folded into the truncated fixCases detail anymore (W1).
+  assert.ok(
+    !d.genInputs.some((gi) => gi.fixCases?.some((c) => (c.detail ?? "").includes("LEVER-2 SELECTOR CONTRADICTIONS"))),
+    "the contradiction must no longer be folded into the fixCases detail (it would be truncated there)",
+  );
+  // And the real-bug log line must NOT have fired.
+  assert.ok(!logs.some((l) => /real-bug branch/i.test(l)), `real-bug branch must not fire on an absent selector:\n${logs.filter((l) => /real-bug/i.test(l)).join("\n")}`);
+});
+
+// CROSS-BOUNDARY (W5): the real-bug branch must NOT fire when the spec uses a NON-EXTRACTABLE locator
+// (getByTestId/.locator()/getByPlaceholder/…). Lever-2 only extracts getByRole/Text/Label, so a
+// decorative present-unique getByRole would make allUnique true while the ACTUAL failing locator is
+// the unseen getByTestId — a value mismatch then fires a BOGUS "app defect" Issue. The spec below has
+// a present-unique getByRole("button", { name: "Add Owner" }) (in the tree) AND a getByTestId; with a
+// value-mismatch failure, the branch must stay closed and the loop must regenerate instead.
+test("3.x fix-loop W5: real-bug branch does NOT fire when the spec has a non-extractable locator", async () => {
+  const calls: string[] = [];
+  const logs: string[] = [];
+  // The tree contains the getByRole target (present + unique). getByTestId is invisible to the a11y tree.
+  const failureDom = parseAriaSnapshot('- button "Add Owner"\n- heading "Owners"').join("\n");
+  const failing: QaRunResult = {
+    sha: "s", verdict: "fail", passed: false,
+    cases: [{ name: "owners.spec.ts › create", status: "fail", detail: "expect(received).toHaveText(expected)\nExpected: 'Saved'\nReceived: 'Error'", failureDom }],
+    logs: "",
+  };
+  const noReviewApp: AppConfig = { ...app, qa: { ...app.qa, needsReview: false, fixLoop: { maxRetries: 1 } } };
+  const d = deps(failing, calls, { agents: [generated, generated] });
+  d.log = (m: string) => logs.push(m);
+  // The spec uses a PRESENT-UNIQUE getByRole (decorative — present in the tree) AND a getByTestId
+  // (the actual failing locator, invisible to Lever-2). allUnique must be held indeterminate.
+  writeFileSync(
+    join(d.mirrorDir, "e2e", "a.spec.ts"),
+    `import { test, expect } from "./fixtures";\n` +
+      `test("create", async ({ page }) => {\n` +
+      `  await page.getByRole("button", { name: "Add Owner" }).click();\n` +
+      `  await expect(page.getByTestId("flash")).toHaveText("Saved");\n` +
+      `});\n`,
+  );
+  d.execute = async () => { calls.push("execute"); return failing; };
+  await runPipeline(noReviewApp, "abc123", d);
+  // The branch must NOT have fired (the non-extractable getByTestId makes uniqueness indeterminate).
+  assert.ok(!logs.some((l) => /real-bug branch/i.test(l)), `real-bug branch must not fire with a non-extractable locator:\n${logs.filter((l) => /real-bug/i.test(l)).join("\n")}`);
+  // It should have proceeded to regenerate (a second generate call beyond the initial one).
+  assert.ok(d.genInputs.length >= 2, `expected the loop to regenerate, got ${d.genInputs.length} generate call(s)`);
+});
+
+// CONTROL for W5: the SAME value-mismatch + present-unique getByRole, but with NO non-extractable
+// locator, MUST fire the real-bug branch — proving the W5 guard is the only thing suppressing it
+// above (not some unrelated condition). This is the design's intended Lever-3 motivating path.
+test("3.x fix-loop W5 control: real-bug branch DOES fire when every locator is extractable + unique", async () => {
+  const calls: string[] = [];
+  const logs: string[] = [];
+  const failureDom = parseAriaSnapshot('- button "Add Owner"\n- heading "Owners"').join("\n");
+  const failing: QaRunResult = {
+    sha: "s", verdict: "fail", passed: false,
+    cases: [{ name: "owners.spec.ts › create", status: "fail", detail: "expect(received).toHaveText(expected)\nExpected: 'Saved'\nReceived: 'Error'", failureDom }],
+    logs: "",
+  };
+  const issueApp: AppConfig = { ...app, qa: { ...app.qa, needsReview: false, fixLoop: { maxRetries: 1 } } };
+  const d = deps(failing, calls, { agents: [generated, generated] });
+  d.log = (m: string) => logs.push(m);
+  // Only extractable, present-unique locators → allUnique true → value mismatch → real-bug fires.
+  writeFileSync(
+    join(d.mirrorDir, "e2e", "a.spec.ts"),
+    `import { test, expect } from "./fixtures";\n` +
+      `test("create", async ({ page }) => {\n` +
+      `  await page.getByRole("button", { name: "Add Owner" }).click();\n` +
+      `  await expect(page.getByRole("heading", { name: "Owners" })).toHaveText("Saved");\n` +
+      `});\n`,
+  );
+  d.execute = async () => { calls.push("execute"); return failing; };
+  await runPipeline(issueApp, "abc123", d);
+  assert.ok(logs.some((l) => /real-bug branch/i.test(l)), `real-bug branch SHOULD fire when all locators are extractable + unique:\n${logs.join("\n")}`);
+});
+
+// CROSS-BOUNDARY (W3): the real-bug branch must NOT fire when a failing case's spec contains an
+// UNVERIFIABLE selector — one whose role is in NO captured tree (so it is neither present nor
+// verifiable-absent, falling through both Lever-2 branches). A single decorative present-unique
+// getByRole would otherwise set anyVerifiedPresent and make allUnique true → a bogus "app defect"
+// Issue (newly reachable once C2 classifies the toHaveText failure as value-mismatch). The tree below
+// has button+heading but NO textbox; the spec uses a present-unique getByRole("button") AND an
+// unverifiable getByRole("textbox", { name: "Email" }). allUnique must be held false → loop regenerates.
+test("3.x fix-loop W3: real-bug branch does NOT fire when a failing selector is unverifiable", async () => {
+  const calls: string[] = [];
+  const logs: string[] = [];
+  // textbox is NOT in this tree → getByRole("textbox", …) is unverifiable (role absent entirely).
+  const failureDom = parseAriaSnapshot('- button "Add Owner"\n- heading "Owners"').join("\n");
+  const failing: QaRunResult = {
+    sha: "s", verdict: "fail", passed: false,
+    cases: [{ name: "owners.spec.ts › create", status: "fail", detail: "expect(received).toHaveText(expected)\nExpected: 'Saved'\nReceived: 'Error'", failureDom }],
+    logs: "",
+  };
+  const noReviewApp: AppConfig = { ...app, qa: { ...app.qa, needsReview: false, fixLoop: { maxRetries: 1 } } };
+  const d = deps(failing, calls, { agents: [generated, generated] });
+  d.log = (m: string) => logs.push(m);
+  // Decorative present-unique getByRole("button", …) (in the tree) + an UNVERIFIABLE getByRole(
+  // "textbox", …) whose role never appears in the tree. The latter must force allUnique false (W3).
+  writeFileSync(
+    join(d.mirrorDir, "e2e", "a.spec.ts"),
+    `import { test, expect } from "./fixtures";\n` +
+      `test("create", async ({ page }) => {\n` +
+      `  await page.getByRole("button", { name: "Add Owner" }).click();\n` +
+      `  await page.getByRole("textbox", { name: "Email" }).fill("x@y.z");\n` +
+      `  await expect(page.getByRole("heading", { name: "Owners" })).toHaveText("Saved");\n` +
+      `});\n`,
+  );
+  d.execute = async () => { calls.push("execute"); return failing; };
+  await runPipeline(noReviewApp, "abc123", d);
+  // The branch must NOT have fired (the unverifiable textbox selector makes uniqueness indeterminate).
+  assert.ok(!logs.some((l) => /real-bug branch/i.test(l)), `real-bug branch must not fire with an unverifiable selector:\n${logs.filter((l) => /real-bug/i.test(l)).join("\n")}`);
+  // It should have proceeded to regenerate instead (a second generate call beyond the initial one).
+  assert.ok(d.genInputs.length >= 2, `expected the loop to regenerate, got ${d.genInputs.length} generate call(s)`);
 });

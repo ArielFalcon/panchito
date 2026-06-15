@@ -5,13 +5,14 @@
 // carry PII/DEV data that would later feed an Issue).
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { writeFileSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { writeFileSync, readFileSync, readdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { QaRunResult, QaCase, CaseStatus } from "../types";
 import { scrubEnv } from "./code-runner";
 import { parsePlaywrightReport } from "./playwright-report";
 import { sanitizeText, containsSecrets, recordAudit } from "../orchestrator/sanitizer";
+import { parseAriaSnapshot } from "./dom-snapshot";
 
 // Default wall-clock budget for one Playwright suite run. A hung browser must never
 // freeze the sequential queue (one run blocks ALL apps); on expiry the whole process
@@ -92,12 +93,15 @@ export function streamStatusToCase(status: string): CaseStatus | null {
 }
 
 // Playwright RUNNER-infrastructure failure signatures: the browser could not launch / is missing /
-// the host lacks deps / the browser died mid-run. These are a `fallo del runner` = INFRASTRUCTURE,
-// NOT a test-logic failure (an assertion, or a timeout against DEV). Matched from Playwright's OWN
-// error strings — the only channel it offers — and kept narrow so a genuine failure is never
-// relabeled as infra.
+// the host lacks deps. These are a `fallo del runner` = INFRASTRUCTURE, NOT a test-logic failure
+// (an assertion, or a timeout against DEV). Matched from Playwright's OWN error strings — the only
+// channel it offers — and kept narrow so a genuine failure is never relabeled as infra.
+//
+// `Target (page|context|browser) ... closed` is DELIBERATELY excluded: the app under test crashing
+// the tab (a real defect the test SHOULD surface) produces the same string, so reclassifying it
+// fail→infra-error would HIDE a genuine bug. Only unambiguous launch/host signatures stay here.
 const PLAYWRIGHT_INFRA_RE =
-  /browserType\.(?:launch|connect)|Executable doesn't exist|Failed to launch|missing dependencies to run browsers|Host system is missing dependencies|Target (?:page|context|browser) (?:has been|was) closed/i;
+  /browserType\.(?:launch|connect)|Executable doesn't exist|Failed to launch|missing dependencies to run browsers|Host system is missing dependencies/i;
 
 // True when the run failed but EVERY failed case is a runner-infrastructure fault (e.g. the browser
 // could not launch), so the run never actually exercised the app. The caller reclassifies it as
@@ -129,6 +133,11 @@ export interface ExecuteDeps {
     signal?: AbortSignal;
     timeoutMs?: number;
     onEvent?: (ev: StreamEvent) => void;
+    // Dir where the qa-failure-capture afterEach fixture writes per-case aria snapshots.
+    // Minted by defaultExecuteDeps.runSuite as a temp dir; passed via QA_FAILURE_CAPTURE_DIR
+    // in the child env so the fixture can write to it. The orchestrator reads and parses the
+    // dumps after the run to populate QaCase.failureDom for each failed case.
+    failureCaptureDir?: string;
   }): Promise<RunOutput>;
 }
 
@@ -179,6 +188,18 @@ export async function runE2E(
       }
     : undefined;
 
+  // Mint a temp dir for the qa-failure-capture afterEach to write aria snapshots into.
+  // The dir is created here (the orchestration layer) so the harvest logic (below) can
+  // read it after the run without coupling it to the defaultExecuteDeps boundary.
+  // Best-effort: if mkdtempSync fails (e.g. no /tmp space), we skip capture gracefully.
+  let failureCaptureDir: string | undefined;
+  try { failureCaptureDir = mkdtempSync(join(tmpdir(), "qa-fail-")); } catch { /* no-op */ }
+
+  // W6: the cleanup try is opened HERE — immediately after the dir is minted and BEFORE the
+  // runSuite await — so the finally's rmSync also runs when deps.runSuite REJECTS (a spawn error),
+  // not only on the return paths below. Previously the await sat outside this try and a reject
+  // escaped before cleanup, leaking the temp dir.
+  try {
   const runPromise = deps.runSuite({
     dir: specDir,
     baseUrl: opts.baseUrl,
@@ -188,6 +209,7 @@ export async function runE2E(
     signal: opts.signal,
     timeoutMs: opts.timeoutMs,
     onEvent,
+    failureCaptureDir,
   });
 
   // Race the suite against timeout and operator cancel at the orchestration level
@@ -226,6 +248,8 @@ export async function runE2E(
   const sanitized = sanitizeText(logs);
   recordAudit(opts.namespace, sanitized.detection);
 
+  // The temp capture dir is removed on EVERY exit path — the early infra-error returns below, the
+  // main return, a throw from the harvest, AND a runSuite REJECT (W6) — via the finally at the end.
   // A runner that produced no parseable report did not actually run the suite —
   // it crashed (bad config, browser launch failure, OOM). That is INFRASTRUCTURE,
   // not a pass: never let a swallowed parse error surface as green (the #1 invariant).
@@ -269,13 +293,181 @@ export async function runE2E(
     };
   }
 
+  // Post-run harvest: for each failed case, read the aria snapshot dump written by the
+  // qa-failure-capture afterEach fixture and populate QaCase.failureDom. This gives the
+  // fix-loop regeneration prompt the REAL post-failure DOM (the only reliable ground truth).
+  //
+  // failureDom is stored as the RAW parseAriaSnapshot lines ("role: name", no "- " markers)
+  // joined by "\n" — the FULL line set, so Lever-2's selector check (pipeline.ts) sees the
+  // COMPLETE tree (a table is never truncated away here; any size cap is applied later, only
+  // on the prompt text). The pipeline splits this back into lines without re-parsing.
+  //
+  // Priority: fixture dump > errorContext from the JSON report (errorContext covers expect()
+  // failures for free in PW 1.60; the fixture dump covers click/nav timeouts where no
+  // errorContext is emitted). LOUD WARNING when a failed case yields neither — this is a
+  // grounding gap (invariant: never swallow, per CLAUDE.md INV-4).
+  // Post-run harvest over PwCase[] (before widening to QaCase[]): PwCase carries errorContext
+  // from the 1.60 JSON report, which is needed as a fallback when no fixture dump exists.
+  // We mutate the same objects (same references) — the cast to QaCase[] below picks up the
+  // failureDom we set here because the runtime objects are identical.
+  const failedPwCases = parsed.cases.filter((c) => c.status === "fail");
+  if (failedPwCases.length > 0) {
+    // W2: the per-case harvest runs whenever there are failed cases — NOT gated on failureCaptureDir.
+    // Only the fixture-dump read needs the dir; when it is absent (e.g. mkdtempSync failed for lack of
+    // /tmp space) `dumps` is simply [] and we fall through to the errorContext fallback (which needs no
+    // temp dir) and, failing that, the loud "no grounding captured" WARNING. Gating the whole loop on
+    // the dir silently dropped BOTH the fallback and the WARNING — violating the never-swallow invariant.
+    // Read every dump ONCE into {file, title, retry, yaml}: matching keys off the dump's own `file` +
+    // `title` (the describe›test chain the fixture wrote), which the report's case name ENDS WITH —
+    // the report prepends the spec file as the top suite, the fixture records it as a separate `file`.
+    const dumps = failureCaptureDir ? readFailureDumps(failureCaptureDir) : [];
+    for (const c of failedPwCases) {
+      // PwCase is structurally assignable to QaCase (all new QaCase fields are optional), so we can
+      // safely treat it as QaCase here to write failureDom. TypeScript needs the cast because PwCase
+      // is the narrower type and failureDom was added only to QaCase.
+      const qa = c as unknown as QaCase;
+      const dump = matchFailureDumps(c.name, dumps);
+      if (dump?.yaml) {
+        // Store the full parsed line set (NOT formatDomSnapshot output) so Lever-2 sees the
+        // complete tree; the readable header + size cap are applied later on the prompt text.
+        const nodes = parseAriaSnapshot(dump.yaml);
+        if (nodes.length > 0) qa.failureDom = nodes.join("\n");
+      }
+      // Fallback: try errorContext from the JSON report (PW 1.60 expect() failures).
+      // errorContext is the SAME raw ariaSnapshot YAML the fixture writes (Playwright's
+      // `- role "name"` form), so it MUST be flattened through parseAriaSnapshot to the
+      // "role: name" shape every consumer expects (buildFailureDomLines, selectorPresent,
+      // capDomLines.isPriorityNode) — storing it RAW leaves Lever-2, the absent/unique
+      // checks, and the real-bug branch inert for expect() failures (the common case).
+      // c.errorContext is on PwCase; qa.failureDom is on QaCase — same runtime object, different views.
+      if (!qa.failureDom && c.errorContext) {
+        const nodes = parseAriaSnapshot(c.errorContext);
+        if (nodes.length > 0) qa.failureDom = nodes.join("\n");
+      }
+      // Neither dump nor errorContext (or both unparseable): loud WARNING (grounding gap —
+      // INV-4: never swallow, and never store a half-shape raw YAML the consumers can't read).
+      if (!qa.failureDom) {
+        console.warn(`[qa] WARNING: no failure-point DOM captured for failed case ${JSON.stringify(c.name)} (dump absent + no errorContext) — fix-loop will run without grounding.`);
+      }
+    }
+  }
+
+  // Cast to QaCase[] — the harvest above already wrote failureDom onto the runtime objects;
+  // this cast makes the return type correct for QaRunResult.cases.
+  const qaCases = parsed.cases as QaCase[];
+
   return {
     sha: opts.namespace,
     verdict: parsed.verdict,
     passed: parsed.passed,
-    cases: parsed.cases,
+    cases: qaCases,
     logs: sanitized.text,
   };
+  } finally {
+    // Remove the temp capture dir on ALL exit paths (early infra-error returns + the main
+    // return + any throw). Best-effort: a failed unlink never breaks the run.
+    if (failureCaptureDir) {
+      try { rmSync(failureCaptureDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
+  }
+}
+
+// Splits a Playwright case/dump title into its hierarchy segments on the " › " separator the
+// stream reporter and the fixture both emit. Trims each and drops empties. Pure.
+const TITLE_SEP = " › ";
+export function titleSegments(title: string): string[] {
+  return title.split(TITLE_SEP).map((s) => s.trim()).filter(Boolean);
+}
+
+// True when `tail` is a contiguous TAIL of `full` with EXACT per-segment equality. The report's
+// case name is `file.spec.ts › describe › test`; the fixture's title is `describe › test` (no file
+// prefix), so the dump's segments must equal the LAST k segments of the case's segments — never a
+// loose character-suffix (which once cross-matched "add owner" to a dump titled "owner").
+export function segmentsAreTail(full: string[], tail: string[]): boolean {
+  if (tail.length === 0 || tail.length > full.length) return false;
+  const offset = full.length - tail.length;
+  for (let i = 0; i < tail.length; i++) {
+    if (full[offset + i] !== tail[i]) return false;
+  }
+  return true;
+}
+
+// One parsed qa-failure-capture dump: the Playwright project name, the spec FILE (basename), the
+// describe›test chain the fixture recorded (`title`), the retry index, and the aria-snapshot YAML at
+// the failure point. `file` disambiguates two tests that share the SAME describe›test chain across
+// DIFFERENT spec files (their `title` collides — only the file tells them apart). Optional for
+// backward compatibility with dumps written before the file was recorded (then matching is title-only).
+export interface FailureDump {
+  project: string; // testInfo.project.name — disambiguates desktop/mobile runs of the same spec
+  file?: string; // basename(testInfo.file) — disambiguates same-titled tests in different spec files
+  title: string; // titlePath.filter(Boolean).slice(1).join(" › ") — the stream reporter's _name
+  retry: number;
+  yaml?: string;
+}
+
+// Reads every qa-failure-capture dump from the capture dir into a parsed list. Best-effort: an
+// unreadable/malformed dump is skipped (warned), never fatal. The body is authoritative for
+// `project`/`title`/`yaml`; the filename's trailing `__<n>.json` carries the retry index as a
+// fallback when the body omits it (it always carries it now).
+export function readFailureDumps(dir: string): FailureDump[] {
+  let files: string[] = [];
+  try { files = readdirSync(dir); } catch { return []; }
+  const RETRY_RE = /__(\d+)\.json$/;
+  const out: FailureDump[] = [];
+  for (const f of files) {
+    const m = RETRY_RE.exec(f);
+    if (!m) continue;
+    try {
+      const body = JSON.parse(readFileSync(join(dir, f), "utf8")) as { project?: unknown; file?: unknown; title?: unknown; retry?: unknown; yaml?: unknown };
+      out.push({
+        project: typeof body.project === "string" ? body.project : "",
+        ...(typeof body.file === "string" ? { file: body.file } : {}),
+        title: typeof body.title === "string" ? body.title : "",
+        retry: typeof body.retry === "number" ? body.retry : parseInt(m[1]!, 10),
+        ...(typeof body.yaml === "string" ? { yaml: body.yaml } : {}),
+      });
+    } catch (err) {
+      console.warn(`[qa] WARNING: failed to read failure capture dump ${f}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return out;
+}
+
+// Matches a failed case to its capture dump. The report's case name is `[project ›] file › describe › test`
+// (the fixture keys the dump off `describe › test` only — titlePath without the project + file prefix —
+// and records the spec `file` separately). Match on TWO conditions:
+//   1. FILE: the dump's `file` (basename) equals ANY segment of the case name — so two tests with the
+//      SAME `describe › test` chain in DIFFERENT spec files never cross-attach the wrong DOM (W1). The
+//      file is NOT assumed to be the leading segment: with the seed's two-project config the suite runs
+//      with NO `--project`, so Playwright nests specs under the PROJECT top-suite and the case name is
+//      `desktop › owners.spec.ts › …` (project leads, file is the SECOND segment). A single-project run
+//      leads with the file. Matching `file === any segment` is correct for both (C1). Skipped for dumps
+//      with no recorded file (older dumps) — then matching falls back to title-only, the pre-W1 behavior.
+//   2. SEGMENT-WISE TITLE: the dump's title segments must be a contiguous TAIL of the case's segments
+//      with EXACT per-segment equality (so "add owner" never matches a dump "owner", which the old
+//      character `endsWith` wrongly did).
+// Ties (two projects, same spec) are broken DETERMINISTICALLY — sort by project name, then take the
+// HIGHEST retry — never readdirSync order. Pure over the parsed dumps so it is unit-testable without
+// FS I/O. Returns null on no match.
+export function matchFailureDumps(caseName: string, dumps: FailureDump[]): FailureDump | null {
+  const caseSegs = titleSegments(caseName);
+  const candidates = dumps.filter((d) => {
+    if (!d.title || !segmentsAreTail(caseSegs, titleSegments(d.title))) return false;
+    // The file must match SOME case segment when the dump carries one (the leading segment is the
+    // PROJECT under the multi-project config, the FILE under single-project — so never assume it is
+    // caseSegs[0]). The dump records `file` as the BASENAME (`checkout.spec.ts`), but Playwright names
+    // the file suite with the path RELATIVE to rootDir — so a fan-out spec at `flows/checkout.spec.ts`
+    // appears as the segment `flows/checkout.spec.ts`. Match the basename against a whole segment OR its
+    // trailing `/<basename>` (every fan-out spec lives under `flows/`), while still rejecting
+    // `add-checkout.spec.ts`. When the dump has no file (older dumps) fall back to the title-only match.
+    if (d.file && !caseSegs.some((s) => s === d.file || s.endsWith(`/${d.file}`))) return false;
+    return true;
+  });
+  if (candidates.length === 0) return null;
+  // Deterministic order: project name ascending, then highest retry first. Both projects run the
+  // same spec, so either dump is a valid post-failure DOM; we just need a STABLE pick across runs.
+  candidates.sort((a, b) => (a.project < b.project ? -1 : a.project > b.project ? 1 : b.retry - a.retry));
+  return candidates[0]!;
 }
 
 // Default runner: runs Playwright in the repo's `e2e/` project (with its own
@@ -359,7 +551,7 @@ export function playwrightArgs(reporterPath: string, project?: string): string[]
 }
 
 export const defaultExecuteDeps: ExecuteDeps = {
-  runSuite: ({ dir, baseUrl, namespace, faultInject, project, signal, timeoutMs, onEvent }) =>
+  runSuite: ({ dir, baseUrl, namespace, faultInject, project, signal, timeoutMs, onEvent, failureCaptureDir }) =>
     new Promise((resolve, reject) => {
       const work = mkdtempSync(join(tmpdir(), "qa-pw-"));
       const reporterPath = join(work, "qa-stream-reporter.cjs");
@@ -371,7 +563,10 @@ export const defaultExecuteDeps: ExecuteDeps = {
       const child = spawn("npx", playwrightArgs(reporterPath, project), {
         cwd: dir,
         // Agent-written specs are untrusted code: scrub orchestrator secrets, keep DEV_* creds.
-        env: { ...scrubEnv(/^DEV_/), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonPath, ...(faultInject ? { QA_FAULT_INJECT: "1" } : {}) },
+        // QA_FAILURE_CAPTURE_DIR: the qa-failure-capture afterEach fixture writes per-case aria
+        // snapshot dumps here on failure; the orchestrator harvests them post-run to populate
+        // QaCase.failureDom for the fix-loop grounding prompt.
+        env: { ...scrubEnv(/^DEV_/), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonPath, ...(faultInject ? { QA_FAULT_INJECT: "1" } : {}), ...(failureCaptureDir ? { QA_FAILURE_CAPTURE_DIR: failureCaptureDir } : {}) },
         detached: true, // own process group → killTree reaps npx/playwright/browser grandchildren
       });
 

@@ -52,8 +52,13 @@ import { github } from "./integrations/github";
 import { capDiff } from "./orchestrator/sanitizer";
 import { renderIssue, type IssueContext, type TestedItem } from "./report/reporter";
 import { renderValueTag } from "./qa/value-report";
+import { captureDom, captureDomForRoutes, defaultCaptureDomDeps } from "./qa/dom-snapshot";
+import { loadContextCache as loadContextCacheDefault, saveContextCache as saveContextCacheDefault } from "./qa/context-cache";
 import { AgentResult, QaCase, QaRunResult, TriggerSource, RunMode, RunOptions, TestTarget, RunOutcome, SpecMeta } from "./types";
 import type { AgentDeps, ReviewInput, ReviewResult } from "./integrations/opencode-client";
+import { decideProgress, bestRound, isLikelyRealBug, classifyFailure, type RoundResult } from "./qa/progress-gate";
+import { extractProposedSelectors, selectorPresent, selectorUnique, hasNonExtractableLocator, type ProposedSelector } from "./qa/selector-check";
+import { capDomLines } from "./qa/dom-snapshot";
 
 // Tests live in this folder inside the repo (git is the source of truth).
 const E2E_DIR = "e2e";
@@ -78,7 +83,10 @@ export interface GenerateInput {
   fixCases?: QaCase[]; // re-generation: failed cases from a previous execution to fix
   reviewCorrections?: string[]; // re-generation: corrections from a reviewer rejection
   coverageGap?: string; // re-generation: changed lines not yet exercised (change-coverage)
+  selectorContradictions?: string[]; // Lever-2 deterministic absent/ambiguous selector findings (W1) — rendered un-truncated
   learnedRules?: string; // retrieval: rules from past runs injected into the agent prompt
+  domSnapshot?: string; // live DEV a11y snapshot — grounds the generator's selectors in regeneration
+  failureSourced?: boolean; // true when domSnapshot is the failure-point capture (not a live pre-write snapshot) — switches the prompt framing to "GROUND TRUTH AT FAILURE"
   parallelDiff?: boolean; // qa.parallelDiff: diff-mode fan-out opt-in
   explorer?: boolean; // qa.explorer: read-only explorer pass before the generator (single-agent diff)
   runId?: string; // for SSE live activity: maps the OpenCode session to this run record
@@ -129,7 +137,18 @@ export interface PipelineDeps {
   publishCode(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string; parentRunId?: string }): Promise<{ prUrl: string | null; merged: boolean; error?: string } | null>;
   publishContext(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string }): Promise<{ prUrl: string | null; merged: boolean; error?: string } | null>;
   openIssue(repo: string, title: string, body: string): Promise<{ url: string }>;
+  // Grounds the independent reviewer in the LIVE DEV DOM: renders the routes the spec targets and
+  // returns "role: name" lines so the reviewer judges UI facts against reality, not its training
+  // memory. Best-effort (undefined on any failure) — the review degrades to defer-on-unverifiable.
+  captureDom?(input: { e2eDir: string; baseUrl: string; specContents: string[] }): Promise<string | undefined>;
+  // Persistent context-map cache (qa-data). Skips the ~195s agent rebuild when a same-sha map exists.
+  loadContextCache?(app: string): ArchitectureContext | undefined;
+  saveContextCache?(app: string, map: ArchitectureContext): void;
   saveOutcome?(outcome: RunOutcome): Promise<void>; // learning layer: persist RunOutcome (off-path, never blocks)
+  // Post-run PROCESS audit (off-path, server-side): inspect this run's quality vs. recent history,
+  // self-heal the ledger (deprecate noise rules), and record an incident for the maintainer on a
+  // repeating engine defect. Absent ⇒ no audit.
+  auditProcess?(input: { app: string; runId: string }): Promise<void>;
   runOracle?(input: OracleInput): Promise<ValueOracleResult>; // Phase 1: mutation testing / benchmark replay (off-path, never blocks)
   retrieveRules?(app: string, errorClass?: string | null, archetypes?: string[]): RetrievalResult; // Phase 2: retrieval (archetypes bias relevance to the diff's structural shape)
   reflectAndDistill?(input: { app: string; runId: string; outcome: RunOutcome; archetype?: string | null }): Promise<StructuredReflection | null>; // Phase 2: reflect + distill (off-path, never blocks)
@@ -188,7 +207,10 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
         fixCases: input.fixCases,
         reviewCorrections: input.reviewCorrections,
         coverageGap: input.coverageGap,
+        selectorContradictions: input.selectorContradictions,
         learnedRules: input.learnedRules,
+        domSnapshot: input.domSnapshot,
+        failureSourced: input.failureSourced,
         runId: input.runId,
         contextMap: input.contextMap,
         explorer: input.explorer,
@@ -202,7 +224,15 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
       // qa.parallelDiff is explicitly enabled in the app config.
       const useParallel = shouldFanOut(input);
       return useParallel
-        ? runOpencodeParallel(ocInput, oc, { signal, onProgress })
+        ? runOpencodeParallel(ocInput, oc, {
+            signal,
+            onProgress,
+            // Deterministic DOM grounding for the fan-out workers: capture the planned routes' live
+            // a11y tree on the orchestrator (Playwright stays out of the agent boundary). Best-effort.
+            ...(input.baseUrl
+              ? { captureRoutesDom: (routes: string[]) => captureDomForRoutes(routes, { e2eDir: join(input.mirrorDir, E2E_DIR), baseUrl: input.baseUrl }, defaultCaptureDomDeps) }
+              : {}),
+          })
         : runOpencode(ocInput, oc, { signal, onProgress });
     },
     setupE2e: (e2eDir) => setupE2eProject(e2eDir, defaultSetupDeps),
@@ -251,6 +281,9 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
     },
     review: async (input, signal) =>
       reviewIndependently(input, await agentDepsFactory(), { signal }),
+    captureDom: (input) => captureDom(input, defaultCaptureDomDeps),
+    loadContextCache: (app) => loadContextCacheDefault(app),
+    saveContextCache: (app, map) => saveContextCacheDefault(app, map),
     collectCoverage: async (input) => {
       // Code runs emit no coverage report on their own, so produce one (best-effort, fully
       // decoupled from the pass/fail run) before reading it. e2e reads the V8 dumps the
@@ -276,6 +309,80 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
     saveOutcome: async (outcome) => {
       const { saveRunOutcome } = await import("./server/history");
       saveRunOutcome(outcome);
+    },
+    auditProcess: async ({ app, runId }) => {
+      // The full post-run quality loop (server-side, off-path). (1) deterministic detection, (2) an
+      // LLM root-cause diagnosis enriches each engine-fix finding (the qa-reflector — Layer 2),
+      // (3) the router applies each by disposition: deprecate ledger noise + invalidate a stale map
+      // AUTONOMOUSLY (reversible DATA), surface engram for the agent layer, and record an incident
+      // for the qa-maintainer ONLY on an engine-code defect (which the maintainer turns into a
+      // human-gated fix PR — Layers 4-5). Best-effort throughout; never blocks.
+      const { getRunOutcome, listRunOutcomes, listLearningRules, setRuleStatusByHuman, markContextStale } = await import("./server/history");
+      const { auditProcess, applyAudit } = await import("./qa/learning/process-audit");
+      const { recordIncident } = await import("./server/maintainer");
+      const outcome = getRunOutcome(runId);
+      if (!outcome) return; // not persisted yet / nothing to audit
+      const recent = listRunOutcomes(app, 10);
+      const rules = listLearningRules(app, 50).map((r) => ({ id: r.id, errorClass: r.errorClass, status: r.status, usageCount: r.usageCount, successRate: r.successRate }));
+      const findings = auditProcess({ outcome, recent, rules });
+      if (findings.length === 0) return;
+
+      // Layer 2 — LLM root-cause diagnosis, ONLY for engine-fix findings (rare: a repeating defect),
+      // so the maintainer starts from a hypothesis, not a bare signal. qa-reflector is tool-less and
+      // read-only; a failure just leaves the finding undiagnosed (the deterministic evidence stands).
+      const engineFindings = findings.filter((f) => f.disposition === "engine-fix");
+      // Defer the LLM diagnosis when the system is busy: opening a qa-reflector session would
+      // contend for the OpenCode server + the LLM API with the active run (same guard as
+      // reflectAndDistill). The findings still record their deterministic evidence — only the
+      // optional root-cause hypothesis is skipped. Best-effort, never blocks the audit.
+      if (engineFindings.length > 0 && hasOpenSessions()) {
+        console.warn("[qa] engine-fix diagnosis skipped (non-blocking): another agent session is open; the incident records without a root-cause hypothesis");
+      } else if (engineFindings.length > 0) {
+        try {
+          const { askAssistant } = await import("./integrations/opencode-client");
+          const agentDeps = await agentDepsFactory();
+          const recentLine = recent.slice(0, 5).map((o) => `${o.at.slice(0, 19)} ${o.verdict}/${o.errorClass ?? "-"} ${o.sha.slice(0, 7)}`).join("\n");
+          for (const f of engineFindings) {
+            const prompt = [
+              `The ai-pipeline ENGINE (the deterministic orchestrator, NOT the watched app's tests) shows a repeating quality problem.`,
+              `Finding: ${f.summary}`,
+              `Evidence: ${f.evidence}`,
+              `Recent run outcomes (newest first):\n${recentLine}`,
+              `In 2-3 sentences: the most likely ROOT CAUSE in the ENGINE's own logic, and which area/file to inspect. Be concrete; do not blame the watched app.`,
+            ].join("\n\n");
+            f.diagnosis = (await askAssistant({ context: prompt, question: "Diagnose the engine defect.", instruction: "Output 2-3 plain sentences. No markdown.", agent: "qa-reflector" }, agentDeps, "/tmp")).trim() || undefined;
+          }
+        } catch {
+          // best-effort: an undiagnosed engine-fix still records its deterministic evidence
+        }
+      }
+
+      applyAudit(findings, {
+        log: (line) => console.log(line),
+        deprecateRule: (ruleId) => setRuleStatusByHuman(ruleId, "deprecated"),
+        recordEngineIncident: (f) =>
+          recordIncident({
+            source: "process-audit",
+            severity: f.severity === "error" ? "error" : "warn",
+            summary: f.summary,
+            detail: [f.evidence, f.diagnosis ? `\nLIKELY ROOT CAUSE (qa-reflector): ${f.diagnosis}` : ""].join(""),
+          }),
+        invalidateContext: (reason) => {
+          // Force the next generating run to rebuild the app's architecture map — a reversible DATA
+          // heal (the map regenerates), never a code change. Set a DB-backed staleness flag rather
+          // than writing the mirror's context.json: the mirror is reset by `git checkout -f`/`git
+          // clean -fd` on every run, so a file-level write would be undone before the next run reads
+          // it. The flag survives and is consumed by the context-bootstrap step.
+          try {
+            markContextStale(app);
+            console.log(`[audit] marked context stale for ${app} — rebuilds next run (${reason})`);
+            return true;
+          } catch { /* best-effort */ }
+          return false;
+        },
+        flagMemoryHeal: (f) =>
+          recordIncident({ source: "process-audit", severity: "warn", summary: `engram memory may be corrupt: ${f.summary}`, detail: `${f.evidence} — engram is agent-owned; an agent-layer cleanup is required (the orchestrator does not write engram).` }),
+      });
     },
     runOracle: async (input) =>
       input.target === "e2e" ? runFaultInjectionOracle(input) : runMutationOracle(input),
@@ -392,12 +499,23 @@ async function foldValueLearning(
   }
 
   let valueScore: number | null = null;
-  // Shadow-aware default for both targets; an explicit qa.valueOracle always wins. e2e is diff-only
-  // on purpose (fault-injection re-runs the whole suite); both are signal-only and never block.
+  // Shadow-aware default for both targets; an explicit qa.valueOracle always wins. Both targets are
+  // signal-only and never block publish.
   const valueOraclePolicy = app.qa.valueOracle ?? (app.qa.shadow ? "off" : "signal");
-  const runValueOracle =
-    !!deps.runOracle && generating && run.verdict === "pass" && valueOraclePolicy === "signal" &&
-    (isCode || (mode === "diff" && !!app.dev?.baseUrl));
+  // The e2e fault-injection oracle scores the ASSERTION STRENGTH of baseline-PASSING specs, so its
+  // real precondition is "≥1 spec passed" — not a fully-green run, and not a specific mode. In the
+  // heavy, infrequent whole-suite modes (complete/exhaustive/manual) it runs on the passing SUBSET
+  // even when sibling specs failed, so a partially-red run still earns the learning signal. THIS WAS
+  // THE ORACLE GAP: exhaustive/complete runs (which generate the most tests) never reached the
+  // oracle, so their retrieved candidate rules never accumulated outcomes and never promoted. The
+  // frequent diff path keeps the conservative full-pass gate, so a run that already caught a
+  // regression doesn't also pay the 2× re-run cost. The code (mutation) oracle is unchanged: full
+  // pass, any mode.
+  const e2eOracle =
+    !isCode && !!app.dev?.baseUrl &&
+    (mode === "diff" ? run.verdict === "pass" : run.cases.some((c) => c.status === "pass"));
+  const codeOracle = isCode && run.verdict === "pass";
+  const runValueOracle = !!deps.runOracle && generating && valueOraclePolicy === "signal" && (codeOracle || e2eOracle);
   if (runValueOracle) {
     try {
       log(isCode ? "[qa] oracle: running mutation testing (diff-scoped)..." : "[qa] oracle: running response fault-injection (signal)...");
@@ -824,12 +942,42 @@ export async function runPipeline(
       const staleWarn = await deps.checkContextStaleness(mirrorDir, sha);
       if (staleWarn) refreshReason = staleWarn;
     }
+    // The process-audit context-heal sets a DB-backed staleness flag (the mirror file write would
+    // be wiped by the run's git checkout/clean, so it can't). Consume it here — one-shot — and force
+    // a rebuild even if the map looks current on disk. Best-effort: a flag-store error never blocks.
+    try {
+      const { consumeContextStale } = await import("./server/history");
+      if (consumeContextStale(app.name)) refreshReason = "operator/process-audit invalidated the map";
+    } catch { /* best-effort */ }
     if (refreshReason) {
-      log(`[qa] context bootstrap needed: ${refreshReason}`);
-      const built = await buildContextMap(false);
-      if (built.run) return built.run;
-      contextMap = built.contextMap;
-      if (!contextMap) log("[qa] WARNING: context bootstrap finished but the map could not be reloaded; continuing without architecture context.");
+      // Before paying the ~195s agent rebuild, try the persistent cache. The mirror is git-cleaned
+      // each run, so a map built on a PRIOR run of THIS exact sha is gone from disk but still cached.
+      // Restore it deterministically (no agent). ONLY for the "missing map" case AND when it was built
+      // from this exact sha — a staleness/invalidation reason must genuinely rebuild, and a same-sha
+      // map cannot be stale.
+      // Restored from cache? Gate the rebuild on THIS, not on whether a map is in memory — a STALE
+      // refresh has a (stale) map loaded but must still rebuild.
+      let restored = false;
+      const cached = refreshReason.startsWith("missing") && deps.loadContextCache ? deps.loadContextCache(app.name) : undefined;
+      if (cached && cached.builtAtSha === sha && validateContext(cached).ok) {
+        try {
+          mkdirSync(join(e2eDir, ".qa"), { recursive: true });
+          writeFileSync(join(e2eDir, ".qa", "context.json"), JSON.stringify(cached));
+          contextMap = cached;
+          restored = true;
+          log(`[qa] context bootstrap: restored the cached architecture map (built at ${sha.slice(0, 7)}) — skipped the ~195s rebuild.`);
+        } catch (err) {
+          log(`[qa] WARNING: could not restore cached context map (${err instanceof Error ? err.message : String(err)}); rebuilding.`);
+        }
+      }
+      if (!restored) {
+        log(`[qa] context bootstrap needed: ${refreshReason}`);
+        const built = await buildContextMap(false);
+        if (built.run) return built.run;
+        contextMap = built.contextMap;
+        if (contextMap) deps.saveContextCache?.(app.name, contextMap); // persist for the next same-sha run
+        if (!contextMap) log("[qa] WARNING: context bootstrap finished but the map could not be reloaded; continuing without architecture context.");
+      }
     }
   }
 
@@ -863,11 +1011,20 @@ export async function runPipeline(
   };
 
   const MAX_REVIEW_ROUNDS = 2;
+  // Static-gate repair budget (Filter B). Mirrors the execution fix-loop: a trivial tsc/eslint/list
+  // error should get a bounded second chance, not fail the whole run on the first miss.
+  const MAX_STATIC_FIX_ROUNDS = 2;
   const generateAndReview = async (genInput: GenerateInput): Promise<AgentResult> => {
     const genStart = Date.now();
     let r = await reconcileSpecs(await deps.generate(genInput, signal, log));
     log(`[qa] [timing] generation produced ${r.specs.length} spec(s) in ${Math.round((Date.now() - genStart) / 1000)}s`);
     if (!(app.qa.needsReview && deps.review)) return r;
+    // The live-DOM grounding only depends on the ROUTES the specs target, so capture it once and
+    // reuse it across review rounds — re-launching a browser every round (up to MAX_REVIEW_ROUNDS)
+    // is wasted cost when the spec set (hence the routes) is unchanged. Recompute only when the
+    // regenerated spec set differs.
+    let domSnapshot: string | undefined;
+    let lastSpecsKey = "";
     for (let round = 0; round < MAX_REVIEW_ROUNDS; round++) {
       if (r.specs.length === 0) {
         // A FIRST-round empty result is a legitimate no-op. A LATER (post-rejection)
@@ -877,11 +1034,24 @@ export async function runPipeline(
       }
       let review: ReviewResult;
       const reviewStart = Date.now();
+      // Ground the reviewer in the LIVE DEV DOM (the routes these specs target) so it judges UI
+      // facts against reality, not training memory. Best-effort, e2e only, never blocks the review.
+      // Memoized by the spec set across rounds: re-capture only when the regenerated specs changed.
+      if (!isCode && deps.captureDom && app.dev?.baseUrl) {
+        const specsKey = r.specs.slice().sort().join(",");
+        if (specsKey !== lastSpecsKey) {
+          const specContents = r.specs.map((s) => {
+            try { return readFileSync(join(mirrorDir, E2E_DIR, s), "utf8"); } catch { return ""; }
+          });
+          domSnapshot = await deps.captureDom({ e2eDir, baseUrl: app.dev.baseUrl, specContents }).catch(() => undefined);
+          lastSpecsKey = specsKey;
+        }
+      }
       try {
         review = await deps.review(
           // Arm the independent judge with the PROVEN learned rules (active only — never unproven
           // candidates) so it enforces app-specific anti-patterns earned from past failures.
-          { diff: promptDiff, specs: r.specs, mirrorDir, e2eRelDir: isCode ? "" : E2E_DIR, baseUrl: app.dev?.baseUrl, intent, guidance: opts.guidance, appName: app.name, mode, target: opts.target, learnedRules: renderRulesForReviewer(retrievedRules) },
+          { diff: promptDiff, specs: r.specs, mirrorDir, e2eRelDir: isCode ? "" : E2E_DIR, baseUrl: app.dev?.baseUrl, intent, guidance: opts.guidance, appName: app.name, mode, target: opts.target, learnedRules: renderRulesForReviewer(retrievedRules), domSnapshot },
           signal,
         );
       } catch (err) {
@@ -920,7 +1090,11 @@ export async function runPipeline(
       onStep?.("retry");
       retries++;
       const regenStart = Date.now();
-      r = await reconcileSpecs(await deps.generate({ ...genInput, reviewCorrections: review.corrections }, signal, log));
+      // Ground the regeneration in the SAME live a11y snapshot the reviewer just judged against, so the
+      // generator fixes selectors against the real tree (e.g. no `columnheader` role on this table)
+      // instead of re-deriving them from HTML intuition — the captured tree already shows what roles
+      // actually exist and which names are duplicated (strict-mode risk).
+      r = await reconcileSpecs(await deps.generate({ ...genInput, reviewCorrections: review.corrections, domSnapshot }, signal, log));
       log(`[qa] [timing] regeneration produced ${r.specs.length} spec(s) in ${Math.round((Date.now() - regenStart) / 1000)}s`);
     }
     return r;
@@ -1126,6 +1300,19 @@ export async function runPipeline(
         // fail-open
       }
     }
+    // Post-run PROCESS audit — the engine reflecting on its OWN run quality (recurring defects,
+    // ledger noise, review churn) and routing each finding to the right remediation: deprecate
+    // noise rules autonomously (DATA), record an incident for the maintainer on an engine defect
+    // (CODE → human-gated PR). Server-side, off-path, independent of any client/TUI session.
+    if (deps.auditProcess && opts.runId) {
+      // AWAITED (not fire-and-forget): a manual/CLI run does `process.exit` right after the pipeline
+      // returns, which would kill an un-awaited audit mid-flight (its incident/deprecation never
+      // lands). The deterministic detection is cheap and the LLM diagnosis is already
+      // hasOpenSessions-gated, so awaiting adds no meaningful latency. Best-effort — never throws.
+      await deps
+        .auditProcess({ app: app.name, runId: opts.runId })
+        .catch((err) => log(`[qa] WARNING: process audit failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`));
+    }
   };
 
   checkSignal();
@@ -1135,7 +1322,35 @@ export async function runPipeline(
   if (!isCode) {
     onStep?.("validate");
     log("[qa] validating specs (typecheck + lint + list + manifest)...");
-    const validation = await deps.validate(e2eDir);
+    let validation = await deps.validate(e2eDir);
+    // Static-repair loop. A single trivial gate error (an unused var, a stray import) used to fail the
+    // WHOLE run `invalid` with no second chance — while EXECUTION failures already get a fix-loop. That
+    // asymmetry let one `no-unused-vars` discard 7 otherwise-good specs (observed on PetClinic). Mirror
+    // the execution loop: feed the EXACT tsc/eslint/list errors back to the agent (single-agent — a
+    // reviewCorrections payload forces shouldFanOut false) and re-validate, bounded. Only a gate still
+    // red after the budget is a real `invalid`. Skipped when nothing was generated to repair.
+    let staticFixRounds = 0;
+    while (
+      !validation.ok && !validation.infra && generating &&
+      (result?.specs.length ?? 0) > 0 &&
+      staticFixRounds < MAX_STATIC_FIX_ROUNDS && !signal?.aborted
+    ) {
+      staticFixRounds++;
+      retries++;
+      log(`[qa] static gate failed (repair ${staticFixRounds}/${MAX_STATIC_FIX_ROUNDS}); regenerating to fix:\n${validation.errors.join("\n")}`);
+      result = await generateAndReview(
+        baseGenInput({
+          reviewCorrections: [
+            `The generated specs FAILED the static gate (tsc + eslint + \`playwright --list\`). Fix EXACTLY these errors and change nothing else:\n${validation.errors.join("\n")}`,
+          ],
+        }),
+      );
+      checkSignal();
+      validation = await deps.validate(e2eDir);
+    }
+    if (staticFixRounds > 0 && validation.ok) {
+      log(`[qa] static gate PASSED after ${staticFixRounds} repair round(s).`);
+    }
     if (!validation.ok) {
       log(`[qa] static gate failed:\n${validation.errors.join("\n")}`);
       // When every failure is infrastructure (ENOENT, signal-kill), the gate itself
@@ -1193,9 +1408,23 @@ export async function runPipeline(
     }
   }
 
-  // Re-generation on failure (max 1 retry): feed failed cases back to the agent
-  // so it can fix selector issues, scoping, and regex ambiguity before reporting.
-  const MAX_RETRIES = 1;
+  // Re-generation on failure: feed failed cases + their failure-point DOM back to the agent.
+  // The fix-loop is bounded by qa.fixLoop.maxRetries (default 2, was hard 1). A progress gate
+  // (decideProgress) stops early when no deterministic signal of improvement is observed:
+  //   (A) failing count decreased   (B) failing name set changed   (C) Lever-2 selector flip
+  // The regression guard keeps the best round (fewest failures). The real-bug branch short-
+  // circuits when all selectors resolve uniquely and the failure is a value mismatch — that
+  // is an app defect, not a selector problem; file an Issue immediately.
+  const MAX_RETRIES = app.qa.fixLoop?.maxRetries ?? 2;
+  let prevRound: RoundResult | null = null;
+  // Regression guard (W1): track the best EXECUTED run (fewest failures). A later retry that makes
+  // things worse must not ship — after the loop we restore this. bestRound (progress-gate) picks the
+  // fewest-failures round (ties → later), so an equal-or-better rewrite is still preferred.
+  let bestRunSoFar: QaRunResult = run;
+  const failCount = (r: QaRunResult): number => r.cases.filter((c) => c.status === "fail").length;
+  // Flag: the real-bug branch detected a genuine app defect → skip to Issue.
+  let realBugDetected = false;
+
   for (let retry = 0; retry < MAX_RETRIES && run.verdict === "fail" && generating; retry++) {
     const failed = run.cases.filter((c) => c.status === "fail");
     log(
@@ -1203,10 +1432,150 @@ export async function runPipeline(
         failed.map((c) => `  ❌ ${c.name}${c.detail ? ` — ${c.detail.slice(0, 200)}` : ""}`).join("\n"),
     );
 
+    // ── Lever-2 selector check (before spending the retry) ──────────────────
+    // Extract proposed selectors from the generated spec sources and verify them PER CASE (C2)
+    // against THAT case's own failure-point a11y tree — never a fused union, which would count a
+    // node present on page A as non-unique against page B. A selector is a real contradiction only
+    // when it is verifiable-ABSENT in every failed case's tree (present in none); it is non-unique
+    // only when it resolves to >1 nodes within a SINGLE case's tree. Absent → contradiction folded
+    // into the next prompt; non-unique → strict-mode ambiguity flag.
+    const failedTrees = failed
+      .map((c) => ({ case: c, lines: buildFailureDomLines(c.failureDom) }))
+      .filter((t) => t.lines.length > 0);
+    const haveTrees = !isCode && failedTrees.length > 0;
+    const selectorContradictions: string[] = [];
+    const absentKeys = new Set<string>(); // structured identity of verifiable-absent selectors (W2)
+    let anyVerifiedPresent = false;
+    // W5: when ANY generated spec uses a locator family Lever-2 cannot extract (getByTestId, raw
+    // CSS .locator(), getByPlaceholder/AltText/Title), the "all selectors present+unique" judgment
+    // is INCOMPLETE — a decorative getByRole could look unique while the ACTUAL failing locator is
+    // unseen. uniqueness then becomes indeterminate and the real-bug branch must NOT fire.
+    let anyNonExtractableLocator = false;
+    // W3: an extracted selector that is UNVERIFIABLE (its role is in NO tree, or appears only as a
+    // `(present)` marker whose name was dropped) is present in no `anyPresent` AND in no `absentKeys`
+    // — it falls through both branches. With one decorative present-unique getByRole setting
+    // anyVerifiedPresent, allUnique would wrongly become true and the real-bug branch could file a
+    // bogus "app defect" Issue for a selector we never actually confirmed. Track it so it forces
+    // allUnique=false: uniqueness is load-bearing only when EVERY extracted selector was verifiable.
+    let anyUnverifiableSelector = false;
+    if (haveTrees && result != null && result.specs.length > 0) {
+      for (const specFile of result.specs) {
+        const specPath = join(e2eDir, specFile);
+        if (!existsSync(specPath)) continue;
+        const specSrc = readFileSync(specPath, "utf8");
+        if (hasNonExtractableLocator(specSrc)) anyNonExtractableLocator = true;
+        for (const sel of extractProposedSelectors(specSrc)) {
+          const presences = failedTrees.map((t) => selectorPresent(sel, t.lines));
+          const anyPresent = presences.some((p) => p.present);
+          const anyVerifiable = presences.some((p) => p.verifiable);
+          if (anyPresent) {
+            anyVerifiedPresent = true;
+            // Non-unique within ANY single failed case's tree → strict-mode risk (per-tree, never fused).
+            if (failedTrees.some((t) => selectorPresent(sel, t.lines).present && !selectorUnique(sel, t.lines))) {
+              const roleLabel = sel.role ?? sel.kind;
+              const nameLabel = sel.name ? ` "${sel.name}"` : "";
+              selectorContradictions.push(`${roleLabel}:${nameLabel} matches MULTIPLE nodes (strict-mode ambiguity — scope to a unique parent)`);
+            }
+          } else if (anyVerifiable) {
+            // Verifiable-absent in EVERY tree (role is known to at least one tree, no name match
+            // anywhere, present nowhere) → a real contradiction. Unverifiable-everywhere is skipped (D4).
+            absentKeys.add(selectorKey(sel));
+            const roleLabel = sel.role ?? sel.kind;
+            const nameLabel = sel.name ? ` "${sel.name}"` : "";
+            const presentRoles = [...new Set(failedTrees.flatMap((t) => t.lines.map((l) => l.split(":")[0]?.trim())).filter(Boolean))].join(", ");
+            selectorContradictions.push(
+              `${roleLabel}:${nameLabel} is NOT in the captured failure-point tree. Present roles: ${presentRoles || "(none)"}`,
+            );
+          } else {
+            // Neither present nor verifiable-absent in any tree → UNVERIFIABLE (its role never appeared
+            // with a real name). Not a contradiction (D4: the snapshot may prune it), but it means the
+            // selector set is NOT fully confirmed — so uniqueness can't be trusted to attribute a value
+            // mismatch to an app defect. Force the real-bug branch closed (W3).
+            anyUnverifiableSelector = true;
+          }
+        }
+      }
+    }
+
+    // Lever-2 signal C, computed ONCE after the per-spec loop (W2): prev-round absent selectors that
+    // are NOT absent this round flipped (absent→present OR absent→ambiguous — both are progress). The
+    // comparison is by STRUCTURED identity (selectorKey), not human-string startsWith.
+    const lever2Flips =
+      prevRound && prevRound.absentSelectors.size > 0
+        ? [...prevRound.absentSelectors].filter((k) => !absentKeys.has(k)).length
+        : 0;
+
+    // ── Progress gate ────────────────────────────────────────────────────────
+    const curRound: RoundResult = {
+      failingNames: new Set(failed.map((c) => c.name)),
+      failingCount: failed.length,
+      absentSelectors: absentKeys,
+      lever2Flips,
+    };
+    const gate = decideProgress(prevRound, curRound);
+    log(`[qa] progress gate (retry ${retry + 1}/${MAX_RETRIES}): spend=${gate.spend} — ${gate.reason}`);
+
+    // Observability: the per-failure class (locator / timeout / value-mismatch / other), so the log
+    // shows WHY the real-bug branch did or did not fire (the branch needs every failure to be a value
+    // mismatch). Uses the same classifier isLikelyRealBug applies internally.
+    if (!isCode && failed.length > 0) {
+      const classes = failed.map((c) => `${c.name}=${classifyFailure(c.detail ?? "")}`);
+      log(`[qa] failure classes: ${classes.join(", ")}`);
+    }
+
+    // Real-bug branch (C4): fire ONLY when every checked selector was PRESENT and UNIQUE — i.e. at
+    // least one selector verified present, ZERO absent contradictions, AND ZERO MULTIPLE
+    // contradictions — and every failure is a value mismatch. An absent selector makes allUnique
+    // false (the test may simply be looking at the wrong element, not a real defect).
+    // W5: a non-extractable locator (getByTestId/.locator()/getByPlaceholder/…) anywhere in the spec
+    // makes uniqueness INDETERMINATE — the verified getByRole set is not the full locator set, so a
+    // value mismatch cannot be safely attributed to an app defect. Hold allUnique false → no misfire.
+    // W3: likewise an UNVERIFIABLE extracted selector (role in no tree / only a `(present)` marker) is
+    // never confirmed present, so a decorative present-unique getByRole must not make allUnique true
+    // on its own — require EVERY extracted selector to have been verifiable.
+    const allUnique =
+      anyVerifiedPresent &&
+      absentKeys.size === 0 &&
+      !anyNonExtractableLocator &&
+      !anyUnverifiableSelector &&
+      !selectorContradictions.some((c) => c.includes("MULTIPLE"));
+    if (
+      !isCode &&
+      isLikelyRealBug(allUnique, failed.map((c) => c.detail ?? ""))
+    ) {
+      log("[qa] real-bug branch: selectors resolve uniquely + value mismatch → likely app defect, not a selector problem. Filing an Issue.");
+      realBugDetected = true;
+      break;
+    }
+
+    if (!gate.spend) {
+      log("[qa] progress gate stopped the fix-loop (no improvement signal).");
+      break;
+    }
+
+    prevRound = curRound;
+
+    // ── Regeneration ─────────────────────────────────────────────────────────
+    // Build the failure-point DOM block (header + the case's tree, prompt-size-capped) as the
+    // authoritative grounding for the regeneration prompt.
+    const failureDomSnapshot = buildFailureDom(failed);
+
+    // Thread Lever-2 contradictions as their OWN field (W1) — NOT folded into the fixCases detail.
+    // The fix prompt renders `c.detail?.slice(0, 500)`; verbose PW 1.60 errors fill those 500 chars,
+    // so a contradiction appended to detail was truncated away exactly when an absent selector was
+    // found — silencing the deterministic compliance-wall closer. buildPrompt now renders these
+    // un-truncated in a dedicated section next to the GROUND TRUTH block.
     log("[qa] re-generating with failure feedback...");
     onStep?.("retry");
     retries++;
-    result = await generateAndReview(baseGenInput({ fixCases: failed }));
+    result = await generateAndReview(
+      baseGenInput({
+        fixCases: failed,
+        ...(selectorContradictions.length > 0 ? { selectorContradictions } : {}),
+        domSnapshot: failureDomSnapshot,
+        ...(failureDomSnapshot ? { failureSourced: true } : {}),
+      }),
+    );
     if (result.specs.length > 0) {
       const entries = result.specMetas?.length
         ? result.specMetas.map((m) => ({ name: m.file, flow: m.flow, objective: m.objective }))
@@ -1221,6 +1590,17 @@ export async function runPipeline(
     if (result.specs.length === 0) {
       log("[qa] retry agent produced no fixes; keeping original verdict.");
       break;
+    }
+
+    // T2 (design §1.5b): when Lever-2 proved a selector ABSENT (verifiable), the contradiction is
+    // already folded into the prompt above — skip the wasted re-validate+re-execute for THIS round
+    // and loop straight to the next regeneration. The next iteration re-checks the new spec against
+    // the SAME (unchanged) failure trees: if the absent selector is now present, Lever-2 signal C
+    // fires (gate spends) and we DO re-execute; if it is still absent and nothing else moved, the
+    // gate stops the loop. Bounded by the same cap (the for-header) and gate; counts against budget.
+    if (!isCode && absentKeys.size > 0) {
+      log(`[qa] Lever-2 short-circuit: ${absentKeys.size} selector(s) verifiably absent — regenerated WITHOUT re-executing; re-checking against the known failure tree next round.`);
+      continue;
     }
 
     if (isCode) {
@@ -1247,6 +1627,30 @@ export async function runPipeline(
       run = retryRun;
     }
     log(`[qa] retry verdict: ${run.verdict}`);
+
+    // Regression guard (W1): keep the best EXECUTED run seen so far (fewest failures). bestRound's
+    // tie-break prefers the later round, so an equal rewrite still wins — only a strictly-worse retry
+    // is discarded. infra-error is never "better" (it has no test cases to count as a fix).
+    if (run.verdict !== "infra-error") {
+      bestRunSoFar = bestRound([
+        { failingCount: failCount(bestRunSoFar), run: bestRunSoFar },
+        { failingCount: failCount(run), run },
+      ])!.run;
+    }
+  }
+
+  // Regression guard (W1): restore the best executed run AFTER the loop, so a worse terminal retry
+  // never ships. Skip when the real-bug branch fired (the current fail run must reach the Issue) or
+  // when the loop ended on infra-error (that verdict must stand).
+  if (!realBugDetected && run.verdict !== "infra-error" && failCount(bestRunSoFar) < failCount(run)) {
+    log(`[qa] regression guard: discarding the final retry (${failCount(run)} failing) for an earlier better run (${failCount(bestRunSoFar)} failing).`);
+    run = bestRunSoFar;
+  }
+
+  // The real-bug branch overrides the verdict so the decide step files an Issue.
+  if (realBugDetected && run.verdict !== "infra-error") {
+    // Keep run as "fail" so the decide step (below) opens an Issue.
+    log("[qa] real-bug override: run kept as fail for Issue filing.");
   }
 
   // 8. Filter D — change-coverage (the value keystone). Only for a per-commit DIFF run whose
@@ -1441,6 +1845,49 @@ export async function runPipeline(
 
 function resultOf(ns: string, verdict: QaRunResult["verdict"], logs: string, note?: string): QaRunResult {
   return { sha: ns, verdict, passed: verdict === "pass", cases: [], logs, note };
+}
+
+// Max "role: name" lines per case in the regeneration PROMPT (not the stored tree). The cap is
+// applied HERE, on the readable block, so a huge tree does not blow the prompt — while Lever-2 still
+// checks selectors against the FULL stored line set (capDomLines keeps every table/list node, so a
+// data table is never the thing that gets truncated away).
+const FAILURE_DOM_PROMPT_MAX_LINES = 80;
+
+// Builds the failure-point DOM block for the regeneration prompt from failed cases' failureDom.
+// Each case becomes a header + its captured a11y tree (size-capped, table-preserving). Returns
+// undefined when no failed case carries a failureDom (blind-fix fallback).
+//
+// failureDom is the RAW parseAriaSnapshot line set ("role: name", "\n"-joined) that execute.ts
+// stores — already human-readable, so we present it directly; we only ADD the header and apply the
+// prompt-size cap here (never on the stored tree, which Lever-2 needs complete).
+export function buildFailureDom(cases: QaCase[]): string | undefined {
+  const parts: string[] = [];
+  for (const c of cases) {
+    if (!c.failureDom) continue;
+    const lines = c.failureDom.split("\n").filter((l) => l.trim());
+    const { kept, dropped } = capDomLines(lines, FAILURE_DOM_PROMPT_MAX_LINES);
+    const body = dropped > 0 ? [...kept, `… (${dropped} more non-table elements omitted)`] : kept;
+    parts.push(`### ${c.name}\n${body.join("\n")}`);
+  }
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
+}
+
+// Splits a single case's stored failureDom into its "role: name" lines (blanks dropped). The stored
+// value is ALREADY parseAriaSnapshot output (execute.ts), so we MUST NOT re-parse it — re-parsing
+// the "role: name" form (no "- " markers) yields []. Used by the Lever-2 selector check, PER CASE
+// (C2): each spec's selectors are verified against that case's own tree, never a fused union (which
+// would make a node present on page A look non-unique against page B). Returns [] when absent.
+export function buildFailureDomLines(failureDom: string | undefined): string[] {
+  if (!failureDom) return [];
+  return failureDom.split("\n").filter((l) => l.trim());
+}
+
+// Stable STRUCTURED identity for a proposed selector (W2): role+name+exact+isRegex+kind. Used to
+// compare the prev round's absent selectors to the current round's by identity — NOT by startsWith
+// over the human-readable contradiction strings, which mis-counts an absent→ambiguous transition
+// (the same selector, now MULTIPLE instead of absent) as "still absent" and starves Lever-2 signal C.
+export function selectorKey(sel: ProposedSelector): string {
+  return `${sel.kind}|${sel.role ?? ""}|${sel.name ?? ""}|${sel.exact ? "1" : "0"}|${sel.isRegex ? "1" : "0"}`;
 }
 
 // What the agent reported testing (flow + objective per spec) — the "what was tested"

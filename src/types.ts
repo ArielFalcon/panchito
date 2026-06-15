@@ -79,6 +79,11 @@ export interface QaCase {
   objective?: string;
   reason?: string;
   durationMs?: number; // wall-clock of the test, from the Playwright stream (live cases)
+  // Populated for failed cases: the accessible-role tree captured at the failure point (ariaSnapshot
+  // YAML parsed + formatted). Used by the fix-loop to ground the regeneration prompt in the REAL
+  // post-failure DOM instead of the pre-write grounding snapshot. Absent when capture missed
+  // (page closed on nav-crash, env var unset, or parse failure) — grounding gap is warned loudly.
+  failureDom?: string;
 }
 
 export interface QaRunResult {
@@ -139,7 +144,7 @@ export interface RunRecord {
 }
 
 export type IncidentSeverity = "warn" | "error" | "critical";
-export type IncidentSource = "health-check" | "log-scraper" | "qa-generator" | "qa-reviewer" | "cli";
+export type IncidentSource = "health-check" | "log-scraper" | "qa-generator" | "qa-reviewer" | "cli" | "process-audit";
 
 export interface Incident {
   id: string;

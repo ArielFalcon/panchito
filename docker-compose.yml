@@ -50,6 +50,9 @@ services:
       OPENCODE_SERVE_URL: http://agents:4096
       AGENT_SUPERVISOR_URL: http://agents:4097
       MIRROR_DIR: /app/.mirrors
+      # noble drift: the image's `sandbox` user is uid 1002 (pwuser took 1001 on Ubuntu 24.04) — keep
+      # code-runner.ts (CODE_SANDBOX_UID ?? 1001) in sync with the Dockerfile so privilege-drop resolves.
+      CODE_SANDBOX_UID: "1002"
     volumes:
       - ./config:/app/config # app configs + the config/e2e seed (read-mostly; not hot-swapped)
       # NOTE: src/ and package files are NOT bind-mounted here on purpose — the hot-swap must be

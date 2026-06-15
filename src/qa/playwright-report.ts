@@ -11,6 +11,10 @@ export interface PwCase {
   name: string;
   status: CaseStatus;
   detail?: string;
+  // Playwright 1.60 attaches the aria snapshot of the receiver on expect() failures in
+  // result.errors[].errorContext. Absent on pre-1.60 reports (backward-compatible).
+  // TODO(1.60-verify): confirm errors[].errorContext shape against a real 1.60 JSON report.
+  errorContext?: string;
 }
 
 export interface ParsedReport {
@@ -26,6 +30,13 @@ export interface ParsedReport {
 interface PwResult {
   status?: string;
   error?: { message?: string };
+  // Playwright 1.60 adds an errors[] array with full error objects. The errorContext field
+  // (when present) contains the aria snapshot of the locator receiver at the failure point.
+  // The field shape in the actual JSON report is unverified against a real 1.60 run —
+  // everything here is optional-chained so a missing/differently-shaped field degrades
+  // silently to "no errorContext".
+  // TODO(1.60-verify): confirm errors[].errorContext shape against a real 1.60 JSON report.
+  errors?: Array<{ message?: string; errorContext?: string }>;
 }
 interface PwTest {
   results?: PwResult[];
@@ -65,6 +76,7 @@ export function parsePlaywrightReport(json: unknown): ParsedReport {
       for (const spec of suite.specs ?? []) {
         const outcome = specOutcome(spec);
         if (outcome === "skipped") continue; // executed nothing → not a case, not a pass
+        const ec = firstErrorContext(spec);
         cases.push({
           name: [title, spec.title].filter(Boolean).join(" › "),
           status: outcome,
@@ -77,6 +89,7 @@ export function parsePlaywrightReport(json: unknown): ParsedReport {
               : outcome === "flaky"
                 ? `flaky — passed only after a retry; first-attempt failure: ${firstError(spec) ?? "(no error captured in the report)"}`
                 : firstError(spec),
+          ...(ec !== undefined ? { errorContext: ec } : {}),
         });
       }
       walk(suite.suites, title);
@@ -138,6 +151,22 @@ function firstError(spec: PwSpec): string | undefined {
   for (const t of spec.tests ?? []) {
     for (const r of t.results ?? []) {
       if (r.error?.message) return r.error.message;
+    }
+  }
+  return undefined;
+}
+
+// Extracts the errorContext from the first result that carries one. Playwright 1.60 attaches
+// the aria snapshot of the locator receiver on expect() failures in result.errors[].errorContext.
+// Fully defensive: the exact field shape in the 1.60 JSON report is unverified — all accesses
+// optional-chain so a missing/differently-shaped field degrades silently to undefined.
+// TODO(1.60-verify): confirm errors[].errorContext shape against a real 1.60 JSON report.
+export function firstErrorContext(spec: PwSpec): string | undefined {
+  for (const t of spec.tests ?? []) {
+    for (const r of t.results ?? []) {
+      // Optional-chain ALL accesses — PW 1.60 shape is not confirmed against a real report.
+      const ctx = r?.errors?.[0]?.errorContext;
+      if (typeof ctx === "string" && ctx.length > 0) return ctx;
     }
   }
   return undefined;

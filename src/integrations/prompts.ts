@@ -18,15 +18,19 @@ export function specFileForFlow(flow: string): string {
   return `flows/${safe}.spec.ts`;
 }
 // Surgical, self-contained instructions for ONE worker. Adapts based on needsUi:
-// UI workers get the Playwright MCP and explore-before-write instructions; code-only
-// workers use serena exclusively to derive tests from the affected symbols.
+// UI workers transcribe the injected a11y tree — they have NO Playwright MCP and MUST NOT navigate.
+// Code-only workers use serena exclusively to derive tests from the affected symbols.
+// (Q2: Playwright MCP removed from qa-worker — navigation was ×N expensive, concurrent DEV pressure,
+// and the prior 1/7 failure rate was caused by exploration+write competing for the step budget.
+// The planner (qa-generator) explores ONCE with the MCP and injects the tree; workers transcribe it.)
 export function buildWorkerPrompt(w: ParallelWorkerInput): string {
   const rules = w.needsUi
     ? [
-        w.baseUrl
-          ? `- Explore YOUR flow FIRST with the Playwright MCP: browser_navigate to the LIVE DEV URL, browser_snapshot, and use ONLY selectors verified against the real DOM. Never invent selectors.`
-          : `- No LIVE DEV URL: derive selectors from the code (serena) and note this limitation in a spec comment.`,
+        w.domSnapshot
+          ? `- You have NO browser. The injected a11y tree above is your ONLY source of DOM truth — transcribe it directly into selectors; do NOT navigate or snapshot.`
+          : `- You have NO browser. No a11y tree was injected — derive selectors from the brief and mark them unverified in a comment (e.g. // selector unverified — no snapshot available).`,
         `- Prefer getByRole/getByLabel/getByTestId; scope to a section; no waitForTimeout; no network mocks.`,
+        `- getByRole matches the ACCESSIBILITY TREE, not the HTML tag: a <th> is often NOT a "columnheader", a <table> may lose its "table"/"row"/"cell" roles (Bootstrap/CSS strips them). Use ONLY roles + names you LITERALLY SEE in the injected tree; if the role isn't there, use getByText or a scoped locator. A getByRole that matches 0 elements passes review but TIMES OUT on execution.`,
         `- At least ONE real assertion on the observable OUTCOME (not just a click). Clean up created data via cleanup().`,
       ]
     : [
@@ -37,6 +41,12 @@ export function buildWorkerPrompt(w: ParallelWorkerInput): string {
   return [
     `Write ONE test for this objective. Write ONLY your assigned file.`,
     ``,
+    `## ⚠ The ONE required outcome: the file exists on disk`,
+    `Your step budget is LIMITED. Writing ${w.e2eRelDir}/${w.specFile} with the \`write\` tool is the only`,
+    `result that counts — a perfect spec you never wrote is a TOTAL FAILURE (it counts as a phantom and`,
+    `the whole flow is dropped). So: WRITE the file EARLY with selectors from the injected tree,`,
+    `and only then refine if budget remains. Never end your turn without having written the file.`,
+    ``,
     `## Objective`,
     sanitizeText(w.objective).text,
     ``,
@@ -46,14 +56,26 @@ export function buildWorkerPrompt(w: ParallelWorkerInput): string {
       ? `- The blast radius is distilled in the Exploration brief below — use it; do NOT re-read the code.`
       : `- Affected code symbols (read them with serena): ${w.symbols.join(", ") || "(none specified)"}`,
     `- Namespace prefix for any data you create: ${w.namespace}`,
-    w.needsUi ? `- LIVE DEV URL: ${w.baseUrl ?? "(not provided)"}` : null,
     `- Write EXACTLY this file: ${w.e2eRelDir}/${w.specFile}  — do not create or edit any other file.`,
     w.needsUi ? `- Import the shared harness: import { test, expect } from "../fixtures"` : null,
     ...(w.brief ? [``, renderExplorationBrief(w.brief)] : []),
+    ...(w.needsUi && w.domSnapshot
+      ? [
+          ``,
+          `## Injected a11y tree (GROUND TRUTH — your ONLY source of DOM truth)`,
+          `These are the roles + accessible names the browser ACTUALLY exposes for this flow's route(s).`,
+          `You have NO browser MCP. You do NOT need to navigate or snapshot — the tree is below.`,
+          `Author selectors ONLY from what appears here (transcribe, do NOT guess).`,
+          `If a role you expected (e.g. \`columnheader\`) is NOT listed, it is NOT in the tree:`,
+          `use \`getByText\` or a scoped locator instead. If a name appears MORE THAN ONCE,`,
+          `scope it to a unique parent (a bare getByRole/getByText would match multiple → strict-mode error).`,
+          w.domSnapshot,
+        ]
+      : []),
     ``,
     `## Rules`,
     ...(w.brief
-      ? [`- The Exploration brief already distilled the code — do NOT re-explore it with serena; verify only selectors against the live DOM.`]
+      ? [`- The Exploration brief already distilled the code — do NOT re-explore it with serena.`]
       : []),
     ...rules,
     `- Do NOT write to the manifest — the orchestrator records metadata. Do NOT read or edit other workers' files.`,
@@ -73,6 +95,22 @@ export function buildPlanPrompt(input: OpencodeRunInput): string {
   const lessonsBlock = input.learnedRules
     ? [``, `## Lessons learned from past runs (factor these into the objectives you plan)`, input.learnedRules]
     : [];
+  // The deterministic FE↔BE architecture map. The single-agent generator already receives it; the
+  // PLANNER must too, or the fan-out path silently re-derives the blast radius from serena alone and
+  // discards the map the engine spent a whole `context` run building. The planner distills it into
+  // each objective's brief, so it reaches the workers (who have no map of their own).
+  const contextBlock = input.contextMap
+    ? [
+        ``,
+        `## Architecture map (FE↔BE — authoritative; distil the relevant links into each brief)`,
+        renderArchitectureContext(input.contextMap, input.mode === "diff" ? input.intent?.changedFiles : undefined) ?? "",
+        ``,
+        `IMPORTANT — each brief's \`routes[].path\` MUST be the CONCRETE, directly-navigable URL the`,
+        `worker will \`page.goto(...)\` (include any SPA/hash prefix, e.g. "/#!/owners"; for a parameterized`,
+        `route use a real existing instance, e.g. "/#!/owners/1"), NOT the abstract pattern. The orchestrator`,
+        `renders these to capture the live DOM for the workers, so an abstract or wrong route yields no grounding.`,
+      ]
+    : [];
   if (input.mode === "diff") {
     return [
       `Plan E2E test objectives for the blast radius of commit ${input.sha} of ${input.repo}.`,
@@ -89,12 +127,18 @@ export function buildPlanPrompt(input: OpencodeRunInput): string {
       `   re-read the code: blastRadius (each touched symbol with its file + a ONE-LINE role), the FE↔BE`,
       `   links, the relevant contract facts (fields/enums/errors to assert), and risks/what-to-assert.`,
       `   Set the brief's builtForSha to ${input.sha}. The worker trusts the brief for CODE but still`,
-      `   verifies selectors against the live DOM.`,
+      `   transcribes selectors from the injected a11y tree (workers have no browser MCP).`,
+      `4. Lever-3 route verification (REQUIRED for needsUi objectives): use the Playwright MCP to`,
+      `   navigate each flow — especially interaction flows that land on a NEW route (e.g.`,
+      `   owner-register → /#!/owners/{id}). Discover and verify the post-interaction landing routes.`,
+      `   Declare them in \`routes[]\` with \`"verified": true\`. Only mark verified routes you actually`,
+      `   navigated to and confirmed exist. Unverified (static/pattern) routes keep \`"verified": false\`.`,
+      `   The orchestrator captures the live DOM for ONLY the verified routes and injects it into workers.`,
       ``,
       `## Change intent (Conventional Commits)`,
       `- Type: ${input.intent?.type ?? "unknown"}${input.intent?.breaking ? " (BREAKING)" : ""}`,
       `- Message: ${sanitizeText(input.intent?.message ?? "").text}`,
-      `- Changed files: ${sanitizeText(input.intent?.changedFiles.join(", ") ?? "").text || "(unknown)"}`,
+      `- Changed files: ${sanitizeText(input.intent?.changedFiles?.join(", ") ?? "").text || "(unknown)"}`,
       ``,
       `## Commit diff`,
       "```diff",
@@ -109,10 +153,11 @@ export function buildPlanPrompt(input: OpencodeRunInput): string {
             `changed service behavior through the UI.`,
           ]
         : []),
+      ...contextBlock,
       ...lessonsBlock,
       ``,
       `## Output — end with ONLY this JSON (no spec files):`,
-      `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","needsUi":true,"brief":{"builtForSha":"<the sha above>","objective":"…","blastRadius":[{"symbol":"CheckoutService.pay","file":"src/checkout/checkout.service.ts","role":"applies the bulk discount and creates the order"}],"feBe":[{"route":"/checkout","operationId":"createOrder","via":"OrderClient.create"}],"contracts":[{"operationId":"createOrder","method":"POST","path":"/orders","fields":["items","total"]}],"risks":["assert the discounted total AFTER the cart re-queries"]}}]}`,
+      `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","needsUi":true,"brief":{"builtForSha":"<the sha above>","objective":"…","blastRadius":[{"symbol":"CheckoutService.pay","file":"src/checkout/checkout.service.ts","role":"applies the bulk discount and creates the order"}],"routes":[{"path":"/#!/checkout","verified":true}],"feBe":[{"route":"/checkout","operationId":"createOrder","via":"OrderClient.create"}],"contracts":[{"operationId":"createOrder","method":"POST","path":"/orders","fields":["items","total"]}],"risks":["assert the discounted total AFTER the cart re-queries"]}}]}`,
       `If the commit's change is not testable through a user flow, output {"objectives":[]}.`,
     ].join("\n");
   }
@@ -140,10 +185,11 @@ export function buildPlanPrompt(input: OpencodeRunInput): string {
     `   For each objective, include a distilled "brief" of its blast radius (blastRadius: each touched`,
     `   symbol with its file + a ONE-LINE role; plus FE↔BE links, relevant contract facts, and risks)`,
     `   so the worker does NOT re-read the code. Set the brief's builtForSha to ${input.sha}.`,
+    ...contextBlock,
     ...lessonsBlock,
     ``,
     `## Output — end with ONLY this JSON (no spec files):`,
-    `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","needsUi":true,"brief":{"builtForSha":"<the sha above>","objective":"…","blastRadius":[{"symbol":"CheckoutService.pay","file":"src/checkout/checkout.service.ts","role":"applies the bulk discount and creates the order"}],"feBe":[{"route":"/checkout","operationId":"createOrder","via":"OrderClient.create"}],"contracts":[{"operationId":"createOrder","method":"POST","path":"/orders","fields":["items","total"]}],"risks":["assert the discounted total AFTER the cart re-queries"]}}]}`,
+    `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","needsUi":true,"brief":{"builtForSha":"<the sha above>","objective":"…","blastRadius":[{"symbol":"CheckoutService.pay","file":"src/checkout/checkout.service.ts","role":"applies the bulk discount and creates the order"}],"routes":[{"path":"/#!/checkout","verified":true}],"feBe":[{"route":"/checkout","operationId":"createOrder","via":"OrderClient.create"}],"contracts":[{"operationId":"createOrder","method":"POST","path":"/orders","fields":["items","total"]}],"risks":["assert the discounted total AFTER the cart re-queries"]}}]}`,
     `If every important flow is already well covered, output {"objectives":[]}.`,
   ].join("\n");
 }
@@ -158,7 +204,7 @@ export function buildExplorerPrompt(input: OpencodeRunInput): string {
     `## Change intent (Conventional Commits)`,
     `- Type: ${input.intent?.type ?? "unknown"}${input.intent?.breaking ? " (BREAKING)" : ""}`,
     `- Message: ${sanitizeText(input.intent?.message ?? "").text}`,
-    `- Changed files: ${sanitizeText(input.intent?.changedFiles.join(", ") ?? "").text || "(unknown)"}`,
+    `- Changed files: ${sanitizeText(input.intent?.changedFiles?.join(", ") ?? "").text || "(unknown)"}`,
     ``,
     `## Commit diff`,
     "```diff",
@@ -214,6 +260,10 @@ export function buildPrompt(input: OpencodeRunInput): string {
     : [];
 
   // Fix mode: prepend failure feedback before the original task.
+  // When `failureSourced` is true (the domSnapshot is the failure-point capture), the fix
+  // instructions remove the browser_navigate + browser_snapshot steps — the agent MUST NOT
+  // navigate; the injected tree IS the ground truth. This prevents wasted MCP round-trips
+  // and conflation of the current live-DEV state with the state AT THE FAILURE POINT.
   const fixBlock = input.fixCases?.length && isGenerationMode
     ? [
         `## Fix failing tests`,
@@ -226,18 +276,98 @@ export function buildPrompt(input: OpencodeRunInput): string {
           (c) => `- ${c.name}\n  Error: ${c.detail?.slice(0, 500) ?? "(no detail)"}`,
         ),
         ``,
-        `For each failure, use the Playwright MCP to explore the page and verify`,
-        `your fix BEFORE writing it:`,
-        `1. Read the test file to understand what it asserts`,
-        `2. Use browser_navigate + browser_snapshot to see the ACTUAL page structure`,
-        `3. Fix the ROOT CAUSE, guided by the error type:`,
-        `   - "strict mode violation" → scope the selector to a section first`,
-        `   - "locator.click: … not found" → the element doesn't exist; check role/label`,
-        `   - "expect(…).toBeVisible() timed out" → the element exists but isn't visible; check loading states`,
-        `   - "NS_ERROR_…" / network error → the URL or route is wrong; verify with browser_navigate`,
-        `   - "locator resolved to N elements" → use .first() ONLY as last resort; prefer scoping`,
-        `4. PRESERVE each test's objective and assertions — fix only what's broken`,
+        ...(input.failureSourced
+          ? [
+              `The captured a11y tree at the failure point is injected ABOVE as "GROUND TRUTH AT FAILURE".`,
+              `1. Read the test file to understand what it asserts`,
+              `2. Consult ONLY the GROUND TRUTH tree above — do NOT navigate or snapshot the live page.`,
+              `   The tree above is the page AT THE FAILURE POINT, not the current live state.`,
+              `3. Fix the ROOT CAUSE, guided by the error type:`,
+              `   - "strict mode violation" → scope the selector to a section first`,
+              `   - "locator.click: … not found" → the element doesn't exist; check role/label in the GROUND TRUTH tree`,
+              `   - "expect(…).toBeVisible() timed out" → the element exists but isn't visible; check loading states`,
+              `   - "locator resolved to N elements" → use .filter({hasText:…}) or scope to a unique parent`,
+              `4. PRESERVE each test's objective and assertions — fix only what's broken`,
+            ]
+          : [
+              `For each failure, use the Playwright MCP to explore the page and verify`,
+              `your fix BEFORE writing it:`,
+              `1. Read the test file to understand what it asserts`,
+              `2. Use browser_navigate + browser_snapshot to see the ACTUAL page structure`,
+              `3. Fix the ROOT CAUSE, guided by the error type:`,
+              `   - "strict mode violation" → scope the selector to a section first`,
+              `   - "locator.click: … not found" → the element doesn't exist; check role/label`,
+              `   - "expect(…).toBeVisible() timed out" → the element exists but isn't visible; check loading states`,
+              `   - "NS_ERROR_…" / network error → the URL or route is wrong; verify with browser_navigate`,
+              `   - "locator resolved to N elements" → use .first() ONLY as last resort; prefer scoping`,
+              `4. PRESERVE each test's objective and assertions — fix only what's broken`,
+            ]),
       ]
+    : [];
+
+  // Lever-2 deterministic selector contradictions (W1): each is a VERIFIED finding from comparing the
+  // generated specs' selectors against the captured failure-point a11y tree — an absent selector
+  // ("role:name is NOT in the captured tree; present roles: …") or an ambiguous one ("matches MULTIPLE
+  // nodes …"). This is the design's compliance-wall closer (§1.5/§1.5b). It is rendered as its OWN,
+  // UN-truncated section (NEVER folded into the 500-char-sliced fixCases detail below, where verbose PW
+  // 1.60 errors would cut it off exactly when an absent selector was found). Placed right after the
+  // GROUND TRUTH tree so the agent reads the contradiction against the very tree it must transcribe.
+  const selectorContradictionsBlock =
+    input.selectorContradictions?.length && isGenerationMode
+      ? [
+          `## ⚠ Lever-2 selector contradictions (DETERMINISTIC — resolve EVERY one)`,
+          ``,
+          `These selectors were checked against the captured failure-point tree above and FAILED.`,
+          `Each is a verified fact, not a hint: a contradicted \`role:name\` is NOT in the captured tree`,
+          `(the listed present roles are what IS there) — do NOT re-use it. Replace it with a role/name`,
+          `that appears in the tree, or a \`getByText\`/scoped locator; for a "matches MULTIPLE" finding,`,
+          `scope the locator to a unique parent. You MUST resolve every item before finishing:`,
+          ``,
+          ...input.selectorContradictions.map((c) => `- ${c}`),
+          ``,
+        ]
+      : [];
+
+  // Live DEV accessibility tree of the target routes — the DETERMINISTIC ground truth for selectors.
+  // When `failureSourced` is true, the domSnapshot is the captured failure-point tree (not a live
+  // pre-write snapshot); the heading switches to "GROUND TRUTH AT FAILURE" and source-framing,
+  // counterfactual, and quote-then-assert instructions are prepended (design §6.1).
+  // The block is placed at the PROMPT EDGE (top) so it is the first thing the agent reads.
+  const domBlock = input.domSnapshot && isGenerationMode
+    ? input.failureSourced
+      ? [
+          `## GROUND TRUTH AT FAILURE`,
+          ``,
+          `The tree below is the page AT THE FAILURE POINT — the ONLY source of truth for this fix.`,
+          `Do NOT use general knowledge of what tables, forms, or components usually contain.`,
+          `The ACTUAL rendered tree is what matters, and it is captured below.`,
+          ``,
+          `⚠ Counterfactual warning: even if element types commonly expose a given role`,
+          `(e.g. tables commonly expose \`columnheader\`, forms commonly expose \`textbox\`),`,
+          `if THIS tree does NOT show it — trust the tree, not the convention. The live page`,
+          `may use CSS \`role="presentation"\` or a custom component that drops standard roles.`,
+          ``,
+          `📌 Quote-then-assert contract: before writing any locator, cite the EXACT \`role: name\``,
+          `line from the tree below that the locator relies on. An unquotable locator`,
+          `(i.e. no matching line exists in this tree) MUST be rejected and replaced with`,
+          `\`getByText\` or a scoped CSS/data-testid locator instead.`,
+          ``,
+          input.domSnapshot,
+          ``,
+        ]
+      : [
+          `## Live DEV accessibility tree (GROUND TRUTH for selectors — trust this over HTML intuition)`,
+          ``,
+          `These are the roles + accessible names the browser ACTUALLY exposes for the target routes.`,
+          `Author selectors ONLY from what appears below:`,
+          `- If a role you expected (e.g. \`columnheader\`) is NOT listed, it is NOT in the a11y tree —`,
+          `  do NOT use \`getByRole\` for it. Fall back to \`getByText\` or a scoped locator.`,
+          `- If a name appears MORE THAN ONCE, a bare \`getByRole\`/\`getByText\` matches multiple elements`,
+          `  (strict-mode violation) — scope it to a unique parent/section, or use a unique attribute.`,
+          ``,
+          input.domSnapshot,
+          ``,
+        ]
     : [];
 
   const changeType = input.intent?.type ?? input.mode;
@@ -247,6 +377,8 @@ export function buildPrompt(input: OpencodeRunInput): string {
   return [
     ...reviewBlock,
     ...coverageBlock,
+    ...domBlock,
+    ...selectorContradictionsBlock,
     ...learnedRulesBlock,
     ...fixBlock,
     ...(fixBlock.length ? [``] : []),
@@ -541,7 +673,7 @@ function buildTask(input: OpencodeRunInput): string {
     `## Change intent (Conventional Commits)`,
     `- Type: ${intent?.type ?? "unknown"}${intent?.breaking ? " (BREAKING)" : ""}`,
     `- Message: ${sanitizeText(intent?.message ?? "").text}`,
-    `- Changed files (derive the scope/area from these): ${sanitizeText(intent?.changedFiles.join(", ") ?? "").text || "(unknown)"}`,
+    `- Changed files (derive the scope/area from these): ${sanitizeText(intent?.changedFiles?.join(", ") ?? "").text || "(unknown)"}`,
     `The message gives the INTENT; derive each test's objective from it. But CROSS-CHECK`,
     `against the diff: if the code does more than the message claims, cover what the code`,
     `actually changes, not just what the message promises.`,
