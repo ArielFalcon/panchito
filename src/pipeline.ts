@@ -1618,8 +1618,15 @@ export async function runPipeline(
         break;
       }
       log("[qa] re-running E2E with fixed tests...");
-      deps.clearCoverage?.(e2eDir, ns);
-      const retryRun = await deps.execute(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: ns, onCase, onRunning: onRunningTest, signal });
+      // Fresh DATA namespace per retry. Apps whose backend has no delete (e.g. Spring PetClinic — the
+      // cleanup fixture's DELETE 404s) cannot remove the data a spec created. Re-executing the SAME spec
+      // under the SAME namespace then makes the retry collide with its OWN prior attempt's records (a
+      // second "qa-bot-<ns>-owner" → strict-mode), failing a spec that is actually CORRECT — which is
+      // exactly what masked an otherwise-green suite as `fail`. A per-attempt namespace keeps each
+      // retry's created data uniquely scoped, so a correct spec passes on re-run regardless of cleanup.
+      const retryNs = `${ns}-r${retry + 1}`;
+      deps.clearCoverage?.(e2eDir, retryNs);
+      const retryRun = await deps.execute(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: retryNs, onCase, onRunning: onRunningTest, signal });
       if (retryRun.verdict === "fail" && !(await devHealthy())) {
         run = resultOf(ns, "infra-error", "failures with an unhealthy DEV: treated as infrastructure");
         break;

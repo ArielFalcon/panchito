@@ -1418,6 +1418,28 @@ test("3.6 fix-loop: absent failureDom degrades gracefully (no domSnapshot, blind
   assert.ok(!retryGenInput.failureSourced, "failureSourced should be absent/falsy when no failureDom available");
 });
 
+test("3.x fix-loop: the retry RE-EXECUTES under a fresh per-attempt namespace (no self-pollution)", async () => {
+  // Apps whose backend cannot delete created data (e.g. Spring PetClinic) self-collide if a retry
+  // re-executes under the SAME namespace: the second run re-creates "qa-bot-<ns>-owner" and a verify
+  // assertion hits TWO matches → strict-mode → a CORRECT spec is masked as fail. The retry must use a
+  // per-attempt namespace so each attempt's data is uniquely scoped.
+  const calls: string[] = [];
+  const failingRun: QaRunResult = { sha: "s", verdict: "fail", passed: false, cases: [{ name: "owners", status: "fail", failureDom: "button: Submit" }], logs: "" };
+  const fixedRun: QaRunResult = { sha: "s", verdict: "pass", passed: true, cases: [], logs: "" };
+  const oneRetryApp: AppConfig = { ...app, qa: { ...app.qa, fixLoop: { maxRetries: 1 } } };
+  const d = deps(failingRun, calls);
+  const execNamespaces: string[] = [];
+  let executeCall = 0;
+  d.execute = async (_dir: string, opts: { namespace: string }) => {
+    execNamespaces.push(opts.namespace);
+    return executeCall++ === 0 ? failingRun : fixedRun;
+  };
+  await runPipeline(oneRetryApp, "abc123", d);
+  assert.equal(execNamespaces.length, 2, "expected an initial execute + one retry execute");
+  assert.notEqual(execNamespaces[1], execNamespaces[0], "the retry must use a DIFFERENT namespace than the initial run");
+  assert.equal(execNamespaces[1], `${execNamespaces[0]}-r1`, "the retry namespace is the run namespace suffixed with the attempt index");
+});
+
 // CROSS-BOUNDARY (W1): the regression guard must keep the BEST executed run, not the terminal one.
 // Sequence: initial 2 failures → retry1 1 failure (better) → retry2 3 failures (worse). The earlier
 // 1-failure run must be restored as the verdict — the worse final retry is discarded. Before the
