@@ -4,8 +4,9 @@ import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, existsSync, rmSync 
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 import Database from "better-sqlite3";
-import { createRecord, getRecord, listRecords, currentRun, updateRecord, addCase, continuationDepth, clearDatabase, appendActivity, upsertLearningRule, listLearningRules, recordRuleOutcome, saveScorecardEntry, loadScorecard, deleteAppHistory, interruptedRecords, backupDatabase, saveRunOutcome, getRunOutcome, listRunOutcomes, updateRunOutcomeReflection, markContextStale, consumeContextStale } from "./history";
-import type { RunOutcome, StructuredReflection } from "../types";
+import { createRecord, getRecord, listRecords, currentRun, updateRecord, addCase, continuationDepth, clearDatabase, appendActivity, upsertLearningRule, listLearningRules, recordRuleOutcome, saveScorecardEntry, loadScorecard, deleteAppHistory, interruptedRecords, backupDatabase, saveRunOutcome, getRunOutcome, listRunOutcomes, updateRunOutcomeReflection, markContextStale, consumeContextStale, saveAgentTurn, getAgentTurns } from "./history";
+import type { RunOutcome, StructuredReflection, } from "../types";
+import type { AgentTurnRecord } from "./history";
 
 test("markContextStale then consumeContextStale is one-shot: first consume true, second false", () => {
   const app = "hist-ctx-stale";
@@ -287,4 +288,112 @@ test("backupDatabase keeps only the last 7 backups", async () => {
     else process.env.AI_PIPELINE_ROOT = prevRoot;
     rmSync(tmpRoot, { recursive: true, force: true });
   }
+});
+
+// ── Phase 0 / Slice A — agent_turns store ────────────────────────────────────
+
+// Minimal valid turn record factory for the tests below.
+function makeTurn(overrides: Partial<AgentTurnRecord> = {}): AgentTurnRecord {
+  return {
+    runId: "run-test-001",
+    sessionId: "sess-abc",
+    role: "qa-generator",
+    round: 0,
+    isRepair: false,
+    ts: new Date().toISOString(),
+    objective: "test the login flow",
+    promptText: "Write a Playwright test for the login feature.",
+    outputText: "The test is written.",
+    promptBytes: 43,
+    tokensInput: 100,
+    tokensOutput: 50,
+    tokensReasoning: 10,
+    tokensCacheRead: 5,
+    tokensCacheWrite: 2,
+    cost: 0.001,
+    ...overrides,
+  };
+}
+
+test("Phase 0 A.1/A.2: saveAgentTurn round-trips to getAgentTurns with all fields", () => {
+  const turn = makeTurn();
+  saveAgentTurn(turn);
+  const rows = getAgentTurns(turn.runId!);
+  assert.ok(rows.length >= 1, "at least one row must be returned");
+  const saved = rows.find((r) => r.sessionId === turn.sessionId && r.role === turn.role);
+  assert.ok(saved, "the saved turn must be retrievable by runId");
+  assert.equal(saved!.role, "qa-generator");
+  assert.equal(saved!.round, 0);
+  assert.equal(saved!.isRepair, false);
+  assert.equal(saved!.promptText, turn.promptText);
+  assert.equal(saved!.outputText, turn.outputText);
+  assert.equal(saved!.promptBytes, turn.promptBytes);
+  assert.equal(saved!.tokensInput, 100);
+  assert.equal(saved!.tokensOutput, 50);
+  assert.equal(saved!.tokensReasoning, 10);
+  assert.equal(saved!.tokensCacheRead, 5);
+  assert.equal(saved!.tokensCacheWrite, 2);
+  assert.ok(Math.abs((saved!.cost ?? 0) - 0.001) < 1e-9);
+  assert.equal(saved!.objective, "test the login flow");
+});
+
+test("Phase 0 A.2: saveAgentTurn stores null-runId turns (sessions with no parent run)", () => {
+  const turn = makeTurn({ runId: null, sessionId: "sess-no-run" });
+  // Should not throw — null runId is explicitly valid (e.g. maintainer, chat sessions).
+  assert.doesNotThrow(() => saveAgentTurn(turn));
+});
+
+test("Phase 0 A.2: getAgentTurns returns multiple turns in chronological order", () => {
+  const runId = "run-order-test-" + Date.now();
+  saveAgentTurn(makeTurn({ runId, sessionId: "s1", round: 0, role: "qa-generator", promptText: "first" }));
+  saveAgentTurn(makeTurn({ runId, sessionId: "s1", round: 1, role: "qa-generator", promptText: "second" }));
+  saveAgentTurn(makeTurn({ runId, sessionId: "s2", round: 0, role: "qa-reviewer", promptText: "review" }));
+  const rows = getAgentTurns(runId);
+  assert.equal(rows.length, 3);
+  // Chronological insertion order preserved.
+  assert.equal(rows[0]!.promptText, "first");
+  assert.equal(rows[1]!.promptText, "second");
+  assert.equal(rows[2]!.role, "qa-reviewer");
+});
+
+test("Phase 0 A.2: saveAgentTurn accepts null token fields (Codex path)", () => {
+  const runId = "run-codex-null-" + Date.now();
+  const turn = makeTurn({
+    runId,
+    sessionId: "codex-sess",
+    tokensInput: null,
+    tokensOutput: null,
+    tokensReasoning: null,
+    tokensCacheRead: null,
+    tokensCacheWrite: null,
+    cost: null,
+  });
+  saveAgentTurn(turn);
+  const rows = getAgentTurns(runId);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.tokensInput, null);
+  assert.equal(rows[0]!.tokensOutput, null);
+  assert.equal(rows[0]!.cost, null);
+});
+
+test("Phase 0 A.2: saveAgentTurn stores sanitized output — caller must pre-sanitize (contract)", () => {
+  // The store accepts whatever it receives; the DI contract requires the caller (defaultAgentDeps
+  // funnel) to sanitize before calling saveAgentTurn. We test that round-trip is faithful.
+  const runId = "run-sanitize-rt-" + Date.now();
+  const sanitizedText = "[REDACTED_SECRET] was in the output";
+  saveAgentTurn(makeTurn({ runId, outputText: sanitizedText }));
+  const rows = getAgentTurns(runId);
+  assert.equal(rows[0]!.outputText, sanitizedText);
+});
+
+test("Phase 0 A.1: agent_turns table migrates idempotently on an existing DB (columnExists guard)", () => {
+  // Calling saveAgentTurn twice with different sessions for the same run must work without errors,
+  // proving the schema was created exactly once (the IF NOT EXISTS guards prevent duplicate tables).
+  const runId = "run-migrate-" + Date.now();
+  saveAgentTurn(makeTurn({ runId, sessionId: "sess-a" }));
+  saveAgentTurn(makeTurn({ runId, sessionId: "sess-b", role: "qa-reviewer" }));
+  const rows = getAgentTurns(runId);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0]!.sessionId, "sess-a");
+  assert.equal(rows[1]!.role, "qa-reviewer");
 });

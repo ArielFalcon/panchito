@@ -21,7 +21,7 @@ import { sanitizeText } from "../orchestrator/sanitizer";
 import { ActivityRouter } from "./agent-activity";
 import { mapOpencodeEvent, eventRunId } from "./activity-mapper";
 import type { RunEventBody } from "../contract/events";
-import { appendLog } from "../server/history";
+import { appendLog, saveAgentTurn } from "../server/history";
 import { installHttpDispatcher } from "../util/net";
 
 interface SessionEntry {
@@ -483,6 +483,29 @@ export interface OpencodeRunInput {
   services?: Array<{ repo: string; mirrorDir: string; openapi?: string | string[] }>; // context mode: every declared service, mirrored read-only
 }
 
+// A single agent prompt/response turn captured at the SDK funnel. Emitted via the
+// `onTurn` callback on `open()` opts at the point where `onUsage` already fires.
+// `outputText` is sanitized BEFORE persist (sanitizer.ts); `runId` is null when the
+// session was opened without a descriptor (maintenance sessions, etc.).
+export interface AgentTurnEvent {
+  runId: string | null;
+  sessionId: string;
+  role: string;
+  objective: string | undefined;
+  round: number;
+  isRepair: boolean;
+  promptText: string;
+  promptBytes: number;
+  outputText: string;
+  tokensInput: number | null;
+  tokensOutput: number | null;
+  tokensReasoning: number | null;
+  tokensCacheRead: number | null;
+  tokensCacheWrite: number | null;
+  cost: number | null;
+  ts: string;
+}
+
 // A session opened against `opencode serve`. prompt() sends the message to the
 // `qa-generator` agent and returns its final text (including the closing JSON).
 // dispose() cleans up the session; call it when the session is no longer needed
@@ -492,12 +515,36 @@ export interface AgentSession {
   // textOnly returns only the model's final answer (type:"text" parts), excluding
   // reasoning parts. Default (false) concatenates every text-bearing part — the
   // generator/reviewer need that so a closing JSON emitted in a reasoning part survives.
-  prompt(text: string, opts?: { textOnly?: boolean }): Promise<string>;
+  // round/isRepair are per-call opts so the funnel can distinguish generation rounds
+  // from in-session contract-repair re-prompts when recording agent_turns rows.
+  prompt(text: string, opts?: { textOnly?: boolean; round?: number; isRepair?: boolean }): Promise<string>;
   dispose(): Promise<void>;
 }
 
+// Session-scoped descriptor forwarded by every open() call-site that has a run context.
+// `role` mirrors the existing `agent` arg (kept for consistency with the agent name).
+// `runId`/`objective` are optional so inapplicable call-sites (maintainer, etc.) can
+// leave them undefined without needing a type cast.
+export interface AgentOpenDescriptor {
+  runId?: string;
+  role?: string;
+  objective?: string;
+}
+
 export interface AgentDeps {
-  open(agent: string, cwd: string, opts?: { signal?: AbortSignal; timeoutMs?: number; model?: string; onUsage?: (u: UsageSnapshot) => void }): Promise<AgentSession>;
+  open(
+    agent: string,
+    cwd: string,
+    opts?: {
+      signal?: AbortSignal;
+      timeoutMs?: number;
+      model?: string;
+      onUsage?: (u: UsageSnapshot) => void;
+      onTurn?: (t: AgentTurnEvent) => void;
+      // Session-scoped identity descriptor (threaded by call-sites that have a run context).
+      descriptor?: AgentOpenDescriptor;
+    },
+  ): Promise<AgentSession>;
   cleanupOrphans?(maxAgeMs: number): Promise<number>;
 }
 
@@ -513,7 +560,11 @@ async function maybeExplore(
   if (!input.explorer || input.mode !== "diff" || input.target === "code" || isReGen) return null;
   let session: AgentSession | undefined;
   try {
-    session = await deps.open("qa-explorer", input.mirrorDir, { signal: opts?.signal, timeoutMs: EXPLORER_TIMEOUT_MS });
+    session = await deps.open("qa-explorer", input.mirrorDir, {
+      signal: opts?.signal,
+      timeoutMs: EXPLORER_TIMEOUT_MS,
+      descriptor: { runId: input.runId, role: "qa-explorer" },
+    });
     if (input.runId) registerRunSession(session.id, input.runId, input.mirrorDir, "explorer");
     const text = await session.prompt(buildExplorerPrompt(input));
     const brief = parseExplorationBrief(text);
@@ -548,7 +599,11 @@ export async function runOpencode(
   // exploring inline (never fails the run).
   const explorerBrief = await maybeExplore(input, deps, opts);
   const effectiveInput = explorerBrief ? { ...input, contextBrief: explorerBrief } : input;
-  const session = await deps.open("qa-generator", input.mirrorDir, { signal: opts?.signal, timeoutMs });
+  const session = await deps.open("qa-generator", input.mirrorDir, {
+    signal: opts?.signal,
+    timeoutMs,
+    descriptor: { runId: input.runId, role: "qa-generator", objective: input.intent?.message },
+  });
 
   // Register this session for SSE live activity so the agent's real-time events
   // (tool calls, file edits, streaming text) are routed to the RunRecord logs.
@@ -1065,7 +1120,10 @@ export async function generateParallel(
   const runOne = async (w: ParallelWorkerInput) => {
     try {
       const agent = w.needsUi ? "qa-worker" : "qa-worker-code";
-      const session = await deps.open(agent, w.mirrorDir, { signal: opts?.signal });
+      const session = await deps.open(agent, w.mirrorDir, {
+        signal: opts?.signal,
+        descriptor: { runId: w.runId, role: agent, objective: w.objective },
+      });
       if (w.runId) registerRunSession(session.id, w.runId, w.mirrorDir, w.flow);
       try {
         const output = await session.prompt(buildWorkerPrompt(w));
@@ -1140,7 +1198,11 @@ export async function runOpencodeParallel(
   const timeoutMs = agentTimeout(input.mode);
 
   // Phase 1 — PLAN (strong model). Heartbeat while it analyses the whole repo.
-  const planSession = await deps.open("qa-generator", input.mirrorDir, { signal: opts?.signal, timeoutMs });
+  const planSession = await deps.open("qa-generator", input.mirrorDir, {
+    signal: opts?.signal,
+    timeoutMs,
+    descriptor: { runId: input.runId, role: "qa-generator", objective: "(planner)" },
+  });
   if (input.runId) registerRunSession(planSession.id, input.runId, input.mirrorDir);
   const startedAt = Date.now();
   const heartbeat = opts?.onProgress
@@ -1311,11 +1373,21 @@ const MAX_AGENT_TIMEOUT_MS = Math.max(...Object.values(TIMEOUT_BY_MODE));
 // opts.onUsage still wins (`opts?.onUsage ?? onUsage`). No sink ⇒ baseDeps is returned untouched.
 // Single home for this wrapper so the precedence cannot drift between the entrypoint (index.ts) and
 // the default pipeline factory (pipeline.ts), which both need identical behavior.
-export function withUsageSink(baseDeps: AgentDeps, onUsage?: (u: UsageSnapshot) => void): AgentDeps {
-  if (!onUsage) return baseDeps;
+// `onTurn` is injected similarly: caller-supplied wins; otherwise the provided sink is used.
+export function withUsageSink(
+  baseDeps: AgentDeps,
+  onUsage?: (u: UsageSnapshot) => void,
+  onTurn?: (t: AgentTurnEvent) => void,
+): AgentDeps {
+  if (!onUsage && !onTurn) return baseDeps;
   return {
     ...baseDeps,
-    open: (agent, cwd, opts) => baseDeps.open(agent, cwd, { ...opts, onUsage: opts?.onUsage ?? onUsage }),
+    open: (agent, cwd, opts) =>
+      baseDeps.open(agent, cwd, {
+        ...opts,
+        ...(onUsage ? { onUsage: opts?.onUsage ?? onUsage } : {}),
+        ...(onTurn ? { onTurn: opts?.onTurn ?? onTurn } : {}),
+      }),
   };
 }
 
@@ -1366,12 +1438,51 @@ export async function defaultAgentDeps(): Promise<AgentDeps> {
       // session, burning model tokens) until its natural end or the 30-min orphan sweep.
       const abortRun = () => client.session.abort({ path: { id } }).catch(() => {});
 
+      // Default turn sink: persist to agent_turns when a runId is available and no caller-supplied
+      // onTurn overrides it. Best-effort: a storage failure must not break the agent session.
+      const defaultOnTurn = opts?.descriptor?.runId
+        ? (t: AgentTurnEvent) => {
+            try {
+              saveAgentTurn({
+                runId: t.runId,
+                sessionId: t.sessionId,
+                role: t.role,
+                round: t.round,
+                isRepair: t.isRepair,
+                ts: t.ts,
+                objective: t.objective ?? null,
+                promptText: t.promptText,
+                outputText: t.outputText,
+                promptBytes: t.promptBytes,
+                tokensInput: t.tokensInput,
+                tokensOutput: t.tokensOutput,
+                tokensReasoning: t.tokensReasoning,
+                tokensCacheRead: t.tokensCacheRead,
+                tokensCacheWrite: t.tokensCacheWrite,
+                cost: t.cost,
+              });
+            } catch (err) {
+              console.warn(`[qa] agent_turns persist failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+        : undefined;
+      // The effective onTurn: caller-supplied wins; default sink fires when runId is present.
+      const effectiveOnTurn = opts?.onTurn ?? defaultOnTurn;
+
+      // Track the per-call round counter so `onTurn` can report which round produced each output.
+      // The counter starts at 0 for the first prompt() call on this session and increments each
+      // time prompt() is invoked (whether a normal generation round or an in-session repair).
+      let _round = 0;
+
       return {
         id,
         prompt: (text, promptOpts) =>
           withTimeout(
             (() => {
               checkCircuit();
+              // Capture the round for this call (incremented after the closure captures it so
+              // round=0 on the first call, round=1 on the second, etc.).
+              const thisRound = _round++;
               const runPrompt = (modelOverride?: string) => {
                 const overrideModel = modelOverride ? parseModelRef(modelOverride) : undefined;
                 return client.session
@@ -1395,13 +1506,13 @@ export async function defaultAgentDeps(): Promise<AgentDeps> {
                       throw agentErrorToInfra(agentErr);
                     }
                     recordCircuitSuccess();
+                    const infoRaw = res.data?.info as
+                      | { tokens?: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }; cost?: number }
+                      | undefined;
                     // Emit a usage snapshot for the accumulator (observation-only). The ONLY sink is
                     // opts.onUsage — callers that want capture pre-wrap this AgentDeps to inject it
                     // into every open() (so internal callers like the explorer/reviewer are covered
                     // without touching their individual call sites).
-                    const infoRaw = res.data?.info as
-                      | { tokens?: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }; cost?: number }
-                      | undefined;
                     if (infoRaw?.tokens) {
                       const snapshot: UsageSnapshot = {
                         input: infoRaw.tokens.input ?? 0,
@@ -1413,7 +1524,33 @@ export async function defaultAgentDeps(): Promise<AgentDeps> {
                       };
                       opts?.onUsage?.(snapshot);
                     }
-                    return extractText(res.data?.parts, promptOpts);
+                    const outputRaw = extractText(res.data?.parts, promptOpts);
+                    // Emit a per-turn event alongside onUsage. Sanitize output_text before
+                    // emitting so any DEV-environment data in the agent reply is redacted at
+                    // the earliest point (before storage or logging by callers).
+                    if (effectiveOnTurn) {
+                      const sanitizedOutput = sanitizeText(outputRaw).text;
+                      const turnEvent: AgentTurnEvent = {
+                        runId: opts?.descriptor?.runId ?? null,
+                        sessionId: id,
+                        role: opts?.descriptor?.role ?? agent,
+                        objective: opts?.descriptor?.objective,
+                        round: promptOpts?.round ?? thisRound,
+                        isRepair: promptOpts?.isRepair ?? false,
+                        promptText: text,
+                        promptBytes: Buffer.byteLength(text, "utf8"),
+                        outputText: sanitizedOutput,
+                        tokensInput: infoRaw?.tokens?.input ?? null,
+                        tokensOutput: infoRaw?.tokens?.output ?? null,
+                        tokensReasoning: infoRaw?.tokens?.reasoning ?? null,
+                        tokensCacheRead: infoRaw?.tokens?.cache?.read ?? null,
+                        tokensCacheWrite: infoRaw?.tokens?.cache?.write ?? null,
+                        cost: infoRaw?.cost ?? null,
+                        ts: new Date().toISOString(),
+                      };
+                      effectiveOnTurn(turnEvent);
+                    }
+                    return outputRaw;
                   })
                   // Record the circuit failure in EXACTLY one place per attempt. The error
                   // branches above throw without counting; this single trailing catch counts

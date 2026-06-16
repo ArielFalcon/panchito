@@ -17,6 +17,28 @@ import type { ErrorClass } from "../qa/learning/taxonomy";
 import type { Curriculum } from "../qa/learning/curriculum";
 import { updateScorecard, type Scorecard, type ScorecardEntry } from "../qa/learning/oracle-types";
 
+// Per-turn record of one agent prompt/response cycle, persisted to `agent_turns`.
+// Foundation for Phase-0 telemetry (see docs/plan-diff-manual-quality.md § Phase 0).
+// Token fields are null for Codex runs (Codex returns no token info).
+export interface AgentTurnRecord {
+  runId: string | null;       // maps to RunRecord.id; null for turns with no parent run
+  sessionId: string;          // OpenCode session id
+  role: string;               // agent name (qa-generator, qa-reviewer, qa-explorer, …)
+  round: number;              // 0-based generation round within the session
+  isRepair: boolean;          // true for in-session contract-repair re-prompts
+  ts: string;                 // ISO-8601 timestamp when the turn completed
+  objective: string | null;   // human-readable objective scope (null when not supplied)
+  promptText: string;         // full prompt sent to the agent
+  outputText: string;         // agent reply, sanitized before persist
+  promptBytes: number;        // byte length of promptText
+  tokensInput: number | null;
+  tokensOutput: number | null;
+  tokensReasoning: number | null;
+  tokensCacheRead: number | null;
+  tokensCacheWrite: number | null;
+  cost: number | null;
+}
+
 const DELETE_MAX_AGE_DAYS = 30;
 
 let db!: Database.Database;
@@ -45,6 +67,8 @@ let loadCurriculumStmt!: Database.Statement;
 let saveCurriculumStmt!: Database.Statement;
 let loadScorecardStmt!: Database.Statement;
 let saveScorecardStmt!: Database.Statement;
+let insertAgentTurnStmt!: Database.Statement;
+let getAgentTurnsStmt!: Database.Statement;
 let initialized = false;
 
 function ensureDb(): void {
@@ -185,6 +209,31 @@ function ensureDb(): void {
       app TEXT PRIMARY KEY,
       at TEXT NOT NULL
     );
+
+    -- Per-turn telemetry for every agent prompt/response cycle (Phase 0 foundation).
+    -- Mirrors the run_events 30-day retention. Token columns are nullable because Codex
+    -- runs return no token info. output_text is sanitized before persist (sanitizer.ts).
+    CREATE TABLE IF NOT EXISTS agent_turns (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id TEXT,
+      session_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      round INTEGER NOT NULL DEFAULT 0,
+      is_repair INTEGER NOT NULL DEFAULT 0,
+      ts TEXT NOT NULL,
+      objective TEXT,
+      prompt_text TEXT NOT NULL,
+      output_text TEXT NOT NULL,
+      prompt_bytes INTEGER NOT NULL DEFAULT 0,
+      tokens_input INTEGER,
+      tokens_output INTEGER,
+      tokens_reasoning INTEGER,
+      tokens_cache_read INTEGER,
+      tokens_cache_write INTEGER,
+      cost REAL
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_turns_run_id ON agent_turns(run_id);
+    CREATE INDEX IF NOT EXISTS idx_agent_turns_role ON agent_turns(role);
   `);
 
   // Migration: add columns introduced after the initial schema to DBs that already
@@ -253,10 +302,25 @@ function ensureDb(): void {
   loadScorecardStmt = db.prepare("SELECT data FROM scorecard WHERE app = ?");
   saveScorecardStmt = db.prepare("INSERT INTO scorecard (app, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(app) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at");
 
+  // agent_turns: insert a turn record; retrieve all turns for a run ordered by id.
+  insertAgentTurnStmt = db.prepare(`
+    INSERT INTO agent_turns
+      (run_id, session_id, role, round, is_repair, ts, objective,
+       prompt_text, output_text, prompt_bytes,
+       tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write, cost)
+    VALUES
+      (@runId, @sessionId, @role, @round, @isRepair, @ts, @objective,
+       @promptText, @outputText, @promptBytes,
+       @tokensInput, @tokensOutput, @tokensReasoning, @tokensCacheRead, @tokensCacheWrite, @cost)
+  `);
+  getAgentTurnsStmt = db.prepare("SELECT * FROM agent_turns WHERE run_id = ? ORDER BY id ASC");
+
   // Prune old runs once on first use.
   db.prepare(`DELETE FROM runs WHERE at < datetime('now', '-${DELETE_MAX_AGE_DAYS} days')`).run();
   // Bound the durable event log: drop events older than the run retention window (ts is epoch ms).
   db.prepare("DELETE FROM run_events WHERE ts < ?").run(Date.now() - DELETE_MAX_AGE_DAYS * 24 * 60 * 60 * 1000);
+  // Prune agent_turns older than the retention window.
+  db.prepare(`DELETE FROM agent_turns WHERE ts < datetime('now', '-${DELETE_MAX_AGE_DAYS} days')`).run();
 
   initialized = true;
 }
@@ -694,6 +758,54 @@ export function loadRunEvents(runId: string, afterSeq = -1): Array<{ runId: stri
     .prepare("SELECT run_id, seq, ts, body FROM run_events WHERE run_id = ? AND seq > ? ORDER BY seq")
     .all(runId, afterSeq) as Array<{ run_id: string; seq: number; ts: number; body: string }>;
   return rows.map((r) => ({ runId: r.run_id, seq: r.seq, ts: r.ts, body: safeJsonParse(r.body, {}) }));
+}
+
+// Persist one agent turn. `output_text` MUST already be sanitized by the caller
+// (sanitizer.ts `sanitizeText`) — this function stores whatever it receives.
+export function saveAgentTurn(turn: AgentTurnRecord): void {
+  ensureDb();
+  insertAgentTurnStmt.run({
+    runId: turn.runId ?? null,
+    sessionId: turn.sessionId,
+    role: turn.role,
+    round: turn.round,
+    isRepair: turn.isRepair ? 1 : 0,
+    ts: turn.ts,
+    objective: turn.objective ?? null,
+    promptText: turn.promptText,
+    outputText: turn.outputText,
+    promptBytes: turn.promptBytes,
+    tokensInput: turn.tokensInput ?? null,
+    tokensOutput: turn.tokensOutput ?? null,
+    tokensReasoning: turn.tokensReasoning ?? null,
+    tokensCacheRead: turn.tokensCacheRead ?? null,
+    tokensCacheWrite: turn.tokensCacheWrite ?? null,
+    cost: turn.cost ?? null,
+  });
+}
+
+// Retrieve all agent turn records for a run, ordered by insertion (chronological).
+export function getAgentTurns(runId: string): AgentTurnRecord[] {
+  ensureDb();
+  const rows = getAgentTurnsStmt.all(runId) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    runId: (r.run_id as string | null) ?? null,
+    sessionId: r.session_id as string,
+    role: r.role as string,
+    round: r.round as number,
+    isRepair: Boolean(r.is_repair),
+    ts: r.ts as string,
+    objective: (r.objective as string | null) ?? null,
+    promptText: r.prompt_text as string,
+    outputText: r.output_text as string,
+    promptBytes: r.prompt_bytes as number,
+    tokensInput: (r.tokens_input as number | null) ?? null,
+    tokensOutput: (r.tokens_output as number | null) ?? null,
+    tokensReasoning: (r.tokens_reasoning as number | null) ?? null,
+    tokensCacheRead: (r.tokens_cache_read as number | null) ?? null,
+    tokensCacheWrite: (r.tokens_cache_write as number | null) ?? null,
+    cost: (r.cost as number | null) ?? null,
+  }));
 }
 
 export function loadCurriculum(app: string): Curriculum | null {
