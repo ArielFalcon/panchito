@@ -73,6 +73,15 @@ export const AppConfigSchema = z
           maxRetries: z.number().int().min(0).max(5).optional(),
         })
         .optional(),
+      // Phase 6a: shared iteration ceiling across ALL four regeneration loops (review, static-fix,
+      // exec-fix, coverage-enforce) plus the two in-session contract-repair re-prompts (generator
+      // and reviewer). When the counter reaches this value no further generateAndReview() call is
+      // made; the run concludes with the last available state and logs the reason.
+      // NOTE: generateParallel workers are intentionally excluded — they run inside their own
+      // per-session timeout (OPENCODE_TIMEOUT_MS) and are bounded by that mechanism, not this
+      // shared counter. This is by design: parallel workers are fire-and-join, not iterated loops.
+      // Default (undefined) → a large safe constant that does not change existing behaviour.
+      iterationBudget: z.number().int().positive().optional(),
     }),
     code: z.boolean().optional(),
     report: z.object({

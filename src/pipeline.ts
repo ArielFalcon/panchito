@@ -106,7 +106,9 @@ export interface PipelineDeps {
   // Cross-repo runs: the PRIMARY repo at the HEAD of its base branch (the triggering
   // SHA belongs to the service repo and does not exist in the primary).
   prepareAtBranch(repo: string, branch: string): Promise<{ mirrorDir: string }>;
-  generate(input: GenerateInput, signal?: AbortSignal, onProgress?: (msg: string) => void, onUsage?: (u: UsageSnapshot) => void): Promise<AgentResult>;
+  // Phase 6a: `onRepair` fires once when the generator emits an in-session contract-repair
+  // re-prompt, so the shared cycle counter can account for repairs without polling the turn store.
+  generate(input: GenerateInput, signal?: AbortSignal, onProgress?: (msg: string) => void, onUsage?: (u: UsageSnapshot) => void, onRepair?: () => void): Promise<AgentResult>;
   // The *.spec.ts the agent actually wrote on disk (git status over e2e/), e2e-relative.
   // The authoritative spec set for the no-op decision and the reviewer's file list — the
   // orchestrator trusts the working copy, not the agent's self-report. Absent ⇒ no
@@ -117,7 +119,9 @@ export interface PipelineDeps {
   execute(e2eDir: string, opts: { baseUrl: string; namespace: string; onCase?: (c: QaCase) => void; onRunning?: (title: string) => void; onDiscovered?: (title: string, file?: string) => void; signal?: AbortSignal }): Promise<QaRunResult>;
   cleanup(e2eDir: string, opts: { baseUrl: string; namespace: string }): Promise<void>; // orphan-data cleanup (best-effort)
   isHealthy(versionUrl: string): Promise<boolean>; // is DEV healthy right now? (infra vs quality)
-  review?(input: ReviewInput, signal?: AbortSignal, onUsage?: (u: UsageSnapshot) => void): Promise<ReviewResult>; // independent reviewer (null = disabled)
+  // Phase 6a: `onRepair` fires once when the reviewer emits an in-session contract-repair
+  // re-prompt, so the shared cycle counter can account for repairs without polling the turn store.
+  review?(input: ReviewInput, signal?: AbortSignal, onUsage?: (u: UsageSnapshot) => void, onRepair?: () => void): Promise<ReviewResult>; // independent reviewer (null = disabled)
   // Change-coverage provider (the value keystone). Returns the lines actually exercised by the
   // run, repo-relative, or null when no usable coverage was produced (→ "unknown", never blocks).
   // Absent (undefined) ⇒ the change-coverage step is skipped entirely.
@@ -209,7 +213,7 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
     },
     prepareAtBranch: async (repo, branch) => ({ mirrorDir: await ensureMirrorAtBranch(repo, branch, defaultMirrorDeps) }),
     listChangedSpecs: (mirrorDir, e2eRelDir) => gitListChangedSpecs(mirrorDir, e2eRelDir, defaultMirrorDeps),
-    generate: async (input, signal, onProgress, onUsage) => {
+    generate: async (input, signal, onProgress, onUsage, onRepair) => {
       const ocInput = {
         repo: input.repo,
         sha: input.sha,
@@ -246,6 +250,10 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
       // modes (diff/manual) and any fix/review re-generation use the single-agent path. Code mode
       // always uses the single agent (no web fan-out). Diff mode fans out only when
       // qa.parallelDiff is explicitly enabled in the app config.
+      // Phase 6a NOTE: generateParallel workers are intentionally NOT covered by the shared cycle
+      // counter. Workers are fire-and-join sessions bounded by OPENCODE_TIMEOUT_MS per session,
+      // not by an iterated loop — so the counter would double-count them against the per-loop
+      // ceiling and break fan-out. The counter covers only the main-agent iterated path.
       const useParallel = shouldFanOut(input);
       return useParallel
         ? runOpencodeParallel(ocInput, oc, {
@@ -257,7 +265,7 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
               ? { captureRoutesDom: (routes: string[]) => captureDomForRoutes(routes, { e2eDir: join(input.mirrorDir, E2E_DIR), baseUrl: input.baseUrl }, defaultCaptureDomDeps) }
               : {}),
           })
-        : runOpencode(ocInput, oc, { signal, onProgress });
+        : runOpencode(ocInput, oc, { signal, onProgress, onRepair });
     },
     setupE2e: (e2eDir) => setupE2eProject(e2eDir, defaultSetupDeps),
     validate: (e2eDir) => validateSpecs(e2eDir, defaultValidateDeps),
@@ -303,8 +311,8 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
         return false;
       }
     },
-    review: async (input, signal, onUsage) =>
-      reviewIndependently(input, await agentDepsFactory(onUsage), { signal }),
+    review: async (input, signal, onUsage, onRepair) =>
+      reviewIndependently(input, await agentDepsFactory(onUsage), { signal, onRepair }),
     captureDom: (input) => captureDom(input, defaultCaptureDomDeps),
     loadContextCache: (app) => loadContextCacheDefault(app),
     saveContextCache: (app, map) => saveContextCacheDefault(app, map),
@@ -658,6 +666,22 @@ export async function runPipeline(
   const reviewerCorrections: string[] = []; // accumulated across review rounds (for RunOutcome)
   let reviewerRationale: string | undefined; // the LAST round's reviewer reasoning (approve or reject)
   let retries = 0; // total regeneration attempts (review loop + failure retries)
+
+  // Phase 6a: shared iteration ceiling. One counter shared across all four regeneration loops
+  // (review for-loop, static-fix while, exec-fix for-loop, coverage-enforce if) plus the two
+  // in-session contract-repair re-prompts (generator and reviewer). A single ceiling is simpler
+  // and fairer than per-loop caps: a run that spends budget in the static-fix loop gets fewer
+  // remaining cycles in the exec-fix loop, which is the correct behaviour.
+  //
+  // NOTE: generateParallel workers are intentionally NOT counted here. Workers run in
+  // fire-and-join parallel sessions bounded by OPENCODE_TIMEOUT_MS, not by iterated loops.
+  // Counting them would require coordinating across goroutines and would double-penalise
+  // large-PR fan-out runs. The ceiling covers only the main-agent sequential path.
+  //
+  // Default (≈ no ceiling): 9999 ensures the counter exists and is observed by tests
+  // without changing existing behaviour for apps that do not set iterationBudget.
+  const MAX_CYCLES = app.qa.iterationBudget ?? 9999;
+  let cycleCount = 0; // incremented BEFORE every generateAndReview() + before each repair re-prompt
   let retrievedRuleIds: string[] = []; // rule IDs retrieved for this run (for RunOutcome)
   let retrievedRules: LearningRule[] = []; // full retrieved rules (errorClass needed for governance)
   let curriculum: ReturnType<typeof initCurriculum> | null = null; // persisted across runs
@@ -1087,9 +1111,30 @@ export async function runPipeline(
   // Static-gate repair budget (Filter B). Mirrors the execution fix-loop: a trivial tsc/eslint/list
   // error should get a bounded second chance, not fail the whole run on the first miss.
   const MAX_STATIC_FIX_ROUNDS = 2;
+
+  // Phase 6a: the shared cycle counter callback — wired as onRepair into every deps.generate()
+  // and deps.review() call so that in-session contract-repair re-prompts increment cycleCount.
+  // The counter itself is declared above alongside `retries`.
+  const onRepair = () => {
+    cycleCount++;
+    log(`[qa] cycle-counter: in-session repair re-prompt (cycleCount=${cycleCount}/${MAX_CYCLES})`);
+  };
+
   const generateAndReview = async (genInput: GenerateInput): Promise<AgentResult> => {
+    // Phase 6a: count this invocation toward the shared iteration budget BEFORE spending any
+    // tokens. The ceiling check happens at every generateAndReview() call-site AND here for the
+    // review-round internal re-generation. A ceiling hit returns the current state immediately
+    // with a log — no silent stop.
+    cycleCount++;
+    if (cycleCount > MAX_CYCLES) {
+      log(`[qa] cycle-ceiling reached (cycleCount=${cycleCount - 1}/${MAX_CYCLES}): skipping this generateAndReview call and returning current state.`);
+      // Return a neutral result: no specs, not approved, with an explanatory note.
+      return { output: "", specs: [], reviewed: false, approved: false, note: `iteration budget exhausted (maxCycles=${MAX_CYCLES})` };
+    }
+    log(`[qa] cycle-counter: generateAndReview invocation (cycleCount=${cycleCount}/${MAX_CYCLES})`);
+
     const genStart = Date.now();
-    let r = await reconcileSpecs(await deps.generate(genInput, signal, log, usage.add.bind(usage)));
+    let r = await reconcileSpecs(await deps.generate(genInput, signal, log, usage.add.bind(usage), onRepair));
     log(`[qa] [timing] generation produced ${r.specs.length} spec(s) in ${Math.round((Date.now() - genStart) / 1000)}s`);
     if (!(app.qa.needsReview && deps.review)) return r;
     // The live-DOM grounding only depends on the ROUTES the specs target, so capture it once and
@@ -1127,6 +1172,7 @@ export async function runPipeline(
           { diff: promptDiff, specs: r.specs, mirrorDir, e2eRelDir: isCode ? "" : E2E_DIR, baseUrl: app.dev?.baseUrl, intent, guidance: opts.guidance, appName: app.name, mode, target: opts.target, learnedRules: renderRulesForReviewer(retrievedRules), domSnapshot },
           signal,
           usage.add.bind(usage),
+          onRepair,
         );
       } catch (err) {
         // FAIL CLOSED: the reviewer is the only independent gate against the circular
@@ -1164,11 +1210,19 @@ export async function runPipeline(
       onStep?.("retry");
       retries++;
       const regenStart = Date.now();
+      // Phase 6a: count the review-round internal re-generation against the shared budget.
+      // The ceiling check prevents unbounded rounds when a run has already spent budget elsewhere.
+      cycleCount++;
+      if (cycleCount > MAX_CYCLES) {
+        log(`[qa] cycle-ceiling reached mid-review-loop (cycleCount=${cycleCount - 1}/${MAX_CYCLES}): stopping regeneration, returning current reviewer-rejected state.`);
+        return { ...r, approved: false, note: `iteration budget exhausted mid-review (maxCycles=${MAX_CYCLES}); last reviewer correction: ${review.corrections.join("; ")}` };
+      }
+      log(`[qa] cycle-counter: review-round regeneration (cycleCount=${cycleCount}/${MAX_CYCLES})`);
       // Ground the regeneration in the SAME live a11y snapshot the reviewer just judged against, so the
       // generator fixes selectors against the real tree (e.g. no `columnheader` role on this table)
       // instead of re-deriving them from HTML intuition — the captured tree already shows what roles
       // actually exist and which names are duplicated (strict-mode risk).
-      r = await reconcileSpecs(await deps.generate({ ...genInput, reviewCorrections: review.corrections, domSnapshot }, signal, log, usage.add.bind(usage)));
+      r = await reconcileSpecs(await deps.generate({ ...genInput, reviewCorrections: review.corrections, domSnapshot }, signal, log, usage.add.bind(usage), onRepair));
       log(`[qa] [timing] regeneration produced ${r.specs.length} spec(s) in ${Math.round((Date.now() - regenStart) / 1000)}s`);
     }
     return r;

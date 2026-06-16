@@ -591,7 +591,14 @@ async function maybeExplore(
 export async function runOpencode(
   input: OpencodeRunInput,
   deps: AgentDeps,
-  opts?: { signal?: AbortSignal; onProgress?: (msg: string) => void },
+  opts?: {
+    signal?: AbortSignal;
+    onProgress?: (msg: string) => void;
+    // Phase 6a: called once when the generator fires an in-session contract-repair re-prompt,
+    // so the shared cycle counter in pipeline.ts can account for in-session repairs without
+    // polling the turn store. Optional — absent means repairs are not counted externally.
+    onRepair?: () => void;
+  },
 ): Promise<AgentResult> {
   const timeoutMs = agentTimeout(input.mode);
   // Fase 3: optional read-only explorer pass — distill the blast radius in an isolated session so the
@@ -636,7 +643,9 @@ export async function runOpencode(
     const genCheck = checkGeneratorVerdict(finalText);
     if (!genCheck.valid) {
       console.warn(`[qa] generator verdict failed the typed contract (${genCheck.issues.join("; ")}); requesting one repair.`);
-      finalText = await session.prompt(repairInstruction("generator", genCheck.issues));
+      // Phase 6a: notify the shared cycle counter before the repair re-prompt fires.
+      opts?.onRepair?.();
+      finalText = await session.prompt(repairInstruction("generator", genCheck.issues), { isRepair: true });
       if (!checkGeneratorVerdict(finalText).valid) {
         console.warn("[qa] generator verdict still invalid after repair — proceeding with best-effort parse (disk reconciliation still applies).");
       }
@@ -779,7 +788,13 @@ const EXPLORER_TIMEOUT_MS = Number(process.env.OPENCODE_EXPLORER_TIMEOUT_MS) || 
 export async function reviewIndependently(
   input: ReviewInput,
   deps: AgentDeps,
-  opts?: { signal?: AbortSignal },
+  opts?: {
+    signal?: AbortSignal;
+    // Phase 6a: called once when the reviewer fires an in-session contract-repair re-prompt,
+    // so the shared cycle counter in pipeline.ts can account for in-session repairs without
+    // polling the turn store. Optional — absent means repairs are not counted externally.
+    onRepair?: () => void;
+  },
 ): Promise<ReviewResult> {
   const session = await deps.open("qa-reviewer", input.mirrorDir, { signal: opts?.signal, timeoutMs: REVIEWER_TIMEOUT_MS });
   try {
@@ -863,7 +878,9 @@ export async function reviewIndependently(
     // repair reuses REVIEWER_TIMEOUT_MS, so worst case it is spent twice — error path only).
     if (!v.valid) {
       console.warn(`[qa] reviewer verdict failed the typed contract (${v.issues.join("; ")}); requesting one repair.`);
-      output = await session.prompt(repairInstruction("reviewer", v.issues));
+      // Phase 6a: notify the shared cycle counter before the repair re-prompt fires.
+      opts?.onRepair?.();
+      output = await session.prompt(repairInstruction("reviewer", v.issues), { isRepair: true });
       v = parseReviewerVerdict(output);
     }
     if (v.parsed && v.valid) {

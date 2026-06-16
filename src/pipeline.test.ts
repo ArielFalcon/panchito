@@ -1831,6 +1831,123 @@ test("usage: verdict and published are identical with and without usage (observa
   assert.equal(d1.published, d2.published, "published must be identical");
 });
 
+// ── Phase 6a: shared iteration cycle counter ──────────────────────────────────
+// The counter `cycleCount` is shared across all four regeneration loops (review for-loop,
+// static-fix while, exec-fix for-loop, coverage-enforce if) plus the two in-session
+// contract-repair re-prompts. A ceiling (qa.iterationBudget) stops any further
+// generateAndReview() call once reached and logs the reason.
+//
+// generateParallel workers are intentionally NOT counted — they are bounded by their own
+// per-session timeout (OPENCODE_TIMEOUT_MS), not by iterated loops. This is by design.
+
+// Test 6a-1: Default behaviour unchanged — no iterationBudget → counter exists but never
+// triggers; a normal single-generation run still publishes.
+test("phase-6a: default behaviour unchanged when iterationBudget is not configured", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls);
+  const result = await runPipeline(app, "abc1234def", d);
+  assert.equal(result.verdict, "pass", "run should pass unchanged with no iterationBudget");
+  assert.ok(d.published, "suite should be published as normal");
+  const genCount = calls.filter((c) => c === "generate").length;
+  assert.equal(genCount, 1, `only one generate call expected; got ${genCount}`);
+});
+
+// Test 6a-2: Ceiling halts regeneration — with iterationBudget=1, the FIRST generateAndReview
+// call consumes the budget; the static-fix loop's second call is blocked.
+test("phase-6a: ceiling halts the static-fix regeneration loop when iterationBudget=1", async () => {
+  const calls: string[] = [];
+  const logs: string[] = [];
+  // Validation always fails so the static-fix loop would normally iterate MAX_STATIC_FIX_ROUNDS.
+  // With budget=1 the first generateAndReview exhausts the counter; the loop must stop.
+  const budgetApp: AppConfig = { ...app, qa: { ...app.qa, needsReview: false, iterationBudget: 1 } };
+  const d = deps(passing(), calls, { validation: { ok: false, errors: ["tsc: error"], infra: false } });
+  d.log = (m: string) => logs.push(m);
+  await runPipeline(budgetApp, "abc1234def", d);
+  const genCount = calls.filter((c) => c === "generate").length;
+  // Budget=1: the initial generateAndReview is allowed (cycle 1); the static-fix loop's
+  // generateAndReview hits the ceiling (cycle 2 > 1) and returns without calling generate.
+  assert.equal(genCount, 1, `only the initial generate should fire with budget=1; got ${genCount}`);
+  assert.ok(
+    logs.some((l) => /cycle-ceiling reached/i.test(l)),
+    `expected a cycle-ceiling log; got:\n${logs.join("\n")}`,
+  );
+});
+
+// Test 6a-3: Under-budget run — with iterationBudget=10, a run with review rejection + regen
+// is not affected (cycles 1-2 are within budget=10).
+test("phase-6a: under-budget run with review rejection is unaffected by the ceiling", async () => {
+  const calls: string[] = [];
+  const budgetApp: AppConfig = { ...app, qa: { ...app.qa, iterationBudget: 10 } };
+  // Two review calls: first rejects (triggers regeneration), second approves.
+  const d = deps(passing(), calls, {
+    review: [
+      { approved: false, corrections: ["fix selector"], parsed: true },
+      { approved: true, corrections: [], parsed: true },
+    ],
+  });
+  const result = await runPipeline(budgetApp, "abc1234def", d);
+  assert.equal(result.verdict, "pass", "under-budget run should still pass");
+  assert.ok(d.published, "suite should still be published");
+  // Two generate calls: initial + review-rejection regen (all within budget=10)
+  const genCount = calls.filter((c) => c === "generate").length;
+  assert.equal(genCount, 2, `initial + review-regen = 2 generate calls; got ${genCount}`);
+});
+
+// Test 6a-4: Ceiling spans multiple loops — budget=2 is consumed by initial generation
+// + review-rejection regen; the exec-fix loop's generateAndReview is then blocked.
+test("phase-6a: ceiling spans review loop and exec-fix loop (shared counter)", async () => {
+  const calls: string[] = [];
+  const logs: string[] = [];
+  // Budget=2: generation (cycle 1) + review-rejection regen (cycle 2) fill the budget.
+  // The run passes the reviewer on round 2 but then the exec fails.
+  // The exec-fix loop's generateAndReview would be cycle 3 → blocked by ceiling.
+  const budgetApp: AppConfig = { ...app, qa: { ...app.qa, iterationBudget: 2 } };
+  const failingRun: QaRunResult = { sha: "s", verdict: "fail", passed: false, cases: [{ name: "x", status: "fail", detail: "timeout" }], logs: "" };
+  const d = deps(failingRun, calls, {
+    review: [
+      { approved: false, corrections: ["fix it"], parsed: true },
+      { approved: true, corrections: [], parsed: true },
+    ],
+  });
+  d.log = (m: string) => logs.push(m);
+  const result = await runPipeline(budgetApp, "abc1234def", d);
+  // The ceiling should have blocked the exec-fix regeneration.
+  const genCount = calls.filter((c) => c === "generate").length;
+  // cycle 1: initial generate, cycle 2: review-regen (mid-review-loop path)
+  // cycle 3: exec-fix generate → blocked → only 2 generate calls total.
+  assert.equal(genCount, 2, `budget=2 should allow initial + review-regen only; got ${genCount}`);
+  assert.ok(
+    logs.some((l) => /cycle-ceiling reached/i.test(l)),
+    `expected a cycle-ceiling log for exec-fix block; got:\n${logs.join("\n")}`,
+  );
+  // Run should conclude with the last available state (fail, since exec failed and no regen happened)
+  assert.equal(result.verdict, "fail", "run should conclude with last available verdict when ceiling is hit");
+});
+
+// Test 6a-5: Repair callbacks increment the counter — onRepair fires and cycleCount advances.
+// Verified via the log: a repair log line appears when onRepair is invoked.
+test("phase-6a: onRepair callback increments cycleCount and logs the event", async () => {
+  const calls: string[] = [];
+  const logs: string[] = [];
+  // Budget=1: the initial generateAndReview consumes cycle 1; a repair (via onRepair) pushes
+  // to 2, which is > 1. The NEXT generateAndReview (if any) would be blocked. The repair itself
+  // still fires (it's an in-session event, not a loop invocation), but the log confirms it counted.
+  const budgetApp: AppConfig = { ...app, qa: { ...app.qa, needsReview: false, iterationBudget: 10 } };
+  const d = deps(passing(), calls);
+  d.log = (m: string) => logs.push(m);
+  // Override generate to fire onRepair once (simulating a generator contract-repair re-prompt).
+  (d as PipelineDeps).generate = async (_input, _signal, _onProgress, _onUsage, onRepair) => {
+    calls.push("generate");
+    onRepair?.(); // simulate a generator repair
+    return generated;
+  };
+  await runPipeline(budgetApp, "abc1234def", d);
+  assert.ok(
+    logs.some((l) => /in-session repair re-prompt/i.test(l)),
+    `expected a repair-counter log; got:\n${logs.join("\n")}`,
+  );
+});
+
 // Test D: persisted on static-invalid early return.
 test("usage: persisted on static-invalid early return when onUsage was fired before validation", async () => {
   const calls: string[] = [];
