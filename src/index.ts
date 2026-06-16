@@ -24,7 +24,7 @@ import { pruneMirrors, defaultMirrorPruneDeps } from "./server/mirror-prune";
 import { createMaintainerRuntime } from "./server/maintainer-runtime";
 import { installHttpDispatcher } from "./util/net";
 import { resolveRef, defaultMirrorDeps } from "./integrations/repo-mirror";
-import { askAssistant, AgentDeps, getOpenSessionCount } from "./integrations/opencode-client";
+import { askAssistant, AgentDeps, getOpenSessionCount, withUsageSink } from "./integrations/opencode-client";
 import { createAgentRuntimeManager } from "./server/agent-runtime";
 import { CodexRuntimeStrategy, OpenCodeRuntimeStrategy } from "./agent-runtime";
 import { appendLog, appendActivity, deleteAppHistory, runVerdictCounts } from "./server/history";
@@ -127,8 +127,15 @@ function currentAgentDeps(): AgentDeps {
 
 function currentPipelineDeps() {
   return defaultPipelineDeps({
-    agentDepsFactory: async () => currentAgentDeps(),
+    // Forward the per-run usage sink to the facade's AgentDeps so every open() call emits
+    // a UsageSnapshot. The facade forwards opts (including onUsage) via {...opts} spreads
+    // to the underlying runtime strategy, which eventually reaches defaultAgentDeps.open()
+    // where the snapshot is emitted after recordCircuitSuccess(). withUsageSink is the shared
+    // wrapper (also used in defaultPipelineDeps) so the opts.onUsage precedence cannot drift; it
+    // injects onUsage into every open() — including internal callers (explorer, reviewer, etc.).
+    agentDepsFactory: async (onUsage) => withUsageSink(currentAgentDeps(), onUsage),
     hasOpenSessions: () => agentRuntime.hasOpenSessions(),
+    agentRuntimeConfig: agentRuntime.facade().config,
   });
 }
 

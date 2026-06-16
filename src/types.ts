@@ -183,6 +183,12 @@ export interface RunOutcome {
     reviewerApproved?: boolean;
     flaky: boolean;
     retries: number;
+    // Write-confinement guard: set when the guard ran (dep wired), absent when dep not wired.
+    // { strays: 0, dangerous: 0, reverted: [] } is a positive "guard ran, clean" record.
+    confinement?: { strays: number; dangerous: number; reverted: string[] };
+    // Per-run agent token/cost usage — observation-only, never affects verdict or publish.
+    // Absent when no snapshot fired (Codex-only run or dep not wired); never a zero-filled object.
+    usage?: import("./qa/usage").RunUsage;
   };
   rulesRetrieved: string[];
   reflection?: StructuredReflection;

@@ -1,5 +1,6 @@
 import type { AgentDeps, AgentSession } from "../integrations/opencode-client";
 import type { LiveActivity } from "../integrations/opencode-client";
+import type { UsageSnapshot } from "../qa/usage";
 import type { RunEventBody } from "../contract/events";
 
 export type AgentProvider = "opencode" | "codex";
@@ -58,7 +59,10 @@ export interface AgentRuntimeStrategy {
   provider: AgentProvider;
   health(): Promise<AgentProviderHealth>;
   listModels(): Promise<AgentModelInfo[]>;
-  openSession(role: AgentRole, cwd: string, opts?: { signal?: AbortSignal; timeoutMs?: number; model?: string }): Promise<AgentRuntimeSession>;
+  // onUsage is part of the TYPED end-to-end usage path: the facade forwards it through to the
+  // underlying strategy's deps.open, where each session.prompt response emits a UsageSnapshot
+  // (observation-only — never influences any verdict).
+  openSession(role: AgentRole, cwd: string, opts?: { signal?: AbortSignal; timeoutMs?: number; model?: string; onUsage?: (u: UsageSnapshot) => void }): Promise<AgentRuntimeSession>;
   startEventStream?(
     onActivity: (a: LiveActivity) => void,
     signal?: AbortSignal,

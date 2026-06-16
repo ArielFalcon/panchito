@@ -141,15 +141,19 @@ test("buildPrompt joins multiple OpenAPI globs and omits the line when no hint i
 
 // ── A' (commit body context) + B' (shared acceptance criterion): the diff/manual objective sharpening ──
 
-test("A' buildPrompt (diff) renders the commit body as stated intent when present", () => {
+test("A' buildPrompt (diff) merges subject + body into ONE commit-message block (no separate section)", () => {
   const withBody = { ...input, intent: { ...input.intent!, body: "Owners with >10 pets were overcharged because the cart re-queried after the discount." } };
   const p = buildPrompt(withBody);
-  assert.match(p, /Why this change \(commit body/);
-  assert.match(p, /Owners with >10 pets were overcharged/);
+  assert.match(p, /## Commit message/);
+  assert.match(p, /feat: new screen/); // the subject
+  assert.match(p, /Owners with >10 pets were overcharged/); // the body — same block
+  assert.doesNotMatch(p, /Why this change/); // merged: no separate body section
 });
 
-test("A' buildPrompt (diff) omits the body section when the commit has no body", () => {
-  assert.doesNotMatch(buildPrompt(input), /Why this change \(commit body/); // input.intent has no body
+test("A' buildPrompt (diff) renders just the subject when the commit has no body", () => {
+  const p = buildPrompt(input); // input.intent has no body
+  assert.match(p, /## Commit message/);
+  assert.match(p, /feat: new screen/);
 });
 
 test("A' buildPrompt sanitizes the commit body (defense in depth — the body is attacker-influenceable prose)", () => {
@@ -185,10 +189,10 @@ test("B' buildPrompt (manual) carries the SAME acceptance criterion — manual i
   assert.match(p, /observable OUTCOME/);
 });
 
-test("A' buildExplorerPrompt renders the commit body so the explorer infers a concrete objective", () => {
+test("A' buildExplorerPrompt renders the commit message (subject + body) so the explorer infers a concrete objective", () => {
   const withBody = { ...input, intent: { ...input.intent!, body: "the discount must persist after the cart re-queries" } };
   const e = buildExplorerPrompt(withBody);
-  assert.match(e, /Why this change \(commit body/);
+  assert.match(e, /## Commit message/);
   assert.match(e, /discount must persist/);
 });
 
@@ -959,6 +963,23 @@ test("buildPlanPrompt in diff mode plans ONLY the commit blast radius and includ
   assert.match(text, /feat: bulk discount/);
   assert.doesNotMatch(text, /WHOLE repository/);
   assert.match(text, /"objectives"/);
+});
+
+test("buildPlanPrompt (diff) renders the FULL commit message (subject + body) via renderCommitMessage, not the old subject-only `- Message:` line", () => {
+  const withBody = { ...diffPlanInput, intent: { ...diffPlanInput.intent, body: "Owners with >10 pets were overcharged because the cart re-queried after the discount." } };
+  const text = buildPlanPrompt(withBody);
+  // The shared commit-message block heading is present (same form as buildTask/buildExplorerPrompt).
+  assert.match(text, /## Commit message/);
+  // The body — the richest statement of intent — reaches the planner (the drift fix #9 targets).
+  assert.match(text, /overcharged because the cart re-queried/);
+  // The old subject-only label is gone.
+  assert.doesNotMatch(text, /^- Message:/m);
+});
+
+test("buildPlanPrompt (diff) renders just the subject when the commit has no body", () => {
+  const text = buildPlanPrompt(diffPlanInput); // diffPlanInput.intent has no body
+  assert.match(text, /## Commit message/);
+  assert.match(text, /feat: bulk discount/);
 });
 
 test("buildPlanPrompt complete/exhaustive variants are unchanged", () => {

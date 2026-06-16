@@ -230,6 +230,33 @@ export function toRunReportView(input: RunReportInput): ReportView {
     }),
   );
 
+  // Agent usage — one informational line; absent when no snapshot fired (never shows $0).
+  {
+    const u = outcome?.gateSignals.usage ?? null;
+    // Compact thousands: 1500 → "1.5k", 800 → "800".
+    const k = (n: number): string => (n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n));
+    const caption = u
+      ? `${k(u.tokens.input)} in / ${k(u.tokens.output)} out / ${k(u.tokens.reasoning)} reason` +
+        // Render the $ segment ONLY when a real cost was computed (> 0). cost === 0 means the
+        // model's rate config is absent from opencode.json (a documented real case) — printing
+        // "$0.0000" would falsely imply a free run, violating "never $0".
+        (u.cost !== undefined && u.cost > 0 ? ` · $${u.cost.toFixed(4)}` : "") +
+        (!u.complete ? " (partial)" : "")
+      : "not measured this run";
+    insights.push(
+      snapshot({
+        id: "agent-usage",
+        title: "Agent usage",
+        chart: "big-number",
+        value: u ? u.tokens.total : null,
+        unit: "count",
+        goodWhen: "down",
+        score: W("agent-usage", 0.25),
+        caption,
+      }),
+    );
+  }
+
   insights.sort((a, b) => b.score - a.score);
 
   return {

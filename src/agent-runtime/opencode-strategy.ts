@@ -8,6 +8,7 @@ import {
   type AgentDeps,
 } from "../integrations/opencode-client";
 import type { RunEventBody } from "../contract/events";
+import type { UsageSnapshot } from "../qa/usage";
 import type {
   AgentModelInfo,
   AgentProviderHealth,
@@ -79,7 +80,8 @@ export class OpenCodeRuntimeStrategy implements AgentRuntimeStrategy {
   async openSession(
     role: AgentRole,
     cwd: string,
-    opts?: { signal?: AbortSignal; timeoutMs?: number; model?: string },
+    // onUsage is forwarded verbatim to deps.open (the typed usage path — see AgentRuntimeStrategy).
+    opts?: { signal?: AbortSignal; timeoutMs?: number; model?: string; onUsage?: (u: UsageSnapshot) => void },
   ): Promise<AgentRuntimeSession> {
     const deps = await this.deps();
     return deps.open(ROLE_TO_OPENCODE_AGENT[role], cwd, opts);

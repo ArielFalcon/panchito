@@ -7,11 +7,13 @@
 // ordering and branches are verifiable with stubs.
 
 import { join, dirname } from "node:path";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync, lstatSync } from "node:fs";
 import { AppConfig } from "./orchestrator/config-loader";
 import { DeployTarget, waitForDeploy } from "./env/deploy-gate";
-import { ensureMirror, ensureMirrorAtBranch, getCommitDiff, getCommitMessage, listChangedSpecs as gitListChangedSpecs, getCommitsBehind, defaultMirrorDeps } from "./integrations/repo-mirror";
-import { runOpencode, runOpencodeParallel, shouldFanOut, defaultAgentDeps, reviewIndependently, getOpenSessionCount } from "./integrations/opencode-client";
+import { ensureMirror, ensureMirrorAtBranch, getCommitDiff, getCommitMessage, listChangedSpecs as gitListChangedSpecs, getCommitsBehind, defaultMirrorDeps, realGit } from "./integrations/repo-mirror";
+import { runConfinement, type ConfinementResult } from "./qa/confinement";
+import { createUsageAccumulator, type UsageSnapshot, type RunUsage } from "./qa/usage";
+import { runOpencode, runOpencodeParallel, shouldFanOut, defaultAgentDeps, reviewIndependently, getOpenSessionCount, withUsageSink } from "./integrations/opencode-client";
 import { classifyCommit, CommitIntent } from "./qa/commit-classify";
 import { setupE2eProject, defaultSetupDeps } from "./qa/setup";
 import { validateSpecs, defaultValidateDeps } from "./qa/validate";
@@ -56,6 +58,7 @@ import { captureDom, captureDomForRoutes, defaultCaptureDomDeps } from "./qa/dom
 import { loadContextCache as loadContextCacheDefault, saveContextCache as saveContextCacheDefault } from "./qa/context-cache";
 import { AgentResult, QaCase, QaRunResult, TriggerSource, RunMode, RunOptions, TestTarget, RunOutcome, SpecMeta } from "./types";
 import type { AgentDeps, ReviewInput, ReviewResult } from "./integrations/opencode-client";
+import type { AgentRuntimeConfig } from "./agent-runtime/types";
 import { decideProgress, bestRound, isLikelyRealBug, classifyFailure, type RoundResult } from "./qa/progress-gate";
 import { extractProposedSelectors, selectorPresent, selectorUnique, hasNonExtractableLocator, type ProposedSelector } from "./qa/selector-check";
 import { capDomLines } from "./qa/dom-snapshot";
@@ -103,7 +106,7 @@ export interface PipelineDeps {
   // Cross-repo runs: the PRIMARY repo at the HEAD of its base branch (the triggering
   // SHA belongs to the service repo and does not exist in the primary).
   prepareAtBranch(repo: string, branch: string): Promise<{ mirrorDir: string }>;
-  generate(input: GenerateInput, signal?: AbortSignal, onProgress?: (msg: string) => void): Promise<AgentResult>;
+  generate(input: GenerateInput, signal?: AbortSignal, onProgress?: (msg: string) => void, onUsage?: (u: UsageSnapshot) => void): Promise<AgentResult>;
   // The *.spec.ts the agent actually wrote on disk (git status over e2e/), e2e-relative.
   // The authoritative spec set for the no-op decision and the reviewer's file list — the
   // orchestrator trusts the working copy, not the agent's self-report. Absent ⇒ no
@@ -114,7 +117,7 @@ export interface PipelineDeps {
   execute(e2eDir: string, opts: { baseUrl: string; namespace: string; onCase?: (c: QaCase) => void; onRunning?: (title: string) => void; onDiscovered?: (title: string, file?: string) => void; signal?: AbortSignal }): Promise<QaRunResult>;
   cleanup(e2eDir: string, opts: { baseUrl: string; namespace: string }): Promise<void>; // orphan-data cleanup (best-effort)
   isHealthy(versionUrl: string): Promise<boolean>; // is DEV healthy right now? (infra vs quality)
-  review?(input: ReviewInput, signal?: AbortSignal): Promise<ReviewResult>; // independent reviewer (null = disabled)
+  review?(input: ReviewInput, signal?: AbortSignal, onUsage?: (u: UsageSnapshot) => void): Promise<ReviewResult>; // independent reviewer (null = disabled)
   // Change-coverage provider (the value keystone). Returns the lines actually exercised by the
   // run, repo-relative, or null when no usable coverage was produced (→ "unknown", never blocks).
   // Absent (undefined) ⇒ the change-coverage step is skipped entirely.
@@ -167,18 +170,36 @@ export interface PipelineDeps {
   // Diff mode: checks whether the deployed context.json is stale vs the current HEAD.
   // Returns a warning string if stale, empty string if fresh or no map exists.
   checkContextStaleness?(mirrorDir: string, sha: string): Promise<string>;
+  // Write-confinement guard: detects and reverts agent writes outside the allowed area
+  // (e2e/ for e2e-target; denylist for code-target). Non-blocking — the run continues.
+  // Absent ⇒ guard disabled (no-op). Result is always set when dep is wired, including
+  // the clean case ({ strays: 0, dangerous: 0, reverted: [] }).
+  confine?(mirrorDir: string, isCode: boolean): Promise<ConfinementResult>;
+  // The agent runtime config for this run — used to derive usage.complete.
+  // Absent ⇒ complete defaults to false.
+  agentRuntimeConfig?: AgentRuntimeConfig;
 }
 
 export interface DefaultPipelineDepsOptions {
-  agentDepsFactory?: () => Promise<AgentDeps>;
+  agentDepsFactory?: (onUsage?: (u: UsageSnapshot) => void) => Promise<AgentDeps>;
   hasOpenSessions?: () => boolean;
+  // The agent runtime config — forwarded to PipelineDeps.agentRuntimeConfig so runPipeline can
+  // derive usage.complete (true iff primary and reviewer are both opencode).
+  agentRuntimeConfig?: AgentRuntimeConfig;
 }
 
 export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): PipelineDeps {
-  const agentDepsFactory = options.agentDepsFactory ?? defaultAgentDeps;
+  // The default factory wraps defaultAgentDeps so the per-run usage sink is injected via the SINGLE
+  // typed mechanism — opts.onUsage on every open() — exactly as the production override in index.ts
+  // does. defaultAgentDeps itself takes no usage argument; capture is driven only through open opts.
+  // withUsageSink is the shared wrapper (also used in index.ts) so the precedence cannot drift.
+  const agentDepsFactory: (onUsage?: (u: UsageSnapshot) => void) => Promise<AgentDeps> =
+    options.agentDepsFactory ??
+    (async (onUsage) => withUsageSink(await defaultAgentDeps(), onUsage));
   const hasOpenSessions = options.hasOpenSessions ?? (() => getOpenSessionCount() > 0);
 
   return {
+    agentRuntimeConfig: options.agentRuntimeConfig,
     waitForDeploy: (target, sha, signal) => waitForDeploy(target, sha, undefined, signal),
     prepare: async (repo, sha, commits) => {
       const mirrorDir = await ensureMirror(repo, sha, defaultMirrorDeps);
@@ -188,7 +209,7 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
     },
     prepareAtBranch: async (repo, branch) => ({ mirrorDir: await ensureMirrorAtBranch(repo, branch, defaultMirrorDeps) }),
     listChangedSpecs: (mirrorDir, e2eRelDir) => gitListChangedSpecs(mirrorDir, e2eRelDir, defaultMirrorDeps),
-    generate: async (input, signal, onProgress) => {
+    generate: async (input, signal, onProgress, onUsage) => {
       const ocInput = {
         repo: input.repo,
         sha: input.sha,
@@ -217,7 +238,10 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
         service: input.service,
         services: input.services,
       };
-      const oc = await agentDepsFactory();
+      // Build the AgentDeps with the per-run usage sink wired in (the factory injects onUsage into
+      // every open() via opts), so each session.prompt response emits a UsageSnapshot into the run's
+      // accumulator.
+      const oc = await agentDepsFactory(onUsage);
       // complete/exhaustive fan out to parallel workers (plan → workers → consolidate); the other
       // modes (diff/manual) and any fix/review re-generation use the single-agent path. Code mode
       // always uses the single agent (no web fan-out). Diff mode fans out only when
@@ -279,8 +303,8 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
         return false;
       }
     },
-    review: async (input, signal) =>
-      reviewIndependently(input, await agentDepsFactory(), { signal }),
+    review: async (input, signal, onUsage) =>
+      reviewIndependently(input, await agentDepsFactory(onUsage), { signal }),
     captureDom: (input) => captureDom(input, defaultCaptureDomDeps),
     loadContextCache: (app) => loadContextCacheDefault(app),
     saveContextCache: (app, map) => saveContextCacheDefault(app, map),
@@ -304,6 +328,13 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
       if (input.coveredFiles.length) store = recordCoverage(store, input.coveredFiles);
       writeMeasured(mfs, measuredPath, store);
     },
+    confine: (mirrorDir, isCode) =>
+      runConfinement(mirrorDir, isCode, {
+        git: realGit,
+        realpath: (p) => realpathSync(p),
+        // Cheap symlink pre-filter so the escape check only resolves realpath for actual symlinks.
+        isSymlink: (p) => lstatSync(p).isSymbolicLink(),
+      }),
     publish: (input) => publishE2e(input, defaultPublishDeps),
     openIssue: (repo, title, body) => github.openIssue(repo, title, body),
     saveOutcome: async (outcome) => {
@@ -630,8 +661,17 @@ export async function runPipeline(
   let retrievedRuleIds: string[] = []; // rule IDs retrieved for this run (for RunOutcome)
   let retrievedRules: LearningRule[] = []; // full retrieved rules (errorClass needed for governance)
   let curriculum: ReturnType<typeof initCurriculum> | null = null; // persisted across runs
+  // Per-run usage accumulator — sums token/cost snapshots from every agent call.
+  // Observation-only: never influences verdict, blocksPublish, or control flow.
+  const usage = createUsageAccumulator();
+  // complete = true iff both primary and reviewer are opencode (full picture).
+  // false when dual (only OpenCode roles fire) or config is absent.
+  const pipelineAgentConfig = deps.agentRuntimeConfig;
+  const usageComplete =
+    pipelineAgentConfig?.assignments.primary.provider === "opencode" &&
+    pipelineAgentConfig?.assignments.reviewer.provider === "opencode";
 
-  const persistOutcome = (verdict: QaRunResult, overrides?: { staticOk?: boolean; coverageRatio?: number | null; valueScore?: number | null; rulesRetrieved?: string[] }) => {
+  const persistOutcome = (verdict: QaRunResult, overrides?: { staticOk?: boolean; coverageRatio?: number | null; valueScore?: number | null; rulesRetrieved?: string[]; confinement?: ConfinementResult; usage?: RunUsage }) => {
     if (!deps.saveOutcome || !opts.runId) return;
     const outcome = labelRunOutcome({
       runId: opts.runId,
@@ -655,6 +695,12 @@ export async function runPipeline(
     }
     if (overrides?.rulesRetrieved) {
       outcome.rulesRetrieved = overrides.rulesRetrieved;
+    }
+    if (overrides?.confinement !== undefined) {
+      outcome.gateSignals.confinement = overrides.confinement;
+    }
+    if (overrides?.usage !== undefined) {
+      outcome.gateSignals.usage = overrides.usage;
     }
     deps.saveOutcome(outcome).catch((err) => {
       log(`[qa] WARNING: failed to persist RunOutcome (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
@@ -732,6 +778,26 @@ export async function runPipeline(
   }
   const e2eDir = join(mirrorDir, E2E_DIR);
   const ns = testDataNamespace(app.qa.testDataPrefix, sha, opts.runId);
+
+  // Write-confinement guard, run on EVERY post-generation exit: green (after the LAST generation,
+  // i.e. past any coverage-enforce regen), the agent no-op skip, static-gate invalid/infra-error,
+  // health pre-flight, the no-dev infra exit, and both context exits (publish success + invalid).
+  // The pre-generation classify-skip exit does NOT run it (nothing ran, nothing to revert). Detects
+  // out-of-area writes that git status surfaces and reverts them (a symlink escape is detected + its
+  // link entry reverted — any external file written THROUGH it is NOT un-written). NON-BLOCKING: it
+  // never changes the verdict; git errors THROW (not swallowed). Each caller invokes it exactly ONCE
+  // on its own exit (no caching → no double-run). Absent dep ⇒ undefined (guard disabled).
+  const runConfine = async (): Promise<ConfinementResult | undefined> => {
+    if (!deps.confine) return undefined;
+    const result = await deps.confine(mirrorDir, isCode);
+    if (result.strays > 0) {
+      if (result.dangerous > 0)
+        log(`[qa] SECURITY: confinement reverted ${result.strays} out-of-area change(s), ${result.dangerous} DANGEROUS (secret/path-escape): ${result.reverted.join(", ")}`);
+      else
+        log(`[qa] confinement: reverted ${result.strays} out-of-area change(s): ${result.reverted.join(", ")}`);
+    }
+    return result;
+  };
 
   checkSignal();
 
@@ -833,7 +899,7 @@ export async function runPipeline(
       openapi: app.openapi,
       services: serviceRefs,
     };
-    const ctxResult = await deps.generate(genInput, signal, log);
+    const ctxResult = await deps.generate(genInput, signal, log, usage.add.bind(usage));
 
     log(`[qa] context agent: approved=${ctxResult.approved} specs=[${ctxResult.specs.join(", ")}]`);
 
@@ -870,6 +936,10 @@ export async function runPipeline(
         return { run: undefined };
       }
       log(`[qa] context validation failed:\n${validated.errors.join("\n")}`);
+      // Post-generation exit (publish=true): the context agent ran, so revert any out-of-area
+      // strays before returning, consistent with the success path's confine-before-publish — the
+      // guarantee is that EVERY post-generation context exit reverts strays. Non-blocking.
+      await runConfine();
       await issueOrShadow(
         shadow, deps, log, app.repo,
         `QA context map for ${sha} is invalid`,
@@ -900,6 +970,9 @@ export async function runPipeline(
     } else if (shadow) {
       log("[qa] (shadow) context map built; a PR would have been opened.");
     } else {
+      // Confinement BEFORE the context PR: the context agent just ran, so revert any out-of-area
+      // strays it wrote so they are not swept into the published context.json PR. Non-blocking.
+      await runConfine();
       const pr = await deps.publishContext({ repo: app.repo, sha, mirrorDir, baseBranch: app.baseBranch ?? "main" });
       log(pr
         ? pr.merged
@@ -1016,7 +1089,7 @@ export async function runPipeline(
   const MAX_STATIC_FIX_ROUNDS = 2;
   const generateAndReview = async (genInput: GenerateInput): Promise<AgentResult> => {
     const genStart = Date.now();
-    let r = await reconcileSpecs(await deps.generate(genInput, signal, log));
+    let r = await reconcileSpecs(await deps.generate(genInput, signal, log, usage.add.bind(usage)));
     log(`[qa] [timing] generation produced ${r.specs.length} spec(s) in ${Math.round((Date.now() - genStart) / 1000)}s`);
     if (!(app.qa.needsReview && deps.review)) return r;
     // The live-DOM grounding only depends on the ROUTES the specs target, so capture it once and
@@ -1053,6 +1126,7 @@ export async function runPipeline(
           // candidates) so it enforces app-specific anti-patterns earned from past failures.
           { diff: promptDiff, specs: r.specs, mirrorDir, e2eRelDir: isCode ? "" : E2E_DIR, baseUrl: app.dev?.baseUrl, intent, guidance: opts.guidance, appName: app.name, mode, target: opts.target, learnedRules: renderRulesForReviewer(retrievedRules), domSnapshot },
           signal,
+          usage.add.bind(usage),
         );
       } catch (err) {
         // FAIL CLOSED: the reviewer is the only independent gate against the circular
@@ -1094,7 +1168,7 @@ export async function runPipeline(
       // generator fixes selectors against the real tree (e.g. no `columnheader` role on this table)
       // instead of re-deriving them from HTML intuition — the captured tree already shows what roles
       // actually exist and which names are duplicated (strict-mode risk).
-      r = await reconcileSpecs(await deps.generate({ ...genInput, reviewCorrections: review.corrections, domSnapshot }, signal, log));
+      r = await reconcileSpecs(await deps.generate({ ...genInput, reviewCorrections: review.corrections, domSnapshot }, signal, log, usage.add.bind(usage)));
       log(`[qa] [timing] regeneration produced ${r.specs.length} spec(s) in ${Math.round((Date.now() - regenStart) / 1000)}s`);
     }
     return r;
@@ -1224,7 +1298,13 @@ export async function runPipeline(
     // complete run where everything important is already covered) → skip.
     if (result.approved && result.specs.length === 0) {
       log("[qa] the agent produced no tests (nothing to cover); nothing to run.");
-      return { sha: ns, verdict: "skipped", passed: true, cases: [], logs: result.note ?? result.output.slice(0, 300) };
+      // Post-generation exit: the agent ran (tokens spent) and may have written out-of-area strays
+      // even when it produced no specs. Revert/record strays AND record the token spend — a no-op
+      // is a common diff-mode outcome. Non-blocking; the verdict stays `skipped`.
+      const skipped: QaRunResult = { sha: ns, verdict: "skipped", passed: true, cases: [], logs: result.note ?? result.output.slice(0, 300) };
+      const confinement = await runConfine();
+      persistOutcome(skipped, { confinement, usage: usage.result(usageComplete) });
+      return skipped;
     }
   } else {
     log("[qa] regression: not generating tests; validating and running the existing suite.");
@@ -1358,12 +1438,15 @@ export async function runPipeline(
       // don't open an Issue on the watched repo for a missing binary or OOM.
       if (validation.infra) {
         const infra = resultOf(ns, "infra-error", validation.errors.join("\n\n"));
-        persistOutcome(infra);
+        // Post-generation exit: revert any strays the agent wrote, and record the tokens already spent.
+        const confinement = await runConfine();
+        persistOutcome(infra, { confinement, usage: usage.result(usageComplete) });
         await report(app, issueRepo, sha, infra, deps, log, shadow, isCode);
         return infra;
       }
       const invalid = resultOf(ns, "invalid", validation.errors.join("\n\n"));
-      persistOutcome(invalid, { staticOk: false });
+      const confinement = await runConfine();
+      persistOutcome(invalid, { staticOk: false, confinement, usage: usage.result(usageComplete) });
       await report(app, issueRepo, sha, invalid, deps, log, shadow, isCode, {
         note: `The generated tests did not pass the static gate (typecheck + lint + Playwright list).\n${validation.errors.join("\n")}`,
         tested: testedFrom(result),
@@ -1377,7 +1460,9 @@ export async function runPipeline(
     // healthy the run is inconclusive → infra error, not reported as a bug.
     if (!(await devHealthy())) {
       const infra = resultOf(ns, "infra-error", "DEV is not healthy before execution");
-      persistOutcome(infra);
+      // Post-generation exit: revert any strays the agent wrote, and record the tokens already spent.
+      const confinement = await runConfine();
+      persistOutcome(infra, { confinement, usage: usage.result(usageComplete) });
       await report(app, issueRepo, sha, infra, deps, log, shadow, isCode);
       return infra;
     }
@@ -1394,7 +1479,9 @@ export async function runPipeline(
   } else if (!app.dev) {
     // Defensive: an e2e run on an app with no dev environment is inconclusive.
     run = resultOf(ns, "infra-error", "e2e run requested but no dev environment is configured");
-    persistOutcome(run);
+    // Post-generation exit: revert any strays the agent wrote, and record the tokens already spent.
+    const confinement = await runConfine();
+    persistOutcome(run, { confinement, usage: usage.result(usageComplete) });
     await report(app, issueRepo, sha, run, deps, log, shadow, isCode);
     return run;
   } else {
@@ -1660,6 +1747,11 @@ export async function runPipeline(
     log("[qa] real-bug override: run kept as fail for Issue filing.");
   }
 
+  // NOTE: the green-path write-confinement guard runs LATER — after the change-coverage block, just
+  // before the decide/publish step. In `enforce` mode a coverage gap triggers ANOTHER generation
+  // (below), which can write fresh strays; reverting here would miss them and ship them in the PR.
+  // Deferring to after the LAST generation keeps the revert (and the persisted result) fresh.
+
   // 8. Filter D — change-coverage (the value keystone). Only for a per-commit DIFF run whose
   //    suite is GREEN: does executing the tests actually exercise the lines the commit changed?
   //    Skipped when no provider is wired (unit tests) or the policy is off. Unmeasured coverage is
@@ -1762,6 +1854,15 @@ export async function runPipeline(
   const valueScore = valueLearned.valueScore;
   curriculum = valueLearned.curriculum;
 
+  // Write-confinement guard on the green path — run here, AFTER the last generation (past any
+  // coverage-enforce regeneration above), so it reverts strays from that regen too and the persisted
+  // result is fresh, BEFORE the decide/publish step ships the suite. Detect + revert agent strays
+  // (out-of-area writes git status surfaces; symlink escapes detected + the link entry reverted) so a
+  // stray never reaches the suite PR. Non-blocking — the verdict is unchanged. runConfine() runs the
+  // guard exactly once on the green path (the earlier exits already returned), so green is never
+  // double-run.
+  const confinement = await runConfine();
+
   // 9. Final decision.
   const kind = isCode ? "code" : "E2E";
   if (run.verdict !== "pass") {
@@ -1841,7 +1942,7 @@ export async function runPipeline(
       reviewerRationale,
     });
   }
-  persistOutcome(run, { staticOk: !isCode && generating, coverageRatio: ratio, valueScore, rulesRetrieved: retrievedRuleIds });
+  persistOutcome(run, { staticOk: !isCode && generating, coverageRatio: ratio, valueScore, rulesRetrieved: retrievedRuleIds, confinement, usage: usage.result(usageComplete) });
 
   // Reviewer-corrections distillation, labeling, prevention governance, reflection and
   // curriculum persistence — shared with the static-gate (`invalid`) early return above.

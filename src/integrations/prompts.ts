@@ -8,8 +8,22 @@
 
 import { sanitizeText, capText } from "../orchestrator/sanitizer";
 import type { ArchitectureContext } from "../qa/context";
+import type { CommitIntent } from "../qa/commit-classify";
 import type { OpencodeRunInput, ParallelWorkerInput } from "./opencode-client";
 import { renderExplorationBrief } from "../qa/exploration-brief";
+
+// The author's commit message as ONE block: subject + (optionally) body. The body is the richest
+// statement of intent; the subject alone is often too terse to derive a concrete objective from. The
+// subject is parsed for the TYPE deterministically upstream (first line only — robust against false
+// matches in the body); here we just hand the agent the whole message to read as one coherent
+// statement. The body is bounded (capText — attacker-influenceable prose with no natural length
+// limit) and the whole thing sanitized. CommitIntent.message stays the subject ONLY so the GitHub
+// Issue title is a concise one-liner; the agent gets subject+body merged.
+function renderCommitMessage(intent: CommitIntent | undefined, includeBody: boolean): string {
+  const subject = intent?.message ?? "";
+  const body = includeBody ? intent?.body : undefined;
+  return sanitizeText(body ? `${subject}\n\n${capText(body)}` : subject).text;
+}
 
 // The single source of the "commit to a concrete objective BEFORE writing" rule, shared by the
 // single-agent diff task AND the manual task so the wording cannot drift (judgment-day finding: the
@@ -153,8 +167,15 @@ export function buildPlanPrompt(input: OpencodeRunInput): string {
       ``,
       `## Change intent (Conventional Commits)`,
       `- Type: ${input.intent?.type ?? "unknown"}${input.intent?.breaking ? " (BREAKING)" : ""}`,
-      `- Message: ${sanitizeText(input.intent?.message ?? "").text}`,
       `- Changed files: ${sanitizeText(input.intent?.changedFiles?.join(", ") ?? "").text || "(unknown)"}`,
+      ``,
+      // The planner derives the worker objectives from the commit intent, so it must read the FULL
+      // message (subject + body) via the shared renderCommitMessage helper — the same form buildTask
+      // and buildExplorerPrompt use. The body is the richest statement of intent; rendering only the
+      // subject (the old `- Message:` line) is exactly the drift the helper exists to prevent. The
+      // planner is always a first pass (never a regen), so the body is included.
+      `## Commit message (the author's intent — derive each objective from this)`,
+      renderCommitMessage(input.intent, true),
       ``,
       `## Commit diff`,
       "```diff",
@@ -219,11 +240,10 @@ export function buildExplorerPrompt(input: OpencodeRunInput): string {
     ``,
     `## Change intent (Conventional Commits)`,
     `- Type: ${input.intent?.type ?? "unknown"}${input.intent?.breaking ? " (BREAKING)" : ""}`,
-    `- Message: ${sanitizeText(input.intent?.message ?? "").text}`,
     `- Changed files: ${sanitizeText(input.intent?.changedFiles?.join(", ") ?? "").text || "(unknown)"}`,
-    ...(input.intent?.body
-      ? [``, `## Why this change (commit body — the author's stated intent)`, sanitizeText(capText(input.intent.body)).text]
-      : []),
+    ``,
+    `## Commit message (the author's intent — subject + body)`,
+    renderCommitMessage(input.intent, true),
     ``,
     `## Commit diff`,
     "```diff",
@@ -698,14 +718,13 @@ function buildTask(input: OpencodeRunInput): string {
     ``,
     `## Change intent (Conventional Commits)`,
     `- Type: ${intent?.type ?? "unknown"}${intent?.breaking ? " (BREAKING)" : ""}`,
-    `- Message: ${sanitizeText(intent?.message ?? "").text}`,
     `- Changed files (derive the scope/area from these): ${sanitizeText(intent?.changedFiles?.join(", ") ?? "").text || "(unknown)"}`,
-    `The message gives the INTENT; derive each test's objective from it. But CROSS-CHECK`,
-    `against the diff: if the code does more than the message claims, cover what the code`,
-    `actually changes, not just what the message promises.`,
-    ...(intent?.body && !isReGen
-      ? [``, `## Why this change (commit body — the author's stated intent)`, sanitizeText(capText(intent.body)).text]
-      : []),
+    ``,
+    `## Commit message (the author's intent — derive each test's objective from this)`,
+    renderCommitMessage(intent, !isReGen),
+    ``,
+    `Cross-check against the diff: if the code does more than the message claims, cover what`,
+    `the code actually changes, not just what the message promises.`,
     ``,
     `## Commit diff`,
     "```diff",

@@ -70,11 +70,14 @@ test("passing run: PASS headline with coverage, case-mix donut, single-run windo
   assert.equal(cov.caption, "82% of changed lines exercised (target 70%)");
 });
 
-test("clean run ranks by importance: case-mix first, duration last", () => {
+test("clean run ranks by importance: case-mix first, agent-usage last (below suite-duration)", () => {
   const view = toRunReportView({ record: record(), outcome: outcome() });
   const ids = view.insights.map((i) => i.id);
   assert.equal(ids[0], "case-mix");
-  assert.equal(ids[ids.length - 1], "suite-duration");
+  // agent-usage (score 0.25) ranks below suite-duration (0.3), so it is the lowest-ranked insight.
+  assert.equal(ids[ids.length - 1], "agent-usage");
+  // suite-duration still appears immediately above agent-usage.
+  assert.ok(ids.indexOf("suite-duration") < ids.indexOf("agent-usage"));
   // No flow misbehaved, so the flow-results insight is absent entirely.
   assert.ok(!ids.includes("flow-results"));
 });
@@ -169,4 +172,47 @@ test("suite duration sums case timings; null when no case carried timing", () =>
     outcome: outcome(),
   });
   assert.equal(untimed.insights.find((i) => i.id === "suite-duration")!.value, null);
+});
+
+// ── Agent usage display ───────────────────────────────────────────────────────
+
+test("agent-usage: present + complete → value=total, caption with tokens and cost, no (partial)", () => {
+  const out = outcome({ usage: { tokens: { input: 1000, output: 500, reasoning: 200, cacheRead: 0, cacheWrite: 0, total: 1700 }, cost: 0.0123, complete: true } });
+  const view = toRunReportView({ record: record(), outcome: out });
+  const u = view.insights.find((i) => i.id === "agent-usage")!;
+  assert.ok(u, "agent-usage insight must be present");
+  assert.equal(u.value, 1700, "value must equal tokens.total");
+  assert.ok(u.caption?.includes("1.0k in"), `caption missing "1.0k in": ${u.caption}`);
+  assert.ok(u.caption?.includes("500"), `caption missing "500": ${u.caption}`);
+  assert.ok(u.caption?.includes("200"), `caption missing "200": ${u.caption}`);
+  assert.ok(u.caption?.includes("$0.0123"), `caption missing "$0.0123": ${u.caption}`);
+  assert.ok(!u.caption?.includes("(partial)"), "caption must not include (partial) when complete=true");
+});
+
+test("agent-usage: present + incomplete → caption contains (partial)", () => {
+  const out = outcome({ usage: { tokens: { input: 1000, output: 500, reasoning: 200, cacheRead: 0, cacheWrite: 0, total: 1700 }, cost: 0.0123, complete: false } });
+  const view = toRunReportView({ record: record(), outcome: out });
+  const u = view.insights.find((i) => i.id === "agent-usage")!;
+  assert.ok(u.caption?.includes("(partial)"), `caption must contain "(partial)" when complete=false: ${u.caption}`);
+});
+
+test("agent-usage: cost === 0 (rate config absent) → tokens shown, NO $ segment (never $0)", () => {
+  const out = outcome({ usage: { tokens: { input: 1000, output: 500, reasoning: 200, cacheRead: 0, cacheWrite: 0, total: 1700 }, cost: 0, complete: true } });
+  const view = toRunReportView({ record: record(), outcome: out });
+  const u = view.insights.find((i) => i.id === "agent-usage")!;
+  assert.equal(u.value, 1700, "tokens are still surfaced");
+  assert.ok(u.caption?.includes("1.0k in"), `caption must still show tokens: ${u.caption}`);
+  assert.ok(!u.caption?.includes("$"), `caption must NOT contain $ when cost is 0: ${u.caption}`);
+  assert.ok(!u.caption?.includes("$0.0000"), `caption must NOT print $0.0000: ${u.caption}`);
+});
+
+test("agent-usage: absent → value=null, caption='not measured this run', no $ in caption", () => {
+  const out = outcome({ usage: undefined });
+  const view = toRunReportView({ record: record(), outcome: out });
+  const u = view.insights.find((i) => i.id === "agent-usage")!;
+  assert.ok(u, "agent-usage insight must always be present");
+  assert.equal(u.value, null, "value must be null when usage is absent");
+  assert.equal(u.caption, "not measured this run");
+  assert.ok(!u.caption?.includes("$"), "caption must not contain $ when usage is absent");
+  assert.ok(!u.caption?.includes("$0"), "caption must not contain $0 when usage is absent");
 });

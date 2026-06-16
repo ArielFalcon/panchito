@@ -13,6 +13,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { AgentResult, QaCase, RunMode, TestTarget, SpecMeta, ActivityKind } from "../types";
+import type { UsageSnapshot } from "../qa/usage";
 import { CommitIntent } from "../qa/commit-classify";
 import type { ArchitectureContext } from "../qa/context";
 import { coerceExplorationBrief, parseExplorationBrief, type ExplorationBrief } from "../qa/exploration-brief";
@@ -496,7 +497,7 @@ export interface AgentSession {
 }
 
 export interface AgentDeps {
-  open(agent: string, cwd: string, opts?: { signal?: AbortSignal; timeoutMs?: number; model?: string }): Promise<AgentSession>;
+  open(agent: string, cwd: string, opts?: { signal?: AbortSignal; timeoutMs?: number; model?: string; onUsage?: (u: UsageSnapshot) => void }): Promise<AgentSession>;
   cleanupOrphans?(maxAgeMs: number): Promise<number>;
 }
 
@@ -1305,9 +1306,27 @@ export function agentTimeout(mode: RunMode): number {
 
 const MAX_AGENT_TIMEOUT_MS = Math.max(...Object.values(TIMEOUT_BY_MODE));
 
+// Wrap an AgentDeps so EVERY open() injects the per-run usage sink, including internal callers
+// (explorer, reviewer, parallel workers) that never set opts.onUsage themselves. A caller-supplied
+// opts.onUsage still wins (`opts?.onUsage ?? onUsage`). No sink ⇒ baseDeps is returned untouched.
+// Single home for this wrapper so the precedence cannot drift between the entrypoint (index.ts) and
+// the default pipeline factory (pipeline.ts), which both need identical behavior.
+export function withUsageSink(baseDeps: AgentDeps, onUsage?: (u: UsageSnapshot) => void): AgentDeps {
+  if (!onUsage) return baseDeps;
+  return {
+    ...baseDeps,
+    open: (agent, cwd, opts) => baseDeps.open(agent, cwd, { ...opts, onUsage: opts?.onUsage ?? onUsage }),
+  };
+}
+
 // Integration boundary: real connection to `opencode serve`. Not covered by unit
 // tests (like the Playwright runner). The SDK is imported lazily so tests do not
 // require the package. OPENCODE_SERVE_URL points to the `opencode` container.
+//
+// Usage capture is driven SOLELY by `opts.onUsage` on each open() — the single, typed mechanism.
+// Callers that want the snapshots wrap this AgentDeps (via withUsageSink) to inject onUsage into
+// every open() (the runner/pipeline path via the facade). There is no factory-level usage sink (it
+// was dead in the production strategy path, which always constructs this with no argument).
 export async function defaultAgentDeps(): Promise<AgentDeps> {
   // The undici transport timeout must exceed EVERY per-prompt withTimeout, or it aborts the
   // request before our own deadline fires. The reviewer and the explorer each have their OWN budget
@@ -1376,6 +1395,24 @@ export async function defaultAgentDeps(): Promise<AgentDeps> {
                       throw agentErrorToInfra(agentErr);
                     }
                     recordCircuitSuccess();
+                    // Emit a usage snapshot for the accumulator (observation-only). The ONLY sink is
+                    // opts.onUsage — callers that want capture pre-wrap this AgentDeps to inject it
+                    // into every open() (so internal callers like the explorer/reviewer are covered
+                    // without touching their individual call sites).
+                    const infoRaw = res.data?.info as
+                      | { tokens?: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }; cost?: number }
+                      | undefined;
+                    if (infoRaw?.tokens) {
+                      const snapshot: UsageSnapshot = {
+                        input: infoRaw.tokens.input ?? 0,
+                        output: infoRaw.tokens.output ?? 0,
+                        reasoning: infoRaw.tokens.reasoning ?? 0,
+                        cacheRead: infoRaw.tokens.cache?.read ?? 0,
+                        cacheWrite: infoRaw.tokens.cache?.write ?? 0,
+                        cost: infoRaw.cost ?? 0,
+                      };
+                      opts?.onUsage?.(snapshot);
+                    }
                     return extractText(res.data?.parts, promptOpts);
                   })
                   // Record the circuit failure in EXACTLY one place per attempt. The error

@@ -124,7 +124,10 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
           log: emitLog,
           // During generation, emit a heartbeat every 15s so the TUI and chat
           // have live feedback while the agent is working (blocking prompt call).
-          generate: async (input, signal) => {
+          // FORWARD onUsage (4th arg): the runner keeps its OWN progress callback for live
+          // heartbeats, but must pass the usage sink through or the generator's token spend is
+          // never captured in the webhook path (only the reviewer's would be).
+          generate: async (input, signal, _onProgress, onUsage) => {
             const onProgress = emitLog;
             return pipeline.generate({ ...input, runId: record.id }, signal, (msg) => {
               // Enrich heartbeat messages with live agent context.
@@ -137,7 +140,7 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
                 return;
               }
               onProgress(msg);
-            });
+            }, onUsage);
           },
         },
         req.source ?? "webhook",

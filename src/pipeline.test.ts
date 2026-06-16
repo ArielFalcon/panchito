@@ -1607,3 +1607,247 @@ test("3.x fix-loop W3: real-bug branch does NOT fire when a failing selector is 
   // It should have proceeded to regenerate instead (a second generate call beyond the initial one).
   assert.ok(d.genInputs.length >= 2, `expected the loop to regenerate, got ${d.genInputs.length} generate call(s)`);
 });
+
+// ── Write-confinement guard wiring ────────────────────────────────────────────
+
+// Task 4.3: verify the confine dep is called exactly once per run, the result lands
+// in gateSignals.confinement, and the run is non-blocking (published === true, verdict unchanged).
+
+test("confinement: stub returning { strays:1, dangerous:0, reverted:[\"foo.md\"] } is called once and persisted", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls);
+  let confineCalls = 0;
+  const confinementResult = { strays: 1, dangerous: 0, reverted: ["foo.md"] };
+  (d as PipelineDeps).confine = async (_mirrorDir, _isCode) => {
+    confineCalls++;
+    return confinementResult;
+  };
+  await runPipeline(app, "abc1234def", d, "manual", { mode: "diff", runId: "run-confine-1" });
+  assert.equal(confineCalls, 1, "confine should be called exactly once");
+  assert.ok(d.savedOutcomes.length > 0, "outcome must be persisted");
+  const outcome = d.savedOutcomes[0]!;
+  assert.deepEqual(outcome.gateSignals.confinement, confinementResult);
+  assert.ok(d.published, "run should still publish — confinement is non-blocking");
+  assert.equal(outcome.verdict, "pass");
+});
+
+test("confinement: clean result { strays:0, dangerous:0, reverted:[] } is ALWAYS set on gateSignals when dep is wired (LOCKED DECISION)", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls);
+  const cleanResult = { strays: 0, dangerous: 0, reverted: [] as string[] };
+  (d as PipelineDeps).confine = async () => cleanResult;
+  await runPipeline(app, "abc1234def", d, "manual", { mode: "diff", runId: "run-confine-clean" });
+  assert.ok(d.savedOutcomes.length > 0, "outcome must be persisted");
+  const outcome = d.savedOutcomes[0]!;
+  // LOCKED DECISION: even a zero-stray result is written to the signal when the dep was wired.
+  assert.deepEqual(
+    outcome.gateSignals.confinement,
+    cleanResult,
+    "a clean confinement result must be present on gateSignals, not undefined",
+  );
+  assert.ok(d.published, "clean run must still publish");
+});
+
+test("confinement: absent dep leaves gateSignals.confinement undefined", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls);
+  // No confine dep wired (the default test harness does not include one).
+  assert.equal((d as PipelineDeps).confine, undefined, "test harness must not have confine by default");
+  await runPipeline(app, "abc1234def", d, "manual", { mode: "diff", runId: "run-confine-absent" });
+  assert.ok(d.savedOutcomes.length > 0);
+  const outcome = d.savedOutcomes[0]!;
+  assert.equal(outcome.gateSignals.confinement, undefined, "gateSignals.confinement must be absent when dep is not wired");
+});
+
+test("confinement: verdict is unchanged by a stray — dangerous stray does not become 'invalid'", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls);
+  (d as PipelineDeps).confine = async () => ({ strays: 1, dangerous: 1, reverted: [".env.local"] });
+  const run = await runPipeline(app, "abc1234def", d, "manual", { mode: "diff", runId: "run-confine-danger" });
+  assert.equal(run.verdict, "pass", "a dangerous stray must not change the verdict to invalid");
+  assert.ok(d.published, "run must still publish despite a dangerous stray");
+});
+
+test("confinement: runs + persists on the static-gate INVALID early return (post-generation exit)", async () => {
+  const calls: string[] = [];
+  // Failing validation kills the run at the static gate (a post-generation exit). The agent ran,
+  // so confinement must still execute there and the result must reach the persisted outcome.
+  const d = deps(passing(), calls, { validation: { ok: false, errors: ["tsc failed"], infra: false } });
+  let confineCalls = 0;
+  const confinementResult = { strays: 1, dangerous: 0, reverted: ["stray.md"] };
+  (d as PipelineDeps).confine = async () => {
+    confineCalls++;
+    return confinementResult;
+  };
+  const run = await runPipeline(app, "abc1234def", d, "manual", { mode: "diff", runId: "run-confine-invalid" });
+  assert.equal(run.verdict, "invalid");
+  assert.ok(confineCalls >= 1, "confine must run on the static-invalid exit");
+  const outcome = d.savedOutcomes[0]!;
+  assert.deepEqual(outcome.gateSignals.confinement, confinementResult, "confinement must be persisted on the invalid exit");
+});
+
+test("confinement + usage: both persist on the health pre-flight INFRA-ERROR early return", async () => {
+  const calls: string[] = [];
+  // DEV unhealthy at the pre-flight (the first isHealthy call in this flow; the gate uses the
+  // waitForDeploy stub) → infra-error, a post-generation exit. Tokens were spent during generation.
+  const d = deps(passing(), calls, { healthy: false });
+  let confineCalls = 0;
+  const confinementResult = { strays: 0, dangerous: 0, reverted: [] as string[] };
+  (d as PipelineDeps).confine = async () => {
+    confineCalls++;
+    return confinementResult;
+  };
+  (d as PipelineDeps).generate = async (_input, _signal, _onProgress, onUsage) => {
+    calls.push("generate");
+    onUsage?.({ input: 70, output: 30, reasoning: 10, cacheRead: 0, cacheWrite: 0, cost: 0.002 });
+    return generated;
+  };
+  const run = await runPipeline(app, "abc1234def", d, "manual", { mode: "diff", runId: "run-confine-infra" });
+  assert.equal(run.verdict, "infra-error");
+  assert.ok(confineCalls >= 1, "confine must run on the health pre-flight infra-error exit");
+  const outcome = d.savedOutcomes[0]!;
+  assert.deepEqual(outcome.gateSignals.confinement, confinementResult, "confinement must be present on the infra-error exit");
+  // usage: tokens were spent before the pre-flight, so they must be recorded on the infra-error exit.
+  assert.ok(outcome.gateSignals.usage !== undefined, "usage must be persisted on the infra-error exit");
+  assert.equal(outcome.gateSignals.usage.tokens.input, 70);
+});
+
+// F1: the agent no-op exit (approved + zero specs) is a post-generation exit — the agent ran
+// (tokens spent) and may have written strays, so confine must run AND the outcome must persist
+// confinement + usage. The verdict stays `skipped` (confinement is non-blocking).
+test("confinement + usage: the no-op (approved, zero specs) exit confines once and persists both, verdict stays skipped", async () => {
+  const calls: string[] = [];
+  const noop: AgentResult = { output: "the change needs no tests", specs: [], reviewed: true, approved: true };
+  const d = deps(passing(), calls, { agent: noop });
+  let confineCalls = 0;
+  const confinementResult = { strays: 1, dangerous: 0, reverted: ["stray.md"] };
+  (d as PipelineDeps).confine = async () => {
+    confineCalls++;
+    return confinementResult;
+  };
+  // The agent spends tokens even on a no-op — fire a usage snapshot from generate.
+  (d as PipelineDeps).generate = async (_input, _signal, _onProgress, onUsage) => {
+    calls.push("generate");
+    onUsage?.({ input: 42, output: 10, reasoning: 5, cacheRead: 0, cacheWrite: 0, cost: 0.001 });
+    return noop;
+  };
+  const run = await runPipeline(app, "abc1234def", d, "manual", { mode: "diff", runId: "run-confine-noop" });
+  assert.equal(run.verdict, "skipped", "a no-op is still a clean skipped verdict");
+  assert.equal(confineCalls, 1, "confine must run exactly once on the no-op exit");
+  // It is a no-op: nothing should have been validated, executed or published.
+  assert.ok(!calls.includes("validate"));
+  assert.ok(!calls.includes("execute"));
+  assert.equal(d.published, false);
+  assert.ok(d.savedOutcomes.length > 0, "the no-op outcome must be persisted (runId given)");
+  const outcome = d.savedOutcomes[0]!;
+  assert.equal(outcome.verdict, "skipped");
+  assert.deepEqual(outcome.gateSignals.confinement, confinementResult, "confinement must be persisted on the no-op exit");
+  assert.ok(outcome.gateSignals.usage !== undefined, "usage must be persisted on the no-op exit");
+  assert.equal(outcome.gateSignals.usage.tokens.input, 42, "the tokens spent on the no-op generation are recorded");
+});
+
+// F2: in `enforce` mode a coverage gap triggers a SECOND generation that can write fresh strays.
+// Confine must run AFTER that regeneration (and before publish), so a stray from the regen is
+// reverted and the persisted confinement is fresh — not the stale pre-regen snapshot.
+test("confinement (enforce): runs AFTER the coverage-gap regeneration, reverts its stray before publish, persists fresh", async () => {
+  const calls: string[] = [];
+  // First generate; the improvement regen closes the gap (full coverage on the 2nd collect) → publishes.
+  const d = deps(passing(), calls, { diff: DIFF_4, agents: [generated, generated], coverage: [cov([1]), cov([1, 2, 3, 4])] });
+  let confineCalls = 0;
+  const confinementResult = { strays: 1, dangerous: 0, reverted: ["enforce-regen-stray.md"] };
+  (d as PipelineDeps).confine = async () => {
+    confineCalls++;
+    calls.push("confine");
+    return confinementResult;
+  };
+  await runPipeline(covApp("enforce"), "abc1234def", d, "manual", { mode: "diff", runId: "run-confine-enforce" });
+  assert.equal(confineCalls, 1, "confine must run exactly once on the green path");
+  assert.equal(d.published, true, "the gap was closed → the suite publishes");
+  // Ordering: the SECOND generate (the enforce regen) must precede confine, which must precede publish.
+  const generateIdxs = calls.map((c, i) => (c === "generate" ? i : -1)).filter((i) => i >= 0);
+  assert.ok(generateIdxs.length >= 2, `expected >=2 generate calls (initial + enforce regen), got ${generateIdxs.length}: ${calls.join(",")}`);
+  const secondGenerate = generateIdxs[1]!;
+  const confineIdx = calls.indexOf("confine");
+  const publishIdx = calls.indexOf("publish");
+  assert.ok(confineIdx > secondGenerate, `confine (${confineIdx}) must run AFTER the enforce regen generate (${secondGenerate}): ${calls.join(",")}`);
+  assert.ok(publishIdx > confineIdx, `publish (${publishIdx}) must run AFTER confine (${confineIdx}): ${calls.join(",")}`);
+  // The persisted confinement is the one captured on THIS (post-regen) pass — fresh, not stale.
+  const outcome = d.savedOutcomes.at(-1)!;
+  assert.deepEqual(outcome.gateSignals.confinement, confinementResult, "the fresh post-regen confinement must be persisted");
+});
+
+// ── Usage accumulator wiring ───────────────────────────────────────────────────
+
+// Test A: stub generate fires N snapshots → gateSignals.usage equals summed RunUsage.
+test("usage: stub generate fires 2 snapshots → gateSignals.usage equals summed RunUsage", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls);
+  // Wire generate to call onUsage twice with known values.
+  (d as PipelineDeps).generate = async (_input, _signal, _onProgress, onUsage) => {
+    calls.push("generate");
+    onUsage?.({ input: 100, output: 50, reasoning: 20, cacheRead: 5, cacheWrite: 3, cost: 0.001 });
+    onUsage?.({ input: 200, output: 80, reasoning: 30, cacheRead: 10, cacheWrite: 2, cost: 0.002 });
+    return generated;
+  };
+  await runPipeline(app, "abc1234def", d, "manual", { mode: "diff", runId: "run-usage-1" });
+  assert.ok(d.savedOutcomes.length > 0, "outcome must be persisted");
+  const usage = d.savedOutcomes[0]!.gateSignals.usage;
+  assert.ok(usage !== undefined, "usage must be set when snapshots were fired");
+  assert.equal(usage.tokens.input, 300);
+  assert.equal(usage.tokens.output, 130);
+  assert.equal(usage.tokens.reasoning, 50);
+  assert.equal(usage.tokens.total, 300 + 130 + 50);
+  assert.ok(Math.abs((usage.cost ?? 0) - 0.003) < 1e-9, `expected cost ~0.003, got ${usage.cost}`);
+  // Verdict must be unchanged — usage is observation-only.
+  assert.equal(d.savedOutcomes[0]!.verdict, "pass");
+});
+
+// Test B: onUsage never fired → gateSignals.usage undefined.
+test("usage: onUsage never fired → gateSignals.usage undefined", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls);
+  // Default test harness does not call onUsage in generate.
+  await runPipeline(app, "abc1234def", d, "manual", { mode: "diff", runId: "run-usage-absent" });
+  assert.ok(d.savedOutcomes.length > 0);
+  assert.equal(d.savedOutcomes[0]!.gateSignals.usage, undefined, "usage must be absent when no snapshots fired");
+});
+
+// Test C: verdict and published are IDENTICAL with and without usage — observation-only lock.
+test("usage: verdict and published are identical with and without usage (observation-only lock)", async () => {
+  const calls1: string[] = [];
+  const d1 = deps(passing(), calls1);
+  await runPipeline(app, "abc1234def", d1, "manual", { mode: "diff", runId: "run-usage-obs-no" });
+
+  const calls2: string[] = [];
+  const d2 = deps(passing(), calls2);
+  (d2 as PipelineDeps).generate = async (_input, _signal, _onProgress, onUsage) => {
+    calls2.push("generate");
+    onUsage?.({ input: 500, output: 200, reasoning: 100, cacheRead: 0, cacheWrite: 0, cost: 0.01 });
+    return generated;
+  };
+  await runPipeline(app, "abc1234def", d2, "manual", { mode: "diff", runId: "run-usage-obs-yes" });
+
+  assert.equal(d1.savedOutcomes[0]!.verdict, d2.savedOutcomes[0]!.verdict, "verdict must be identical");
+  assert.equal(d1.published, d2.published, "published must be identical");
+});
+
+// Test D: persisted on static-invalid early return.
+test("usage: persisted on static-invalid early return when onUsage was fired before validation", async () => {
+  const calls: string[] = [];
+  // Use failing validation so the static gate kills the run after one or more generate calls.
+  // The static-repair loop retries generate up to MAX_STATIC_FIX_ROUNDS times, so we assert
+  // that usage is defined and that input is a multiple of 50 (one 50 per generate call).
+  const d = deps(passing(), calls, { validation: { ok: false, errors: ["tsc failed"], infra: false } });
+  (d as PipelineDeps).generate = async (_input, _signal, _onProgress, onUsage) => {
+    calls.push("generate");
+    onUsage?.({ input: 50, output: 20, reasoning: 10, cacheRead: 0, cacheWrite: 0, cost: 0.0005 });
+    return generated;
+  };
+  await runPipeline(app, "abc1234def", d, "manual", { mode: "diff", runId: "run-usage-invalid" });
+  assert.ok(d.savedOutcomes.length > 0, "outcome must be persisted even for invalid runs");
+  const usage = d.savedOutcomes[0]!.gateSignals.usage;
+  assert.ok(usage !== undefined, "usage must be set on static-invalid return when tokens were spent");
+  // At least one generate call fired: input must be a positive multiple of 50.
+  assert.ok((usage.tokens.input ?? 0) > 0, "usage.tokens.input must be positive");
+  assert.equal(usage.tokens.input % 50, 0, "input must be a multiple of 50 (one call = 50)");
+});
