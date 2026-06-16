@@ -42,6 +42,7 @@ export function recordIncident(opts: {
   severity: IncidentSeverity;
   summary: string;
   detail?: string;
+  status?: Incident["status"];
 }): Incident {
   const incident: Incident = {
     id: nextId(),
@@ -49,7 +50,7 @@ export function recordIncident(opts: {
     severity: opts.severity,
     summary: opts.summary,
     detail: opts.detail,
-    status: "pending",
+    status: opts.status ?? "pending",
     at: new Date().toISOString(),
   };
   incidents.push(incident);
