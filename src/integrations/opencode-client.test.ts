@@ -1826,3 +1826,71 @@ test("Phase 0 A.3: AgentSession.prompt() accepts round/isRepair opts without bre
   assert.ok(turns.length >= 1);
   assert.equal(turns[0]!.isRepair, false);
 });
+
+// Phase 0b: the reviewer session opens WITH a descriptor so its turn record gets a non-null run_id.
+// Spec scenario: "Reviewer session tracked with runId".
+test("phase-0b: reviewIndependently passes runId and objective from ReviewInput to the open() descriptor", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "qa-review-descr-"));
+  const e2eDir = join(dir, "e2e");
+  mkdirSync(e2eDir, { recursive: true });
+  writeFileSync(join(e2eDir, "login.spec.ts"), "// spec content");
+  const capturedDescriptor: { runId?: string; role?: string; objective?: string } = {};
+  const stub: AgentDeps = {
+    open: async (_agent: string, _cwd: string, opts) => {
+      if (opts?.descriptor) {
+        capturedDescriptor.runId = opts.descriptor.runId;
+        capturedDescriptor.role = opts.descriptor.role;
+        capturedDescriptor.objective = opts.descriptor.objective;
+      }
+      return {
+        id: "rev-session",
+        prompt: async () => '{"approved":true,"corrections":[],"rationale":"looks good"}',
+        dispose: async () => {},
+      };
+    },
+  };
+  try {
+    await reviewIndependently(
+      {
+        diff: "diff --git a/x b/x",
+        specs: ["login.spec.ts"],
+        mirrorDir: dir,
+        e2eRelDir: "e2e",
+        appName: "demo",
+        mode: "diff",
+        runId: "run-0b-test",
+        objective: "feat: add login page",
+      },
+      stub,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  assert.equal(capturedDescriptor.runId, "run-0b-test", "descriptor.runId must be the parent run's id");
+  assert.equal(capturedDescriptor.role, "qa-reviewer", "descriptor.role must be qa-reviewer");
+  assert.equal(capturedDescriptor.objective, "feat: add login page", "descriptor.objective must be forwarded");
+});
+
+// Phase 0b: askAssistant threads the role (and optional runId) into the session descriptor.
+// This covers the qa-reflector path used by reflectAndDistill and auditProcess.
+test("phase-0b: askAssistant passes role (and optional runId) in the open() descriptor", async () => {
+  const capturedDescriptors: Array<{ runId?: string; role?: string }> = [];
+  const stub: AgentDeps = {
+    open: async (_agent: string, _cwd: string, opts) => {
+      capturedDescriptors.push({ runId: opts?.descriptor?.runId, role: opts?.descriptor?.role });
+      return {
+        id: "s",
+        prompt: async () => "answer",
+        dispose: async () => {},
+      };
+    },
+  };
+  // With runId
+  await askAssistant({ context: "ctx", question: "q?", agent: "qa-reflector", runId: "run-reflector-1" }, stub, "/tmp");
+  // Without runId (chat path)
+  await askAssistant({ context: "ctx", question: "q?" }, stub, "/tmp");
+  assert.equal(capturedDescriptors[0]?.role, "qa-reflector", "role forwarded for qa-reflector path");
+  assert.equal(capturedDescriptors[0]?.runId, "run-reflector-1", "runId forwarded when provided");
+  assert.equal(capturedDescriptors[1]?.role, "qa-assistant", "role forwarded for default chat path");
+  assert.equal(capturedDescriptors[1]?.runId, undefined, "runId is undefined when not provided");
+});

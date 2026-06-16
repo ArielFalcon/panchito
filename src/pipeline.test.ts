@@ -1948,6 +1948,40 @@ test("phase-6a: onRepair callback increments cycleCount and logs the event", asy
   );
 });
 
+// Phase 0b: the deps.review() call-site forwards runId and objective from opts into ReviewInput.
+// Spec scenario: "Reviewer session tracked with runId".
+test("phase-0b: deps.review receives runId and objective forwarded from runPipeline opts", async () => {
+  const calls: string[] = [];
+  // Capture the ReviewInput passed to deps.review so we can assert the new fields.
+  let capturedReviewInput: import("./integrations/opencode-client").ReviewInput | undefined;
+  const d = deps(
+    passing(),
+    calls,
+    { review: [{ approved: true, corrections: [] }] },
+  );
+  // Replace review with a capturing version (keep the return value compatible).
+  (d as PipelineDeps).review = async (input) => {
+    capturedReviewInput = input;
+    return { approved: true, corrections: [] };
+  };
+  await runPipeline(
+    app,
+    "abc1234def",
+    d,
+    "webhook",
+    // Phase 0b: pass a runId so pipeline threads it into deps.review.
+    { mode: "diff", runId: "run-0b-pipeline-test" },
+  );
+  assert.ok(capturedReviewInput !== undefined, "deps.review must have been called");
+  assert.equal(capturedReviewInput!.runId, "run-0b-pipeline-test", "ReviewInput.runId must match opts.runId");
+  // objective is derived from guidance (undefined here) or intent.message (commit message is "feat: change")
+  assert.equal(
+    capturedReviewInput!.objective,
+    "feat: change",
+    "ReviewInput.objective must come from intent.message when guidance is absent",
+  );
+});
+
 // Test D: persisted on static-invalid early return.
 test("usage: persisted on static-invalid early return when onUsage was fired before validation", async () => {
   const calls: string[] = [];

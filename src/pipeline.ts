@@ -389,7 +389,8 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
               `Recent run outcomes (newest first):\n${recentLine}`,
               `In 2-3 sentences: the most likely ROOT CAUSE in the ENGINE's own logic, and which area/file to inspect. Be concrete; do not blame the watched app.`,
             ].join("\n\n");
-            f.diagnosis = (await askAssistant({ context: prompt, question: "Diagnose the engine defect.", instruction: "Output 2-3 plain sentences. No markdown.", agent: "qa-reflector" }, agentDeps, "/tmp")).trim() || undefined;
+            // Phase 0b: pass runId so the qa-reflector session can be correlated to the run that triggered the audit.
+            f.diagnosis = (await askAssistant({ context: prompt, question: "Diagnose the engine defect.", instruction: "Output 2-3 plain sentences. No markdown.", agent: "qa-reflector", runId }, agentDeps, "/tmp")).trim() || undefined;
           }
         } catch {
           // best-effort: an undiagnosed engine-fix still records its deterministic evidence
@@ -454,7 +455,8 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
         const raw = await askAssistant(
           // qa-reflector is a tool-less role: the reflection is a pure transform of the failure
           // context into a rule, with no engram/filesystem access (unlike the chat assistant).
-          { context: prompt, question: "Produce the StructuredReflection JSON.", instruction: "Output ONLY the JSON object. No markdown, no explanation.", agent: "qa-reflector" },
+          // Phase 0b: pass runId so the qa-reflector session is correlated to the run in telemetry.
+          { context: prompt, question: "Produce the StructuredReflection JSON.", instruction: "Output ONLY the JSON object. No markdown, no explanation.", agent: "qa-reflector", runId: input.runId },
           deps,
           "/tmp",
         );
@@ -1169,7 +1171,16 @@ export async function runPipeline(
         review = await deps.review(
           // Arm the independent judge with the PROVEN learned rules (active only — never unproven
           // candidates) so it enforces app-specific anti-patterns earned from past failures.
-          { diff: promptDiff, specs: r.specs, mirrorDir, e2eRelDir: isCode ? "" : E2E_DIR, baseUrl: app.dev?.baseUrl, intent, guidance: opts.guidance, appName: app.name, mode, target: opts.target, learnedRules: renderRulesForReviewer(retrievedRules), domSnapshot },
+          // Phase 0b: thread runId + objective so the reviewer's agent_turns row carries a
+          // non-null run_id, enabling per-role telemetry on the reviewer's turns.
+          {
+            diff: promptDiff, specs: r.specs, mirrorDir, e2eRelDir: isCode ? "" : E2E_DIR,
+            baseUrl: app.dev?.baseUrl, intent, guidance: opts.guidance, appName: app.name,
+            mode, target: opts.target, learnedRules: renderRulesForReviewer(retrievedRules),
+            domSnapshot,
+            runId: opts.runId,
+            objective: opts.guidance ?? intent?.message,
+          },
           signal,
           usage.add.bind(usage),
           onRepair,

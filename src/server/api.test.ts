@@ -989,3 +989,72 @@ test("the SSE poll flushes events persisted by another process (the in-process b
   assert.match(res.writes.join(""), /event: step.changed/);
   req.emit("close"); // stop the poll
 });
+
+// Phase 0b: GET /api/runs/:id/turns — per-run agent_turns endpoint.
+// Spec scenario: "Per-role cache trends retrievable".
+
+test("phase-0b: GET /api/runs/:id/turns returns 501 when getAgentTurns is not wired", async () => {
+  const record: RunRecord = { id: "r1", app: "demo", sha: "abc", target: "e2e", mode: "diff", status: "done", cases: [], logs: [], at: "t" };
+  const res = mkRes();
+  await handleApi(mkReq("GET", "/api/v1/runs/r1/turns"), res, deps({ getRecord: () => record }));
+  assert.equal(res.status, 501);
+  assert.match(res.body, /not available/i);
+});
+
+test("phase-0b: GET /api/runs/:id/turns returns 404 when the run is not found", async () => {
+  const res = mkRes();
+  await handleApi(
+    mkReq("GET", "/api/v1/runs/missing-run/turns"),
+    res,
+    deps({ getAgentTurns: () => [], getRecord: () => undefined }),
+  );
+  assert.equal(res.status, 404);
+  assert.match(res.body, /not found/i);
+});
+
+test("phase-0b: GET /api/runs/:id/turns returns the saved turns for the run as a JSON array", async () => {
+  const record: RunRecord = { id: "r1", app: "demo", sha: "abc", target: "e2e", mode: "diff", status: "done", cases: [], logs: [], at: "t" };
+  const stubTurns = [
+    {
+      runId: "r1", sessionId: "s1", role: "qa-generator", round: 0, isRepair: false,
+      ts: "2026-06-16T00:00:00.000Z", objective: "feat: add login",
+      promptText: "generate tests", outputText: "tests done",
+      promptBytes: 14, tokensInput: 100, tokensOutput: 50,
+      tokensReasoning: 0, tokensCacheRead: 20, tokensCacheWrite: 5, cost: 0.001,
+    },
+    {
+      runId: "r1", sessionId: "s2", role: "qa-reviewer", round: 0, isRepair: false,
+      ts: "2026-06-16T00:01:00.000Z", objective: "feat: add login",
+      promptText: "review tests", outputText: '{"approved":true,"corrections":[],"rationale":"ok"}',
+      promptBytes: 12, tokensInput: 80, tokensOutput: 30,
+      tokensReasoning: null, tokensCacheRead: 10, tokensCacheWrite: 3, cost: 0.0008,
+    },
+  ];
+  const res = mkRes();
+  await handleApi(
+    mkReq("GET", "/api/v1/runs/r1/turns"),
+    res,
+    deps({ getRecord: () => record, getAgentTurns: () => stubTurns as any }),
+  );
+  assert.equal(res.status, 200);
+  const body = JSON.parse(res.body);
+  assert.ok(Array.isArray(body), "response must be a JSON array");
+  assert.equal(body.length, 2, "both turns must be returned");
+  assert.equal(body[0].role, "qa-generator");
+  assert.equal(body[1].role, "qa-reviewer");
+  // Phase 0b keystone: the reviewer turn must carry a non-null run_id
+  assert.equal(body[1].runId, "r1", "reviewer turn must have the parent run's runId");
+});
+
+test("phase-0b: GET /api/runs/:id/turns returns an empty array when no turns exist for the run", async () => {
+  const record: RunRecord = { id: "r1", app: "demo", sha: "abc", target: "e2e", mode: "diff", status: "done", cases: [], logs: [], at: "t" };
+  const res = mkRes();
+  await handleApi(
+    mkReq("GET", "/api/v1/runs/r1/turns"),
+    res,
+    deps({ getRecord: () => record, getAgentTurns: () => [] }),
+  );
+  assert.equal(res.status, 200);
+  const body = JSON.parse(res.body);
+  assert.deepEqual(body, []);
+});

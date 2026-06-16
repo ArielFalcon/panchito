@@ -51,6 +51,7 @@ import { RunEventSchema, type RunEvent } from "../contract/events";
 import { handshake } from "./version";
 import { reportToCsv, trendsToCsv } from "./report-view";
 import type { RunEventStore } from "./run-events";
+import type { AgentTurnRecord } from "./history";
 
 const TARGETS: TestTarget[] = ["e2e", "code"];
 
@@ -98,6 +99,9 @@ export interface ApiDeps {
   deleteApp?: (name: string, purge: boolean) => { removed: string[] };
   listRepos?: (owner: string, page: number) => Promise<{ repos: Array<{ fullName: string; private: boolean; description: string | null }>; hasMore: boolean }>;
   runEvents?: RunEventStore;
+  // Phase 0b: returns persisted agent_turns rows for a run (all roles, chronological).
+  // Absent ⇒ the /api/runs/:id/turns route returns 501.
+  getAgentTurns?: (runId: string) => AgentTurnRecord[];
   // Cadence (ms) of the SSE durable-poll loop in handleRunEvents. Injected so tests can drive
   // the poll fast; production uses DEFAULT_SSE_POLL_MS.
   ssePollMs?: number;
@@ -167,6 +171,12 @@ export async function handleApi(
   const eventMatch = path.match(/^\/api\/runs\/([^/]+)\/events$/);
   if (req.method === "GET" && eventMatch) {
     return handleRunEvents(req, res, deps, eventMatch[1]!);
+  }
+
+  // Phase 0b: per-run agent_turns (all roles, chronological).
+  const turnsMatch = path.match(/^\/api\/runs\/([^/]+)\/turns$/);
+  if (req.method === "GET" && turnsMatch) {
+    return handleRunTurns(res, deps, turnsMatch[1]!);
   }
 
   const runMatch = path.match(/^\/api\/runs\/([^/]+)$/);
@@ -450,6 +460,22 @@ function handleRunEvents(req: IncomingMessage, res: ServerResponse, deps: ApiDep
   // Client disconnect → tear everything down. The write-after-close race is also guarded
   // centrally in sseWrite (writableEnded), so a late event is a no-op.
   req.on("close", () => finish());
+  return true;
+}
+
+// Phase 0b: returns the persisted agent_turns rows for a run as a JSON array (all roles,
+// chronological). Mirrors the existing run-scoped endpoints' shape and error handling.
+function handleRunTurns(res: ServerResponse, deps: ApiDeps, id: string): boolean {
+  if (!deps.getAgentTurns) {
+    json(res, 501, { error: "agent turns are not available" });
+    return true;
+  }
+  const record = deps.getRecord(id);
+  if (!record) {
+    json(res, 404, { error: `run not found: ${id}` });
+    return true;
+  }
+  json(res, 200, deps.getAgentTurns(id));
   return true;
 }
 

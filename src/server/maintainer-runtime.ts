@@ -130,8 +130,12 @@ export function createMaintainerRuntime(cfg: MaintainerConfig, fx: MaintainerSid
       await ensureMirrorSelf(maintainerWorkDir, mirrorDeps);
       await mirrorDeps.git(["checkout", "-B", branchName], maintainerWorkDir);
 
-      // Step 2: Open agent session to diagnose and fix
-      const session = await deps.open("qa-maintainer", maintainerWorkDir);
+      // Step 2: Open agent session to diagnose and fix.
+      // Phase 0b: thread the role descriptor; runId is intentionally absent — the maintainer is
+      // not triggered by a watched-repo run and has no parent runId to associate with.
+      const session = await deps.open("qa-maintainer", maintainerWorkDir, {
+        descriptor: { role: "qa-maintainer" },
+      });
       try {
         // Inject the memory of past failed fixes so the agent does not repeat a change that
         // already broke the service for the same reason.

@@ -397,7 +397,9 @@ export async function askAssistant(
   // `agent` selects the role this Q&A runs as. It defaults to the read-only chat assistant; the
   // reflection path passes "qa-reflector" — a tool-less role (no MCP) — so a one-shot reflection
   // cannot touch engram or the filesystem the way the chat assistant (which keeps engram memory) can.
-  input: { context: string; question: string; instruction?: string; agent?: string },
+  // Phase 0b: `runId` threads the parent run's identity into the session descriptor so telemetry
+  // records which run triggered a reflection/audit-diagnosis; undefined when no run context exists.
+  input: { context: string; question: string; instruction?: string; agent?: string; runId?: string },
   deps: AgentDeps,
   cwd: string,
 ): Promise<string> {
@@ -430,7 +432,12 @@ export async function askAssistant(
       ``,
       `- If the context lacks the answer, reply (in the question's language): "No tengo suficiente información para responder eso."`,
     ].join("\n");
-  const session = await deps.open(input.agent ?? "qa-assistant", cwd);
+  const role = input.agent ?? "qa-assistant";
+  // Phase 0b: thread the role into the descriptor; runId is forwarded when the caller has one
+  // (reflectAndDistill / audit-diagnosis paths) so telemetry can correlate the session to a run.
+  const session = await deps.open(role, cwd, {
+    descriptor: { role, runId: input.runId },
+  });
   try {
     // textOnly drops the model's reasoning parts: the assistant's return value is shown
     // verbatim to the operator, so a leaked chain-of-thought would surface in the chat.
@@ -762,6 +769,12 @@ export interface ReviewInput {
   // memory of "similar apps", which is what made it hallucinate corrections (e.g. "the button says
   // Add Owner" when DEV says "Submit"). Absent for code mode / when capture is unavailable.
   domSnapshot?: string;
+  // Phase 0b: threads the parent run's identity into the reviewer session so the resulting
+  // agent_turns row carries a non-null run_id (previously always null for the reviewer).
+  runId?: string;
+  // Phase 0b: the human-readable description of what these tests are supposed to defend
+  // (injected as the reviewer-session objective so telemetry can slice by intent).
+  objective?: string;
 }
 
 export interface ReviewResult {
@@ -796,7 +809,14 @@ export async function reviewIndependently(
     onRepair?: () => void;
   },
 ): Promise<ReviewResult> {
-  const session = await deps.open("qa-reviewer", input.mirrorDir, { signal: opts?.signal, timeoutMs: REVIEWER_TIMEOUT_MS });
+  // Phase 0b: thread the parent run's identity so the reviewer's agent_turns row carries a
+  // non-null run_id. The descriptor's `objective` echoes whatever the generator was defending
+  // (guidance in manual mode, commit message in diff mode) for telemetry cross-slicing.
+  const session = await deps.open("qa-reviewer", input.mirrorDir, {
+    signal: opts?.signal,
+    timeoutMs: REVIEWER_TIMEOUT_MS,
+    descriptor: { runId: input.runId, role: "qa-reviewer", objective: input.objective },
+  });
   try {
     const changeType = input.intent?.type ?? input.mode;
     const specBlock = renderReviewSpecs(input);
@@ -1270,7 +1290,12 @@ export async function runOpencodeParallel(
   if (process.env.PRE_INDEX_SERENA !== "0") {
     opts?.onProgress?.(`[qa] pre-indexing serena for ${objectives.length} workers...`);
     try {
-      const idxSession = await deps.open("qa-worker-code", input.mirrorDir, { timeoutMs: 120_000 });
+      // Phase 0b: thread role into the descriptor; runId is forwarded when available.
+      // The serena pre-index session has no per-objective context, so objective is left undefined.
+      const idxSession = await deps.open("qa-worker-code", input.mirrorDir, {
+        timeoutMs: 120_000,
+        descriptor: { runId: input.runId, role: "qa-worker-code" },
+      });
       try {
         await idxSession.prompt("Activate serena (activate_project) on the current directory. Do nothing else. End with {\"spec\":\"\"}.");
       } finally {
