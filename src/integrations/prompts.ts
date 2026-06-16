@@ -3,6 +3,11 @@
 // TASK + CONTEXT (diff, intent, namespace, architecture map, learned rules) the agent receives.
 // Pure string assembly with cheap defense-in-depth sanitization; no client/session/network state.
 //
+// Phase 1b: each builder declares typed Section descriptors and delegates final assembly to the
+// ContextAssembler, which enforces canonical order (STABLE → SEMI-STABLE → VOLATILE → TASK →
+// CRITICAL recap) and emits per-section sectionSizes for Phase-0 telemetry. The FUNCTIONAL
+// CONTENT of every section is preserved exactly; only the ORDER between sections changes.
+//
 // The input types are imported TYPE-ONLY from opencode-client (erased at runtime), so although
 // opencode-client imports these functions as values, there is no runtime import cycle.
 
@@ -13,6 +18,10 @@ import type { ArchitectureContext } from "../qa/context";
 import type { CommitIntent } from "../qa/commit-classify";
 import type { OpencodeRunInput, ParallelWorkerInput, ReviewInput } from "./opencode-client";
 import { renderExplorationBrief } from "../qa/exploration-brief";
+import { assemble, section, type AssembledPrompt } from "./context-assembler";
+
+// Re-export AssembledPrompt so callers that use the assembled variants only need one import.
+export type { AssembledPrompt };
 
 // The author's commit message as ONE block: subject + (optionally) body. The body is the richest
 // statement of intent; the subject alone is often too terse to derive a concrete objective from. The
@@ -55,7 +64,10 @@ export function specFileForFlow(flow: string): string {
 // (Q2: Playwright MCP removed from qa-worker — navigation was ×N expensive, concurrent DEV pressure,
 // and the prior 1/7 failure rate was caused by exploration+write competing for the step budget.
 // The planner (qa-generator) explores ONCE with the MCP and injects the tree; workers transcribe it.)
-export function buildWorkerPrompt(w: ParallelWorkerInput): string {
+//
+// Phase 1b: internally uses the ContextAssembler. Return type is unchanged (string).
+// Use buildWorkerPromptAssembled() to get the sectionSizes map for telemetry.
+export function buildWorkerPromptAssembled(w: ParallelWorkerInput): AssembledPrompt {
   const rules = w.needsUi
     ? [
         w.domSnapshot
@@ -70,7 +82,26 @@ export function buildWorkerPrompt(w: ParallelWorkerInput): string {
         `- Assert on BEHAVIOR (the correct output for given inputs), not implementation details. Include edge cases from the objective.`,
         `- Do NOT attempt to navigate or use browser tools — you have no Playwright MCP.`,
       ];
-  return [
+
+  // STABLE prefix: procedural rules for this worker role (stable across turns/runs for same role).
+  // The JSON output contract is kept in its own critical-recap section (canonical order places it
+  // after volatile content such as learned-rules, so the "lessons precede the JSON contract" invariant
+  // is preserved while also reinforcing the contract at the very end of the prompt).
+  const rulesBlock = [
+    ``,
+    `## Rules`,
+    ...(w.brief
+      ? [`- The Exploration brief already distilled the code — do NOT re-explore it with serena.`]
+      : []),
+    ...rules,
+    `- Do NOT write to the manifest — the orchestrator records metadata. Do NOT read or edit other workers' files.`,
+  ].join("\n");
+
+  // CRITICAL recap: JSON output contract repeated at the end (canonical order enforces this).
+  const outputContract = `- End your reply with ONLY this JSON: {"spec":"${w.specFile}"}`;
+
+  // TASK header: the critical "file must exist" requirement + objective.
+  const taskHeader = [
     `Write ONE test for this objective. Write ONLY your assigned file.`,
     ``,
     `## ⚠ The ONE required outcome: the file exists on disk`,
@@ -81,7 +112,10 @@ export function buildWorkerPrompt(w: ParallelWorkerInput): string {
     ``,
     `## Objective`,
     sanitizeText(w.objective).text,
-    ``,
+  ].join("\n");
+
+  // SEMI-STABLE: context block (symbols, namespace, brief) — stable for this worker assignment.
+  const contextLines = [
     `## Context`,
     `- Flow: ${w.flow}`,
     w.brief
@@ -89,49 +123,56 @@ export function buildWorkerPrompt(w: ParallelWorkerInput): string {
       : `- Affected code symbols (read them with serena): ${w.symbols.join(", ") || "(none specified)"}`,
     `- Namespace prefix for any data you create: ${w.namespace}`,
     `- Write EXACTLY this file: ${w.e2eRelDir}/${w.specFile}  — do not create or edit any other file.`,
-    w.needsUi ? `- Import the shared harness: import { test, expect } from "../fixtures"` : null,
+    ...(w.needsUi ? [`- Import the shared harness: import { test, expect } from "../fixtures"`] : []),
     ...(w.brief ? [``, renderExplorationBrief(w.brief)] : []),
-    ...(w.needsUi && w.domSnapshot
-      ? [
-          ``,
-          `## Injected a11y tree (GROUND TRUTH — your ONLY source of DOM truth)`,
-          `These are the roles + accessible names the browser ACTUALLY exposes for this flow's route(s).`,
-          `You have NO browser MCP. You do NOT need to navigate or snapshot — the tree is below.`,
-          `Author selectors ONLY from what appears here (transcribe, do NOT guess).`,
-          `If a role you expected (e.g. \`columnheader\`) is NOT listed, it is NOT in the tree:`,
-          `use \`getByText\` or a scoped locator instead. If a name appears MORE THAN ONCE,`,
-          `scope it to a unique parent (a bare getByRole/getByText would match multiple → strict-mode error).`,
-          w.domSnapshot,
-        ]
-      : []),
-    ``,
-    `## Rules`,
-    ...(w.brief
-      ? [`- The Exploration brief already distilled the code — do NOT re-explore it with serena.`]
-      : []),
-    ...rules,
-    `- Do NOT write to the manifest — the orchestrator records metadata. Do NOT read or edit other workers' files.`,
-    ...(w.learnedRules
-      ? [
-          ``,
-          `## Lessons learned from past runs (avoid repeating these)`,
-          w.learnedRules,
-        ]
-      : []),
-    `- End your reply with ONLY this JSON: {"spec":"${w.specFile}"}`,
-  ].filter((l): l is string => l !== null).join("\n");
+  ].join("\n");
+
+  // VOLATILE: injected a11y tree (changes per worker assignment based on route capture).
+  const domContent = w.needsUi && w.domSnapshot
+    ? [
+        `## Injected a11y tree (GROUND TRUTH — your ONLY source of DOM truth)`,
+        `These are the roles + accessible names the browser ACTUALLY exposes for this flow's route(s).`,
+        `You have NO browser MCP. You do NOT need to navigate or snapshot — the tree is below.`,
+        `Author selectors ONLY from what appears here (transcribe, do NOT guess).`,
+        `If a role you expected (e.g. \`columnheader\`) is NOT listed, it is NOT in the tree:`,
+        `use \`getByText\` or a scoped locator instead. If a name appears MORE THAN ONCE,`,
+        `scope it to a unique parent (a bare getByRole/getByText would match multiple → strict-mode error).`,
+        w.domSnapshot,
+      ].join("\n")
+    : "";
+
+  // VOLATILE: lessons from past runs (injected at call time, may change across runs).
+  const learnedRulesContent = w.learnedRules
+    ? [`## Lessons learned from past runs (avoid repeating these)`, w.learnedRules].join("\n")
+    : "";
+
+  return assemble([
+    // STABLE prefix: procedural rules (deterministic given the worker role + needsUi).
+    section("worker-rules", "stable-prefix", rulesBlock, { priority: 1, cacheable: true }),
+    // SEMI-STABLE: objective + context (changes per worker assignment but stable within a turn).
+    section("worker-context", "semi-stable", contextLines, { priority: 1 }),
+    // VOLATILE: injected DOM (changes per captured route snapshot).
+    ...(domContent ? [section("worker-dom", "volatile", domContent, { priority: 1 })] : []),
+    // VOLATILE: learned rules (changes as the learning layer accumulates knowledge).
+    ...(learnedRulesContent ? [section("worker-learned-rules", "volatile", learnedRulesContent, { priority: 2 })] : []),
+    // TASK: the write mandate + concrete objective.
+    section("worker-task", "task", taskHeader, { priority: 1 }),
+    // CRITICAL recap: output contract at the end so it is the last thing the agent sees before replying.
+    section("worker-output-contract", "critical-recap", outputContract, { priority: 1 }),
+  ]);
+}
+
+export function buildWorkerPrompt(w: ParallelWorkerInput): string {
+  return buildWorkerPromptAssembled(w).text;
 }
 // return STRUCTURED objectives (no spec files). It must question its own list (drop naive flows,
 // keep main use cases + MVP happy paths + relevant edge cases).
-export function buildPlanPrompt(input: OpencodeRunInput): string {
-  const lessonsBlock = input.learnedRules
-    ? [``, `## Lessons learned from past runs (factor these into the objectives you plan)`, input.learnedRules]
-    : [];
-  // The deterministic FE↔BE architecture map. The single-agent generator already receives it; the
-  // PLANNER must too, or the fan-out path silently re-derives the blast radius from serena alone and
-  // discards the map the engine spent a whole `context` run building. The planner distills it into
-  // each objective's brief, so it reaches the workers (who have no map of their own).
-  const contextBlock = input.contextMap
+//
+// Phase 1b: internally uses the ContextAssembler. Return type is unchanged (string).
+// Use buildPlanPromptAssembled() to get the sectionSizes map for telemetry.
+export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
+  // SEMI-STABLE: architecture map (stable for this run; changes between runs as the context evolves).
+  const contextMapContent = input.contextMap
     ? [
         ``,
         `## Architecture map (FE↔BE — authoritative; distil the relevant links into each brief)`,
@@ -141,12 +182,30 @@ export function buildPlanPrompt(input: OpencodeRunInput): string {
         `worker will \`page.goto(...)\` (include any SPA/hash prefix, e.g. "/#!/owners"; for a parameterized`,
         `route use a real existing instance, e.g. "/#!/owners/1"), NOT the abstract pattern. The orchestrator`,
         `renders these to capture the live DOM for the workers, so an abstract or wrong route yields no grounding.`,
-      ]
-    : [];
+      ].join("\n")
+    : "";
+
+  // SEMI-STABLE: lessons from past runs (stable for this run; evolves between runs).
+  const lessonsContent = input.learnedRules
+    ? [``, `## Lessons learned from past runs (factor these into the objectives you plan)`, input.learnedRules].join("\n")
+    : "";
+
+  // CRITICAL recap: the output format that must appear at the very end.
+  const outputFormatContent = input.mode === "diff"
+    ? [
+        `## Output — end with ONLY this JSON (no spec files):`,
+        `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","needsUi":true,"brief":{"builtForSha":"<the sha above>","objective":"…","blastRadius":[{"symbol":"CheckoutService.pay","file":"src/checkout/checkout.service.ts","role":"applies the bulk discount and creates the order"}],"routes":[{"path":"/#!/checkout","verified":true}],"feBe":[{"route":"/checkout","operationId":"createOrder","via":"OrderClient.create"}],"contracts":[{"operationId":"createOrder","method":"POST","path":"/orders","fields":["items","total"]}],"risks":["assert the discounted total AFTER the cart re-queries"]}}]}`,
+        `If the commit's change is not testable through a user flow, output {"objectives":[]}.`,
+      ].join("\n")
+    : [
+        `## Output — end with ONLY this JSON (no spec files):`,
+        `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","needsUi":true,"brief":{"builtForSha":"<the sha above>","objective":"…","blastRadius":[{"symbol":"CheckoutService.pay","file":"src/checkout/checkout.service.ts","role":"applies the bulk discount and creates the order"}],"routes":[{"path":"/#!/checkout","verified":true}],"feBe":[{"route":"/checkout","operationId":"createOrder","via":"OrderClient.create"}],"contracts":[{"operationId":"createOrder","method":"POST","path":"/orders","fields":["items","total"]}],"risks":["assert the discounted total AFTER the cart re-queries"]}}]}`,
+        `If every important flow is already well covered, output {"objectives":[]}.`,
+      ].join("\n");
+
   if (input.mode === "diff") {
-    return [
-      `Plan E2E test objectives for the blast radius of commit ${input.sha} of ${input.repo}.`,
-      ``,
+    // STABLE prefix: the planning procedure (same structure for every diff-mode plan session).
+    const planProcedure = [
       `## Phase 1 of 2 — PLANNING ONLY. Do NOT write any .spec.ts in this phase.`,
       `1. Activate serena (activate_project). Read the commit intent and diff below; derive the`,
       `   affected user flows (use find_referencing_symbols to widen from the changed symbols).`,
@@ -166,16 +225,19 @@ export function buildPlanPrompt(input: OpencodeRunInput): string {
       `   Declare them in \`routes[]\` with \`"verified": true\`. Only mark verified routes you actually`,
       `   navigated to and confirmed exist. Unverified (static/pattern) routes keep \`"verified": false\`.`,
       `   The orchestrator captures the live DOM for ONLY the verified routes and injects it into workers.`,
-      ``,
+    ].join("\n");
+
+    // SEMI-STABLE: the change intent + diff (specific to this commit but stable within this planning session).
+    // The planner derives the worker objectives from the commit intent, so it must read the FULL
+    // message (subject + body) via the shared renderCommitMessage helper — the same form buildTask
+    // and buildExplorerPrompt use. The body is the richest statement of intent; rendering only the
+    // subject (the old `- Message:` line) is exactly the drift the helper exists to prevent. The
+    // planner is always a first pass (never a regen), so the body is included.
+    const changeContent = [
       `## Change intent (Conventional Commits)`,
       `- Type: ${input.intent?.type ?? "unknown"}${input.intent?.breaking ? " (BREAKING)" : ""}`,
       `- Changed files: ${sanitizeText(input.intent?.changedFiles?.join(", ") ?? "").text || "(unknown)"}`,
       ``,
-      // The planner derives the worker objectives from the commit intent, so it must read the FULL
-      // message (subject + body) via the shared renderCommitMessage helper — the same form buildTask
-      // and buildExplorerPrompt use. The body is the richest statement of intent; rendering only the
-      // subject (the old `- Message:` line) is exactly the drift the helper exists to prevent. The
-      // planner is always a first pass (never a regen), so the body is included.
       `## Commit message (the author's intent — derive each objective from this)`,
       renderCommitMessage(input.intent, true),
       ``,
@@ -192,20 +254,26 @@ export function buildPlanPrompt(input: OpencodeRunInput): string {
             `changed service behavior through the UI.`,
           ]
         : []),
-      ...contextBlock,
-      ...lessonsBlock,
-      ``,
-      `## Output — end with ONLY this JSON (no spec files):`,
-      `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","needsUi":true,"brief":{"builtForSha":"<the sha above>","objective":"…","blastRadius":[{"symbol":"CheckoutService.pay","file":"src/checkout/checkout.service.ts","role":"applies the bulk discount and creates the order"}],"routes":[{"path":"/#!/checkout","verified":true}],"feBe":[{"route":"/checkout","operationId":"createOrder","via":"OrderClient.create"}],"contracts":[{"operationId":"createOrder","method":"POST","path":"/orders","fields":["items","total"]}],"risks":["assert the discounted total AFTER the cart re-queries"]}}]}`,
-      `If the commit's change is not testable through a user flow, output {"objectives":[]}.`,
     ].join("\n");
+
+    // TASK: the opening line that names what this session is doing.
+    const taskContent = `Plan E2E test objectives for the blast radius of commit ${input.sha} of ${input.repo}.`;
+
+    return assemble([
+      section("plan-procedure", "stable-prefix", planProcedure, { priority: 1, cacheable: true }),
+      section("plan-change", "semi-stable", changeContent, { priority: 1, language: "verbatim" }),
+      ...(contextMapContent ? [section("plan-arch-map", "semi-stable", contextMapContent, { priority: 2, cacheable: true })] : []),
+      ...(lessonsContent ? [section("plan-lessons", "semi-stable", lessonsContent, { priority: 3 })] : []),
+      section("plan-task", "task", taskContent, { priority: 1 }),
+      section("plan-output-format", "critical-recap", outputFormatContent, { priority: 1 }),
+    ]);
   }
+
+  // complete / exhaustive mode
   const exhaustive = input.mode === "exhaustive";
-  return [
-    exhaustive
-      ? `Audit the ENTIRE E2E suite of ${input.repo} and plan a full regeneration.`
-      : `Analyze the WHOLE repository ${input.repo} and plan where to GROW the E2E suite.`,
-    ``,
+
+  // STABLE prefix: the planning procedure for complete/exhaustive.
+  const wholeProcedure = [
     `## Phase 1 of 2 — PLANNING ONLY. Do NOT write any .spec.ts in this phase.`,
     `1. Activate serena (activate_project) and build a COVERAGE + IMPORTANCE map: read the existing`,
     `   specs in ${input.e2eRelDir}/ and the app code (get_symbols_overview, find_symbol,`,
@@ -224,13 +292,24 @@ export function buildPlanPrompt(input: OpencodeRunInput): string {
     `   For each objective, include a distilled "brief" of its blast radius (blastRadius: each touched`,
     `   symbol with its file + a ONE-LINE role; plus FE↔BE links, relevant contract facts, and risks)`,
     `   so the worker does NOT re-read the code. Set the brief's builtForSha to ${input.sha}.`,
-    ...contextBlock,
-    ...lessonsBlock,
-    ``,
-    `## Output — end with ONLY this JSON (no spec files):`,
-    `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","needsUi":true,"brief":{"builtForSha":"<the sha above>","objective":"…","blastRadius":[{"symbol":"CheckoutService.pay","file":"src/checkout/checkout.service.ts","role":"applies the bulk discount and creates the order"}],"routes":[{"path":"/#!/checkout","verified":true}],"feBe":[{"route":"/checkout","operationId":"createOrder","via":"OrderClient.create"}],"contracts":[{"operationId":"createOrder","method":"POST","path":"/orders","fields":["items","total"]}],"risks":["assert the discounted total AFTER the cart re-queries"]}}]}`,
-    `If every important flow is already well covered, output {"objectives":[]}.`,
   ].join("\n");
+
+  // TASK: the opening line naming what this session is doing.
+  const wholeTaskContent = exhaustive
+    ? `Audit the ENTIRE E2E suite of ${input.repo} and plan a full regeneration.`
+    : `Analyze the WHOLE repository ${input.repo} and plan where to GROW the E2E suite.`;
+
+  return assemble([
+    section("plan-procedure", "stable-prefix", wholeProcedure, { priority: 1, cacheable: true }),
+    ...(contextMapContent ? [section("plan-arch-map", "semi-stable", contextMapContent, { priority: 2, cacheable: true })] : []),
+    ...(lessonsContent ? [section("plan-lessons", "semi-stable", lessonsContent, { priority: 3 })] : []),
+    section("plan-task", "task", wholeTaskContent, { priority: 1 }),
+    section("plan-output-format", "critical-recap", outputFormatContent, { priority: 1 }),
+  ]);
+}
+
+export function buildPlanPrompt(input: OpencodeRunInput): string {
+  return buildPlanPromptAssembled(input).text;
 }
 
 // Fase 3: the dynamic task for the read-only explorer (single-agent diff path). The "how" + the
@@ -263,186 +342,19 @@ export function buildExplorerPrompt(input: OpencodeRunInput): string {
 // Assembles the dynamic message for the agent. The "how" lives in
 // agents/agent/qa-generator.md and the skills; only the task + context go here.
 // The diff/guidance are sanitized (cheap defense in depth).
-export function buildPrompt(input: OpencodeRunInput): string {
+//
+// Phase 1b: internally uses the ContextAssembler (P3 canonical order fix). Return type
+// is unchanged (string). Use buildPromptAssembled() to get the sectionSizes map for telemetry.
+export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
   const isGenerationMode = input.mode !== "context";
-
-  // Review-fix mode: prepend the reviewer's actionable corrections before anything else, so
-  // the agent's first priority is to resolve them (the reviewer→generator feedback loop).
-  const reviewBlock = input.reviewCorrections?.length && isGenerationMode
-    ? [
-        `## Apply reviewer corrections (HIGHEST priority)`,
-        ``,
-        `An independent reviewer REJECTED the previous specs. Fix EACH item below precisely;`,
-        `do NOT rewrite specs that were not flagged. Where a fix concerns a selector or an`,
-        `assertion, re-verify it against the live DOM with the Playwright MCP before editing.`,
-        ``,
-        ...input.reviewCorrections.map((c) => `- ${c}`),
-        ``,
-      ]
-    : [];
-
-  // Coverage-improvement mode: the executed tests did not exercise some changed lines. Tell the
-  // agent exactly which, so it extends/adds tests to cover the change (the change-coverage loop).
-  const coverageBlock = input.coverageGap && isGenerationMode
-    ? [
-        `## Cover the change (HIGH priority)`,
-        ``,
-        `The tests ran green but did NOT exercise all the lines this commit changed. Extend or add`,
-        `tests so those lines are actually executed and asserted (covering ≠ asserting — assert the`,
-        `behavior of the changed code, do not just touch the line):`,
-        ``,
-        input.coverageGap,
-        ``,
-      ]
-    : [];
-
-  const learnedRulesBlock = input.learnedRules && isGenerationMode
-    ? [input.learnedRules, ``]
-    : [];
-
-  // Fix mode: prepend failure feedback before the original task.
-  // When `failureSourced` is true (the domSnapshot is the failure-point capture), the fix
-  // instructions remove the browser_navigate + browser_snapshot steps — the agent MUST NOT
-  // navigate; the injected tree IS the ground truth. This prevents wasted MCP round-trips
-  // and conflation of the current live-DEV state with the state AT THE FAILURE POINT.
-  const fixBlock = input.fixCases?.length && isGenerationMode
-    ? [
-        `## Fix failing tests`,
-        ``,
-        `The following tests FAILED during execution against DEV. Fix ONLY these`,
-        `tests; do NOT rewrite or touch tests that passed.`,
-        ``,
-        `Failed cases:`,
-        ...input.fixCases.map(
-          (c) => `- ${c.name}\n  Error: ${c.detail?.slice(0, 500) ?? "(no detail)"}`,
-        ),
-        ``,
-        ...(input.failureSourced
-          ? [
-              `The captured a11y tree at the failure point is injected ABOVE as "GROUND TRUTH AT FAILURE".`,
-              `1. Read the test file to understand what it asserts`,
-              `2. Consult ONLY the GROUND TRUTH tree above — do NOT navigate or snapshot the live page.`,
-              `   The tree above is the page AT THE FAILURE POINT, not the current live state.`,
-              `3. Fix the ROOT CAUSE, guided by the error type:`,
-              `   - "strict mode violation" → scope the selector to a section first`,
-              `   - "locator.click: … not found" → the element doesn't exist; check role/label in the GROUND TRUTH tree`,
-              `   - "expect(…).toBeVisible() timed out" → the element exists but isn't visible; check loading states`,
-              `   - "locator resolved to N elements" → use .filter({hasText:…}) or scope to a unique parent`,
-              `4. PRESERVE each test's objective and assertions — fix only what's broken`,
-            ]
-          : [
-              `For each failure, use the Playwright MCP to explore the page and verify`,
-              `your fix BEFORE writing it:`,
-              `1. Read the test file to understand what it asserts`,
-              `2. Use browser_navigate + browser_snapshot to see the ACTUAL page structure`,
-              `3. Fix the ROOT CAUSE, guided by the error type:`,
-              `   - "strict mode violation" → scope the selector to a section first`,
-              `   - "locator.click: … not found" → the element doesn't exist; check role/label`,
-              `   - "expect(…).toBeVisible() timed out" → the element exists but isn't visible; check loading states`,
-              `   - "NS_ERROR_…" / network error → the URL or route is wrong; verify with browser_navigate`,
-              `   - "locator resolved to N elements" → use .first() ONLY as last resort; prefer scoping`,
-              `4. PRESERVE each test's objective and assertions — fix only what's broken`,
-            ]),
-      ]
-    : [];
-
-  // Lever-2 deterministic selector contradictions (W1): each is a VERIFIED finding from comparing the
-  // generated specs' selectors against the captured failure-point a11y tree — an absent selector
-  // ("role:name is NOT in the captured tree; present roles: …") or an ambiguous one ("matches MULTIPLE
-  // nodes …"). This is the design's compliance-wall closer (§1.5/§1.5b). It is rendered as its OWN,
-  // UN-truncated section (NEVER folded into the 500-char-sliced fixCases detail below, where verbose PW
-  // 1.60 errors would cut it off exactly when an absent selector was found). Placed right after the
-  // GROUND TRUTH tree so the agent reads the contradiction against the very tree it must transcribe.
-  const selectorContradictionsBlock =
-    input.selectorContradictions?.length && isGenerationMode
-      ? [
-          `## ⚠ Lever-2 selector contradictions (DETERMINISTIC — resolve EVERY one)`,
-          ``,
-          `These selectors were checked against the captured failure-point tree above and FAILED.`,
-          `Each is a verified fact, not a hint: a contradicted \`role:name\` is NOT in the captured tree`,
-          `(the listed present roles are what IS there) — do NOT re-use it. Replace it with a role/name`,
-          `that appears in the tree, or a \`getByText\`/scoped locator; for a "matches MULTIPLE" finding,`,
-          `scope the locator to a unique parent. You MUST resolve every item before finishing:`,
-          ``,
-          ...input.selectorContradictions.map((c) => `- ${c}`),
-          ``,
-        ]
-      : [];
-
-  // Live DEV accessibility tree of the target routes — the DETERMINISTIC ground truth for selectors.
-  // When `failureSourced` is true, the domSnapshot is the captured failure-point tree (not a live
-  // pre-write snapshot); the heading switches to "GROUND TRUTH AT FAILURE" and source-framing,
-  // counterfactual, and quote-then-assert instructions are prepended (design §6.1).
-  // The block is placed at the PROMPT EDGE (top) so it is the first thing the agent reads.
-  const domBlock = input.domSnapshot && isGenerationMode
-    ? input.failureSourced
-      ? [
-          `## GROUND TRUTH AT FAILURE`,
-          ``,
-          `The tree below is the page AT THE FAILURE POINT — the ONLY source of truth for this fix.`,
-          `Do NOT use general knowledge of what tables, forms, or components usually contain.`,
-          `The ACTUAL rendered tree is what matters, and it is captured below.`,
-          ``,
-          `⚠ Counterfactual warning: even if element types commonly expose a given role`,
-          `(e.g. tables commonly expose \`columnheader\`, forms commonly expose \`textbox\`),`,
-          `if THIS tree does NOT show it — trust the tree, not the convention. The live page`,
-          `may use CSS \`role="presentation"\` or a custom component that drops standard roles.`,
-          ``,
-          `📌 Quote-then-assert contract: before writing any locator, cite the EXACT \`role: name\``,
-          `line from the tree below that the locator relies on. An unquotable locator`,
-          `(i.e. no matching line exists in this tree) MUST be rejected and replaced with`,
-          `\`getByText\` or a scoped CSS/data-testid locator instead.`,
-          ``,
-          input.domSnapshot,
-          ``,
-        ]
-      : [
-          `## Live DEV accessibility tree (GROUND TRUTH for selectors — trust this over HTML intuition)`,
-          ``,
-          `These are the roles + accessible names the browser ACTUALLY exposes for the target routes.`,
-          `Author selectors ONLY from what appears below:`,
-          `- If a role you expected (e.g. \`columnheader\`) is NOT listed, it is NOT in the a11y tree —`,
-          `  do NOT use \`getByRole\` for it. Fall back to \`getByText\` or a scoped locator.`,
-          `- If a name appears MORE THAN ONCE, a bare \`getByRole\`/\`getByText\` matches multiple elements`,
-          `  (strict-mode violation) — scope it to a unique parent/section, or use a unique attribute.`,
-          ``,
-          input.domSnapshot,
-          ``,
-        ]
-    : [];
-
-  const changeType = input.intent?.type ?? input.mode;
   const openapiHint = Array.isArray(input.openapi) ? input.openapi.join(", ") : input.openapi;
   const isCode = input.target === "code";
   const memTarget = input.mode === "context" ? "context" : input.target;
-  return [
-    ...reviewBlock,
-    ...coverageBlock,
-    ...domBlock,
-    ...selectorContradictionsBlock,
-    ...learnedRulesBlock,
-    ...fixBlock,
-    ...(fixBlock.length ? [``] : []),
-    buildTask(input),
-    ``,
-    ...(input.contextMap
-      ? [
-          renderArchitectureContext(
-            input.contextMap,
-            input.mode === "diff" ? input.intent?.changedFiles : undefined,
-          ) ?? "",
-          ``,
-        ]
-      : []),
-    ...(input.contextBrief
-      ? [
-          renderExplorationBrief(input.contextBrief),
-          `(The brief above distilled the blast radius — do NOT re-read that code. Verify selectors against the live DOM.)`,
-          ``,
-        ]
-      : []),
+
+  // STABLE prefix: working rules for the generator role (mode-specific but stable within a session).
+  const workingRulesLines: string[] = [
     `## Working rules`,
-    input.mode === "context"
+    ...(input.mode === "context"
       ? [
           `- This is a CONTEXT mode run: you are building the FE↔BE architecture map, not writing tests.`,
           `- Your ONLY output is ${input.e2eRelDir}/.qa/context.json — do not create or modify any .spec.ts files.`,
@@ -485,12 +397,205 @@ export function buildPrompt(input: OpencodeRunInput): string {
                 `- OpenAPI contract(s) for this repo: ${openapiHint}. For any backend endpoint the affected flow touches, read the matching operation and assert against its contract (required fields, enums, validation/error responses). Drive the app through the web UI like a user — never call the API directly.`,
               ]
             : []),
-        ],
+        ]),
     `- engram memory: scoped per app AND per mode (e2e, code, or context). Use project="${input.appName}" on ALL mem_save, mem_search, mem_context, and mem_session_summary calls. Prefix every topic_key with "${memTarget}/" so each mode's memory lives in its own namespace (e.g. topic_key="context/angular-routes" or "e2e/checkout-flow"). When searching, include "${memTarget}" in the query text to filter results to this mode. Never save or search without the mode prefix.`,
     input.needsReview
       ? `- An INDEPENDENT reviewer judges your specs after you finish and may return corrections for a follow-up turn. Self-review against the test-value-review criteria BEFORE finishing (every spec must fail if its feature breaks); do not rely on spawning a subagent.`
       : `- Review disabled for this run.`,
-  ].join("\n");
+  ];
+  const workingRulesContent = workingRulesLines.join("\n");
+
+  // SEMI-STABLE: architecture map (stable for this run, changes between runs).
+  const archMapContent = input.contextMap
+    ? [
+        renderArchitectureContext(
+          input.contextMap,
+          input.mode === "diff" ? input.intent?.changedFiles : undefined,
+        ) ?? "",
+        ``,
+      ].join("\n")
+    : "";
+
+  // SEMI-STABLE: exploration brief (set by the pre-write explorer pass; stable for this turn).
+  const contextBriefContent = input.contextBrief
+    ? [
+        renderExplorationBrief(input.contextBrief),
+        `(The brief above distilled the blast radius — do NOT re-read that code. Verify selectors against the live DOM.)`,
+        ``,
+      ].join("\n")
+    : "";
+
+  // VOLATILE: Live DEV accessibility tree of the target routes — the DETERMINISTIC ground truth for
+  // selectors. When `failureSourced` is true, the domSnapshot is the captured failure-point tree
+  // (not a live pre-write snapshot); the heading switches to "GROUND TRUTH AT FAILURE" and
+  // source-framing, counterfactual, and quote-then-assert instructions are prepended (design §6.1).
+  const domContent = input.domSnapshot && isGenerationMode
+    ? input.failureSourced
+      ? [
+          `## GROUND TRUTH AT FAILURE`,
+          ``,
+          `The tree below is the page AT THE FAILURE POINT — the ONLY source of truth for this fix.`,
+          `Do NOT use general knowledge of what tables, forms, or components usually contain.`,
+          `The ACTUAL rendered tree is what matters, and it is captured below.`,
+          ``,
+          `⚠ Counterfactual warning: even if element types commonly expose a given role`,
+          `(e.g. tables commonly expose \`columnheader\`, forms commonly expose \`textbox\`),`,
+          `if THIS tree does NOT show it — trust the tree, not the convention. The live page`,
+          `may use CSS \`role="presentation"\` or a custom component that drops standard roles.`,
+          ``,
+          `📌 Quote-then-assert contract: before writing any locator, cite the EXACT \`role: name\``,
+          `line from the tree below that the locator relies on. An unquotable locator`,
+          `(i.e. no matching line exists in this tree) MUST be rejected and replaced with`,
+          `\`getByText\` or a scoped CSS/data-testid locator instead.`,
+          ``,
+          input.domSnapshot,
+          ``,
+        ].join("\n")
+      : [
+          `## Live DEV accessibility tree (GROUND TRUTH for selectors — trust this over HTML intuition)`,
+          ``,
+          `These are the roles + accessible names the browser ACTUALLY exposes for the target routes.`,
+          `Author selectors ONLY from what appears below:`,
+          `- If a role you expected (e.g. \`columnheader\`) is NOT listed, it is NOT in the a11y tree —`,
+          `  do NOT use \`getByRole\` for it. Fall back to \`getByText\` or a scoped locator.`,
+          `- If a name appears MORE THAN ONCE, a bare \`getByRole\`/\`getByText\` matches multiple elements`,
+          `  (strict-mode violation) — scope it to a unique parent/section, or use a unique attribute.`,
+          ``,
+          input.domSnapshot,
+          ``,
+        ].join("\n")
+    : "";
+
+  // VOLATILE: Lever-2 deterministic selector contradictions (W1). Each is a VERIFIED finding from
+  // comparing the generated specs' selectors against the captured failure-point a11y tree — an absent
+  // selector ("role:name is NOT in the captured tree; present roles: …") or an ambiguous one
+  // ("matches MULTIPLE nodes …"). Rendered as its OWN section so it is never truncated by the
+  // 500-char detail slice. Positioned after the DOM (reads the contradiction against the tree).
+  const selectorContradictionsContent =
+    input.selectorContradictions?.length && isGenerationMode
+      ? [
+          `## ⚠ Lever-2 selector contradictions (DETERMINISTIC — resolve EVERY one)`,
+          ``,
+          `These selectors were checked against the captured failure-point tree above and FAILED.`,
+          `Each is a verified fact, not a hint: a contradicted \`role:name\` is NOT in the captured tree`,
+          `(the listed present roles are what IS there) — do NOT re-use it. Replace it with a role/name`,
+          `that appears in the tree, or a \`getByText\`/scoped locator; for a "matches MULTIPLE" finding,`,
+          `scope the locator to a unique parent. You MUST resolve every item before finishing:`,
+          ``,
+          ...input.selectorContradictions.map((c) => `- ${c}`),
+          ``,
+        ].join("\n")
+      : "";
+
+  // VOLATILE: Fix instructions for failed test cases. When `failureSourced` is true the fix
+  // instructions remove the browser_navigate + browser_snapshot steps — the injected tree IS
+  // the ground truth. Positioned after selector contradictions (references the tree above).
+  const fixContent = input.fixCases?.length && isGenerationMode
+    ? [
+        `## Fix failing tests`,
+        ``,
+        `The following tests FAILED during execution against DEV. Fix ONLY these`,
+        `tests; do NOT rewrite or touch tests that passed.`,
+        ``,
+        `Failed cases:`,
+        ...input.fixCases.map(
+          (c) => `- ${c.name}\n  Error: ${c.detail?.slice(0, 500) ?? "(no detail)"}`,
+        ),
+        ``,
+        ...(input.failureSourced
+          ? [
+              `The captured a11y tree at the failure point is injected ABOVE as "GROUND TRUTH AT FAILURE".`,
+              `1. Read the test file to understand what it asserts`,
+              `2. Consult ONLY the GROUND TRUTH tree above — do NOT navigate or snapshot the live page.`,
+              `   The tree above is the page AT THE FAILURE POINT, not the current live state.`,
+              `3. Fix the ROOT CAUSE, guided by the error type:`,
+              `   - "strict mode violation" → scope the selector to a section first`,
+              `   - "locator.click: … not found" → the element doesn't exist; check role/label in the GROUND TRUTH tree`,
+              `   - "expect(…).toBeVisible() timed out" → the element exists but isn't visible; check loading states`,
+              `   - "locator resolved to N elements" → use .filter({hasText:…}) or scope to a unique parent`,
+              `4. PRESERVE each test's objective and assertions — fix only what's broken`,
+            ]
+          : [
+              `For each failure, use the Playwright MCP to explore the page and verify`,
+              `your fix BEFORE writing it:`,
+              `1. Read the test file to understand what it asserts`,
+              `2. Use browser_navigate + browser_snapshot to see the ACTUAL page structure`,
+              `3. Fix the ROOT CAUSE, guided by the error type:`,
+              `   - "strict mode violation" → scope the selector to a section first`,
+              `   - "locator.click: … not found" → the element doesn't exist; check role/label`,
+              `   - "expect(…).toBeVisible() timed out" → the element exists but isn't visible; check loading states`,
+              `   - "NS_ERROR_…" / network error → the URL or route is wrong; verify with browser_navigate`,
+              `   - "locator resolved to N elements" → use .first() ONLY as last resort; prefer scoping`,
+              `4. PRESERVE each test's objective and assertions — fix only what's broken`,
+            ]),
+        ``,
+      ].join("\n")
+    : "";
+
+  // VOLATILE: Reviewer corrections — the highest-priority re-generation signal. The agent must
+  // resolve every flagged item before finishing. Positioned in VOLATILE after DOM so the DOM
+  // grounding is already established when the corrections reference it.
+  const reviewContent = input.reviewCorrections?.length && isGenerationMode
+    ? [
+        `## Apply reviewer corrections (HIGHEST priority)`,
+        ``,
+        `An independent reviewer REJECTED the previous specs. Fix EACH item below precisely;`,
+        `do NOT rewrite specs that were not flagged. Where a fix concerns a selector or an`,
+        `assertion, re-verify it against the live DOM with the Playwright MCP before editing.`,
+        ``,
+        ...input.reviewCorrections.map((c) => `- ${c}`),
+        ``,
+      ].join("\n")
+    : "";
+
+  // VOLATILE: Coverage improvement — the executed tests did not exercise some changed lines.
+  const coverageContent = input.coverageGap && isGenerationMode
+    ? [
+        `## Cover the change (HIGH priority)`,
+        ``,
+        `The tests ran green but did NOT exercise all the lines this commit changed. Extend or add`,
+        `tests so those lines are actually executed and asserted (covering ≠ asserting — assert the`,
+        `behavior of the changed code, do not just touch the line):`,
+        ``,
+        input.coverageGap,
+        ``,
+      ].join("\n")
+    : "";
+
+  // VOLATILE: learned anti-patterns from past runs.
+  const learnedRulesContent = input.learnedRules && isGenerationMode
+    ? [input.learnedRules, ``].join("\n")
+    : "";
+
+  // TASK: mode-specific task (the concrete objective for this session).
+  const taskContent = buildTask(input);
+
+  return assemble([
+    // STABLE prefix: working rules (mode-specific but stable for the generator role per session).
+    section("working-rules", "stable-prefix", workingRulesContent, { priority: 1, cacheable: true }),
+    // SEMI-STABLE: architecture map and exploration brief (change between runs, stable within).
+    ...(archMapContent ? [section("arch-map", "semi-stable", archMapContent, { priority: 1, cacheable: true })] : []),
+    ...(contextBriefContent ? [section("context-brief", "semi-stable", contextBriefContent, { priority: 2 })] : []),
+    // VOLATILE: grounding (DOM snapshot — priority 1 within VOLATILE so it's first and the
+    // selectorContradictions section can reference "the tree above" correctly).
+    ...(domContent ? [section("dom-snapshot", "volatile", domContent, { priority: 1 })] : []),
+    // VOLATILE: selector contradictions must appear AFTER the DOM tree (priority 2).
+    ...(selectorContradictionsContent ? [section("selector-contradictions", "volatile", selectorContradictionsContent, { priority: 2 })] : []),
+    // VOLATILE: fix instructions reference the DOM tree above (priority 3).
+    ...(fixContent ? [section("fix-cases", "volatile", fixContent, { priority: 3 })] : []),
+    // VOLATILE: reviewer corrections (priority 4 — after grounding context is established).
+    ...(reviewContent ? [section("reviewer-corrections", "volatile", reviewContent, { priority: 4, maxBytes: 20_000, overflow: "drop" })] : []),
+    // VOLATILE: coverage gap (priority 5).
+    ...(coverageContent ? [section("coverage-gap", "volatile", coverageContent, { priority: 5 })] : []),
+    // VOLATILE: learned rules (priority 6 — lowest, as they're supplementary anti-patterns).
+    ...(learnedRulesContent ? [section("learned-rules", "volatile", learnedRulesContent, { priority: 6 })] : []),
+    // TASK: the concrete mode-specific objective.
+    section("task", "task", taskContent, { priority: 1 }),
+  ]);
+}
+
+export function buildPrompt(input: OpencodeRunInput): string {
+  return buildPromptAssembled(input).text;
 }
 
 // ── Architecture context injection ──────────────────────────────────────────
@@ -847,7 +952,10 @@ export function renderReviewSpecs(input: ReviewInput): string {
 // (paths come from ReviewInput) but otherwise depends only on its argument. The
 // contract-repair re-prompt and session lifecycle stay in reviewIndependently —
 // only this initial BUILD moves here so it can be owned by the ContextAssembler later.
-export function buildReviewerPrompt(input: ReviewInput): string {
+//
+// Phase 1b: internally uses the ContextAssembler. Return type is unchanged (string).
+// Use buildReviewerPromptAssembled() to get the sectionSizes map for telemetry.
+export function buildReviewerPromptAssembled(input: ReviewInput): AssembledPrompt {
   const changeType = input.intent?.type ?? input.mode;
   const specBlock = renderReviewSpecs(input);
   const kind = input.target === "code" ? "tests" : "E2E tests";
@@ -857,26 +965,9 @@ export function buildReviewerPrompt(input: ReviewInput): string {
   // manual/whole-repo run against the commit diff is the [wrong-objective] bug: it rejects good
   // tests for "not testing the change" when the change was never the objective.
   const obj = reviewObjective(input);
-  // Ground the reviewer's UI-fact claims in the REAL DEV DOM (captured deterministically by the
-  // ORCHESTRATOR — not the generator, so independence holds). Without this the reviewer judged
-  // labels/routes from its training memory of "similar apps" and hallucinated corrections.
-  const domBlock = input.domSnapshot
-    ? [
-        ``,
-        `## Live DEV DOM — the ACTUAL roles + accessible names on the routes this spec targets`,
-        `Captured by the orchestrator from ${input.baseUrl ?? "DEV"}. Judge EVERY concrete UI fact`,
-        `(button/link labels, headings, routes) against THIS, never against prior knowledge of similar apps.`,
-        "```",
-        input.domSnapshot,
-        "```",
-      ]
-    : [];
-  // Arm the judge with PROVEN app-specific rules (when present) as extra reject criteria.
-  const rulesBlock = input.learnedRules ? [``, input.learnedRules] : [];
-  const rulesInstruction = input.learnedRules
-    ? [`6. Also REJECT if any spec violates an app-specific reject-on-sight rule listed above.`]
-    : [];
-  return [
+
+  // STABLE prefix: the reviewer's role framing + independence mandate (same for every review).
+  const roleFramingContent = [
     `## Independent review — judge these ${kind} WITHOUT the generator's reasoning`,
     ``,
     `You are reviewing tests written for ${obj.subject}, but you have NO access to the`,
@@ -886,14 +977,13 @@ export function buildReviewerPrompt(input: ReviewInput): string {
     `## Review context`,
     `- Run type: ${changeType}`,
     `- Base URL: ${input.baseUrl ?? "(not provided)"}`,
-    ``,
-    obj.heading,
-    ...obj.body,
-    ...domBlock,
-    ``,
-    specBlock,
-    ...rulesBlock,
-    ``,
+  ].join("\n");
+
+  // STABLE prefix: the reviewing instructions (stable for the reviewer role).
+  const rulesInstruction = input.learnedRules
+    ? [`6. Also REJECT if any spec violates an app-specific reject-on-sight rule listed above.`]
+    : [];
+  const instructionsContent = [
     `## Instructions`,
     `1. The spec contents are provided above — no need to read files.`,
     `2. Apply the test-value-review skill from BOTH perspectives (value + robustness).`,
@@ -906,7 +996,10 @@ export function buildReviewerPrompt(input: ReviewInput): string {
       + ` NOT a valid correction — omit it. Reject on what you can SEE (no assertions, fragile selectors,`
       + ` wrong objective, missing cleanup), not on guessed app specifics.`,
     ...rulesInstruction,
-    ``,
+  ].join("\n");
+
+  // CRITICAL recap: the output contract — must appear last so the model's final action is the JSON.
+  const outputContractContent = [
     `Output your verdict as JSON with no text before or after. Always include a one or two`,
     `sentence "rationale" explaining the verdict — on APPROVAL too (why these tests genuinely`,
     `defend ${obj.targetNoun}), not only on rejection.`,
@@ -916,4 +1009,49 @@ export function buildReviewerPrompt(input: ReviewInput): string {
     `brittle locator), [no-cleanup] (leaves test data behind), or [other].`,
     `{"approved":false,"rationale":"why, in 1-2 sentences","corrections":["[fragile-selector] file.spec.ts: specific actionable fix"]}`,
   ].join("\n");
+
+  // SEMI-STABLE: the objective heading + body (changes per run — diff commits vs guidance).
+  const objectiveContent = [obj.heading, ...obj.body].join("\n");
+
+  // VOLATILE: Live DEV DOM — the ACTUAL roles + accessible names on the routes this spec targets.
+  // Captured deterministically by the ORCHESTRATOR (independence holds). Grounds the reviewer's
+  // UI-fact claims in reality instead of training memory of "similar apps".
+  const domContent = input.domSnapshot
+    ? [
+        `## Live DEV DOM — the ACTUAL roles + accessible names on the routes this spec targets`,
+        `Captured by the orchestrator from ${input.baseUrl ?? "DEV"}. Judge EVERY concrete UI fact`,
+        `(button/link labels, headings, routes) against THIS, never against prior knowledge of similar apps.`,
+        "```",
+        input.domSnapshot,
+        "```",
+      ].join("\n")
+    : "";
+
+  // VOLATILE: spec contents to review (the actual test code — changes each review session).
+  // P5: typed maxBytes cap on reviewer corrections via REVIEW_SPECS_MAX_BYTES in renderReviewSpecs.
+  const specContent = specBlock;
+
+  // VOLATILE: proven app-specific rules as extra reject criteria (changes as the learning layer grows).
+  const learnedRulesContent = input.learnedRules ? [``, input.learnedRules].join("\n") : "";
+
+  return assemble([
+    // STABLE prefix: role framing + independence mandate.
+    section("reviewer-role-framing", "stable-prefix", roleFramingContent, { priority: 1, cacheable: true }),
+    // STABLE prefix: reviewing instructions (stable for the reviewer role).
+    section("reviewer-instructions", "stable-prefix", instructionsContent, { priority: 2, cacheable: true }),
+    // SEMI-STABLE: the objective (commit diff for diff mode, guidance for manual, etc.).
+    section("reviewer-objective", "semi-stable", objectiveContent, { priority: 1, language: "verbatim" }),
+    // VOLATILE: DOM grounding (priority 1 — first in VOLATILE so instructions can reference "above").
+    ...(domContent ? [section("reviewer-dom", "volatile", domContent, { priority: 1 })] : []),
+    // VOLATILE: spec contents (priority 2 — the primary content the reviewer judges).
+    section("reviewer-specs", "volatile", specContent, { priority: 2 }),
+    // VOLATILE: proven app-specific learned rules (priority 3 — supplementary reject criteria).
+    ...(learnedRulesContent ? [section("reviewer-learned-rules", "volatile", learnedRulesContent, { priority: 3 })] : []),
+    // CRITICAL recap: the output contract (must appear at the very end).
+    section("reviewer-output-contract", "critical-recap", outputContractContent, { priority: 1 }),
+  ]);
+}
+
+export function buildReviewerPrompt(input: ReviewInput): string {
+  return buildReviewerPromptAssembled(input).text;
 }

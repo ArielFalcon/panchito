@@ -44,8 +44,11 @@ export { extractJsonObjects, parseVerdict };
 // Prompt/task assembly (extracted to ./prompts, BND-08). Re-exported so existing importers (runtime
 // + tests) keep resolving them from this module. The input types are shared via a type-only import
 // on the prompts side, so there is no runtime import cycle.
-import { specFileForFlow, buildWorkerPrompt, buildPlanPrompt, buildPrompt, buildExplorerPrompt, buildContextTask, renderArchitectureContext, buildReviewerPrompt, reviewObjective, renderReviewSpecs } from "./prompts";
-export { specFileForFlow, buildWorkerPrompt, buildPlanPrompt, buildPrompt, buildExplorerPrompt, buildContextTask, renderArchitectureContext, buildReviewerPrompt, reviewObjective, renderReviewSpecs };
+// Phase 1b: also re-exports the assembled variants (return AssembledPrompt) and the Section type
+// so callers that need sectionSizes for telemetry can import directly from this module.
+import { specFileForFlow, buildWorkerPrompt, buildWorkerPromptAssembled, buildPlanPrompt, buildPlanPromptAssembled, buildPrompt, buildPromptAssembled, buildExplorerPrompt, buildContextTask, renderArchitectureContext, buildReviewerPrompt, buildReviewerPromptAssembled, reviewObjective, renderReviewSpecs } from "./prompts";
+export { specFileForFlow, buildWorkerPrompt, buildWorkerPromptAssembled, buildPlanPrompt, buildPlanPromptAssembled, buildPrompt, buildPromptAssembled, buildExplorerPrompt, buildContextTask, renderArchitectureContext, buildReviewerPrompt, buildReviewerPromptAssembled, reviewObjective, renderReviewSpecs };
+export type { AssembledPrompt } from "./prompts";
 // Typed verdict contract + bounded repair (post-ADR-001, Phase 1 / 3.1). Schema validation of
 // the agent's generator + reviewer output, and the targeted re-prompt used on a contract miss.
 import { checkGeneratorVerdict, repairInstruction, parseReviewerVerdict } from "./verdict-validate";
@@ -494,6 +497,9 @@ export interface OpencodeRunInput {
 // `onTurn` callback on `open()` opts at the point where `onUsage` already fires.
 // `outputText` is sanitized BEFORE persist (sanitizer.ts); `runId` is null when the
 // session was opened without a descriptor (maintenance sessions, etc.).
+// Phase 1b: `sectionSizes` carries the per-section byte map from the ContextAssembler
+// when the prompt was assembled via one of the buildXxxAssembled() functions; null for
+// prompts not produced by the assembler (contract-repair re-prompts, explorer, etc.).
 export interface AgentTurnEvent {
   runId: string | null;
   sessionId: string;
@@ -511,6 +517,9 @@ export interface AgentTurnEvent {
   tokensCacheWrite: number | null;
   cost: number | null;
   ts: string;
+  // Phase 1b: per-section size map from the ContextAssembler. Null when the prompt was not
+  // assembled by one of the buildXxxAssembled() functions (repairs, explorer, etc.).
+  sectionSizes: Record<string, number> | null;
 }
 
 // A session opened against `opencode serve`. prompt() sends the message to the
@@ -524,7 +533,10 @@ export interface AgentSession {
   // generator/reviewer need that so a closing JSON emitted in a reasoning part survives.
   // round/isRepair are per-call opts so the funnel can distinguish generation rounds
   // from in-session contract-repair re-prompts when recording agent_turns rows.
-  prompt(text: string, opts?: { textOnly?: boolean; round?: number; isRepair?: boolean }): Promise<string>;
+  // Phase 1b: sectionSizes carries the per-section byte map from the ContextAssembler
+  // when the prompt was produced by one of the buildXxxAssembled() functions. It flows
+  // through the funnel into AgentTurnEvent so telemetry records it per turn.
+  prompt(text: string, opts?: { textOnly?: boolean; round?: number; isRepair?: boolean; sectionSizes?: Record<string, number> | null }): Promise<string>;
   dispose(): Promise<void>;
 }
 
@@ -638,7 +650,9 @@ export async function runOpencode(
   }
 
   try {
-    let finalText = await session.prompt(buildPrompt(effectiveInput));
+    // Phase 1b: use the assembled variant so sectionSizes flows to the turn telemetry.
+    const assembled = buildPromptAssembled(effectiveInput);
+    let finalText = await session.prompt(assembled.text, { sectionSizes: assembled.sectionSizes });
 
     // Typed-contract guard (post-ADR-001, Phase 1): if the generator's closing JSON does not
     // satisfy the contract (missing specs array, malformed specMetas, …), re-prompt ONCE with
@@ -818,11 +832,12 @@ export async function reviewIndependently(
     descriptor: { runId: input.runId, role: "qa-reviewer", objective: input.objective },
   });
   try {
-    // Phase 1a: the initial prompt string is built by the pure buildReviewerPrompt() function.
-    // The contract-repair re-prompt and session lifecycle stay here (not extracted).
-    const prompt = buildReviewerPrompt(input);
+    // Phase 1a+1b: the initial prompt is built by the pure buildReviewerPromptAssembled() function.
+    // The assembled variant carries sectionSizes for turn telemetry. The contract-repair re-prompt
+    // and session lifecycle stay here (not extracted).
+    const assembled = buildReviewerPromptAssembled(input);
 
-    let output = await session.prompt(prompt);
+    let output = await session.prompt(assembled.text, { sectionSizes: assembled.sectionSizes });
     let v = parseReviewerVerdict(output);
     // The reviewer is the AUTHORITATIVE gate, so a formatting slip must not silently become a
     // fail-closed rejection (which would burn a regeneration round on non-actionable feedback).
@@ -1018,7 +1033,9 @@ export async function generateParallel(
       });
       if (w.runId) registerRunSession(session.id, w.runId, w.mirrorDir, w.flow);
       try {
-        const output = await session.prompt(buildWorkerPrompt(w));
+        // Phase 1b: assembled variant carries sectionSizes for turn telemetry.
+        const workerAssembled = buildWorkerPromptAssembled(w);
+        const output = await session.prompt(workerAssembled.text, { sectionSizes: workerAssembled.sectionSizes });
         const json = lastJsonMatching(output, (x) => typeof x.spec === "string");
         const spec = json?.spec as string | undefined;
         // VERIFY on disk — a parsed spec NAME is the worker's CLAIM, not proof it wrote the file. A
@@ -1102,7 +1119,9 @@ export async function runOpencodeParallel(
     : undefined;
   let planText: string;
   try {
-    planText = await planSession.prompt(buildPlanPrompt(input));
+    // Phase 1b: assembled variant carries sectionSizes for turn telemetry.
+    const planAssembled = buildPlanPromptAssembled(input);
+    planText = await planSession.prompt(planAssembled.text, { sectionSizes: planAssembled.sectionSizes });
     // Typed-contract repair (parity with the generator/reviewer): a plan whose response INTENDED
     // objectives but parsed to NONE was malformed/over-nested JSON — re-prompt ONCE for a clean,
     // minimal plan before accepting a false "0 objectives" that would wrongly SKIP a whole-repo run
@@ -1444,6 +1463,9 @@ export async function defaultAgentDeps(): Promise<AgentDeps> {
                         tokensCacheWrite: infoRaw?.tokens?.cache?.write ?? null,
                         cost: infoRaw?.cost ?? null,
                         ts: new Date().toISOString(),
+                        // Phase 1b: per-section byte map from the ContextAssembler. Null when
+                        // the prompt was not assembled (repairs, explorer, etc.).
+                        sectionSizes: promptOpts?.sectionSizes ?? null,
                       };
                       effectiveOnTurn(turnEvent);
                     }

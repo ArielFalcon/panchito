@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildPrompt,
+  buildPromptAssembled,
+  buildWorkerPromptAssembled,
+  buildPlanPromptAssembled,
   buildContextTask,
   parseVerdict,
   extractJsonObjects,
@@ -859,6 +862,93 @@ test("buildPlanPrompt injects learnedRules in both diff and complete variants", 
   assert.doesNotMatch(buildPlanPrompt({ ...input, mode: "complete", intent: undefined }), /Lessons learned/);
 });
 
+// Phase 1b regression gate: complete/exhaustive paths preserve all functional content and honour
+// the canonical STABLE → SEMI-STABLE → VOLATILE → TASK → CRITICAL-RECAP order. These assertions
+// are the "section order contract" that must stay green whenever prompts.ts or context-assembler.ts
+// are modified.
+test("Phase 1b E.5: buildWorkerPrompt assembled output preserves all functional sections in canonical order", () => {
+  const base: ParallelWorkerInput = {
+    objective: "verify checkout flow",
+    flow: "checkout",
+    symbols: ["CheckoutPage"],
+    needsUi: true,
+    specFile: "flows/checkout.spec.ts",
+    repo: "r",
+    mirrorDir: "/m",
+    e2eRelDir: "e2e",
+    namespace: "ns",
+    baseUrl: "https://dev",
+    appName: "a",
+    mode: "complete",
+    domSnapshot: "button: Place Order\nbutton: Cancel",
+    learnedRules: "- avoid waitForTimeout",
+  };
+
+  const { text, sectionSizes } = buildWorkerPromptAssembled(base);
+
+  // All functional sections must be present (content preservation).
+  assert.match(text, /Rules/);
+  assert.match(text, /Flow: checkout/);
+  assert.match(text, /GROUND TRUTH/);
+  assert.match(text, /Place Order/);
+  assert.match(text, /Lessons learned from past runs/);
+  assert.match(text, /avoid waitForTimeout/);
+  assert.match(text, /verify checkout flow/);
+  assert.match(text, /flows\/checkout\.spec\.ts/);
+
+  // sectionSizes must record all non-empty sections.
+  assert.ok("worker-rules" in sectionSizes, "worker-rules in sectionSizes");
+  assert.ok("worker-context" in sectionSizes, "worker-context in sectionSizes");
+  assert.ok("worker-dom" in sectionSizes, "worker-dom in sectionSizes");
+  assert.ok("worker-learned-rules" in sectionSizes, "worker-learned-rules in sectionSizes");
+  assert.ok("worker-task" in sectionSizes, "worker-task in sectionSizes");
+  assert.ok("worker-output-contract" in sectionSizes, "worker-output-contract in sectionSizes");
+
+  // Canonical order (STABLE < VOLATILE < TASK < CRITICAL-RECAP).
+  const rulesIdx = text.indexOf("## Rules");
+  const domIdx = text.indexOf("GROUND TRUTH");
+  const lessonsIdx = text.indexOf("Lessons learned from past runs");
+  const objectiveIdx = text.indexOf("## Objective");
+  const contractIdx = text.indexOf('{"spec"');
+
+  assert.ok(rulesIdx < domIdx, "stable-prefix (rules) before volatile (dom)");
+  assert.ok(domIdx < lessonsIdx, "dom (volatile p1) before lessons (volatile p2)");
+  assert.ok(lessonsIdx < objectiveIdx, "lessons (volatile) before task (objective)");
+  assert.ok(objectiveIdx < contractIdx, "task (objective) before critical-recap (output contract)");
+});
+
+test("Phase 1b E.5: buildPlanPrompt assembled output preserves all functional sections in canonical order (complete mode)", () => {
+  const rule = "- avoid flaky selectors";
+  const assembled = buildPlanPromptAssembled({ ...input, mode: "complete", intent: undefined, learnedRules: rule });
+
+  const { text, sectionSizes } = assembled;
+
+  // Functional content must be present.
+  assert.match(text, /Lessons learned from past runs/);
+  assert.match(text, /avoid flaky selectors/);
+  assert.match(text, /PLANNING ONLY/);
+  assert.match(text, /"objectives"/);
+
+  // sectionSizes must be a non-empty map.
+  assert.ok(Object.keys(sectionSizes).length > 0, "sectionSizes must have entries");
+  assert.ok("plan-procedure" in sectionSizes, "plan-procedure in sectionSizes");
+  assert.ok("plan-lessons" in sectionSizes, "plan-lessons in sectionSizes");
+  assert.ok("plan-task" in sectionSizes, "plan-task in sectionSizes");
+  assert.ok("plan-output-format" in sectionSizes, "plan-output-format in sectionSizes");
+
+  // Canonical order: PLANNING ONLY is in the stable-prefix (procedure); lessons are semi-stable;
+  // the task opening line is in the task band; the output format is critical-recap.
+  // Expected order: stable-prefix < semi-stable < task < critical-recap.
+  const planningIdx = text.indexOf("PLANNING ONLY");
+  const lessonsIdx = text.indexOf("Lessons learned from past runs");
+  const taskIdx = text.indexOf("Analyze the WHOLE repository");
+  const outputFormatIdx = text.indexOf('"objectives"');
+
+  assert.ok(planningIdx < lessonsIdx, "stable-prefix (PLANNING ONLY) before semi-stable (lessons)");
+  assert.ok(lessonsIdx < taskIdx, "semi-stable (lessons) before task");
+  assert.ok(taskIdx < outputFormatIdx, "task before critical-recap (output format)");
+});
+
 test("parseModelRef splits provider/model and rejects malformed refs", () => {
   // The fallback model override must reach the SDK as {providerID, modelID}, not a raw string
   // (the bug that broke typecheck). A model id can itself contain slashes — only the FIRST splits.
@@ -1637,6 +1727,7 @@ function makeOnTurnDeps(
               tokensCacheWrite: 2,
               cost: 0.001,
               ts: new Date().toISOString(),
+              sectionSizes: null,
             });
           }
           return finalText;
@@ -1680,6 +1771,7 @@ test("Phase 0 A.3/A.4: onTurn fires per prompt() call with correct role, round, 
               tokensCacheWrite: 3,
               cost: 0.002,
               ts: new Date().toISOString(),
+              sectionSizes: null,
             });
           }
           return verdictText;
@@ -1764,6 +1856,7 @@ test("Phase 0 A.4: onTurn outputText does not expose secrets (sanitized before e
               tokensCacheWrite: null,
               cost: null,
               ts: new Date().toISOString(),
+              sectionSizes: null,
             });
           }
           return secretOutput; // parser sees it raw; the verdict has no specs so run is skipped
@@ -1808,6 +1901,7 @@ test("Phase 0 A.3: AgentSession.prompt() accepts round/isRepair opts without bre
               tokensInput: null, tokensOutput: null, tokensReasoning: null,
               tokensCacheRead: null, tokensCacheWrite: null, cost: null,
               ts: new Date().toISOString(),
+              sectionSizes: null,
             });
           }
           return '{"approved":true,"specs":[]}';
