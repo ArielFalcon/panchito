@@ -6,10 +6,12 @@
 // The input types are imported TYPE-ONLY from opencode-client (erased at runtime), so although
 // opencode-client imports these functions as values, there is no runtime import cycle.
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { sanitizeText, capText } from "../orchestrator/sanitizer";
 import type { ArchitectureContext } from "../qa/context";
 import type { CommitIntent } from "../qa/commit-classify";
-import type { OpencodeRunInput, ParallelWorkerInput } from "./opencode-client";
+import type { OpencodeRunInput, ParallelWorkerInput, ReviewInput } from "./opencode-client";
 import { renderExplorationBrief } from "../qa/exploration-brief";
 
 // The author's commit message as ONE block: subject + (optionally) body. The body is the richest
@@ -749,5 +751,169 @@ function buildTask(input: OpencodeRunInput): string {
     `- Read existing specs ONLY for the one or two flows this commit actually touches.`,
     `- Explore ONLY the page(s) the change affects — not the whole app.`,
     `A handful of focused specs is the right output for a single-commit diff, not a suite rewrite.`,
+  ].join("\n");
+}
+
+// ── Reviewer prompt assembly (Phase 1a precursor) ──────────────────────────
+//
+// The prompt for the independent reviewer session. Extracted from the inline
+// build inside reviewIndependently so the ContextAssembler (Phase 1b) can own
+// the boundary — the assembly logic is pure and can be unit-tested without
+// opening a session. The contract-repair re-prompt and session lifecycle stay
+// in reviewIndependently; only the BUILD of the initial prompt string lives here.
+
+// The "what must these tests defend?" framing, per run mode.  Diff runs judge
+// against the commit's changed code; MANUAL runs against the user's guidance;
+// whole-repo (complete/exhaustive) runs against each spec's own stated objective.
+// `targetNoun` flows into the question, the rationale ask, and the [wrong-objective]
+// definition so the judge measures the spec against the RIGHT goal.
+export function reviewObjective(input: ReviewInput): { subject: string; heading: string; body: string[]; targetNoun: string } {
+  if (input.mode === "manual") {
+    const g = sanitizeText(((input.guidance ?? "").trim() || "(no guidance was provided)")).text;
+    return {
+      subject: "a guided (manual) run",
+      heading: `## Objective — the requested behavior (judge against THIS, NOT any commit diff)`,
+      body: [g],
+      targetNoun: "the requested behavior",
+    };
+  }
+  if (input.mode === "complete" || input.mode === "exhaustive") {
+    return {
+      subject: `a whole-repo ${input.mode} run`,
+      heading: `## Objective — there is no single commit; judge each spec against its OWN stated objective`,
+      body: [
+        `Each spec declares the user flow it targets (in its header comment / the manifest). Judge`,
+        `whether it meaningfully exercises that flow, or could the flow break while the test stays green.`,
+      ],
+      targetNoun: "the targeted user flow",
+    };
+  }
+  const commitDiffObjective = () => ({
+    subject: "this commit",
+    heading: `## Commit diff`,
+    body: ["```diff", sanitizeText(input.diff).text, "```"],
+    targetNoun: "the change",
+  });
+  // diff and code-mode runs are commit-driven: the commit's changed code is the objective.
+  if (input.mode === "diff" || input.target === "code") return commitDiffObjective();
+  // Any other (unexpected) mode reached the reviewer. Fall back to the commit-diff framing so the
+  // reviewer still has a concrete objective, but log it: a future mode must not silently
+  // mis-objective the independent judge.
+  console.warn(`[qa] reviewObjective: unhandled review mode ${JSON.stringify(input.mode)} — defaulting to the commit-diff objective`);
+  return commitDiffObjective();
+}
+
+const REVIEW_SPECS_MAX_BYTES = 40_000;
+
+// Read and inline the spec files for the reviewer. Byte-caps at REVIEW_SPECS_MAX_BYTES;
+// above the cap, degrades to a file-list so the reviewer reads files itself (surfaced loudly
+// as a mode switch). A spec that cannot be read is replaced with a placeholder — never
+// silently dropped — so the gate cannot be bypassed by an unreadable spec.
+export function renderReviewSpecs(input: ReviewInput): string {
+  // e2e specs are e2e/-relative; code-mode tests are repo-relative (e2eRelDir = "").
+  const rel = (s: string) => (input.e2eRelDir ? `${input.e2eRelDir}/${s}` : s);
+  const contents: string[] = [];
+  let totalBytes = 0;
+  for (const s of input.specs) {
+    let content: string;
+    try {
+      content = readFileSync(join(input.mirrorDir, input.e2eRelDir, s), "utf8");
+    } catch (err) {
+      // A spec the independent reviewer NEVER sees can otherwise ship inside an approved batch — that
+      // silently bypasses the quality gate. Surface it loudly (CLAUDE.md: never swallow), like the
+      // byte-cap branch below does for its own mode switch.
+      console.warn(`[qa] WARNING: could not read spec '${rel(s)}' for review (${err instanceof Error ? err.message : String(err)}) — it will be judged from a placeholder, NOT its real content.`);
+      contents.push(`### ${rel(s)}\n( could not read file — review skipped for this spec )`);
+      continue;
+    }
+    const block = `### ${rel(s)}\n\`\`\`typescript\n${content}\n\`\`\``;
+    totalBytes += Buffer.byteLength(block, "utf8");
+    if (totalBytes > REVIEW_SPECS_MAX_BYTES) {
+      // The review silently degrades from "judge inline content" (deterministic, what the
+      // orchestrator placed in the prompt) to "agent reads the files itself" (a weaker,
+      // agent-driven path). Surface that mode switch to the operator instead of hiding it.
+      console.warn(
+        `[qa] WARNING: the combined contents of ${input.specs.length} spec(s) exceed the ${REVIEW_SPECS_MAX_BYTES}-byte inline cap — ` +
+          `the reviewer will read files itself instead of judging inlined contents (weaker determinism).`,
+      );
+      return `## Specs to review\n\n${input.specs.map((n, i) => `${i + 1}. ${rel(n)}`).join("\n")}\n\n( spec contents exceed ${REVIEW_SPECS_MAX_BYTES} bytes — read each file with the read tool )`;
+    }
+    contents.push(block);
+  }
+  return `## Specs to review (${contents.length} file(s) — contents provided inline)\n\n${contents.join("\n\n")}`;
+}
+
+// Assemble the reviewer prompt string for `input`. Pure: reads spec files from disk
+// (paths come from ReviewInput) but otherwise depends only on its argument. The
+// contract-repair re-prompt and session lifecycle stay in reviewIndependently —
+// only this initial BUILD moves here so it can be owned by the ContextAssembler later.
+export function buildReviewerPrompt(input: ReviewInput): string {
+  const changeType = input.intent?.type ?? input.mode;
+  const specBlock = renderReviewSpecs(input);
+  const kind = input.target === "code" ? "tests" : "E2E tests";
+  // What these tests must defend depends on the run mode. A diff run is judged against the
+  // commit's changed code; a MANUAL run against the user's guidance; a whole-repo
+  // (complete/exhaustive) run against each spec's own stated objective. Judging a
+  // manual/whole-repo run against the commit diff is the [wrong-objective] bug: it rejects good
+  // tests for "not testing the change" when the change was never the objective.
+  const obj = reviewObjective(input);
+  // Ground the reviewer's UI-fact claims in the REAL DEV DOM (captured deterministically by the
+  // ORCHESTRATOR — not the generator, so independence holds). Without this the reviewer judged
+  // labels/routes from its training memory of "similar apps" and hallucinated corrections.
+  const domBlock = input.domSnapshot
+    ? [
+        ``,
+        `## Live DEV DOM — the ACTUAL roles + accessible names on the routes this spec targets`,
+        `Captured by the orchestrator from ${input.baseUrl ?? "DEV"}. Judge EVERY concrete UI fact`,
+        `(button/link labels, headings, routes) against THIS, never against prior knowledge of similar apps.`,
+        "```",
+        input.domSnapshot,
+        "```",
+      ]
+    : [];
+  // Arm the judge with PROVEN app-specific rules (when present) as extra reject criteria.
+  const rulesBlock = input.learnedRules ? [``, input.learnedRules] : [];
+  const rulesInstruction = input.learnedRules
+    ? [`6. Also REJECT if any spec violates an app-specific reject-on-sight rule listed above.`]
+    : [];
+  return [
+    `## Independent review — judge these ${kind} WITHOUT the generator's reasoning`,
+    ``,
+    `You are reviewing tests written for ${obj.subject}, but you have NO access to the`,
+    `generator's thought process. Judge the tests on their own merit using the`,
+    `test-value-review skill.`,
+    ``,
+    `## Review context`,
+    `- Run type: ${changeType}`,
+    `- Base URL: ${input.baseUrl ?? "(not provided)"}`,
+    ``,
+    obj.heading,
+    ...obj.body,
+    ...domBlock,
+    ``,
+    specBlock,
+    ...rulesBlock,
+    ``,
+    `## Instructions`,
+    `1. The spec contents are provided above — no need to read files.`,
+    `2. Apply the test-value-review skill from BOTH perspectives (value + robustness).`,
+    `3. Answer: could ${obj.targetNoun} be BROKEN and these tests STILL be green?`,
+    `4. Be strict — a single anti-pattern in any spec means rejection.`,
+    `5. STAY IN YOUR LANE — judge VALUE and ROBUSTNESS. The GENERATOR owns ground-truth against the`
+      + ` live app (it navigated DEV). Judge a concrete UI fact (exact label, button/link text, route)`
+      + ` ONLY when the ${input.domSnapshot ? "Live DEV DOM above" : "spec itself"} confirms it. NEVER`
+      + ` assert a UI fact from memory: an unconfirmed guess that a label/route "should be" something is`
+      + ` NOT a valid correction — omit it. Reject on what you can SEE (no assertions, fragile selectors,`
+      + ` wrong objective, missing cleanup), not on guessed app specifics.`,
+    ...rulesInstruction,
+    ``,
+    `Output your verdict as JSON with no text before or after. Always include a one or two`,
+    `sentence "rationale" explaining the verdict — on APPROVAL too (why these tests genuinely`,
+    `defend ${obj.targetNoun}), not only on rejection.`,
+    `Prefix EVERY correction with exactly one class tag from this closed list so the failure`,
+    `is machine-classifiable: [false-positive] (asserts nothing / passes when the feature is`,
+    `broken), [wrong-objective] (does not test ${obj.targetNoun}), [fragile-selector] (ambiguous or`,
+    `brittle locator), [no-cleanup] (leaves test data behind), or [other].`,
+    `{"approved":false,"rationale":"why, in 1-2 sentences","corrections":["[fragile-selector] file.spec.ts: specific actionable fix"]}`,
   ].join("\n");
 }
