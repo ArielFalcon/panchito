@@ -104,9 +104,12 @@ export function correctionToRuleUpsert(input: { correction: string; runId: strin
   };
 }
 
-// Off-path distillation of a rejection: every correction becomes a candidate rule,
-// deduped against ALL statuses (a pattern already tried and demoted must not respawn).
-// Same governance as oracle-born rules: candidates must EARN promotion via outcomes.
+// Phase 7: off-path distillation of a reviewer rejection. Corrections become PENDING rules (not
+// candidate) — they are stored for deduplication and future promotion but are excluded from
+// retrieval until at least one run outcome validates them. This prevents raw reviewer text from
+// being recirculated as authoritative generator instructions before any measurement confirms
+// their value. The pending → candidate transition happens in recordRuleOutcome on first outcome.
+// Same dedup semantics as oracle-born rules: a pattern already tried and demoted must not respawn.
 export function distillReviewerCorrections(input: {
   app: string;
   runId: string;
@@ -126,7 +129,10 @@ export function distillReviewerCorrections(input: {
   const inserted: string[] = [];
   for (const c of toInsert) {
     const ruleId = `rule-${input.runId.slice(-8)}-${randomBytes(3).toString("hex")}`;
-    upsertLearningRule({ ...c, app: input.app, id: ruleId });
+    // Insert as "pending" so the rule is quarantined from generator retrieval until a run outcome
+    // validates it. This is the Phase-7 de-poison invariant: no raw correction becomes a generator
+    // instruction before it has survived real-world measurement.
+    upsertLearningRule({ ...c, app: input.app, id: ruleId, initialStatus: "pending" });
     inserted.push(ruleId);
   }
   return { inserted };

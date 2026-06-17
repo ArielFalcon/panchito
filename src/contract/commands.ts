@@ -366,7 +366,10 @@ export const LearningRuleViewSchema = z.object({
   usageCount: z.number().int().nonnegative(),
   outcomeCount: z.number().int().nonnegative(),
   successRate: z.number().nullable(),
-  status: z.enum(["candidate", "active", "deprecated", "superseded"]),
+  // Phase 7: "pending" is a pre-candidate quarantine for correction-sourced rules — excluded
+  // from retrieval until a run outcome validates them. Included in the contract so the ledger
+  // CLI and intelligence view can surface pending rules to the operator.
+  status: z.enum(["pending", "candidate", "active", "deprecated", "superseded"]),
 });
 
 export const ScorecardViewSchema = z.object({

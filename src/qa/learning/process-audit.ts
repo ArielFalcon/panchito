@@ -49,7 +49,8 @@ const ENGINE_DEFECT_CLASSES = new Set<ErrorClass>(["E-STATIC"]);
 export interface RuleView {
   id: string;
   errorClass: ErrorClass;
-  status: "candidate" | "active" | "deprecated" | "superseded";
+  // Phase 7: "pending" added — correction-sourced rules quarantined until validated.
+  status: "pending" | "candidate" | "active" | "deprecated" | "superseded";
   usageCount: number;
   successRate: number | null;
 }

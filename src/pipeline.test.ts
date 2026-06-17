@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { runPipeline, PipelineDeps, GenerateInput, buildFailureDom, buildFailureDomLines } from "./pipeline";
+import { runPipeline, PipelineDeps, GenerateInput, buildFailureDom, buildFailureDomLines, deriveCycleBackstop } from "./pipeline";
 import { parseAriaSnapshot } from "./qa/dom-snapshot";
 import { ReviewResult } from "./integrations/opencode-client";
 import { CoveredLines } from "./qa/change-coverage";
@@ -2204,4 +2204,56 @@ test("usage: persisted on static-invalid early return when onUsage was fired bef
   // At least one generate call fired: input must be a positive multiple of 50.
   assert.ok((usage.tokens.input ?? 0) > 0, "usage.tokens.input must be positive");
   assert.equal(usage.tokens.input % 50, 0, "input must be a multiple of 50 (one call = 50)");
+});
+
+// ── Phase 6b: scope-dimensioned iteration budget ───────────────────────────────
+// deriveCycleBackstop now accepts numObjectives. With numObjectives=1 (single-agent path)
+// it must produce the same value as before. With numObjectives>1, each extra objective adds
+// one session's worth of budget (CYCLES_PER_GENERATE + REPAIR_HEADROOM_PER_GENERATE = 2+2=4
+// for default MAX_REVIEW_ROUNDS=2 and REPAIR_HEADROOM=2), so a 5-objective run's ceiling
+// is materially higher than a 1-objective run's ceiling.
+
+test("Phase 6b (a): deriveCycleBackstop with numObjectives=1 matches the legacy 1-objective backstop", () => {
+  const single = deriveCycleBackstop(2, 1);
+  const legacy = deriveCycleBackstop(2);
+  assert.equal(single, legacy, "numObjectives=1 must produce the same backstop as the legacy default");
+});
+
+test("Phase 6b (b): deriveCycleBackstop scales up with numObjectives — 5 objectives yields a higher ceiling than 1", () => {
+  const single = deriveCycleBackstop(2, 1);
+  const multi = deriveCycleBackstop(2, 5);
+  assert.ok(multi > single, `5-objective backstop (${multi}) must be higher than 1-objective (${single})`);
+});
+
+test("Phase 6b (c): deriveCycleBackstop increments linearly per extra objective", () => {
+  const one = deriveCycleBackstop(2, 1);
+  const two = deriveCycleBackstop(2, 2);
+  const three = deriveCycleBackstop(2, 3);
+  // Each extra objective adds a fixed delta (CYCLES_PER_GENERATE + REPAIR_HEADROOM_PER_GENERATE).
+  const delta = two - one;
+  assert.ok(delta > 0, "each additional objective must add to the ceiling");
+  assert.equal(three - two, delta, "increment must be constant per extra objective");
+});
+
+test("Phase 6b (d): pipeline retroactively raises MAX_CYCLES when generate returns objectiveCount>1", async () => {
+  // Arrange: iterationBudget=1 (very tight). A multi-objective result should raise the ceiling
+  // above 1 so the run is NOT truncated just because the first cycle consumed the budget.
+  const calls: string[] = [];
+  const logs: string[] = [];
+  // Return objectiveCount=5 to trigger the retroactive scale-up.
+  const multiObjectiveResult: AgentResult = { ...generated, objectiveCount: 5 };
+  const budgetApp: AppConfig = {
+    ...app,
+    qa: { ...app.qa, needsReview: false },
+    // No iterationBudget — use the derived backstop.
+  };
+  const d = deps(passing(), calls, { agent: multiObjectiveResult });
+  d.log = (m: string) => logs.push(m);
+  const result = await runPipeline(budgetApp, "abc1234def", d);
+  assert.equal(result.verdict, "pass", "multi-objective run should still complete");
+  // The scope-dimensioned backstop log is emitted when objectiveCount>1 and no explicit budget.
+  assert.ok(
+    logs.some((l) => /scope-dimensioned backstop raised/i.test(l)),
+    `expected a scope-dimensioned backstop log; got:\n${logs.filter((l) => l.includes("cycle")).join("\n")}`,
+  );
 });

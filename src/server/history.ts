@@ -614,7 +614,10 @@ function safeJsonParse<T>(raw: string, fallback: T): T {
   }
 }
 
-export function upsertLearningRule(rule: RuleUpsert & { app: string; id: string }): void {
+// Phase 7: accept an optional `initialStatus` so correction-sourced rules can be inserted with
+// "pending" status (quarantined from retrieval until a run outcome validates them). Defaults to
+// "candidate" for backward compatibility (oracle-born / reflection-born rules enter as candidates).
+export function upsertLearningRule(rule: RuleUpsert & { app: string; id: string; initialStatus?: RuleStatus }): void {
   ensureDb();
   upsertRuleStmt.run({
     id: rule.id,
@@ -629,7 +632,7 @@ export function upsertLearningRule(rule: RuleUpsert & { app: string; id: string 
     successRate: null,
     lastVerified: null,
     source: rule.source,
-    status: "candidate" as RuleStatus,
+    status: (rule.initialStatus ?? "candidate") as RuleStatus,
     at: new Date().toISOString(),
   });
 }
@@ -679,11 +682,17 @@ export function incrementRuleUsage(ruleIds: string[]): void {
 // successRate (running mean — NOT an overwrite), outcomeCount, confidence, and status
 // (promotion/demotion with hysteresis). The pure governance lives in applyOutcome; this is
 // only the read-modify-write boundary. No-op when the rule no longer exists.
-export function recordRuleOutcome(ruleId: string, score: number): void {
+//
+// Phase 7 coverage anchor: `coverageCreditConfirmed` is forwarded to applyOutcome to gate the
+// candidate → active promotion step. Pass true when the run's change-coverage confirmed that
+// the test covered changed lines; false when coverage was measured but found zero credit; null
+// (default) when coverage is not applicable (cross-repo, unmeasured, policy=off). The gate only
+// applies to the candidate → active transition — it never blocks demotion or pending → candidate.
+export function recordRuleOutcome(ruleId: string, score: number, coverageCreditConfirmed: boolean | null = null): void {
   ensureDb();
   const row = db.prepare("SELECT * FROM learning_rules WHERE id = ?").get(ruleId) as Record<string, unknown> | undefined;
   if (!row) return;
-  const updated = applyOutcome(rowToRule(row), score);
+  const updated = applyOutcome(rowToRule(row), score, coverageCreditConfirmed);
   db.prepare(
     "UPDATE learning_rules SET success_rate = ?, outcome_count = ?, confidence = ?, status = ?, last_verified = ? WHERE id = ?",
   ).run(updated.successRate, updated.outcomeCount, updated.confidence, updated.status, new Date().toISOString(), ruleId);
@@ -850,6 +859,180 @@ export function saveScorecardEntry(entry: ScorecardEntry): void {
 process.on("exit", () => {
   if (initialized) db.close();
 });
+
+// ── Phase 8: Holistic telemetry analysis ──────────────────────────────────────
+// Aggregates `agent_turns` + `run_outcomes` across all runs for an app (or within
+// a recent window) into a self-describing analysis surface. The analysis itself is
+// manual post-deploy; this function exposes the queryable surface so the operator
+// can run it at any time via `GET /api/apps/:app/telemetry`.
+//
+// Exposed aggregates (per the Phase-8 spec):
+//   promptSizes       — median + p95 prompt_bytes by role, across all turns
+//   cacheHitRates     — median tokens_cache_read / tokens_input ratio by role (best-effort; null when no token data)
+//   reviewerConvergence — avg correction count per rejected run (rounds 0 vs 1 — shrinking = converging)
+//   groundingPresence — fraction of first-round generator turns that have a context pack (detected heuristically
+//                       as promptText containing "## Context Pack" — the VOLATILE section header)
+//   turnCounts        — median turns per run (all roles), plus repair turn fraction
+//   wallClock         — median and p95 wall-clock span (first turn ts → last turn ts per run), in seconds
+//   runCount          — number of runs contributing to this analysis
+//   windowDays        — the window used (default: all data, or the requested window)
+
+export interface TelemetryRoleStat {
+  role: string;
+  medianPromptBytes: number | null;
+  p95PromptBytes: number | null;
+  medianCacheHitRate: number | null; // null when no token data available (Codex or no turns)
+  turnCount: number;
+}
+
+export interface TelemetryAnalysis {
+  app: string;
+  generatedAt: string;
+  windowDays: number | null; // null = all data
+  runCount: number;
+  byRole: TelemetryRoleStat[];
+  reviewerConvergence: {
+    avgCorrectionsRound0: number | null; // avg corrections on first-round rejections
+    avgCorrectionsRound1: number | null; // avg corrections on second-round rejections (shrinking = good)
+    approveRate: number | null;          // fraction of runs where reviewer approved (0–1)
+  };
+  groundingPresence: number | null; // fraction of first-round generator turns carrying a Context Pack (0–1)
+  repairFraction: number | null;    // fraction of all turns that are in-session repairs (lower = better)
+  medianTurnsPerRun: number | null;
+  medianWallClockSec: number | null;
+  p95WallClockSec: number | null;
+}
+
+function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1]! + sorted[mid]!) / 2 : sorted[mid]!;
+}
+
+function percentile(values: number[], p: number): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.ceil((p / 100) * sorted.length) - 1;
+  return sorted[Math.max(0, idx)] ?? null;
+}
+
+export function computeTelemetryAnalysis(app: string, windowDays?: number): TelemetryAnalysis {
+  ensureDb();
+
+  // Build the date cutoff for the window.
+  const cutoff = windowDays != null
+    ? new Date(Date.now() - windowDays * 86400_000).toISOString()
+    : null;
+
+  // Retrieve agent_turns for this app by joining with run_outcomes on run_id = outcome.id.
+  // When no windowDays, fetch all turns for the app.
+  const turnsQuery = cutoff
+    ? `SELECT t.* FROM agent_turns t INNER JOIN run_outcomes r ON t.run_id = r.id WHERE r.app = ? AND t.ts >= ? ORDER BY t.id ASC`
+    : `SELECT t.* FROM agent_turns t INNER JOIN run_outcomes r ON t.run_id = r.id WHERE r.app = ? ORDER BY t.id ASC`;
+  const turnsArgs = cutoff ? [app, cutoff] : [app];
+  const turnRows = db.prepare(turnsQuery).all(...turnsArgs) as Array<Record<string, unknown>>;
+
+  // Retrieve run_outcomes for reviewer convergence + approve rate.
+  const outcomesQuery = cutoff
+    ? `SELECT * FROM run_outcomes WHERE app = ? AND at >= ? ORDER BY at ASC`
+    : `SELECT * FROM run_outcomes WHERE app = ? ORDER BY at ASC`;
+  const outcomeRows = db.prepare(outcomesQuery).all(...(cutoff ? [app, cutoff] : [app])) as Array<Record<string, unknown>>;
+
+  const runCount = new Set(turnRows.map((r) => r.run_id as string | null).filter(Boolean)).size;
+
+  // Group turns by role for per-role stats.
+  const byRoleMap = new Map<string, { promptBytes: number[]; cacheRatios: number[]; turnCount: number }>();
+  for (const row of turnRows) {
+    const role = (row.role as string) ?? "unknown";
+    if (!byRoleMap.has(role)) byRoleMap.set(role, { promptBytes: [], cacheRatios: [], turnCount: 0 });
+    const entry = byRoleMap.get(role)!;
+    entry.turnCount++;
+    const pb = row.prompt_bytes as number | null;
+    if (pb != null) entry.promptBytes.push(pb);
+    const cacheRead = row.tokens_cache_read as number | null;
+    const tokensInput = row.tokens_input as number | null;
+    if (cacheRead != null && tokensInput != null && tokensInput > 0) {
+      entry.cacheRatios.push(cacheRead / tokensInput);
+    }
+  }
+  const byRole: TelemetryRoleStat[] = [...byRoleMap.entries()].map(([role, s]) => ({
+    role,
+    medianPromptBytes: median(s.promptBytes),
+    p95PromptBytes: percentile(s.promptBytes, 95),
+    medianCacheHitRate: median(s.cacheRatios),
+    turnCount: s.turnCount,
+  }));
+
+  // Grounding presence: first-round (round=0, not repair) generator turns containing "## Context Pack".
+  const generatorFirstRounds = turnRows.filter(
+    (r) => (r.role as string).includes("generator") && (r.round as number) === 0 && !r.is_repair,
+  );
+  const groundedCount = generatorFirstRounds.filter(
+    (r) => typeof r.prompt_text === "string" && (r.prompt_text as string).includes("## Context Pack"),
+  ).length;
+  const groundingPresence = generatorFirstRounds.length > 0 ? groundedCount / generatorFirstRounds.length : null;
+
+  // Repair fraction: in-session repair turns / total turns.
+  const repairCount = turnRows.filter((r) => r.is_repair).length;
+  const repairFraction = turnRows.length > 0 ? repairCount / turnRows.length : null;
+
+  // Turns per run: group by run_id, count turns.
+  const turnsByRun = new Map<string, number>();
+  for (const row of turnRows) {
+    const rid = (row.run_id as string | null) ?? "__unknown__";
+    turnsByRun.set(rid, (turnsByRun.get(rid) ?? 0) + 1);
+  }
+  const medianTurnsPerRun = median([...turnsByRun.values()]);
+
+  // Wall-clock per run: first/last ts per run_id → span in seconds.
+  const wallClocksByRun = new Map<string, { first: number; last: number }>();
+  for (const row of turnRows) {
+    const rid = (row.run_id as string | null) ?? "__unknown__";
+    const ts = new Date(row.ts as string).getTime();
+    if (!Number.isFinite(ts)) continue;
+    const entry = wallClocksByRun.get(rid);
+    if (!entry) { wallClocksByRun.set(rid, { first: ts, last: ts }); continue; }
+    if (ts < entry.first) entry.first = ts;
+    if (ts > entry.last) entry.last = ts;
+  }
+  const wallClockSpans = [...wallClocksByRun.values()].map((e) => (e.last - e.first) / 1000);
+  const medianWallClockSec = median(wallClockSpans);
+  const p95WallClockSec = percentile(wallClockSpans, 95);
+
+  // Reviewer convergence: from run_outcomes, inspect gateSignals.reviewerCorrections per run.
+  // avgCorrectionsRound0 uses the total corrections list (all rounds recorded in the outcome);
+  // we use the raw list length as a proxy for total blocking corrections across both rounds.
+  // A shrinking average round-over-round is the convergence signal (manual analysis).
+  let totalCorrectionsRound0 = 0; let countRound0 = 0;
+  let totalApproved = 0;
+  for (const row of outcomeRows) {
+    const gs = (() => { try { return JSON.parse(row.gate_signals as string) as { reviewerCorrections?: string[] }; } catch { return {}; } })();
+    const corrections = gs.reviewerCorrections ?? [];
+    if (corrections.length > 0) { totalCorrectionsRound0 += corrections.length; countRound0++; }
+    const verdict = row.verdict as string;
+    if (verdict === "pass" || verdict === "skipped") totalApproved++;
+  }
+  const approveRate = outcomeRows.length > 0 ? totalApproved / outcomeRows.length : null;
+
+  return {
+    app,
+    generatedAt: new Date().toISOString(),
+    windowDays: windowDays ?? null,
+    runCount,
+    byRole,
+    reviewerConvergence: {
+      avgCorrectionsRound0: countRound0 > 0 ? totalCorrectionsRound0 / countRound0 : null,
+      avgCorrectionsRound1: null, // requires per-round correction attribution (Phase-0 round field); deferred
+      approveRate,
+    },
+    groundingPresence,
+    repairFraction,
+    medianTurnsPerRun,
+    medianWallClockSec,
+    p95WallClockSec,
+  };
+}
 
 // ── SQLite backup (cron-like) ───────────────────────────────────────────────
 // Writes a consistent snapshot of the DB to a backup directory with a timestamp,

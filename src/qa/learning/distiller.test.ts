@@ -173,3 +173,42 @@ describe("distillReviewerCorrections", () => {
     assert.deepEqual(result.inserted, []);
   });
 });
+
+// ── Phase 7: distillReviewerCorrections inserts rules as "pending" ────────────
+// Corrections must enter the DB as "pending" (quarantined from retrieval) rather than
+// "candidate" (injectable). This is the Phase-7 de-poison invariant: no raw reviewer
+// correction becomes a generator instruction before a run outcome validates it.
+
+describe("Phase 7 (b): distillReviewerCorrections inserts rules as 'pending', not 'candidate'", () => {
+  it("inserted correction-sourced rules have status='pending' in the DB", () => {
+    const app = `phase7-pend-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const result = distillReviewerCorrections({
+      app,
+      runId: "run-phase7-pend",
+      corrections: ["uses a fragile selector on the submit button"],
+    });
+    assert.equal(result.inserted.length, 1, "one correction should produce one inserted rule");
+
+    // Retrieve ALL rules (including pending) and verify the status.
+    const all = listAllLearningRules(app, 50);
+    const inserted = all.find((r) => r.id === result.inserted[0]);
+    assert.ok(inserted, "inserted rule must be retrievable via listAllLearningRules");
+    assert.equal(inserted.status, "pending", "correction-sourced rule must start as 'pending', not 'candidate'");
+  });
+
+  it("pending rules do NOT appear in the standard retrieval list (excluded from generator injection)", () => {
+    const app = `phase7-excl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    distillReviewerCorrections({
+      app,
+      runId: "run-phase7-excl",
+      corrections: ["uses a fragile selector"],
+    });
+    // listLearningRules is the retrieval list — it must exclude pending rules.
+    const retrievable = listLearningRules(app, 50);
+    assert.equal(
+      retrievable.filter((r) => r.status === "pending").length,
+      0,
+      "pending rules must not appear in the retrieval list (injection path)",
+    );
+  });
+});

@@ -2457,6 +2457,7 @@
           "status": {
             "type": "string",
             "enum": [
+              "pending",
               "candidate",
               "active",
               "deprecated",

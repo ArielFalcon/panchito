@@ -722,9 +722,21 @@ const REPAIR_HEADROOM_PER_GENERATE = 2;
 // REPAIR_HEADROOM_PER_GENERATE in-session repairs. So a default below this would TRUNCATE a
 // legitimate run; the backstop sits exactly at the worst case so only a true runaway above it stops.
 // Calibratable downward from Phase-0 agent-turn telemetry once real cycle distributions land.
-function deriveCycleBackstop(maxRetries: number): number {
+//
+// Phase 6b: scope-dimensioned budget. When the planner yields multiple objectives, each objective
+// is a legitimate unit of work (one agent session, one review). The base backstop covers a SINGLE
+// objective's full loop sequence; multi-objective runs get an additive per-objective increment so the
+// ceiling stays a TRUE backstop (never truncates legitimate work) while remaining meaningfully tighter
+// than an unconstrained product. Each extra objective adds CYCLES_PER_GENERATE + REPAIR_HEADROOM_PER_GENERATE
+// cycles (one session's max cost) — conservative and proportional without being multiplicative.
+// numObjectives defaults to 1 (single-agent path): the backstop reduces to the original derivation.
+export function deriveCycleBackstop(maxRetries: number, numObjectives = 1): number {
   const generateEntries = 1 + MAX_STATIC_FIX_ROUNDS + maxRetries + 1;
-  return generateEntries * (CYCLES_PER_GENERATE + REPAIR_HEADROOM_PER_GENERATE);
+  const singleObjectiveBase = generateEntries * (CYCLES_PER_GENERATE + REPAIR_HEADROOM_PER_GENERATE);
+  // Additional objectives each add one session's worth of budget (not the full loop sequence, since
+  // worker sessions are bounded and do not go through the 4-loop generate→review→fix→coverage path).
+  const extraObjectives = Math.max(0, numObjectives - 1);
+  return singleObjectiveBase + extraObjectives * (CYCLES_PER_GENERATE + REPAIR_HEADROOM_PER_GENERATE);
 }
 
 export async function runPipeline(
@@ -791,7 +803,8 @@ export async function runPipeline(
   // entries, each costing review-round + repair headroom — so only a TRUE runaway above it is cut.
   // This is the safety backstop, not the symptom lever (per-loop budgets are Phases 3–4); it is
   // calibratable downward from Phase-0 telemetry. Apps can still override via qa.iterationBudget.
-  const MAX_CYCLES = app.qa.iterationBudget ?? deriveCycleBackstop(app.qa.fixLoop?.maxRetries ?? 2);
+  // Phase 6b: let so it can be retroactively dimensioned by objectiveCount from the first generate.
+  let MAX_CYCLES = app.qa.iterationBudget ?? deriveCycleBackstop(app.qa.fixLoop?.maxRetries ?? 2);
   let cycleCount = 0; // incremented BEFORE every generateAndReview() + before each repair re-prompt
   let retrievedRuleIds: string[] = []; // rule IDs retrieved for this run (for RunOutcome)
   let retrievedRules: LearningRule[] = []; // full retrieved rules (errorClass needed for governance)
@@ -1574,6 +1587,19 @@ export async function runPipeline(
     log("[qa] generating E2E tests with OpenCode...");
     result = await generateAndReview(baseGenInput({ fixCases: opts.fixCases }));
 
+    // Phase 6b: retroactively dimension the runaway backstop to the actual scope when the planner
+    // produced multiple objectives. The app-level iterationBudget override is authoritative and is
+    // never replaced. The default backstop (numObjectives=1) is refined to the planner's count only
+    // on multi-objective runs: a 5-objective run gets a proportionally higher ceiling than a 1-objective
+    // run so we don't truncate legitimate parallel work.
+    if (!app.qa.iterationBudget && result.objectiveCount && result.objectiveCount > 1) {
+      const refined = deriveCycleBackstop(app.qa.fixLoop?.maxRetries ?? 2, result.objectiveCount);
+      if (refined > MAX_CYCLES) {
+        log(`[qa] cycle-counter: scope-dimensioned backstop raised to ${refined} (${result.objectiveCount} objective(s)); was ${MAX_CYCLES}`);
+        MAX_CYCLES = refined;
+      }
+    }
+
     // Wire the specs into the RunRecord so the TUI shows what was generated.
     // specMetas carries structured data (flow, objective); specs[] is the flat fallback.
     if (result.specs.length > 0) {
@@ -1623,7 +1649,7 @@ export async function runPipeline(
       try {
         const distilled = deps.distillCorrections({ app: app.name, runId: opts.runId, corrections: reviewerCorrections, archetype: runArchetype });
         if (distilled.inserted.length > 0) {
-          log(`[qa] learning: distilled ${distilled.inserted.length} candidate rule(s) from reviewer corrections`);
+          log(`[qa] learning: distilled ${distilled.inserted.length} pending rule(s) from reviewer corrections (quarantined until first outcome validates them)`);
         }
       } catch (err) {
         log(`[qa] WARNING: reviewer-corrections distillation failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
@@ -1642,6 +1668,16 @@ export async function runPipeline(
     // errorClass — into the retrieved rules. This lets candidate rules earn or lose trust for
     // EVERY app, not just oracle-enabled ones, so the flywheel turns universally. Capped at
     // "medium" confidence (only the oracle lifts a rule to "high"). See preventionOutcome.
+    //
+    // Phase 7 coverage anchor: derive a coverage-credit signal to gate candidate → active promotion.
+    // coverageCreditConfirmed is true when coverage was measured AND the test covered changed lines
+    // (coverageRatio > 0), false when measured but found no coverage, null when not measured at all
+    // (cross-repo, policy=off, or unknown). This is the non-circular anchor: promotion requires that
+    // the tests the rule influenced actually exercised the diff's changed lines, not just green-lit by
+    // the reviewer. Coverage stays non-blocking where unmeasurable (null → promotion allowed).
+    const coverageRatio = o.coverageRatio ?? null;
+    const coverageMeasured = coverageRatio !== null; // true when the coverage step ran and produced a ratio
+    const coverageCreditConfirmed = coverageMeasured ? coverageRatio > 0 : null;
     if ((o.valueScore ?? null) === null && retrievedRules.length > 0 && opts.runId) {
       try {
         const { recordRuleOutcome } = await import("./server/history");
@@ -1649,11 +1685,12 @@ export async function runPipeline(
         for (const rule of retrievedRules) {
           const score = preventionOutcome(rule.errorClass, labeled.errorClass);
           if (score === null) continue; // no evidence about this rule from this run
-          recordRuleOutcome(rule.id, score);
+          // Pass the coverage-credit signal so the DB's promotion gate can apply it.
+          recordRuleOutcome(rule.id, score, coverageCreditConfirmed);
           folded++;
         }
         if (folded > 0) {
-          log(`[qa] governance: folded prevention signal into ${folded} rule(s) (no oracle; runErrorClass=${labeled.errorClass ?? "none"})`);
+          log(`[qa] governance: folded prevention signal into ${folded} rule(s) (no oracle; runErrorClass=${labeled.errorClass ?? "none"}; coverageCredit=${coverageCreditConfirmed ?? "unmeasured"})`);
         }
       } catch (err) {
         log(`[qa] WARNING: governance signal update failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);

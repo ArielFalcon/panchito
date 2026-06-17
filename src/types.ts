@@ -56,6 +56,11 @@ export interface AgentResult {
   reviewed: boolean; // whether review was enabled
   approved: boolean; // reviewer verdict (true when not reviewed)
   note?: string; // reason when not approved (e.g. did not converge)
+  // Phase 6b: the number of objectives the planner derived for this run. Set on plan-first paths
+  // (diff/manual fan-out) so the pipeline can retroactively adjust the runaway backstop to the
+  // actual scope — multi-objective runs legitimately need more cycles than single-objective ones.
+  // Absent on single-agent paths (defaults to 1 in the backstop calculation).
+  objectiveCount?: number;
 }
 
 // Outcome of RUNNING the E2E tests against DEV.

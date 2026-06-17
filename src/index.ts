@@ -17,7 +17,7 @@ import { toRunReportView } from "./server/run-report-view";
 import { createDurableRunEventStore } from "./server/durable-run-events";
 import { serveDashboard } from "./server/static";
 import { handleMaintainerApi, recordIncident, getMaintainerStatus, getIncidents } from "./server/maintainer";
-import { getRecord, listRecords, currentRun, updateRecord, interruptedRecords, continuationDepth, MAX_CONTINUATION_DEPTH, listLearningRules, loadScorecard, loadCurriculum, listRunOutcomes, getRunOutcome, getAgentTurns } from "./server/history";
+import { getRecord, listRecords, currentRun, updateRecord, interruptedRecords, continuationDepth, MAX_CONTINUATION_DEPTH, listLearningRules, loadScorecard, loadCurriculum, listRunOutcomes, getRunOutcome, getAgentTurns, computeTelemetryAnalysis } from "./server/history";
 import { enqueueTrackedRun, cancelTrackedRun } from "./server/runner";
 import { defaultPipelineDeps } from "./pipeline";
 import { pruneMirrors, defaultMirrorPruneDeps } from "./server/mirror-prune";
@@ -378,6 +378,8 @@ const apiDeps: ApiDeps = {
   runEvents,
   // Phase 0b: expose agent_turns for the /api/runs/:id/turns endpoint.
   getAgentTurns: (runId) => getAgentTurns(runId),
+  // Phase 8: holistic telemetry analysis for /api/apps/:app/telemetry.
+  telemetryAnalysis: (app, windowDays) => computeTelemetryAnalysis(app, windowDays),
   resolveRef: (repo, ref) => resolveRef(repo, ref, defaultMirrorDeps),
   getRecord,
   listRecords,

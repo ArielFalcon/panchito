@@ -1337,6 +1337,9 @@ export async function runOpencodeParallel(
     reviewed: false,
     approved: specs.length > 0, // overridden by the orchestrator's independent reviewer when enabled
     note: errors.length ? `worker errors: ${errors.join("; ")}` : undefined,
+    // Phase 6b: expose the planner's objective count so the pipeline can retroactively
+    // dimension the runaway backstop to the actual scope of this run.
+    objectiveCount: objectives.length,
   };
 }
 

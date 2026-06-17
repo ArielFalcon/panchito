@@ -51,7 +51,7 @@ import { RunEventSchema, type RunEvent } from "../contract/events";
 import { handshake } from "./version";
 import { reportToCsv, trendsToCsv } from "./report-view";
 import type { RunEventStore } from "./run-events";
-import type { AgentTurnRecord } from "./history";
+import type { AgentTurnRecord, TelemetryAnalysis } from "./history";
 
 const TARGETS: TestTarget[] = ["e2e", "code"];
 
@@ -102,6 +102,9 @@ export interface ApiDeps {
   // Phase 0b: returns persisted agent_turns rows for a run (all roles, chronological).
   // Absent ⇒ the /api/runs/:id/turns route returns 501.
   getAgentTurns?: (runId: string) => AgentTurnRecord[];
+  // Phase 8: cross-run telemetry analysis for the holistic evaluation surface.
+  // Absent ⇒ the /api/apps/:app/telemetry route returns 501.
+  telemetryAnalysis?: (app: string, windowDays?: number) => TelemetryAnalysis;
   // Cadence (ms) of the SSE durable-poll loop in handleRunEvents. Injected so tests can drive
   // the poll fast; production uses DEFAULT_SSE_POLL_MS.
   ssePollMs?: number;
@@ -213,6 +216,12 @@ export async function handleApi(
   const trendsMatch = path.match(/^\/api\/apps\/([^/]+)\/trends$/);
   if (req.method === "GET" && trendsMatch) {
     return handleAppTrends(res, deps, trendsMatch[1]!, parseWindow(url.searchParams.get("window")), url.searchParams.get("format"));
+  }
+
+  // Phase 8: holistic telemetry analysis surface (agent_turns + run_outcomes aggregates).
+  const telemetryMatch = path.match(/^\/api\/apps\/([^/]+)\/telemetry$/);
+  if (req.method === "GET" && telemetryMatch) {
+    return handleAppTelemetry(res, deps, telemetryMatch[1]!, parseWindow(url.searchParams.get("window")));
   }
 
   const reportMatch = path.match(/^\/api\/apps\/([^/]+)\/report$/);
@@ -671,6 +680,30 @@ function handleRunReport(
     return true;
   }
   contractJson(res, 200, RunReportViewSchema, report);
+  return true;
+}
+
+// Phase 8: holistic telemetry analysis surface. Returns the computed aggregates as plain JSON
+// (no contract schema — the shape is defined by TelemetryAnalysis in history.ts and is stable
+// enough for operator queries; a Zod schema would couple the analysis shape to the API contract
+// before Phase-8 data is available to validate it against). 501 when the dep is not wired.
+function handleAppTelemetry(res: ServerResponse, deps: ApiDeps, name: string, window?: number): boolean {
+  if (!deps.telemetryAnalysis) {
+    json(res, 501, { error: "telemetry analysis is not available" });
+    return true;
+  }
+  try {
+    deps.loadApp(name); // 404 when the app is not configured
+  } catch {
+    json(res, 404, { error: `app not found: '${name}'` });
+    return true;
+  }
+  try {
+    const analysis = deps.telemetryAnalysis(name, window);
+    json(res, 200, analysis);
+  } catch (err) {
+    json(res, 500, { error: `telemetry query failed: ${err instanceof Error ? err.message : String(err)}` });
+  }
   return true;
 }
 
