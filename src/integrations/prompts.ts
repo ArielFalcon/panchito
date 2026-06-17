@@ -19,6 +19,7 @@ import type { CommitIntent } from "../qa/commit-classify";
 import type { OpencodeRunInput, ParallelWorkerInput, ReviewInput } from "./opencode-client";
 import { renderExplorationBrief } from "../qa/exploration-brief";
 import { assemble, section, type AssembledPrompt } from "./context-assembler";
+import { roleWindowBytes } from "./model-window-catalog";
 
 // Re-export AssembledPrompt so callers that use the assembled variants only need one import.
 export type { AssembledPrompt };
@@ -159,7 +160,7 @@ export function buildWorkerPromptAssembled(w: ParallelWorkerInput): AssembledPro
     section("worker-task", "task", taskHeader, { priority: 1 }),
     // CRITICAL recap: output contract at the end so it is the last thing the agent sees before replying.
     section("worker-output-contract", "critical-recap", outputContract, { priority: 1 }),
-  ]);
+  ], { budgetBytes: roleWindowBytes("qa-worker") });
 }
 
 export function buildWorkerPrompt(w: ParallelWorkerInput): string {
@@ -266,7 +267,7 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
       ...(lessonsContent ? [section("plan-lessons", "semi-stable", lessonsContent, { priority: 3 })] : []),
       section("plan-task", "task", taskContent, { priority: 1 }),
       section("plan-output-format", "critical-recap", outputFormatContent, { priority: 1 }),
-    ]);
+    ], { budgetBytes: roleWindowBytes("qa-generator") });
   }
 
   // complete / exhaustive mode
@@ -305,7 +306,7 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
     ...(lessonsContent ? [section("plan-lessons", "semi-stable", lessonsContent, { priority: 3 })] : []),
     section("plan-task", "task", wholeTaskContent, { priority: 1 }),
     section("plan-output-format", "critical-recap", outputFormatContent, { priority: 1 }),
-  ]);
+  ], { budgetBytes: roleWindowBytes("qa-generator") });
 }
 
 export function buildPlanPrompt(input: OpencodeRunInput): string {
@@ -591,7 +592,7 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
     ...(learnedRulesContent ? [section("learned-rules", "volatile", learnedRulesContent, { priority: 6 })] : []),
     // TASK: the concrete mode-specific objective.
     section("task", "task", taskContent, { priority: 1 }),
-  ]);
+  ], { budgetBytes: roleWindowBytes("qa-generator") });
 }
 
 export function buildPrompt(input: OpencodeRunInput): string {
@@ -1050,7 +1051,7 @@ export function buildReviewerPromptAssembled(input: ReviewInput): AssembledPromp
     ...(learnedRulesContent ? [section("reviewer-learned-rules", "volatile", learnedRulesContent, { priority: 3 })] : []),
     // CRITICAL recap: the output contract (must appear at the very end).
     section("reviewer-output-contract", "critical-recap", outputContractContent, { priority: 1 }),
-  ]);
+  ], { budgetBytes: roleWindowBytes("qa-reviewer") });
 }
 
 export function buildReviewerPrompt(input: ReviewInput): string {

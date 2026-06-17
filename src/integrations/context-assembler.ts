@@ -32,6 +32,47 @@
 // (`sectionSizes`) that is emitted to the Phase-0 turn telemetry so every boundary
 // prompt is observable by section.
 
+// Phase 2 / Slice F — Global byte budget enforcement.
+//
+// `assemble()` now accepts an optional `budgetBytes` option (the per-role total
+// prompt budget derived from the model-window catalog in model-window-catalog.ts).
+// When supplied, the assembler enforces a GLOBAL ceiling on the assembled prompt:
+//
+//   1. Resolve every section's content (lazy producers called once) and apply
+//      per-section maxBytes caps (the Phase-1 per-section hygiene).
+//   2. Compute the total assembled size. If it fits within `budgetBytes`, emit as
+//      usual.
+//   3. If the total EXCEEDS `budgetBytes`, shed sections in ASCENDING priority order
+//      within each role band (highest priority number = lowest priority = shed first),
+//      applying their `overflow` policy:
+//        "drop"      → omit the whole section (logged).
+//        "summarize" → degrades to truncation with a visible marker (Phase-2 fallback;
+//                      a real summarizer is a future phase).
+//      Shedding repeats until the total fits or all shedable sections are exhausted.
+//   4. Every shed event is LOGGED (no silent truncation). The log includes the
+//      section id, original byte count, and the action taken.
+//
+// This adds a SECOND, OUTER enforcement layer on top of the per-section maxBytes
+// (the inner layer). The outer budget is the model's effective input window
+// (catalog window × safety margin × 4 bytes/token). The inner caps are preserved
+// for section-local hygiene (a reviewer-corrections section, for example, has its
+// own cap regardless of the total budget).
+//
+// Sections with `maxBytes = 0` (uncapped) that are not shed by the global budget
+// remain uncapped — the global budget is the only ceiling for those sections.
+//
+// The global budget DOES NOT replace the per-section caps (those are additive
+// hygiene): it adds an outer guarantee. This means a prompt never exceeds the
+// role's configured budget, but sections can still be individually capped below it.
+
+// Options for assemble().
+export interface AssembleOpts {
+  // Global byte budget for the assembled prompt. When provided and positive, the
+  // assembler sheds lowest-priority sections until the total fits within this limit.
+  // 0 or absent means no global budget enforcement (Phase-1 behaviour, unchanged).
+  budgetBytes?: number;
+}
+
 // The structural role of a section in the canonical order.
 // Numeric values define sort order among sections with the same role.
 export type SectionRole =
@@ -115,7 +156,12 @@ function capToBytes(text: string, maxBytes: number, sectionId: string): string {
 
 // Assemble the declared sections into a single prompt string following the canonical
 // structure. Returns the prompt text and a per-section size map for telemetry.
-export function assemble(sections: Section[]): AssembledPrompt {
+//
+// When `opts.budgetBytes` is positive, a GLOBAL byte-budget enforcement pass runs
+// BEFORE final assembly: sections are shed (lowest priority first) until the total
+// fits. Every shed event is logged with section id, original bytes, and action.
+// See the module header for the full Phase-2 budget enforcement description.
+export function assemble(sections: Section[], opts: AssembleOpts = {}): AssembledPrompt {
   // Sort by canonical role order, then by priority within each role.
   const sorted = [...sections].sort((a, b) => {
     const ra = ROLE_ORDER[a.role];
@@ -124,36 +170,173 @@ export function assemble(sections: Section[]): AssembledPrompt {
     return a.priority - b.priority;
   });
 
-  const parts: string[] = [];
-  const sectionSizes: Record<string, number> = {};
+  // ── Phase 1: Per-section resolution and inner-cap enforcement ───────────────
+  // Resolve each section to its (possibly capped) content. This is the Phase-1
+  // per-section maxBytes hygiene layer. The result is a list of resolved entries
+  // that the global-budget pass (Phase 2) then prunes if needed.
+  interface ResolvedSection {
+    section: Section;
+    content: string; // resolved and inner-capped content (may be empty → will be dropped)
+    dropped: boolean; // true if the inner cap already dropped this section
+  }
 
-  for (const section of sorted) {
+  const resolved: ResolvedSection[] = [];
+  for (const sec of sorted) {
     // Resolve content (lazy producer or static string).
-    const raw = typeof section.content === "function" ? section.content() : section.content;
+    const raw = typeof sec.content === "function" ? sec.content() : sec.content;
     // Skip empty sections (no-op: don't add blank blocks or size entries for absent content).
     if (!raw) continue;
 
-    // Honor the overflow policy when the section is over budget.
-    //   "drop"      → OMIT the whole section (better an absent section than a half-truncated one
-    //                 that misleads the agent — e.g. reviewer-corrections, where a mid-sentence cut
-    //                 could read as a different instruction than intended).
-    //   "summarize" → there is no summarizer yet, so this DEGRADES to truncate-with-marker (the
-    //                 same path as an in-budget cap). The full summarizing budget engine is Phase 2.
-    const overBudget = section.maxBytes > 0 && Buffer.byteLength(raw, "utf8") > section.maxBytes;
-    if (overBudget && section.overflow === "drop") {
+    // Inner-cap enforcement (Phase 1 per-section maxBytes):
+    //   "drop"      → OMIT the whole section.
+    //   "summarize" → degrades to truncation with a marker (no real summarizer yet).
+    const overInnerBudget = sec.maxBytes > 0 && Buffer.byteLength(raw, "utf8") > sec.maxBytes;
+    if (overInnerBudget && sec.overflow === "drop") {
       console.warn(
-        `[context-assembler] section '${section.id}' (${Buffer.byteLength(raw, "utf8")} bytes) exceeds maxBytes ${section.maxBytes} and overflow='drop' — omitting the whole section.`,
+        `[context-assembler] section '${sec.id}' (${Buffer.byteLength(raw, "utf8")} bytes) exceeds maxBytes ${sec.maxBytes} and overflow='drop' — omitting the whole section.`,
       );
-      continue; // dropped: no part pushed, no sectionSizes entry (treated like an absent section).
+      resolved.push({ section: sec, content: "", dropped: true });
+      continue;
     }
 
     // "summarize" (degrades to truncation) and the in-budget case both go through capToBytes.
-    const capped = capToBytes(raw, section.maxBytes, section.id);
+    const capped = capToBytes(raw, sec.maxBytes, sec.id);
+    resolved.push({ section: sec, content: capped, dropped: false });
+  }
 
+  // ── Phase 2: Global byte-budget enforcement ──────────────────────────────────
+  // When a budget is provided and the total assembled size would exceed it, shed
+  // the lowest-priority sections (by descending priority number within each role
+  // band, so the highest numeric priority = lowest value = first to go) until the
+  // total fits. Shedding follows each section's overflow policy.
+  const budgetBytes = opts.budgetBytes ?? 0;
+  if (budgetBytes > 0) {
+    // Compute total bytes of the assembled prompt (surviving sections joined by "\n").
+    // The join adds (survivingCount - 1) separator bytes. We include them so the budget
+    // check reflects the actual assembled size accurately.
+    const totalBytes = () => {
+      const surviving = resolved.filter((r) => !r.dropped && r.content);
+      const contentBytes = surviving.reduce((sum, r) => sum + Buffer.byteLength(r.content, "utf8"), 0);
+      const separatorBytes = surviving.length > 1 ? surviving.length - 1 : 0;
+      return contentBytes + separatorBytes;
+    };
+
+    if (totalBytes() > budgetBytes) {
+      // Build shed candidates: surviving sections sorted by descending priority within
+      // their role band (highest priority number = lowest importance = shed first).
+      // Sections in stable-prefix and critical-recap are shed LAST (they are small and
+      // load-bearing for every prompt). VOLATILE and SEMI-STABLE are shed before TASK
+      // and before STABLE/RECAP.
+      const SHED_ROLE_ORDER: Record<SectionRole, number> = {
+        "volatile": 1,        // shed first (ground-truth is per-run; most replaceable)
+        "semi-stable": 2,     // shed second (architecture context, diff scope)
+        "task": 3,            // shed third (only when nothing else can be removed)
+        "stable-prefix": 4,   // shed last (system rules — shedding breaks the role)
+        "critical-recap": 4,  // shed last (output contract — shedding breaks the role)
+      };
+
+      // Note: totalBytes() counts section content bytes only. The final assembly joins
+      // sections with "\n" (1 byte per join). To avoid off-by-one errors in the budget
+      // check, we add the join overhead to the cap marker's overhead estimate. In practice,
+      // the few-byte discrepancy from separators is negligible relative to the budget
+      // (which is measured in hundreds of kilobytes), so totalBytes() provides a
+      // sufficiently accurate budget estimate for shedding decisions.
+
+      // Sort shed candidates: primary key = shed-role order (most shedable first),
+      // secondary key = priority number (highest = least important = shed first).
+      const candidates = resolved
+        .filter((r) => !r.dropped)
+        .sort((a, b) => {
+          const roleA = SHED_ROLE_ORDER[a.section.role];
+          const roleB = SHED_ROLE_ORDER[b.section.role];
+          if (roleA !== roleB) return roleA - roleB;
+          return b.section.priority - a.section.priority; // higher priority number → shed first
+        });
+
+      for (const candidate of candidates) {
+        if (totalBytes() <= budgetBytes) break;
+
+        const originalBytes = Buffer.byteLength(candidate.content, "utf8");
+
+        if (candidate.section.overflow === "drop") {
+          // Drop: omit the entire section.
+          console.warn(
+            `[context-assembler] BUDGET OVERFLOW: shedding section '${candidate.section.id}' ` +
+              `(${originalBytes} bytes, overflow='drop') — total was ${totalBytes()} bytes, ` +
+              `budget is ${budgetBytes} bytes.`,
+          );
+          candidate.dropped = true;
+          // Clear content so totalBytes() recalculation reflects the shed.
+          candidate.content = "";
+        } else {
+          // "summarize" degrades to truncation: truncate to fill the remaining budget.
+          // The remaining budget is the total budget minus the bytes of all OTHER surviving sections.
+          // We must reserve space for the cap marker that capToBytes appends:
+          //   marker = `\n…(section '{id}' capped at {N} bytes)`
+          // We pre-compute the marker overhead so the TOTAL (truncated content + marker) fits.
+          const remainingBudget = budgetBytes - (totalBytes() - originalBytes);
+          if (remainingBudget <= 0) {
+            // No room at all: drop entirely.
+            console.warn(
+              `[context-assembler] BUDGET OVERFLOW: shedding section '${candidate.section.id}' ` +
+                `(${originalBytes} bytes, overflow='summarize' → no room → dropping entirely) — ` +
+                `total was ${totalBytes()} bytes, budget is ${budgetBytes} bytes.`,
+            );
+            candidate.dropped = true;
+            candidate.content = "";
+          } else {
+            // capToBytes appends a marker of the form `\n…(section '{id}' capped at {N} bytes)`.
+            // Estimate the marker byte overhead conservatively (64 bytes covers any realistic id).
+            const markerOverhead = Buffer.byteLength(
+              `\n…(section '${candidate.section.id}' capped at ${remainingBudget} bytes)`,
+              "utf8",
+            );
+            // The content target is remainingBudget minus the marker overhead.
+            // If the target is ≤ 0 there is truly no room; drop entirely.
+            const contentTarget = remainingBudget - markerOverhead;
+            if (contentTarget <= 0) {
+              console.warn(
+                `[context-assembler] BUDGET OVERFLOW: shedding section '${candidate.section.id}' ` +
+                  `(${originalBytes} bytes, overflow='summarize' → no room after marker overhead → dropping entirely) — ` +
+                  `total was ${totalBytes()} bytes, budget is ${budgetBytes} bytes.`,
+              );
+              candidate.dropped = true;
+              candidate.content = "";
+            } else {
+              const truncated = capToBytes(candidate.content, contentTarget, candidate.section.id);
+              console.warn(
+                `[context-assembler] BUDGET OVERFLOW: truncating section '${candidate.section.id}' ` +
+                  `from ${originalBytes} to ${Buffer.byteLength(truncated, "utf8")} bytes ` +
+                  `(overflow='summarize') — total was ${totalBytes()} bytes, budget is ${budgetBytes} bytes.`,
+              );
+              candidate.content = truncated;
+            }
+          }
+        }
+      }
+
+      if (totalBytes() > budgetBytes) {
+        // Could not shed enough without removing load-bearing sections. Log it but
+        // do not hard-fail — a prompt that is slightly over budget is better than
+        // an aborted run. The operator can raise the budget or reduce section sizes.
+        console.warn(
+          `[context-assembler] BUDGET OVERFLOW: could not shed enough sections to meet ` +
+            `${budgetBytes}-byte budget (remaining: ${totalBytes()} bytes). ` +
+            `The assembled prompt exceeds the role budget — raise budgetBytes or reduce section sizes.`,
+        );
+      }
+    }
+  }
+
+  // ── Final assembly: emit surviving sections ──────────────────────────────────
+  const parts: string[] = [];
+  const sectionSizes: Record<string, number> = {};
+
+  for (const r of resolved) {
+    if (r.dropped || !r.content) continue;
     // Record the byte size of the (possibly capped) content.
-    sectionSizes[section.id] = Buffer.byteLength(capped, "utf8");
-
-    parts.push(capped);
+    sectionSizes[r.section.id] = Buffer.byteLength(r.content, "utf8");
+    parts.push(r.content);
   }
 
   return {

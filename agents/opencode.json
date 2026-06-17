@@ -7,8 +7,8 @@
   },
   "compaction": {
     "auto": true,
-    "tail_turns": 2,
-    "preserve_recent_tokens": 16000
+    "tail_turns": 3,
+    "preserve_recent_tokens": 32000
   },
   "tool_output": {
     "max_lines": 4000,

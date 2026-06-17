@@ -27,6 +27,7 @@ import {
   parseModelRef,
   withUsageSink,
   buildReviewerPrompt,
+  buildReviewerPromptAssembled,
   ManifestFs,
   ParallelWorkerInput,
   AgentDeps,
@@ -42,6 +43,7 @@ import {
 import { isInfraError } from "../errors";
 import type { ArchitectureContext } from "../qa/context";
 import type { ExplorationBrief } from "../qa/exploration-brief";
+import { roleWindowBytes } from "./model-window-catalog";
 
 // context.json is read from the WATCHED repo and committed by this system's own PRs, so it
 // is attacker-influenceable. It must be sanitized before reaching the test-writing agent.
@@ -2190,4 +2192,90 @@ test("Phase 1a D.2: buildReviewerPrompt output is consumed verbatim by reviewInd
   assert.match(p, /## Commit diff/); // diff-mode objective
   assert.match(p, /STAY IN YOUR LANE/);
   assert.match(p, /\{"approved":false/);
+});
+
+// ── Slice F Phase 2: budget wiring end-to-end through the *Assembled builders ─
+//
+// The budget engine (model-window-catalog + assemble budgetBytes) is INERT unless
+// the *Assembled builders resolve the per-role window and pass it as budgetBytes.
+// These tests prove the wiring is active and can never silently regress to inert again.
+
+test("Slice F F.3: buildPromptAssembled applies qa-generator budget — normal prompt fits, no sections shed", () => {
+  // A minimal diff-mode prompt is well within the qa-generator budget
+  // (roleWindowBytes("qa-generator") = floor(64000 × 0.75 × 4) = 192,000 bytes).
+  // All sections must survive when the prompt is normal-sized.
+  const { text, sectionSizes } = buildPromptAssembled({
+    ...input,
+    mode: "diff",
+    diff: "diff --git a/x b/x\n+const x = 1;",
+  });
+
+  // Core sections must all survive (nothing shed by the conservative budget).
+  assert.match(text, /Working rules/, "working-rules section must survive");
+  assert.match(text, /Generate\/update E2E tests/, "task section must survive");
+
+  // sectionSizes must exist for the core sections.
+  assert.ok("working-rules" in sectionSizes, "working-rules in sectionSizes");
+  assert.ok("task" in sectionSizes, "task in sectionSizes");
+
+  // The total byte size must be well under the qa-generator budget (192,000 bytes).
+  const totalBytes = Buffer.byteLength(text, "utf8");
+  const budget = roleWindowBytes("qa-generator");
+  assert.ok(budget > 0, "roleWindowBytes must return a positive budget");
+  assert.ok(
+    totalBytes < budget,
+    `normal prompt (${totalBytes} bytes) must fit within qa-generator budget (${budget} bytes)`,
+  );
+});
+
+test("Slice F F.3: buildReviewerPromptAssembled applies qa-reviewer budget — oversized learnedRules section is shed", () => {
+  // The qa-reviewer budget = floor(32000 × 0.75 × 4) = 96,000 bytes.
+  // To force an overflow: pad learnedRules to exceed the budget when combined with
+  // the other sections (role-framing + instructions + objective + specs + output-contract
+  // together are ~4–6 KB; so learnedRules > 92 KB reliably overflows the 96 KB budget).
+  // reviewer-learned-rules has priority: 3 within volatile (the lowest-priority volatile
+  // section in the reviewer), so it is shed FIRST by the global budget pass.
+  const dir = mkdtempSync(join(tmpdir(), "qa-rev-budget-"));
+  mkdirSync(join(dir, "e2e"), { recursive: true });
+  writeFileSync(join(dir, "e2e", "login.spec.ts"), "// spec\ntest('login', async () => {});");
+
+  // A learnedRules string that is guaranteed to push the total over the budget.
+  // reviewer budget = 96,000 bytes; 100,000 bytes of learnedRules is safely over.
+  const hugeLearnedRules = "- rule: " + "x".repeat(100_000);
+
+  try {
+    const { text, sectionSizes } = buildReviewerPromptAssembled(
+      makeReviewInput(dir, { learnedRules: hugeLearnedRules }),
+    );
+
+    // The oversized learnedRules section must be shed (overflow='drop' for a section
+    // that pushes the total over budget; reviewer-learned-rules is the lowest-priority
+    // volatile section and therefore the first candidate to go).
+    assert.ok(
+      !text.includes(hugeLearnedRules.slice(0, 20)),
+      "oversized learnedRules section must be shed when budget is exceeded",
+    );
+
+    // The reviewer budget IS applied: without it, hugeLearnedRules would appear in the prompt.
+    // Core load-bearing sections must survive (they have the highest shed-resistance).
+    assert.match(text, /Independent review/, "role-framing section must survive");
+    assert.match(text, /\{"approved":false/, "output-contract section must survive");
+
+    // sectionSizes must NOT include the shed section (dropped sections are excluded).
+    assert.ok(
+      !("reviewer-learned-rules" in sectionSizes),
+      "shed section must not appear in sectionSizes",
+    );
+
+    // The surviving prompt must fit within the budget.
+    const totalBytes = Buffer.byteLength(text, "utf8");
+    const budget = roleWindowBytes("qa-reviewer");
+    assert.ok(budget > 0, "roleWindowBytes must return a positive budget");
+    assert.ok(
+      totalBytes <= budget,
+      `surviving prompt (${totalBytes} bytes) must be within qa-reviewer budget (${budget} bytes)`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

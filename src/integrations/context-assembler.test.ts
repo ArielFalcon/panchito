@@ -1,7 +1,9 @@
-// Colocated tests for the ContextAssembler (Slice E / Phase 1b).
+// Colocated tests for the ContextAssembler (Slice E / Phase 1b + Slice F / Phase 2).
 // Covers: canonical ordering, per-section byte cap enforcement,
 // scaffold-vs-verbatim language handling, section_sizes output,
-// and the lazy-producer path.
+// the lazy-producer path (Phase 1b), AND the global byte-budget enforcement
+// added in Phase 2 (Slice F): budget overflow sheds lowest-priority sections,
+// logs the action, and preserves higher-priority sections intact.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -317,4 +319,198 @@ test("assemble: a realistic multi-section prompt has canonical structure (P3 spe
     assert.ok(id in sectionSizes, `sectionSizes must contain '${id}'`);
     assert.ok(sectionSizes[id]! > 0, `sectionSizes['${id}'] must be > 0`);
   }
+});
+
+// ── Phase 2 / Slice F: Global byte-budget enforcement ────────────────────────
+// These tests verify the OUTER global budget layer added in Phase 2.
+
+// Helper: count bytes of a string (UTF-8).
+function byteLen(s: string): number {
+  return Buffer.byteLength(s, "utf8");
+}
+
+test("assemble: no budgetBytes option preserves original Phase-1 behaviour (no global cap)", () => {
+  // Without budgetBytes, even a very large total is not trimmed.
+  const bigContent = "A".repeat(100_000);
+  const sections = [section("big", "volatile", bigContent, { overflow: "summarize" })];
+  const { text } = assemble(sections); // no opts
+  assert.equal(text, bigContent, "without budgetBytes the content must pass through unchanged");
+});
+
+test("assemble: budgetBytes=0 disables the global budget (same as omitting it)", () => {
+  const bigContent = "B".repeat(100_000);
+  const sections = [section("big", "volatile", bigContent, { overflow: "summarize" })];
+  const { text } = assemble(sections, { budgetBytes: 0 });
+  assert.equal(text, bigContent, "budgetBytes=0 must be treated as no budget");
+});
+
+test("assemble: prompt within budget is emitted unchanged (no shedding needed)", () => {
+  const content = "C".repeat(50);
+  const sections = [
+    section("rules", "stable-prefix", content),
+    section("task", "task", content),
+  ];
+  const bigBudget = 100_000;
+  const { text, sectionSizes } = assemble(sections, { budgetBytes: bigBudget });
+  // Both sections fit comfortably — nothing is shed.
+  assert.ok(text.includes(content), "content must survive when within budget");
+  assert.ok("rules" in sectionSizes, "both sections must be in sectionSizes when within budget");
+  assert.ok("task" in sectionSizes, "both sections must be in sectionSizes when within budget");
+});
+
+test("assemble: overflow budget sheds the lowest-priority volatile section first (overflow='drop')", () => {
+  // low-priority volatile (priority 10) must be shed before high-priority volatile (priority 1).
+  const highPriContent = "H".repeat(100);
+  const lowPriContent  = "L".repeat(200);
+  const sections = [
+    section("high-pri-vol", "volatile",      highPriContent, { priority: 1, overflow: "drop" }),
+    section("low-pri-vol",  "volatile",      lowPriContent,  { priority: 10, overflow: "drop" }),
+    section("task",         "task",          "T".repeat(10), { priority: 1 }),
+    section("rules",        "stable-prefix", "R".repeat(10), { priority: 1 }),
+  ];
+
+  // Total without shedding: 100 + 200 + 10 + 10 = 320 bytes.
+  // Budget of 150 bytes forces the low-priority volatile to be shed (200 bytes).
+  // After shed: 100 + 10 + 10 = 120 bytes ≤ 150 budget.
+  const budgetBytes = 150;
+  const { text, sectionSizes } = assemble(sections, { budgetBytes });
+
+  // High-priority volatile survives.
+  assert.ok(text.includes(highPriContent), "high-priority volatile section must survive budget enforcement");
+  assert.ok("high-pri-vol" in sectionSizes, "high-priority volatile must be in sectionSizes");
+
+  // Low-priority volatile is shed.
+  assert.ok(!text.includes(lowPriContent), "low-priority volatile section must be shed");
+  assert.ok(!("low-pri-vol" in sectionSizes), "shed section must be absent from sectionSizes");
+
+  // The surviving sections + task + rules keep the total within budget.
+  assert.ok(byteLen(text) <= budgetBytes, `total (${byteLen(text)}) must be ≤ budget (${budgetBytes})`);
+});
+
+test("assemble: budget enforcement sheds volatile before semi-stable before task", () => {
+  // volatile sections are shed before semi-stable, which are shed before task.
+  // This test forces enough overflow that both volatile AND semi-stable must go.
+  const volatileContent   = "V".repeat(200);
+  const semiStableContent = "S".repeat(200);
+  const taskContent       = "T".repeat(50);
+  const stableContent     = "R".repeat(20);
+
+  const sections = [
+    section("dom",     "volatile",      volatileContent,   { priority: 1, overflow: "drop" }),
+    section("arch",    "semi-stable",   semiStableContent, { priority: 1, overflow: "drop" }),
+    section("task",    "task",          taskContent,       { priority: 1, overflow: "drop" }),
+    section("rules",   "stable-prefix", stableContent,     { priority: 1, overflow: "drop" }),
+  ];
+
+  // Total: 200 + 200 + 50 + 20 = 470 bytes.
+  // Budget: 75 bytes → only task (50) + rules (20) = 70 bytes survive.
+  const budgetBytes = 75;
+  const { text, sectionSizes } = assemble(sections, { budgetBytes });
+
+  // task and stable-prefix survive (load-bearing, shed last).
+  assert.ok(text.includes(taskContent),   "task must survive — it is load-bearing");
+  assert.ok(text.includes(stableContent), "stable-prefix must survive — it is load-bearing");
+  assert.ok("task"  in sectionSizes, "task must be in sectionSizes");
+  assert.ok("rules" in sectionSizes, "stable-prefix must be in sectionSizes");
+
+  // volatile and semi-stable are shed.
+  assert.ok(!text.includes(volatileContent),   "volatile section must be shed before semi-stable");
+  assert.ok(!text.includes(semiStableContent), "semi-stable section must be shed before task");
+  assert.ok(!("dom"  in sectionSizes), "shed volatile must be absent from sectionSizes");
+  assert.ok(!("arch" in sectionSizes), "shed semi-stable must be absent from sectionSizes");
+
+  assert.ok(byteLen(text) <= budgetBytes, `total (${byteLen(text)}) must be ≤ budget (${budgetBytes})`);
+});
+
+test("assemble: overflow='summarize' in global budget truncates rather than drops", () => {
+  // A section with overflow='summarize' must be truncated (not dropped entirely)
+  // when the global budget forces action, so some content survives.
+  // We use a generous budget (400 bytes) so that the truncated content + task both fit,
+  // proving truncation is used (not drop).
+  const bigContent = "S".repeat(1000); // 1000 bytes
+  const taskContent = "T".repeat(20);  // 20 bytes
+  const sections = [
+    section("big-volatile", "volatile", bigContent, { priority: 1, overflow: "summarize" }),
+    section("task",         "task",     taskContent, { priority: 1 }),
+  ];
+  // Budget = 400 bytes. big-volatile (1000 bytes) must be truncated to ~380 bytes (leaving
+  // room for task). The result must be shorter than the original but not absent.
+  const budgetBytes = 400;
+  const { text, sectionSizes } = assemble(sections, { budgetBytes });
+
+  // Both sections survive: task is not shed (400 > 20), big-volatile is truncated.
+  assert.ok(text.includes(taskContent), "task must survive within the 400-byte budget");
+  // The volatile section is truncated (not dropped): it still appears in sectionSizes.
+  assert.ok("big-volatile" in sectionSizes, "truncated volatile must still appear in sectionSizes (not dropped)");
+  // The assembled text is shorter than the original 1000-byte content would have been.
+  assert.ok(byteLen(text) < 1000 + 20, "total must be shorter than original (truncation applied)");
+  assert.ok(byteLen(text) <= budgetBytes, `total (${byteLen(text)}) must be ≤ budget (${budgetBytes})`);
+  // The marker must appear to signal truncation (not silent truncation).
+  assert.match(text, /capped at \d+ bytes/, "truncation marker must be present (no silent truncation)");
+});
+
+test("assemble: canonical role order is preserved even after budget shedding", () => {
+  // After some sections are shed, the surviving sections must still appear in
+  // canonical order (stable-prefix → semi-stable → volatile → task → critical-recap).
+  const sections = [
+    section("stable",  "stable-prefix", "STABLE".repeat(5),   { priority: 1, overflow: "drop" }),
+    section("semi",    "semi-stable",   "SEMI".repeat(50),    { priority: 1, overflow: "drop" }),
+    section("vol",     "volatile",      "VOL".repeat(5),      { priority: 1, overflow: "drop" }),
+    section("task",    "task",          "TASK".repeat(5),     { priority: 1, overflow: "drop" }),
+    section("recap",   "critical-recap","RECAP".repeat(5),    { priority: 1, overflow: "drop" }),
+  ];
+  // Total: 30 + 200 + 30 + 20 + 25 = 305 bytes. Budget forces shed of semi (200 bytes).
+  const budgetBytes = 110;
+  const { text } = assemble(sections, { budgetBytes });
+
+  const stableIdx = text.indexOf("STABLE");
+  const volIdx    = text.indexOf("VOL");
+  const taskIdx   = text.indexOf("TASK");
+  const recapIdx  = text.indexOf("RECAP");
+
+  if (stableIdx >= 0 && volIdx >= 0) {
+    assert.ok(stableIdx < volIdx, "stable-prefix must precede volatile after budget enforcement");
+  }
+  if (volIdx >= 0 && taskIdx >= 0) {
+    assert.ok(volIdx < taskIdx, "volatile must precede task after budget enforcement");
+  }
+  if (taskIdx >= 0 && recapIdx >= 0) {
+    assert.ok(taskIdx < recapIdx, "task must precede critical-recap after budget enforcement");
+  }
+});
+
+test("assemble: budget enforcement respects per-section inner caps (both layers stack)", () => {
+  // A section with a per-section maxBytes cap (inner cap) that also needs global shedding
+  // should have the inner cap already applied before the global budget sees it.
+  // Here: inner-capped volatile → already truncated to 50 bytes before the budget check.
+  const content = "I".repeat(1000);
+  const sections = [
+    section("capped-vol", "volatile", content, { priority: 1, maxBytes: 50, overflow: "summarize" }),
+    section("task",       "task",     "T".repeat(20), { priority: 1 }),
+  ];
+  // Budget of 200 bytes — the inner-capped volatile is already ≤ 50+marker bytes,
+  // so the global budget should not need to shed it.
+  const { text, sectionSizes } = assemble(sections, { budgetBytes: 200 });
+
+  // Both sections survive (inner cap brought volatile well under the global budget).
+  assert.ok(text.includes("T".repeat(20)), "task must survive");
+  assert.ok("capped-vol" in sectionSizes, "inner-capped volatile must survive the global budget check");
+  assert.ok(byteLen(text) <= 200, "total must be ≤ global budget");
+});
+
+test("assemble: global budget shedding does not affect sectionSizes for surviving sections", () => {
+  // sectionSizes for a surviving section must reflect its actual byte length,
+  // regardless of whether other sections were shed by the global budget.
+  const surviveContent = "X".repeat(100);
+  const shedContent    = "Y".repeat(200);
+  const sections = [
+    section("survive", "stable-prefix", surviveContent, { priority: 1 }),
+    section("shed",    "volatile",      shedContent,    { priority: 1, overflow: "drop" }),
+  ];
+  // Budget of 110 bytes: stable-prefix (100) fits; volatile (200) must be shed.
+  const { sectionSizes } = assemble(sections, { budgetBytes: 110 });
+
+  assert.ok("survive" in sectionSizes, "surviving section must be in sectionSizes");
+  assert.equal(sectionSizes["survive"], byteLen(surviveContent), "sectionSizes must reflect the surviving section's actual byte count");
+  assert.ok(!("shed" in sectionSizes), "shed section must be absent from sectionSizes");
 });
