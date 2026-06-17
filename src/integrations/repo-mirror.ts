@@ -210,3 +210,46 @@ export async function getCommitsBehind(
   if (!Number.isFinite(n)) throw new Error(`unexpected rev-list output: ${JSON.stringify(stdout.trim().slice(0, 40))}`);
   return n;
 }
+
+// Slice G — PR-aware ingestion (P9 / design §P3).
+//
+// Compute the UNION of files changed across a PR's full commit range (`baseSha..headSha`).
+// A PR can span many commits; taking only the tip commit (the current default) misses
+// blast-radius files changed earlier in the branch. This union drives the Context Pack
+// blast-radius construction so the generator sees ALL changed symbols, not just the latest.
+//
+// `baseSha` is the merge-base or the branch point; `headSha` is the PR tip. Both must be
+// hex SHAs (assertHexSha — same injection-closing rationale as the rest of this module).
+//
+// Returns a deduplicated, sorted list of repo-relative paths. When the range is empty
+// (single commit, or baseSha === headSha) the list degrades to the single-commit path
+// (getCommitDiff caller extracts changed files from the raw diff) — degrade-to-n=1
+// is explicit per design §2 principle 2.
+//
+// Webhook wiring TODO: the calling webhook handler currently derives only a single SHA
+// from the push event. To use the full PR range, the webhook must resolve the PR's base
+// SHA (via the GitHub API: GET /repos/{owner}/{repo}/pulls/{number}/commits, or the
+// compare endpoint). Until that wiring is added, callers pass baseSha=headSha and receive
+// the single-commit degenerate. The TODO is here, not silently dropped. (Slice H/I will
+// resolve the webhook side once the pack is proven on the single-commit path.)
+export async function getChangedFilesInRange(
+  mirrorDir: string,
+  baseSha: string,
+  headSha: string,
+  deps: MirrorDeps,
+): Promise<string[]> {
+  assertHexSha(baseSha);
+  assertHexSha(headSha);
+  // When baseSha === headSha (single-commit / degenerate PR), return immediately to
+  // avoid `git diff --name-only sha..sha` producing an empty output (correct, but the
+  // caller already has the changed files from the commit diff).
+  if (baseSha === headSha) return [];
+  // --name-only lists only the file paths changed between base and head, one per line.
+  const stdout = await deps.git(["diff", "--name-only", `${baseSha}..${headSha}`], mirrorDir);
+  const files = stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  // Deduplicate and sort for determinism (renames can appear twice under both paths).
+  return [...new Set(files)].sort();
+}

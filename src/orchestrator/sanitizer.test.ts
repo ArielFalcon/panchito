@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sanitizeText, containsSecrets, SECRET_AUDIT, recordAudit, capText, MAX_PROMPT_BODY_CHARS } from "./sanitizer";
+import { sanitizeText, containsSecrets, SECRET_AUDIT, recordAudit, capText, MAX_PROMPT_BODY_CHARS, capDiff, MAX_PROMPT_DIFF_CHARS } from "./sanitizer";
 
 test("redacts secrets (api key, token)", () => {
   const { text: out } = sanitizeText("const apiKey = sk-abc123XYZ\ntoken: ghs_supersecretvalue");
@@ -229,4 +229,90 @@ test("redacts credentials in JSON form (quoted keys with colon)", () => {
     const { detection } = sanitizeText(json);
     assert.equal(detection.redacted, true, `must redact: ${json}`);
   }
+});
+
+// ── Slice G: capDiff relevance ordering ───────────────────────────────────────
+
+function makeDiffSection(file: string, lines = "+"+"changed line\n"): string {
+  return `diff --git a/${file} b/${file}\nindex 000..111 100644\n--- a/${file}\n+++ b/${file}\n${lines}`;
+}
+
+// Build a large filler string to make a diff section exceed the cap.
+// Each repetition is 10 chars; 6000 repetitions = 60,000 chars > 50,000.
+function bigContent(n = 6000): string { return "+lock line\n".repeat(n); }
+
+test("Slice G capDiff: changed-source files appear before lockfiles when both are present", () => {
+  // Build a diff that exceeds the cap: 1 lockfile (large) + 1 source file (smaller).
+  // Use a tight cap so only one section can fit.
+  const lockfileSection = makeDiffSection("package-lock.json", "+lock line\n".repeat(20));
+  const sourceSection = makeDiffSection("src/app/auth.ts", "+auth change\n".repeat(5));
+  const diff = lockfileSection + sourceSection;
+  // Tight cap: just enough for the source section but not both.
+  const cap = lockfileSection.length - 5;
+  const result = capDiff(diff, cap);
+  // With relevance ordering, the source file should be present.
+  const srcPos = result.indexOf("src/app/auth.ts");
+  const lockPos = result.indexOf("package-lock.json");
+  assert.ok(srcPos >= 0, "source file must appear in result");
+  if (lockPos >= 0) {
+    // If both fit (cap was generous enough), source must appear before the lockfile.
+    assert.ok(srcPos <= lockPos, "source file must appear before lockfile in relevance order");
+  }
+  // If lockPos < 0, the lockfile was fully omitted — this is the expected outcome when the
+  // lockfile is low-relevance and doesn't fit in the cap after the source file is written first.
+});
+
+test("Slice G capDiff: changed source is preserved when lockfile would push it out in head-order", () => {
+  // Large lockfile (> cap) + small source. With head-by-file ordering the lockfile takes
+  // the budget and source is omitted. With relevance ordering source is kept, lock omitted.
+  const bigLock = makeDiffSection("package-lock.json", bigContent());
+  const smallSrc = makeDiffSection("src/server.ts", "+server change\n");
+  const rawDiff = bigLock + smallSrc;
+  assert.ok(rawDiff.length > MAX_PROMPT_DIFF_CHARS, "diff must exceed cap for the test to be meaningful");
+  const result = capDiff(rawDiff);
+  assert.ok(result.includes("src/server.ts"), "source file must be preserved");
+  // The lockfile should either be absent or appear after the source.
+  const srcPos = result.indexOf("src/server.ts");
+  const lockPos = result.indexOf("package-lock.json");
+  if (lockPos >= 0) {
+    assert.ok(srcPos < lockPos, "source must appear before the lockfile in the result");
+  }
+});
+
+test("Slice G capDiff: generated files are low-relevance (.generated.ts sorted last)", () => {
+  const bigGenerated = makeDiffSection("src/api/api.generated.ts", bigContent());
+  const src = makeDiffSection("src/app/user.ts", "+user change\n");
+  const rawDiff = bigGenerated + src;
+  assert.ok(rawDiff.length > MAX_PROMPT_DIFF_CHARS, "must exceed cap");
+  const result = capDiff(rawDiff);
+  assert.ok(result.includes("src/app/user.ts"), "real source must survive");
+});
+
+test("Slice G capDiff: snapshot files (.snap) are low-relevance", () => {
+  const bigSnap = makeDiffSection("tests/__snapshots__/App.test.ts.snap", bigContent());
+  const src = makeDiffSection("src/app.ts", "+app change\n");
+  const rawDiff = bigSnap + src;
+  assert.ok(rawDiff.length > MAX_PROMPT_DIFF_CHARS, "must exceed cap");
+  const result = capDiff(rawDiff);
+  assert.ok(result.includes("src/app.ts"), "real source must survive");
+});
+
+test("Slice G capDiff: diff under cap passes through unchanged (no reordering artefacts)", () => {
+  const smallDiff = makeDiffSection("src/foo.ts", "+one\n") + makeDiffSection("package-lock.json", "+lock\n");
+  assert.ok(smallDiff.length < MAX_PROMPT_DIFF_CHARS, "must be under cap");
+  const result = capDiff(smallDiff);
+  assert.ok(result.includes("src/foo.ts"), "source file preserved");
+  assert.ok(result.includes("package-lock.json"), "lockfile preserved (under cap — no truncation needed)");
+  assert.ok(!result.includes("[diff truncated"), "no truncation marker when diff is under cap");
+});
+
+test("Slice G capDiff: multiple source files — all kept before any lockfile is truncated", () => {
+  const src1 = makeDiffSection("src/a.ts", "+a\n".repeat(5));
+  const src2 = makeDiffSection("src/b.ts", "+b\n".repeat(5));
+  const bigLock = makeDiffSection("yarn.lock", bigContent());
+  const rawDiff = bigLock + src1 + src2;
+  assert.ok(rawDiff.length > MAX_PROMPT_DIFF_CHARS, "must exceed cap");
+  const result = capDiff(rawDiff);
+  assert.ok(result.includes("src/a.ts"), "first source file preserved");
+  assert.ok(result.includes("src/b.ts"), "second source file preserved");
 });

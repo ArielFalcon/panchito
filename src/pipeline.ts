@@ -55,6 +55,7 @@ import { capDiff } from "./orchestrator/sanitizer";
 import { renderIssue, type IssueContext, type TestedItem } from "./report/reporter";
 import { renderValueTag } from "./qa/value-report";
 import { captureDom, captureDomForRoutes, defaultCaptureDomDeps } from "./qa/dom-snapshot";
+import { buildContextPack, defaultContextPackDeps } from "./qa/context-pack";
 import { loadContextCache as loadContextCacheDefault, saveContextCache as saveContextCacheDefault } from "./qa/context-cache";
 import { AgentResult, QaCase, QaRunResult, TriggerSource, RunMode, RunOptions, TestTarget, RunOutcome, SpecMeta } from "./types";
 import type { AgentDeps, ReviewInput, ReviewResult } from "./integrations/opencode-client";
@@ -94,6 +95,9 @@ export interface GenerateInput {
   explorer?: boolean; // qa.explorer: read-only explorer pass before the generator (single-agent diff)
   runId?: string; // for SSE live activity: maps the OpenCode session to this run record
   contextMap?: ArchitectureContext; // cross-cutting: the FE↔BE map loaded from e2e/.qa/context.json
+  // Slice G: pre-built Context Pack text (blast-radius + DOM + contracts), assembled by the
+  // orchestrator before the first write and pushed into the generator prompt (VOLATILE band).
+  contextPack?: string;
   service?: { repo: string; mirrorDir: string; openapi?: string | string[] }; // cross-repo: the triggering microservice (read-only working copy)
   services?: Array<{ repo: string; mirrorDir: string; openapi?: string | string[] }>; // context mode: every declared service, mirrored read-only
 }
@@ -239,6 +243,7 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
         runId: input.runId,
         contextMap: input.contextMap,
         explorer: input.explorer,
+        contextPack: input.contextPack,
         service: input.service,
         services: input.services,
       };
@@ -1277,6 +1282,12 @@ export async function runPipeline(
   // coverage-enforce regeneration, which previously dropped them.
   let promptSections: string | undefined;
 
+  // Slice G: the Context Pack is built once from the brief/DOM/contracts and stored here.
+  // Every generation call via baseGenInput receives the same pack — it is NOT rebuilt on
+  // regen passes (the pack is first-write ground truth; fix/review/coverage passes use
+  // domSnapshot instead which is sourced from the failure-point capture).
+  let builtContextPack: string | undefined;
+
   const baseGenInput = (extra: Partial<GenerateInput>): GenerateInput => ({
     repo: app.repo,
     sha,
@@ -1294,6 +1305,7 @@ export async function runPipeline(
     parallelDiff: app.qa.parallelDiff,
     explorer: app.qa.explorer,
     contextMap,
+    contextPack: builtContextPack,
     learnedRules: promptSections,
     service: triggerService
       ? { repo: triggerService.repo, mirrorDir: serviceMirrorDir!, openapi: triggerService.openapi }
@@ -1372,6 +1384,47 @@ export async function runPipeline(
     }
 
     promptSections = allPromptSections || undefined; // every later regeneration inherits this via baseGenInput
+
+    // Slice G — Context Pack: build and push BEFORE the first generation call.
+    // The pack is orchestrator-built (blast-radius from a prior explorer pass stored in the
+    // ExplorationBrief, DOM via Playwright, contracts from context.json). Best-effort: a pack
+    // build failure logs a warning and the run continues with the explore-first behaviour.
+    // Only built for e2e mode; code mode has no DOM and no diff-driven blast radius.
+    // Re-generation passes (fix/review/coverage) inherit the same pack via baseGenInput so the
+    // generator always sees the same ground truth it was given on the first write.
+    if (!isCode && app.dev?.baseUrl) {
+      try {
+        const packResult = await buildContextPack(
+          {
+            // The explorer brief is available on the current run only if the explorer pass ran
+            // and returned a usable brief. In parallelDiff mode the planner embeds briefs per
+            // objective in the plan output — those are not available here on the single-agent
+            // path. For now, the pack is built from contextMap + DOM only when no brief is
+            // available; the brief path is exercised when the explorer is enabled.
+            brief: undefined, // Slice H will wire the explorer brief here after Phase 3b
+            baseUrl: app.dev.baseUrl,
+            e2eDir,
+            contextMap,
+            // prChangedFiles: will be wired from webhook PR-range in the follow-up TODO below.
+            // TODO (Slice H / webhook): wire the PR-range changed-file union here. The webhook
+            // currently delivers a single SHA; computing the PR base requires the GitHub API
+            // (GET /repos/{owner}/{repo}/pulls/{number}/commits or the compare endpoint).
+            // Until that wiring exists, prChangedFiles is undefined and contracts are filtered
+            // by the brief's feBe only (or contextMap feBe when no brief is present).
+            prChangedFiles: intent?.changedFiles,
+          },
+          defaultContextPackDeps,
+        );
+        if (packResult.text) {
+          builtContextPack = packResult.text;
+          log(`[qa] context-pack: built (blastRadius=${packResult.blastRadiusBytes}B, dom=${packResult.domBytes}B, contracts=${packResult.contractBytes}B)`);
+        } else {
+          log("[qa] context-pack: all components absent or failed — generator will use explore-first");
+        }
+      } catch (err) {
+        log(`[qa] context-pack: build FAILED (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
 
     log("[qa] generating E2E tests with OpenCode...");
     result = await generateAndReview(baseGenInput({ fixCases: opts.fixCases }));

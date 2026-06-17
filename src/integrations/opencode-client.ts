@@ -489,6 +489,11 @@ export interface OpencodeRunInput {
   contextMap?: ArchitectureContext; // cross-cutting: the FE↔BE map, injected by the orchestrator
   explorer?: boolean; // Fase 3: run a read-only explorer pass before the generator (diff single-agent, opt-in)
   contextBrief?: ExplorationBrief; // the distilled blast radius from the explorer pass (set internally → buildPrompt)
+  // Slice G: the pre-built Context Pack text block (blast-radius + DOM slice + contracts),
+  // assembled by the orchestrator BEFORE the first write and pushed into the VOLATILE band.
+  // When present, the generator transcribes from this pack instead of re-exploring.
+  // When absent, the explore-first mandate remains active (existing behaviour unchanged).
+  contextPack?: string;
   service?: { repo: string; mirrorDir: string; openapi?: string | string[] }; // cross-repo: the triggering microservice (read-only working copy)
   services?: Array<{ repo: string; mirrorDir: string; openapi?: string | string[] }>; // context mode: every declared service, mirrored read-only
 }

@@ -568,6 +568,14 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
     ? [input.learnedRules, ``].join("\n")
     : "";
 
+  // VOLATILE: Context Pack — pushed by the orchestrator before the first write (Slice G / P8).
+  // Carries the blast-radius (code symbols from the ExplorationBrief), the live DOM slice
+  // (captured orchestrator-side via Playwright), and the relevant API contracts.
+  // Positioned at priority 0 within VOLATILE so it is the FIRST volatile section seen by
+  // the model — near the task, within the compaction preserve window. When the pack is
+  // present the generator transcribes; when absent the explore-first mandate stays active.
+  const contextPackContent = input.contextPack && isGenerationMode ? input.contextPack : "";
+
   // TASK: mode-specific task (the concrete objective for this session).
   const taskContent = buildTask(input);
 
@@ -577,6 +585,11 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
     // SEMI-STABLE: architecture map and exploration brief (change between runs, stable within).
     ...(archMapContent ? [section("arch-map", "semi-stable", archMapContent, { priority: 1, cacheable: true })] : []),
     ...(contextBriefContent ? [section("context-brief", "semi-stable", contextBriefContent, { priority: 2 })] : []),
+    // VOLATILE priority 0: Context Pack (blast-radius + DOM + contracts, pushed by orchestrator).
+    // Placed FIRST in VOLATILE so the ground-truth is nearest the task and within the
+    // compaction-preserved tail. The domSnapshot (failure-point capture) stays at priority 1
+    // so it follows the pack on regen passes without conflicting.
+    ...(contextPackContent ? [section("context-pack", "volatile", contextPackContent, { priority: 0 })] : []),
     // VOLATILE: grounding (DOM snapshot — priority 1 within VOLATILE so it's first and the
     // selectorContradictions section can reference "the tree above" correctly).
     ...(domContent ? [section("dom-snapshot", "volatile", domContent, { priority: 1 })] : []),
