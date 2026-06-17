@@ -269,15 +269,27 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
       // every open() via opts), so each session.prompt response emits a UsageSnapshot into the run's
       // accumulator.
       const oc = await agentDepsFactory(onUsage);
-      // complete/exhaustive fan out to parallel workers (plan → workers → consolidate); the other
-      // modes (diff/manual) and any fix/review re-generation use the single-agent path. Code mode
-      // always uses the single agent (no web fan-out). Diff mode fans out only when
-      // qa.parallelDiff is explicitly enabled in the app config.
+      // Phase 5 — unified diff/manual engine + cardinality-keyed fan-out.
+      //
+      // Routing decision (three cases):
+      //   1. complete/exhaustive (e2e): always plan → fan-out via shouldFanOut (unchanged).
+      //   2. diff/manual (e2e, first-pass): always plan first, then branch on objective count
+      //      inside runOpencodeParallel (<2 → strong-agent fallback; ≥2 → fan-out workers).
+      //      Replaces the old shouldFanOut gate that required parallelDiff=true for diff fan-out.
+      //   3. regen passes (fix/review/coverage), code mode, or context mode: strong agent only
+      //      (same as before — feedback context cannot be split across workers).
+      //
       // Phase 6a NOTE: generateParallel workers are intentionally NOT covered by the shared cycle
       // counter. Workers are fire-and-join sessions bounded by OPENCODE_TIMEOUT_MS per session,
       // not by an iterated loop — so the counter would double-count them against the per-loop
       // ceiling and break fan-out. The counter covers only the main-agent iterated path.
-      const useParallel = shouldFanOut(input);
+      const isReGen = Boolean(input.fixCases?.length || input.reviewCorrections?.length || input.coverageGap);
+      const isCodeMode = (input.target ?? "e2e") !== "e2e";
+      // complete/exhaustive: use shouldFanOut (unchanged — regression gate proves this).
+      const isCompleteExhaustive = shouldFanOut(input);
+      // diff/manual first-pass e2e: unified engine — always plan-first, cardinality decides fan-out.
+      const isDiffManualFirstPass = !isReGen && !isCodeMode && (input.mode === "diff" || input.mode === "manual");
+      const useParallel = isCompleteExhaustive || isDiffManualFirstPass;
       return useParallel
         ? runOpencodeParallel(ocInput, oc, {
             signal,
@@ -1482,8 +1494,12 @@ export async function runPipeline(
       }
     }
 
-    // Inject curriculum archetypes into agent prompt
-    const activeArchetypes = selectActiveArchetypesCached(curriculum!);
+    // Inject curriculum archetypes into agent prompt — ONLY when intent (diff) is present.
+    // Phase 5: archetypes and exemplars are relevance-gated IDENTICALLY for both diff and manual.
+    // Archetypes are structural patterns derived from past diff runs (form-change, api-call, …);
+    // without a commit diff they have no scope signal and become noise in the manual prompt,
+    // competing with the user's guidance. Gate them the same way exemplars are gated (requires intent).
+    const activeArchetypes = generating && intent ? selectActiveArchetypesCached(curriculum!) : [];
     if (activeArchetypes.length > 0) {
       const archetypeText = renderArchetypesForPrompt(activeArchetypes);
       allPromptSections = (allPromptSections ? allPromptSections + "\n" : "") + archetypeText;

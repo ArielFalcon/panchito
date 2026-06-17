@@ -192,11 +192,15 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
     : "";
 
   // CRITICAL recap: the output format that must appear at the very end.
-  const outputFormatContent = input.mode === "diff"
+  // For diff/manual the planner should say "no testable flow" when nothing applies;
+  // for complete/exhaustive it should say "already covered".
+  const outputFormatContent = (input.mode === "diff" || input.mode === "manual")
     ? [
         `## Output — end with ONLY this JSON (no spec files):`,
         `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","needsUi":true,"brief":{"builtForSha":"<the sha above>","objective":"…","blastRadius":[{"symbol":"CheckoutService.pay","file":"src/checkout/checkout.service.ts","role":"applies the bulk discount and creates the order"}],"routes":[{"path":"/#!/checkout","verified":true}],"feBe":[{"route":"/checkout","operationId":"createOrder","via":"OrderClient.create"}],"contracts":[{"operationId":"createOrder","method":"POST","path":"/orders","fields":["items","total"]}],"risks":["assert the discounted total AFTER the cart re-queries"]}}]}`,
-        `If the commit's change is not testable through a user flow, output {"objectives":[]}.`,
+        input.mode === "diff"
+          ? `If the commit's change is not testable through a user flow, output {"objectives":[]}.`
+          : `If the guidance does not yield any testable flow, output {"objectives":[]}.`,
       ].join("\n")
     : [
         `## Output — end with ONLY this JSON (no spec files):`,
@@ -266,6 +270,55 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
       ...(contextMapContent ? [section("plan-arch-map", "semi-stable", contextMapContent, { priority: 2, cacheable: true })] : []),
       ...(lessonsContent ? [section("plan-lessons", "semi-stable", lessonsContent, { priority: 3 })] : []),
       section("plan-task", "task", taskContent, { priority: 1 }),
+      section("plan-output-format", "critical-recap", outputFormatContent, { priority: 1 }),
+    ], { budgetBytes: roleWindowBytes("qa-generator") });
+  }
+
+  // manual mode — the scope is the user's guidance, not a commit diff or whole-repo scan.
+  // The planner decomposes the guidance into independent flow objectives so large manual
+  // scopes fan out to workers the same way diff does. This is the unified diff/manual engine
+  // (Phase 5): only objective derivation differs (guidance vs commits), not the plan→dispatch logic.
+  if (input.mode === "manual") {
+    const guidance = sanitizeText((input.guidance ?? "(no guidance provided)").trim()).text;
+
+    // STABLE prefix: planning procedure for guidance-scoped runs.
+    const manualPlanProcedure = [
+      `## Phase 1 of 2 — PLANNING ONLY. Do NOT write any .spec.ts in this phase.`,
+      `1. Activate serena (activate_project). Read the guidance below and the existing suite in`,
+      `   ${input.e2eRelDir}/ to understand the scope.`,
+      `2. Plan one objective per INDEPENDENT affected flow that the guidance asks to test. Stay`,
+      `   strictly within the guidance scope; do NOT plan flows the guidance does not mention.`,
+      `   If everything fits one flow, return a single objective.`,
+      `   Each objective is a concrete acceptance criterion in given/when/then form, with the code`,
+      `   symbols it exercises. Set "needsUi": true when the flow involves page navigation or DOM`,
+      `   interaction, and "needsUi": false for pure logic.`,
+      `3. For each objective, include a distilled "brief" of its blast radius so the worker does NOT`,
+      `   re-read the code: blastRadius (each touched symbol with its file + a ONE-LINE role), the FE↔BE`,
+      `   links, the relevant contract facts (fields/enums/errors to assert), and risks/what-to-assert.`,
+      `   Set the brief's builtForSha to ${input.sha}. The worker trusts the brief for CODE but still`,
+      `   transcribes selectors from the injected a11y tree (workers have no browser MCP).`,
+      `4. Lever-3 route verification (REQUIRED for needsUi objectives): use the Playwright MCP to`,
+      `   navigate each flow. Discover and verify the routes the guidance targets.`,
+      `   Declare them in \`routes[]\` with \`"verified": true\`. Only mark verified routes you actually`,
+      `   navigated to and confirmed exist. Unverified routes keep \`"verified": false\`.`,
+      `   The orchestrator captures the live DOM for ONLY the verified routes and injects it into workers.`,
+    ].join("\n");
+
+    // SEMI-STABLE: the guidance (verbatim user input — the scope driver for manual mode).
+    const guidanceContent = [
+      `## Guidance (the user's instruction — derive ALL objectives from this)`,
+      guidance,
+    ].join("\n");
+
+    // TASK: the opening line naming what this session is doing.
+    const manualTaskContent = `Plan E2E test objectives for ${input.repo} guided by the instruction above.`;
+
+    return assemble([
+      section("plan-procedure", "stable-prefix", manualPlanProcedure, { priority: 1, cacheable: true }),
+      section("plan-guidance", "semi-stable", guidanceContent, { priority: 1, language: "verbatim" }),
+      ...(contextMapContent ? [section("plan-arch-map", "semi-stable", contextMapContent, { priority: 2, cacheable: true })] : []),
+      ...(lessonsContent ? [section("plan-lessons", "semi-stable", lessonsContent, { priority: 3 })] : []),
+      section("plan-task", "task", manualTaskContent, { priority: 1 }),
       section("plan-output-format", "critical-recap", outputFormatContent, { priority: 1 }),
     ], { budgetBytes: roleWindowBytes("qa-generator") });
   }

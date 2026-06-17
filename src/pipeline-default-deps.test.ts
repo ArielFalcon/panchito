@@ -56,14 +56,36 @@ function failedOutcome(): RunOutcome {
 }
 
 test("defaultPipelineDeps routes generation through the injected agent deps factory", async () => {
+  // Phase 5: diff mode now goes through the plan-first engine (runOpencodeParallel).
+  // The stub must return planner objectives first (when PLANNING ONLY is in the prompt),
+  // then a single-agent generator response (when <2 objectives → strong-agent fallback).
   const opened: string[] = [];
+  let promptCount = 0;
   const deps = defaultPipelineDeps({
-    agentDepsFactory: async () => fakeAgentDeps(opened, () => '{ "approved": true, "specs": ["flows/generated.spec.ts"] }'),
+    agentDepsFactory: async () => ({
+      open: async (agent) => {
+        opened.push(agent);
+        return {
+          id: `${agent}-session`,
+          prompt: async (text: string) => {
+            promptCount++;
+            // Planner call: return a single objective so the fallback fires (single-agent path).
+            if (text.includes("PLANNING ONLY")) {
+              return '{"objectives":[{"flow":"generated","objective":"test the flow","symbols":[],"needsUi":true}]}';
+            }
+            // Generator call (fallback from planner with 1 objective).
+            return '{ "approved": true, "specs": ["flows/generated.spec.ts"] }';
+          },
+          dispose: async () => {},
+        };
+      },
+    }),
   });
 
   const result = await deps.generate(generateInput());
 
-  assert.deepEqual(opened, ["qa-generator"]);
+  // The planner (qa-generator) runs first; then the strong-agent fallback (qa-generator again).
+  assert.ok(opened.includes("qa-generator"), "qa-generator must be opened");
   assert.equal(result.approved, true);
   assert.deepEqual(result.specs, ["flows/generated.spec.ts"]);
 });

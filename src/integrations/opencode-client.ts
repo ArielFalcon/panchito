@@ -1169,9 +1169,11 @@ export async function runOpencodeParallel(
     return { output: planText, specs: [], reviewed: false, approved: true, note: "planner found no important uncovered flows" };
   }
 
-  // A diff plan with a single objective gains nothing from fan-out and would LOSE the
-  // single-agent prompt's full context (diff, fix/review blocks). Fall back.
-  if (input.mode === "diff" && objectives.length < 2) {
+  // A diff or manual plan with a single objective gains nothing from fan-out and would LOSE
+  // the single-agent prompt's full context (diff/guidance, fix/review blocks). Fall back to the
+  // strong agent. This is the unified diff/manual cardinality gate (Phase 5): both modes branch
+  // on objective count, not on the mode name — same logic, only the scope source differs.
+  if ((input.mode === "diff" || input.mode === "manual") && objectives.length < 2) {
     opts?.onProgress?.(`[qa] plan: ${objectives.length} objective(s) — falling back to the single-agent path`);
     // The planner already explored the repo (and may have distilled a brief for the single objective).
     // Reuse that brief and DISABLE the explorer pass so the fallback does not re-explore from scratch.
@@ -1218,9 +1220,45 @@ export async function runOpencodeParallel(
     }
   }
 
-  // Phase 2 — FAN-OUT to workers (one spec each).
+  // Phase 2 — FAN-OUT to workers (one spec each), with per-objective grounding check (Phase 5).
+  //
+  // Grounding semantics: a UI objective is "grounded" if:
+  //   (a) the orchestrator captured DOM (workerDom is set), OR
+  //   (b) the planner did NOT verify any routes in its brief (no verified routes → no DOM was
+  //       promised, so the worker self-explores normally), OR
+  //   (c) it is a code-only objective (needsUi:false — no DOM grounding required at all).
+  //
+  // An objective is "ungrounded" (→ strong-agent fallback) ONLY when the planner explicitly
+  // verified routes (promising orchestrator-captured DOM) but the orchestrator failed to capture
+  // them (workerDom is absent). Dispatching such an objective blind to a lite worker with no
+  // browser MCP is the failure class this fallback exists to prevent. The strong agent has the
+  // full Playwright MCP and can self-navigate to recover.
+  //
+  // This heterogeneous partial fan-out (some objectives to workers, some to the strong agent)
+  // is an explicit Phase-5 design item; results are consolidated in Phase 3 below.
   const changeType = input.intent?.type ?? input.mode;
-  const workers: ParallelWorkerInput[] = objectives.map((o) => ({
+  const grounded: PlanObjective[] = [];
+  const ungrounded: PlanObjective[] = [];
+  for (const o of objectives) {
+    // Code-only objectives never need DOM — always grounded.
+    if (!o.needsUi) {
+      grounded.push(o);
+      continue;
+    }
+    // Does this objective's planner brief promise verified routes (that the orchestrator should capture)?
+    const hasVerifiedRoutes = Boolean(o.brief?.routes?.some((r) => r.verified));
+    // Grounded when: DOM was captured (workerDom set) OR the planner made no route promise.
+    if (workerDom || !hasVerifiedRoutes) {
+      grounded.push(o);
+    } else {
+      // The planner promised verified routes, but the orchestrator failed to capture DOM.
+      // Dispatch to the strong agent instead of a lite worker without DOM grounding.
+      ungrounded.push(o);
+      opts?.onProgress?.(`[qa] grounding: objective '${o.flow}' has verified routes but no captured DOM — routing to strong agent`);
+    }
+  }
+
+  const workers: ParallelWorkerInput[] = grounded.map((o) => ({
     objective: o.objective,
     flow: o.flow,
     symbols: o.symbols,
@@ -1238,25 +1276,55 @@ export async function runOpencodeParallel(
     ...(workerDom ? { domSnapshot: workerDom } : {}),
     runId: input.runId,
   }));
-  const { results, errors } = await generateParallel(workers, deps, { signal: opts?.signal, concurrency: opts?.concurrency, ...(opts?.specExists ? { specExists: opts.specExists } : {}) });
-  opts?.onProgress?.(`[qa] workers: ${results.length} spec(s) written, ${errors.length} error(s)`);
+
+  // Dispatch grounded objectives to lite workers in parallel.
+  const { results: workerResults, errors } = workers.length > 0
+    ? await generateParallel(workers, deps, { signal: opts?.signal, concurrency: opts?.concurrency, ...(opts?.specExists ? { specExists: opts.specExists } : {}) })
+    : { results: [], errors: [] };
+  opts?.onProgress?.(`[qa] workers: ${workerResults.length} spec(s) written, ${errors.length} error(s)`);
   if (errors.length > 0) {
     // A failed worker means a PLANNED flow is silently absent from the suite. Surface it loudly
     // (not only buried in the result note): when review is off, the run can otherwise report
     // approved over a partial suite, so the missing coverage must be visible to the operator.
-    const writtenFlows = new Set(results.map((r) => r.flow));
-    const failedFlows = objectives.filter((o) => !writtenFlows.has(o.flow)).map((o) => o.flow);
+    const writtenFlows = new Set(workerResults.map((r) => r.flow));
+    const failedFlows = grounded.filter((o) => !writtenFlows.has(o.flow)).map((o) => o.flow);
     console.warn(`[qa] WARNING: ${errors.length} worker(s) failed — these planned flows are NOT in the suite: ${failedFlows.join(", ") || "(unknown)"}. ${errors.join("; ")}`);
   }
 
-  // Phase 3 — CONSOLIDATE: the orchestrator writes the manifest from the plan (no worker race).
-  const written = new Set(results.map((r) => r.flow));
+  // Dispatch ungrounded objectives to the strong agent (sequentially, one per call).
+  // Each strong-agent call produces its own specs; they are appended to the results.
+  const strongResults: Array<{ flow: string; spec: string }> = [];
+  for (const o of ungrounded) {
+    try {
+      opts?.onProgress?.(`[qa] strong agent handling ungrounded objective '${o.flow}'...`);
+      const strongResult = await runOpencode(
+        {
+          ...input,
+          explorer: false, // planner already ran; skip redundant explorer
+          ...(o.brief ? { contextBrief: o.brief } : {}),
+        },
+        deps,
+        opts,
+      );
+      // Collect specs the strong agent wrote (may be multiple if the planner didn't scope tightly).
+      // Record them under this objective's flow so manifest consolidation can attribute them.
+      for (const s of strongResult.specs) {
+        strongResults.push({ flow: o.flow, spec: s });
+      }
+    } catch (err) {
+      console.warn(`[qa] WARNING: strong-agent fallback for objective '${o.flow}' failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // Phase 3 — CONSOLIDATE: merge worker specs + strong-agent specs; write manifest once (no race).
+  const allResults = [...workerResults, ...strongResults];
+  const written = new Set(allResults.map((r) => r.flow));
   const entries: ManifestEntry[] = objectives
     .filter((o) => written.has(o.flow))
     .map((o) => ({ id: o.flow, objective: o.objective, flow: o.flow, targets: o.symbols, changeRef: { sha: input.sha, type: changeType } }));
   upsertManifest(fs, join(input.mirrorDir, input.e2eRelDir, ".qa", "manifest.json"), entries);
 
-  const specs = results.map((r) => r.spec);
+  const specs = allResults.map((r) => r.spec);
   return {
     output: planText,
     specs,

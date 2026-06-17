@@ -1045,6 +1045,143 @@ test("shouldFanOut: never for code target, re-generation passes, or context mode
   assert.equal(shouldFanOut({ target: "e2e", mode: "context" }), false);
 });
 
+// ── Phase 5 regression gate: complete/exhaustive paths are unchanged ──────────
+//
+// These tests pin the CURRENT observable behavior of the complete/exhaustive shared surfaces
+// (shouldFanOut, runOpencodeParallel, generateParallel, buildWorkerPrompt, buildPlanPrompt)
+// before Phase 5 changes the diff/manual dispatch logic. They must stay green after Phase 5.
+
+test("Phase 5 regression gate: shouldFanOut still returns true for complete/exhaustive (unchanged)", () => {
+  // complete and exhaustive must ALWAYS fan out — their plan produces many objectives that
+  // a single agent cannot handle in one context window. Phase 5 does NOT change this.
+  assert.equal(shouldFanOut({ target: "e2e", mode: "complete" }), true, "complete still fans out");
+  assert.equal(shouldFanOut({ target: "e2e", mode: "exhaustive" }), true, "exhaustive still fans out");
+  // manual never uses shouldFanOut for its dispatch (Phase 5 adds plan-first for diff/manual).
+  // But the predicate itself must not start returning true for manual (it is unchanged).
+  assert.equal(shouldFanOut({ target: "e2e", mode: "manual" }), false, "manual is NOT in shouldFanOut scope");
+});
+
+test("Phase 5 regression gate: runOpencodeParallel for complete mode dispatches planner then workers", async () => {
+  // Pin the plan → dispatch shape for complete mode: the planner fires, then one qa-worker per objective.
+  const agentCalls: Array<{ agent: string; promptSnippet: string }> = [];
+  const stub: AgentDeps = {
+    open: async (agent) => ({
+      id: `s-${agent}`,
+      prompt: async (text) => {
+        agentCalls.push({ agent, promptSnippet: text.slice(0, 120) });
+        if (agent === "qa-generator") {
+          if (text.includes("PLANNING ONLY")) {
+            // Planner returns two objectives (forces fan-out, not fallback).
+            return '{"objectives":[{"flow":"owners","objective":"list owners","symbols":["OwnerList"],"needsUi":true},{"flow":"pets","objective":"add pet","symbols":["PetForm"],"needsUi":true}]}';
+          }
+          // Pre-index serena prompt (qa-worker-code is the pre-index agent but also qa-generator can run it).
+          return '{"spec":""}';
+        }
+        // Workers respond with their spec path.
+        if (text.includes("flows/owners.spec.ts")) return '{"spec":"flows/owners.spec.ts"}';
+        return '{"spec":"flows/pets.spec.ts"}';
+      },
+      dispose: async () => {},
+    }),
+  };
+  const fakeFs: ManifestFs = { read: () => null, write: () => {} };
+  const result = await runOpencodeParallel(
+    { ...input, mode: "complete", intent: undefined },
+    stub,
+    { specExists: () => true },
+    fakeFs,
+  );
+  // Planner must have fired (qa-generator with PLANNING ONLY in the prompt).
+  const plannerCall = agentCalls.find((c) => c.agent === "qa-generator" && c.promptSnippet.includes("PLANNING ONLY"));
+  assert.ok(plannerCall, "planner session must fire for complete mode");
+  // Workers must have been dispatched for each objective.
+  const workerCalls = agentCalls.filter((c) => c.agent === "qa-worker");
+  assert.equal(workerCalls.length, 2, "two qa-worker sessions dispatched (one per objective)");
+  // Results must include both specs.
+  assert.equal(result.specs.length, 2, "two specs returned");
+  assert.ok(result.specs.includes("flows/owners.spec.ts"), "owners spec present");
+  assert.ok(result.specs.includes("flows/pets.spec.ts"), "pets spec present");
+});
+
+test("Phase 5 regression gate: buildWorkerPrompt for complete mode preserves objective + context sections", () => {
+  // Complete mode workers receive a prompt from buildWorkerPrompt. The prompt must still contain
+  // all the key sections a complete-mode worker needs (unchanged by Phase 5).
+  const completeWorker: ParallelWorkerInput = {
+    objective: "Given the owners list, when the user clicks Add Owner, then a form appears",
+    flow: "add-owner",
+    symbols: ["OwnerForm", "OwnerController"],
+    needsUi: true,
+    specFile: "flows/add-owner.spec.ts",
+    repo: "org/petclinic",
+    mirrorDir: "/m/petclinic",
+    e2eRelDir: "e2e",
+    namespace: "qa-bot-abc",
+    baseUrl: "https://dev.petclinic",
+    appName: "petclinic",
+    mode: "complete",
+    domSnapshot: "button: Add Owner\ntextbox: First Name",
+    learnedRules: "- avoid waitForTimeout in complete mode",
+  };
+  const prompt = buildWorkerPrompt(completeWorker);
+  // Core task content.
+  assert.match(prompt, /flows\/add-owner\.spec\.ts/, "specFile present");
+  assert.match(prompt, /Add Owner, then a form appears/, "objective present");
+  assert.match(prompt, /OwnerForm/, "symbol present in context");
+  // DOM grounding (complete-mode workers get the injected tree).
+  assert.match(prompt, /GROUND TRUTH/, "dom grounding section present");
+  assert.match(prompt, /Add Owner/, "dom content (button) present");
+  // Learned rules injected.
+  assert.match(prompt, /avoid waitForTimeout/, "learnedRules present");
+  // Output contract present.
+  assert.match(prompt, /flows\/add-owner\.spec\.ts.*\}/, "output contract references specFile");
+});
+
+test("Phase 5 regression gate: buildPlanPrompt for complete/exhaustive uses whole-repo procedure (unchanged)", () => {
+  // The complete/exhaustive plan prompt must still reference "WHOLE repository" and must not
+  // contain the diff-mode commit blast-radius framing. Phase 5 does NOT touch these.
+  const base: OpencodeRunInput = {
+    ...input, mode: "complete", intent: undefined,
+  };
+  const completePlan = buildPlanPrompt(base);
+  assert.match(completePlan, /WHOLE repository/, "complete uses whole-repo framing");
+  assert.doesNotMatch(completePlan, /blast radius of commit/, "no commit framing in complete mode");
+  assert.match(completePlan, /PLANNING ONLY/, "planning-only instruction present");
+  assert.match(completePlan, /"objectives"/, "objectives output contract present");
+
+  const exhaustivePlan = buildPlanPrompt({ ...base, mode: "exhaustive" });
+  assert.doesNotMatch(exhaustivePlan, /blast radius of commit/, "no commit framing in exhaustive mode");
+  assert.match(exhaustivePlan, /PLANNING ONLY/, "planning-only instruction present in exhaustive");
+  assert.match(exhaustivePlan, /ENTIRE E2E suite/, "exhaustive uses full-suite framing (not diff framing)");
+  assert.match(exhaustivePlan, /"objectives"/, "objectives output contract present in exhaustive");
+});
+
+test("Phase 5 regression gate: generateParallel dispatches all workers and collects results (complete mode)", async () => {
+  // generateParallel is a shared surface. Verify it still works identically for complete-mode workers.
+  const workers: ParallelWorkerInput[] = [
+    { objective: "o1", flow: "login", symbols: [], needsUi: true, specFile: "flows/login.spec.ts",
+      repo: "r", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "ns", appName: "a", mode: "complete" },
+    { objective: "o2", flow: "checkout", symbols: [], needsUi: false, specFile: "flows/checkout.spec.ts",
+      repo: "r", mirrorDir: "/m", e2eRelDir: "e2e", namespace: "ns", appName: "a", mode: "complete" },
+  ];
+  const opened: string[] = [];
+  const pd: AgentDeps = {
+    open: async (agent) => {
+      opened.push(agent);
+      return {
+        id: agent,
+        prompt: async (text) => text.includes("flows/login.spec.ts") ? '{"spec":"flows/login.spec.ts"}' : '{"spec":"flows/checkout.spec.ts"}',
+        dispose: async () => {},
+      };
+    },
+  };
+  const { results, errors } = await generateParallel(workers, pd, { specExists: () => true });
+  assert.equal(results.length, 2, "both workers produced a result");
+  assert.equal(errors.length, 0, "no errors");
+  // login uses qa-worker (needsUi: true); checkout uses qa-worker-code (needsUi: false).
+  assert.ok(opened.includes("qa-worker"), "qa-worker dispatched for UI objective");
+  assert.ok(opened.includes("qa-worker-code"), "qa-worker-code dispatched for non-UI objective");
+});
+
 const diffPlanInput = {
   repo: "org/shop-front", sha: "a1b2c3d", diff: "diff --git a/cart.ts b/cart.ts\n+ bulkDiscount()",
   mirrorDir: "/m/front", e2eRelDir: "e2e", namespace: "qa-1", needsReview: false,
@@ -2283,6 +2420,252 @@ test("Phase 4 regression: complete/exhaustive buildReviewerPrompt works unchange
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── Phase 5: unified diff/manual engine + cardinality-keyed fan-out ─────────────────────────────
+//
+// These tests cover the Phase-5 behavior changes:
+//   (a) buildPlanPrompt for manual mode: guidance-scoped plan (not commit-diff plan, not whole-repo)
+//   (b) manual mode with <2 objectives: falls back to the strong agent (same as diff)
+//   (c) manual mode with >=2 objectives: dispatches workers (same as diff)
+//   (d) per-objective grounding fallback: ungrounded objective (verified routes, no DOM) → strong agent
+//   (e) complete/exhaustive regression gate still passes (proved by the 5 regression gate tests above)
+
+test("Phase 5 (a): buildPlanPrompt for manual mode produces guidance-scoped plan, NOT commit-diff plan", () => {
+  const manualInput: OpencodeRunInput = {
+    ...input,
+    mode: "manual",
+    guidance: "Test the contact form submission and error states",
+    intent: undefined,
+  };
+  const text = buildPlanPrompt(manualInput);
+
+  // Manual plan must reference the guidance, not a commit.
+  assert.match(text, /Test the contact form/, "guidance present in manual plan");
+  assert.match(text, /PLANNING ONLY/, "planning-only instruction present");
+  assert.match(text, /"objectives"/, "objectives output contract present");
+
+  // Must NOT contain diff-only framing (commit blast-radius, commit diff, or whole-repo scan).
+  assert.doesNotMatch(text, /blast radius of commit/i, "no commit framing in manual plan");
+  assert.doesNotMatch(text, /Commit diff/, "no commit diff in manual plan");
+  assert.doesNotMatch(text, /WHOLE repository/, "no whole-repo framing in manual plan");
+  assert.doesNotMatch(text, /COVERAGE \+ IMPORTANCE map/, "no coverage-map framing in manual plan");
+});
+
+test("Phase 5 (a): buildPlanPrompt for manual mode includes guidance scope instruction and verbatim guidance block", () => {
+  const guidance = "My specific test guidance — verify the cart discount feature";
+  const text = buildPlanPrompt({ ...input, mode: "manual", guidance, intent: undefined });
+  assert.match(text, /My specific test guidance/, "verbatim guidance is present");
+  assert.match(text, /verify the cart discount feature/, "full guidance text is present");
+  assert.match(text, /guided by the instruction above/i, "task references the guidance");
+});
+
+test("Phase 5 (b): runOpencodeParallel for manual mode with <2 objectives falls back to the strong agent", async () => {
+  const prompts: string[] = [];
+  const agents: string[] = [];
+  const stub: AgentDeps = {
+    open: async (agent) => {
+      agents.push(agent);
+      return {
+        id: agent,
+        prompt: async (text: string) => {
+          prompts.push(text.slice(0, 80));
+          if (text.includes("PLANNING ONLY")) {
+            // Single objective → fallback to strong agent.
+            return '{"objectives":[{"flow":"contact-form","objective":"submit the contact form and see success","symbols":[],"needsUi":true}]}';
+          }
+          // Strong-agent generation (fallback from 1 objective).
+          return '{"approved":true,"specs":["flows/contact-form.spec.ts"]}';
+        },
+        dispose: async () => {},
+      };
+    },
+  };
+  const result = await runOpencodeParallel(
+    { ...input, mode: "manual", guidance: "Test the contact form", intent: undefined },
+    stub,
+  );
+  // Should have fallen back to the strong agent (2 qa-generator sessions: planner + generator).
+  assert.equal(agents.filter((a) => a === "qa-generator").length, 2, "planner + strong-agent = 2 qa-generator sessions");
+  assert.equal(agents.filter((a) => a === "qa-worker").length, 0, "no lite workers for single objective");
+  assert.deepEqual(result.specs, ["flows/contact-form.spec.ts"]);
+});
+
+test("Phase 5 (c): runOpencodeParallel for manual mode with >=2 objectives dispatches workers", async () => {
+  const agents: string[] = [];
+  const stub: AgentDeps = {
+    open: async (agent) => {
+      agents.push(agent);
+      return {
+        id: agent,
+        prompt: async (text: string) => {
+          if (agent === "qa-generator") {
+            return '{"objectives":[{"flow":"contact","objective":"submit contact form","symbols":[],"needsUi":true},{"flow":"newsletter","objective":"subscribe to newsletter","symbols":[],"needsUi":true}]}';
+          }
+          // Workers respond with their spec.
+          return text.includes("flows/contact.spec.ts") ? '{"spec":"flows/contact.spec.ts"}' : '{"spec":"flows/newsletter.spec.ts"}';
+        },
+        dispose: async () => {},
+      };
+    },
+  };
+  const fakeFs: ManifestFs = { read: () => null, write: () => {} };
+  const result = await runOpencodeParallel(
+    { ...input, mode: "manual", guidance: "Test contact and newsletter flows", intent: undefined },
+    stub,
+    { specExists: () => true },
+    fakeFs,
+  );
+  // Two workers dispatched (one per objective), no single-agent fallback.
+  assert.equal(agents.filter((a) => a === "qa-worker").length, 2, "two qa-worker sessions for two objectives");
+  assert.equal(result.specs.length, 2, "two specs returned");
+});
+
+test("Phase 5 (d): per-objective grounding fallback — ungrounded UI objective (verified route, no DOM) routes to strong agent", async () => {
+  // An objective with a brief containing at least one verified route is "expecting" orchestrator DOM
+  // capture. If the orchestrator did NOT capture DOM (workerDom absent), it is ungrounded → strong agent.
+  const agents: string[] = [];
+  const stub: AgentDeps = {
+    open: async (agent) => {
+      agents.push(agent);
+      return {
+        id: agent,
+        prompt: async (text: string) => {
+          if (agent === "qa-generator" && text.includes("PLANNING ONLY")) {
+            // Two objectives: one with a verified route (will be ungrounded without DOM),
+            // one without a verified route (grounded — worker proceeds normally).
+            return JSON.stringify({
+              objectives: [
+                {
+                  flow: "owners",
+                  objective: "list owners",
+                  symbols: ["OwnerList"],
+                  needsUi: true,
+                  brief: {
+                    builtForSha: "abc123",
+                    objective: "list owners",
+                    blastRadius: [{ symbol: "OwnerList", file: "src/owners.ts", role: "lists owners" }],
+                    // This route is verified → objective expects DOM capture.
+                    routes: [{ path: "/#!/owners", verified: true }],
+                    feBe: [],
+                    contracts: [],
+                    risks: [],
+                  },
+                },
+                {
+                  flow: "pets",
+                  objective: "list pets",
+                  symbols: ["PetList"],
+                  needsUi: true,
+                  brief: {
+                    builtForSha: "abc123",
+                    objective: "list pets",
+                    blastRadius: [{ symbol: "PetList", file: "src/pets.ts", role: "lists pets" }],
+                    // No verified routes → does NOT expect DOM capture → grounded to worker.
+                    routes: [{ path: "/#!/pets", verified: false }],
+                    feBe: [],
+                    contracts: [],
+                    risks: [],
+                  },
+                },
+              ],
+            });
+          }
+          // Strong-agent fallback for the ungrounded 'owners' objective.
+          if (agent === "qa-generator") return '{"approved":true,"specs":["flows/owners.spec.ts"]}';
+          // Worker for the grounded 'pets' objective.
+          return '{"spec":"flows/pets.spec.ts"}';
+        },
+        dispose: async () => {},
+      };
+    },
+  };
+  const fakeFs: ManifestFs = { read: () => null, write: () => {} };
+  // captureRoutesDom is NOT provided (no DOM capture) → owners is ungrounded, pets is grounded.
+  const result = await runOpencodeParallel(
+    { ...input, mode: "diff", intent: undefined },
+    stub,
+    { specExists: () => true, captureRoutesDom: undefined },
+    fakeFs,
+  );
+  // 'pets' objective has no verified routes → grounded → dispatched to qa-worker.
+  assert.ok(agents.includes("qa-worker"), "grounded objective dispatched to qa-worker");
+  // 'owners' objective has a verified route but no DOM captured → ungrounded → qa-generator fallback.
+  assert.equal(agents.filter((a) => a === "qa-generator").length >= 2, true, "ungrounded objective dispatched to strong agent (qa-generator) in addition to the planner");
+  // Both specs must appear in the result (merged from worker + strong-agent).
+  assert.ok(result.specs.includes("flows/pets.spec.ts"), "grounded (worker) spec present");
+  assert.ok(result.specs.includes("flows/owners.spec.ts"), "ungrounded (strong-agent) spec present");
+});
+
+test("Phase 5 (d): per-objective grounding — UI objective with verified route IS grounded when workerDom is captured", async () => {
+  // When the orchestrator captures DOM (workerDom present), even UI objectives with verified routes
+  // are grounded → dispatched to workers, NOT to the strong agent.
+  const agents: string[] = [];
+  const stub: AgentDeps = {
+    open: async (agent) => {
+      agents.push(agent);
+      return {
+        id: agent,
+        prompt: async (text: string) => {
+          if (agent === "qa-generator" && text.includes("PLANNING ONLY")) {
+            return JSON.stringify({
+              objectives: [
+                {
+                  flow: "owners",
+                  objective: "list owners",
+                  symbols: [],
+                  needsUi: true,
+                  brief: {
+                    builtForSha: "abc123",
+                    objective: "o",
+                    blastRadius: [],
+                    routes: [{ path: "/#!/owners", verified: true }], // verified route
+                    feBe: [],
+                    contracts: [],
+                    risks: [],
+                  },
+                },
+                {
+                  flow: "pets",
+                  objective: "list pets",
+                  symbols: [],
+                  needsUi: true,
+                  brief: {
+                    builtForSha: "abc123",
+                    objective: "o",
+                    blastRadius: [],
+                    routes: [{ path: "/#!/pets", verified: true }], // verified route
+                    feBe: [],
+                    contracts: [],
+                    risks: [],
+                  },
+                },
+              ],
+            });
+          }
+          // Workers respond — no qa-generator generation call should happen (no fallback).
+          return text.includes("flows/owners.spec.ts") ? '{"spec":"flows/owners.spec.ts"}' : '{"spec":"flows/pets.spec.ts"}';
+        },
+        dispose: async () => {},
+      };
+    },
+  };
+  const fakeFs: ManifestFs = { read: () => null, write: () => {} };
+  // captureRoutesDom returns a non-empty DOM → workerDom is set → all objectives are grounded.
+  const result = await runOpencodeParallel(
+    { ...input, mode: "diff", intent: undefined },
+    stub,
+    {
+      specExists: () => true,
+      captureRoutesDom: async () => "button: Add Owner\nbutton: Add Pet",
+    },
+    fakeFs,
+  );
+  // With DOM captured, both objectives are grounded → dispatched to qa-workers.
+  assert.equal(agents.filter((a) => a === "qa-worker").length, 2, "both objectives dispatched to workers (grounded)");
+  // The strong agent must NOT have been called for generation (only the planner).
+  assert.equal(agents.filter((a) => a === "qa-generator").length, 1, "only the planner called qa-generator (no fallback)");
+  assert.equal(result.specs.length, 2, "both specs returned");
 });
 
 // ── Slice F Phase 2: budget wiring end-to-end through the *Assembled builders ─
