@@ -575,7 +575,9 @@ export interface AgentDeps {
 // Runs the read-only explorer ONCE for a first-pass diff e2e generation when opted in, returning the
 // distilled brief (or null to degrade silently). Gated tightly: never on code mode, never on a
 // re-generation pass (fix/review/coverage already carry context), and only when input.explorer is set.
-async function maybeExplore(
+// Exported (Slice H) so the orchestrator (pipeline.ts) can call it BEFORE buildContextPack to wire
+// the brief into the pack without a second explorer pass inside runOpencode (no-double-run guarantee).
+export async function maybeExplore(
   input: OpencodeRunInput,
   deps: AgentDeps,
   opts?: { signal?: AbortSignal; onProgress?: (msg: string) => void },

@@ -211,13 +211,34 @@ export async function buildContextPack(
   }
 
   // Component (b): DOM slice — captured orchestrator-side via Playwright.
-  // Routes come from the brief's verified routes list; only verified routes are rendered
-  // (the explorer confirmed they exist as navigable URLs). If no brief or no routes,
-  // skip DOM capture (the generator falls back to its own exploration).
+  // Candidate routes for DOM capture = brief's code-derived routes (ALL, regardless of
+  // r.verified) UNION contextMap routes that overlap the diff's changed files. The qa-explorer
+  // agent runs without a browser so verified is ALWAYS false (by design — see qa-explorer.md);
+  // requiring verified=true meant DOM was never captured. Fix: capture all candidate routes
+  // best-effort; a route that fails to load yields no DOM for that path (graceful degradation).
+  // Cap: top DOM_ROUTE_CAP routes most relevant to the objective (bounds cost: ~15s/route).
+  const DOM_ROUTE_CAP = 6;
   let domSection = "";
-  const briefRoutes = (input.brief?.routes ?? [])
-    .filter((r) => r.verified && r.path)
-    .map((r) => r.path);
+  // Build candidate set: brief routes (all, no verified filter) + contextMap routes.
+  const briefRoutePaths = new Set<string>(
+    (input.brief?.routes ?? [])
+      .filter((r) => r.path)
+      .map((r) => r.path),
+  );
+  // Include contextMap routes that the diff/brief touched (feBe route overlap).
+  // This ensures routes relevant to the current objective are captured even when the brief
+  // has no routes (e.g., empty blast-radius for a trivial commit).
+  const contextMapRoutes = new Set<string>();
+  if (input.contextMap?.feBe?.length && input.brief?.feBe?.length) {
+    const briefOps = new Set(input.brief.feBe.map((l) => l.operationId));
+    for (const link of input.contextMap.feBe) {
+      if (briefOps.has(link.operationId) && link.route) contextMapRoutes.add(link.route);
+    }
+  }
+  // Merge: brief routes first (more precise, code-derived), then contextMap routes.
+  const candidateRoutes = [...briefRoutePaths, ...contextMapRoutes].filter(Boolean);
+  // Cap to DOM_ROUTE_CAP most relevant routes (briefRoutes first = highest relevance).
+  const briefRoutes = candidateRoutes.slice(0, DOM_ROUTE_CAP);
   if (briefRoutes.length > 0 && input.e2eDir && input.baseUrl) {
     try {
       const raw = await deps.captureDomForRoutes(briefRoutes, { e2eDir: input.e2eDir, baseUrl: input.baseUrl }, deps.domDeps);

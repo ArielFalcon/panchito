@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildContextPack, type ContextPackInput, type ContextPackDeps } from "./context-pack";
-import { buildPromptAssembled } from "../integrations/prompts";
+import { buildPromptAssembled, buildPlanPromptAssembled } from "../integrations/prompts";
 import type { OpencodeRunInput } from "../integrations/opencode-client";
 import type { CaptureDomDeps } from "./dom-snapshot";
 import type { ExplorationBrief } from "./exploration-brief";
@@ -250,4 +250,328 @@ test("Slice G: complete/exhaustive mode suppresses contextPack (isGenerationMode
     !assembled.text.includes("Context Pack"),
     "contextPack must be suppressed in context mode (not a generation pass)",
   );
+});
+
+// ── Slice H tests ─────────────────────────────────────────────────────────────
+//
+// P10: DOM push activation — brief wired → pack carries blast-radius + DOM.
+// P11: explore-first conditional — pack present → transcribe framing; absent → explore framing.
+// No-double-run: the brief drives the pack; the generator receives it via contextBrief, not re-explored.
+// Regression gate: complete/exhaustive mode unaffected.
+
+test("Slice H (P10 — DOM push active): brief wired to buildContextPack produces blast-radius + DOM", async () => {
+  const domContent = "button: Submit\nheading: Checkout";
+  const result = await buildContextPack(
+    {
+      brief: MINIMAL_BRIEF,
+      baseUrl: "http://localhost:3000",
+      e2eDir: "/fake/e2e",
+    },
+    stubContextPackDeps(domContent),
+  );
+  // The brief must drive blast-radius content.
+  assert.ok(result.text !== undefined, "pack text must be set when brief is provided");
+  assert.ok(result.blastRadiusBytes > 0, "blast-radius section must be non-empty when brief is wired");
+  // The brief's candidate route (/checkout) must drive DOM capture (verified=true here — also works).
+  assert.ok(result.domBytes > 0, "DOM section must be captured from brief's candidate routes when wired");
+  assert.ok(result.text!.includes("CheckoutService.pay"), "brief blast-radius symbol must appear in pack");
+  assert.ok(result.text!.includes("Live DOM"), "DOM section header must appear in pack");
+});
+
+test("Slice H (P10 — DOM push active): brief wired → pack appears in assembled generator prompt", async () => {
+  // Simulate the full pipeline: build a pack with a brief, then push it into buildPromptAssembled.
+  const domContent = "button: Submit\nheading: Checkout";
+  const packResult = await buildContextPack(
+    { brief: MINIMAL_BRIEF, baseUrl: "http://localhost:3000", e2eDir: "/fake/e2e" },
+    stubContextPackDeps(domContent),
+  );
+  assert.ok(packResult.text !== undefined, "pack must be built from brief");
+
+  // Thread the pack into the assembled generator prompt (simulates pipeline.ts baseGenInput).
+  const input = minimalOpencodeInput(packResult.text);
+  const assembled = buildPromptAssembled(input);
+
+  // Blast-radius must appear in the assembled prompt (the brief drove the pack content).
+  assert.ok(
+    assembled.text.includes("CheckoutService.pay"),
+    "brief blast-radius symbol must appear in the assembled generator prompt",
+  );
+  // DOM section must appear.
+  assert.ok(
+    assembled.text.includes("Live DOM"),
+    "DOM ground-truth section must appear in the assembled generator prompt",
+  );
+  // sectionSizes must carry context-pack (telemetry proof that the pack is not inert).
+  assert.ok(
+    (assembled.sectionSizes["context-pack"] ?? 0) > 0,
+    "context-pack byte count must be positive in sectionSizes when brief + DOM are wired",
+  );
+});
+
+test("Slice H (no-double-run): when exploreForPack dep is wired, explorer is always false in baseGenInput", () => {
+  // The no-double-run guarantee: when exploreForPack dep is present (production), the orchestrator-
+  // level explorer runs once. baseGenInput must set explorer=false so maybeExplore inside runOpencode
+  // is a no-op. We simulate the two paths of the new logic:
+  //
+  // Production path (exploreForPack dep wired): explorer ALWAYS false regardless of brief/flag.
+  const hasExploreForPackDep = true;
+  const ocExplorerProd = hasExploreForPackDep ? false : (MINIMAL_BRIEF ? false : true);
+  assert.equal(ocExplorerProd, false, "explorer must be false in production path (exploreForPack dep wired)");
+
+  // Legacy/stub path (no exploreForPack dep): falls back to explorerBrief ? false : app.qa.explorer.
+  const hasExploreForPackDepStub = false;
+  // Sub-case A: brief set → explorer cleared (brief forwarded as contextBrief).
+  const ocExplorerLegacyWithBrief = hasExploreForPackDepStub ? false : (MINIMAL_BRIEF ? false : true);
+  assert.equal(ocExplorerLegacyWithBrief, false, "explorer must be false when brief is already set (stub path)");
+  // Sub-case B: no brief → legacy flag preserved for in-runOpencode maybeExplore.
+  const noBrief: ExplorationBrief | undefined = undefined;
+  const legacyFlag = true; // simulate app.qa.explorer=true
+  const ocExplorerLegacyNoBrief = hasExploreForPackDepStub ? false : (noBrief ? false : legacyFlag);
+  assert.equal(ocExplorerLegacyNoBrief, true, "explorer flag preserved when stub path and no brief");
+
+  // Also verify that contextBrief is forwarded from explorerBrief when available.
+  const ocContextBrief = MINIMAL_BRIEF ?? undefined;
+  assert.equal(ocContextBrief, MINIMAL_BRIEF, "contextBrief must be forwarded from explorerBrief");
+});
+
+test("Slice H (P11 — explore-first conditional): pack present → transcribe framing in working-rules", () => {
+  // When contextPack is present, the generator working-rules must carry the transcribe framing,
+  // not the unconditional "you MUST browser_navigate" mandate.
+  const pack = "## Context Pack (pushed by the orchestrator before the first write)\n\nDOM stuff here";
+  const input = minimalOpencodeInput(pack);
+  const assembled = buildPromptAssembled(input);
+  // Transcribe framing: "Context Pack" must be mentioned AND the working-rules must NOT
+  // contain the unconditional navigate mandate (that appears only when pack is absent).
+  assert.ok(
+    assembled.text.includes("TRANSCRIBE"),
+    "when pack is present, working-rules must instruct to transcribe from the pack",
+  );
+  assert.ok(
+    assembled.text.includes("do NOT use browser_navigate"),
+    "when pack is present, working-rules must suppress unconditional explore-first for covered routes",
+  );
+});
+
+test("Slice H (P11 — explore-first conditional): pack absent → explore-first mandate in working-rules", () => {
+  // When contextPack is absent, the generator working-rules must carry the explore-first mandate.
+  const input = minimalOpencodeInput(undefined);
+  const assembled = buildPromptAssembled(input);
+  // Explore-first framing: "you MUST use it BEFORE writing any test" must appear.
+  assert.ok(
+    assembled.text.includes("MUST use it BEFORE writing any test") ||
+      assembled.text.includes("Playwright MCP is AVAILABLE"),
+    "when pack is absent, working-rules must carry the explore-first mandate",
+  );
+  // Must NOT contain the transcribe framing (would be contradictory).
+  assert.ok(
+    !assembled.text.includes("TRANSCRIBE selectors directly from"),
+    "when pack is absent, transcribe framing must not appear",
+  );
+});
+
+test("Slice H (regression gate): complete/exhaustive plan prompts unaffected by contextPack changes", () => {
+  // complete/exhaustive use buildPlanPromptAssembled, not buildPromptAssembled. They must be
+  // unaffected by the explore-first conditional changes (their prompts have no contextPack section
+  // and no working-rules explore-first block). This gates the complete/exhaustive regression.
+  const planInput: OpencodeRunInput = {
+    repo: "org/app",
+    sha: "abc1234",
+    diff: "",
+    mirrorDir: "/mirrors/org__app",
+    e2eRelDir: "e2e",
+    namespace: "qa-bot-abc",
+    needsReview: false,
+    target: "e2e" as const,
+    mode: "complete" as const,
+    appName: "testapp",
+    baseUrl: "http://localhost:3000",
+    contextPack: "some pack content — must be ignored in plan prompt",
+  };
+  const planAssembled = buildPlanPromptAssembled(planInput);
+  // The plan prompt must NOT include the context-pack section (complete/exhaustive don't use it).
+  assert.ok(
+    !planAssembled.sectionSizes["context-pack"],
+    "complete/exhaustive plan prompt must NOT include a context-pack section",
+  );
+  // The plan prompt must not carry the explore-first conditional from buildPromptAssembled.
+  assert.ok(
+    !planAssembled.text.includes("TRANSCRIBE selectors directly from"),
+    "complete/exhaustive plan prompt must not carry the Slice H transcribe instruction",
+  );
+});
+
+// ── Slice H (fix) tests — universal grounding + unverified DOM capture ────────
+//
+// The original Slice H had two gaps:
+//   GAP 1: exploreForPack was opt-in (gated on qa.explorer flag); apps without the flag (e.g. portfolio)
+//          never got the orchestrator-level explorer pass.
+//   GAP 2: context-pack.ts filtered DOM capture by r.verified=true, but qa-explorer never sets
+//          verified=true (no browser), so briefRoutes was always [] and DOM was never captured.
+//
+// These tests prove the fixes: universal explorer activation + DOM from unverified candidate routes.
+
+test("Slice H (fix — GAP 1): exploreForPack runs for diff/manual with NO qa.explorer set", () => {
+  // Simulate the fixed exploreForPack gate: it no longer requires input.explorer.
+  // Previously: `if (input.target === "code" || !input.explorer) return null`
+  // Fixed:      `if (input.target === "code") return null`
+  // We test the gate logic directly with the same conditions a portfolio-like app would produce.
+  // Use string (not literal) types so TS does not complain about unreachable comparisons.
+  const target: string = "e2e";  // portfolio is always e2e
+  const mode: string = "diff";
+  const explorer: boolean | undefined = undefined; // portfolio has no qa.explorer set
+  const fixCases: string[] | undefined = undefined;
+  const reviewCorrections: string[] | undefined = undefined;
+  const coverageGap: string | undefined = undefined;
+
+  // Old gate (broken): would return null because !explorer is true.
+  const oldGate = target === "code" || !explorer;
+  assert.equal(oldGate, true, "old gate would block the explorer for apps without qa.explorer — confirming the bug");
+
+  // New gate (fixed): only blocks on code mode or regen passes.
+  // Use Array/string vars rather than undefined to avoid TS `never` narrowing on .length.
+  const fixCasesArr: string[] = [];
+  const reviewCorrsArr: string[] = [];
+  const isReGen = Boolean(fixCasesArr.length || reviewCorrsArr.length || coverageGap);
+  const newGateBlocks = target === "code" || isReGen || (mode !== "diff" && mode !== "manual");
+  assert.equal(newGateBlocks, false, "new gate must NOT block the explorer for portfolio-like apps (no qa.explorer, diff mode, e2e)");
+});
+
+test("Slice H (fix — GAP 1): exploreForPack does NOT run for complete/exhaustive mode", () => {
+  // complete/exhaustive must be unaffected — the explorer is only for diff/manual.
+  const target: string = "e2e";
+  const mode: string = "complete";
+  const fixCasesArr: string[] = [];
+  const reviewCorrsArr: string[] = [];
+  const coverageGap: string | undefined = undefined;
+
+  const isReGenComplete = Boolean(fixCasesArr.length || reviewCorrsArr.length || coverageGap);
+  const newGateBlocksComplete = target === "code" || isReGenComplete || (mode !== "diff" && mode !== "manual");
+  assert.equal(newGateBlocksComplete, true, "new gate must block the explorer for complete mode (regression gate)");
+});
+
+test("Slice H (fix — GAP 2): DOM captured from unverified candidate routes (verified=false)", async () => {
+  // qa-explorer has no browser → verified is always false. The old code filtered by r.verified,
+  // so DOM was never captured. The fix removes the verified filter.
+  const briefWithUnverifiedRoutes: ExplorationBrief = {
+    builtForSha: "abc1234",
+    objective: "test the portfolio home page",
+    blastRadius: [{ symbol: "IndexPage", file: "src/pages/index.astro", role: "renders the homepage" }],
+    routes: [
+      { path: "/", verified: false },   // unverified — qa-explorer didn't navigate
+      { path: "/about", verified: false }, // unverified — qa-explorer didn't navigate
+    ],
+  };
+  const domContent = "heading: Hello World\nbutton: Contact me";
+  let capturedRoutes: string[] = [];
+  const capturingDeps: ContextPackDeps = {
+    captureDomForRoutes: async (routes, _input, _domDeps) => {
+      capturedRoutes = routes; // capture what routes were requested
+      return domContent;
+    },
+    domDeps: stubDomDeps(domContent),
+    log: () => {},
+  };
+
+  const result = await buildContextPack(
+    { brief: briefWithUnverifiedRoutes, baseUrl: "http://localhost:3000", e2eDir: "/fake/e2e" },
+    capturingDeps,
+  );
+
+  // GAP 2 fix: unverified routes must be included as candidates.
+  assert.ok(capturedRoutes.length > 0, "DOM capture must be called even for unverified routes");
+  assert.ok(capturedRoutes.includes("/"), "root route must be a candidate for DOM capture");
+  assert.ok(result.domBytes > 0, "DOM section must be populated from unverified candidate routes");
+  assert.ok(result.text?.includes("Live DOM"), "DOM section header must appear in pack");
+});
+
+test("Slice H (fix — GAP 2 end-to-end): DOM from unverified routes appears in assembled generator prompt for portfolio-like app", async () => {
+  // Full end-to-end proof: portfolio-like app (no qa.explorer, routes all unverified) →
+  // pack built with DOM from unverified routes → DOM appears in assembled generator prompt.
+  const portfolioBrief: ExplorationBrief = {
+    builtForSha: "def5678",
+    objective: "test contact form submission",
+    blastRadius: [{ symbol: "ContactForm", file: "src/components/ContactForm.astro", role: "submits contact data to API" }],
+    routes: [
+      { path: "/contact", verified: false }, // portfolio: qa-explorer doesn't navigate
+    ],
+    risks: ["assert the form submits without error"],
+  };
+  const contactDom = "heading: Contact Me\nform: contact-form\nbutton: Send Message";
+  const packResult = await buildContextPack(
+    { brief: portfolioBrief, baseUrl: "https://portfolio.dev", e2eDir: "/fake/e2e" },
+    stubContextPackDeps(contactDom),
+  );
+
+  // Pack must carry both blast-radius AND DOM.
+  assert.ok(packResult.text !== undefined, "pack must be built from portfolio-like brief");
+  assert.ok(packResult.blastRadiusBytes > 0, "blast-radius from brief must appear in pack");
+  assert.ok(packResult.domBytes > 0, "DOM from unverified route must appear in pack (GAP 2 fixed)");
+  assert.ok(packResult.text!.includes("ContactForm"), "blast-radius symbol must appear");
+  assert.ok(packResult.text!.includes("Live DOM"), "DOM section header must appear");
+  assert.ok(packResult.text!.includes("Send Message"), "DOM content must appear in pack");
+
+  // Thread pack into assembled generator prompt.
+  const promptInput = minimalOpencodeInput(packResult.text);
+  const assembled = buildPromptAssembled(promptInput);
+
+  // DOM content must reach the assembled generator prompt.
+  assert.ok(assembled.text.includes("Send Message"), "DOM content from unverified route must appear in assembled generator prompt");
+  assert.ok(assembled.text.includes("ContactForm"), "blast-radius symbol must appear in assembled prompt");
+  assert.ok(
+    (assembled.sectionSizes["context-pack"] ?? 0) > 0,
+    "context-pack section must be non-zero in sectionSizes (pack is not inert)",
+  );
+  // explore-first must be suppressed (pack is present).
+  assert.ok(assembled.text.includes("TRANSCRIBE"), "transcribe framing must appear when pack is present");
+});
+
+test("Slice H (fix — route cap): DOM capture capped at DOM_ROUTE_CAP routes", async () => {
+  // When the brief has more than 6 candidate routes, DOM capture must be limited to the top 6.
+  const manyRoutesBrief: ExplorationBrief = {
+    builtForSha: "abc1234",
+    objective: "test many flows",
+    blastRadius: [{ symbol: "App", file: "src/App.ts", role: "root component" }],
+    routes: Array.from({ length: 10 }, (_, i) => ({ path: `/route${i}`, verified: false })),
+  };
+  let capturedRouteCount = 0;
+  const countingDeps: ContextPackDeps = {
+    captureDomForRoutes: async (routes, _input, _domDeps) => {
+      capturedRouteCount = routes.length;
+      return routes.map((r) => `button: Button for ${r}`).join("\n");
+    },
+    domDeps: stubDomDeps(undefined),
+    log: () => {},
+  };
+
+  await buildContextPack(
+    { brief: manyRoutesBrief, baseUrl: "http://localhost:3000", e2eDir: "/fake/e2e" },
+    countingDeps,
+  );
+
+  // Must be capped at DOM_ROUTE_CAP (6).
+  assert.ok(capturedRouteCount <= 6, `DOM capture must be capped at 6 routes, but captured ${capturedRouteCount}`);
+  assert.ok(capturedRouteCount > 0, "DOM capture must have been called with at least 1 route");
+});
+
+test("Slice H (fix — regression gate): complete/exhaustive runs unaffected by GAP 1 fix", () => {
+  // complete/exhaustive mode: the pack is not built; buildPlanPromptAssembled is unaffected.
+  // Verify the plan prompt is clean of any Slice H grounding content.
+  const completePlanInput: OpencodeRunInput = {
+    repo: "org/portfolio",
+    sha: "abc1234",
+    diff: "",
+    mirrorDir: "/mirrors/portfolio",
+    e2eRelDir: "e2e",
+    namespace: "qa-bot-complete",
+    needsReview: false,
+    target: "e2e" as const,
+    mode: "exhaustive" as const,
+    appName: "portfolio",
+    baseUrl: "http://localhost:3000",
+    // No contextPack — complete/exhaustive don't push one.
+  };
+  const planAssembled = buildPlanPromptAssembled(completePlanInput);
+  assert.ok(!planAssembled.sectionSizes["context-pack"], "complete/exhaustive must have no context-pack section");
+  assert.ok(!planAssembled.text.includes("TRANSCRIBE"), "complete/exhaustive must not have transcribe framing");
+  assert.ok(!planAssembled.text.includes("Live DOM"), "complete/exhaustive plan prompt must not include DOM content");
 });

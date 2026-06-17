@@ -13,7 +13,7 @@ import { DeployTarget, waitForDeploy } from "./env/deploy-gate";
 import { ensureMirror, ensureMirrorAtBranch, getCommitDiff, getCommitMessage, listChangedSpecs as gitListChangedSpecs, getCommitsBehind, defaultMirrorDeps, realGit } from "./integrations/repo-mirror";
 import { runConfinement, type ConfinementResult } from "./qa/confinement";
 import { createUsageAccumulator, type UsageSnapshot, type RunUsage } from "./qa/usage";
-import { runOpencode, runOpencodeParallel, shouldFanOut, defaultAgentDeps, reviewIndependently, getOpenSessionCount, withUsageSink } from "./integrations/opencode-client";
+import { runOpencode, runOpencodeParallel, shouldFanOut, defaultAgentDeps, reviewIndependently, getOpenSessionCount, withUsageSink, maybeExplore } from "./integrations/opencode-client";
 import { classifyCommit, CommitIntent } from "./qa/commit-classify";
 import { setupE2eProject, defaultSetupDeps } from "./qa/setup";
 import { validateSpecs, defaultValidateDeps } from "./qa/validate";
@@ -98,6 +98,11 @@ export interface GenerateInput {
   // Slice G: pre-built Context Pack text (blast-radius + DOM + contracts), assembled by the
   // orchestrator before the first write and pushed into the generator prompt (VOLATILE band).
   contextPack?: string;
+  // Slice H: the ExplorationBrief produced by the orchestrator-level explorer pass, carried into
+  // defaultPipelineDeps.generate so it can be forwarded as contextBrief to runOpencode WITHOUT
+  // triggering a second maybeExplore call (explorer flag cleared when this is set). The brief also
+  // fed buildContextPack before this GenerateInput is created — same brief, one pass, no double-run.
+  explorerBrief?: import("./qa/exploration-brief").ExplorationBrief;
   service?: { repo: string; mirrorDir: string; openapi?: string | string[] }; // cross-repo: the triggering microservice (read-only working copy)
   services?: Array<{ repo: string; mirrorDir: string; openapi?: string | string[] }>; // context mode: every declared service, mirrored read-only
 }
@@ -169,6 +174,13 @@ export interface PipelineDeps {
   // The app's most recent persisted outcome's errorClass — biases rule retrieval toward
   // rules that prevent the failure the engine made last. Absent ⇒ no bias.
   recentErrorClass?(app: string): Promise<string | null>;
+  // Slice H: run the read-only explorer pass BEFORE buildContextPack so the brief is available to
+  // feed both the pack (blast-radius + verified routes → DOM capture) and the generator (passed as
+  // explorerBrief on GenerateInput so runOpencode reuses it without re-running maybeExplore).
+  // Optional — absent ⇒ pack is built without a brief (DOM and contracts from contextMap only).
+  // Cost: one extra read-only explorer agent session for diff/manual first-pass only.
+  // Never called on regen passes (fix/review/coverage) or code-mode runs.
+  exploreForPack?(input: GenerateInput, signal?: AbortSignal, onProgress?: (msg: string) => void): Promise<import("./qa/exploration-brief").ExplorationBrief | null>;
   log?(msg: string): void;
   // Context mode: validates the produced context.json. Injected so tests can bypass file I/O.
   validateContextFn?(content: unknown): { ok: boolean; errors: string[] };
@@ -242,7 +254,13 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
         failureSourced: input.failureSourced,
         runId: input.runId,
         contextMap: input.contextMap,
-        explorer: input.explorer,
+        // Slice H: no-double-run guarantee. When the orchestrator already ran the explorer
+        // pass (input.explorerBrief is set), forward the brief as contextBrief and clear
+        // the explorer flag so maybeExplore inside runOpencode returns null immediately.
+        // When explorerBrief is absent, preserve the explorer flag so runOpencode can still
+        // run maybeExplore if the app config requests it (opt-in backward-compat path).
+        contextBrief: input.explorerBrief ?? undefined,
+        explorer: input.explorerBrief ? false : input.explorer,
         contextPack: input.contextPack,
         service: input.service,
         services: input.services,
@@ -271,6 +289,47 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
               : {}),
           })
         : runOpencode(ocInput, oc, { signal, onProgress, onRepair });
+    },
+    // Slice H (fixed): run the read-only explorer pass at the orchestrator level UNIVERSALLY for
+    // every diff/manual e2e first-pass generation — no qa.explorer flag required. The explorer was
+    // previously opt-in; the fix makes it unconditional so apps without qa.explorer (e.g. portfolio)
+    // also get the blast-radius grounding. qa.explorer is now ONLY used as the maybeExplore fallback
+    // inside runOpencode when exploreForPack dep is absent (legacy path, no-op in production).
+    // Best-effort: error → null → pack degrades to DOM+contracts only.
+    exploreForPack: async (input, signal, onProgress) => {
+      if (input.target === "code") return null;
+      // Regen passes (fix/review/coverage) must not re-run the explorer — the pack is already present.
+      const isReGen = Boolean(input.fixCases?.length || input.reviewCorrections?.length || input.coverageGap);
+      if (isReGen) return null;
+      // Explorer runs on diff mode and manual mode (manual shares the same engine and benefits from
+      // the blast-radius/route grounding equally). complete/exhaustive do not build a per-commit pack.
+      if (input.mode !== "diff" && input.mode !== "manual") return null;
+      try {
+        // Build a minimal OpencodeRunInput just for the explorer pass (no contextPack, no contextBrief).
+        const explorerOcInput = {
+          repo: input.repo,
+          sha: input.sha,
+          diff: input.diff,
+          mirrorDir: input.mirrorDir,
+          e2eRelDir: E2E_DIR,
+          namespace: input.namespace,
+          needsReview: false,
+          target: (input.target ?? "e2e") as import("./types").TestTarget,
+          mode: input.mode as import("./types").RunMode,
+          appName: input.appName,
+          baseUrl: input.baseUrl,
+          intent: input.intent,
+          guidance: input.guidance,
+          runId: input.runId,
+          explorer: true, // force-enable so maybeExplore doesn't skip it
+          service: input.service,
+        };
+        const oc = await agentDepsFactory(undefined);
+        return maybeExplore(explorerOcInput, oc, { signal, onProgress });
+      } catch (err) {
+        console.warn(`[qa] exploreForPack failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
     },
     setupE2e: (e2eDir) => setupE2eProject(e2eDir, defaultSetupDeps),
     validate: (e2eDir) => validateSpecs(e2eDir, defaultValidateDeps),
@@ -1288,6 +1347,13 @@ export async function runPipeline(
   // domSnapshot instead which is sourced from the failure-point capture).
   let builtContextPack: string | undefined;
 
+  // Slice H: the ExplorationBrief from the orchestrator-level explorer pass (run BEFORE the pack
+  // build so the brief drives route/blast-radius selection inside buildContextPack). The same brief
+  // is forwarded to every generation call via baseGenInput.explorerBrief, so defaultPipelineDeps.generate
+  // can set contextBrief on the OpencodeRunInput and clear explorer — guaranteeing at most ONE
+  // explorer pass per run (no double-run). Undefined when the explorer is disabled or fails.
+  let builtExplorerBrief: import("./qa/exploration-brief").ExplorationBrief | undefined;
+
   const baseGenInput = (extra: Partial<GenerateInput>): GenerateInput => ({
     repo: app.repo,
     sha,
@@ -1303,7 +1369,14 @@ export async function runPipeline(
     guidance: opts.guidance,
     openapi: app.openapi,
     parallelDiff: app.qa.parallelDiff,
-    explorer: app.qa.explorer,
+    // Slice H (fixed): when exploreForPack dep is wired (production), the orchestrator-level
+    // explorer already ran (or was attempted); the in-runOpencode maybeExplore must NEVER run
+    // again (no-double-run guarantee). Set explorer=false unconditionally in that case.
+    // When exploreForPack dep is absent (test stubs that don't inject it), fall back to the
+    // legacy flag: brief set → false (brief already forwarded as contextBrief); brief absent → app.qa.explorer.
+    // qa.explorer is now only a fallback for the stub/legacy path; it is ignored in production.
+    explorer: deps.exploreForPack ? false : (builtExplorerBrief ? false : app.qa.explorer),
+    explorerBrief: builtExplorerBrief,
     contextMap,
     contextPack: builtContextPack,
     learnedRules: promptSections,
@@ -1385,23 +1458,46 @@ export async function runPipeline(
 
     promptSections = allPromptSections || undefined; // every later regeneration inherits this via baseGenInput
 
-    // Slice G — Context Pack: build and push BEFORE the first generation call.
-    // The pack is orchestrator-built (blast-radius from a prior explorer pass stored in the
-    // ExplorationBrief, DOM via Playwright, contracts from context.json). Best-effort: a pack
-    // build failure logs a warning and the run continues with the explore-first behaviour.
-    // Only built for e2e mode; code mode has no DOM and no diff-driven blast radius.
-    // Re-generation passes (fix/review/coverage) inherit the same pack via baseGenInput so the
-    // generator always sees the same ground truth it was given on the first write.
+    // Slice G/H — Context Pack: build and push BEFORE the first generation call.
+    // Slice H adds: (a) run the explorer pass FIRST to obtain the ExplorationBrief, which drives
+    // route selection for DOM capture and blast-radius content; (b) forward the same brief to every
+    // generation call via baseGenInput.explorerBrief so runOpencode does NOT re-run the explorer
+    // (no-double-run). The explorer is best-effort: failure → no brief → pack degrades to DOM+contracts.
+    // The pack itself is also best-effort: a failure logs a warning and the run continues with
+    // explore-first behaviour. Only built for e2e mode; code mode has no DOM and no blast radius.
+    // Re-generation passes inherit the same pack via baseGenInput so the generator always sees the
+    // same ground truth it was given on the first write.
     if (!isCode && app.dev?.baseUrl) {
+      // Slice H step 1: orchestrator-level explorer pass — runs BEFORE the pack so the brief is
+      // available as input to buildContextPack. Gated to first-pass only (not regen) via exploreForPack.
+      // Cost: one extra read-only qa-explorer agent session on diff/manual e2e runs when qa.explorer
+      // is enabled. The agent pass distills blast-radius symbols + verified routes via Serena; this is
+      // the intended trade against expensive downstream re-navigation iterations.
+      if (deps.exploreForPack) {
+        try {
+          const explorerBrief = await deps.exploreForPack(
+            baseGenInput({ fixCases: opts.fixCases }),
+            signal,
+            (msg) => log(msg),
+          );
+          if (explorerBrief) {
+            builtExplorerBrief = explorerBrief;
+            log(`[qa] context-pack: explorer brief available (${builtExplorerBrief.blastRadius.length} symbol(s), ${(builtExplorerBrief.routes ?? []).length} candidate route(s); verified=${(builtExplorerBrief.routes ?? []).filter((r) => r.verified).length})`);
+          } else {
+            log("[qa] context-pack: no explorer brief — pack will use DOM+contracts only");
+          }
+        } catch (err) {
+          log(`[qa] context-pack: explorer pass FAILED (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
       try {
         const packResult = await buildContextPack(
           {
-            // The explorer brief is available on the current run only if the explorer pass ran
-            // and returned a usable brief. In parallelDiff mode the planner embeds briefs per
-            // objective in the plan output — those are not available here on the single-agent
-            // path. For now, the pack is built from contextMap + DOM only when no brief is
-            // available; the brief path is exercised when the explorer is enabled.
-            brief: undefined, // Slice H will wire the explorer brief here after Phase 3b
+            // Slice H: the brief (from the orchestrator-level explorer pass above) now drives both
+            // route selection for DOM capture and blast-radius content in the pack. When absent the
+            // pack degrades to DOM-via-context-routes + contracts; explore-first mandate stays active.
+            brief: builtExplorerBrief,
             baseUrl: app.dev.baseUrl,
             e2eDir,
             contextMap,

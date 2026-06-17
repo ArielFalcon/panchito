@@ -385,9 +385,20 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
           `- Test-data prefix: ${input.namespace}`,
           `- LIVE DEV URL: ${input.baseUrl ?? "(not provided — ABORT and report infra-error: no base URL)"}`,
           `  In the SPEC files, reach the app via the PW_BASE_URL env var (the orchestrator sets it at run time).`,
-          `- Playwright MCP is AVAILABLE and you MUST use it BEFORE writing any test: browser_navigate to`,
-          `  the LIVE DEV URL above, then browser_snapshot to read the ACTUAL DOM. Selectors MUST be verified`,
-          `  against the real DOM, NEVER invented from code analysis alone.`,
+          ...(input.contextPack
+            ? [
+                `- A Context Pack (blast-radius + DOM slice + contracts) was pushed into this prompt by the`,
+                `  orchestrator BEFORE this session started. Where the pack supplies the DOM for a route,`,
+                `  TRANSCRIBE selectors directly from the "Live DOM" section — do NOT use browser_navigate or`,
+                `  browser_snapshot on routes already covered in the pack (the ground truth is already here).`,
+                `  For routes NOT covered in the pack (not listed in the DOM section), use the Playwright MCP`,
+                `  to explore the live page before writing selectors.`,
+              ]
+            : [
+                `- Playwright MCP is AVAILABLE and you MUST use it BEFORE writing any test: browser_navigate to`,
+                `  the LIVE DEV URL above, then browser_snapshot to read the ACTUAL DOM. Selectors MUST be verified`,
+                `  against the real DOM, NEVER invented from code analysis alone.`,
+              ]),
           `- Also inspect runtime signals with the Playwright MCP: browser_console_messages (catch JS errors`,
           `  and warnings — a console error on the changed flow is a real bug signal) and browser_network_requests`,
           `  (read the actual API calls/responses the flow makes, and assert against their real shape — status,`,
