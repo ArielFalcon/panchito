@@ -3,6 +3,9 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { capabilitiesForRole } from "./types";
+import { sanitizeText } from "../orchestrator/sanitizer";
+import { saveAgentTurn } from "../server/history";
+import type { AgentOpenDescriptor, AgentTurnEvent } from "../integrations/opencode-client";
 import type {
   AgentModelInfo,
   AgentProviderHealth,
@@ -119,12 +122,85 @@ export class CodexRuntimeStrategy implements AgentRuntimeStrategy {
   async openSession(
     role: AgentRole,
     cwd: string,
-    opts?: { signal?: AbortSignal; timeoutMs?: number; model?: string },
+    opts?: {
+      signal?: AbortSignal;
+      timeoutMs?: number;
+      model?: string;
+      descriptor?: AgentOpenDescriptor;
+      onTurn?: (t: AgentTurnEvent) => void;
+    },
   ): Promise<AgentRuntimeSession> {
     const session = await this.transport.start({ role, cwd, model: opts?.model, signal: opts?.signal, timeoutMs: opts?.timeoutMs });
+    // Default turn sink, mirroring defaultAgentDeps.open: persist to agent_turns when a runId is
+    // available and no caller-supplied onTurn overrides it. Best-effort — a storage failure must
+    // not break the agent session. The OpenCode runtime builds this sink at the SDK funnel; for
+    // Codex this strategy IS the funnel (it never goes through defaultAgentDeps), so the default
+    // sink lives here so Codex roles persist with a real run_id even when no onTurn is injected.
+    const defaultOnTurn = opts?.descriptor?.runId
+      ? (t: AgentTurnEvent) => {
+          try {
+            saveAgentTurn({
+              runId: t.runId,
+              sessionId: t.sessionId,
+              role: t.role,
+              round: t.round,
+              isRepair: t.isRepair,
+              ts: t.ts,
+              objective: t.objective ?? null,
+              promptText: t.promptText,
+              outputText: t.outputText,
+              promptBytes: t.promptBytes,
+              tokensInput: t.tokensInput,
+              tokensOutput: t.tokensOutput,
+              tokensReasoning: t.tokensReasoning,
+              tokensCacheRead: t.tokensCacheRead,
+              tokensCacheWrite: t.tokensCacheWrite,
+              cost: t.cost,
+            });
+          } catch (err) {
+            console.warn(`[qa] agent_turns persist failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      : undefined;
+    // Caller-supplied onTurn wins; otherwise the default sink fires when runId is present.
+    const effectiveOnTurn = opts?.onTurn ?? defaultOnTurn;
+    // Per-session round index, mirroring the OpenCode funnel: 0 for the first prompt() on this
+    // session, +1 per call (see opencode-client `_round`). Cross-session regeneration ordering is
+    // reconstructed from `ts`, not from this counter.
+    let round = 0;
     return {
       id: session.id,
-      prompt: (text) => session.prompt(withCodexRolePreamble(role, text, this.promptRoot)),
+      // Codex's turn-telemetry funnel — the Codex-side equivalent of defaultAgentDeps.open's
+      // OpenCode funnel. We emit an AgentTurnEvent per prompt so Codex roles persist agent_turns
+      // rows with a real run_id. Token/cost fields are null: `codex exec` does not surface usage
+      // here (AgentTurnRecord documents nulls as acceptable). outputText is sanitized BEFORE the
+      // event fires (same as OpenCode), so any DEV-environment data is redacted before storage.
+      prompt: async (text, promptOpts) => {
+        const thisRound = round++;
+        const output = await session.prompt(withCodexRolePreamble(role, text, this.promptRoot));
+        if (effectiveOnTurn) {
+          effectiveOnTurn({
+            runId: opts?.descriptor?.runId ?? null,
+            sessionId: session.id,
+            role: opts?.descriptor?.role ?? role,
+            objective: opts?.descriptor?.objective,
+            round: promptOpts?.round ?? thisRound,
+            isRepair: promptOpts?.isRepair ?? false,
+            promptText: text,
+            promptBytes: Buffer.byteLength(text, "utf8"),
+            outputText: sanitizeText(output).text,
+            tokensInput: null,
+            tokensOutput: null,
+            tokensReasoning: null,
+            tokensCacheRead: null,
+            tokensCacheWrite: null,
+            cost: null,
+            ts: new Date().toISOString(),
+            sectionSizes: promptOpts?.sectionSizes ?? null,
+          });
+        }
+        return output;
+      },
       dispose: () => session.dispose(),
     };
   }

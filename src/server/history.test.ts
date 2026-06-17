@@ -397,3 +397,40 @@ test("Phase 0 A.1: agent_turns table migrates idempotently on an existing DB (co
   assert.equal(rows[0]!.sessionId, "sess-a");
   assert.equal(rows[1]!.role, "qa-reviewer");
 });
+
+// FIX 3: the agent_turns 30-day prune compares an ISO-8601 (…T…Z) ts column against
+// datetime('now', '-30 days'), which yields the space-separated 'YYYY-MM-DD HH:MM:SS' form. A RAW
+// string compare skews exactly at the BOUNDARY: when the date portions match, the 'T' (0x54) at
+// index 10 of the ISO value sorts GREATER than the cutoff's ' ' (0x20), so a row that IS older than
+// the cutoff (same day, earlier time) wrongly fails `ts < cutoff` and is NOT pruned. The fix wraps
+// ts in datetime() so both operands are SQLite's canonical form. This self-contained test pins the
+// cutoff to a known instant and reproduces the boundary skew + proves the fixed predicate is correct.
+test("FIX 3: agent_turns prune predicate (datetime(ts)) is boundary-correct for ISO ts, unlike a raw compare", () => {
+  const db = new Database(":memory:");
+  // Mirror the production column shape: ts is ISO-8601 TEXT (…T…Z).
+  db.exec("CREATE TABLE agent_turns (id INTEGER PRIMARY KEY, ts TEXT NOT NULL)");
+
+  // A fixed cutoff so the assertions are deterministic (no dependency on the test clock).
+  const cutoff = "2026-05-18 12:00:00"; // SQLite datetime() form (space-separated)
+  // An ISO turn that is genuinely OLDER than the cutoff: SAME date, earlier time → MUST prune.
+  const olderSameDay = "2026-05-18T08:00:00.000Z";
+  // An ISO turn NEWER than the cutoff: same date, later time → MUST survive.
+  const newerSameDay = "2026-05-18T20:00:00.000Z";
+  db.prepare("INSERT INTO agent_turns (ts) VALUES (?)").run(olderSameDay);
+  db.prepare("INSERT INTO agent_turns (ts) VALUES (?)").run(newerSameDay);
+
+  // The OLD broken predicate (raw string compare) FAILS to prune the older-same-day row: at index 10
+  // its 'T' > the cutoff's ' ', so `olderSameDay < cutoff` is false. This demonstrates the boundary bug.
+  const rawWouldPrune = (db.prepare("SELECT COUNT(*) AS c FROM agent_turns WHERE ts < ?").get(cutoff) as { c: number }).c;
+  assert.equal(rawWouldPrune, 0, "raw string compare mis-sorts the older-same-day ISO row (the boundary bug: 0 pruned)");
+
+  // The FIXED predicate: datetime(ts) normalizes the ISO value to the same canonical form as the cutoff.
+  const fixedWouldPrune = (db.prepare("SELECT COUNT(*) AS c FROM agent_turns WHERE datetime(ts) < ?").get(cutoff) as { c: number }).c;
+  assert.equal(fixedWouldPrune, 1, "datetime(ts) correctly identifies the older-same-day row as prunable");
+
+  db.prepare("DELETE FROM agent_turns WHERE datetime(ts) < ?").run(cutoff);
+  const survivors = db.prepare("SELECT ts FROM agent_turns").all() as Array<{ ts: string }>;
+  assert.equal(survivors.length, 1, "exactly the newer row must survive");
+  assert.equal(survivors[0]!.ts, newerSameDay, "the surviving row must be the newer-same-day one");
+  db.close();
+});

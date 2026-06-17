@@ -622,6 +622,35 @@ async function foldValueLearning(
   return { valueScore, curriculum };
 }
 
+// Regeneration-loop caps. Module-level so the runaway backstop (MAX_CYCLES, derived below)
+// and the loops that actually consume them share ONE source of truth — the derivation cannot
+// silently drift from the real loop bounds.
+//   MAX_REVIEW_ROUNDS    — reviewer reject→regenerate rounds inside one generateAndReview().
+//   MAX_STATIC_FIX_ROUNDS — static-gate (Filter B) repair rounds (tsc/eslint/list).
+const MAX_REVIEW_ROUNDS = 2;
+const MAX_STATIC_FIX_ROUNDS = 2;
+
+// Each generateAndReview() costs at most CYCLES_PER_GENERATE counter ticks: 1 for the entry
+// invocation + up to (MAX_REVIEW_ROUNDS - 1) in-loop review-round regenerations.
+const CYCLES_PER_GENERATE = 1 + (MAX_REVIEW_ROUNDS - 1);
+// In-session contract-repair headroom: each generateAndReview() may also fire up to ~2 repair
+// re-prompts (one generator, one reviewer) that each tick the shared counter via onRepair.
+const REPAIR_HEADROOM_PER_GENERATE = 2;
+
+// Derive the runaway BACKSTOP from the configured loop caps: the absolute ceiling above which the
+// shared cycle counter assumes a true runaway (a compounding generate→review→fix→coverage spiral),
+// NOT the symptom lever for tuning loop aggressiveness (that is Phases 3–4 — per-loop budgets).
+// The legitimate worst-case sequence of generateAndReview() entries is:
+//   initial(1) + static-fix loop(MAX_STATIC_FIX_ROUNDS) + exec-fix loop(maxRetries) + coverage-enforce(1)
+// and each of those entries costs up to CYCLES_PER_GENERATE counter ticks plus
+// REPAIR_HEADROOM_PER_GENERATE in-session repairs. So a default below this would TRUNCATE a
+// legitimate run; the backstop sits exactly at the worst case so only a true runaway above it stops.
+// Calibratable downward from Phase-0 agent-turn telemetry once real cycle distributions land.
+function deriveCycleBackstop(maxRetries: number): number {
+  const generateEntries = 1 + MAX_STATIC_FIX_ROUNDS + maxRetries + 1;
+  return generateEntries * (CYCLES_PER_GENERATE + REPAIR_HEADROOM_PER_GENERATE);
+}
+
 export async function runPipeline(
   app: AppConfig,
   sha: string,
@@ -680,9 +709,13 @@ export async function runPipeline(
   // Counting them would require coordinating across goroutines and would double-penalise
   // large-PR fan-out runs. The ceiling covers only the main-agent sequential path.
   //
-  // Default (≈ no ceiling): 9999 ensures the counter exists and is observed by tests
-  // without changing existing behaviour for apps that do not set iterationBudget.
-  const MAX_CYCLES = app.qa.iterationBudget ?? 9999;
+  // Default ceiling: a runaway BACKSTOP derived from the configured loop caps (NOT a flat 12,
+  // which truncated a legitimate worst-case run with maxRetries=5). The default sits exactly at
+  // the legitimate worst case — initial + static-fix + exec-fix + coverage-enforce generateAndReview
+  // entries, each costing review-round + repair headroom — so only a TRUE runaway above it is cut.
+  // This is the safety backstop, not the symptom lever (per-loop budgets are Phases 3–4); it is
+  // calibratable downward from Phase-0 telemetry. Apps can still override via qa.iterationBudget.
+  const MAX_CYCLES = app.qa.iterationBudget ?? deriveCycleBackstop(app.qa.fixLoop?.maxRetries ?? 2);
   let cycleCount = 0; // incremented BEFORE every generateAndReview() + before each repair re-prompt
   let retrievedRuleIds: string[] = []; // rule IDs retrieved for this run (for RunOutcome)
   let retrievedRules: LearningRule[] = []; // full retrieved rules (errorClass needed for governance)
@@ -1109,10 +1142,10 @@ export async function runPipeline(
     return { ...r, specs: onDisk };
   };
 
-  const MAX_REVIEW_ROUNDS = 2;
-  // Static-gate repair budget (Filter B). Mirrors the execution fix-loop: a trivial tsc/eslint/list
-  // error should get a bounded second chance, not fail the whole run on the first miss.
-  const MAX_STATIC_FIX_ROUNDS = 2;
+  // MAX_REVIEW_ROUNDS and MAX_STATIC_FIX_ROUNDS are module-level constants (the same source of
+  // truth the runaway-backstop derivation reads). The static-gate repair budget (Filter B) mirrors
+  // the execution fix-loop: a trivial tsc/eslint/list error should get a bounded second chance, not
+  // fail the whole run on the first miss.
 
   // Phase 6a: the shared cycle counter callback — wired as onRepair into every deps.generate()
   // and deps.review() call so that in-session contract-repair re-prompts increment cycleCount.

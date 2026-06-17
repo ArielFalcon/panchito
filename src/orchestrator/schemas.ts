@@ -80,7 +80,11 @@ export const AppConfigSchema = z
       // NOTE: generateParallel workers are intentionally excluded — they run inside their own
       // per-session timeout (OPENCODE_TIMEOUT_MS) and are bounded by that mechanism, not this
       // shared counter. This is by design: parallel workers are fire-and-join, not iterated loops.
-      // Default (undefined) → a large safe constant that does not change existing behaviour.
+      // Default (undefined) → a runaway BACKSTOP derived from the configured loop caps (review +
+      // static-fix + exec-fix + coverage-enforce, plus repair headroom — see pipeline.ts
+      // deriveCycleBackstop). It sits at the legitimate worst case so it never truncates a valid
+      // run (including maxRetries=5); only a true runaway above it is stopped. Calibratable down
+      // from Phase-0 telemetry. This is the safety backstop, NOT the symptom lever (Phases 3–4).
       iterationBudget: z.number().int().positive().optional(),
     }),
     code: z.boolean().optional(),

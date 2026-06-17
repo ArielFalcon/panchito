@@ -73,10 +73,10 @@ test("assemble: content within maxBytes is passed through unchanged", () => {
   assert.equal(sectionSizes["s"], Buffer.byteLength(content, "utf8"));
 });
 
-test("assemble: content exceeding maxBytes is truncated with a visible marker", () => {
+test("assemble: content exceeding maxBytes is truncated with a visible marker (overflow=summarize)", () => {
   const longContent = "X".repeat(1000);
   const maxBytes = 50;
-  const s = section("reviewer-corrections", "volatile", longContent, { maxBytes });
+  const s = section("reviewer-corrections", "volatile", longContent, { maxBytes, overflow: "summarize" });
   const { text, sectionSizes } = assemble([s]);
 
   // The capped output must be shorter than the original.
@@ -92,12 +92,83 @@ test("assemble: content exceeding maxBytes is truncated with a visible marker", 
   assert.equal(reportedSize, Buffer.byteLength(text, "utf8"));
 });
 
+// #6 regression: a cap that lands in the MIDDLE of a multi-byte UTF-8 sequence must not inject a
+// U+FFFD replacement char, and the truncated content must be a TRUE byte ceiling (≤ maxBytes).
+// "€" is 3 bytes (E2 82 AC); maxBytes=10 lands on the 4th char's lead byte (bytes 0-8 = 3 chars,
+// byte 9 = start of the 4th) → the partial lead byte must be dropped, leaving 9 valid bytes.
+test("assemble: a cap at a mid-multibyte boundary yields valid UTF-8 (no U+FFFD) within the ceiling", () => {
+  const content = "€".repeat(20); // 60 bytes of 3-byte chars
+  const maxBytes = 10;
+  const { text, sectionSizes } = assemble([section("reviewer-corrections", "volatile", content, { maxBytes, overflow: "summarize" })]);
+
+  // No replacement char anywhere in the output.
+  assert.doesNotMatch(text, /�/, "no U+FFFD replacement char may appear");
+
+  // Isolate the truncated CONTENT (everything before the appended cap marker line).
+  const markerIdx = text.indexOf("\n…(section");
+  assert.ok(markerIdx > 0, "the cap marker must be appended");
+  const truncatedContent = text.slice(0, markerIdx);
+
+  // The truncated content is a true byte ceiling and a whole number of complete code points.
+  assert.ok(
+    Buffer.byteLength(truncatedContent, "utf8") <= maxBytes,
+    `truncated content (${Buffer.byteLength(truncatedContent, "utf8")} bytes) must be ≤ maxBytes (${maxBytes})`,
+  );
+  assert.equal(truncatedContent, "€€€", "exactly 3 whole '€' chars (9 bytes) fit under a 10-byte cap");
+  // sectionSizes reflects the full (content + marker) byte length actually emitted.
+  assert.equal(sectionSizes["reviewer-corrections"], Buffer.byteLength(text, "utf8"));
+});
+
 test("assemble: maxBytes=0 means uncapped (no truncation)", () => {
   const longContent = "Y".repeat(100_000);
   const s = section("diff", "semi-stable", longContent, { maxBytes: 0, language: "verbatim" });
   const { text, sectionSizes } = assemble([s]);
   assert.equal(text, longContent);
   assert.equal(sectionSizes["diff"], Buffer.byteLength(longContent, "utf8"));
+});
+
+// ── Overflow policy (FIX 2) ──────────────────────────────────────────────────
+
+// FIX 2: an overflow="drop" section that exceeds maxBytes must be OMITTED entirely — never
+// truncated mid-content (a half-cut instruction can read as a DIFFERENT instruction). This is
+// the policy the production reviewer-corrections section declares (prompts.ts).
+test("assemble: an overflow='drop' section over budget is omitted entirely (not truncated)", () => {
+  const longContent = "Z".repeat(1000);
+  const maxBytes = 50;
+  const dropped = section("reviewer-corrections", "volatile", longContent, { maxBytes, overflow: "drop" });
+  // A neighbouring task section proves the assembler keeps going after a drop.
+  const keep = section("task", "task", "## TASK\nthe objective");
+  const { text, sectionSizes } = assemble([dropped, keep]);
+
+  // The over-budget drop section contributes NOTHING — no content, no marker, no size entry.
+  assert.ok(!text.includes("Z"), "dropped section content must not appear");
+  assert.doesNotMatch(text, /capped at 50 bytes/, "a dropped section must not emit a truncation marker");
+  assert.ok(!("reviewer-corrections" in sectionSizes), "a dropped section must be absent from sectionSizes");
+  // The other section is unaffected.
+  assert.ok(text.includes("## TASK"), "non-overflowing sections must still be assembled");
+  assert.ok("task" in sectionSizes, "the kept section must be in sectionSizes");
+});
+
+// FIX 2: an overflow='drop' section that is WITHIN budget passes through unchanged (drop only
+// fires on overflow, never on in-budget content).
+test("assemble: an overflow='drop' section within budget is passed through unchanged", () => {
+  const content = "within budget";
+  const s = section("reviewer-corrections", "volatile", content, { maxBytes: 500, overflow: "drop" });
+  const { text, sectionSizes } = assemble([s]);
+  assert.equal(text, content, "in-budget drop section must be emitted verbatim");
+  assert.equal(sectionSizes["reviewer-corrections"], Buffer.byteLength(content, "utf8"));
+});
+
+// FIX 2: overflow='summarize' has no summarizer yet, so it DEGRADES to truncate-with-marker
+// (the documented fallback) — same observable behaviour as before this fix for that policy.
+test("assemble: an overflow='summarize' section over budget is truncated with a marker (degraded fallback)", () => {
+  const longContent = "W".repeat(1000);
+  const maxBytes = 40;
+  const s = section("reviewer-corrections", "volatile", longContent, { maxBytes, overflow: "summarize" });
+  const { text, sectionSizes } = assemble([s]);
+  assert.match(text, /capped at 40 bytes/, "summarize must fall back to truncation-with-marker");
+  assert.ok("reviewer-corrections" in sectionSizes, "a truncated section is still emitted (present in sectionSizes)");
+  assert.ok(sectionSizes["reviewer-corrections"]! < Buffer.byteLength(longContent, "utf8"));
 });
 
 // ── Scaffold vs verbatim language ────────────────────────────────────────────

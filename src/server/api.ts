@@ -475,7 +475,15 @@ function handleRunTurns(res: ServerResponse, deps: ApiDeps, id: string): boolean
     json(res, 404, { error: `run not found: ${id}` });
     return true;
   }
-  json(res, 200, deps.getAgentTurns(id));
+  // Defensive egress sanitization, matching sanitizeRecord on the sibling run-read endpoints.
+  // prompt_text embeds the live-DEV domSnapshot and is persisted RAW (output_text is sanitized at
+  // capture, but re-sanitizing is idempotent and keeps the egress pass uniform across both fields).
+  const turns = deps.getAgentTurns(id).map((t) => ({
+    ...t,
+    promptText: sanitizeText(t.promptText).text,
+    outputText: sanitizeText(t.outputText).text,
+  }));
+  json(res, 200, turns);
   return true;
 }
 

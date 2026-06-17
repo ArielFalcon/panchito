@@ -319,8 +319,12 @@ function ensureDb(): void {
   db.prepare(`DELETE FROM runs WHERE at < datetime('now', '-${DELETE_MAX_AGE_DAYS} days')`).run();
   // Bound the durable event log: drop events older than the run retention window (ts is epoch ms).
   db.prepare("DELETE FROM run_events WHERE ts < ?").run(Date.now() - DELETE_MAX_AGE_DAYS * 24 * 60 * 60 * 1000);
-  // Prune agent_turns older than the retention window.
-  db.prepare(`DELETE FROM agent_turns WHERE ts < datetime('now', '-${DELETE_MAX_AGE_DAYS} days')`).run();
+  // Prune agent_turns older than the retention window. agent_turns.ts is ISO-8601 (…T…Z) TEXT, but
+  // datetime('now', …) yields the space-separated 'YYYY-MM-DD HH:MM:SS' form — a raw string compare
+  // would mis-sort (the 'T' > ' ' at index 10 makes every ISO value sort GREATER, so nothing prunes).
+  // Wrap ts in datetime() so BOTH sides are SQLite's canonical datetime form: a correct boundary
+  // compare, consistent with run_events (which prunes correctly via its own typed epoch-ms compare).
+  db.prepare(`DELETE FROM agent_turns WHERE datetime(ts) < datetime('now', '-${DELETE_MAX_AGE_DAYS} days')`).run();
 
   initialized = true;
 }

@@ -6,6 +6,8 @@ import {
   startActivitySink,
   type LiveActivity,
   type AgentDeps,
+  type AgentOpenDescriptor,
+  type AgentTurnEvent,
 } from "../integrations/opencode-client";
 import type { RunEventBody } from "../contract/events";
 import type { UsageSnapshot } from "../qa/usage";
@@ -80,8 +82,16 @@ export class OpenCodeRuntimeStrategy implements AgentRuntimeStrategy {
   async openSession(
     role: AgentRole,
     cwd: string,
-    // onUsage is forwarded verbatim to deps.open (the typed usage path — see AgentRuntimeStrategy).
-    opts?: { signal?: AbortSignal; timeoutMs?: number; model?: string; onUsage?: (u: UsageSnapshot) => void },
+    // onUsage/descriptor/onTurn are forwarded verbatim to deps.open: the typed usage + turn-telemetry
+    // paths. defaultAgentDeps.open builds the AgentTurnEvent funnel from the descriptor (see AgentRuntimeStrategy).
+    opts?: {
+      signal?: AbortSignal;
+      timeoutMs?: number;
+      model?: string;
+      onUsage?: (u: UsageSnapshot) => void;
+      descriptor?: AgentOpenDescriptor;
+      onTurn?: (t: AgentTurnEvent) => void;
+    },
   ): Promise<AgentRuntimeSession> {
     const deps = await this.deps();
     return deps.open(ROLE_TO_OPENCODE_AGENT[role], cwd, opts);

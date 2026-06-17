@@ -71,7 +71,7 @@ export function buildWorkerPromptAssembled(w: ParallelWorkerInput): AssembledPro
   const rules = w.needsUi
     ? [
         w.domSnapshot
-          ? `- You have NO browser. The injected a11y tree above is your ONLY source of DOM truth — transcribe it directly into selectors; do NOT navigate or snapshot.`
+          ? `- You have NO browser. The injected a11y tree section in this prompt is your ONLY source of DOM truth — transcribe it directly into selectors; do NOT navigate or snapshot.`
           : `- You have NO browser. No a11y tree was injected — derive selectors from the brief and mark them unverified in a comment (e.g. // selector unverified — no snapshot available).`,
         `- Prefer getByRole/getByLabel/getByTestId; scope to a section; no waitForTimeout; no network mocks.`,
         `- getByRole matches the ACCESSIBILITY TREE, not the HTML tag: a <th> is often NOT a "columnheader", a <table> may lose its "table"/"row"/"cell" roles (Bootstrap/CSS strips them). Use ONLY roles + names you LITERALLY SEE in the injected tree; if the role isn't there, use getByText or a scoped locator. A getByRole that matches 0 elements passes review but TIMES OUT on execution.`,
@@ -361,7 +361,7 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
           `- Use ONLY serena to read code (activate_project, find_symbol, get_symbols_overview) — no Playwright MCP.`,
           `- Extract from STRUCTURED sources: every route from a routing file, every operation from an OpenAPI spec.`,
           `- Consult the architecture-mapping skill for detailed extraction patterns per source type.`,
-          `- The task block above has the complete procedure. Follow it precisely.`,
+          `- The task block in this prompt has the complete procedure. Follow it precisely.`,
         ]
       : isCode
       ? [
@@ -981,17 +981,17 @@ export function buildReviewerPromptAssembled(input: ReviewInput): AssembledPromp
 
   // STABLE prefix: the reviewing instructions (stable for the reviewer role).
   const rulesInstruction = input.learnedRules
-    ? [`6. Also REJECT if any spec violates an app-specific reject-on-sight rule listed above.`]
+    ? [`6. Also REJECT if any spec violates an app-specific reject-on-sight rule provided in this prompt.`]
     : [];
   const instructionsContent = [
     `## Instructions`,
-    `1. The spec contents are provided above — no need to read files.`,
+    `1. The spec contents are provided in this prompt — no need to read files.`,
     `2. Apply the test-value-review skill from BOTH perspectives (value + robustness).`,
     `3. Answer: could ${obj.targetNoun} be BROKEN and these tests STILL be green?`,
     `4. Be strict — a single anti-pattern in any spec means rejection.`,
     `5. STAY IN YOUR LANE — judge VALUE and ROBUSTNESS. The GENERATOR owns ground-truth against the`
       + ` live app (it navigated DEV). Judge a concrete UI fact (exact label, button/link text, route)`
-      + ` ONLY when the ${input.domSnapshot ? "Live DEV DOM above" : "spec itself"} confirms it. NEVER`
+      + ` ONLY when the ${input.domSnapshot ? "Live DEV DOM section" : "spec itself"} confirms it. NEVER`
       + ` assert a UI fact from memory: an unconfirmed guess that a label/route "should be" something is`
       + ` NOT a valid correction — omit it. Reject on what you can SEE (no assertions, fragile selectors,`
       + ` wrong objective, missing cleanup), not on guessed app specifics.`,
@@ -1041,7 +1041,8 @@ export function buildReviewerPromptAssembled(input: ReviewInput): AssembledPromp
     section("reviewer-instructions", "stable-prefix", instructionsContent, { priority: 2, cacheable: true }),
     // SEMI-STABLE: the objective (commit diff for diff mode, guidance for manual, etc.).
     section("reviewer-objective", "semi-stable", objectiveContent, { priority: 1, language: "verbatim" }),
-    // VOLATILE: DOM grounding (priority 1 — first in VOLATILE so instructions can reference "above").
+    // VOLATILE: DOM grounding (priority 1 — first in VOLATILE so it precedes the spec contents that
+    // reference it; the instructions refer to it position-independently as "the Live DEV DOM section").
     ...(domContent ? [section("reviewer-dom", "volatile", domContent, { priority: 1 })] : []),
     // VOLATILE: spec contents (priority 2 — the primary content the reviewer judges).
     section("reviewer-specs", "volatile", specContent, { priority: 2 }),

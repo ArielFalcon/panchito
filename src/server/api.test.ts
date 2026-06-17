@@ -1046,6 +1046,40 @@ test("phase-0b: GET /api/runs/:id/turns returns the saved turns for the run as a
   assert.equal(body[1].runId, "r1", "reviewer turn must have the parent run's runId");
 });
 
+// #4 regression: the /turns egress must run prompt_text + output_text through sanitizeText, matching
+// the defensive egress pass the sibling run-read endpoints apply (prompt_text embeds the live-DEV
+// domSnapshot, persisted raw). A secret in either field must be redacted before it leaves the system.
+test("phase-0b: GET /api/runs/:id/turns sanitizes prompt_text and output_text before egress", async () => {
+  const record: RunRecord = { id: "r1", app: "demo", sha: "abc", target: "e2e", mode: "diff", status: "done", cases: [], logs: [], at: "t" };
+  const secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  const stubTurns = [
+    {
+      runId: "r1", sessionId: "s1", role: "qa-generator", round: 0, isRepair: false,
+      ts: "2026-06-16T00:00:00.000Z", objective: "feat: add login",
+      // prompt_text carries the (raw-persisted) domSnapshot; output_text carries the agent reply.
+      promptText: `## Live DEV DOM\ntoken=${secret}\nbutton: Submit`,
+      outputText: `done — leaked ${secret}`,
+      promptBytes: 50, tokensInput: 100, tokensOutput: 50,
+      tokensReasoning: 0, tokensCacheRead: 20, tokensCacheWrite: 5, cost: 0.001,
+    },
+  ];
+  const res = mkRes();
+  await handleApi(
+    mkReq("GET", "/api/v1/runs/r1/turns"),
+    res,
+    deps({ getRecord: () => record, getAgentTurns: () => stubTurns as any }),
+  );
+  assert.equal(res.status, 200);
+  // The raw secret must not appear anywhere in the response body.
+  assert.doesNotMatch(res.body, /ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ/, "secret must be redacted in the /turns egress");
+  const body = JSON.parse(res.body);
+  assert.doesNotMatch(body[0].promptText, /ghp_/, "prompt_text must be sanitized");
+  assert.doesNotMatch(body[0].outputText, /ghp_/, "output_text must be sanitized");
+  assert.match(body[0].promptText, /REDACTED/);
+  // Non-secret content survives (the button label is still readable).
+  assert.match(body[0].promptText, /button: Submit/);
+});
+
 test("phase-0b: GET /api/runs/:id/turns returns an empty array when no turns exist for the run", async () => {
   const record: RunRecord = { id: "r1", app: "demo", sha: "abc", target: "e2e", mode: "diff", status: "done", cases: [], logs: [], at: "t" };
   const res = mkRes();

@@ -20,10 +20,13 @@
 // the assembler stamps English on its own structure while leaving user content alone.
 //
 // Per-section byte caps (`maxBytes`) are the P5 hygiene fix. When a section exceeds
-// its cap, the overflow policy (`summarize` | `drop`) determines what happens. In
-// this Phase-1b implementation the assembler enforces the cap via truncation with a
-// visible marker — the full budget engine (Slice F, Phase 2) resolves it against the
-// role's model-window catalog.
+// its cap, the section's `overflow` policy determines what happens:
+//   `drop`      → the whole section is OMITTED (no half-truncated content that could
+//                 read as a different instruction than intended).
+//   `summarize` → there is no summarizer in this phase, so it DEGRADES to truncation
+//                 with a visible marker (same path as an in-budget cap). The full
+//                 budget engine (Slice F, Phase 2) — which resolves caps against the
+//                 role's model-window catalog and adds real summarization — supersedes this.
 //
 // `assemble()` returns the assembled string AND a per-section size map
 // (`sectionSizes`) that is emitted to the Phase-0 turn telemetry so every boundary
@@ -77,17 +80,35 @@ export interface AssembledPrompt {
   sectionSizes: Record<string, number>;
 }
 
+// Truncate a UTF-8 buffer to at most `maxBytes`, stripping any trailing bytes that form an
+// INCOMPLETE multi-byte sequence. `buf.subarray(0, maxBytes).toString("utf8")` would instead
+// decode a split sequence into a U+FFFD replacement char AND can emit MORE bytes than maxBytes
+// (U+FFFD is 3 bytes) — so the truncated content is neither clean nor a true ceiling. By cutting
+// at a UTF-8 sequence boundary we return valid text whose byte length is guaranteed ≤ maxBytes.
+function truncateToValidUtf8(buf: Buffer, maxBytes: number): string {
+  let end = Math.min(maxBytes, buf.length);
+  // Walk back off any continuation bytes (0b10xxxxxx); then, if we're sitting on a lead byte whose
+  // full sequence would run past `end`, drop that lead byte too. The result is a whole number of
+  // complete code points and never exceeds maxBytes.
+  while (end > 0 && (buf[end] !== undefined) && (buf[end]! & 0xc0) === 0x80) end--;
+  if (end > 0) {
+    const lead = buf[end - 1]!;
+    const seqLen = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+    if (seqLen > 1 && end - 1 + seqLen > Math.min(maxBytes, buf.length)) end--;
+  }
+  return buf.subarray(0, end).toString("utf8");
+}
+
 // Cap a string to `maxBytes` bytes (UTF-8). Returns the original string when the cap
-// is 0 or when the string is already within the cap.
+// is 0 or when the string is already within the cap. Otherwise the section content is
+// truncated at a UTF-8 boundary (a true byte ceiling, no U+FFFD replacement char) and a
+// visible marker is appended so the observer knows the section was capped.
 function capToBytes(text: string, maxBytes: number, sectionId: string): string {
   if (maxBytes <= 0 || Buffer.byteLength(text, "utf8") <= maxBytes) return text;
-  // Truncate to maxBytes. Since UTF-8 can have multi-byte chars, work in bytes.
   const buf = Buffer.from(text, "utf8");
-  const truncated = buf.subarray(0, maxBytes).toString("utf8");
-  // Remove any partial multi-byte sequence at the end (Buffer.toString handles this gracefully
-  // but we add a visible marker so the observer knows the section was capped).
+  const truncated = truncateToValidUtf8(buf, maxBytes);
   console.warn(
-    `[context-assembler] section '${sectionId}' truncated from ${buf.length} to ${maxBytes} bytes (overflow policy applied).`,
+    `[context-assembler] section '${sectionId}' truncated from ${buf.length} to ${maxBytes} bytes (overflow='summarize' degrades to truncation).`,
   );
   return truncated + `\n…(section '${sectionId}' capped at ${maxBytes} bytes)`;
 }
@@ -112,7 +133,21 @@ export function assemble(sections: Section[]): AssembledPrompt {
     // Skip empty sections (no-op: don't add blank blocks or size entries for absent content).
     if (!raw) continue;
 
-    // Apply maxBytes cap.
+    // Honor the overflow policy when the section is over budget.
+    //   "drop"      → OMIT the whole section (better an absent section than a half-truncated one
+    //                 that misleads the agent — e.g. reviewer-corrections, where a mid-sentence cut
+    //                 could read as a different instruction than intended).
+    //   "summarize" → there is no summarizer yet, so this DEGRADES to truncate-with-marker (the
+    //                 same path as an in-budget cap). The full summarizing budget engine is Phase 2.
+    const overBudget = section.maxBytes > 0 && Buffer.byteLength(raw, "utf8") > section.maxBytes;
+    if (overBudget && section.overflow === "drop") {
+      console.warn(
+        `[context-assembler] section '${section.id}' (${Buffer.byteLength(raw, "utf8")} bytes) exceeds maxBytes ${section.maxBytes} and overflow='drop' — omitting the whole section.`,
+      );
+      continue; // dropped: no part pushed, no sectionSizes entry (treated like an absent section).
+    }
+
+    // "summarize" (degrades to truncation) and the in-budget case both go through capToBytes.
     const capped = capToBytes(raw, section.maxBytes, section.id);
 
     // Record the byte size of the (possibly capped) content.

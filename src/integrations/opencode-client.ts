@@ -628,7 +628,9 @@ export async function runOpencode(
   const session = await deps.open("qa-generator", input.mirrorDir, {
     signal: opts?.signal,
     timeoutMs,
-    descriptor: { runId: input.runId, role: "qa-generator", objective: input.intent?.message },
+    // In manual mode intent.message is undefined; fall back to guidance so the turn attributes an
+    // objective (parity with the reviewer descriptor in pipeline.ts: `opts.guidance ?? intent?.message`).
+    descriptor: { runId: input.runId, role: "qa-generator", objective: input.guidance ?? input.intent?.message },
   });
 
   // Register this session for SSE live activity so the agent's real-time events
@@ -1289,11 +1291,15 @@ const MAX_AGENT_TIMEOUT_MS = Math.max(...Object.values(TIMEOUT_BY_MODE));
 // opts.onUsage still wins (`opts?.onUsage ?? onUsage`). No sink ⇒ baseDeps is returned untouched.
 // Single home for this wrapper so the precedence cannot drift between the entrypoint (index.ts) and
 // the default pipeline factory (pipeline.ts), which both need identical behavior.
-// `onTurn` is injected similarly: caller-supplied wins; otherwise the provided sink is used.
+//
+// `onTurn` is TEST-ONLY: production never passes it (both call sites supply onUsage alone, and turn
+// persistence runs via the defaultOnTurn sink inside defaultAgentDeps.open, not through this
+// wrapper). It is retained solely so the colocated tests can exercise the same caller-wins
+// threading contract for onTurn (`opts?.onTurn ?? onTurn`) that onUsage uses.
 export function withUsageSink(
   baseDeps: AgentDeps,
   onUsage?: (u: UsageSnapshot) => void,
-  onTurn?: (t: AgentTurnEvent) => void,
+  onTurn?: (t: AgentTurnEvent) => void, // TEST-ONLY (see note above); production passes only onUsage.
 ): AgentDeps {
   if (!onUsage && !onTurn) return baseDeps;
   return {
@@ -1388,6 +1394,13 @@ export async function defaultAgentDeps(): Promise<AgentDeps> {
       // Track the per-call round counter so `onTurn` can report which round produced each output.
       // The counter starts at 0 for the first prompt() call on this session and increments each
       // time prompt() is invoked (whether a normal generation round or an in-session repair).
+      //
+      // SEMANTICS: `round` is SESSION-LOCAL — a per-session prompt index, NOT a per-run regeneration
+      // index. Each regeneration pass (fix / reviewer-corrections / coverage) opens a NEW session,
+      // so every main generation turn is round=0; only in-session contract-repair re-prompts push it
+      // to 1, 2, … within the same session. Cross-session regeneration ORDERING is therefore NOT
+      // encoded in `round`; it is reconstructed from the turn `ts` (and run_id) when reading
+      // agent_turns. (Threading a run-level regeneration index is intentionally out of scope here.)
       let _round = 0;
 
       return {

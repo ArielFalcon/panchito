@@ -2093,6 +2093,44 @@ test("Phase 1a D.1: buildReviewerPrompt omits the DOM section when no snapshot i
   }
 });
 
+// Phase 1b deixis guard (regression for the stale "above" wording): the canonical reorder places the
+// ## Instructions section BEFORE the spec contents and the Live DEV DOM, so any instruction that
+// claims either is "above" is FALSE. Assert the instructions are position-independent AND that the
+// real section order matches the wording (Instructions precede both specs and DOM).
+test("Phase 1b: reviewer Instructions are position-independent and precede the specs/DOM they reference", () => {
+  const dir = mkdtempSync(join(tmpdir(), "qa-rev-prompt-deixis-"));
+  mkdirSync(join(dir, "e2e"), { recursive: true });
+  writeFileSync(join(dir, "e2e", "login.spec.ts"), "// SPEC_BODY_MARKER\ntest('x', async () => {});");
+  try {
+    const p = buildReviewerPrompt(makeReviewInput(dir, { domSnapshot: "button: Submit", learnedRules: "- avoid waitForTimeout" }));
+
+    // Isolate the Instructions section (up to the next "## " heading) so a legitimate "above" in a
+    // later section (e.g. spec contents referencing the DOM) cannot mask a stale instruction.
+    const instrStart = p.indexOf("## Instructions");
+    assert.ok(instrStart >= 0, "Instructions section must be present");
+    const afterInstr = p.slice(instrStart + "## Instructions".length);
+    const nextHeading = afterInstr.indexOf("\n## ");
+    const instructions = nextHeading >= 0 ? afterInstr.slice(0, nextHeading) : afterInstr;
+    assert.doesNotMatch(
+      instructions,
+      /\babove\b/i,
+      "no reviewer instruction may claim content is 'above' (canonical order puts Instructions BEFORE specs/DOM)",
+    );
+
+    // The wording the fix uses is present and position-neutral.
+    assert.match(p, /spec contents are provided in this prompt/i);
+    assert.match(p, /Live DEV DOM section/);
+
+    // The structural order matches the wording: Instructions BEFORE the DOM and BEFORE the specs.
+    const domIdx = p.indexOf("## Live DEV DOM");
+    const specsIdx = p.indexOf("## Specs to review");
+    assert.ok(domIdx > instrStart, "Live DEV DOM must appear AFTER the Instructions section");
+    assert.ok(specsIdx > instrStart, "Specs must appear AFTER the Instructions section");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("Phase 1a D.1: buildReviewerPrompt injects learnedRules when present and adds the extra rule instruction", () => {
   const dir = mkdtempSync(join(tmpdir(), "qa-rev-prompt-rules-"));
   mkdirSync(join(dir, "e2e"), { recursive: true });
@@ -2107,11 +2145,13 @@ test("Phase 1a D.1: buildReviewerPrompt injects learnedRules when present and ad
   }
 });
 
-// D.2: byte-identical proof — buildReviewerPrompt output matches what reviewIndependently used to
-// build inline. The existing reviewIndependently tests (independence guard, DOM injection, manual
-// mode, complete mode) still pass UNCHANGED — they test the outer function's behavior, which now
-// calls buildReviewerPrompt. This test asserts the builder directly against the same expected
-// prompt structure those tests check, confirming the extraction is byte-identical.
+// D.2: consumption proof — buildReviewerPrompt output is what reviewIndependently sends to the
+// session. The existing reviewIndependently tests (independence guard, DOM injection, manual mode,
+// complete mode) still pass UNCHANGED — they test the outer function's behavior, which now calls
+// buildReviewerPrompt. This test asserts the builder is consumed verbatim by reviewIndependently
+// via the structural markers the pure builder assembles. NOTE: Phase 1b reordered the assembled
+// sections (canonical STABLE → SEMI-STABLE → VOLATILE → TASK → CRITICAL-recap), so the output is no
+// longer "byte-identical" to the pre-extraction inline build — only structurally equivalent.
 test("Phase 1a D.2: buildReviewerPrompt output is consumed verbatim by reviewIndependently (behavior preserved)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "qa-rev-prompt-identity-"));
   const e2eDir = join(dir, "e2e");

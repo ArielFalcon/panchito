@@ -1840,8 +1840,9 @@ test("usage: verdict and published are identical with and without usage (observa
 // generateParallel workers are intentionally NOT counted — they are bounded by their own
 // per-session timeout (OPENCODE_TIMEOUT_MS), not by iterated loops. This is by design.
 
-// Test 6a-1: Default behaviour unchanged — no iterationBudget → counter exists but never
-// triggers; a normal single-generation run still publishes.
+// Test 6a-1: Default behaviour unchanged — no iterationBudget → the derived runaway backstop
+// (24 for the default maxRetries=2) applies, far above a normal single-generation run (1 cycle),
+// so it never triggers and the run still publishes.
 test("phase-6a: default behaviour unchanged when iterationBudget is not configured", async () => {
   const calls: string[] = [];
   const d = deps(passing(), calls);
@@ -1945,6 +1946,68 @@ test("phase-6a: onRepair callback increments cycleCount and logs the event", asy
   assert.ok(
     logs.some((l) => /in-session repair re-prompt/i.test(l)),
     `expected a repair-counter log; got:\n${logs.join("\n")}`,
+  );
+});
+
+// Test 6a-6 (FIX 1): the default ceiling is a runaway BACKSTOP DERIVED from the configured caps,
+// not the old flat 12. With maxRetries=5 the derived backstop is 36. A LEGITIMATE worst-case trace
+// that consumes 14 cycles (entry + 12 in-session repairs + 1 mid-review regen) — which the old flat
+// 12 WOULD have truncated — must NOT be cut short: the review-round regeneration still fires.
+test("phase-6a (FIX 1): a legitimate worst-case trace with maxRetries=5 is NOT truncated by the derived default", async () => {
+  const calls: string[] = [];
+  const logs: string[] = [];
+  // No iterationBudget → default derives from maxRetries=5 → backstop 36.
+  const budgetApp: AppConfig = { ...app, qa: { ...app.qa, needsReview: true, fixLoop: { maxRetries: 5 } } };
+  // First generate fires onRepair 12× (cycleCount: 1 entry + 12 = 13). Round-0 review rejects →
+  // mid-review regen ticks to 14. 14 ≤ 36 ⇒ not blocked ⇒ a SECOND generate fires (which approves).
+  const d = deps(passing(), calls, {
+    review: [
+      { approved: false, corrections: ["fix selector"], parsed: true },
+      { approved: true, corrections: [], parsed: true },
+    ],
+  });
+  d.log = (m: string) => logs.push(m);
+  let firstGenerate = true;
+  (d as PipelineDeps).generate = async (_input, _signal, _onProgress, _onUsage, onRepair) => {
+    calls.push("generate");
+    if (firstGenerate) {
+      firstGenerate = false;
+      for (let i = 0; i < 12; i++) onRepair?.(); // 12 in-session contract repairs
+    }
+    return generated;
+  };
+  const result = await runPipeline(budgetApp, "abc1234def", d);
+  const genCount = calls.filter((c) => c === "generate").length;
+  assert.equal(genCount, 2, `derived backstop (36) must allow the 14-cycle trace; got ${genCount} generate call(s)`);
+  assert.ok(
+    !logs.some((l) => /cycle-ceiling reached/i.test(l)),
+    `the derived backstop must NOT truncate a legitimate trace; got a ceiling log:\n${logs.join("\n")}`,
+  );
+  assert.equal(result.verdict, "pass", "the legitimate worst-case run should still pass");
+});
+
+// Test 6a-7 (FIX 1): a TRUE runaway above the derived ceiling IS stopped. With maxRetries=5 the
+// backstop is 36; a generate that fires 40 in-session repairs (cycleCount 41) is a runaway — the
+// next (mid-review) regeneration is blocked and the run concludes with the last state + a log.
+test("phase-6a (FIX 1): a runaway exceeding the derived ceiling IS stopped", async () => {
+  const calls: string[] = [];
+  const logs: string[] = [];
+  const budgetApp: AppConfig = { ...app, qa: { ...app.qa, needsReview: true, fixLoop: { maxRetries: 5 } } };
+  const d = deps(passing(), calls, {
+    review: [{ approved: false, corrections: ["fix selector"], parsed: true }],
+  });
+  d.log = (m: string) => logs.push(m);
+  (d as PipelineDeps).generate = async (_input, _signal, _onProgress, _onUsage, onRepair) => {
+    calls.push("generate");
+    for (let i = 0; i < 40; i++) onRepair?.(); // runaway: 40 in-session repairs past the 36 backstop
+    return generated;
+  };
+  await runPipeline(budgetApp, "abc1234def", d);
+  const genCount = calls.filter((c) => c === "generate").length;
+  assert.equal(genCount, 1, `the runaway must be stopped before a second generate; got ${genCount}`);
+  assert.ok(
+    logs.some((l) => /cycle-ceiling reached/i.test(l)),
+    `expected a cycle-ceiling log for the runaway; got:\n${logs.join("\n")}`,
   );
 });
 
