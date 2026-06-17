@@ -2194,6 +2194,97 @@ test("Phase 1a D.2: buildReviewerPrompt output is consumed verbatim by reviewInd
   assert.match(p, /\{"approved":false/);
 });
 
+// ── Phase 4: severity gate + stateful rounds — buildReviewerPrompt ────────────
+
+test("Phase 4: buildReviewerPrompt includes severity instructions in the output contract", () => {
+  // The output contract section must explain the blocking/advisory severity field so the
+  // reviewer knows to emit structured correction objects.
+  const dir = mkdtempSync(join(tmpdir(), "qa-rev-severity-contract-"));
+  mkdirSync(join(dir, "e2e"), { recursive: true });
+  writeFileSync(join(dir, "e2e", "login.spec.ts"), "// spec");
+  try {
+    const p = buildReviewerPrompt(makeReviewInput(dir));
+    assert.match(p, /severity/, "output contract must mention severity field");
+    assert.match(p, /blocking/, "output contract must explain blocking severity");
+    assert.match(p, /advisory/, "output contract must explain advisory severity");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Phase 4: buildReviewerPrompt without priorCorrections omits the prior-corrections section", () => {
+  // On round 1, there are no prior corrections to inject — the section must be absent.
+  const dir = mkdtempSync(join(tmpdir(), "qa-rev-no-prior-"));
+  mkdirSync(join(dir, "e2e"), { recursive: true });
+  writeFileSync(join(dir, "e2e", "login.spec.ts"), "// spec");
+  try {
+    const p = buildReviewerPrompt(makeReviewInput(dir)); // no priorCorrections
+    assert.doesNotMatch(p, /Prior-round corrections/, "no prior-corrections section on round 1");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Phase 4 (d): buildReviewerPrompt injects priorCorrections as a VOLATILE section on round 2+", () => {
+  // On round 2, the reviewer must receive its own round-1 corrections so it can converge.
+  const dir = mkdtempSync(join(tmpdir(), "qa-rev-prior-round-"));
+  mkdirSync(join(dir, "e2e"), { recursive: true });
+  writeFileSync(join(dir, "e2e", "login.spec.ts"), "// spec");
+  const priorCorrections = [
+    "[false-positive] login.spec.ts: PRIOR_BLOCKING_CORRECTION — add assertion",
+  ];
+  try {
+    const p = buildReviewerPrompt(makeReviewInput(dir, { priorCorrections }));
+    assert.match(p, /Prior-round corrections/, "prior-corrections section must appear");
+    assert.match(p, /PRIOR_BLOCKING_CORRECTION/, "the actual correction text must be injected");
+    assert.match(p, /approve.*blocking.*resolved/i, "convergence instruction must be present");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Phase 4: buildReviewerPrompt prior-corrections section appears AFTER specs in the assembled order", () => {
+  // The prior-corrections section is in the VOLATILE band at priority 4 (after specs at priority 2).
+  // This ensures it never crowds out the primary spec contents the reviewer is judging.
+  const dir = mkdtempSync(join(tmpdir(), "qa-rev-prior-order-"));
+  mkdirSync(join(dir, "e2e"), { recursive: true });
+  writeFileSync(join(dir, "e2e", "spec.spec.ts"), "// SPEC_CONTENT_MARKER");
+  const priorCorrections = ["[other] spec.spec.ts: PRIOR_CORRECTION_MARKER"];
+  try {
+    const p = buildReviewerPrompt(makeReviewInput(dir, { specs: ["spec.spec.ts"], priorCorrections }));
+    const specIdx = p.indexOf("SPEC_CONTENT_MARKER");
+    const priorIdx = p.indexOf("PRIOR_CORRECTION_MARKER");
+    assert.ok(specIdx !== -1 && priorIdx !== -1, "both markers must appear in the prompt");
+    assert.ok(specIdx < priorIdx, "spec content must appear BEFORE prior corrections");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Phase 4 regression: complete/exhaustive buildReviewerPrompt works unchanged (no priorCorrections by default)", () => {
+  // complete/exhaustive runs call buildReviewerPrompt with mode="complete" and no priorCorrections.
+  // The existing behavior must be preserved: no prior-corrections section, no regressions.
+  const dir = mkdtempSync(join(tmpdir(), "qa-rev-complete-reg-"));
+  mkdirSync(join(dir, "e2e", "flows"), { recursive: true });
+  writeFileSync(join(dir, "e2e", "flows", "complete.spec.ts"), "// COMPLETE_SPEC_MARKER");
+  try {
+    const p = buildReviewerPrompt(makeReviewInput(dir, {
+      mode: "complete",
+      specs: ["flows/complete.spec.ts"],
+      guidance: undefined,
+    }));
+    assert.doesNotMatch(p, /Prior-round corrections/, "no prior corrections on first complete/exhaustive round");
+    assert.match(p, /COMPLETE_SPEC_MARKER/, "spec content inlined");
+    // The whole-repo objective framing must appear (not the commit-diff framing).
+    assert.match(p, /whole-repo complete run/, "complete mode uses whole-repo objective framing");
+    // Severity contract must appear (Phase 4 — both complete and diff share the reviewer role).
+    assert.match(p, /blocking/, "severity blocking instruction in contract");
+    assert.match(p, /advisory/, "severity advisory instruction in contract");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── Slice F Phase 2: budget wiring end-to-end through the *Assembled builders ─
 //
 // The budget engine (model-window-catalog + assemble budgetBytes) is INERT unless

@@ -476,6 +476,146 @@ test("reviewer error fails closed: does not trust the generator or publish", asy
   assert.equal(h.issues.length, 1);
 });
 
+// ── Phase 4: severity-gated reviewer ─────────────────────────────────────────
+
+test("Phase 4 (a): advisory-only reviewer result APPROVES the gate (does not regenerate)", async () => {
+  // Gate rule: blockingCount=0 → approve, regardless of advisory corrections.
+  // The run should publish WITHOUT regenerating, even though the reviewer emitted corrections.
+  const calls: string[] = [];
+  const d = deps(passing(), calls, {
+    agents: [generated],
+    review: [
+      // Zero blocking corrections → gate passes on round 1.
+      {
+        approved: false, // model-level judgment (advisory nits found), but severity gate overrides
+        corrections: ["[fragile-selector] a.spec.ts: prefer getByRole — advisory"],
+        blockingCount: 0, // explicitly zero blocking
+        parsed: true,
+      },
+    ],
+  });
+  await runPipeline(app, "abc123", d);
+  assert.equal(calls.filter((c) => c === "generate").length, 1, "no regeneration for advisory-only verdict");
+  assert.equal(calls.filter((c) => c === "review").length, 1, "reviewed once");
+  assert.equal(d.published, true, "gate passes with advisory-only corrections");
+  assert.equal(d.issues.length, 0, "no Issue opened");
+});
+
+test("Phase 4 (b): blocking correction fails the gate and triggers regeneration", async () => {
+  // A result with blockingCount>0 must fail the gate and trigger a regeneration round.
+  const calls: string[] = [];
+  const d = deps(passing(), calls, {
+    agents: [generated, generated],
+    review: [
+      {
+        approved: false,
+        corrections: ["[false-positive] a.spec.ts: no assertion on the discount"],
+        blockingCount: 1, // one blocking correction → fail
+        parsed: true,
+      },
+      { approved: true, corrections: [], blockingCount: 0, parsed: true }, // round 2: clean
+    ],
+  });
+  await runPipeline(app, "abc123", d);
+  assert.equal(calls.filter((c) => c === "generate").length, 2, "regenerated after blocking correction");
+  assert.equal(d.published, true, "second round approved → published");
+});
+
+test("Phase 4 (c): missing blockingCount defaults to fail-closed (all corrections treated as blocking)", async () => {
+  // When blockingCount is absent on the ReviewResult, the gate must treat the corrections as
+  // blocking (fail-closed backward compat). This prevents pre-Phase-4 reviewer verdicts from
+  // accidentally passing the gate.
+  const calls: string[] = [];
+  const d = deps(passing(), calls, {
+    agents: [generated, generated],
+    review: [
+      {
+        approved: false,
+        corrections: ["[other] a.spec.ts: some correction with no blockingCount"],
+        // blockingCount absent → treated as corrections.length (=1, blocking)
+        parsed: true,
+      },
+      { approved: true, corrections: [], parsed: true },
+    ],
+  });
+  await runPipeline(app, "abc123", d);
+  assert.equal(calls.filter((c) => c === "generate").length, 2, "regenerated because missing blockingCount is fail-closed");
+  assert.equal(d.published, true);
+});
+
+test("Phase 4 (d): priorCorrections from round 1 are threaded into the round-2 review call", async () => {
+  // Stateful rounds: the reviewer's corrections from round 1 must appear as priorCorrections
+  // on the round-2 deps.review() call so the reviewer can judge convergence.
+  const calls: string[] = [];
+  const capturedReviewInputs: Array<import("./integrations/opencode-client").ReviewInput> = [];
+  const h = deps(passing(), calls, {
+    agents: [generated, generated],
+    review: [
+      { approved: false, corrections: ["[false-positive] a.spec.ts: BLOCKING_CORRECTION_ROUND1"], blockingCount: 1, parsed: true },
+      { approved: true, corrections: [], blockingCount: 0, parsed: true },
+    ],
+  });
+  // Intercept review calls to capture the ReviewInput for each round.
+  const origReview = h.review!;
+  h.review = async (input, ...rest) => {
+    capturedReviewInputs.push(input);
+    return origReview(input, ...rest);
+  };
+  await runPipeline(app, "abc123", h);
+  assert.equal(capturedReviewInputs.length, 2, "review called twice");
+  // Round 1: no prior corrections.
+  assert.equal(capturedReviewInputs[0]!.priorCorrections, undefined, "round 1 has no prior corrections");
+  // Round 2: the round-1 corrections must be present as priorCorrections.
+  assert.ok(
+    Array.isArray(capturedReviewInputs[1]!.priorCorrections) &&
+    capturedReviewInputs[1]!.priorCorrections!.some((c) => c.includes("BLOCKING_CORRECTION_ROUND1")),
+    `round-2 priorCorrections must carry round-1 corrections; got: ${JSON.stringify(capturedReviewInputs[1]!.priorCorrections)}`,
+  );
+});
+
+test("Phase 4 (e): approve-when-resolved — round 2 with zero blocking after round 1 blocking approves and publishes", async () => {
+  // Simulates the happy-path convergence: round 1 has a blocking correction, the generator
+  // fixes it, and round 2 finds zero blocking corrections → the gate approves and the run
+  // publishes without opening an Issue.
+  const calls: string[] = [];
+  const d = deps(passing(), calls, {
+    agents: [generated, generated],
+    review: [
+      { approved: false, corrections: ["[false-positive] a.spec.ts: missing assertion"], blockingCount: 1, parsed: true },
+      // Round 2: blocking resolved; one advisory nit remains. Gate must approve.
+      {
+        approved: false, // model may still say false for the advisory nit
+        corrections: ["[fragile-selector] a.spec.ts: prefer getByRole — advisory"],
+        blockingCount: 0, // zero blocking → gate approves
+        parsed: true,
+      },
+    ],
+  });
+  await runPipeline(app, "abc123", d);
+  assert.equal(calls.filter((c) => c === "generate").length, 2, "regenerated once after blocking");
+  assert.equal(calls.filter((c) => c === "review").length, 2, "reviewed twice");
+  assert.equal(d.published, true, "blocking resolved → published");
+  assert.equal(d.issues.length, 0, "no Issue opened");
+});
+
+// ── Phase 4 regression gate: complete/exhaustive review flow ──────────────────
+
+test("Phase 4 regression: complete/exhaustive runs also use the severity gate (advisory does not block)", async () => {
+  // complete/exhaustive runs also go through the reviewer. Ensure the severity gate
+  // does NOT break their review flow: advisory-only → still approves.
+  const calls: string[] = [];
+  const d = deps(passing(), calls, {
+    agents: [{ ...generated, specs: ["flows/complete.spec.ts"] }],
+    review: [
+      // Advisory-only verdict for a complete-mode review → must approve.
+      { approved: false, corrections: ["[other] flows/complete.spec.ts: minor advisory"], blockingCount: 0, parsed: true },
+    ],
+  });
+  await runPipeline(app, "abc123", d, "webhook", { target: "e2e", mode: "complete" });
+  assert.equal(calls.filter((c) => c === "generate").length, 1, "no regeneration for advisory-only in complete mode");
+  assert.equal(d.published, true, "complete mode: advisory does not block");
+});
+
 // ── change-coverage (Filter D) ───────────────────────────────────────────────
 
 const covApp = (mode: "off" | "signal" | "enforce", minRatio = 0.7): AppConfig => ({

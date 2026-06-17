@@ -798,11 +798,20 @@ export interface ReviewInput {
   // Phase 0b: the human-readable description of what these tests are supposed to defend
   // (injected as the reviewer-session objective so telemetry can slice by intent).
   objective?: string;
+  // Phase 4: the reviewer's OWN corrections from the PREVIOUS round. Injected so the
+  // reviewer can judge convergence: approve once the previously-raised BLOCKING issues
+  // are resolved; do not invent new nits on unchanged specs.
+  priorCorrections?: string[];
 }
 
 export interface ReviewResult {
   approved: boolean;
   corrections: string[];
+  // Phase 4: count of BLOCKING corrections (plain-string corrections without an explicit
+  // severity are treated as blocking — fail-closed backward compat). The gate passes when
+  // this is zero, regardless of advisory count. Absent means not yet populated (pre-Phase 4
+  // or parse miss): callers treat absent as "all corrections are blocking" (fail-closed).
+  blockingCount?: number;
   // The reviewer's short reasoning for the verdict — captured on APPROVE and reject so a
   // wrong auto-merge is auditable after the fact. Optional (older verdicts / parse misses
   // omit it). Persisted on RunOutcome.gateSignals.reviewerRationale.
@@ -863,13 +872,16 @@ export async function reviewIndependently(
       return {
         approved: v.approved,
         corrections: v.corrections,
+        // Phase 4: thread blockingCount so the caller's gate can pass on advisory-only
+        // verdicts without re-parsing the raw correction entries.
+        blockingCount: v.blockingCount,
         ...(v.rationale ? { rationale: v.rationale } : {}),
         parsed: true,
       };
     }
     // Still unusable after one repair. Fail-closed direction (no false green), flagged as a
     // PARSE MISS so the caller does not mistake it for an actionable rejection.
-    return { approved: false, corrections: ["the independent reviewer produced no parseable verdict"], parsed: false };
+    return { approved: false, corrections: ["the independent reviewer produced no parseable verdict"], blockingCount: 0, parsed: false };
   } finally {
     await session.dispose().catch((err) => {
       console.warn(`[qa] reviewer session dispose failed: ${err instanceof Error ? err.message : String(err)}`);

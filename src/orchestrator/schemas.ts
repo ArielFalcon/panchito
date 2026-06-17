@@ -211,10 +211,42 @@ export type ValidatedGeneratorVerdict = z.infer<typeof GeneratorVerdictSchema>;
 // tolerant (`.catch`) so a formatting slip in advisory fields can NEVER turn a genuine
 // approval into a fail-closed rejection. A missing/non-boolean `approved` is the one thing
 // worth a repair re-prompt.
+//
+// Phase 4: each correction entry may carry an optional `severity` field.
+// The gate approves when zero BLOCKING corrections remain (advisory corrections are
+// non-fatal notes — recorded but do not fail the gate).
+// Backward-compat rule: a plain string correction (no severity) defaults to BLOCKING
+// (fail-closed). A structured entry without a valid severity also defaults to BLOCKING.
+// Entries are tolerant (.catch) so a formatting slip in any single correction never
+// turns a genuine approval into a fail-closed rejection.
+export const CorrectionEntrySchema = z.union([
+  // Structured entry with severity: the Phase-4 contract.
+  z.object({
+    text: z.string(),
+    severity: z.enum(["blocking", "advisory"]),
+  }),
+  // Legacy plain-string entry: treated as blocking (fail-closed backward compat).
+  z.string(),
+]);
+
+export type CorrectionEntry = z.infer<typeof CorrectionEntrySchema>;
+
+// Resolve a correction entry to its canonical text string.
+export function correctionText(entry: CorrectionEntry): string {
+  return typeof entry === "string" ? entry : entry.text;
+}
+
+// Resolve a correction entry's severity. Defaults to "blocking" for plain strings
+// and any entry without an explicit severity (fail-closed backward compat).
+export function correctionSeverity(entry: CorrectionEntry): "blocking" | "advisory" {
+  if (typeof entry === "string") return "blocking";
+  return entry.severity;
+}
+
 export const ReviewerVerdictSchema = z.object({
   approved: z.boolean(),
   rationale: z.string().optional().catch(undefined),
-  corrections: z.array(z.string()).catch([]),
+  corrections: z.array(CorrectionEntrySchema).catch([]),
 });
 
 export type ValidatedReviewerVerdict = z.infer<typeof ReviewerVerdictSchema>;

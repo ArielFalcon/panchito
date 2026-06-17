@@ -1242,6 +1242,10 @@ export async function runPipeline(
     // regenerated spec set differs.
     let domSnapshot: string | undefined;
     let lastSpecsKey = "";
+    // Phase 4: track the prior-round corrections to thread into the NEXT review call so the
+    // reviewer can converge (approve once BLOCKING issues are resolved; skip new nits on
+    // unchanged specs). Initialized to undefined (no prior corrections on round 0).
+    let previousRoundCorrections: string[] | undefined;
     for (let round = 0; round < MAX_REVIEW_ROUNDS; round++) {
       if (r.specs.length === 0) {
         // A FIRST-round empty result is a legitimate no-op. A LATER (post-rejection)
@@ -1270,6 +1274,7 @@ export async function runPipeline(
           // candidates) so it enforces app-specific anti-patterns earned from past failures.
           // Phase 0b: thread runId + objective so the reviewer's agent_turns row carries a
           // non-null run_id, enabling per-role telemetry on the reviewer's turns.
+          // Phase 4: thread priorCorrections so the reviewer can converge across rounds.
           {
             diff: promptDiff, specs: r.specs, mirrorDir, e2eRelDir: isCode ? "" : E2E_DIR,
             baseUrl: app.dev?.baseUrl, intent, guidance: opts.guidance, appName: app.name,
@@ -1277,6 +1282,7 @@ export async function runPipeline(
             domSnapshot,
             runId: opts.runId,
             objective: opts.guidance ?? intent?.message,
+            ...(previousRoundCorrections ? { priorCorrections: previousRoundCorrections } : {}),
           },
           signal,
           usage.add.bind(usage),
@@ -1308,13 +1314,40 @@ export async function runPipeline(
       }
       // Reset counter on successful reviewer response
       consecutiveReviewerFailures = 0;
-      log(`[qa] independent reviewer round ${round + 1}/${MAX_REVIEW_ROUNDS}: approved=${review.approved} corrections=${review.corrections.length} (${Math.round((Date.now() - reviewStart) / 1000)}s)`);
+      // Phase 4: the gate passes when zero BLOCKING corrections remain, regardless of advisory count.
+      // A correction without an explicit severity (plain string) is treated as blocking — fail-closed.
+      // `blockingCount` is absent on pre-Phase-4 verdicts and parse misses; treat absent as "all blocking".
+      const blockingCount = review.blockingCount ?? review.corrections.length;
+      const advisoryCount = review.corrections.length - blockingCount;
+      log(
+        `[qa] independent reviewer round ${round + 1}/${MAX_REVIEW_ROUNDS}: approved=${review.approved}` +
+        ` corrections=${review.corrections.length} (blocking=${blockingCount}, advisory=${advisoryCount})` +
+        ` (${Math.round((Date.now() - reviewStart) / 1000)}s)`,
+      );
       if (review.rationale) reviewerRationale = review.rationale; // the verdict that ultimately decides this run
-      onReviewer?.(review.approved, review.approved ? [] : review.corrections);
-      if (!review.approved) reviewerCorrections.push(...review.corrections);
-      if (review.approved) return { ...r, approved: true, note: undefined };
+      // Phase 4: the gate verdict is: approved when zero BLOCKING corrections remain.
+      // The reviewer's own `approved` field reflects the model's judgment; we additionally
+      // enforce the severity gate so advisory-only outcomes never block the pipeline.
+      const gateApproves = blockingCount === 0;
+      onReviewer?.(gateApproves, gateApproves ? [] : review.corrections.filter((_, i) => {
+        // Surface only blocking corrections to the live ReviewerCard.
+        // We cannot easily re-derive severity from the flat string list, so surface all corrections
+        // when blockingCount > 0 and gateApproves is false — callers already tolerate this.
+        return true;
+      }));
+      if (!gateApproves) reviewerCorrections.push(...review.corrections);
+      // Phase 4: advisory-only → gate passes even if the model said "approved: false".
+      // Store the corrections as informational notes but do not regenerate.
+      if (gateApproves) {
+        if (advisoryCount > 0) {
+          log(`[qa] severity gate: ${advisoryCount} advisory correction(s) recorded but not blocking (zero blocking corrections).`);
+        }
+        return { ...r, approved: true, note: undefined };
+      }
+      // Phase 4: save this round's corrections to thread into the NEXT review call.
+      previousRoundCorrections = review.corrections;
       if (round === MAX_REVIEW_ROUNDS - 1) return { ...r, approved: false, note: review.corrections.join("; ") };
-      log(`[qa] applying ${review.corrections.length} reviewer correction(s) and regenerating...`);
+      log(`[qa] applying ${blockingCount} blocking correction(s) (${advisoryCount} advisory) and regenerating...`);
       onStep?.("retry");
       retries++;
       const regenStart = Date.now();

@@ -1024,6 +1024,13 @@ export function buildReviewerPromptAssembled(input: ReviewInput): AssembledPromp
   ].join("\n");
 
   // CRITICAL recap: the output contract — must appear last so the model's final action is the JSON.
+  // Phase 4: each correction is a structured object with `text` and `severity`.
+  // - "blocking": the test is broken/worthless as-is (false-positive, wrong-objective, missing-cleanup).
+  // - "advisory": style/robustness nit that does not make the test worthless on its own.
+  // The gate passes when zero BLOCKING corrections remain (advisory corrections are recorded but
+  // do not fail the gate and do not require regeneration).
+  // When priorCorrections are present, APPROVE once the previously-raised BLOCKING issues are
+  // resolved — do NOT invent new nits on specs that were not changed.
   const outputContractContent = [
     `Output your verdict as JSON with no text before or after. Always include a one or two`,
     `sentence "rationale" explaining the verdict — on APPROVAL too (why these tests genuinely`,
@@ -1032,7 +1039,11 @@ export function buildReviewerPromptAssembled(input: ReviewInput): AssembledPromp
     `is machine-classifiable: [false-positive] (asserts nothing / passes when the feature is`,
     `broken), [wrong-objective] (does not test ${obj.targetNoun}), [fragile-selector] (ambiguous or`,
     `brittle locator), [no-cleanup] (leaves test data behind), or [other].`,
-    `{"approved":false,"rationale":"why, in 1-2 sentences","corrections":["[fragile-selector] file.spec.ts: specific actionable fix"]}`,
+    `Each correction MUST be a structured object with "text" (the actionable message, prefixed with the class tag) and "severity":`,
+    `- "blocking": this issue makes the test worthless (false-positive, wrong-objective, missing cleanup) — fails the gate.`,
+    `- "advisory": style/robustness nit that does not make the test worthless alone — recorded but does not fail the gate.`,
+    `An unconfirmable UI selector (no DOM evidence in this prompt) MUST be advisory, never blocking.`,
+    `{"approved":false,"rationale":"why, in 1-2 sentences","corrections":[{"text":"[fragile-selector] file.spec.ts: specific actionable fix","severity":"blocking"},{"text":"[other] file.spec.ts: minor style nit","severity":"advisory"}]}`,
   ].join("\n");
 
   // SEMI-STABLE: the objective heading + body (changes per run — diff commits vs guidance).
@@ -1059,6 +1070,32 @@ export function buildReviewerPromptAssembled(input: ReviewInput): AssembledPromp
   // VOLATILE: proven app-specific rules as extra reject criteria (changes as the learning layer grows).
   const learnedRulesContent = input.learnedRules ? [``, input.learnedRules].join("\n") : "";
 
+  // VOLATILE: Phase 4 — prior-round corrections. Injected on round 2+ so the reviewer can
+  // converge: approve once the previously-raised BLOCKING issues are resolved; do not invent
+  // new nits on specs that were not changed since the last round.
+  // Capped at 8,000 bytes: this section is supplementary context, not the primary artifact.
+  const PRIOR_CORRECTIONS_MAX_BYTES = 8_000;
+  const priorCorrectionsContent = (() => {
+    if (!input.priorCorrections || input.priorCorrections.length === 0) return "";
+    const lines = input.priorCorrections.map((c, i) => `${i + 1}. ${c}`).join("\n");
+    const raw = [
+      `## Prior-round corrections (from YOUR previous verdict on these specs)`,
+      ``,
+      `The generator has addressed these corrections. Your task for this round:`,
+      `- APPROVE if the previously-raised BLOCKING issues are now resolved (do not re-raise them as new blocking corrections).`,
+      `- NEW blocking issues on UNCHANGED specs: only if the prior-round fix introduced a new anti-pattern.`,
+      `- Advisory nits on specs that are functionally identical to the prior round: omit.`,
+      ``,
+      lines,
+    ].join("\n");
+    // Truncate to budget if needed (graceful degradation — reviewer still has the spec contents).
+    if (Buffer.byteLength(raw, "utf8") > PRIOR_CORRECTIONS_MAX_BYTES) {
+      const truncated = raw.slice(0, PRIOR_CORRECTIONS_MAX_BYTES);
+      return truncated + "\n… (truncated — see spec contents for the full picture)";
+    }
+    return raw;
+  })();
+
   return assemble([
     // STABLE prefix: role framing + independence mandate.
     section("reviewer-role-framing", "stable-prefix", roleFramingContent, { priority: 1, cacheable: true }),
@@ -1073,6 +1110,9 @@ export function buildReviewerPromptAssembled(input: ReviewInput): AssembledPromp
     section("reviewer-specs", "volatile", specContent, { priority: 2 }),
     // VOLATILE: proven app-specific learned rules (priority 3 — supplementary reject criteria).
     ...(learnedRulesContent ? [section("reviewer-learned-rules", "volatile", learnedRulesContent, { priority: 3 })] : []),
+    // VOLATILE: Phase 4 prior-round corrections (priority 4 — convergence context; lowest priority
+    // in VOLATILE so it does not crowd out the spec contents or DOM grounding on budget overflow).
+    ...(priorCorrectionsContent ? [section("reviewer-prior-corrections", "volatile", priorCorrectionsContent, { priority: 4 })] : []),
     // CRITICAL recap: the output contract (must appear at the very end).
     section("reviewer-output-contract", "critical-recap", outputContractContent, { priority: 1 }),
   ], { budgetBytes: roleWindowBytes("qa-reviewer") });
