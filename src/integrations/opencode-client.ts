@@ -21,6 +21,7 @@ import { normalizeRoutes, MAX_ROUTES } from "../qa/dom-snapshot";
 import { sanitizeText } from "../orchestrator/sanitizer";
 import { ActivityRouter } from "./agent-activity";
 import { mapOpencodeEvent, eventRunId } from "./activity-mapper";
+import { reexploreKindFromEvent, reexploreTracker } from "./reexplore";
 import type { RunEventBody } from "../contract/events";
 import { appendLog, saveAgentTurn } from "../server/history";
 import { installHttpDispatcher } from "../util/net";
@@ -152,6 +153,7 @@ export function registerRunSession(sessionId: string, runId: string, directory: 
 export function unregisterRunSession(sessionId: string): void {
   activityRouter.unregister(sessionId);
   eventStreams.detach(sessionId);
+  reexploreTracker.clear(sessionId); // RE-2: free the per-session counts (read before this call).
 }
 
 // One routed, display-ready activity handed to the SSE consumer: the structured
@@ -194,6 +196,15 @@ export async function startScopedEventStream(
       if (!evt.type) continue;
 
       const raw = { type: evt.type, properties: evt.properties };
+
+      // RE-2: count re-exploration tool calls (browser_navigate/snapshot, serena) from the RAW
+      // `part.tool` — before mapOpencodeEvent collapses every tool into a 4-value `kind`. Keyed by
+      // session so each generation cycle gets its own counts. Observability only.
+      const reexKind = reexploreKindFromEvent(raw);
+      if (reexKind) {
+        const sid = (raw.properties?.part as { sessionID?: string } | undefined)?.sessionID;
+        if (sid) reexploreTracker.record(sid, reexKind);
+      }
 
       // Rich contract RunEvents (agent.activity/plan.updated/…) from the RAW event,
       // so ToolState.title/callID survive. Published to the owning run; a malformed
@@ -764,6 +775,22 @@ export async function runOpencode(
     };
   } finally {
     if (heartbeat) clearInterval(heartbeat);
+    // RE-2: report this cycle's re-exploration tool usage (objective telemetry). Read BEFORE the
+    // tracker is cleared. When the prompt carried grounding (Context Pack / DOM tree), a browser
+    // navigate/snapshot is REDUNDANT — surface it so RE-1 non-compliance is visible in the logs.
+    const reex = reexploreTracker.snapshot(session.id);
+    if (reex.total > 0) {
+      opts?.onProgress?.(
+        `[qa] re-exploration this cycle: ${reex.navigate} navigate, ${reex.snapshot} snapshot, ${reex.serena} serena`,
+      );
+      if ((input.contextPack || input.domSnapshot) && reex.navigate + reex.snapshot > 0) {
+        console.warn(
+          `[qa] WARNING: agent ran ${reex.navigate + reex.snapshot} browser navigate/snapshot call(s) despite ` +
+            `injected grounding — RE-1 directive ignored or the route was uncovered.`,
+        );
+      }
+    }
+    reexploreTracker.clear(session.id);
     if (input.runId) unregisterRunSession(session.id);
     await session.dispose().catch((err) => {
       console.warn(`[qa] session dispose failed: ${err instanceof Error ? err.message : String(err)}`);
