@@ -31,7 +31,7 @@ import {
   EventStreamManager,
   agentErrorToInfra,
 } from "./opencode-client";
-import { isInfraError } from "../errors";
+import { AgentUnavailableError, isInfraError } from "../errors";
 import type { ArchitectureContext } from "../qa/context";
 import type { ExplorationBrief } from "../qa/exploration-brief";
 
@@ -781,6 +781,19 @@ test("withTimeout resolves if the promise arrives in time", async () => {
 test("withTimeout rejects when the deadline elapses", async () => {
   const slow = new Promise((r) => setTimeout(() => r("late"), 50));
   await assert.rejects(() => withTimeout(slow, 5, "agent"), /timed out after 5ms/);
+});
+
+test("withTimeout can throw a typed InfraError so a slow model is not a pipeline crash", async () => {
+  const slow = new Promise((r) => setTimeout(() => r("late"), 50));
+  await assert.rejects(
+    () => withTimeout(slow, 5, "OpenCode prompt", AgentUnavailableError),
+    (err: unknown) => {
+      assert.ok(err instanceof AgentUnavailableError, "timeout must be an AgentUnavailableError");
+      assert.ok(isInfraError(err), "timeout must classify as infrastructure");
+      assert.match((err as Error).message, /OpenCode prompt: timed out after 5ms/);
+      return true;
+    },
+  );
 });
 
 test("buildPrompt renders the cross-repo service section in diff mode", () => {
