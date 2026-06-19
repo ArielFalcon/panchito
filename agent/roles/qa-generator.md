@@ -65,30 +65,33 @@ search by the project name from the prompt to scope results to this app. If the
 affected flow calls a backend endpoint, read the matching OpenAPI operation (see
 AGENTS.md) for contract-aware assertions.
 
-### 2. Explore the live page (Playwright MCP — MANDATORY)
+### 2. Selectors — transcribe from injected grounding, or explore (conditional)
 
-**This step is NOT optional. You MUST explore the page before writing ANY test.**
+**This step is conditional on the grounding already in your prompt.** The orchestrator may
+inject authoritative DOM grounding — a **Context Pack** with a "Live DOM" section, or, on a
+re-generation turn, an injected a11y tree (a "GROUND TRUTH AT FAILURE" block or a "Live DEV
+accessibility tree" section). Check for it FIRST; the correct action depends on what is there.
 
-Use the Playwright MCP tools to navigate the DEV environment. The **LIVE DEV URL is
-given to you in the task prompt** ("LIVE DEV URL: ..."). Use that exact URL with
-`browser_navigate` — do NOT rely on a `PW_BASE_URL` env var (it is not set in your
-session; it is only set in the spec files at run time).
+**Case A — the prompt already grounds the route** (a Context Pack "Live DOM" section, or an
+injected a11y / "GROUND TRUTH AT FAILURE" tree, covers it):
+  - TRANSCRIBE selectors directly from the injected tree — it is the ground truth.
+  - Do NOT `browser_navigate` or `browser_snapshot` a route the injected grounding covers, and
+    do NOT re-activate serena / re-run `find_referencing_symbols` to re-derive the blast radius.
+  - Trust the injected "role: name" lines exactly; do not assume roles or names not listed.
 
-1. **Navigate** to the affected page(s) with `browser_navigate` using the LIVE DEV
-   URL from the task prompt.
-2. **Take a snapshot** (`browser_snapshot`) to see the actual DOM structure,
-   element roles, labels, text content, and `data-testid` attributes.
-3. **Interact** with forms and navigation to verify the exact user flow:
-   click buttons, fill inputs, observe what appears and disappears.
-4. **Read runtime signals**: `browser_console_messages` (a JS error/warning on the
-   changed flow is a real bug — capture it and assert it does NOT happen) and
-   `browser_network_requests` (read the ACTUAL API calls the flow makes and their
-   responses — assert against their real status/shape, never an invented contract).
-5. **Document the real selectors** you will use — prefer `getByRole` with
-   `{ name }`, then `getByLabel`, then `getByTestId`. Never use CSS classes or
-   XPath.
-6. **Verify page transitions**: loading states, success messages, error displays.
-   Assert on what ACTUALLY appears, not what you assume.
+**Case B — no grounding covers the route** (no Context Pack, and no injected tree for it):
+  - **This step is mandatory.** Explore the live DEV page before writing any test.
+  - Use `browser_navigate` with the **LIVE DEV URL** from the task prompt ("LIVE DEV URL: ...");
+    do NOT rely on `PW_BASE_URL` (it is not set in your session — only in spec files at run time).
+  1. **Navigate** to the affected page(s) with `browser_navigate`.
+  2. **Take a snapshot** (`browser_snapshot`) to see the actual DOM structure, element roles,
+     labels, text content, and `data-testid` attributes.
+  3. **Interact** with forms and navigation to verify the exact user flow.
+  4. **Read runtime signals**: `browser_console_messages` (a JS error/warning on the changed flow
+     is a real bug) and `browser_network_requests` (assert the ACTUAL API status/shape).
+  5. **Document the real selectors** — prefer `getByRole` with `{ name }`, then `getByLabel`,
+     then `getByTestId`. Never use CSS classes or XPath.
+  6. **Verify page transitions**: loading states, success messages, error displays.
 
 **If you cannot reach DEV** (network error, auth): note this in your verdict and
 do your best with code analysis alone, marking the limitation explicitly.

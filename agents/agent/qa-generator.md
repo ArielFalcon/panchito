@@ -67,15 +67,19 @@ AGENTS.md) for contract-aware assertions.
 
 ### 2. Selectors — transcribe from pack or explore (conditional)
 
-**Check the prompt for a Context Pack** (a "Context Pack" section in the VOLATILE
-band, pushed by the orchestrator). The correct action depends on what is there:
+**Check the prompt for injected grounding** — a "Context Pack" section in the VOLATILE
+band, OR (on a re-generation turn) an injected a11y tree: a "GROUND TRUTH AT FAILURE"
+block or a "Live DEV accessibility tree" section. The correct action depends on what is there:
 
-**Case A — Context Pack present with a "Live DOM" section for a route:**
-  - TRANSCRIBE selectors directly from the DOM section — it is the ground truth.
-  - Do NOT use `browser_navigate` or `browser_snapshot` on routes already in the pack.
-  - Trust the pack's "role: name" lines exactly; do not assume roles or names not listed.
+**Case A — the prompt already grounds the route** (a Context Pack "Live DOM" section, or an
+injected a11y / "GROUND TRUTH AT FAILURE" tree, covers it):
+  - TRANSCRIBE selectors directly from the injected tree — it is the ground truth.
+  - Do NOT use `browser_navigate` or `browser_snapshot` on a route the injected grounding
+    covers, and do NOT re-activate serena / re-run `find_referencing_symbols` to re-derive
+    the blast radius — the regen prompt already carries the distilled grounding.
+  - Trust the injected "role: name" lines exactly; do not assume roles or names not listed.
 
-**Case B — Context Pack absent OR a route is not covered in the pack's DOM section:**
+**Case B — NO grounding covers the route** (no Context Pack, and no injected tree for it):
   - **This step is mandatory.** Explore the live DEV page before writing any test.
   - Use `browser_navigate` with the LIVE DEV URL from the task prompt (do NOT use
     `PW_BASE_URL` — it is only set in spec files at run time, not in your session).

@@ -23,9 +23,11 @@ produce reliable end-to-end tests for the change you are given.
   - `find_referencing_symbols` → who uses something = the change's **blast radius**.
   Read a symbol's full body only when you truly need it.
 - The `playwright` MCP gives you a REAL Chromium browser. **When the prompt
-  carries a Context Pack with a "Live DOM" section, TRANSCRIBE selectors from
-  the pack for routes it covers — do NOT re-navigate those routes.** For routes
-  NOT covered in the pack (absent from the DOM section), explore the live DEV
+  carries injected grounding — a Context Pack "Live DOM" section, or (on a
+  re-generation turn) an injected a11y tree ("GROUND TRUTH AT FAILURE" / "Live DEV
+  accessibility tree") — TRANSCRIBE selectors from it for the routes it covers and
+  do NOT re-navigate or re-snapshot those routes (nor re-derive the blast radius).**
+  For routes NOT covered (absent from the injected DOM), explore the live DEV
   page before writing: navigate, take a snapshot, and use ONLY selectors verified
   against the actual page. Never invent a selector from code analysis alone —
   code tells you WHAT should exist; the browser (or the pack's DOM slice) tells

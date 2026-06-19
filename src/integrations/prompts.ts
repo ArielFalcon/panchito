@@ -451,6 +451,15 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
   const openapiHint = Array.isArray(input.openapi) ? input.openapi.join(", ") : input.openapi;
   const isCode = input.target === "code";
   const memTarget = input.mode === "context" ? "context" : input.target;
+  // RE-1: the prompt carries authoritative grounding when a Context Pack (with its DOM slice) or an
+  // injected a11y tree is present — in that case the regeneration prompts must NOT command a
+  // re-navigation/re-orientation (the agent fixes from the injected grounding instead).
+  const hasInjectedGrounding = isGenerationMode && Boolean(input.contextPack || input.domSnapshot);
+  // RE-1: a re-generation turn (fix / reviewer-corrections / coverage-gap) has already explored and
+  // distilled the blast radius — it must not re-activate serena or re-skim the repo.
+  const isReGen =
+    isGenerationMode &&
+    Boolean(input.fixCases?.length || input.reviewCorrections?.length || input.coverageGap);
 
   // STABLE prefix: working rules for the generator role (mode-specific but stable within a session).
   const workingRulesLines: string[] = [
@@ -493,6 +502,12 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
                 `  browser_snapshot on routes already covered in the pack (the ground truth is already here).`,
                 `  For routes NOT covered in the pack (not listed in the DOM section), use the Playwright MCP`,
                 `  to explore the live page before writing selectors.`,
+              ]
+            : input.domSnapshot
+            ? [
+                `- An injected a11y tree is provided below (the ground truth for the affected routes) —`,
+                `  transcribe selectors from it; do NOT browser_navigate a route it covers. Use the Playwright`,
+                `  MCP only for a route NOT present in that tree.`,
               ]
             : [
                 `- Playwright MCP is AVAILABLE and you MUST use it BEFORE writing any test: browser_navigate to`,
@@ -627,6 +642,19 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
               `   - "locator resolved to N elements" → use .filter({hasText:…}) or scope to a unique parent`,
               `4. PRESERVE each test's objective and assertions — fix only what's broken`,
             ]
+          : hasInjectedGrounding
+          ? [
+              `Fix from the injected grounding above (Context Pack / DOM tree) — do NOT navigate to re-derive`,
+              `a route it already covers; navigate ONLY a route absent from the injected grounding.`,
+              `1. Read the test file to understand what it asserts`,
+              `2. Resolve the failing selector/assertion against the injected grounding above`,
+              `3. Fix the ROOT CAUSE, guided by the error type:`,
+              `   - "strict mode violation" → scope the selector to a section first`,
+              `   - "locator.click: … not found" → the element doesn't exist; check role/label in the injected grounding`,
+              `   - "expect(…).toBeVisible() timed out" → the element exists but isn't visible; check loading states`,
+              `   - "locator resolved to N elements" → use .filter({hasText:…}) or scope to a unique parent`,
+              `4. PRESERVE each test's objective and assertions — fix only what's broken`,
+            ]
           : [
               `For each failure, use the Playwright MCP to explore the page and verify`,
               `your fix BEFORE writing it:`,
@@ -652,8 +680,10 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
         `## Apply reviewer corrections (HIGHEST priority)`,
         ``,
         `An independent reviewer REJECTED the previous specs. Fix EACH item below precisely;`,
-        `do NOT rewrite specs that were not flagged. Where a fix concerns a selector or an`,
-        `assertion, re-verify it against the live DOM with the Playwright MCP before editing.`,
+        `do NOT rewrite specs that were not flagged.`,
+        hasInjectedGrounding
+          ? `Re-verify against the injected grounding above (Context Pack / DOM tree) before editing — do NOT re-navigate a route it already covers.`
+          : `Where a fix concerns a selector or an assertion, re-verify it against the live DOM with the Playwright MCP before editing.`,
         ``,
         ...input.reviewCorrections.map((c) => `- ${c}`),
         ``,
@@ -669,6 +699,12 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
         `tests so those lines are actually executed and asserted (covering ≠ asserting — assert the`,
         `behavior of the changed code, do not just touch the line):`,
         ``,
+        ...(hasInjectedGrounding
+          ? [
+              `Resolve any new selectors from the injected grounding above — do NOT re-navigate routes it already covers.`,
+              ``,
+            ]
+          : []),
         input.coverageGap,
         ``,
       ].join("\n")
@@ -677,6 +713,19 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
   // VOLATILE: learned anti-patterns from past runs.
   const learnedRulesContent = input.learnedRules && isGenerationMode
     ? [input.learnedRules, ``].join("\n")
+    : "";
+
+  // RE-1: regen-discipline — a re-generation turn must not re-orient; the blast radius was already
+  // distilled into the grounding above. Suppress serena re-activation / blast-radius re-derivation.
+  const regenDisciplineContent = isReGen
+    ? [
+        `## Re-generation turn — do NOT re-orient`,
+        ``,
+        `Re-generation turn: the blast radius was already explored and distilled above. Do NOT re-activate`,
+        `serena, do NOT re-run find_referencing_symbols, do NOT re-skim the repository or re-read unchanged`,
+        `code. Work from the grounding already in this prompt and change only what the correction requires.`,
+        ``,
+      ].join("\n")
     : "";
 
   // VOLATILE: Context Pack — pushed by the orchestrator before the first write (Slice G / P8).
@@ -706,6 +755,8 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
     // before the diff. Assembly POSITION is unchanged (still volatile, near the task); only the shed
     // precedence moves so the diff/task content is dropped before the unrecoverable pack.
     ...(contextPackContent ? [section("context-pack", "volatile", contextPackContent, { priority: 0, shedAs: "critical-recap" })] : []),
+    // RE-1: regen-discipline near the top of VOLATILE so "do not re-orient" is salient on regen turns.
+    ...(regenDisciplineContent ? [section("regen-discipline", "volatile", regenDisciplineContent, { priority: 0 })] : []),
     // VOLATILE: grounding (DOM snapshot — priority 1 within VOLATILE so it's first and the
     // selectorContradictions section can reference "the tree above" correctly).
     ...(domContent ? [section("dom-snapshot", "volatile", domContent, { priority: 1 })] : []),
