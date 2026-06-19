@@ -49,7 +49,8 @@ const ENGINE_DEFECT_CLASSES = new Set<ErrorClass>(["E-STATIC"]);
 export interface RuleView {
   id: string;
   errorClass: ErrorClass;
-  // Phase 7: "pending" added — correction-sourced rules quarantined until validated.
+  // "pending" is a RETIRED status, kept in the union only for backward-compat with any legacy rows
+  // (nothing writes it anymore — correction-sourced rules now enter as "candidate", see distiller.ts).
   status: "pending" | "candidate" | "active" | "deprecated" | "superseded";
   usageCount: number;
   successRate: number | null;

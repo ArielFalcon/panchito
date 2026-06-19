@@ -148,6 +148,41 @@ describe("Phase 8: computeTelemetryAnalysis — grounding presence", () => {
     assert.ok(analysis.groundingPresence !== null, "grounding presence should be computed");
     assert.equal(analysis.groundingPresence, 0.5, "1 of 2 first-round turns grounded = 0.5");
   });
+
+  // FIX 6: the PLANNER turn (role qa-generator, objective "(planner)") is a plan-only pass that never
+  // carries a Context Pack. Counting it deflated groundingPresence. It must be EXCLUDED.
+  it("FIX 6: a planner turn does NOT count against grounding presence", () => {
+    const app = uniqueApp("tel-grnd-planner");
+    const runId = `run-tel-grnd-planner-${Date.now()}`;
+    saveRunOutcome(outcome(runId, app));
+    // The PLANNER turn: round 0, qa-generator, objective "(planner)", NO pack. Must be excluded.
+    saveAgentTurn(turn(runId, {
+      role: "qa-generator", round: 0, isRepair: false, objective: "(planner)",
+      promptText: "## Phase 1 of 2 — PLANNING ONLY\n... no pack here",
+    }));
+    // The real first-round WRITE turn: grounded with a Context Pack.
+    saveAgentTurn(turn(runId, {
+      role: "qa-generator", round: 0, isRepair: false, objective: "checkout flow",
+      promptText: "## System\n...## Context Pack\n<routes>...</routes>",
+    }));
+
+    const analysis = computeTelemetryAnalysis(app);
+    // Only the WRITE turn counts → 1/1 grounded = 1.0. If the planner were (wrongly) counted it
+    // would be 1/2 = 0.5 — so 1.0 proves the planner was excluded.
+    assert.equal(analysis.groundingPresence, 1, "planner turn must be excluded → 1/1 write turn grounded");
+  });
+
+  it("FIX 6: a run that is ONLY a planner turn yields null grounding (no real write turns to measure)", () => {
+    const app = uniqueApp("tel-grnd-planneronly");
+    const runId = `run-tel-grnd-planneronly-${Date.now()}`;
+    saveRunOutcome(outcome(runId, app));
+    saveAgentTurn(turn(runId, {
+      role: "qa-generator", round: 0, isRepair: false, objective: "(planner)",
+      promptText: "## Phase 1 of 2 — PLANNING ONLY",
+    }));
+    const analysis = computeTelemetryAnalysis(app);
+    assert.equal(analysis.groundingPresence, null, "with only a planner turn there are no write turns → null, not 0");
+  });
 });
 
 describe("Phase 8: computeTelemetryAnalysis — repair fraction", () => {

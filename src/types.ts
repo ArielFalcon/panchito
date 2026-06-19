@@ -31,6 +31,13 @@ export interface SpecMeta {
 export type RunMode = "diff" | "complete" | "exhaustive" | "manual" | "context";
 export const RUN_MODES: readonly RunMode[] = ["diff", "complete", "exhaustive", "manual", "context"] as const;
 
+// The objective marker stamped on the fan-out PLANNER turn (a plan-only pass that produces the
+// objectives, carrying no Context Pack). Shared between the producer (opencode-client's planner
+// session descriptor) and the consumer (history's groundingPresence telemetry, which excludes the
+// planner so a fan-out run is not counted as partly ungrounded). One source of truth so the two
+// sides cannot silently drift.
+export const PLANNER_OBJECTIVE = "(planner)";
+
 export interface RunOptions {
   target?: TestTarget; // defaults to "e2e" when omitted
   mode: RunMode;

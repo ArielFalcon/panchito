@@ -478,16 +478,15 @@ test("reviewer error fails closed: does not trust the generator or publish", asy
 
 // ── Phase 4: severity-gated reviewer ─────────────────────────────────────────
 
-test("Phase 4 (a): advisory-only reviewer result APPROVES the gate (does not regenerate)", async () => {
-  // Gate rule: blockingCount=0 → approve, regardless of advisory corrections.
-  // The run should publish WITHOUT regenerating, even though the reviewer emitted corrections.
+test("Phase 4 (a) + FIX 4: approved:TRUE with advisory-only corrections APPROVES the gate (no regeneration)", async () => {
+  // The legitimate severity-gate behavior we must PRESERVE: when the reviewer genuinely approved
+  // (approved:true) and only advisory corrections remain, the run publishes without regenerating.
   const calls: string[] = [];
   const d = deps(passing(), calls, {
     agents: [generated],
     review: [
-      // Zero blocking corrections → gate passes on round 1.
       {
-        approved: false, // model-level judgment (advisory nits found), but severity gate overrides
+        approved: true, // genuine approval
         corrections: ["[fragile-selector] a.spec.ts: prefer getByRole — advisory"],
         blockingCount: 0, // explicitly zero blocking
         parsed: true,
@@ -497,8 +496,26 @@ test("Phase 4 (a): advisory-only reviewer result APPROVES the gate (does not reg
   await runPipeline(app, "abc123", d);
   assert.equal(calls.filter((c) => c === "generate").length, 1, "no regeneration for advisory-only verdict");
   assert.equal(calls.filter((c) => c === "review").length, 1, "reviewed once");
-  assert.equal(d.published, true, "gate passes with advisory-only corrections");
+  assert.equal(d.published, true, "gate passes with advisory-only corrections on a genuine approval");
   assert.equal(d.issues.length, 0, "no Issue opened");
+});
+
+test("FIX 4: approved:FALSE with ALL-advisory corrections FAILS the gate (the gameable hole is closed)", async () => {
+  // The bug FIX 4 fixes: previously `blockingCount === 0` alone passed the gate even when the
+  // reviewer explicitly set approved:false — so downgrading every correction to advisory let a
+  // rejected suite publish. Now the gate requires review.approved AND zero blocking. The reviewer
+  // keeps rejecting on both rounds → never converges → an Issue is opened, nothing publishes.
+  const calls: string[] = [];
+  const d = deps(passing(), calls, {
+    agents: [generated, generated],
+    review: [
+      { approved: false, corrections: ["[fragile-selector] a.spec.ts: advisory nit"], blockingCount: 0, parsed: true },
+      { approved: false, corrections: ["[fragile-selector] a.spec.ts: advisory nit"], blockingCount: 0, parsed: true },
+    ],
+  });
+  await runPipeline(app, "abc123", d);
+  assert.equal(d.published, false, "an explicit approved:false must NOT publish even when all corrections are advisory");
+  assert.ok(d.issues.length > 0, "the reviewer rejection surfaces as an Issue");
 });
 
 test("Phase 4 (b): blocking correction fails the gate and triggers regeneration", async () => {
@@ -582,9 +599,11 @@ test("Phase 4 (e): approve-when-resolved — round 2 with zero blocking after ro
     agents: [generated, generated],
     review: [
       { approved: false, corrections: ["[false-positive] a.spec.ts: missing assertion"], blockingCount: 1, parsed: true },
-      // Round 2: blocking resolved; one advisory nit remains. Gate must approve.
+      // Round 2: blocking resolved; one advisory nit remains. The reviewer now APPROVES (approved:true)
+      // and only an advisory remains → the severity gate approves and publishes. (FIX 4: an explicit
+      // approved:false would NOT pass even with zero blocking, so the approving round must approve.)
       {
-        approved: false, // model may still say false for the advisory nit
+        approved: true,
         corrections: ["[fragile-selector] a.spec.ts: prefer getByRole — advisory"],
         blockingCount: 0, // zero blocking → gate approves
         parsed: true,
@@ -602,13 +621,13 @@ test("Phase 4 (e): approve-when-resolved — round 2 with zero blocking after ro
 
 test("Phase 4 regression: complete/exhaustive runs also use the severity gate (advisory does not block)", async () => {
   // complete/exhaustive runs also go through the reviewer. Ensure the severity gate
-  // does NOT break their review flow: advisory-only → still approves.
+  // does NOT break their review flow: a genuine approval with advisory-only → still approves.
   const calls: string[] = [];
   const d = deps(passing(), calls, {
     agents: [{ ...generated, specs: ["flows/complete.spec.ts"] }],
     review: [
-      // Advisory-only verdict for a complete-mode review → must approve.
-      { approved: false, corrections: ["[other] flows/complete.spec.ts: minor advisory"], blockingCount: 0, parsed: true },
+      // Approved with an advisory nit for a complete-mode review → must publish without regenerating.
+      { approved: true, corrections: ["[other] flows/complete.spec.ts: minor advisory"], blockingCount: 0, parsed: true },
     ],
   });
   await runPipeline(app, "abc123", d, "webhook", { target: "e2e", mode: "complete" });
@@ -1192,6 +1211,61 @@ test("learning layer: learned rules are injected into generation input", async (
   assert.ok(genInput, "generate should be called");
   assert.ok(genInput.learnedRules, "learnedRules should be set");
   assert.match(genInput.learnedRules!, /Learned rules/);
+});
+
+// ── FIX 1b: the value-oracle attribution path threads change-coverage credit ──────────────
+// foldValueLearning previously called recordRuleOutcome(ruleId, valueScore) with NO third arg, so
+// coverageCreditConfirmed was always null and the Phase-7 coverage-anchored promotion gate never
+// fired on the oracle path. These EFFECT tests seed a real candidate (2 prior good outcomes) and
+// run the pipeline as the 3rd outcome: with measured coverage + credit it PROMOTES to active;
+// with measured coverage + ZERO credit it HOLDS at candidate. The gate firing is the proof the
+// credit is threaded (a null credit would have promoted in BOTH cases).
+test("FIX 1b: value-oracle attribution PROMOTES a candidate when coverage confirms credit", async () => {
+  const { upsertLearningRule, recordRuleOutcome, listAllLearningRules } = await import("./server/history");
+  // Unique rule ID per run: the DB persists on disk and upsert is keyed on the PRIMARY KEY `id`
+  // (app/status are set-once), so a reused id would keep a stale row's app/status. Make it unique.
+  const ruleApp = `fix1b-credit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const ruleId = `fix1b-r1-${Math.random().toString(36).slice(2, 10)}`;
+  upsertLearningRule({ id: ruleId, app: ruleApp, trigger: "Applies when t", action: "a", errorClass: "E-FALSE-POSITIVE", source: "seed" });
+  // Two prior good outcomes WITH credit (so this run's outcome is the 3rd → reaches MIN_OUTCOMES).
+  recordRuleOutcome(ruleId, 0.85, true);
+  recordRuleOutcome(ruleId, 0.85, true);
+  assert.equal(listAllLearningRules(ruleApp, 10).find((r) => r.id === ruleId)?.status, "candidate", "precondition: still candidate before the 3rd outcome");
+
+  const creditApp = { ...app, name: ruleApp };
+  const d = deps(passing(), [], { diff: DIFF_4, coverage: [cov([1, 2, 3, 4])], message: "feat: x" });
+  // retrieveRules returns the seeded rule's id so the pipeline attributes its oracle outcome to it.
+  d.retrieveRules = () => ({
+    rules: [{ id: ruleId, trigger: "Applies when t", action: "a", errorClass: "E-FALSE-POSITIVE" as const, confidence: "low" as const, usageCount: 0, outcomeCount: 2, successRate: 0.85, lastVerified: null, source: "seed", status: "candidate" as const, at: "" }],
+    promptSection: "## Learned rules\n- x",
+  });
+  await runPipeline(creditApp, "abc1234fix1b1", d, "manual", { mode: "diff", runId: "run-fix1b-1" });
+
+  const after = listAllLearningRules(ruleApp, 10).find((r) => r.id === ruleId);
+  assert.equal(after?.outcomeCount, 3, "the pipeline's value-oracle attribution must fold one outcome in");
+  assert.equal(after?.status, "active", "measured coverage WITH credit must let the candidate promote (credit threaded)");
+});
+
+test("FIX 1b: value-oracle attribution HOLDS a candidate when coverage measured ZERO credit", async () => {
+  const { upsertLearningRule, recordRuleOutcome, listAllLearningRules } = await import("./server/history");
+  const ruleApp = `fix1b-nocredit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const ruleId = `fix1b-r2-${Math.random().toString(36).slice(2, 10)}`;
+  upsertLearningRule({ id: ruleId, app: ruleApp, trigger: "Applies when t", action: "a", errorClass: "E-FALSE-POSITIVE", source: "seed" });
+  recordRuleOutcome(ruleId, 0.85, true);
+  recordRuleOutcome(ruleId, 0.85, true);
+
+  const noCreditApp = { ...app, name: ruleApp };
+  // cov([]) → the changed file is measured but ZERO changed lines covered → ratio 0 → credit=false.
+  const d = deps(passing(), [], { diff: DIFF_4, coverage: [cov([])], message: "feat: x" });
+  d.retrieveRules = () => ({
+    rules: [{ id: ruleId, trigger: "Applies when t", action: "a", errorClass: "E-FALSE-POSITIVE" as const, confidence: "low" as const, usageCount: 0, outcomeCount: 2, successRate: 0.85, lastVerified: null, source: "seed", status: "candidate" as const, at: "" }],
+    promptSection: "## Learned rules\n- x",
+  });
+  await runPipeline(noCreditApp, "abc1234fix1b2", d, "manual", { mode: "diff", runId: "run-fix1b-2" });
+
+  const after = listAllLearningRules(ruleApp, 10).find((r) => r.id === ruleId);
+  assert.equal(after?.outcomeCount, 3, "the outcome is still folded in (only the promotion is gated)");
+  assert.equal(after?.status, "candidate", "measured coverage with ZERO credit must HOLD the candidate (gate fired → credit threaded)");
 });
 
 test("learning layer: reflectAndDistill is NOT called on green passes", async () => {

@@ -675,11 +675,22 @@ async function foldValueLearning(
 
   // Attribution: fold this run's valueScore into each retrieved rule's running statistics (running
   // mean + hysteresis). NEVER an overwrite, so a fluke cannot poison the ledger.
+  //
+  // FIX 1b: thread the run's change-coverage into recordRuleOutcome as coverageCreditConfirmed so
+  // the Phase-7 coverage-anchored promotion gate actually fires on this (the value-oracle) path —
+  // previously it passed no third arg, leaving it permanently null, so a candidate could promote on
+  // verdict signal alone even where coverage WAS measured and found zero credit. Mirrors the
+  // no-oracle prevention path (which already threads it):
+  //   true  → coverage measured AND ratio > 0 (the tests exercised changed lines) → promotion eligible
+  //   false → coverage measured AND ratio == 0 (no changed lines covered) → hold at candidate
+  //   null  → coverage not measured / cross-repo / unknown → no gate (promotion on verdict signal)
   if (retrievedRuleIds.length > 0 && valueScore !== null) {
+    const coverageMeasured = ccForPersistence?.measured ?? false;
+    const coverageCreditConfirmed = coverageMeasured ? ccForPersistence!.overall.ratio > 0 : null;
     const { recordRuleOutcome } = await import("./server/history");
     try {
-      for (const ruleId of retrievedRuleIds) recordRuleOutcome(ruleId, valueScore);
-      log(`[qa] attribution: recorded outcome (valueScore=${(valueScore * 100).toFixed(0)}%) for ${retrievedRuleIds.length} rule(s)`);
+      for (const ruleId of retrievedRuleIds) recordRuleOutcome(ruleId, valueScore, coverageCreditConfirmed);
+      log(`[qa] attribution: recorded outcome (valueScore=${(valueScore * 100).toFixed(0)}%, coverageCredit=${coverageCreditConfirmed ?? "unmeasured"}) for ${retrievedRuleIds.length} rule(s)`);
     } catch (err) {
       log(`[qa] WARNING: attribution update failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -979,7 +990,9 @@ export async function runPipeline(
 
   // The PROMPT-facing diff is size-capped once here; every LLM consumer (generator, planner,
   // reviewer, regeneration rounds) receives this bounded form. Local consumers (the classifier
-  // above, parseDiffHunks for coverage/oracle scoping) keep the raw diff — they are free.
+  // above, parseDiffHunks for oracle scoping) keep the raw diff — they are free. Change-coverage
+  // is NOT one of them: it parses promptDiff (FIX 8a) so its denominator matches the lines the
+  // agent actually saw.
   const promptDiff = capDiff(diff);
   if (promptDiff.length < diff.length) {
     log(`[qa] diff capped for prompts: ${diff.length} → ${promptDiff.length} chars (full diff stays available in the working copy).`);
@@ -1350,19 +1363,22 @@ export async function runPipeline(
         ` (${Math.round((Date.now() - reviewStart) / 1000)}s)`,
       );
       if (review.rationale) reviewerRationale = review.rationale; // the verdict that ultimately decides this run
-      // Phase 4: the gate verdict is: approved when zero BLOCKING corrections remain.
-      // The reviewer's own `approved` field reflects the model's judgment; we additionally
-      // enforce the severity gate so advisory-only outcomes never block the pipeline.
-      const gateApproves = blockingCount === 0;
-      onReviewer?.(gateApproves, gateApproves ? [] : review.corrections.filter((_, i) => {
-        // Surface only blocking corrections to the live ReviewerCard.
-        // We cannot easily re-derive severity from the flat string list, so surface all corrections
-        // when blockingCount > 0 and gateApproves is false — callers already tolerate this.
-        return true;
-      }));
+      // Phase 4 + FIX 4: the gate requires BOTH the reviewer's own approval AND zero blocking
+      // corrections. The earlier `blockingCount === 0` alone let an all-ADVISORY verdict publish even
+      // when the reviewer explicitly set approved:false (a gameable hole: a model could downgrade
+      // every correction to advisory and still flip the gate to publish). The severity gate still
+      // prevents advisory-only corrections from blocking a genuine approval — but it can no longer
+      // OVERRIDE an explicit rejection. (Grave class-tag corrections — [false-positive],
+      // [wrong-objective], [no-cleanup] — are forced to blocking in parseReviewerVerdict, so a
+      // mislabeled grave finding also keeps blockingCount > 0.)
+      const gateApproves = review.approved && blockingCount === 0;
+      // Surface the corrections to the live ReviewerCard on a non-approval. Severity is not
+      // re-derivable from the flat string list, so all corrections are surfaced when the gate fails —
+      // callers already tolerate this. (FIX 8b: dropped a dead no-op .filter(() => true).)
+      onReviewer?.(gateApproves, gateApproves ? [] : review.corrections);
       if (!gateApproves) reviewerCorrections.push(...review.corrections);
-      // Phase 4: advisory-only → gate passes even if the model said "approved: false".
-      // Store the corrections as informational notes but do not regenerate.
+      // Phase 4: the gate requires BOTH review.approved AND zero blocking corrections. When it
+      // approves, any advisory corrections are stored as informational notes but do not regenerate.
       if (gateApproves) {
         if (advisoryCount > 0) {
           log(`[qa] severity gate: ${advisoryCount} advisory correction(s) recorded but not blocking (zero blocking corrections).`);
@@ -1649,7 +1665,7 @@ export async function runPipeline(
       try {
         const distilled = deps.distillCorrections({ app: app.name, runId: opts.runId, corrections: reviewerCorrections, archetype: runArchetype });
         if (distilled.inserted.length > 0) {
-          log(`[qa] learning: distilled ${distilled.inserted.length} pending rule(s) from reviewer corrections (quarantined until first outcome validates them)`);
+          log(`[qa] learning: distilled ${distilled.inserted.length} candidate rule(s) from reviewer corrections (retrievable, rendered as experimental until measured outcomes promote them)`);
         }
       } catch (err) {
         log(`[qa] WARNING: reviewer-corrections distillation failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
@@ -2103,7 +2119,11 @@ export async function runPipeline(
     log(`[qa] change-coverage: skipped — the changed lines live in ${triggerService.repo}; browser coverage maps only the frontend (status=unknown).`);
   }
   if (deps.collectCoverage && generating && mode === "diff" && run.verdict === "pass" && covPolicy.mode !== "off" && !triggerService) {
-    const changed = parseDiffHunks(diff);
+    // FIX 8a: parse the CAPPED promptDiff (what the agent actually saw), not the raw diff. When a huge
+    // diff is capped for the prompt, the agent never saw the dropped hunks — demanding coverage of
+    // lines it could not have known about would be an unfair, unwinnable gate (and would mislabel a
+    // green run as a coverage gap). Coverage now scopes to exactly the changed lines the agent saw.
+    const changed = parseDiffHunks(promptDiff);
     if (changed.size > 0) {
       onStep?.("coverage");
       const changedFiles = [...changed.keys()];

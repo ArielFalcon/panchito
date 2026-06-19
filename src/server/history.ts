@@ -11,7 +11,7 @@ import Database from "better-sqlite3";
 import { join } from "node:path";
 import { mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { RunRecord, RunMode, TestTarget, QaCase, RunVerdict, SpecRecord, RunOutcome, AgentActivity } from "../types";
+import { RunRecord, RunMode, TestTarget, QaCase, RunVerdict, SpecRecord, RunOutcome, AgentActivity, PLANNER_OBJECTIVE } from "../types";
 import { applyOutcome, type LearningRule, type RuleUpsert, type Confidence, type RuleStatus } from "../qa/learning/learning-rule";
 import type { ErrorClass } from "../qa/learning/taxonomy";
 import type { Curriculum } from "../qa/learning/curriculum";
@@ -614,9 +614,10 @@ function safeJsonParse<T>(raw: string, fallback: T): T {
   }
 }
 
-// Phase 7: accept an optional `initialStatus` so correction-sourced rules can be inserted with
-// "pending" status (quarantined from retrieval until a run outcome validates them). Defaults to
-// "candidate" for backward compatibility (oracle-born / reflection-born rules enter as candidates).
+// Accepts an optional `initialStatus`; defaults to "candidate", which is what ALL current callers
+// get (oracle-born, reflection-born, AND correction-sourced rules all enter as candidates — see the
+// J de-poison in distiller.ts). The "pending" status is retired and no code path passes it anymore;
+// the parameter is kept only so a legacy/explicit status can still be threaded if ever needed.
 export function upsertLearningRule(rule: RuleUpsert & { app: string; id: string; initialStatus?: RuleStatus }): void {
   ensureDb();
   upsertRuleStmt.run({
@@ -965,8 +966,16 @@ export function computeTelemetryAnalysis(app: string, windowDays?: number): Tele
   }));
 
   // Grounding presence: first-round (round=0, not repair) generator turns containing "## Context Pack".
+  // FIX 6: exclude the PLANNER turn (role qa-generator, objective PLANNER_OBJECTIVE). The planner is a
+  // plan-only pass that never carries a Context Pack (it produces the objectives the pack is later
+  // built for), so counting it as a "generator first round" deflated groundingPresence — every run
+  // with a fan-out planner looked partly ungrounded even when the actual write turns were grounded.
   const generatorFirstRounds = turnRows.filter(
-    (r) => (r.role as string).includes("generator") && (r.round as number) === 0 && !r.is_repair,
+    (r) =>
+      (r.role as string).includes("generator") &&
+      (r.round as number) === 0 &&
+      !r.is_repair &&
+      (r.objective as string | null) !== PLANNER_OBJECTIVE,
   );
   const groundedCount = generatorFirstRounds.filter(
     (r) => typeof r.prompt_text === "string" && (r.prompt_text as string).includes("## Context Pack"),

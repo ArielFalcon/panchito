@@ -422,6 +422,80 @@ test("assemble: budget enforcement sheds volatile before semi-stable before task
   assert.ok(byteLen(text) <= budgetBytes, `total (${byteLen(text)}) must be ≤ budget (${budgetBytes})`);
 });
 
+// ── FIX 5: the Context Pack survives shedding OVER the diff (shedAs override) ──────────────
+test("FIX 5: under a tight budget the Context Pack survives and the diff (TASK band) is shed FIRST", () => {
+  // Mirrors buildPromptAssembled's real section setup: the pack is in the VOLATILE band for READING
+  // (near the task) but declares shedAs:"critical-recap" so it is least-shedable. The raw diff lives
+  // in the TASK section (recoverable via `git show`). Before FIX 5, VOLATILE shed first → the pack
+  // (unrecoverable DOM ground-truth) died while the recoverable diff survived. This asserts the EFFECT.
+  const packContent = "PACK-DOM-GROUND-TRUTH-".repeat(20); // ~440 bytes, the unrecoverable pack
+  const diffContent = "DIFF-".repeat(40);                  // 200 bytes, lives in TASK, recoverable
+  const rulesContent = "R".repeat(20);
+
+  const sections = [
+    section("working-rules", "stable-prefix", rulesContent, { priority: 1 }),
+    // The pack: positioned VOLATILE, but shedAs critical-recap (least-shedable).
+    section("context-pack", "volatile", packContent, { priority: 0, shedAs: "critical-recap" }),
+    // The task carries the diff.
+    section("task", "task", diffContent, { priority: 1 }),
+  ];
+
+  // Total ~660 bytes; budget forces dropping ~one section. The diff (TASK) must go before the pack.
+  const budgetBytes = 480;
+  const { text, sectionSizes } = assemble(sections, { budgetBytes });
+
+  assert.ok(text.includes(packContent), "the Context Pack (unrecoverable DOM) must SURVIVE the budget squeeze");
+  assert.ok("context-pack" in sectionSizes, "pack must remain in sectionSizes");
+  assert.ok(!text.includes(diffContent), "the diff (TASK band, recoverable via git show) must be shed FIRST");
+  assert.ok(!("task" in sectionSizes), "the shed diff/task must be absent from sectionSizes");
+  assert.ok(byteLen(text) <= budgetBytes, `total (${byteLen(text)}) must be ≤ budget (${budgetBytes})`);
+});
+
+// FIX D: shedAs must change ONLY the shed precedence, never the canonical ASSEMBLY order. Under a
+// non-shedding (large) budget the Context Pack — a VOLATILE section that declares shedAs:"critical-recap"
+// to be least-shedable — must still render in its VOLATILE position (after semi-stable, before task),
+// NOT down in the critical-recap slot. This pins the invariant that shedAs is purely a shed-band hint.
+test("FIX D: a shedAs:'critical-recap' VOLATILE section renders in its VOLATILE position under a large budget", () => {
+  const sections: Section[] = [
+    section("rules", "stable-prefix", "STABLE_SENTINEL"),
+    section("arch", "semi-stable", "SEMI_SENTINEL"),
+    // The Context Pack: positioned VOLATILE for reading, but shedAs critical-recap (least-shedable).
+    section("context-pack", "volatile", "PACK_SENTINEL", { shedAs: "critical-recap" }),
+    section("task", "task", "TASK_SENTINEL"),
+    section("recap", "critical-recap", "RECAP_SENTINEL"),
+  ];
+  // A budget far larger than the total → NO shedding happens, so only canonical assembly order is exercised.
+  const { text, sectionSizes } = assemble(sections, { budgetBytes: 1_000_000 });
+
+  const semiIdx = text.indexOf("SEMI_SENTINEL");
+  const packIdx = text.indexOf("PACK_SENTINEL");
+  const taskIdx = text.indexOf("TASK_SENTINEL");
+  const recapIdx = text.indexOf("RECAP_SENTINEL");
+
+  // Everything survives (nothing shed under the huge budget).
+  assert.ok("context-pack" in sectionSizes, "the pack must survive a non-shedding budget");
+  // Canonical VOLATILE position: AFTER semi-stable and BEFORE task — its shedAs band is ignored for ordering.
+  assert.ok(semiIdx < packIdx, "shedAs must NOT move the pack before semi-stable (canonical order unchanged)");
+  assert.ok(packIdx < taskIdx, "the pack renders in its VOLATILE slot, before the task — not in the critical-recap slot");
+  assert.ok(taskIdx < recapIdx, "task still precedes the real critical-recap section");
+  // The pack must NOT be rendered down at the critical-recap position despite shedAs:"critical-recap".
+  assert.ok(packIdx < recapIdx, "shedAs:'critical-recap' must not push the pack into the recap slot");
+});
+
+test("FIX 5: WITHOUT shedAs, a volatile section is still shed before the task (the old, unwanted behavior — control)", () => {
+  // Control proving shedAs is what changes the outcome: an ordinary volatile section (no shedAs) sheds
+  // before the task, exactly the path that killed the pack before the fix.
+  const volatileContent = "V".repeat(440);
+  const diffContent = "DIFF-".repeat(40);
+  const sections = [
+    section("ordinary-volatile", "volatile", volatileContent, { priority: 0 }), // no shedAs
+    section("task", "task", diffContent, { priority: 1 }),
+  ];
+  const { text } = assemble(sections, { budgetBytes: 300 });
+  assert.ok(!text.includes(volatileContent), "an ordinary volatile section sheds first (no shedAs)");
+  assert.ok(text.includes(diffContent), "the task survives over an ordinary volatile section");
+});
+
 test("assemble: overflow='summarize' in global budget truncates rather than drops", () => {
   // A section with overflow='summarize' must be truncated (not dropped entirely)
   // when the global budget forces action, so some content survives.

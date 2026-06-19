@@ -246,7 +246,17 @@ export function correctionSeverity(entry: CorrectionEntry): "blocking" | "adviso
 export const ReviewerVerdictSchema = z.object({
   approved: z.boolean(),
   rationale: z.string().optional().catch(undefined),
-  corrections: z.array(CorrectionEntrySchema).catch([]),
+  // Tolerance is PER-ENTRY. An array-level `.catch([])` was fail-OPEN: a SINGLE malformed element
+  // collapsed the WHOLE array to [], so a verdict carrying one blocking correction alongside one
+  // unparseable element yielded blockingCount=0 → the severity gate APPROVED while silently dropping
+  // the blocking finding. The inner per-entry `.catch` instead degrades a bad element to a BLOCKING
+  // placeholder, so a malformed entry FAILS the gate closed (blockingCount>0) while the valid
+  // siblings are preserved. The outer array-level `.catch([])` still guards the orthogonal case where
+  // `corrections` is not an array at all (e.g. a stray string) — that advisory-shape slip must not
+  // false-block a genuine approval, exactly as before.
+  corrections: z
+    .array(CorrectionEntrySchema.catch({ text: "(unparseable correction)", severity: "blocking" }))
+    .catch([]),
 });
 
 export type ValidatedReviewerVerdict = z.infer<typeof ReviewerVerdictSchema>;

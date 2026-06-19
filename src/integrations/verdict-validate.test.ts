@@ -181,6 +181,86 @@ test("Phase 4 (e): approve-when-resolved — zero blocking in round 2 approves e
   assert.equal(v.approved, true);
 });
 
+// ── FIX 4: grave class tags are FORCED to blocking regardless of self-assigned severity ───────
+
+test("FIX 4: a [false-positive] correction self-labeled 'advisory' is counted as BLOCKING", () => {
+  // The gameable hole: a model downgrades a grave finding to "advisory" so the severity gate would
+  // let it publish. The grave class tag overrides the self-assigned severity → blockingCount >= 1.
+  const json = JSON.stringify({
+    approved: false,
+    rationale: "the test never asserts the outcome",
+    corrections: [
+      { text: "[false-positive] checkout.spec.ts: clicks Pay but asserts nothing", severity: "advisory" },
+    ],
+  });
+  const v = parseReviewerVerdict(json);
+  assert.equal(v.valid, true);
+  assert.equal(v.blockingCount, 1, "a grave [false-positive] tag must be blocking even if self-labeled advisory");
+});
+
+test("FIX 4: [wrong-objective] and [no-cleanup] self-labeled advisory also count as blocking", () => {
+  const json = JSON.stringify({
+    approved: false,
+    rationale: "wrong target + leaks data",
+    corrections: [
+      { text: "[wrong-objective] a.spec.ts: tests an unrelated flow", severity: "advisory" },
+      { text: "[no-cleanup] a.spec.ts: leaves an orphaned account on DEV", severity: "advisory" },
+    ],
+  });
+  const v = parseReviewerVerdict(json);
+  assert.equal(v.blockingCount, 2, "both grave tags are forced blocking");
+});
+
+test("FIX 4: a NON-grave tag ([fragile-selector]) keeps its self-assigned advisory severity", () => {
+  // Only the grave classes are forced; the recoverable fragile-selector stays advisory when labeled so.
+  const json = JSON.stringify({
+    approved: true,
+    rationale: "minor nit",
+    corrections: [
+      { text: "[fragile-selector] login.spec.ts: prefer getByRole over nth-child", severity: "advisory" },
+    ],
+  });
+  const v = parseReviewerVerdict(json);
+  assert.equal(v.blockingCount, 0, "a non-grave advisory stays advisory (no over-blocking)");
+});
+
+// ── FIX A: per-entry correction tolerance — one malformed element must NOT nuke the array ─────
+
+test("FIX A: a malformed correction element degrades to BLOCKING (fails closed), valid sibling kept", () => {
+  // The fail-OPEN hole: an array-level `.catch([])` collapsed the WHOLE corrections array to [] when
+  // any single element was malformed. Combined with the severity gate (blockingCount===0), a verdict
+  // carrying one BLOCKING correction + one unparseable element yielded blockingCount=0 → the gate
+  // wrongly APPROVED while silently dropping the blocking finding. Per-entry `.catch` degrades the bad
+  // element to a blocking placeholder instead: the valid entry is preserved AND the malformed one
+  // counts as blocking, so blockingCount>0 and the gate fails CLOSED.
+  const json = JSON.stringify({
+    approved: true, // model says approve — but a blocking finding is present and must hold the gate
+    rationale: "one real blocking finding plus a garbled entry",
+    corrections: [
+      { text: "[false-positive] cart.spec.ts: clicks Pay but asserts nothing", severity: "blocking" },
+      { severity: "advisory" }, // malformed: missing `text` → fails the entry schema
+    ],
+  });
+  const v = parseReviewerVerdict(json);
+  assert.equal(v.valid, true, "the verdict still parses (tolerance is per-entry, not array-nuking)");
+  assert.equal(v.corrections.length, 2, "the valid entry AND the degraded malformed entry both survive");
+  assert.ok(v.blockingCount >= 2, `both count as blocking (real + degraded), got ${v.blockingCount}`);
+  // The whole point: blockingCount > 0 means the caller's gate (approved && blockingCount===0) FAILS
+  // closed, so the blocking finding can no longer be silently dropped.
+  assert.ok(v.blockingCount > 0, "fail-CLOSED: a malformed entry must keep blockingCount > 0");
+});
+
+test("FIX A: a non-array corrections field still falls back to [] (orthogonal advisory-slip tolerance)", () => {
+  // The per-entry change must NOT regress the separate guarantee that a wholly mis-shaped corrections
+  // field (a stray string, not an array) is a tolerable advisory slip — it must never false-block a
+  // genuine approval. This is the existing "tolerates malformed corrections" contract, re-pinned.
+  const v = parseReviewerVerdict('{"approved":true,"corrections":"oops not an array"}');
+  assert.equal(v.valid, true);
+  assert.equal(v.approved, true);
+  assert.deepEqual(v.corrections, []);
+  assert.equal(v.blockingCount, 0, "a non-array corrections field does not fabricate a blocking finding");
+});
+
 // ── repairInstruction ─────────────────────────────────────────────────────────
 
 test("repairInstruction names the generator shape and the specific issues", () => {

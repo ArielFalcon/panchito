@@ -140,23 +140,23 @@ test("Slice G: buildContextPack degrades gracefully when DOM capture throws", as
   assert.equal(result.domBytes, 0, "DOM bytes must be 0 when capture throws");
 });
 
-test("Slice G: buildContextPack DOM section respects budget (large DOM is truncated)", async () => {
-  // Generate a large DOM string (1000 lines, each 80 chars).
-  const largeLines = Array.from({ length: 1000 }, (_, i) => `button: Button ${i}`);
+test("Slice G / FIX 7: buildContextPack DOM section respects the FIXED 30KB budget (large DOM is truncated)", async () => {
+  // FIX 7: the DOM cap is a FIXED 30 KB (~500 lines at ~60 chars/line) — no caller-supplied budget.
+  // 2000 lines far exceeds the ~500-line cap, so the tail (e.g. "Button 1999") must be dropped.
+  const largeLines = Array.from({ length: 2000 }, (_, i) => `button: Button ${i}`);
   const largeDom = largeLines.join("\n");
   const result = await buildContextPack(
     {
       brief: MINIMAL_BRIEF,
       baseUrl: "http://localhost:3000",
       e2eDir: "/fake/e2e",
-      domBudgetBytes: 5000, // tight budget
     },
     stubContextPackDeps(largeDom),
   );
   assert.ok(result.domBytes > 0, "DOM section is present");
-  // The DOM section in the text must be smaller than the full dom (truncated).
+  // The DOM section in the text must be smaller than the full dom (truncated by the fixed cap).
   const domSection = result.text?.split("### Live DOM")[1] ?? "";
-  assert.ok(!domSection.includes("Button 999"), "last button must be omitted (truncated by budget)");
+  assert.ok(!domSection.includes("Button 1999"), "last button must be omitted (truncated by the fixed 30KB cap)");
   assert.ok(result.text?.includes("omitted"), "truncation marker must appear");
 });
 

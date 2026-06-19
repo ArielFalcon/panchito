@@ -208,12 +208,29 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
         `If every important flow is already well covered, output {"objectives":[]}.`,
       ].join("\n");
 
+  // FIX 3: when the orchestrator already ran the read-only explorer pass (exploreForPack), its brief
+  // is forwarded here as input.contextBrief. The planner must USE it — the blast radius is already
+  // distilled — instead of paying for a second full Serena widen (find_referencing_symbols) that
+  // re-derives the same thing the explorer just produced. The brief is rendered as its own SEMI-STABLE
+  // section, and step 1 of the procedure switches to "trust the brief" when present.
+  const planBriefContent = input.contextBrief
+    ? [
+        ``,
+        `## Exploration brief (the blast radius was ALREADY mapped by the explorer pass — use it; do NOT re-widen)`,
+        renderExplorationBrief(input.contextBrief),
+        `Derive the objectives DIRECTLY from this brief's blast radius and routes. Do NOT re-run`,
+        `find_referencing_symbols to re-discover the blast radius — it is already distilled above.`,
+        ``,
+      ].join("\n")
+    : "";
+
   if (input.mode === "diff") {
     // STABLE prefix: the planning procedure (same structure for every diff-mode plan session).
     const planProcedure = [
       `## Phase 1 of 2 — PLANNING ONLY. Do NOT write any .spec.ts in this phase.`,
-      `1. Activate serena (activate_project). Read the commit intent and diff below; derive the`,
-      `   affected user flows (use find_referencing_symbols to widen from the changed symbols).`,
+      input.contextBrief
+        ? `1. The blast radius is ALREADY mapped in the Exploration brief below — read it (and the commit intent/diff) and derive the affected user flows from it. Do NOT re-run find_referencing_symbols to re-discover the blast radius. Activate serena only if you need to confirm a specific symbol.`
+        : `1. Activate serena (activate_project). Read the commit intent and diff below; derive the\n   affected user flows (use find_referencing_symbols to widen from the changed symbols).`,
       `2. Plan one objective per INDEPENDENT affected flow. Do NOT plan flows the commit does not`,
       `   touch; if everything fits one flow, return a single objective.`,
       `   Each objective is a concrete acceptance criterion in given/when/then form, with the code`,
@@ -267,6 +284,9 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
     return assemble([
       section("plan-procedure", "stable-prefix", planProcedure, { priority: 1, cacheable: true }),
       section("plan-change", "semi-stable", changeContent, { priority: 1, language: "verbatim" }),
+      // FIX 3: the explorer's distilled brief (priority 1 so it ranks alongside the change scope — the
+      // planner reads it instead of re-widening). Absent when no orchestrator-level explorer ran.
+      ...(planBriefContent ? [section("plan-brief", "semi-stable", planBriefContent, { priority: 1 })] : []),
       ...(contextMapContent ? [section("plan-arch-map", "semi-stable", contextMapContent, { priority: 2, cacheable: true })] : []),
       ...(lessonsContent ? [section("plan-lessons", "semi-stable", lessonsContent, { priority: 3 })] : []),
       section("plan-task", "task", taskContent, { priority: 1 }),
@@ -284,8 +304,9 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
     // STABLE prefix: planning procedure for guidance-scoped runs.
     const manualPlanProcedure = [
       `## Phase 1 of 2 — PLANNING ONLY. Do NOT write any .spec.ts in this phase.`,
-      `1. Activate serena (activate_project). Read the guidance below and the existing suite in`,
-      `   ${input.e2eRelDir}/ to understand the scope.`,
+      input.contextBrief
+        ? `1. The blast radius is ALREADY mapped in the Exploration brief below — read it (and the guidance) and derive the affected flows from it. Do NOT re-run find_referencing_symbols to re-discover the blast radius. Activate serena only to confirm a specific symbol or to read the existing suite in ${input.e2eRelDir}/.`
+        : `1. Activate serena (activate_project). Read the guidance below and the existing suite in\n   ${input.e2eRelDir}/ to understand the scope.`,
       `2. Plan one objective per INDEPENDENT affected flow that the guidance asks to test. Stay`,
       `   strictly within the guidance scope; do NOT plan flows the guidance does not mention.`,
       `   If everything fits one flow, return a single objective.`,
@@ -316,6 +337,8 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
     return assemble([
       section("plan-procedure", "stable-prefix", manualPlanProcedure, { priority: 1, cacheable: true }),
       section("plan-guidance", "semi-stable", guidanceContent, { priority: 1, language: "verbatim" }),
+      // FIX 3: same brief-reuse as diff — the explorer pass already mapped the blast radius for manual.
+      ...(planBriefContent ? [section("plan-brief", "semi-stable", planBriefContent, { priority: 1 })] : []),
       ...(contextMapContent ? [section("plan-arch-map", "semi-stable", contextMapContent, { priority: 2, cacheable: true })] : []),
       ...(lessonsContent ? [section("plan-lessons", "semi-stable", lessonsContent, { priority: 3 })] : []),
       section("plan-task", "task", manualTaskContent, { priority: 1 }),
@@ -369,6 +392,28 @@ export function buildPlanPrompt(input: OpencodeRunInput): string {
 // Fase 3: the dynamic task for the read-only explorer (single-agent diff path). The "how" + the
 // ExplorationBrief schema live in agents/agent/qa-explorer.md; here we hand it the change to map.
 export function buildExplorerPrompt(input: OpencodeRunInput): string {
+  // FIX 2: in manual mode there is no commit diff — the scope is the user's guidance. Rendering the
+  // (empty) diff would give the explorer nothing to map, so its brief would be empty and the manual
+  // Context Pack would carry no grounding. Drive the exploration from the guidance instead.
+  if (input.mode === "manual") {
+    const guidance = sanitizeText((input.guidance ?? "(no guidance provided)").trim()).text;
+    return [
+      `Explore the blast radius of the following GUIDANCE for ${input.repo} and return a distilled ExplorationBrief.`,
+      `You are READ-ONLY: do NOT write tests or any file. Map the affected flows, then emit ONLY the brief JSON.`,
+      ``,
+      `## Guidance (the user's instruction — the scope to explore)`,
+      guidance,
+      ``,
+      `Use serena (activate_project, find_symbol, find_referencing_symbols) to locate the code that`,
+      `implements the guidance's flows and map its blast radius. Stay strictly within the guidance scope.`,
+      ...(input.baseUrl ? [``, `Route context only — you do NOT navigate; selectors stay unverified. LIVE DEV URL: ${input.baseUrl}`] : []),
+      ...(input.service
+        ? [``, `## Cross-repo (microservice)`, `Related service: ${input.service.repo} (read-only copy at ${input.service.mirrorDir}). Map the FRONTEND flows that exercise it.`]
+        : []),
+      ``,
+      `## Output — set builtForSha to ${input.sha}; end with ONLY the ExplorationBrief JSON (schema in your role prompt).`,
+    ].join("\n");
+  }
   return [
     `Explore the blast radius of commit ${input.sha} of ${input.repo} and return a distilled ExplorationBrief.`,
     `You are READ-ONLY: do NOT write tests or any file. Map the change, then emit ONLY the brief JSON.`,
@@ -653,7 +698,12 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
     // Placed FIRST in VOLATILE so the ground-truth is nearest the task and within the
     // compaction-preserved tail. The domSnapshot (failure-point capture) stays at priority 1
     // so it follows the pack on regen passes without conflicting.
-    ...(contextPackContent ? [section("context-pack", "volatile", contextPackContent, { priority: 0 })] : []),
+    // FIX 5: shedAs "critical-recap" → the pack is LEAST-SHEDABLE under budget pressure. Its DOM
+    // ground-truth is captured live and is NOT recoverable by the agent, whereas the raw diff (in the
+    // TASK band) is recoverable via `git show`. Without this, VOLATILE sheds FIRST and the pack died
+    // before the diff. Assembly POSITION is unchanged (still volatile, near the task); only the shed
+    // precedence moves so the diff/task content is dropped before the unrecoverable pack.
+    ...(contextPackContent ? [section("context-pack", "volatile", contextPackContent, { priority: 0, shedAs: "critical-recap" })] : []),
     // VOLATILE: grounding (DOM snapshot — priority 1 within VOLATILE so it's first and the
     // selectorContradictions section can reference "the tree above" correctly).
     ...(domContent ? [section("dom-snapshot", "volatile", domContent, { priority: 1 })] : []),

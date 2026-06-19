@@ -12,7 +12,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { createHash } from "node:crypto";
-import { AgentResult, QaCase, RunMode, TestTarget, SpecMeta, ActivityKind } from "../types";
+import { AgentResult, QaCase, RunMode, TestTarget, SpecMeta, ActivityKind, PLANNER_OBJECTIVE } from "../types";
 import type { UsageSnapshot } from "../qa/usage";
 import { CommitIntent } from "../qa/commit-classify";
 import type { ArchitectureContext } from "../qa/context";
@@ -572,9 +572,10 @@ export interface AgentDeps {
   cleanupOrphans?(maxAgeMs: number): Promise<number>;
 }
 
-// Runs the read-only explorer ONCE for a first-pass diff e2e generation when opted in, returning the
-// distilled brief (or null to degrade silently). Gated tightly: never on code mode, never on a
-// re-generation pass (fix/review/coverage already carry context), and only when input.explorer is set.
+// Runs the read-only explorer ONCE for a first-pass diff OR manual e2e generation when opted in,
+// returning the distilled brief (or null to degrade silently). Gated tightly: never on code mode,
+// never on a re-generation pass (fix/review/coverage already carry context), and only when
+// input.explorer is set. (FIX 2: manual was previously excluded, so its Context Pack was empty.)
 // Exported (Slice H) so the orchestrator (pipeline.ts) can call it BEFORE buildContextPack to wire
 // the brief into the pack without a second explorer pass inside runOpencode (no-double-run guarantee).
 export async function maybeExplore(
@@ -583,7 +584,10 @@ export async function maybeExplore(
   opts?: { signal?: AbortSignal; onProgress?: (msg: string) => void },
 ): Promise<ExplorationBrief | null> {
   const isReGen = Boolean(input.fixCases?.length || input.reviewCorrections?.length || input.coverageGap);
-  if (!input.explorer || input.mode !== "diff" || input.target === "code" || isReGen) return null;
+  // FIX 2: manual mode shares the same engine as diff and benefits from blast-radius/route grounding
+  // equally — the universal exploreForPack push must NOT no-op for manual. Allow diff AND manual here;
+  // buildExplorerPrompt renders the guidance (not the empty diff) as the exploration objective for manual.
+  if (!input.explorer || (input.mode !== "diff" && input.mode !== "manual") || input.target === "code" || isReGen) return null;
   let session: AgentSession | undefined;
   try {
     session = await deps.open("qa-explorer", input.mirrorDir, {
@@ -1131,7 +1135,7 @@ export async function runOpencodeParallel(
   const planSession = await deps.open("qa-generator", input.mirrorDir, {
     signal: opts?.signal,
     timeoutMs,
-    descriptor: { runId: input.runId, role: "qa-generator", objective: "(planner)" },
+    descriptor: { runId: input.runId, role: "qa-generator", objective: PLANNER_OBJECTIVE },
   });
   if (input.runId) registerRunSession(planSession.id, input.runId, input.mirrorDir);
   const startedAt = Date.now();

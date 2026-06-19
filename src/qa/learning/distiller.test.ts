@@ -174,41 +174,63 @@ describe("distillReviewerCorrections", () => {
   });
 });
 
-// ── Phase 7: distillReviewerCorrections inserts rules as "pending" ────────────
-// Corrections must enter the DB as "pending" (quarantined from retrieval) rather than
-// "candidate" (injectable). This is the Phase-7 de-poison invariant: no raw reviewer
-// correction becomes a generator instruction before a run outcome validates it.
+// ── FIX 1a: distillReviewerCorrections inserts RETRIEVABLE candidates (de-poisoned by framing) ──
+// Corrections must enter the DB as "candidate" — RETRIEVABLE — not the inert retired "pending"
+// status. The de-poison is the "experimental — consider, not proven" framing in renderRulesForPrompt
+// (exercise without authority), NOT exclusion from retrieval. These tests assert the END-TO-END
+// EFFECT: a distilled correction-rule is actually selectable AND renders under the experimental header.
 
-describe("Phase 7 (b): distillReviewerCorrections inserts rules as 'pending', not 'candidate'", () => {
-  it("inserted correction-sourced rules have status='pending' in the DB", () => {
-    const app = `phase7-pend-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+import { selectForRetrieval, renderRulesForPrompt } from "./learning-rule";
+
+describe("FIX 1a: distilled correction-rules are RETRIEVABLE candidates rendered as experimental", () => {
+  it("inserts as 'candidate' (not the retired 'pending') so the rule is on the promotion flywheel", () => {
+    const app = `fix1a-cand-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const result = distillReviewerCorrections({
       app,
-      runId: "run-phase7-pend",
+      runId: "run-fix1a-cand",
       corrections: ["uses a fragile selector on the submit button"],
     });
     assert.equal(result.inserted.length, 1, "one correction should produce one inserted rule");
 
-    // Retrieve ALL rules (including pending) and verify the status.
-    const all = listAllLearningRules(app, 50);
-    const inserted = all.find((r) => r.id === result.inserted[0]);
+    const inserted = listAllLearningRules(app, 50).find((r) => r.id === result.inserted[0]);
     assert.ok(inserted, "inserted rule must be retrievable via listAllLearningRules");
-    assert.equal(inserted.status, "pending", "correction-sourced rule must start as 'pending', not 'candidate'");
+    assert.equal(inserted.status, "candidate", "correction-sourced rule must enter as 'candidate', not 'pending'");
   });
 
-  it("pending rules do NOT appear in the standard retrieval list (excluded from generator injection)", () => {
-    const app = `phase7-excl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    distillReviewerCorrections({
+  it("EFFECT: the distilled rule is actually returned by the retrieval path (listLearningRules + selectForRetrieval)", () => {
+    const app = `fix1a-retr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const result = distillReviewerCorrections({
       app,
-      runId: "run-phase7-excl",
-      corrections: ["uses a fragile selector"],
+      runId: "run-fix1a-retr",
+      corrections: ["no real assertion on the outcome"],
     });
-    // listLearningRules is the retrieval list — it must exclude pending rules.
+    const ruleId = result.inserted[0];
+    assert.ok(ruleId, "a rule must have been inserted");
+
+    // The retrieval list (the generator-injection path) MUST now include it (pending excluded it before).
     const retrievable = listLearningRules(app, 50);
-    assert.equal(
-      retrievable.filter((r) => r.status === "pending").length,
-      0,
-      "pending rules must not appear in the retrieval list (injection path)",
+    assert.ok(
+      retrievable.some((r) => r.id === ruleId),
+      "the distilled correction-rule must appear in the retrieval list (it was permanently dead as 'pending')",
     );
+    // And the ranking selector must actually pick it (not just be eligible).
+    const selected = selectForRetrieval(retrievable, { app });
+    assert.ok(
+      selected.some((r) => r.id === ruleId),
+      "selectForRetrieval must return the candidate so the generator EXERCISES it",
+    );
+  });
+
+  it("EFFECT: the candidate renders under the 'Experimental rules' header, NOT the proven/authoritative one", () => {
+    const app = `fix1a-render-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const result = distillReviewerCorrections({
+      app,
+      runId: "run-fix1a-render",
+      corrections: ["[fragile-selector] login.spec.ts: nth-child locator on the nav"],
+    });
+    const ruleId = result.inserted[0]!;
+    const rendered = renderRulesForPrompt(listLearningRules(app, 50).filter((r) => r.id === ruleId));
+    assert.match(rendered, /## Experimental rules \(unproven/, "must render under the experimental (de-poisoned) header");
+    assert.doesNotMatch(rendered, /## Proven rules/, "an unpromoted correction-rule must NOT carry proven-rule authority");
   });
 });

@@ -1,11 +1,14 @@
 import type { ErrorClass } from "./taxonomy";
 
-// Phase 7: "pending" is a pre-candidate quarantine for correction-sourced rules (distilled from
-// raw reviewer corrections). A pending rule is stored for deduplication and future promotion but
-// is EXCLUDED from retrieval — it cannot be injected into the generator prompt until at least
-// one run outcome validates it. Pending → candidate transition happens in recordRuleOutcome
-// when the first outcome folds in. This is the non-circular anchor: a reviewer correction must
-// survive real-world outcome measurement before it becomes a generator instruction.
+// "pending" is a RETIRED status, kept in the enum only for backward-compat with any rows an older
+// build wrote. It was meant as a pre-candidate quarantine for correction-sourced rules, but it was
+// inert: pending is excluded from retrieval (history.ts listRulesStmt) and its only exit transition
+// (pending → candidate) lives in recordRuleOutcome, which iterates only RETRIEVED rules — so a
+// pending rule was never retrieved, never accrued an outcome, and stayed pending forever. The
+// distiller now inserts correction-sourced rules directly as "candidate"; the de-poison is the
+// "experimental — consider, not proven" framing in renderRulesForPrompt (exercise without authority),
+// NOT exclusion from retrieval. No code path inserts "pending" anymore; the nextStatus pending →
+// candidate edge below is dead-but-harmless (it self-heals any legacy pending row on first outcome).
 export type RuleStatus = "pending" | "candidate" | "active" | "deprecated" | "superseded";
 export type Confidence = "low" | "medium" | "high";
 
@@ -172,11 +175,11 @@ export function selectForRetrieval(
     maxRules?: number;
   },
 ): LearningRule[] {
-  // Only proven (active) or still-exploring (candidate) rules are eligible; deprecated,
-  // superseded, and pending rules are never injected. PENDING rules are correction-sourced
-  // hypotheses quarantined until at least one run outcome validates them — injecting them
-  // before validation would recirculate unvalidated reviewer text as authoritative generator
-  // instructions (the Phase-7 de-poison invariant). Ranking: ACTIVE rules first (exploit
+  // Only proven (active) or still-exploring (candidate) rules are eligible; deprecated and
+  // superseded rules are never injected (and the retired "pending" status, which nothing writes
+  // anymore, is excluded too). Correction-sourced rules now enter as CANDIDATES, so they ARE
+  // retrieved — the de-poison is the "experimental — consider" framing in renderRulesForPrompt
+  // (exercise without authority), not exclusion from retrieval. Ranking: ACTIVE rules first (exploit
   // what has earned its place), then by successRate (the attribution signal), then relevance
   // to this run's errorClass AND the diff's structural shape. Candidates fill the remaining
   // slots as a bounded exploration tail so they can accumulate the outcomes that earn — or

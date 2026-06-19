@@ -108,9 +108,27 @@ export function normalizeModelName(raw: string): string {
   return raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
 }
 
+// FIX 8c: a fall-through to the default window is silent today, so a model-name/catalog mismatch
+// (e.g. the roster in agents/opencode.json renamed a model the catalog still keys by the old name)
+// is invisible — every prompt would quietly use the conservative DEFAULT_WINDOW_TOKENS instead of the
+// model's real, larger window. Warn ONCE per (role, reason) so the mismatch is observable without
+// spamming the log on every assemble() call. Module-level set survives for the process lifetime.
+const warnedFallbacks = new Set<string>();
+function warnFallbackOnce(role: string, reason: string): void {
+  const key = `${role}:${reason}`;
+  if (warnedFallbacks.has(key)) return;
+  warnedFallbacks.add(key);
+  console.warn(
+    `[model-window-catalog] role '${role}' fell through to the DEFAULT window (${DEFAULT_WINDOW_TOKENS} tokens): ${reason}. ` +
+      `The assembled-prompt budget for this role is the conservative default, not its real model window. ` +
+      `Confirm the role→model mapping in agents/opencode.json and the catalog in this file (see \`opencode models\`).`,
+  );
+}
+
 // Resolve the byte budget for a ROLE. Reads the role's model from
 // `agents/opencode.json` at `agentsConfigPath` (defaults to the process-cwd
-// relative path used by the rest of `src/`). Falls back gracefully at every step:
+// relative path used by the rest of `src/`). Falls back gracefully at every step
+// (logging ONCE per role/reason so a mismatch is observable, FIX 8c):
 //   1. Config file missing or unparseable → DEFAULT_WINDOW_TOKENS
 //   2. Role absent from agents.agent map → DEFAULT_WINDOW_TOKENS
 //   3. Model not in catalog → DEFAULT_WINDOW_TOKENS
@@ -121,15 +139,26 @@ export function roleWindowBytes(
 ): number {
   const configPath = agentsConfigPath ?? join(process.cwd(), "agents", "opencode.json");
   try {
-    if (!existsSync(configPath)) return modelWindowBytes("__fallback__");
+    if (!existsSync(configPath)) {
+      warnFallbackOnce(role, `config not found at ${configPath}`);
+      return modelWindowBytes("__fallback__");
+    }
     const raw = JSON.parse(readFileSync(configPath, "utf8")) as {
       agent?: Record<string, { model?: string }>;
     };
     const modelRef = raw.agent?.[role]?.model;
-    if (!modelRef) return modelWindowBytes("__fallback__");
-    return modelWindowBytes(normalizeModelName(modelRef));
+    if (!modelRef) {
+      warnFallbackOnce(role, "role absent from agents.agent map (no model assigned)");
+      return modelWindowBytes("__fallback__");
+    }
+    const modelName = normalizeModelName(modelRef);
+    if (!(modelName in MODEL_WINDOW_TOKENS)) {
+      warnFallbackOnce(role, `model '${modelName}' not in the catalog`);
+    }
+    return modelWindowBytes(modelName);
   } catch {
     // Config unreadable or unparseable; return the safe fallback.
+    warnFallbackOnce(role, "config unreadable or unparseable JSON");
     return modelWindowBytes("__fallback__");
   }
 }

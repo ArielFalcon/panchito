@@ -366,9 +366,10 @@ export const LearningRuleViewSchema = z.object({
   usageCount: z.number().int().nonnegative(),
   outcomeCount: z.number().int().nonnegative(),
   successRate: z.number().nullable(),
-  // Phase 7: "pending" is a pre-candidate quarantine for correction-sourced rules — excluded
-  // from retrieval until a run outcome validates them. Included in the contract so the ledger
-  // CLI and intelligence view can surface pending rules to the operator.
+  // "pending" is a RETIRED status (kept in the enum only for backward-compat with rows an older
+  // build may have written; nothing inserts it anymore — correction-sourced rules now enter as
+  // "candidate", see distiller.ts). Included in the contract so the ledger CLI and intelligence view
+  // can still surface any legacy pending rows to the operator.
   status: z.enum(["pending", "candidate", "active", "deprecated", "superseded"]),
 });
 

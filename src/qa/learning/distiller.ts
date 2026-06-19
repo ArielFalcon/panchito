@@ -104,12 +104,18 @@ export function correctionToRuleUpsert(input: { correction: string; runId: strin
   };
 }
 
-// Phase 7: off-path distillation of a reviewer rejection. Corrections become PENDING rules (not
-// candidate) — they are stored for deduplication and future promotion but are excluded from
-// retrieval until at least one run outcome validates them. This prevents raw reviewer text from
-// being recirculated as authoritative generator instructions before any measurement confirms
-// their value. The pending → candidate transition happens in recordRuleOutcome on first outcome.
-// Same dedup semantics as oracle-born rules: a pattern already tried and demoted must not respawn.
+// Phase 7 (J de-poison, corrected): off-path distillation of a reviewer rejection. Corrections
+// become CANDIDATE rules — retrievable, but rendered under the "experimental — consider, not
+// proven" header (renderRulesForPrompt) that strips their authority. THIS is the correct de-poison:
+// the generator EXERCISES the hypothesis (which is how it accumulates the outcomes that earn or deny
+// promotion) without being told to treat raw reviewer text as a proven prescription.
+//
+// The earlier "pending" path was inert: pending is excluded from retrieval (history.ts listRulesStmt
+// filters status IN ('active','candidate')), and the ONLY pending→candidate transition lives in
+// recordRuleOutcome, which only iterates RETRIEVED rules — so a pending rule was never retrieved,
+// never accrued an outcome, and stayed pending forever (permanently dead). Inserting as candidate
+// puts the rule on the live promotion flywheel from the first run. Same dedup semantics as
+// oracle-born rules: a pattern already tried and demoted must not respawn.
 export function distillReviewerCorrections(input: {
   app: string;
   runId: string;
@@ -129,10 +135,9 @@ export function distillReviewerCorrections(input: {
   const inserted: string[] = [];
   for (const c of toInsert) {
     const ruleId = `rule-${input.runId.slice(-8)}-${randomBytes(3).toString("hex")}`;
-    // Insert as "pending" so the rule is quarantined from generator retrieval until a run outcome
-    // validates it. This is the Phase-7 de-poison invariant: no raw correction becomes a generator
-    // instruction before it has survived real-world measurement.
-    upsertLearningRule({ ...c, app: input.app, id: ruleId, initialStatus: "pending" });
+    // Insert as "candidate" (the upsert default) so the rule is RETRIEVABLE and accumulates outcomes.
+    // De-poisoning is the experimental framing in renderRulesForPrompt, not exclusion from retrieval.
+    upsertLearningRule({ ...c, app: input.app, id: ruleId });
     inserted.push(ruleId);
   }
   return { inserted };

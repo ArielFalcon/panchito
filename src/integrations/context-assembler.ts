@@ -111,6 +111,14 @@ export interface Section {
   overflow: "summarize" | "drop";
   // Language tag: `scaffold` = this repo's English prose; `verbatim` = user-supplied content.
   language: "scaffold" | "verbatim";
+  // FIX 5: optional override of the SHED-ORDER band (NOT the canonical assembly order, which is
+  // always ROLE_ORDER). When set, the global-budget pass treats the section as if it were in this
+  // SectionRole's shed band instead of its own. This lets a section that is positioned in the
+  // VOLATILE band for READING (near the task) survive shedding as if it were less shedable — the
+  // case for the Context Pack: it is DOM ground-truth NOT recoverable by the agent, so it must
+  // outlast the raw diff (recoverable via `git show`) which lives in the TASK band. Assembly order
+  // is unchanged; only the shed precedence moves.
+  shedAs?: SectionRole;
 }
 
 // Result of assembling a prompt.
@@ -244,11 +252,15 @@ export function assemble(sections: Section[], opts: AssembleOpts = {}): Assemble
 
       // Sort shed candidates: primary key = shed-role order (most shedable first),
       // secondary key = priority number (highest = least important = shed first).
+      // FIX 5: a section may override its shed band via `shedAs` (assembly order is untouched). The
+      // Context Pack sits in VOLATILE for reading but sheds as CRITICAL-RECAP (least-shedable), so the
+      // raw diff (in TASK, recoverable via `git show`) goes before the unrecoverable DOM ground-truth.
+      const shedBand = (s: Section): number => SHED_ROLE_ORDER[s.shedAs ?? s.role];
       const candidates = resolved
         .filter((r) => !r.dropped)
         .sort((a, b) => {
-          const roleA = SHED_ROLE_ORDER[a.section.role];
-          const roleB = SHED_ROLE_ORDER[b.section.role];
+          const roleA = shedBand(a.section);
+          const roleB = shedBand(b.section);
           if (roleA !== roleB) return roleA - roleB;
           return b.section.priority - a.section.priority; // higher priority number → shed first
         });
@@ -270,6 +282,10 @@ export function assemble(sections: Section[], opts: AssembleOpts = {}): Assemble
           candidate.content = "";
         } else {
           // "summarize" degrades to truncation: truncate to fill the remaining budget.
+          // FIX 8d / production note: there is NO real summarizer in this phase, and every prompt
+          // builder in prompts.ts uses overflow:"drop" (the section() default) — so in production
+          // this branch is never taken. It is kept as a TRUNCATE-not-drop fallback for any future
+          // section that opts into overflow:"summarize"; until then "summarize" effectively == drop.
           // The remaining budget is the total budget minus the bytes of all OTHER surviving sections.
           // We must reserve space for the cap marker that capToBytes appends:
           //   marker = `\n…(section '{id}' capped at {N} bytes)`
@@ -353,7 +369,7 @@ export function section(
   id: string,
   role: SectionRole,
   content: string | (() => string),
-  opts: Partial<Pick<Section, "priority" | "maxBytes" | "cacheable" | "overflow" | "language">> = {},
+  opts: Partial<Pick<Section, "priority" | "maxBytes" | "cacheable" | "overflow" | "language" | "shedAs">> = {},
 ): Section {
   return {
     id,
@@ -364,5 +380,6 @@ export function section(
     cacheable: opts.cacheable ?? false,
     overflow: opts.overflow ?? "drop",
     language: opts.language ?? "scaffold",
+    ...(opts.shedAs ? { shedAs: opts.shedAs } : {}),
   };
 }

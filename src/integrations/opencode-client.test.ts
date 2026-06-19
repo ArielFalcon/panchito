@@ -22,6 +22,7 @@ import {
   buildWorkerPrompt,
   buildPlanPrompt,
   buildExplorerPrompt,
+  maybeExplore,
   renderArchitectureContext,
   shouldFanOut,
   parseModelRef,
@@ -628,6 +629,62 @@ test("runOpencode degrades gracefully when the explorer yields no parseable brie
   assert.deepEqual(res.specs, ["x.spec.ts"]);
 });
 
+// ── FIX 2: manual mode gets grounding (explorer no longer no-ops for manual) ──────────────
+
+test("FIX 2: buildExplorerPrompt renders the GUIDANCE (not the empty diff) as the manual exploration objective", () => {
+  const p = buildExplorerPrompt({
+    ...input,
+    mode: "manual",
+    diff: "", // manual runs carry NO diff
+    intent: undefined,
+    guidance: "test the contact form submission and validation errors",
+  });
+  assert.match(p, /test the contact form submission and validation errors/, "the guidance drives the exploration");
+  assert.match(p, /Guidance/, "the prompt frames the scope as guidance");
+  assert.match(p, /read-only|do NOT write/i);
+  assert.match(p, /ExplorationBrief|brief/i);
+  assert.doesNotMatch(p, /Commit diff/, "manual must NOT render an empty commit-diff block");
+});
+
+test("FIX 2: maybeExplore RUNS the explorer in manual mode and returns a usable brief (no longer no-ops)", async () => {
+  const opened: string[] = [];
+  let explorerPrompt = "";
+  const stub: AgentDeps = {
+    open: async (agent) => {
+      opened.push(agent);
+      return {
+        id: `s-${agent}`,
+        prompt: async (text: string) => {
+          explorerPrompt = text;
+          return '{"builtForSha":"abc123","objective":"contact form","blastRadius":[{"symbol":"ContactForm.submit","file":"src/contact.ts","role":"submits the form"}]}';
+        },
+        dispose: async () => {},
+      };
+    },
+  };
+  const brief = await maybeExplore(
+    { ...input, mode: "manual", diff: "", intent: undefined, guidance: "test the contact form", explorer: true },
+    stub,
+  );
+  assert.deepEqual(opened, ["qa-explorer"], "the explorer MUST run for manual mode (previously skipped → empty pack)");
+  assert.ok(brief, "manual mode must now yield a brief (the grounding source for the Context Pack)");
+  assert.equal(brief!.blastRadius[0]!.symbol, "ContactForm.submit", "the brief carries blast-radius grounding");
+  assert.match(explorerPrompt, /test the contact form/, "the explorer was driven by the guidance");
+});
+
+test("FIX 2: maybeExplore still no-ops for manual REGEN passes (fix/review/coverage already carry context)", async () => {
+  const opened: string[] = [];
+  const stub: AgentDeps = {
+    open: async (agent) => { opened.push(agent); return { id: "s", prompt: async () => "{}", dispose: async () => {} }; },
+  };
+  const brief = await maybeExplore(
+    { ...input, mode: "manual", diff: "", guidance: "g", explorer: true, reviewCorrections: ["fix selector"] },
+    stub,
+  );
+  assert.equal(brief, null, "a regen pass must not re-explore");
+  assert.deepEqual(opened, [], "no explorer session on a manual regen pass");
+});
+
 // ── Judgment-day fixes ───────────────────────────────────────────────────────
 
 test("runOpencode gives the explorer a TIGHTER timeout than the generator (cannot starve the queue)", async () => {
@@ -705,6 +762,62 @@ test("runOpencodeParallel single-objective fallback reuses the planned brief and
   await runOpencodeParallel({ ...input, mode: "diff", explorer: true, needsReview: false }, stub);
   assert.ok(!opened.includes("qa-explorer"), "the planner already explored — no redundant explorer session on the fallback");
   assert.match(generatorPrompt, /the planned role/, "the planner's brief is reused in the generator prompt");
+});
+
+// ── FIX 3: the explorer brief reaches the planner so it does NOT re-explore the same blast radius ──
+const fix3Brief: ExplorationBrief = {
+  builtForSha: "a1b2c3d",
+  objective: "bulk discount",
+  blastRadius: [{ symbol: "CartService.bulkDiscount", file: "cart.ts", role: "applies the bulk discount on >10 items" }],
+};
+
+test("FIX 3: buildPlanPrompt CONSUMES a supplied explorer brief and tells the planner NOT to re-widen", () => {
+  const withBrief = buildPlanPrompt({ ...diffPlanInput, contextBrief: fix3Brief });
+  assert.match(withBrief, /Exploration brief/, "the brief is rendered into the plan prompt");
+  assert.match(withBrief, /applies the bulk discount on >10 items/, "the brief's distilled blast radius is present");
+  assert.match(withBrief, /do NOT re-widen|do NOT re-run find_referencing_symbols/i, "the planner is told not to repeat exploration");
+});
+
+test("FIX 3: WITHOUT a brief the planner keeps the find_referencing_symbols widen step (back-compat)", () => {
+  const noBrief = buildPlanPrompt(diffPlanInput);
+  assert.match(noBrief, /find_referencing_symbols to widen/i, "no brief → the planner widens the blast radius itself");
+  assert.doesNotMatch(noBrief, /Exploration brief/, "no brief section when none was supplied");
+});
+
+test("FIX 3: manual-mode planner also consumes a supplied brief instead of re-widening", () => {
+  const manualWithBrief = buildPlanPrompt({ ...diffPlanInput, mode: "manual", diff: "", intent: undefined, guidance: "test the cart bulk discount", contextBrief: fix3Brief });
+  assert.match(manualWithBrief, /Exploration brief/);
+  assert.match(manualWithBrief, /do NOT re-run find_referencing_symbols/i);
+});
+
+test("FIX 3 (end-to-end): runOpencodeParallel feeds the forwarded brief into the PLANNER prompt (no re-exploration)", async () => {
+  // Two objectives → real fan-out path (not the single-objective fallback). The plan prompt must
+  // carry the brief that the orchestrator already built, so the planner reuses it rather than
+  // re-running find_referencing_symbols.
+  let planPrompt = "";
+  const opened: string[] = [];
+  const stub: AgentDeps = {
+    open: async (agent) => {
+      opened.push(agent);
+      return {
+        id: agent,
+        prompt: async (text: string) => {
+          if (text.includes("PLANNING ONLY")) { planPrompt = text; return '{"objectives":[{"flow":"a","objective":"o1","needsUi":false},{"flow":"b","objective":"o2","needsUi":false}]}'; }
+          return '{"spec":"flows/a.spec.ts"}';
+        },
+        dispose: async () => {},
+      };
+    },
+  };
+  // contextBrief is what defaultPipelineDeps.generate sets from builtExplorerBrief before calling
+  // runOpencodeParallel — simulate that wiring directly here. Inject a fake ManifestFs so the
+  // orchestrator's manifest write does not touch the real filesystem.
+  const store = new Map<string, string>();
+  const fakeFs: ManifestFs = { read: (p) => store.get(p) ?? null, write: (p, c) => void store.set(p, c) };
+  await runOpencodeParallel({ ...diffPlanInput, contextBrief: fix3Brief }, stub, { concurrency: 1, specExists: () => true }, fakeFs);
+  assert.match(planPrompt, /Exploration brief/, "the planner prompt must carry the forwarded brief");
+  assert.match(planPrompt, /applies the bulk discount on >10 items/, "the planner sees the already-distilled blast radius");
+  assert.match(planPrompt, /do NOT re-run find_referencing_symbols/i, "the planner is instructed not to re-explore");
 });
 
 test("specFileForFlow produces a safe path under flows/", () => {

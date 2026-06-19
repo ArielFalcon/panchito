@@ -65,12 +65,6 @@ export interface ContextPackInput {
   // Slice G). Used to further filter contracts to operations touched by the PR. When
   // absent, the brief's own routes/feBe are the only filter.
   prChangedFiles?: string[];
-
-  // Max bytes for the DOM component within the pack (sized by the assembler budget;
-  // defaults to a generous 30,000 bytes ≈ ~500 lines — much larger than the old 240-line
-  // fixed cap, and further bounded by the assembler's global budget when the pack section
-  // is added to the prompt).
-  domBudgetBytes?: number;
 }
 
 export interface ContextPackResult {
@@ -106,10 +100,12 @@ export const defaultContextPackDeps: ContextPackDeps = {
 
 // ── DOM budget ────────────────────────────────────────────────────────────────
 
-// Default generous DOM budget for the pack (30 KB ≈ ~500 lines at ~60 chars/line).
-// This replaces the old 4×60 = 240-line fixed cap (P10 fix). The assembler's global
-// budget further bounds the pack section when the total prompt is too large.
-const DEFAULT_DOM_BUDGET_BYTES = 30_000;
+// FIXED DOM budget for the pack (30 KB ≈ ~500 lines at ~60 chars/line). This replaces the old
+// 4×60 = 240-line fixed cap (P10 fix). It is NOT caller-configurable (FIX 7: the prior
+// `domBudgetBytes` override was never passed by any caller — dead plumbing, now removed). The
+// assembler's global per-prompt budget further bounds the pack SECTION when the total prompt is
+// too large (and FIX 5 makes the pack least-shedable so the diff is shed before it).
+const DOM_BUDGET_BYTES = 30_000;
 
 // Approximation: bytes ≈ chars for ASCII-dominant text (the a11y tree is plain text).
 const BYTES_PER_CHAR = 1;
@@ -202,7 +198,11 @@ export async function buildContextPack(
   deps: ContextPackDeps,
 ): Promise<ContextPackResult> {
   const log = deps.log ?? (() => {});
-  const domBudgetChars = Math.floor((input.domBudgetBytes ?? DEFAULT_DOM_BUDGET_BYTES) / BYTES_PER_CHAR);
+  // FIX 7: the DOM component is capped at a FIXED budget (DOM_BUDGET_BYTES). No caller ever supplied
+  // a per-call budget, so the old `domBudgetBytes` plumbing was dead — it has been removed and the
+  // docstring corrected. The assembler's global per-prompt budget is the OUTER bound applied later
+  // when the pack section is shed/truncated (and FIX 5 keeps the pack least-shedable there).
+  const domBudgetChars = Math.floor(DOM_BUDGET_BYTES / BYTES_PER_CHAR);
 
   // Component (a): blast-radius from the ExplorationBrief.
   let blastSection = "";
