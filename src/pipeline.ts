@@ -107,6 +107,16 @@ export interface GenerateInput {
   services?: Array<{ repo: string; mirrorDir: string; openapi?: string | string[] }>; // context mode: every declared service, mirrored read-only
 }
 
+// RE-3: a generator session kept alive across a run's regeneration cycles (opt-in via
+// qa.sessionContinuity). The FIRST generate() sends the full prompt; each later generate() sends a
+// short follow-up on the SAME session (the agent already holds the working rules / brief / pack /
+// diff), so the fix-loop stops re-orienting. dispose() frees it; the real impl ALSO self-disposes
+// after a wall-clock deadline, so an early-return/throw can never leak a session past that bound.
+export interface GeneratorSession {
+  generate(input: GenerateInput): Promise<AgentResult>;
+  dispose(): Promise<void>;
+}
+
 export interface PipelineDeps {
   // The signal aborts the gate's poll loop early (run cancelled, or the commit was
   // classified as a skip while the gate was still polling in the background).
@@ -118,6 +128,13 @@ export interface PipelineDeps {
   // Phase 6a: `onRepair` fires once when the generator emits an in-session contract-repair
   // re-prompt, so the shared cycle counter can account for repairs without polling the turn store.
   generate(input: GenerateInput, signal?: AbortSignal, onProgress?: (msg: string) => void, onUsage?: (u: UsageSnapshot) => void, onRepair?: () => void): Promise<AgentResult>;
+  // RE-3 (opt-in via qa.sessionContinuity): open ONE generator session for the whole run. Absent ⇒
+  // the fresh-session-per-call `generate` path is used (current behavior, no regression). The
+  // pipeline owns the handle and disposes it; the real impl self-disposes after a deadline too.
+  openGenerator?(
+    input: GenerateInput,
+    ctx: { signal?: AbortSignal; onProgress?: (msg: string) => void; onUsage?: (u: UsageSnapshot) => void; onRepair?: () => void },
+  ): Promise<GeneratorSession>;
   // The *.spec.ts the agent actually wrote on disk (git status over e2e/), e2e-relative.
   // The authoritative spec set for the no-op decision and the reviewer's file list — the
   // orchestrator trusts the working copy, not the agent's self-report. Absent ⇒ no
@@ -1257,6 +1274,11 @@ export async function runPipeline(
     log(`[qa] cycle-counter: in-session repair re-prompt (cycleCount=${cycleCount}/${MAX_CYCLES})`);
   };
 
+  // RE-3: the run-scoped generator session (opt-in via qa.sessionContinuity). Opened lazily by the
+  // first generateOnce, REUSED across cycles (the fix-loop continues it), and disposed before the
+  // decide step. The real impl also self-disposes after a deadline, covering early-return/throw paths.
+  let genSession: GeneratorSession | null = null;
+
   const generateOnce = async (genInput: GenerateInput): Promise<AgentResult> => {
     // Phase 6a: count this invocation toward the shared iteration budget BEFORE spending any
     // tokens. The ceiling check happens at every generateAndReview() call-site AND here for the
@@ -1271,7 +1293,26 @@ export async function runPipeline(
     log(`[qa] cycle-counter: generateAndReview invocation (cycleCount=${cycleCount}/${MAX_CYCLES})`);
 
     const genStart = Date.now();
-    let r = await reconcileSpecs(await deps.generate(genInput, signal, log, usage.add.bind(usage), onRepair));
+    // RE-3: route through a CONTINUED session when enabled — open lazily, then each cycle continues
+    // the SAME session (a short follow-up) instead of re-orienting a fresh agent. Any open error
+    // falls back to the fresh-session path so continuity can never break a run.
+    let raw: AgentResult;
+    if (app.qa.sessionContinuity && deps.openGenerator && generating) {
+      if (!genSession) {
+        genSession = await deps
+          .openGenerator(genInput, { signal, onProgress: log, onUsage: usage.add.bind(usage), onRepair })
+          .catch((e) => {
+            log(`[qa] session-continuity unavailable (${e instanceof Error ? e.message : String(e)}); using fresh-session generation.`);
+            return null;
+          });
+      }
+      raw = genSession
+        ? await genSession.generate(genInput)
+        : await deps.generate(genInput, signal, log, usage.add.bind(usage), onRepair);
+    } else {
+      raw = await deps.generate(genInput, signal, log, usage.add.bind(usage), onRepair);
+    }
+    let r = await reconcileSpecs(raw);
     log(`[qa] [timing] generation produced ${r.specs.length} spec(s) in ${Math.round((Date.now() - genStart) / 1000)}s`);
     return r;
   };
@@ -2244,6 +2285,13 @@ export async function runPipeline(
   // guard exactly once on the green path (the earlier exits already returned), so green is never
   // double-run.
   const confinement = await runConfine();
+
+  // RE-3: dispose the continued generator session — all regeneration is done by this point (the
+  // impl's self-dispose deadline covers the early-return/throw paths above). Safe if never opened.
+  if (genSession) {
+    await genSession.dispose().catch((e) => log(`[qa] generator session dispose failed: ${e instanceof Error ? e.message : String(e)}`));
+    genSession = null;
+  }
 
   // 9. Final decision.
   const kind = isCode ? "code" : "E2E";

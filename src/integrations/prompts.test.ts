@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPrompt, buildPromptAssembled } from "./prompts";
+import { buildPrompt, buildPromptAssembled, buildFollowupPrompt } from "./prompts";
 import type { OpencodeRunInput } from "./opencode-client";
 import type { QaCase } from "../types";
 
@@ -172,6 +172,38 @@ test("JD-C2: regen-discipline is in the stable band (renders before the volatile
   const iPack = a.text.indexOf("CTXPACK-MARKER");
   assert.ok(iRegen >= 0 && iPack >= 0, "both regen-discipline and the context-pack must be present");
   assert.ok(iRegen < iPack, "regen-discipline (stable) must render before the volatile context-pack");
+});
+
+// RE-3: a re-generation on a CONTINUED session sends a short follow-up — the session already holds
+// the working-rules, context-pack, brief and diff, so re-sending them wastes tokens. The follow-up
+// carries only the new failure/correction signal + a "do not re-explore" continuation framing.
+test("RE-3 buildFollowupPrompt: continuation carries the failures but NOT the full re-sent context", () => {
+  const input = mkInput({
+    fixCases: [failingCase],
+    contextPack: "## Context Pack CTXPACK_UNIQUE_MARKER\n" + "x".repeat(2000),
+    domSnapshot: "button: Add Owner",
+    failureSourced: true,
+  });
+  const full = buildPrompt(input);
+  const followup = buildFollowupPrompt(input);
+  assert.ok(followup.length < full.length, "the follow-up must be smaller than the full prompt");
+  assert.ok(followup.includes("owners list"), "the follow-up carries the failing case");
+  assert.ok(
+    !followup.includes("CTXPACK_UNIQUE_MARKER"),
+    "the follow-up must NOT re-send the context pack (the session already has it)",
+  );
+  assert.ok(
+    /continuation|do NOT re-explore|do NOT re-orient|already in this session/i.test(followup),
+    "the follow-up frames the turn as a continuation",
+  );
+});
+
+test("RE-3 buildFollowupPrompt: a failure-sourced continuation still injects the GROUND TRUTH AT FAILURE tree", () => {
+  const followup = buildFollowupPrompt(
+    mkInput({ fixCases: [failingCase], domSnapshot: "button: Add Owner", failureSourced: true }),
+  );
+  assert.ok(followup.includes("GROUND TRUTH AT FAILURE"), "the failure-point tree is NEW info, not in the session yet");
+  assert.ok(followup.includes("Add Owner"), "the captured failure DOM is present");
 });
 
 // JD-R2: the failure-sourced fix branch is also grounded (the captured failure tree), so it shares the

@@ -792,6 +792,68 @@ export function buildPrompt(input: OpencodeRunInput): string {
   return buildPromptAssembled(input).text;
 }
 
+// RE-3: the follow-up prompt for a re-generation on a CONTINUED session. The session already holds
+// the working rules, blast-radius brief, Context Pack and diff from the initial turn, so re-sending
+// them wastes tokens and invites re-exploration. This carries ONLY the new failure signal + a
+// "do not re-explore" framing. The failure-point a11y tree IS new (captured at the failure), so it
+// is injected; everything else the agent already has in its session history.
+export function buildFollowupPrompt(input: OpencodeRunInput): string {
+  const parts: string[] = [
+    `## Continuation — same session; do NOT re-explore`,
+    ``,
+    `The suite you wrote was executed against DEV. The working rules, blast-radius brief, Context Pack`,
+    `and diff are ALREADY in this session above — do NOT re-read them, do NOT re-activate serena, do NOT`,
+    `re-run find_referencing_symbols, and do NOT re-navigate a route you already explored. Fix from what`,
+    `you already have, plus the new failure signal below.`,
+    GROUNDING_UNCOVERED_ESCAPE,
+    ``,
+  ];
+  if (input.domSnapshot && input.failureSourced) {
+    parts.push(
+      `## GROUND TRUTH AT FAILURE`,
+      ``,
+      `The tree below is the page AT THE FAILURE POINT — the ONLY source of truth for this fix. Quote the`,
+      `exact \`role: name\` line before writing any locator; an unquotable locator MUST be replaced.`,
+      ``,
+      input.domSnapshot,
+      ``,
+    );
+  }
+  if (input.selectorContradictions?.length) {
+    parts.push(
+      `## ⚠ Selector contradictions (DETERMINISTIC — resolve EVERY one)`,
+      `Each was checked against the captured tree and FAILED — replace it with a role/name that appears there:`,
+      ...input.selectorContradictions.map((c) => `- ${c}`),
+      ``,
+    );
+  }
+  if (input.fixCases?.length) {
+    parts.push(
+      `## Fix failing tests`,
+      `These tests FAILED against DEV. Fix ONLY these; do NOT touch tests that passed.`,
+      ...input.fixCases.map((c) => `- ${c.name}\n  Error: ${c.detail?.slice(0, 500) ?? "(no detail)"}`),
+      ``,
+    );
+  }
+  if (input.reviewCorrections?.length) {
+    parts.push(
+      `## Apply reviewer corrections (HIGHEST priority)`,
+      `An independent reviewer REJECTED the previous specs. Fix EACH item; do NOT rewrite specs not flagged.`,
+      ...input.reviewCorrections.map((c) => `- ${c}`),
+      ``,
+    );
+  }
+  if (input.coverageGap) {
+    parts.push(
+      `## Cover the change (HIGH priority)`,
+      `The tests ran green but did NOT exercise all the changed lines. Extend/add tests so they are asserted:`,
+      input.coverageGap,
+      ``,
+    );
+  }
+  return parts.join("\n");
+}
+
 // ── Architecture context injection ──────────────────────────────────────────
 //
 // The orchestrator loads e2e/.qa/context.json and passes it via contextMap. This

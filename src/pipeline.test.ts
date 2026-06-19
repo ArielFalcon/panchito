@@ -1650,6 +1650,55 @@ test("3.x fix-loop: execution retries validate and execute before spending revie
   assert.ok(finalReview > retryExecute, `final reviewer should run after the fixed suite passes, not before retry execution:\n${calls.join(",")}`);
 });
 
+// RE-3: when qa.sessionContinuity is on AND deps.openGenerator is provided, the run opens ONE
+// generator session and the fix-loop CONTINUES it (a follow-up prompt) instead of fresh-generating.
+test("RE-3 session continuity: the fix-loop continues one generator session (no fresh re-generate)", async () => {
+  const calls: string[] = [];
+  const failingRun: QaRunResult = {
+    sha: "s", verdict: "fail", passed: false,
+    cases: [{ name: "owners list", status: "fail", failureDom: "button: Add Owner" }], logs: "",
+  };
+  const fixedRun: QaRunResult = { sha: "s", verdict: "pass", passed: true, cases: [], logs: "" };
+  const contApp: AppConfig = { ...app, qa: { ...app.qa, needsReview: true, sessionContinuity: true, fixLoop: { maxRetries: 1 } } };
+  const d = deps(failingRun, calls, {
+    agents: [generated, generated],
+    review: [{ approved: true, corrections: [] }, { approved: true, corrections: [] }],
+  });
+  let sessionGenerates = 0, sessionDisposes = 0, openCount = 0;
+  d.openGenerator = async () => {
+    openCount++;
+    return {
+      generate: async () => { sessionGenerates++; calls.push("session.generate"); return generated; },
+      dispose: async () => { sessionDisposes++; calls.push("session.dispose"); },
+    };
+  };
+  let executeCall = 0;
+  d.execute = async () => { calls.push("execute"); return executeCall++ === 0 ? failingRun : fixedRun; };
+  const freshGen = d.generate;
+  d.generate = async (...a: Parameters<typeof freshGen>) => { calls.push("FRESH.generate"); return freshGen(...a); };
+
+  const run = await runPipeline(contApp, "abc123", d, "manual", { mode: "manual", guidance: "test owner creation" });
+
+  assert.equal(run.verdict, "pass");
+  assert.equal(openCount, 1, `exactly one generator session opened; got ${openCount}`);
+  assert.ok(sessionGenerates >= 2, `the session must generate for the initial pass AND the retry; got ${sessionGenerates}`);
+  assert.equal(sessionDisposes, 1, `the session is disposed exactly once; got ${sessionDisposes}`);
+  assert.ok(!calls.includes("FRESH.generate"), `the fresh-session path must NOT run under continuity:\n${calls.join(",")}`);
+});
+
+test("RE-3 session continuity OFF (default): the fresh-session generate path is used, openGenerator untouched", async () => {
+  const calls: string[] = [];
+  const greenRun: QaRunResult = { sha: "s", verdict: "pass", passed: true, cases: [], logs: "" };
+  const d = deps(greenRun, calls, { agents: [generated], review: [{ approved: true, corrections: [] }] });
+  let opened = 0;
+  d.openGenerator = async () => { opened++; return { generate: async () => generated, dispose: async () => {} }; };
+
+  await runPipeline(app, "abc123", d, "manual", { mode: "manual", guidance: "x" });
+
+  assert.equal(opened, 0, "openGenerator must NOT be called when sessionContinuity is off (default)");
+  assert.ok(calls.includes("generate"), "the fresh-session generate path is used");
+});
+
 test("3.6 fix-loop: absent failureDom degrades gracefully (no domSnapshot, blind fix fallback)", async () => {
   const calls: string[] = [];
   const caseWithoutDom: QaCase = { name: "owners list", status: "fail", detail: "element not found" };

@@ -47,6 +47,10 @@ export const AppConfigSchema = z
       // Fase 3: run a read-only explorer pass before the generator on single-agent diff runs, so the
       // generator gets a distilled blast-radius brief instead of re-exploring. Default off (cost/opt-in).
       explorer: z.boolean().optional(),
+      // RE-3: keep ONE generator session alive across a run's regeneration cycles, so the fix-loop /
+      // coverage retries CONTINUE it (a short follow-up prompt) instead of re-orienting from a fresh
+      // session. Default off — higher-risk (a long-lived session); opt-in per app once trusted.
+      sessionContinuity: z.boolean().optional(),
       // Change-coverage policy (the value keystone). off = skip; signal (default) = measure +
       // record only; enforce = also try to close the gap and block publishing if it stays low.
       changeCoverage: z
