@@ -345,10 +345,21 @@ function recalcCounts(runId: string): { passed: number; failed: number } {
   return { passed, failed };
 }
 
+// SQLite returns an absent optional TEXT column as NULL, but the wire entities (QaCase / SpecRecord)
+// and their zod contracts type these fields as `field?: string` (undefined, NOT nullable). A NULL
+// objective/flow therefore fails contract validation on the API response (observed: a run whose spec
+// had no objective → "specs[].objective expected string, received null"). Normalize NULL → undefined at
+// the read boundary so an un-supplied field is simply omitted on the wire, matching the optional type.
+function nullsToUndefined<T extends Record<string, unknown>>(row: T): T {
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(row)) out[k] = row[k] === null ? undefined : row[k];
+  return out as T;
+}
+
 function rowToRecord(row: Record<string, unknown>): RunRecord {
   const runId = row.id as string;
-  const cases = getCasesStmt.all(runId) as QaCase[];
-  const specRows = getSpecsStmt.all(runId) as SpecRecord[];
+  const cases = (getCasesStmt.all(runId) as Record<string, unknown>[]).map(nullsToUndefined) as unknown as QaCase[];
+  const specRows = (getSpecsStmt.all(runId) as Record<string, unknown>[]).map(nullsToUndefined) as unknown as SpecRecord[];
   const logsText = (row.logs as string) || "";
   const activityRows = getActivityStmt.all(runId) as Array<{ kind: string; status: string | null; text: string; ts: string }>;
 

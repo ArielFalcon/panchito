@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 import Database from "better-sqlite3";
 import { createRecord, getRecord, listRecords, currentRun, updateRecord, addCase, continuationDepth, clearDatabase, appendActivity, upsertLearningRule, listLearningRules, recordRuleOutcome, saveScorecardEntry, loadScorecard, deleteAppHistory, interruptedRecords, backupDatabase, saveRunOutcome, getRunOutcome, listRunOutcomes, updateRunOutcomeReflection, markContextStale, consumeContextStale, saveAgentTurn, getAgentTurns } from "./history";
+import { SpecRecordSchema } from "../contract/commands";
 import type { RunOutcome, StructuredReflection, } from "../types";
 import type { AgentTurnRecord } from "./history";
 
@@ -70,6 +71,20 @@ test("currentRun returns a running/enqueued record and skips finished ones", () 
   assert.ok(currentRun());
   updateRecord(r.id, { status: "done", verdict: "pass" });
   assert.equal(getRecord(r.id)?.status, "done");
+});
+
+test("a spec with no objective/flow round-trips as undefined (not null) — wire-contract safe", () => {
+  // The single-agent (manual/diff fallback) path can report a spec without an objective; the DB stores
+  // an absent optional TEXT column as NULL. The read MUST normalize NULL → undefined, or the run's API
+  // response fails SpecRecordSchema (objective is optional, NOT nullable) — observed as a Zod
+  // "expected string, received null" on specs[].objective.
+  const r = createRecord({ target: "e2e", app: "hist-nullobj", sha: "9999999", mode: "manual" });
+  updateRecord(r.id, { status: "done", verdict: "pass", specs: [{ name: "flows/x.spec.ts" }] });
+  const spec = getRecord(r.id)!.specs![0]!;
+  assert.equal(spec.name, "flows/x.spec.ts");
+  assert.equal(spec.objective, undefined, "absent objective must read back as undefined, not null");
+  assert.equal(spec.flow, undefined, "absent flow must read back as undefined, not null");
+  assert.doesNotThrow(() => SpecRecordSchema.parse(spec), "the spec must satisfy the wire contract");
 });
 
 test("currentRun prefers running over enqueued when both exist (queue FIFO)", () => {
