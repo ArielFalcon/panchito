@@ -1,6 +1,6 @@
 # Agentic engine image: the OpenCode CLI + Serena (baked at build time) and the
 # language runtimes its language servers need.
-FROM node:22-bookworm
+FROM node:24-bookworm
 
 # - opencode/codex: agent CLIs (npm global → PATH at /usr/local/bin).
 # - engram: persistent episodic memory MCP (Go binary, single-file, no runtime deps).
@@ -17,17 +17,21 @@ ARG ENGRAM_VERSION=1.16.1
 # depends on outbound GitHub/PyPI access and startup is deterministic and fast. Pin a
 # release tag for reproducibility — bump it deliberately, never float on a moving ref.
 ARG SERENA_VERSION=v1.5.3
-# NOTE: opencode-ai / @playwright/mcp install "latest" at image build time. The IMAGE
-# is the version anchor — rebuilding the image is the deliberate bump point. Pin
-# explicitly here if a future bump introduces a breaking change.
+# The agent CLIs are PINNED to exact versions (CLAUDE.md: pin exact versions on the
+# execution path). A floating "latest" would let a silent upstream bump change agent
+# behavior on the next rebuild. Bumping is a deliberate edit here + an image rebuild —
+# confirm a new opencode-ai against `opencode models` before bumping.
+ARG OPENCODE_VERSION=1.17.7
+ARG CODEX_VERSION=0.139.0
+ARG PLAYWRIGHT_MCP_VERSION=0.0.76
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl ca-certificates git openjdk-17-jdk-headless python3 \
    && rm -rf /var/lib/apt/lists/* \
    && curl -LsSf https://astral.sh/uv/install.sh | sh \
    && export PATH="/root/.local/bin:${PATH}" \
    && uv tool install --python 3.11 "git+https://github.com/oraios/serena@${SERENA_VERSION}" \
-   && npm install -g opencode-ai @openai/codex typescript typescript-language-server \
-   && npm install -g @playwright/mcp \
+   && npm install -g "opencode-ai@${OPENCODE_VERSION}" "@openai/codex@${CODEX_VERSION}" typescript typescript-language-server \
+   && npm install -g "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" \
    && npx playwright install --with-deps chromium \
    && curl -fsSL "https://github.com/Gentleman-Programming/engram/releases/download/v${ENGRAM_VERSION}/engram_${ENGRAM_VERSION}_linux_amd64.tar.gz" \
      | tar -xz -C /usr/local/bin engram \

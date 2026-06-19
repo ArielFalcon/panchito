@@ -65,30 +65,31 @@ search by the project name from the prompt to scope results to this app. If the
 affected flow calls a backend endpoint, read the matching OpenAPI operation (see
 AGENTS.md) for contract-aware assertions.
 
-### 2. Explore the live page (Playwright MCP — MANDATORY)
+### 2. Selectors — transcribe from pack or explore (conditional)
 
-**This step is NOT optional. You MUST explore the page before writing ANY test.**
+**Check the prompt for a Context Pack** (a "Context Pack" section in the VOLATILE
+band, pushed by the orchestrator). The correct action depends on what is there:
 
-Use the Playwright MCP tools to navigate the DEV environment. The **LIVE DEV URL is
-given to you in the task prompt** ("LIVE DEV URL: ..."). Use that exact URL with
-`browser_navigate` — do NOT rely on a `PW_BASE_URL` env var (it is not set in your
-session; it is only set in the spec files at run time).
+**Case A — Context Pack present with a "Live DOM" section for a route:**
+  - TRANSCRIBE selectors directly from the DOM section — it is the ground truth.
+  - Do NOT use `browser_navigate` or `browser_snapshot` on routes already in the pack.
+  - Trust the pack's "role: name" lines exactly; do not assume roles or names not listed.
 
-1. **Navigate** to the affected page(s) with `browser_navigate` using the LIVE DEV
-   URL from the task prompt.
-2. **Take a snapshot** (`browser_snapshot`) to see the actual DOM structure,
-   element roles, labels, text content, and `data-testid` attributes.
-3. **Interact** with forms and navigation to verify the exact user flow:
-   click buttons, fill inputs, observe what appears and disappears.
-4. **Read runtime signals**: `browser_console_messages` (a JS error/warning on the
-   changed flow is a real bug — capture it and assert it does NOT happen) and
-   `browser_network_requests` (read the ACTUAL API calls the flow makes and their
-   responses — assert against their real status/shape, never an invented contract).
-5. **Document the real selectors** you will use — prefer `getByRole` with
-   `{ name }`, then `getByLabel`, then `getByTestId`. Never use CSS classes or
-   XPath.
-6. **Verify page transitions**: loading states, success messages, error displays.
-   Assert on what ACTUALLY appears, not what you assume.
+**Case B — Context Pack absent OR a route is not covered in the pack's DOM section:**
+  - **This step is mandatory.** Explore the live DEV page before writing any test.
+  - Use `browser_navigate` with the LIVE DEV URL from the task prompt (do NOT use
+    `PW_BASE_URL` — it is only set in spec files at run time, not in your session).
+  1. **Navigate** to the affected page(s) with `browser_navigate`.
+  2. **Take a snapshot** (`browser_snapshot`) to see the actual DOM structure,
+     element roles, labels, text content, and `data-testid` attributes.
+  3. **Interact** with forms and navigation to verify the exact user flow.
+  4. **Document the real selectors** — prefer `getByRole` with `{ name }`, then
+     `getByLabel`, then `getByTestId`. Never use CSS classes or XPath.
+  5. **Verify page transitions**: loading states, success messages, error displays.
+
+**In both cases**, also read runtime signals:
+- `browser_console_messages` — a JS error/warning on the changed flow is a real bug.
+- `browser_network_requests` — assert the ACTUAL API call status/shape, not invented.
 
 **If you cannot reach DEV** (network error, auth): note this in your verdict and
 do your best with code analysis alone, marking the limitation explicitly.
@@ -109,13 +110,23 @@ cookies/cache, file upload. Each test must:
 - Have **at least one real assert** on the observable outcome.
 - Be **deterministic** and **clean up** what it creates via `cleanup()`.
 
-### 4. Verify the tests compile (bash)
+### 4. Verify the tests COMPILE — do NOT run them (bash)
 
-After writing, run:
+After writing, verify they are DISCOVERABLE (parse + typecheck) and nothing more:
 ```bash
 cd e2e && npx playwright test --list 2>&1
 ```
-to verify the tests are discoverable. Fix any errors immediately.
+Fix any errors immediately. Then STOP touching the suite. Do **NOT**:
+- run the suite itself (`npx playwright test` WITHOUT `--list`),
+- `npx playwright install` browsers,
+- run mobile/desktop/project variants or any second execution.
+
+The ORCHESTRATOR executes the specs against live DEV (its deterministic Filter C) and then
+an independent reviewer judges them — running them yourself is wasted, duplicated work that
+can BLOCK your turn: a `playwright test` that waits on DEV (or a browser install) hangs your
+session, so you never emit the closing verdict and the whole run TIMES OUT and fails even
+though a correct spec is already on disk. Your deliverable is the written spec + a clean
+`--list`, nothing more.
 
 ### 5. Declare metadata in your verdict — do NOT edit manifest.json
 
@@ -143,6 +154,14 @@ to upsert so knowledge evolves across runs. **Always prefix topic_key with the
 test target** (e.g. `e2e/checkout`, `code/order-total`) so e2e and code-mode
 memory is isolated from each other. When searching, include the target in the
 query to avoid cross-mode contamination.
+
+## Stop when the spec is written — then emit the verdict
+
+Once your specs are written and `--list` is clean, you are DONE generating. Spend the rest
+of the turn on ONE thing: the closing JSON verdict below. Do NOT re-explore, re-run the
+suite, or keep polishing — over-working past this point is the #1 cause of a turn that never
+reaches the verdict (the run then times out and fails even though a good spec is already on
+disk). Keep step 7 (engram) to a single quick `mem_save`. The verdict is your LAST action.
 
 ## Final output
 

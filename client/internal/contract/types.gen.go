@@ -435,6 +435,159 @@ func (e QaCaseStatus) Valid() bool {
 	}
 }
 
+// Defines values for ReportInsightBreakdownSemantic.
+const (
+	ReportInsightBreakdownSemanticBad     ReportInsightBreakdownSemantic = "bad"
+	ReportInsightBreakdownSemanticGood    ReportInsightBreakdownSemantic = "good"
+	ReportInsightBreakdownSemanticNeutral ReportInsightBreakdownSemantic = "neutral"
+)
+
+// Valid indicates whether the value is a known member of the ReportInsightBreakdownSemantic enum.
+func (e ReportInsightBreakdownSemantic) Valid() bool {
+	switch e {
+	case ReportInsightBreakdownSemanticBad:
+		return true
+	case ReportInsightBreakdownSemanticGood:
+		return true
+	case ReportInsightBreakdownSemanticNeutral:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReportInsightChart.
+const (
+	Area       ReportInsightChart = "area"
+	BigNumber  ReportInsightChart = "big-number"
+	Donut      ReportInsightChart = "donut"
+	Gauge      ReportInsightChart = "gauge"
+	Line       ReportInsightChart = "line"
+	PairedBars ReportInsightChart = "paired-bars"
+	RankedBars ReportInsightChart = "ranked-bars"
+	StackedBar ReportInsightChart = "stacked-bar"
+)
+
+// Valid indicates whether the value is a known member of the ReportInsightChart enum.
+func (e ReportInsightChart) Valid() bool {
+	switch e {
+	case Area:
+		return true
+	case BigNumber:
+		return true
+	case Donut:
+		return true
+	case Gauge:
+		return true
+	case Line:
+		return true
+	case PairedBars:
+		return true
+	case RankedBars:
+		return true
+	case StackedBar:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReportInsightDirection.
+const (
+	Down ReportInsightDirection = "down"
+	Flat ReportInsightDirection = "flat"
+	Up   ReportInsightDirection = "up"
+)
+
+// Valid indicates whether the value is a known member of the ReportInsightDirection enum.
+func (e ReportInsightDirection) Valid() bool {
+	switch e {
+	case Down:
+		return true
+	case Flat:
+		return true
+	case Up:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReportInsightGoodWhen.
+const (
+	ReportInsightGoodWhenDown    ReportInsightGoodWhen = "down"
+	ReportInsightGoodWhenNeutral ReportInsightGoodWhen = "neutral"
+	ReportInsightGoodWhenUp      ReportInsightGoodWhen = "up"
+)
+
+// Valid indicates whether the value is a known member of the ReportInsightGoodWhen enum.
+func (e ReportInsightGoodWhen) Valid() bool {
+	switch e {
+	case ReportInsightGoodWhenDown:
+		return true
+	case ReportInsightGoodWhenNeutral:
+		return true
+	case ReportInsightGoodWhenUp:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReportInsightIntent.
+const (
+	Comparison   ReportInsightIntent = "comparison"
+	Composition  ReportInsightIntent = "composition"
+	Distribution ReportInsightIntent = "distribution"
+	SingleValue  ReportInsightIntent = "single-value"
+	Trend        ReportInsightIntent = "trend"
+)
+
+// Valid indicates whether the value is a known member of the ReportInsightIntent enum.
+func (e ReportInsightIntent) Valid() bool {
+	switch e {
+	case Comparison:
+		return true
+	case Composition:
+		return true
+	case Distribution:
+		return true
+	case SingleValue:
+		return true
+	case Trend:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReportInsightUnit.
+const (
+	Count   ReportInsightUnit = "count"
+	Ms      ReportInsightUnit = "ms"
+	Percent ReportInsightUnit = "percent"
+	Ratio   ReportInsightUnit = "ratio"
+	Score   ReportInsightUnit = "score"
+)
+
+// Valid indicates whether the value is a known member of the ReportInsightUnit enum.
+func (e ReportInsightUnit) Valid() bool {
+	switch e {
+	case Count:
+		return true
+	case Ms:
+		return true
+	case Percent:
+		return true
+	case Ratio:
+		return true
+	case Score:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for RoleAssignmentProvider.
 const (
 	RoleAssignmentProviderCodex    RoleAssignmentProvider = "codex"
@@ -585,6 +738,60 @@ func (e ListAgentModelsParamsProvider) Valid() bool {
 	}
 }
 
+// Defines values for GetAppReportParamsFormat.
+const (
+	GetAppReportParamsFormatCsv  GetAppReportParamsFormat = "csv"
+	GetAppReportParamsFormatJson GetAppReportParamsFormat = "json"
+)
+
+// Valid indicates whether the value is a known member of the GetAppReportParamsFormat enum.
+func (e GetAppReportParamsFormat) Valid() bool {
+	switch e {
+	case GetAppReportParamsFormatCsv:
+		return true
+	case GetAppReportParamsFormatJson:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GetAppTrendsParamsFormat.
+const (
+	GetAppTrendsParamsFormatCsv  GetAppTrendsParamsFormat = "csv"
+	GetAppTrendsParamsFormatJson GetAppTrendsParamsFormat = "json"
+)
+
+// Valid indicates whether the value is a known member of the GetAppTrendsParamsFormat enum.
+func (e GetAppTrendsParamsFormat) Valid() bool {
+	switch e {
+	case GetAppTrendsParamsFormatCsv:
+		return true
+	case GetAppTrendsParamsFormatJson:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GetRunReportParamsFormat.
+const (
+	Csv  GetRunReportParamsFormat = "csv"
+	Json GetRunReportParamsFormat = "json"
+)
+
+// Valid indicates whether the value is a known member of the GetRunReportParamsFormat enum.
+func (e GetRunReportParamsFormat) Valid() bool {
+	switch e {
+	case Csv:
+		return true
+	case Json:
+		return true
+	default:
+		return false
+	}
+}
+
 // AgentActivity defines model for AgentActivity.
 type AgentActivity struct {
 	Kind   AgentActivityKind    `json:"kind"`
@@ -726,6 +933,15 @@ type ContinueResult struct {
 	ParentRunId string `json:"parentRunId"`
 }
 
+// CoverageTrend defines model for CoverageTrend.
+type CoverageTrend struct {
+	Measured      bool      `json:"measured"`
+	MinRatio      float32   `json:"minRatio"`
+	PreviousRatio *float32  `json:"previousRatio"`
+	Ratio         *float32  `json:"ratio"`
+	Series        []float32 `json:"series"`
+}
+
 // CreateAppInput defines model for CreateAppInput.
 type CreateAppInput struct {
 	BaseUrl        *string                `json:"baseUrl,omitempty"`
@@ -806,6 +1022,21 @@ type DeleteAppResult struct {
 	Removed []string `json:"removed"`
 }
 
+// ErrorClassCount defines model for ErrorClassCount.
+type ErrorClassCount struct {
+	Count         int      `json:"count"`
+	ErrorClass    string   `json:"errorClass"`
+	Multiplier    *float32 `json:"multiplier"`
+	PreviousCount int      `json:"previousCount"`
+}
+
+// FlakyTrend defines model for FlakyTrend.
+type FlakyTrend struct {
+	PreviousRate *float32 `json:"previousRate"`
+	Rate         *float32 `json:"rate"`
+	Runs         int      `json:"runs"`
+}
+
 // IntelligenceView defines model for IntelligenceView.
 type IntelligenceView struct {
 	App        string             `json:"app"`
@@ -831,6 +1062,18 @@ type LearningRuleViewConfidence string
 
 // LearningRuleViewStatus defines model for LearningRuleView.Status.
 type LearningRuleViewStatus string
+
+// LoginRequest defines model for LoginRequest.
+type LoginRequest struct {
+	GithubToken string `json:"githubToken"`
+}
+
+// LoginResponse defines model for LoginResponse.
+type LoginResponse struct {
+	ExpiresAt string `json:"expiresAt"`
+	Token     string `json:"token"`
+	Username  string `json:"username"`
+}
 
 // OnboardServiceInput defines model for OnboardServiceInput.
 type OnboardServiceInput struct {
@@ -918,6 +1161,56 @@ type RepoListResponse struct {
 	Repos   []RepoListItem `json:"repos"`
 }
 
+// ReportInsight defines model for ReportInsight.
+type ReportInsight struct {
+	Breakdown *[]struct {
+		Label    string                          `json:"label"`
+		Semantic *ReportInsightBreakdownSemantic `json:"semantic,omitempty"`
+		Value    float32                         `json:"value"`
+	} `json:"breakdown,omitempty"`
+	Caption    *string                `json:"caption,omitempty"`
+	Chart      ReportInsightChart     `json:"chart"`
+	Delta      *float32               `json:"delta"`
+	Direction  ReportInsightDirection `json:"direction"`
+	GoodWhen   ReportInsightGoodWhen  `json:"goodWhen"`
+	Id         string                 `json:"id"`
+	Intent     ReportInsightIntent    `json:"intent"`
+	Multiplier *float32               `json:"multiplier"`
+	Score      float32                `json:"score"`
+	Series     *[]float32             `json:"series,omitempty"`
+	Target     *float32               `json:"target,omitempty"`
+	Title      string                 `json:"title"`
+	Unit       *ReportInsightUnit     `json:"unit,omitempty"`
+	Value      *float32               `json:"value"`
+}
+
+// ReportInsightBreakdownSemantic defines model for ReportInsight.Breakdown.Semantic.
+type ReportInsightBreakdownSemantic string
+
+// ReportInsightChart defines model for ReportInsight.Chart.
+type ReportInsightChart string
+
+// ReportInsightDirection defines model for ReportInsight.Direction.
+type ReportInsightDirection string
+
+// ReportInsightGoodWhen defines model for ReportInsight.GoodWhen.
+type ReportInsightGoodWhen string
+
+// ReportInsightIntent defines model for ReportInsight.Intent.
+type ReportInsightIntent string
+
+// ReportInsightUnit defines model for ReportInsight.Unit.
+type ReportInsightUnit string
+
+// ReportView defines model for ReportView.
+type ReportView struct {
+	App         string          `json:"app"`
+	GeneratedAt string          `json:"generatedAt"`
+	Headline    string          `json:"headline"`
+	Insights    []ReportInsight `json:"insights"`
+	Window      TrendWindow     `json:"window"`
+}
+
 // RoleAssignment defines model for RoleAssignment.
 type RoleAssignment struct {
 	Model    string                 `json:"model"`
@@ -965,6 +1258,12 @@ type RunRecordTarget string
 // RunRecordVerdict defines model for RunRecord.Verdict.
 type RunRecordVerdict string
 
+// RunReportView defines model for RunReportView.
+type RunReportView struct {
+	Current   ReportView  `json:"current"`
+	Evolution *ReportView `json:"evolution"`
+}
+
 // ScorecardView defines model for ScorecardView.
 type ScorecardView struct {
 	AvgValueScore *float32 `json:"avgValueScore"`
@@ -984,7 +1283,10 @@ type ScorecardView struct {
 // SignalsView defines model for SignalsView.
 type SignalsView struct {
 	Coverage struct {
-		Measured bool `json:"measured"`
+		AvgRatio     *float32 `json:"avgRatio"`
+		Measured     bool     `json:"measured"`
+		MeasuredRuns int      `json:"measuredRuns"`
+		TotalRuns    int      `json:"totalRuns"`
 	} `json:"coverage"`
 	Reviewer struct {
 		PassRate *float32 `json:"passRate"`
@@ -1005,6 +1307,36 @@ type SpecRecord struct {
 	Objective *string `json:"objective,omitempty"`
 }
 
+// TrendWindow defines model for TrendWindow.
+type TrendWindow struct {
+	Current  int `json:"current"`
+	Previous int `json:"previous"`
+}
+
+// TrendsView defines model for TrendsView.
+type TrendsView struct {
+	App      string        `json:"app"`
+	Coverage CoverageTrend `json:"coverage"`
+	Duration struct {
+		AvgMs      *float32 `json:"avgMs"`
+		PreviousMs *float32 `json:"previousMs"`
+		Runs       int      `json:"runs"`
+	} `json:"duration"`
+	ErrorClasses []ErrorClassCount `json:"errorClasses"`
+	Flaky        FlakyTrend        `json:"flaky"`
+	Flows        []struct {
+		Fail  int    `json:"fail"`
+		Flaky int    `json:"flaky"`
+		Flow  string `json:"flow"`
+		Runs  int    `json:"runs"`
+	} `json:"flows"`
+	GeneratedAt      string         `json:"generatedAt"`
+	ReviewerPassRate *float32       `json:"reviewerPassRate"`
+	ValueOracle      ValueTrend     `json:"valueOracle"`
+	VerdictMix       map[string]int `json:"verdictMix"`
+	Window           TrendWindow    `json:"window"`
+}
+
 // UpdateAppInput defines model for UpdateAppInput.
 type UpdateAppInput struct {
 	BaseUrl        *string                `json:"baseUrl,omitempty"`
@@ -1022,11 +1354,20 @@ type UpdateAppInput struct {
 // UpdateAppInputTarget defines model for UpdateAppInput.Target.
 type UpdateAppInputTarget string
 
+// ValueTrend defines model for ValueTrend.
+type ValueTrend struct {
+	AvgScore         *float32  `json:"avgScore"`
+	Measured         bool      `json:"measured"`
+	PreviousAvgScore *float32  `json:"previousAvgScore"`
+	Series           []float32 `json:"series"`
+}
+
 // VersionInfo defines model for VersionInfo.
 type VersionInfo struct {
 	ApiVersion       string   `json:"apiVersion"`
 	Capabilities     []string `json:"capabilities"`
 	Compatible       bool     `json:"compatible"`
+	GithubClientId   *string  `json:"githubClientId,omitempty"`
 	Message          *string  `json:"message,omitempty"`
 	MinClientVersion string   `json:"minClientVersion"`
 	ServerVersion    string   `json:"serverVersion"`
@@ -1045,6 +1386,24 @@ type DeleteAppParams struct {
 	Purge *bool `form:"purge,omitempty" json:"purge,omitempty"`
 }
 
+// GetAppReportParams defines parameters for GetAppReport.
+type GetAppReportParams struct {
+	Window *int                      `form:"window,omitempty" json:"window,omitempty"`
+	Format *GetAppReportParamsFormat `form:"format,omitempty" json:"format,omitempty"`
+}
+
+// GetAppReportParamsFormat defines parameters for GetAppReport.
+type GetAppReportParamsFormat string
+
+// GetAppTrendsParams defines parameters for GetAppTrends.
+type GetAppTrendsParams struct {
+	Window *int                      `form:"window,omitempty" json:"window,omitempty"`
+	Format *GetAppTrendsParamsFormat `form:"format,omitempty" json:"format,omitempty"`
+}
+
+// GetAppTrendsParamsFormat defines parameters for GetAppTrends.
+type GetAppTrendsParamsFormat string
+
 // ListReposParams defines parameters for ListRepos.
 type ListReposParams struct {
 	Owner string `form:"owner" json:"owner"`
@@ -1062,6 +1421,15 @@ type StreamRunEventsParams struct {
 	LastEventID *string `json:"Last-Event-ID,omitempty"`
 }
 
+// GetRunReportParams defines parameters for GetRunReport.
+type GetRunReportParams struct {
+	Window *int                      `form:"window,omitempty" json:"window,omitempty"`
+	Format *GetRunReportParamsFormat `form:"format,omitempty" json:"format,omitempty"`
+}
+
+// GetRunReportParamsFormat defines parameters for GetRunReport.
+type GetRunReportParamsFormat string
+
 // HandshakeParams defines parameters for Handshake.
 type HandshakeParams struct {
 	Client *string `form:"client,omitempty" json:"client,omitempty"`
@@ -1078,6 +1446,9 @@ type CreateAppJSONRequestBody = CreateAppInput
 
 // UpdateAppJSONRequestBody defines body for UpdateApp for application/json ContentType.
 type UpdateAppJSONRequestBody = UpdateAppInput
+
+// LoginJSONRequestBody defines body for Login for application/json ContentType.
+type LoginJSONRequestBody = LoginRequest
 
 // HelpJSONRequestBody defines body for Help for application/json ContentType.
 type HelpJSONRequestBody = AskRequest

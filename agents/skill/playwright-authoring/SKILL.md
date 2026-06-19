@@ -26,6 +26,14 @@ adapted from [TestDino playwright-skill](https://github.com/testdino-hq/playwrig
   CSS/XPath. **Always scope to a section**: locate the section by heading/landmark
   first, then narrow within it — never do `page.getByText(...)` without scope.
   See `locators-and-waiting.md` for the full selector rules.
+- **Selector source — conditional on Context Pack:**
+  - **Pack present with DOM for the route:** TRANSCRIBE from the "Live DOM" section
+    of the Context Pack. Do NOT `browser_navigate`/`browser_snapshot` for routes
+    already covered there — the pack is the orchestrator-pushed ground truth.
+  - **Pack absent or route not covered:** use the Playwright MCP to explore the live
+    page before writing any selector (see `qa-generator.md` step 2, Case B).
+  - Never invent a selector that does not appear in either the pack's DOM or a live
+    snapshot you just took.
 - **Web-first waiting**: use `expect(locator).toBeVisible()` etc. with auto-retry.
   **No `waitForTimeout`** (sleep) and no `networkidle`.
 - **One real assert** on the observable outcome, not just clicks.

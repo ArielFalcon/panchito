@@ -4,8 +4,18 @@ import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, existsSync, rmSync 
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 import Database from "better-sqlite3";
-import { createRecord, getRecord, listRecords, currentRun, updateRecord, addCase, continuationDepth, clearDatabase, appendActivity, upsertLearningRule, listLearningRules, recordRuleOutcome, saveScorecardEntry, loadScorecard, deleteAppHistory, interruptedRecords, backupDatabase, saveRunOutcome, getRunOutcome, listRunOutcomes, updateRunOutcomeReflection } from "./history";
-import type { RunOutcome, StructuredReflection } from "../types";
+import { createRecord, getRecord, listRecords, currentRun, updateRecord, addCase, continuationDepth, clearDatabase, appendActivity, upsertLearningRule, listLearningRules, recordRuleOutcome, saveScorecardEntry, loadScorecard, deleteAppHistory, interruptedRecords, backupDatabase, saveRunOutcome, getRunOutcome, listRunOutcomes, updateRunOutcomeReflection, markContextStale, consumeContextStale, saveAgentTurn, getAgentTurns } from "./history";
+import { SpecRecordSchema } from "../contract/commands";
+import type { RunOutcome, StructuredReflection, } from "../types";
+import type { AgentTurnRecord } from "./history";
+
+test("markContextStale then consumeContextStale is one-shot: first consume true, second false", () => {
+  const app = "hist-ctx-stale";
+  assert.equal(consumeContextStale(app), false); // nothing marked yet
+  markContextStale(app);
+  assert.equal(consumeContextStale(app), true); // the flag is read…
+  assert.equal(consumeContextStale(app), false); // …and cleared (survives only until consumed once)
+});
 
 test("createRecord stores an enqueued record findable by id", () => {
   const r = createRecord({ target: "e2e",  app: "hist-a", sha: "abcdef1234", mode: "diff" });
@@ -61,6 +71,20 @@ test("currentRun returns a running/enqueued record and skips finished ones", () 
   assert.ok(currentRun());
   updateRecord(r.id, { status: "done", verdict: "pass" });
   assert.equal(getRecord(r.id)?.status, "done");
+});
+
+test("a spec with no objective/flow round-trips as undefined (not null) — wire-contract safe", () => {
+  // The single-agent (manual/diff fallback) path can report a spec without an objective; the DB stores
+  // an absent optional TEXT column as NULL. The read MUST normalize NULL → undefined, or the run's API
+  // response fails SpecRecordSchema (objective is optional, NOT nullable) — observed as a Zod
+  // "expected string, received null" on specs[].objective.
+  const r = createRecord({ target: "e2e", app: "hist-nullobj", sha: "9999999", mode: "manual" });
+  updateRecord(r.id, { status: "done", verdict: "pass", specs: [{ name: "flows/x.spec.ts" }] });
+  const spec = getRecord(r.id)!.specs![0]!;
+  assert.equal(spec.name, "flows/x.spec.ts");
+  assert.equal(spec.objective, undefined, "absent objective must read back as undefined, not null");
+  assert.equal(spec.flow, undefined, "absent flow must read back as undefined, not null");
+  assert.doesNotThrow(() => SpecRecordSchema.parse(spec), "the spec must satisfy the wire contract");
 });
 
 test("currentRun prefers running over enqueued when both exist (queue FIFO)", () => {
@@ -279,4 +303,149 @@ test("backupDatabase keeps only the last 7 backups", async () => {
     else process.env.AI_PIPELINE_ROOT = prevRoot;
     rmSync(tmpRoot, { recursive: true, force: true });
   }
+});
+
+// ── Phase 0 / Slice A — agent_turns store ────────────────────────────────────
+
+// Minimal valid turn record factory for the tests below.
+function makeTurn(overrides: Partial<AgentTurnRecord> = {}): AgentTurnRecord {
+  return {
+    runId: "run-test-001",
+    sessionId: "sess-abc",
+    role: "qa-generator",
+    round: 0,
+    isRepair: false,
+    ts: new Date().toISOString(),
+    objective: "test the login flow",
+    promptText: "Write a Playwright test for the login feature.",
+    outputText: "The test is written.",
+    promptBytes: 43,
+    tokensInput: 100,
+    tokensOutput: 50,
+    tokensReasoning: 10,
+    tokensCacheRead: 5,
+    tokensCacheWrite: 2,
+    cost: 0.001,
+    ...overrides,
+  };
+}
+
+test("Phase 0 A.1/A.2: saveAgentTurn round-trips to getAgentTurns with all fields", () => {
+  const turn = makeTurn();
+  saveAgentTurn(turn);
+  const rows = getAgentTurns(turn.runId!);
+  assert.ok(rows.length >= 1, "at least one row must be returned");
+  const saved = rows.find((r) => r.sessionId === turn.sessionId && r.role === turn.role);
+  assert.ok(saved, "the saved turn must be retrievable by runId");
+  assert.equal(saved!.role, "qa-generator");
+  assert.equal(saved!.round, 0);
+  assert.equal(saved!.isRepair, false);
+  assert.equal(saved!.promptText, turn.promptText);
+  assert.equal(saved!.outputText, turn.outputText);
+  assert.equal(saved!.promptBytes, turn.promptBytes);
+  assert.equal(saved!.tokensInput, 100);
+  assert.equal(saved!.tokensOutput, 50);
+  assert.equal(saved!.tokensReasoning, 10);
+  assert.equal(saved!.tokensCacheRead, 5);
+  assert.equal(saved!.tokensCacheWrite, 2);
+  assert.ok(Math.abs((saved!.cost ?? 0) - 0.001) < 1e-9);
+  assert.equal(saved!.objective, "test the login flow");
+});
+
+test("Phase 0 A.2: saveAgentTurn stores null-runId turns (sessions with no parent run)", () => {
+  const turn = makeTurn({ runId: null, sessionId: "sess-no-run" });
+  // Should not throw — null runId is explicitly valid (e.g. maintainer, chat sessions).
+  assert.doesNotThrow(() => saveAgentTurn(turn));
+});
+
+test("Phase 0 A.2: getAgentTurns returns multiple turns in chronological order", () => {
+  const runId = "run-order-test-" + Date.now();
+  saveAgentTurn(makeTurn({ runId, sessionId: "s1", round: 0, role: "qa-generator", promptText: "first" }));
+  saveAgentTurn(makeTurn({ runId, sessionId: "s1", round: 1, role: "qa-generator", promptText: "second" }));
+  saveAgentTurn(makeTurn({ runId, sessionId: "s2", round: 0, role: "qa-reviewer", promptText: "review" }));
+  const rows = getAgentTurns(runId);
+  assert.equal(rows.length, 3);
+  // Chronological insertion order preserved.
+  assert.equal(rows[0]!.promptText, "first");
+  assert.equal(rows[1]!.promptText, "second");
+  assert.equal(rows[2]!.role, "qa-reviewer");
+});
+
+test("Phase 0 A.2: saveAgentTurn accepts null token fields (Codex path)", () => {
+  const runId = "run-codex-null-" + Date.now();
+  const turn = makeTurn({
+    runId,
+    sessionId: "codex-sess",
+    tokensInput: null,
+    tokensOutput: null,
+    tokensReasoning: null,
+    tokensCacheRead: null,
+    tokensCacheWrite: null,
+    cost: null,
+  });
+  saveAgentTurn(turn);
+  const rows = getAgentTurns(runId);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.tokensInput, null);
+  assert.equal(rows[0]!.tokensOutput, null);
+  assert.equal(rows[0]!.cost, null);
+});
+
+test("Phase 0 A.2: saveAgentTurn stores sanitized output — caller must pre-sanitize (contract)", () => {
+  // The store accepts whatever it receives; the DI contract requires the caller (defaultAgentDeps
+  // funnel) to sanitize before calling saveAgentTurn. We test that round-trip is faithful.
+  const runId = "run-sanitize-rt-" + Date.now();
+  const sanitizedText = "[REDACTED_SECRET] was in the output";
+  saveAgentTurn(makeTurn({ runId, outputText: sanitizedText }));
+  const rows = getAgentTurns(runId);
+  assert.equal(rows[0]!.outputText, sanitizedText);
+});
+
+test("Phase 0 A.1: agent_turns table migrates idempotently on an existing DB (columnExists guard)", () => {
+  // Calling saveAgentTurn twice with different sessions for the same run must work without errors,
+  // proving the schema was created exactly once (the IF NOT EXISTS guards prevent duplicate tables).
+  const runId = "run-migrate-" + Date.now();
+  saveAgentTurn(makeTurn({ runId, sessionId: "sess-a" }));
+  saveAgentTurn(makeTurn({ runId, sessionId: "sess-b", role: "qa-reviewer" }));
+  const rows = getAgentTurns(runId);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0]!.sessionId, "sess-a");
+  assert.equal(rows[1]!.role, "qa-reviewer");
+});
+
+// FIX 3: the agent_turns 30-day prune compares an ISO-8601 (…T…Z) ts column against
+// datetime('now', '-30 days'), which yields the space-separated 'YYYY-MM-DD HH:MM:SS' form. A RAW
+// string compare skews exactly at the BOUNDARY: when the date portions match, the 'T' (0x54) at
+// index 10 of the ISO value sorts GREATER than the cutoff's ' ' (0x20), so a row that IS older than
+// the cutoff (same day, earlier time) wrongly fails `ts < cutoff` and is NOT pruned. The fix wraps
+// ts in datetime() so both operands are SQLite's canonical form. This self-contained test pins the
+// cutoff to a known instant and reproduces the boundary skew + proves the fixed predicate is correct.
+test("FIX 3: agent_turns prune predicate (datetime(ts)) is boundary-correct for ISO ts, unlike a raw compare", () => {
+  const db = new Database(":memory:");
+  // Mirror the production column shape: ts is ISO-8601 TEXT (…T…Z).
+  db.exec("CREATE TABLE agent_turns (id INTEGER PRIMARY KEY, ts TEXT NOT NULL)");
+
+  // A fixed cutoff so the assertions are deterministic (no dependency on the test clock).
+  const cutoff = "2026-05-18 12:00:00"; // SQLite datetime() form (space-separated)
+  // An ISO turn that is genuinely OLDER than the cutoff: SAME date, earlier time → MUST prune.
+  const olderSameDay = "2026-05-18T08:00:00.000Z";
+  // An ISO turn NEWER than the cutoff: same date, later time → MUST survive.
+  const newerSameDay = "2026-05-18T20:00:00.000Z";
+  db.prepare("INSERT INTO agent_turns (ts) VALUES (?)").run(olderSameDay);
+  db.prepare("INSERT INTO agent_turns (ts) VALUES (?)").run(newerSameDay);
+
+  // The OLD broken predicate (raw string compare) FAILS to prune the older-same-day row: at index 10
+  // its 'T' > the cutoff's ' ', so `olderSameDay < cutoff` is false. This demonstrates the boundary bug.
+  const rawWouldPrune = (db.prepare("SELECT COUNT(*) AS c FROM agent_turns WHERE ts < ?").get(cutoff) as { c: number }).c;
+  assert.equal(rawWouldPrune, 0, "raw string compare mis-sorts the older-same-day ISO row (the boundary bug: 0 pruned)");
+
+  // The FIXED predicate: datetime(ts) normalizes the ISO value to the same canonical form as the cutoff.
+  const fixedWouldPrune = (db.prepare("SELECT COUNT(*) AS c FROM agent_turns WHERE datetime(ts) < ?").get(cutoff) as { c: number }).c;
+  assert.equal(fixedWouldPrune, 1, "datetime(ts) correctly identifies the older-same-day row as prunable");
+
+  db.prepare("DELETE FROM agent_turns WHERE datetime(ts) < ?").run(cutoff);
+  const survivors = db.prepare("SELECT ts FROM agent_turns").all() as Array<{ ts: string }>;
+  assert.equal(survivors.length, 1, "exactly the newer row must survive");
+  assert.equal(survivors[0]!.ts, newerSameDay, "the surviving row must be the newer-same-day one");
+  db.close();
 });

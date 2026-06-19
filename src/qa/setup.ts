@@ -8,7 +8,7 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { scrubEnv } from "./code-runner";
 import { killTree } from "./execute";
@@ -17,6 +17,63 @@ import { killTree } from "./execute";
 // never freeze the sequential queue; on expiry the process TREE is SIGKILLed and
 // setup throws — the pipeline surfaces that as infra-error, never a code verdict.
 export const DEFAULT_E2E_INSTALL_TIMEOUT_MS = 600_000; // 10 min
+
+// Idempotency marker used by ensureFailureCapture to avoid double-injection.
+// The seed config/e2e/fixtures.ts carries this literal; the same string in an
+// existing repo's fixtures.ts means the block was already injected.
+export const FAILURE_CAPTURE_MARKER = ">>> qa-failure-capture (system-owned: do not edit) >>>";
+
+// The afterEach block injected into existing repos' e2e/fixtures.ts. Not injected
+// into new onboards (the seed already carries it). Append-only: prepended newline
+// so there is always a blank separator from any agent-written lines above.
+// Exported so the test suite can assert it is byte-identical to the seed fixture and
+// ESM-safe (no require()), without re-reading the file off disk.
+export const FAILURE_CAPTURE_BLOCK = `
+// ${FAILURE_CAPTURE_MARKER}
+// Captures the aria snapshot of the page at the failure point and writes it to
+// QA_FAILURE_CAPTURE_DIR so the orchestrator can ground the fix-loop regeneration
+// in the REAL post-failure DOM (not the pre-write snapshot). Best-effort only:
+// the page may be closed on a nav-crash (try/catch swallows), and the entire
+// block is a no-op when QA_FAILURE_CAPTURE_DIR is unset.
+//
+// SELF-CONTAINED: this exact block is also appended (append-only) into existing repos'
+// fixtures.ts by the orchestrator, so it CANNOT assume any top-level import is present.
+// node:fs/path/crypto are pulled in via dynamic import() INSIDE the async afterEach —
+// a CommonJS-style synchronous load is not defined in this native-ESM module
+// ("type":"module") and would throw a ReferenceError that the catch would swallow.
+test.afterEach(async ({ page }, testInfo) => {
+  const dir = process.env.QA_FAILURE_CAPTURE_DIR;
+  if (!dir) return;                                   // degrade to no-op when the orchestrator did not ask
+  if (testInfo.status === testInfo.expectedStatus) return; // only on unexpected status (a real failure)
+  try {
+    const { writeFileSync } = await import("node:fs");
+    const { join, basename } = await import("node:path");
+    const { createHash } = await import("node:crypto");
+    const yaml = await page.locator("body").ariaSnapshot(); // the REAL post-failure page state
+    // title = the describe › test chain (drop the leading project element), MATCHING the stream
+    // reporter's _name. The orchestrator's harvest keys off this: the JSON report's case name is
+    // \`file › describe › test\`, whose trailing segments equal this title's segments.
+    const title = testInfo.titlePath.filter(Boolean).slice(1).join(" › ");
+    const project = testInfo.project.name;
+    // file = the spec's basename. Two tests with the SAME describe › test chain in DIFFERENT spec
+    // files share a title; the file disambiguates them so neither the dump identity nor the harvest
+    // match attaches the wrong DOM. Stored in the body AND folded into the filename hash below.
+    const file = basename(testInfo.file ?? "");
+    // Filename: project + a short hash of file + title + retry. The project keeps two projects
+    // (desktop/mobile) running the same spec from clobbering each other; the (file + title) HASH
+    // (not an 80-char truncation) keeps two long titles sharing an 80-char prefix — or two same-titled
+    // tests in different files — from colliding. The body is authoritative for matching (project/file/
+    // title); the filename only guarantees uniqueness + retry.
+    const hash = createHash("sha1").update(\`\${file}/\${title}\`).digest("hex").slice(0, 12);
+    const safeProject = project.replace(/[^a-z0-9]+/gi, "-").slice(0, 40);
+    writeFileSync(
+      join(dir, \`\${safeProject}__\${hash}__\${testInfo.retry}.json\`),
+      JSON.stringify({ project, file, title, retry: testInfo.retry, yaml }),
+    );
+  } catch { /* page may be closed on a nav-crash — best-effort, never fail the run */ }
+});
+// <<< qa-failure-capture <<<
+`;
 
 export interface SetupOptions {
   signal?: AbortSignal; // operator cancel: kills the install tree and throws
@@ -27,10 +84,27 @@ export interface SetupDeps {
   hasProject(e2eDir: string): boolean; // does the e2e project already exist?
   bootstrap(e2eDir: string): void; // copy the seed into the repo
   install(e2eDir: string, opts?: SetupOptions): Promise<void>;
+  // Create the `flows/` subdir the parallel fan-out writes into. Injected (not a bare mkdirSync) so
+  // the orchestration logic stays unit-testable without touching the real FS. Optional: when absent
+  // (older test stubs) the step is skipped; defaultSetupDeps always provides it for production.
+  ensureSpecDir?(e2eDir: string): void;
+  // Inject the system-owned qa-failure-capture afterEach block into an existing repo's
+  // e2e/fixtures.ts (marker-guarded, append-only, idempotent). New onboards get the block
+  // from the seed copy already; this only runs for repos that predate this change.
+  // Optional: absent stubs skip it; defaultSetupDeps always provides it for production.
+  ensureFailureCapture?(e2eDir: string): void;
 }
 
 export async function setupE2eProject(e2eDir: string, deps: SetupDeps, opts?: SetupOptions): Promise<void> {
   if (!deps.hasProject(e2eDir)) deps.bootstrap(e2eDir); // first time: seed it
+  // Guarantee the `flows/` subdir the parallel fan-out writes into. Each worker is assigned
+  // `flows/<flow>.spec.ts` (specFileForFlow) and can ONLY `write` (no bash, no mkdir, cheap model);
+  // the seed ships no `flows/` dir and a fresh checkout/clean wipes any prior one, so a worker's
+  // write to a non-existent subdir fails silently → every spec is a phantom and a complete/exhaustive
+  // run generates ZERO tests (observed: 7/7 workers phantom). The deterministic layer must create the
+  // dir — the worker cannot. Idempotent; runs on every setup, including the install-cached early return.
+  deps.ensureSpecDir?.(e2eDir);
+  deps.ensureFailureCapture?.(e2eDir);
   if (isInstallCurrent(e2eDir)) {
     console.log("[qa] e2e dependencies up to date; skipping npm ci");
     return;
@@ -90,6 +164,19 @@ function seedDir(): string {
 
 export const defaultSetupDeps: SetupDeps = {
   hasProject: (e2eDir) => existsSync(join(e2eDir, "package.json")),
+  ensureSpecDir: (e2eDir) => mkdirSync(join(e2eDir, "flows"), { recursive: true }),
+  // Injects the qa-failure-capture afterEach block into an existing repo's e2e/fixtures.ts.
+  // Idempotent (marker-guarded): if the block is already present (from the seed OR a prior
+  // injection) it is a no-op. Append-only: existing lines are never modified or removed.
+  // New onboards get the block from the seed cpSync (config/e2e/fixtures.ts → e2e/fixtures.ts),
+  // so this only runs for repos bootstrapped before this change was introduced.
+  ensureFailureCapture: (e2eDir) => {
+    const path = join(e2eDir, "fixtures.ts");
+    if (!existsSync(path)) return; // a fresh onboard gets it from the seed copy already
+    const src = readFileSync(path, "utf8");
+    if (src.includes(FAILURE_CAPTURE_MARKER)) return; // already present — idempotent no-op
+    appendFileSync(path, FAILURE_CAPTURE_BLOCK); // never rewrites existing lines (append-only)
+  },
   bootstrap: (e2eDir) =>
     cpSync(seedDir(), e2eDir, {
       recursive: true,

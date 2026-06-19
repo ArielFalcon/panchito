@@ -2,7 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { handleApi, ApiDeps } from "./api";
-import { RunRecord } from "../types";
+import { toTrendsView } from "./trends-view";
+import { toReportView } from "./report-view";
+import { RunRecord, RunOutcome } from "../types";
 import {
   AgentConfigApplyResultSchema,
   AgentModelsResponseSchema,
@@ -16,8 +18,8 @@ import {
   RepoListResponseSchema,
   RunRecordSchema,
 } from "../contract/commands";
-import { RunEventSchema } from "../contract/events";
-import { createRunEventStore } from "./run-events";
+import { RunEventSchema, RunEvent } from "../contract/events";
+import { createRunEventStore, RunEventStore } from "./run-events";
 
 function mkReq(method: string, url: string, body?: string): any {
   const r: any = Readable.from(body != null ? [body] : []);
@@ -107,6 +109,16 @@ test("GET /api/v1/version returns the handshake and judges client compatibility"
   assert.equal(JSON.parse(old.body).compatible, false);
 });
 
+test("GET /api/version advertises the configured GitHub OAuth client id (and omits it otherwise)", async () => {
+  const withId = mkRes();
+  await handleApi(mkReq("GET", "/api/version"), withId, deps({ githubClientId: "Ov23cid" }));
+  assert.equal(JSON.parse(withId.body).githubClientId, "Ov23cid");
+
+  const without = mkRes();
+  await handleApi(mkReq("GET", "/api/version"), without, deps());
+  assert.equal(JSON.parse(without.body).githubClientId, undefined);
+});
+
 test("GET /api/signals returns the fleet integrity view, or 501 when not wired", async () => {
   const notWired = mkRes();
   await handleApi(mkReq("GET", "/api/v1/signals"), notWired, deps());
@@ -117,13 +129,112 @@ test("GET /api/signals returns the fleet integrity view, or 501 when not wired",
     signals: () => ({
       valueOracle: { measured: true, avgScore: 0.8, measuredRuns: 10, totalRuns: 20 },
       reviewer: { passRate: 0.5, runs: 4 },
-      coverage: { measured: false },
+      coverage: { measured: false, avgRatio: null, measuredRuns: 0, totalRuns: 0 },
     }),
   }));
   assert.equal(res.status, 200);
   const view = JSON.parse(res.body);
   assert.equal(view.valueOracle.avgScore, 0.8);
   assert.equal(view.coverage.measured, false);
+});
+
+test("GET /api/apps/:name/trends and /api/apps/:name/report return 501 when not wired", async () => {
+  const t = mkRes();
+  await handleApi(mkReq("GET", "/api/v1/apps/demo/trends"), t, deps());
+  assert.equal(t.status, 501);
+  const r = mkRes();
+  await handleApi(mkReq("GET", "/api/v1/apps/demo/report"), r, deps());
+  assert.equal(r.status, 501);
+});
+
+test("GET /api/apps/:name/trends and /report return 200 and pass contractJson egress validation", async () => {
+  const outcome = (verdict: RunOutcome["verdict"], coverageRatio: number | null): RunOutcome => ({
+    runId: "r",
+    app: "demo",
+    sha: "s",
+    mode: "diff",
+    target: "e2e",
+    verdict,
+    errorClass: null,
+    gateSignals: { static: true, coverageRatio, valueScore: null, reviewerCorrections: [], flaky: false, retries: 0 },
+    rulesRetrieved: [],
+    at: "2026-01-01T00:00:00Z",
+  });
+  const outcomes = [outcome("pass", 0.8), outcome("fail", 0.4)];
+  const trends = (app: string) => toTrendsView({ app, outcomes, now: "2026-06-14T00:00:00Z" });
+
+  const t = mkRes();
+  await handleApi(
+    mkReq("GET", "/api/v1/apps/demo/trends"),
+    t,
+    deps({ trends }),
+  );
+  assert.equal(t.status, 200);
+  assert.equal(JSON.parse(t.body).app, "demo");
+
+  const r = mkRes();
+  await handleApi(
+    mkReq("GET", "/api/v1/apps/demo/report"),
+    r,
+    deps({ trends, report: (app) => toReportView(trends(app)) }),
+  );
+  assert.equal(r.status, 200);
+  const report = JSON.parse(r.body);
+  assert.equal(report.app, "demo");
+  assert.ok(Array.isArray(report.insights));
+});
+
+test("GET /report?format=csv returns CSV and ?window= is threaded to the dep", async () => {
+  const outcome = (verdict: RunOutcome["verdict"], coverageRatio: number | null): RunOutcome => ({
+    runId: "r", app: "demo", sha: "s", mode: "diff", target: "e2e", verdict, errorClass: null,
+    gateSignals: { static: true, coverageRatio, valueScore: null, reviewerCorrections: [], flaky: false, retries: 0 },
+    rulesRetrieved: [], at: "2026-01-01T00:00:00Z",
+  });
+  const outcomes = [outcome("pass", 0.8), outcome("fail", 0.4)];
+  let seenWindow: number | undefined;
+  const trends = (app: string, window?: number) => {
+    seenWindow = window;
+    return toTrendsView({ app, outcomes, now: "2026-06-14T00:00:00Z", window });
+  };
+  const r = mkRes();
+  await handleApi(
+    mkReq("GET", "/api/v1/apps/demo/report?format=csv&window=5"),
+    r,
+    deps({ trends, report: (app, window) => toReportView(trends(app, window)) }),
+  );
+  assert.equal(r.status, 200);
+  assert.match(r.body, /^id,title,intent,chart,value,unit,delta,multiplier,direction,goodWhen,score/);
+  assert.equal(seenWindow, 5); // ?window= reached the dep through the report path
+});
+
+test("GET /runs/:id/report returns {current, evolution}; CSV exports current; 404 when unknown", async () => {
+  const rep = toReportView(toTrendsView({ app: "demo", outcomes: [], now: "2026-06-14T00:00:00Z" }));
+  const runReport = { current: rep, evolution: null };
+
+  const ok = mkRes();
+  await handleApi(mkReq("GET", "/api/v1/runs/r1/report"), ok, deps({ reportForRun: () => runReport }));
+  assert.equal(ok.status, 200);
+  const body = JSON.parse(ok.body);
+  assert.equal(body.current.app, "demo"); // the current-execution analysis
+  assert.equal(body.evolution, null); // no history yet ⇒ evolution withheld
+
+  // CSV exports the run's OWN facts (the current report's insight table).
+  const csv = mkRes();
+  await handleApi(mkReq("GET", "/api/v1/runs/r1/report?format=csv"), csv, deps({ reportForRun: () => runReport }));
+  assert.equal(csv.status, 200);
+  assert.match(csv.body, /^id,title,intent,chart,value/);
+
+  const missing = mkRes();
+  await handleApi(mkReq("GET", "/api/v1/runs/nope/report"), missing, deps({ reportForRun: () => null }));
+  assert.equal(missing.status, 404);
+});
+
+test("GET /trends?format=csv returns a flat CSV", async () => {
+  const trends = (app: string) => toTrendsView({ app, outcomes: [], now: "2026-06-14T00:00:00Z" });
+  const r = mkRes();
+  await handleApi(mkReq("GET", "/api/v1/apps/demo/trends?format=csv"), r, deps({ trends }));
+  assert.equal(r.status, 200);
+  assert.match(r.body, /^metric,current,previous/);
 });
 
 test("GET /api/runs/:id sanitizes logs/cases/note before egress", async () => {
@@ -138,6 +249,20 @@ test("GET /api/runs/:id sanitizes logs/cases/note before egress", async () => {
   await handleApi(mkReq("GET", "/api/runs/r1"), res, deps({ getRecord: () => leaky }));
   assert.equal(res.status, 200);
   assert.doesNotMatch(res.body, /ghp_AAAA|ghp_BBBB|ghp_CCCC/, "logs/cases/note must be redacted on egress");
+});
+
+test("GET /api/runs/:id: a null/absent case detail does not 500 the contract (egress omits it)", async () => {
+  // history stores a detail-less case as detail:null; the contract is z.string().optional() (no null),
+  // so the egress must OMIT it — else the run-status API 500s and the CLI/TUI loses sight of the run.
+  const record = {
+    id: "r1", app: "demo", sha: "abc", target: "e2e", mode: "exhaustive", status: "running", verdict: "pass",
+    cases: [{ name: "owners › list", status: "pass", detail: null }, { name: "vets › table", status: "fail", detail: "boom" }],
+    logs: [], at: "t",
+  } as unknown as RunRecord;
+  const res = mkRes();
+  await handleApi(mkReq("GET", "/api/runs/r1"), res, deps({ getRecord: () => record }));
+  assert.equal(res.status, 200, "a null-detail case must not 500 the contract");
+  assert.doesNotMatch(res.body, /"detail":\s*null/, "null detail must be omitted, not serialized");
 });
 
 test("POST /api/runs with a sha enqueues and returns 202", async () => {
@@ -758,4 +883,212 @@ test("PUT /api/apps/:name without the dep returns 501", async () => {
   const res = mkRes();
   await handleApi(mkReq("PUT", "/api/apps/shop", JSON.stringify({ baseUrl: "https://x" })), res, deps({}));
   assert.equal(res.status, 501);
+});
+
+// ── POST /api/auth/login (GitHub session exchange) ────────────────────────────
+test("POST /api/auth/login exchanges a GitHub token for a session", async () => {
+  const res = mkRes();
+  const ok = await handleApi(
+    mkReq("POST", "/api/v1/auth/login", JSON.stringify({ githubToken: "gho_x" })),
+    res,
+    deps({ login: async () => ({ ok: true, token: "sess.jwt.sig", username: "alice", expiresAt: "2026-06-15T00:00:00Z" }) }),
+  );
+  assert.equal(ok, true);
+  assert.equal(res.status, 200);
+  const body = JSON.parse(res.body);
+  assert.equal(body.token, "sess.jwt.sig");
+  assert.equal(body.username, "alice");
+  assert.equal(body.expiresAt, "2026-06-15T00:00:00Z");
+});
+
+test("POST /api/auth/login maps a rejected GitHub token to 401", async () => {
+  const res = mkRes();
+  await handleApi(
+    mkReq("POST", "/api/auth/login", JSON.stringify({ githubToken: "bad" })),
+    res,
+    deps({ login: async () => ({ ok: false, reason: "identity" }) }),
+  );
+  assert.equal(res.status, 401);
+});
+
+test("POST /api/auth/login maps a non-collaborator to 403", async () => {
+  const res = mkRes();
+  await handleApi(
+    mkReq("POST", "/api/auth/login", JSON.stringify({ githubToken: "gho_x" })),
+    res,
+    deps({ login: async () => ({ ok: false, reason: "forbidden" }) }),
+  );
+  assert.equal(res.status, 403);
+});
+
+test("POST /api/auth/login without a githubToken is 400", async () => {
+  const res = mkRes();
+  await handleApi(
+    mkReq("POST", "/api/auth/login", JSON.stringify({})),
+    res,
+    deps({ login: async () => ({ ok: true, token: "x", username: "y", expiresAt: "z" }) }),
+  );
+  assert.equal(res.status, 400);
+});
+
+test("POST /api/auth/login without the dep wired returns 501", async () => {
+  const res = mkRes();
+  await handleApi(mkReq("POST", "/api/auth/login", JSON.stringify({ githubToken: "gho_x" })), res, deps({}));
+  assert.equal(res.status, 501);
+});
+
+// ── SSE stream robustness (OBS): the stream must never hang, and must surface events
+// produced by ANOTHER process whose publishes never reach this server's in-process bus. ──
+
+async function waitUntil(cond: () => boolean, timeoutMs: number): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error("condition not met within " + timeoutMs + "ms");
+    await new Promise((r) => setTimeout(r, 4));
+  }
+}
+
+// A store whose live subscription NEVER fires — models a run executing in a different
+// process (the event bus is in-process, so this server's subscribe() can't see it).
+function outOfProcessStore(persisted: RunEvent[]): RunEventStore {
+  return {
+    publish: () => { throw new Error("publish is not used in this test"); },
+    replay: (_id, after = -1) => persisted.filter((e) => e.seq > after),
+    subscribe: () => () => {},
+  };
+}
+
+test("the SSE stream ends when the run goes terminal even without a run.verdict event (out-of-process)", async () => {
+  let status: "running" | "done" = "running";
+  const record = (): RunRecord => ({ id: "r1", app: "demo", sha: "abc", target: "e2e", mode: "diff", status, cases: [], logs: [], at: "t" });
+  const req = mkReq("GET", "/api/v1/runs/r1/events");
+  const res = mkRes();
+  let ended = false;
+  const origEnd = res.end.bind(res);
+  res.end = (b?: string) => { ended = true; res.writableEnded = true; origEnd(b); };
+
+  await handleApi(req, res, deps({ getRecord: () => record(), runEvents: outOfProcessStore([]), ssePollMs: 5 }));
+  assert.equal(ended, false); // still running → the stream stays open
+
+  status = "done"; // the run is finalized by the other process in the shared record store
+  await waitUntil(() => ended, 400);
+  assert.equal(ended, true);
+});
+
+test("the SSE poll flushes events persisted by another process (the in-process bus never fired)", async () => {
+  const persisted: RunEvent[] = [];
+  const record: RunRecord = { id: "r1", app: "demo", sha: "abc", target: "e2e", mode: "diff", status: "running", cases: [], logs: [], at: "t" };
+  const req = mkReq("GET", "/api/v1/runs/r1/events");
+  const res = mkRes();
+
+  await handleApi(req, res, deps({ getRecord: () => record, runEvents: outOfProcessStore(persisted), ssePollMs: 5 }));
+
+  // Another process persists an event AFTER we connected; only the durable poll can surface it.
+  persisted.push({ seq: 0, runId: "r1", ts: 1, body: { type: "step.changed", step: "execute" } } as RunEvent);
+  await waitUntil(() => res.writes.join("").includes("step.changed"), 400);
+  assert.match(res.writes.join(""), /event: step.changed/);
+  req.emit("close"); // stop the poll
+});
+
+// Phase 0b: GET /api/runs/:id/turns — per-run agent_turns endpoint.
+// Spec scenario: "Per-role cache trends retrievable".
+
+test("phase-0b: GET /api/runs/:id/turns returns 501 when getAgentTurns is not wired", async () => {
+  const record: RunRecord = { id: "r1", app: "demo", sha: "abc", target: "e2e", mode: "diff", status: "done", cases: [], logs: [], at: "t" };
+  const res = mkRes();
+  await handleApi(mkReq("GET", "/api/v1/runs/r1/turns"), res, deps({ getRecord: () => record }));
+  assert.equal(res.status, 501);
+  assert.match(res.body, /not available/i);
+});
+
+test("phase-0b: GET /api/runs/:id/turns returns 404 when the run is not found", async () => {
+  const res = mkRes();
+  await handleApi(
+    mkReq("GET", "/api/v1/runs/missing-run/turns"),
+    res,
+    deps({ getAgentTurns: () => [], getRecord: () => undefined }),
+  );
+  assert.equal(res.status, 404);
+  assert.match(res.body, /not found/i);
+});
+
+test("phase-0b: GET /api/runs/:id/turns returns the saved turns for the run as a JSON array", async () => {
+  const record: RunRecord = { id: "r1", app: "demo", sha: "abc", target: "e2e", mode: "diff", status: "done", cases: [], logs: [], at: "t" };
+  const stubTurns = [
+    {
+      runId: "r1", sessionId: "s1", role: "qa-generator", round: 0, isRepair: false,
+      ts: "2026-06-16T00:00:00.000Z", objective: "feat: add login",
+      promptText: "generate tests", outputText: "tests done",
+      promptBytes: 14, tokensInput: 100, tokensOutput: 50,
+      tokensReasoning: 0, tokensCacheRead: 20, tokensCacheWrite: 5, cost: 0.001,
+    },
+    {
+      runId: "r1", sessionId: "s2", role: "qa-reviewer", round: 0, isRepair: false,
+      ts: "2026-06-16T00:01:00.000Z", objective: "feat: add login",
+      promptText: "review tests", outputText: '{"approved":true,"corrections":[],"rationale":"ok"}',
+      promptBytes: 12, tokensInput: 80, tokensOutput: 30,
+      tokensReasoning: null, tokensCacheRead: 10, tokensCacheWrite: 3, cost: 0.0008,
+    },
+  ];
+  const res = mkRes();
+  await handleApi(
+    mkReq("GET", "/api/v1/runs/r1/turns"),
+    res,
+    deps({ getRecord: () => record, getAgentTurns: () => stubTurns as any }),
+  );
+  assert.equal(res.status, 200);
+  const body = JSON.parse(res.body);
+  assert.ok(Array.isArray(body), "response must be a JSON array");
+  assert.equal(body.length, 2, "both turns must be returned");
+  assert.equal(body[0].role, "qa-generator");
+  assert.equal(body[1].role, "qa-reviewer");
+  // Phase 0b keystone: the reviewer turn must carry a non-null run_id
+  assert.equal(body[1].runId, "r1", "reviewer turn must have the parent run's runId");
+});
+
+// #4 regression: the /turns egress must run prompt_text + output_text through sanitizeText, matching
+// the defensive egress pass the sibling run-read endpoints apply (prompt_text embeds the live-DEV
+// domSnapshot, persisted raw). A secret in either field must be redacted before it leaves the system.
+test("phase-0b: GET /api/runs/:id/turns sanitizes prompt_text and output_text before egress", async () => {
+  const record: RunRecord = { id: "r1", app: "demo", sha: "abc", target: "e2e", mode: "diff", status: "done", cases: [], logs: [], at: "t" };
+  const secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  const stubTurns = [
+    {
+      runId: "r1", sessionId: "s1", role: "qa-generator", round: 0, isRepair: false,
+      ts: "2026-06-16T00:00:00.000Z", objective: "feat: add login",
+      // prompt_text carries the (raw-persisted) domSnapshot; output_text carries the agent reply.
+      promptText: `## Live DEV DOM\ntoken=${secret}\nbutton: Submit`,
+      outputText: `done — leaked ${secret}`,
+      promptBytes: 50, tokensInput: 100, tokensOutput: 50,
+      tokensReasoning: 0, tokensCacheRead: 20, tokensCacheWrite: 5, cost: 0.001,
+    },
+  ];
+  const res = mkRes();
+  await handleApi(
+    mkReq("GET", "/api/v1/runs/r1/turns"),
+    res,
+    deps({ getRecord: () => record, getAgentTurns: () => stubTurns as any }),
+  );
+  assert.equal(res.status, 200);
+  // The raw secret must not appear anywhere in the response body.
+  assert.doesNotMatch(res.body, /ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ/, "secret must be redacted in the /turns egress");
+  const body = JSON.parse(res.body);
+  assert.doesNotMatch(body[0].promptText, /ghp_/, "prompt_text must be sanitized");
+  assert.doesNotMatch(body[0].outputText, /ghp_/, "output_text must be sanitized");
+  assert.match(body[0].promptText, /REDACTED/);
+  // Non-secret content survives (the button label is still readable).
+  assert.match(body[0].promptText, /button: Submit/);
+});
+
+test("phase-0b: GET /api/runs/:id/turns returns an empty array when no turns exist for the run", async () => {
+  const record: RunRecord = { id: "r1", app: "demo", sha: "abc", target: "e2e", mode: "diff", status: "done", cases: [], logs: [], at: "t" };
+  const res = mkRes();
+  await handleApi(
+    mkReq("GET", "/api/v1/runs/r1/turns"),
+    res,
+    deps({ getRecord: () => record, getAgentTurns: () => [] }),
+  );
+  assert.equal(res.status, 200);
+  const body = JSON.parse(res.body);
+  assert.deepEqual(body, []);
 });

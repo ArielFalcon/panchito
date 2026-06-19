@@ -74,7 +74,7 @@ test("run report: shadow green run frames the WOULD-do action and the value sign
   assert.match(out, /action\s+would open an auto-merge suite PR/);
   assert.match(out, /produced\s+3 specs · login, add-owner, add-pet/);
   assert.match(out, /change-cov\s+82%\s+signal · measured/);
-  assert.match(out, /oracle\s+off in shadow/);
+  assert.match(out, /oracle\s+off \(set valueOracle: signal/); // default-off (no oraclePolicy ⇒ off)
   assert.match(out, /reviewer\s+approved · covers the new validation branch/);
 });
 
@@ -106,6 +106,20 @@ test("run report: non-shadow run says what it DID and shows a measured oracle sc
   assert.ok(!out.includes("SHADOW"));
   assert.match(out, /action\s+open an auto-merge suite PR/);
   assert.match(out, /oracle\s+60% mutant-kill/);
+});
+
+// The oracle is ENABLED (valueOracle: signal) but produced no score this run — e.g. an
+// infra-error/zero-spec run with no baseline-passing specs to score. The report must NOT say "off"
+// (which would tell the operator to enable an already-enabled oracle); it says "enabled · no
+// ground-truth this run". This is exactly the PetClinic-with-valueOracle-signal case.
+test("run report: an ENABLED oracle with no score reads 'enabled · no ground-truth', not 'off'", () => {
+  const out = renderRunReport({
+    ...baseReport,
+    verdict: "infra-error",
+    signals: { ...baseReport.signals, oraclePolicy: "signal", valueScore: null },
+  });
+  assert.match(out, /oracle\s+enabled · no ground-truth this run/);
+  assert.ok(!/oracle\s+off/.test(out), "must not tell the operator to enable an already-enabled oracle");
 });
 
 test("run report: a skipped run carries no specs and no side effect", () => {

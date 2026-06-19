@@ -128,8 +128,13 @@ export function validateContext(raw: unknown): ContextValidation {
         if (!nonEmpty(f.id)) errors.push(`flows[${i}]: missing 'id'`);
         else if (flowIds.has(f.id!)) errors.push(`flows[${i}]: duplicate id '${f.id}'`);
         else flowIds.add(f.id!);
-        if (!Array.isArray(f.routes) || f.routes.length === 0) {
-          errors.push(`flows '${tag}': empty 'routes' (a flow groups at least one route)`);
+        // A flow with NO routes is TOLERATED (not an error): a real feature can have no mapped
+        // frontend routes — e.g. a disabled / backend-only service (PetClinic's GenAI chat). It is
+        // harmless downstream, and invalidating the WHOLE architecture map over one routeless flow
+        // needlessly discarded an otherwise-good map every run. Only a MALFORMED `routes` (present
+        // but not an array) is a real error.
+        if (f.routes !== undefined && !Array.isArray(f.routes)) {
+          errors.push(`flows '${tag}': 'routes' must be an array when present`);
         }
       });
     }

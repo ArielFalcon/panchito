@@ -17,7 +17,7 @@ function validSeverity(v: unknown): IncidentSeverity | null {
 }
 
 function validSource(v: unknown): IncidentSource | null {
-  const s = ["health-check", "log-scraper", "qa-generator", "qa-reviewer", "cli"] as IncidentSource[];
+  const s = ["health-check", "log-scraper", "qa-generator", "qa-reviewer", "cli", "process-audit"] as IncidentSource[];
   return typeof v === "string" && (s as string[]).includes(v) ? (v as IncidentSource) : null;
 }
 

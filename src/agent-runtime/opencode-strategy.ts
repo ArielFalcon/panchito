@@ -6,8 +6,11 @@ import {
   startActivitySink,
   type LiveActivity,
   type AgentDeps,
+  type AgentOpenDescriptor,
+  type AgentTurnEvent,
 } from "../integrations/opencode-client";
 import type { RunEventBody } from "../contract/events";
+import type { UsageSnapshot } from "../qa/usage";
 import type {
   AgentModelInfo,
   AgentProviderHealth,
@@ -39,8 +42,11 @@ export const ROLE_TO_OPENCODE_AGENT: Record<AgentRole, string> = {
   explorer: "qa-explorer",
 };
 
+// Used ONLY when opencode.json is missing/unreadable (otherwise the live agent catalog wins). Kept
+// aligned with the models actually assigned in opencode.json so a fallback never rejects a valid
+// default (Config A: generator=kimi, reviewer=minimax, chat/workers=flash).
 const FALLBACK_MODELS: AgentModelInfo[] = [
-  { id: "opencode-go/deepseek-v4-pro", label: "DeepSeek V4 Pro" },
+  { id: "opencode-go/kimi-k2.7-code", label: "Kimi K2.7 Code" },
   { id: "opencode-go/minimax-m3", label: "MiniMax M3" },
   { id: "opencode-go/deepseek-v4-flash", label: "DeepSeek V4 Flash" },
 ];
@@ -76,7 +82,16 @@ export class OpenCodeRuntimeStrategy implements AgentRuntimeStrategy {
   async openSession(
     role: AgentRole,
     cwd: string,
-    opts?: { signal?: AbortSignal; timeoutMs?: number; model?: string },
+    // onUsage/descriptor/onTurn are forwarded verbatim to deps.open: the typed usage + turn-telemetry
+    // paths. defaultAgentDeps.open builds the AgentTurnEvent funnel from the descriptor (see AgentRuntimeStrategy).
+    opts?: {
+      signal?: AbortSignal;
+      timeoutMs?: number;
+      model?: string;
+      onUsage?: (u: UsageSnapshot) => void;
+      descriptor?: AgentOpenDescriptor;
+      onTurn?: (t: AgentTurnEvent) => void;
+    },
   ): Promise<AgentRuntimeSession> {
     const deps = await this.deps();
     return deps.open(ROLE_TO_OPENCODE_AGENT[role], cwd, opts);

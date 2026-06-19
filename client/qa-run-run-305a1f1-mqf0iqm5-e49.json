@@ -1,0 +1,10 @@
+{
+  "runId": "run-305a1f1-mqf0iqm5-e4965416",
+  "app": "petclinic",
+  "sha": "305a1f13e4f961001d4e6cb50a9db51dc3fc5967",
+  "target": "e2e",
+  "mode": "exhaustive",
+  "verdict": "skipped",
+  "passed": 0,
+  "failed": 0
+}

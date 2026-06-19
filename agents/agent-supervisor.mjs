@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const PROVIDERS = ["opencode", "codex"];
@@ -186,6 +187,35 @@ async function ensureDesired() {
   }
 }
 
+// One-shot at boot: wipe the OpenCode session DB so it never accumulates across the long-lived
+// container (it grows run-after-run — ~49 MB observed — and a stale/locked row once produced a
+// transient FK-constraint error). Auth is via OPENCODE_API_KEY (env), NOT the DB, so a wipe only
+// drops resumable session history, which the orchestrator never relies on. MUST run BEFORE the first
+// `opencode serve` spawn (an open DB cannot be cleanly replaced); it lives in the boot path only —
+// never in startProvider (crash-restart, :128) or /restart, which would nuke a mid-life DB. The
+// module-level flag makes it idempotent even if the boot path is ever reordered. Best-effort: a
+// missing dir or a locked file degrades to a warning, never a crash.
+let opencodeDbWiped = false;
+function wipeOpencodeDbOnce() {
+  if (opencodeDbWiped) return;
+  opencodeDbWiped = true;
+  const home = process.env.HOME || "/root";
+  const dir = join(process.env.XDG_DATA_HOME || join(home, ".local", "share"), "opencode");
+  try {
+    if (!existsSync(dir)) return;
+    let wiped = 0;
+    for (const name of readdirSync(dir)) {
+      // opencode.db plus its SQLite sidecars (-wal, -shm, -journal).
+      if (name === "opencode.db" || name.startsWith("opencode.db-")) {
+        try { rmSync(join(dir, name), { force: true }); wiped++; } catch { /* best-effort per file */ }
+      }
+    }
+    if (wiped > 0) console.log(`[agent-supervisor] wiped ${wiped} OpenCode session DB file(s) in ${dir} (auth is via OPENCODE_API_KEY, not the DB)`);
+  } catch (err) {
+    console.warn(`[agent-supervisor] could not wipe OpenCode session DB: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 function applyRuntimeEnv(env) {
   if (!env || typeof env !== "object") return;
   for (const [key, value] of Object.entries(env)) {
@@ -349,6 +379,8 @@ async function shutdown() {
 // without binding the port or registering signal handlers.
 const isMainModule = process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMainModule) {
+  // Clean the session DB ONCE, synchronously, before any `opencode serve` spawns (ensureDesired).
+  wipeOpencodeDbOnce();
   process.on("SIGTERM", () => void shutdown());
   process.on("SIGINT", () => void shutdown());
 

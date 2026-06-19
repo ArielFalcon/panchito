@@ -104,7 +104,7 @@ func (m historyModel) View() string {
 			b.WriteString(marker + formatRunLine(r) + "\n")
 		}
 	}
-	b.WriteString("\n" + hintStyle.Render("↑↓ move · enter watch · r refresh · esc back · q quit"))
+	b.WriteString("\n" + hintStyle.Render("↑↓ move · enter open (recap + report) · r refresh · esc back · q quit"))
 	return screenStyle.Render(b.String())
 }
 
@@ -112,10 +112,7 @@ func formatRunLine(r contract.RunRecord) string {
 	icon := runVerdictIcon(r.Verdict)
 	st := runVerdictStyle(r.Verdict)
 	mode := string(r.Mode)
-	shortID := r.Id
-	if len(shortID) > 8 {
-		shortID = shortID[:8]
-	}
+	shortID := shortRunID(r.Id)
 	counts := ""
 	if r.Passed != nil || r.Failed != nil {
 		p, f := 0, 0

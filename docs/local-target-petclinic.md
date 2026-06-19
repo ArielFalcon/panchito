@@ -67,7 +67,7 @@ This is the part that used to be invisible. At the end of a manual run the CLI n
   action       would open an auto-merge suite PR with the new tests
   ── value signals ──
   change-cov   82%  (signal · measured against the diff)
-  value oracle off in shadow (no ground-truth this run — set valueOracle: signal to enable)
+  value oracle  67%  (signal · 2/3 specs noticed corrupted backend responses)
   reviewer     approved — assertions check the persisted owner appears in the list
 ```
 

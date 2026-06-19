@@ -50,6 +50,17 @@ const TAG_TO_CLASS: Record<string, ErrorClass> = {
 
 export const REVIEWER_CORRECTION_TAGS = [...Object.keys(TAG_TO_CLASS), "other"] as const;
 
+// The GRAVE class tags: anti-patterns that MUST block publish regardless of the reviewer's
+// self-assigned severity (a false-positive test, a test that misses the change, or one that leaves
+// orphaned DEV data). DERIVED from TAG_TO_CLASS (the single source of the tag vocabulary) minus the
+// recoverable `fragile-selector` — so a future grave tag added to the taxonomy is automatically
+// grave here too, and cannot silently re-open the downgrade-to-advisory hole that the gate closes
+// (verdict-validate.ts effectiveSeverity). The one recoverable tag is excluded explicitly by name.
+const RECOVERABLE_TAGS = new Set<string>(["fragile-selector"]);
+export const GRAVE_TAGS: ReadonlySet<string> = new Set(
+  Object.keys(TAG_TO_CLASS).filter((tag) => !RECOVERABLE_TAGS.has(tag)),
+);
+
 // Classify a reviewer correction: prefer its explicit leading [tag]; fall back to keyword
 // heuristics for an untagged correction. Returns null when the reviewer chose "[other]" or
 // nothing recognizable matched (→ caller buckets it as E-REVIEWER-REJECTED).

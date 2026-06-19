@@ -65,6 +65,7 @@ type agentModel struct {
 	stagedKeys    map[string]string
 	editingRole   string
 	roleCursor    int
+	focusRole     string // role to jump into editing once the config loads (from the dashboard MODELS row)
 	busyRun       string // app of the active run, if any — the runtime is locked while it runs
 	width         int    // terminal width, for the grid (0 → default via contentWidth)
 }
@@ -98,6 +99,12 @@ func (m agentModel) Update(msg tea.Msg) (agentModel, tea.Cmd) {
 		m.config = &cfg
 		m.draft = &draft
 		m.err = ""
+		// Opened from a specific MODELS row on the dashboard → jump straight into editing that role
+		// (the editor needs the now-loaded draft). A one-shot: cleared so a later refresh stays put.
+		if m.focusRole != "" {
+			m.openRoleEditor(m.focusRole)
+			m.focusRole = ""
+		}
 		return m, nil
 	case queueLoadedMsg:
 		if msg.queue.Running != nil {
@@ -644,7 +651,9 @@ func (m agentModel) agentConfigUpdate(confirm bool) contract.AgentConfigUpdate {
 
 // ── Messages ─────────────────────────────────────────────────────────────────
 
-type agentSelectedMsg struct{}
+// agentSelectedMsg opens the agent runtime screen. `role` ("primary"/"reviewer"/"chat") jumps
+// straight into editing that model; empty opens the full screen with nothing pre-selected.
+type agentSelectedMsg struct{ role string }
 
 type agentConfigLoadedMsg struct{ config contract.PublicAgentConfig }
 

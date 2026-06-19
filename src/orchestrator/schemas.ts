@@ -59,6 +59,33 @@ export const AppConfigSchema = z
       // green suite with corrupted responses and record the catch-rate. NEVER blocks publish, and
       // it DOUBLES the DEV run — so it is opt-in.
       valueOracle: z.enum(["off", "signal"]).optional(),
+      // Run-intelligence report tuning. `weights` overrides the ranker's per-insight interestingness
+      // weight by insight id (e.g. { "change-coverage": 1.5 }); ids left out keep their defaults.
+      reports: z
+        .object({
+          weights: z.record(z.string(), z.number().nonnegative()).optional(),
+        })
+        .optional(),
+      // Fix-loop budget: cap the number of grounded regeneration retries (default 2, max 5).
+      // Set 0 to disable the loop entirely. The progress gate may stop sooner; this is the hard cap.
+      fixLoop: z
+        .object({
+          maxRetries: z.number().int().min(0).max(5).optional(),
+        })
+        .optional(),
+      // Phase 6a: shared iteration ceiling across ALL four regeneration loops (review, static-fix,
+      // exec-fix, coverage-enforce) plus the two in-session contract-repair re-prompts (generator
+      // and reviewer). When the counter reaches this value no further generateAndReview() call is
+      // made; the run concludes with the last available state and logs the reason.
+      // NOTE: generateParallel workers are intentionally excluded — they run inside their own
+      // per-session timeout (OPENCODE_TIMEOUT_MS) and are bounded by that mechanism, not this
+      // shared counter. This is by design: parallel workers are fire-and-join, not iterated loops.
+      // Default (undefined) → a runaway BACKSTOP derived from the configured loop caps (review +
+      // static-fix + exec-fix + coverage-enforce, plus repair headroom — see pipeline.ts
+      // deriveCycleBackstop). It sits at the legitimate worst case so it never truncates a valid
+      // run (including maxRetries=5); only a true runaway above it is stopped. Calibratable down
+      // from Phase-0 telemetry. This is the safety backstop, NOT the symptom lever (Phases 3–4).
+      iterationBudget: z.number().int().positive().optional(),
     }),
     code: z.boolean().optional(),
     report: z.object({
@@ -184,10 +211,52 @@ export type ValidatedGeneratorVerdict = z.infer<typeof GeneratorVerdictSchema>;
 // tolerant (`.catch`) so a formatting slip in advisory fields can NEVER turn a genuine
 // approval into a fail-closed rejection. A missing/non-boolean `approved` is the one thing
 // worth a repair re-prompt.
+//
+// Phase 4: each correction entry may carry an optional `severity` field.
+// The gate approves when zero BLOCKING corrections remain (advisory corrections are
+// non-fatal notes — recorded but do not fail the gate).
+// Backward-compat rule: a plain string correction (no severity) defaults to BLOCKING
+// (fail-closed). A structured entry without a valid severity also defaults to BLOCKING.
+// Entries are tolerant (.catch) so a formatting slip in any single correction never
+// turns a genuine approval into a fail-closed rejection.
+export const CorrectionEntrySchema = z.union([
+  // Structured entry with severity: the Phase-4 contract.
+  z.object({
+    text: z.string(),
+    severity: z.enum(["blocking", "advisory"]),
+  }),
+  // Legacy plain-string entry: treated as blocking (fail-closed backward compat).
+  z.string(),
+]);
+
+export type CorrectionEntry = z.infer<typeof CorrectionEntrySchema>;
+
+// Resolve a correction entry to its canonical text string.
+export function correctionText(entry: CorrectionEntry): string {
+  return typeof entry === "string" ? entry : entry.text;
+}
+
+// Resolve a correction entry's severity. Defaults to "blocking" for plain strings
+// and any entry without an explicit severity (fail-closed backward compat).
+export function correctionSeverity(entry: CorrectionEntry): "blocking" | "advisory" {
+  if (typeof entry === "string") return "blocking";
+  return entry.severity;
+}
+
 export const ReviewerVerdictSchema = z.object({
   approved: z.boolean(),
   rationale: z.string().optional().catch(undefined),
-  corrections: z.array(z.string()).catch([]),
+  // Tolerance is PER-ENTRY. An array-level `.catch([])` was fail-OPEN: a SINGLE malformed element
+  // collapsed the WHOLE array to [], so a verdict carrying one blocking correction alongside one
+  // unparseable element yielded blockingCount=0 → the severity gate APPROVED while silently dropping
+  // the blocking finding. The inner per-entry `.catch` instead degrades a bad element to a BLOCKING
+  // placeholder, so a malformed entry FAILS the gate closed (blockingCount>0) while the valid
+  // siblings are preserved. The outer array-level `.catch([])` still guards the orthogonal case where
+  // `corrections` is not an array at all (e.g. a stray string) — that advisory-shape slip must not
+  // false-block a genuine approval, exactly as before.
+  corrections: z
+    .array(CorrectionEntrySchema.catch({ text: "(unparseable correction)", severity: "blocking" }))
+    .catch([]),
 });
 
 export type ValidatedReviewerVerdict = z.infer<typeof ReviewerVerdictSchema>;

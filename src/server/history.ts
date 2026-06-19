@@ -11,11 +11,33 @@ import Database from "better-sqlite3";
 import { join } from "node:path";
 import { mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { RunRecord, RunMode, TestTarget, QaCase, RunVerdict, SpecRecord, RunOutcome, AgentActivity } from "../types";
+import { RunRecord, RunMode, TestTarget, QaCase, RunVerdict, SpecRecord, RunOutcome, AgentActivity, PLANNER_OBJECTIVE } from "../types";
 import { applyOutcome, type LearningRule, type RuleUpsert, type Confidence, type RuleStatus } from "../qa/learning/learning-rule";
 import type { ErrorClass } from "../qa/learning/taxonomy";
 import type { Curriculum } from "../qa/learning/curriculum";
 import { updateScorecard, type Scorecard, type ScorecardEntry } from "../qa/learning/oracle-types";
+
+// Per-turn record of one agent prompt/response cycle, persisted to `agent_turns`.
+// Foundation for Phase-0 telemetry (see docs/plan-diff-manual-quality.md § Phase 0).
+// Token fields are null for Codex runs (Codex returns no token info).
+export interface AgentTurnRecord {
+  runId: string | null;       // maps to RunRecord.id; null for turns with no parent run
+  sessionId: string;          // OpenCode session id
+  role: string;               // agent name (qa-generator, qa-reviewer, qa-explorer, …)
+  round: number;              // 0-based generation round within the session
+  isRepair: boolean;          // true for in-session contract-repair re-prompts
+  ts: string;                 // ISO-8601 timestamp when the turn completed
+  objective: string | null;   // human-readable objective scope (null when not supplied)
+  promptText: string;         // full prompt sent to the agent
+  outputText: string;         // agent reply, sanitized before persist
+  promptBytes: number;        // byte length of promptText
+  tokensInput: number | null;
+  tokensOutput: number | null;
+  tokensReasoning: number | null;
+  tokensCacheRead: number | null;
+  tokensCacheWrite: number | null;
+  cost: number | null;
+}
 
 const DELETE_MAX_AGE_DAYS = 30;
 
@@ -45,6 +67,8 @@ let loadCurriculumStmt!: Database.Statement;
 let saveCurriculumStmt!: Database.Statement;
 let loadScorecardStmt!: Database.Statement;
 let saveScorecardStmt!: Database.Statement;
+let insertAgentTurnStmt!: Database.Statement;
+let getAgentTurnsStmt!: Database.Statement;
 let initialized = false;
 
 function ensureDb(): void {
@@ -176,6 +200,40 @@ function ensureDb(): void {
       data TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    -- A one-shot "rebuild the architecture map next run" flag, set by the process-audit context-heal.
+    -- DB-backed because the mirror's e2e/.qa/context.json is wiped/restored by git checkout -f +
+    -- git clean -fd on every run, so a file-level invalidation never survives to the next run. This
+    -- flag does, and is CONSUMED (cleared) by the next generating run for the app.
+    CREATE TABLE IF NOT EXISTS context_stale (
+      app TEXT PRIMARY KEY,
+      at TEXT NOT NULL
+    );
+
+    -- Per-turn telemetry for every agent prompt/response cycle (Phase 0 foundation).
+    -- Mirrors the run_events 30-day retention. Token columns are nullable because Codex
+    -- runs return no token info. output_text is sanitized before persist (sanitizer.ts).
+    CREATE TABLE IF NOT EXISTS agent_turns (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id TEXT,
+      session_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      round INTEGER NOT NULL DEFAULT 0,
+      is_repair INTEGER NOT NULL DEFAULT 0,
+      ts TEXT NOT NULL,
+      objective TEXT,
+      prompt_text TEXT NOT NULL,
+      output_text TEXT NOT NULL,
+      prompt_bytes INTEGER NOT NULL DEFAULT 0,
+      tokens_input INTEGER,
+      tokens_output INTEGER,
+      tokens_reasoning INTEGER,
+      tokens_cache_read INTEGER,
+      tokens_cache_write INTEGER,
+      cost REAL
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_turns_run_id ON agent_turns(run_id);
+    CREATE INDEX IF NOT EXISTS idx_agent_turns_role ON agent_turns(role);
   `);
 
   // Migration: add columns introduced after the initial schema to DBs that already
@@ -244,10 +302,29 @@ function ensureDb(): void {
   loadScorecardStmt = db.prepare("SELECT data FROM scorecard WHERE app = ?");
   saveScorecardStmt = db.prepare("INSERT INTO scorecard (app, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(app) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at");
 
+  // agent_turns: insert a turn record; retrieve all turns for a run ordered by id.
+  insertAgentTurnStmt = db.prepare(`
+    INSERT INTO agent_turns
+      (run_id, session_id, role, round, is_repair, ts, objective,
+       prompt_text, output_text, prompt_bytes,
+       tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write, cost)
+    VALUES
+      (@runId, @sessionId, @role, @round, @isRepair, @ts, @objective,
+       @promptText, @outputText, @promptBytes,
+       @tokensInput, @tokensOutput, @tokensReasoning, @tokensCacheRead, @tokensCacheWrite, @cost)
+  `);
+  getAgentTurnsStmt = db.prepare("SELECT * FROM agent_turns WHERE run_id = ? ORDER BY id ASC");
+
   // Prune old runs once on first use.
   db.prepare(`DELETE FROM runs WHERE at < datetime('now', '-${DELETE_MAX_AGE_DAYS} days')`).run();
   // Bound the durable event log: drop events older than the run retention window (ts is epoch ms).
   db.prepare("DELETE FROM run_events WHERE ts < ?").run(Date.now() - DELETE_MAX_AGE_DAYS * 24 * 60 * 60 * 1000);
+  // Prune agent_turns older than the retention window. agent_turns.ts is ISO-8601 (…T…Z) TEXT, but
+  // datetime('now', …) yields the space-separated 'YYYY-MM-DD HH:MM:SS' form — a raw string compare
+  // would mis-sort (the 'T' > ' ' at index 10 makes every ISO value sort GREATER, so nothing prunes).
+  // Wrap ts in datetime() so BOTH sides are SQLite's canonical datetime form: a correct boundary
+  // compare, consistent with run_events (which prunes correctly via its own typed epoch-ms compare).
+  db.prepare(`DELETE FROM agent_turns WHERE datetime(ts) < datetime('now', '-${DELETE_MAX_AGE_DAYS} days')`).run();
 
   initialized = true;
 }
@@ -268,10 +345,21 @@ function recalcCounts(runId: string): { passed: number; failed: number } {
   return { passed, failed };
 }
 
+// SQLite returns an absent optional TEXT column as NULL, but the wire entities (QaCase / SpecRecord)
+// and their zod contracts type these fields as `field?: string` (undefined, NOT nullable). A NULL
+// objective/flow therefore fails contract validation on the API response (observed: a run whose spec
+// had no objective → "specs[].objective expected string, received null"). Normalize NULL → undefined at
+// the read boundary so an un-supplied field is simply omitted on the wire, matching the optional type.
+function nullsToUndefined<T extends Record<string, unknown>>(row: T): T {
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(row)) out[k] = row[k] === null ? undefined : row[k];
+  return out as T;
+}
+
 function rowToRecord(row: Record<string, unknown>): RunRecord {
   const runId = row.id as string;
-  const cases = getCasesStmt.all(runId) as QaCase[];
-  const specRows = getSpecsStmt.all(runId) as SpecRecord[];
+  const cases = (getCasesStmt.all(runId) as Record<string, unknown>[]).map(nullsToUndefined) as unknown as QaCase[];
+  const specRows = (getSpecsStmt.all(runId) as Record<string, unknown>[]).map(nullsToUndefined) as unknown as SpecRecord[];
   const logsText = (row.logs as string) || "";
   const activityRows = getActivityStmt.all(runId) as Array<{ kind: string; status: string | null; text: string; ts: string }>;
 
@@ -403,7 +491,12 @@ export function updateRecord(id: string, patch: Partial<RunRecord>): void {
   if (patch.specs) {
     db.prepare("DELETE FROM specs WHERE run_id = ?").run(id);
     const insertSpec = db.prepare("INSERT INTO specs (run_id, name, objective, flow) VALUES (?, ?, ?, ?)");
+    // De-dup by spec FILE name: a list built per-test (a 3-test file appearing 3×) must not report
+    // "5 specs" for 2 files — the run record + value report count spec FILES, not test cases.
+    const seenSpec = new Set<string>();
     for (const s of patch.specs) {
+      if (seenSpec.has(s.name)) continue;
+      seenSpec.add(s.name);
       insertSpec.run(id, s.name, s.objective ?? null, s.flow ?? null);
     }
   }
@@ -532,7 +625,11 @@ function safeJsonParse<T>(raw: string, fallback: T): T {
   }
 }
 
-export function upsertLearningRule(rule: RuleUpsert & { app: string; id: string }): void {
+// Accepts an optional `initialStatus`; defaults to "candidate", which is what ALL current callers
+// get (oracle-born, reflection-born, AND correction-sourced rules all enter as candidates — see the
+// J de-poison in distiller.ts). The "pending" status is retired and no code path passes it anymore;
+// the parameter is kept only so a legacy/explicit status can still be threaded if ever needed.
+export function upsertLearningRule(rule: RuleUpsert & { app: string; id: string; initialStatus?: RuleStatus }): void {
   ensureDb();
   upsertRuleStmt.run({
     id: rule.id,
@@ -547,7 +644,7 @@ export function upsertLearningRule(rule: RuleUpsert & { app: string; id: string 
     successRate: null,
     lastVerified: null,
     source: rule.source,
-    status: "candidate" as RuleStatus,
+    status: (rule.initialStatus ?? "candidate") as RuleStatus,
     at: new Date().toISOString(),
   });
 }
@@ -597,11 +694,17 @@ export function incrementRuleUsage(ruleIds: string[]): void {
 // successRate (running mean — NOT an overwrite), outcomeCount, confidence, and status
 // (promotion/demotion with hysteresis). The pure governance lives in applyOutcome; this is
 // only the read-modify-write boundary. No-op when the rule no longer exists.
-export function recordRuleOutcome(ruleId: string, score: number): void {
+//
+// Phase 7 coverage anchor: `coverageCreditConfirmed` is forwarded to applyOutcome to gate the
+// candidate → active promotion step. Pass true when the run's change-coverage confirmed that
+// the test covered changed lines; false when coverage was measured but found zero credit; null
+// (default) when coverage is not applicable (cross-repo, unmeasured, policy=off). The gate only
+// applies to the candidate → active transition — it never blocks demotion or pending → candidate.
+export function recordRuleOutcome(ruleId: string, score: number, coverageCreditConfirmed: boolean | null = null): void {
   ensureDb();
   const row = db.prepare("SELECT * FROM learning_rules WHERE id = ?").get(ruleId) as Record<string, unknown> | undefined;
   if (!row) return;
-  const updated = applyOutcome(rowToRule(row), score);
+  const updated = applyOutcome(rowToRule(row), score, coverageCreditConfirmed);
   db.prepare(
     "UPDATE learning_rules SET success_rate = ?, outcome_count = ?, confidence = ?, status = ?, last_verified = ? WHERE id = ?",
   ).run(updated.successRate, updated.outcomeCount, updated.confidence, updated.status, new Date().toISOString(), ruleId);
@@ -620,6 +723,24 @@ export function setRuleStatusByHuman(ruleId: string, status: "deprecated" | "act
     .prepare("UPDATE learning_rules SET status = ?, last_verified = ? WHERE id = ?")
     .run(status, new Date().toISOString(), ruleId);
   return info.changes > 0;
+}
+
+// Mark an app's architecture map as stale so the next generating run rebuilds it. Used by the
+// process-audit context-heal: a file-level invalidation of e2e/.qa/context.json does NOT survive
+// the next run's `git checkout -f`/`git clean -fd`, but this DB flag does. Idempotent (latest wins).
+export function markContextStale(app: string): void {
+  ensureDb();
+  db.prepare("INSERT OR REPLACE INTO context_stale (app, at) VALUES (?, ?)").run(app, new Date().toISOString());
+}
+
+// Consume the staleness flag: returns true (and CLEARS the flag) when the app was marked stale,
+// false otherwise. One-shot by design — the next generating run reads it once to force a rebuild.
+export function consumeContextStale(app: string): boolean {
+  ensureDb();
+  const row = db.prepare("SELECT app FROM context_stale WHERE app = ?").get(app) as { app: string } | undefined;
+  if (!row) return false;
+  db.prepare("DELETE FROM context_stale WHERE app = ?").run(app);
+  return true;
 }
 
 // Back-fill the structured reflection onto an already-saved run outcome. The outcome row is
@@ -664,6 +785,54 @@ export function loadRunEvents(runId: string, afterSeq = -1): Array<{ runId: stri
   return rows.map((r) => ({ runId: r.run_id, seq: r.seq, ts: r.ts, body: safeJsonParse(r.body, {}) }));
 }
 
+// Persist one agent turn. `output_text` MUST already be sanitized by the caller
+// (sanitizer.ts `sanitizeText`) — this function stores whatever it receives.
+export function saveAgentTurn(turn: AgentTurnRecord): void {
+  ensureDb();
+  insertAgentTurnStmt.run({
+    runId: turn.runId ?? null,
+    sessionId: turn.sessionId,
+    role: turn.role,
+    round: turn.round,
+    isRepair: turn.isRepair ? 1 : 0,
+    ts: turn.ts,
+    objective: turn.objective ?? null,
+    promptText: turn.promptText,
+    outputText: turn.outputText,
+    promptBytes: turn.promptBytes,
+    tokensInput: turn.tokensInput ?? null,
+    tokensOutput: turn.tokensOutput ?? null,
+    tokensReasoning: turn.tokensReasoning ?? null,
+    tokensCacheRead: turn.tokensCacheRead ?? null,
+    tokensCacheWrite: turn.tokensCacheWrite ?? null,
+    cost: turn.cost ?? null,
+  });
+}
+
+// Retrieve all agent turn records for a run, ordered by insertion (chronological).
+export function getAgentTurns(runId: string): AgentTurnRecord[] {
+  ensureDb();
+  const rows = getAgentTurnsStmt.all(runId) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    runId: (r.run_id as string | null) ?? null,
+    sessionId: r.session_id as string,
+    role: r.role as string,
+    round: r.round as number,
+    isRepair: Boolean(r.is_repair),
+    ts: r.ts as string,
+    objective: (r.objective as string | null) ?? null,
+    promptText: r.prompt_text as string,
+    outputText: r.output_text as string,
+    promptBytes: r.prompt_bytes as number,
+    tokensInput: (r.tokens_input as number | null) ?? null,
+    tokensOutput: (r.tokens_output as number | null) ?? null,
+    tokensReasoning: (r.tokens_reasoning as number | null) ?? null,
+    tokensCacheRead: (r.tokens_cache_read as number | null) ?? null,
+    tokensCacheWrite: (r.tokens_cache_write as number | null) ?? null,
+    cost: (r.cost as number | null) ?? null,
+  }));
+}
+
 export function loadCurriculum(app: string): Curriculum | null {
   ensureDb();
   const row = loadCurriculumStmt.get(app) as { data: string; updated_at: string } | undefined;
@@ -702,6 +871,188 @@ export function saveScorecardEntry(entry: ScorecardEntry): void {
 process.on("exit", () => {
   if (initialized) db.close();
 });
+
+// ── Phase 8: Holistic telemetry analysis ──────────────────────────────────────
+// Aggregates `agent_turns` + `run_outcomes` across all runs for an app (or within
+// a recent window) into a self-describing analysis surface. The analysis itself is
+// manual post-deploy; this function exposes the queryable surface so the operator
+// can run it at any time via `GET /api/apps/:app/telemetry`.
+//
+// Exposed aggregates (per the Phase-8 spec):
+//   promptSizes       — median + p95 prompt_bytes by role, across all turns
+//   cacheHitRates     — median tokens_cache_read / tokens_input ratio by role (best-effort; null when no token data)
+//   reviewerConvergence — avg correction count per rejected run (rounds 0 vs 1 — shrinking = converging)
+//   groundingPresence — fraction of first-round generator turns that have a context pack (detected heuristically
+//                       as promptText containing "## Context Pack" — the VOLATILE section header)
+//   turnCounts        — median turns per run (all roles), plus repair turn fraction
+//   wallClock         — median and p95 wall-clock span (first turn ts → last turn ts per run), in seconds
+//   runCount          — number of runs contributing to this analysis
+//   windowDays        — the window used (default: all data, or the requested window)
+
+export interface TelemetryRoleStat {
+  role: string;
+  medianPromptBytes: number | null;
+  p95PromptBytes: number | null;
+  medianCacheHitRate: number | null; // null when no token data available (Codex or no turns)
+  turnCount: number;
+}
+
+export interface TelemetryAnalysis {
+  app: string;
+  generatedAt: string;
+  windowDays: number | null; // null = all data
+  runCount: number;
+  byRole: TelemetryRoleStat[];
+  reviewerConvergence: {
+    avgCorrectionsRound0: number | null; // avg corrections on first-round rejections
+    avgCorrectionsRound1: number | null; // avg corrections on second-round rejections (shrinking = good)
+    approveRate: number | null;          // fraction of runs where reviewer approved (0–1)
+  };
+  groundingPresence: number | null; // fraction of first-round generator turns carrying a Context Pack (0–1)
+  repairFraction: number | null;    // fraction of all turns that are in-session repairs (lower = better)
+  medianTurnsPerRun: number | null;
+  medianWallClockSec: number | null;
+  p95WallClockSec: number | null;
+}
+
+function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1]! + sorted[mid]!) / 2 : sorted[mid]!;
+}
+
+function percentile(values: number[], p: number): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.ceil((p / 100) * sorted.length) - 1;
+  return sorted[Math.max(0, idx)] ?? null;
+}
+
+export function computeTelemetryAnalysis(app: string, windowDays?: number): TelemetryAnalysis {
+  ensureDb();
+
+  // Build the date cutoff for the window.
+  const cutoff = windowDays != null
+    ? new Date(Date.now() - windowDays * 86400_000).toISOString()
+    : null;
+
+  // Retrieve agent_turns for this app by joining with run_outcomes on run_id = outcome.id.
+  // When no windowDays, fetch all turns for the app.
+  const turnsQuery = cutoff
+    ? `SELECT t.* FROM agent_turns t INNER JOIN run_outcomes r ON t.run_id = r.id WHERE r.app = ? AND t.ts >= ? ORDER BY t.id ASC`
+    : `SELECT t.* FROM agent_turns t INNER JOIN run_outcomes r ON t.run_id = r.id WHERE r.app = ? ORDER BY t.id ASC`;
+  const turnsArgs = cutoff ? [app, cutoff] : [app];
+  const turnRows = db.prepare(turnsQuery).all(...turnsArgs) as Array<Record<string, unknown>>;
+
+  // Retrieve run_outcomes for reviewer convergence + approve rate.
+  const outcomesQuery = cutoff
+    ? `SELECT * FROM run_outcomes WHERE app = ? AND at >= ? ORDER BY at ASC`
+    : `SELECT * FROM run_outcomes WHERE app = ? ORDER BY at ASC`;
+  const outcomeRows = db.prepare(outcomesQuery).all(...(cutoff ? [app, cutoff] : [app])) as Array<Record<string, unknown>>;
+
+  const runCount = new Set(turnRows.map((r) => r.run_id as string | null).filter(Boolean)).size;
+
+  // Group turns by role for per-role stats.
+  const byRoleMap = new Map<string, { promptBytes: number[]; cacheRatios: number[]; turnCount: number }>();
+  for (const row of turnRows) {
+    const role = (row.role as string) ?? "unknown";
+    if (!byRoleMap.has(role)) byRoleMap.set(role, { promptBytes: [], cacheRatios: [], turnCount: 0 });
+    const entry = byRoleMap.get(role)!;
+    entry.turnCount++;
+    const pb = row.prompt_bytes as number | null;
+    if (pb != null) entry.promptBytes.push(pb);
+    const cacheRead = row.tokens_cache_read as number | null;
+    const tokensInput = row.tokens_input as number | null;
+    if (cacheRead != null && tokensInput != null && tokensInput > 0) {
+      entry.cacheRatios.push(cacheRead / tokensInput);
+    }
+  }
+  const byRole: TelemetryRoleStat[] = [...byRoleMap.entries()].map(([role, s]) => ({
+    role,
+    medianPromptBytes: median(s.promptBytes),
+    p95PromptBytes: percentile(s.promptBytes, 95),
+    medianCacheHitRate: median(s.cacheRatios),
+    turnCount: s.turnCount,
+  }));
+
+  // Grounding presence: first-round (round=0, not repair) generator turns containing "## Context Pack".
+  // FIX 6: exclude the PLANNER turn (role qa-generator, objective PLANNER_OBJECTIVE). The planner is a
+  // plan-only pass that never carries a Context Pack (it produces the objectives the pack is later
+  // built for), so counting it as a "generator first round" deflated groundingPresence — every run
+  // with a fan-out planner looked partly ungrounded even when the actual write turns were grounded.
+  const generatorFirstRounds = turnRows.filter(
+    (r) =>
+      (r.role as string).includes("generator") &&
+      (r.round as number) === 0 &&
+      !r.is_repair &&
+      (r.objective as string | null) !== PLANNER_OBJECTIVE,
+  );
+  const groundedCount = generatorFirstRounds.filter(
+    (r) => typeof r.prompt_text === "string" && (r.prompt_text as string).includes("## Context Pack"),
+  ).length;
+  const groundingPresence = generatorFirstRounds.length > 0 ? groundedCount / generatorFirstRounds.length : null;
+
+  // Repair fraction: in-session repair turns / total turns.
+  const repairCount = turnRows.filter((r) => r.is_repair).length;
+  const repairFraction = turnRows.length > 0 ? repairCount / turnRows.length : null;
+
+  // Turns per run: group by run_id, count turns.
+  const turnsByRun = new Map<string, number>();
+  for (const row of turnRows) {
+    const rid = (row.run_id as string | null) ?? "__unknown__";
+    turnsByRun.set(rid, (turnsByRun.get(rid) ?? 0) + 1);
+  }
+  const medianTurnsPerRun = median([...turnsByRun.values()]);
+
+  // Wall-clock per run: first/last ts per run_id → span in seconds.
+  const wallClocksByRun = new Map<string, { first: number; last: number }>();
+  for (const row of turnRows) {
+    const rid = (row.run_id as string | null) ?? "__unknown__";
+    const ts = new Date(row.ts as string).getTime();
+    if (!Number.isFinite(ts)) continue;
+    const entry = wallClocksByRun.get(rid);
+    if (!entry) { wallClocksByRun.set(rid, { first: ts, last: ts }); continue; }
+    if (ts < entry.first) entry.first = ts;
+    if (ts > entry.last) entry.last = ts;
+  }
+  const wallClockSpans = [...wallClocksByRun.values()].map((e) => (e.last - e.first) / 1000);
+  const medianWallClockSec = median(wallClockSpans);
+  const p95WallClockSec = percentile(wallClockSpans, 95);
+
+  // Reviewer convergence: from run_outcomes, inspect gateSignals.reviewerCorrections per run.
+  // avgCorrectionsRound0 uses the total corrections list (all rounds recorded in the outcome);
+  // we use the raw list length as a proxy for total blocking corrections across both rounds.
+  // A shrinking average round-over-round is the convergence signal (manual analysis).
+  let totalCorrectionsRound0 = 0; let countRound0 = 0;
+  let totalApproved = 0;
+  for (const row of outcomeRows) {
+    const gs = (() => { try { return JSON.parse(row.gate_signals as string) as { reviewerCorrections?: string[] }; } catch { return {}; } })();
+    const corrections = gs.reviewerCorrections ?? [];
+    if (corrections.length > 0) { totalCorrectionsRound0 += corrections.length; countRound0++; }
+    const verdict = row.verdict as string;
+    if (verdict === "pass" || verdict === "skipped") totalApproved++;
+  }
+  const approveRate = outcomeRows.length > 0 ? totalApproved / outcomeRows.length : null;
+
+  return {
+    app,
+    generatedAt: new Date().toISOString(),
+    windowDays: windowDays ?? null,
+    runCount,
+    byRole,
+    reviewerConvergence: {
+      avgCorrectionsRound0: countRound0 > 0 ? totalCorrectionsRound0 / countRound0 : null,
+      avgCorrectionsRound1: null, // requires per-round correction attribution (Phase-0 round field); deferred
+      approveRate,
+    },
+    groundingPresence,
+    repairFraction,
+    medianTurnsPerRun,
+    medianWallClockSec,
+    p95WallClockSec,
+  };
+}
 
 // ── SQLite backup (cron-like) ───────────────────────────────────────────────
 // Writes a consistent snapshot of the DB to a backup directory with a timestamp,

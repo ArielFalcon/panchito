@@ -12,15 +12,17 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { createHash } from "node:crypto";
-import { AgentResult, QaCase, RunMode, TestTarget, SpecMeta, ActivityKind } from "../types";
+import { AgentResult, QaCase, RunMode, TestTarget, SpecMeta, ActivityKind, PLANNER_OBJECTIVE } from "../types";
+import type { UsageSnapshot } from "../qa/usage";
 import { CommitIntent } from "../qa/commit-classify";
 import type { ArchitectureContext } from "../qa/context";
 import { coerceExplorationBrief, parseExplorationBrief, type ExplorationBrief } from "../qa/exploration-brief";
+import { normalizeRoutes, MAX_ROUTES } from "../qa/dom-snapshot";
 import { sanitizeText } from "../orchestrator/sanitizer";
 import { ActivityRouter } from "./agent-activity";
 import { mapOpencodeEvent, eventRunId } from "./activity-mapper";
 import type { RunEventBody } from "../contract/events";
-import { appendLog } from "../server/history";
+import { appendLog, saveAgentTurn } from "../server/history";
 import { installHttpDispatcher } from "../util/net";
 
 interface SessionEntry {
@@ -43,13 +45,16 @@ export { extractJsonObjects, parseVerdict };
 // Prompt/task assembly (extracted to ./prompts, BND-08). Re-exported so existing importers (runtime
 // + tests) keep resolving them from this module. The input types are shared via a type-only import
 // on the prompts side, so there is no runtime import cycle.
-import { specFileForFlow, buildWorkerPrompt, buildPlanPrompt, buildPrompt, buildExplorerPrompt, buildContextTask, renderArchitectureContext } from "./prompts";
-export { specFileForFlow, buildWorkerPrompt, buildPlanPrompt, buildPrompt, buildExplorerPrompt, buildContextTask, renderArchitectureContext };
+// Phase 1b: also re-exports the assembled variants (return AssembledPrompt) and the Section type
+// so callers that need sectionSizes for telemetry can import directly from this module.
+import { specFileForFlow, buildWorkerPrompt, buildWorkerPromptAssembled, buildPlanPrompt, buildPlanPromptAssembled, buildPrompt, buildPromptAssembled, buildExplorerPrompt, buildContextTask, renderArchitectureContext, buildReviewerPrompt, buildReviewerPromptAssembled, reviewObjective, renderReviewSpecs } from "./prompts";
+export { specFileForFlow, buildWorkerPrompt, buildWorkerPromptAssembled, buildPlanPrompt, buildPlanPromptAssembled, buildPrompt, buildPromptAssembled, buildExplorerPrompt, buildContextTask, renderArchitectureContext, buildReviewerPrompt, buildReviewerPromptAssembled, reviewObjective, renderReviewSpecs };
+export type { AssembledPrompt } from "./prompts";
 // Typed verdict contract + bounded repair (post-ADR-001, Phase 1 / 3.1). Schema validation of
 // the agent's generator + reviewer output, and the targeted re-prompt used on a contract miss.
 import { checkGeneratorVerdict, repairInstruction, parseReviewerVerdict } from "./verdict-validate";
 import { ManifestEntrySchema } from "../orchestrator/schemas";
-import { AgentUnavailableError } from "../errors";
+import { AgentUnavailableError, isInfraError } from "../errors";
 
 // Read fallback model mapping from opencode.json (root-level key). Keeps the
 // fallback logic in one place so the orchestrator can retry with a different
@@ -396,7 +401,9 @@ export async function askAssistant(
   // `agent` selects the role this Q&A runs as. It defaults to the read-only chat assistant; the
   // reflection path passes "qa-reflector" — a tool-less role (no MCP) — so a one-shot reflection
   // cannot touch engram or the filesystem the way the chat assistant (which keeps engram memory) can.
-  input: { context: string; question: string; instruction?: string; agent?: string },
+  // Phase 0b: `runId` threads the parent run's identity into the session descriptor so telemetry
+  // records which run triggered a reflection/audit-diagnosis; undefined when no run context exists.
+  input: { context: string; question: string; instruction?: string; agent?: string; runId?: string },
   deps: AgentDeps,
   cwd: string,
 ): Promise<string> {
@@ -429,7 +436,12 @@ export async function askAssistant(
       ``,
       `- If the context lacks the answer, reply (in the question's language): "No tengo suficiente información para responder eso."`,
     ].join("\n");
-  const session = await deps.open(input.agent ?? "qa-assistant", cwd);
+  const role = input.agent ?? "qa-assistant";
+  // Phase 0b: thread the role into the descriptor; runId is forwarded when the caller has one
+  // (reflectAndDistill / audit-diagnosis paths) so telemetry can correlate the session to a run.
+  const session = await deps.open(role, cwd, {
+    descriptor: { role, runId: input.runId },
+  });
   try {
     // textOnly drops the model's reasoning parts: the assistant's return value is shown
     // verbatim to the operator, so a leaked chain-of-thought would surface in the chat.
@@ -466,13 +478,54 @@ export interface OpencodeRunInput {
   fixCases?: QaCase[]; // re-generation: failed cases from a previous execution to fix
   reviewCorrections?: string[]; // re-generation: actionable corrections from a reviewer rejection
   coverageGap?: string; // re-generation: changed lines not yet exercised (change-coverage gap)
+  // Lever-2 deterministic selector contradictions for the fix prompt (W1): each string is a verified
+  // absent/ambiguous finding against the captured failure-point tree ("role:name is NOT in the tree;
+  // present roles: …" or "matches MULTIPLE nodes …"). Rendered as its OWN un-truncated prompt section
+  // (NEVER folded into the 500-char-sliced fixCases detail, where verbose PW errors would cut it off).
+  selectorContradictions?: string[];
   learnedRules?: string; // retrieval: rules from past runs injected into the agent prompt
+  domSnapshot?: string; // live DEV a11y snapshot of the target routes — grounds the GENERATOR's selectors
+  failureSourced?: boolean; // true when domSnapshot is the failure-point capture — switches to "GROUND TRUTH AT FAILURE" framing
   runId?: string; // maps the session to a RunRecord for SSE live activity
   contextMap?: ArchitectureContext; // cross-cutting: the FE↔BE map, injected by the orchestrator
   explorer?: boolean; // Fase 3: run a read-only explorer pass before the generator (diff single-agent, opt-in)
   contextBrief?: ExplorationBrief; // the distilled blast radius from the explorer pass (set internally → buildPrompt)
+  // Slice G: the pre-built Context Pack text block (blast-radius + DOM slice + contracts),
+  // assembled by the orchestrator BEFORE the first write and pushed into the VOLATILE band.
+  // When present, the generator transcribes from this pack instead of re-exploring.
+  // When absent, the explore-first mandate remains active (existing behaviour unchanged).
+  contextPack?: string;
   service?: { repo: string; mirrorDir: string; openapi?: string | string[] }; // cross-repo: the triggering microservice (read-only working copy)
   services?: Array<{ repo: string; mirrorDir: string; openapi?: string | string[] }>; // context mode: every declared service, mirrored read-only
+}
+
+// A single agent prompt/response turn captured at the SDK funnel. Emitted via the
+// `onTurn` callback on `open()` opts at the point where `onUsage` already fires.
+// `outputText` is sanitized BEFORE persist (sanitizer.ts); `runId` is null when the
+// session was opened without a descriptor (maintenance sessions, etc.).
+// Phase 1b: `sectionSizes` carries the per-section byte map from the ContextAssembler
+// when the prompt was assembled via one of the buildXxxAssembled() functions; null for
+// prompts not produced by the assembler (contract-repair re-prompts, explorer, etc.).
+export interface AgentTurnEvent {
+  runId: string | null;
+  sessionId: string;
+  role: string;
+  objective: string | undefined;
+  round: number;
+  isRepair: boolean;
+  promptText: string;
+  promptBytes: number;
+  outputText: string;
+  tokensInput: number | null;
+  tokensOutput: number | null;
+  tokensReasoning: number | null;
+  tokensCacheRead: number | null;
+  tokensCacheWrite: number | null;
+  cost: number | null;
+  ts: string;
+  // Phase 1b: per-section size map from the ContextAssembler. Null when the prompt was not
+  // assembled by one of the buildXxxAssembled() functions (repairs, explorer, etc.).
+  sectionSizes: Record<string, number> | null;
 }
 
 // A session opened against `opencode serve`. prompt() sends the message to the
@@ -484,28 +537,65 @@ export interface AgentSession {
   // textOnly returns only the model's final answer (type:"text" parts), excluding
   // reasoning parts. Default (false) concatenates every text-bearing part — the
   // generator/reviewer need that so a closing JSON emitted in a reasoning part survives.
-  prompt(text: string, opts?: { textOnly?: boolean }): Promise<string>;
+  // round/isRepair are per-call opts so the funnel can distinguish generation rounds
+  // from in-session contract-repair re-prompts when recording agent_turns rows.
+  // Phase 1b: sectionSizes carries the per-section byte map from the ContextAssembler
+  // when the prompt was produced by one of the buildXxxAssembled() functions. It flows
+  // through the funnel into AgentTurnEvent so telemetry records it per turn.
+  prompt(text: string, opts?: { textOnly?: boolean; round?: number; isRepair?: boolean; sectionSizes?: Record<string, number> | null }): Promise<string>;
   dispose(): Promise<void>;
 }
 
+// Session-scoped descriptor forwarded by every open() call-site that has a run context.
+// `role` mirrors the existing `agent` arg (kept for consistency with the agent name).
+// `runId`/`objective` are optional so inapplicable call-sites (maintainer, etc.) can
+// leave them undefined without needing a type cast.
+export interface AgentOpenDescriptor {
+  runId?: string;
+  role?: string;
+  objective?: string;
+}
+
 export interface AgentDeps {
-  open(agent: string, cwd: string, opts?: { signal?: AbortSignal; timeoutMs?: number; model?: string }): Promise<AgentSession>;
+  open(
+    agent: string,
+    cwd: string,
+    opts?: {
+      signal?: AbortSignal;
+      timeoutMs?: number;
+      model?: string;
+      onUsage?: (u: UsageSnapshot) => void;
+      onTurn?: (t: AgentTurnEvent) => void;
+      // Session-scoped identity descriptor (threaded by call-sites that have a run context).
+      descriptor?: AgentOpenDescriptor;
+    },
+  ): Promise<AgentSession>;
   cleanupOrphans?(maxAgeMs: number): Promise<number>;
 }
 
-// Runs the read-only explorer ONCE for a first-pass diff e2e generation when opted in, returning the
-// distilled brief (or null to degrade silently). Gated tightly: never on code mode, never on a
-// re-generation pass (fix/review/coverage already carry context), and only when input.explorer is set.
-async function maybeExplore(
+// Runs the read-only explorer ONCE for a first-pass diff OR manual e2e generation when opted in,
+// returning the distilled brief (or null to degrade silently). Gated tightly: never on code mode,
+// never on a re-generation pass (fix/review/coverage already carry context), and only when
+// input.explorer is set. (FIX 2: manual was previously excluded, so its Context Pack was empty.)
+// Exported (Slice H) so the orchestrator (pipeline.ts) can call it BEFORE buildContextPack to wire
+// the brief into the pack without a second explorer pass inside runOpencode (no-double-run guarantee).
+export async function maybeExplore(
   input: OpencodeRunInput,
   deps: AgentDeps,
   opts?: { signal?: AbortSignal; onProgress?: (msg: string) => void },
 ): Promise<ExplorationBrief | null> {
   const isReGen = Boolean(input.fixCases?.length || input.reviewCorrections?.length || input.coverageGap);
-  if (!input.explorer || input.mode !== "diff" || input.target === "code" || isReGen) return null;
+  // FIX 2: manual mode shares the same engine as diff and benefits from blast-radius/route grounding
+  // equally — the universal exploreForPack push must NOT no-op for manual. Allow diff AND manual here;
+  // buildExplorerPrompt renders the guidance (not the empty diff) as the exploration objective for manual.
+  if (!input.explorer || (input.mode !== "diff" && input.mode !== "manual") || input.target === "code" || isReGen) return null;
   let session: AgentSession | undefined;
   try {
-    session = await deps.open("qa-explorer", input.mirrorDir, { signal: opts?.signal, timeoutMs: EXPLORER_TIMEOUT_MS });
+    session = await deps.open("qa-explorer", input.mirrorDir, {
+      signal: opts?.signal,
+      timeoutMs: EXPLORER_TIMEOUT_MS,
+      descriptor: { runId: input.runId, role: "qa-explorer" },
+    });
     if (input.runId) registerRunSession(session.id, input.runId, input.mirrorDir, "explorer");
     const text = await session.prompt(buildExplorerPrompt(input));
     const brief = parseExplorationBrief(text);
@@ -532,7 +622,14 @@ async function maybeExplore(
 export async function runOpencode(
   input: OpencodeRunInput,
   deps: AgentDeps,
-  opts?: { signal?: AbortSignal; onProgress?: (msg: string) => void },
+  opts?: {
+    signal?: AbortSignal;
+    onProgress?: (msg: string) => void;
+    // Phase 6a: called once when the generator fires an in-session contract-repair re-prompt,
+    // so the shared cycle counter in pipeline.ts can account for in-session repairs without
+    // polling the turn store. Optional — absent means repairs are not counted externally.
+    onRepair?: () => void;
+  },
 ): Promise<AgentResult> {
   const timeoutMs = agentTimeout(input.mode);
   // Fase 3: optional read-only explorer pass — distill the blast radius in an isolated session so the
@@ -540,7 +637,13 @@ export async function runOpencode(
   // exploring inline (never fails the run).
   const explorerBrief = await maybeExplore(input, deps, opts);
   const effectiveInput = explorerBrief ? { ...input, contextBrief: explorerBrief } : input;
-  const session = await deps.open("qa-generator", input.mirrorDir, { signal: opts?.signal, timeoutMs });
+  const session = await deps.open("qa-generator", input.mirrorDir, {
+    signal: opts?.signal,
+    timeoutMs,
+    // In manual mode intent.message is undefined; fall back to guidance so the turn attributes an
+    // objective (parity with the reviewer descriptor in pipeline.ts: `opts.guidance ?? intent?.message`).
+    descriptor: { runId: input.runId, role: "qa-generator", objective: input.guidance ?? input.intent?.message },
+  });
 
   // Register this session for SSE live activity so the agent's real-time events
   // (tool calls, file edits, streaming text) are routed to the RunRecord logs.
@@ -561,7 +664,9 @@ export async function runOpencode(
   }
 
   try {
-    let finalText = await session.prompt(buildPrompt(effectiveInput));
+    // Phase 1b: use the assembled variant so sectionSizes flows to the turn telemetry.
+    const assembled = buildPromptAssembled(effectiveInput);
+    let finalText = await session.prompt(assembled.text, { sectionSizes: assembled.sectionSizes });
 
     // Typed-contract guard (post-ADR-001, Phase 1): if the generator's closing JSON does not
     // satisfy the contract (missing specs array, malformed specMetas, …), re-prompt ONCE with
@@ -573,7 +678,9 @@ export async function runOpencode(
     const genCheck = checkGeneratorVerdict(finalText);
     if (!genCheck.valid) {
       console.warn(`[qa] generator verdict failed the typed contract (${genCheck.issues.join("; ")}); requesting one repair.`);
-      finalText = await session.prompt(repairInstruction("generator", genCheck.issues));
+      // Phase 6a: notify the shared cycle counter before the repair re-prompt fires.
+      opts?.onRepair?.();
+      finalText = await session.prompt(repairInstruction("generator", genCheck.issues), { isRepair: true });
       if (!checkGeneratorVerdict(finalText).valid) {
         console.warn("[qa] generator verdict still invalid after repair — proceeding with best-effort parse (disk reconciliation still applies).");
       }
@@ -684,11 +791,32 @@ export interface ReviewInput {
   // criteria. This is objective ledger state, NOT the generator's reasoning, so the reviewer's
   // independence is preserved while the judge gains app-specific anti-patterns earned from failures.
   learnedRules?: string;
+  // A DETERMINISTIC snapshot of the live DEV DOM (roles + accessible names of the routes the spec
+  // targets), captured by the ORCHESTRATOR — not the generator, so independence holds. It grounds
+  // the reviewer's UI-fact claims (labels, button/link text) in reality instead of its training
+  // memory of "similar apps", which is what made it hallucinate corrections (e.g. "the button says
+  // Add Owner" when DEV says "Submit"). Absent for code mode / when capture is unavailable.
+  domSnapshot?: string;
+  // Phase 0b: threads the parent run's identity into the reviewer session so the resulting
+  // agent_turns row carries a non-null run_id (previously always null for the reviewer).
+  runId?: string;
+  // Phase 0b: the human-readable description of what these tests are supposed to defend
+  // (injected as the reviewer-session objective so telemetry can slice by intent).
+  objective?: string;
+  // Phase 4: the reviewer's OWN corrections from the PREVIOUS round. Injected so the
+  // reviewer can judge convergence: approve once the previously-raised BLOCKING issues
+  // are resolved; do not invent new nits on unchanged specs.
+  priorCorrections?: string[];
 }
 
 export interface ReviewResult {
   approved: boolean;
   corrections: string[];
+  // Phase 4: count of BLOCKING corrections (plain-string corrections without an explicit
+  // severity are treated as blocking — fail-closed backward compat). The gate passes when
+  // this is zero, regardless of advisory count. Absent means not yet populated (pre-Phase 4
+  // or parse miss): callers treat absent as "all corrections are blocking" (fail-closed).
+  blockingCount?: number;
   // The reviewer's short reasoning for the verdict — captured on APPROVE and reject so a
   // wrong auto-merge is auditable after the fact. Optional (older verdicts / parse misses
   // omit it). Persisted on RunOutcome.gateSignals.reviewerRationale.
@@ -703,67 +831,53 @@ export interface ReviewResult {
 // it must never inherit the generator's 25-minute worst-case budget: a hung reviewer would
 // add that whole window to the run before the loop fails closed.
 const REVIEWER_TIMEOUT_MS = Number(process.env.OPENCODE_REVIEWER_TIMEOUT_MS) || 6 * 60 * 1000;
-// The explorer is a cheap read-only PRE-pass; cap it well below the generator/diff budget so a hung
+// The explorer is a read-only PRE-pass; cap it well below the generator/diff budget so a hung
 // explorer cannot hold the sequential queue for the full window before the generator even starts.
-const EXPLORER_TIMEOUT_MS = Number(process.env.OPENCODE_EXPLORER_TIMEOUT_MS) || 90 * 1000;
+// 90s proved too tight on large microservice monorepos (petclinic): the read-only brief needs room
+// to finish; 240s still sits far under the generator's 25-minute worst case.
+const EXPLORER_TIMEOUT_MS = Number(process.env.OPENCODE_EXPLORER_TIMEOUT_MS) || 240 * 1000;
+// The fan-out planner for a SCOPED mode (diff/manual — one commit or one guidance string) derives
+// objectives from the brief + code; it must NOT navigate (F3), so it needs nowhere near the generator's
+// per-mode budget. Bound it with its OWN deadline: it reads OPENCODE_PLANNER_TIMEOUT_MS, NOT the global
+// OPENCODE_TIMEOUT_MS override (which, set to e.g. 900s, would otherwise let a misbehaving planner
+// consume the generator's whole window — the hang that produced 0 specs). Applied to diff/manual
+// REGARDLESS of whether the explorer brief arrived: a brief-less planner still only widens+plans a
+// single scope, and reverting it to the 5–10 min generator budget would re-open the hang on exactly the
+// monorepos this targets. Matched to EXPLORER_TIMEOUT_MS (240s) — the explorer does the comparable
+// read+widen and needed that much on petclinic — and folded into the dispatcher Math.max below.
+// complete/exhaustive (whole-repo analysis, no scope) keep the per-mode generator budget.
+const PLANNER_TIMEOUT_MS = Number(process.env.OPENCODE_PLANNER_TIMEOUT_MS) || 240 * 1000;
+// Cap on how many ungrounded objectives may take the SEQUENTIAL strong-agent recovery path before the
+// run starts serializing. Beyond this, the overflow is dispatched to parallel blind workers instead, so
+// a broad DOM-capture failure (e.g. every route soft-404s on a hash SPA) cannot stall the whole run.
+const MAX_STRONG_FALLBACK = Number(process.env.OPENCODE_MAX_STRONG_FALLBACK) || 3;
 
 export async function reviewIndependently(
   input: ReviewInput,
   deps: AgentDeps,
-  opts?: { signal?: AbortSignal },
+  opts?: {
+    signal?: AbortSignal;
+    // Phase 6a: called once when the reviewer fires an in-session contract-repair re-prompt,
+    // so the shared cycle counter in pipeline.ts can account for in-session repairs without
+    // polling the turn store. Optional — absent means repairs are not counted externally.
+    onRepair?: () => void;
+  },
 ): Promise<ReviewResult> {
-  const session = await deps.open("qa-reviewer", input.mirrorDir, { signal: opts?.signal, timeoutMs: REVIEWER_TIMEOUT_MS });
+  // Phase 0b: thread the parent run's identity so the reviewer's agent_turns row carries a
+  // non-null run_id. The descriptor's `objective` echoes whatever the generator was defending
+  // (guidance in manual mode, commit message in diff mode) for telemetry cross-slicing.
+  const session = await deps.open("qa-reviewer", input.mirrorDir, {
+    signal: opts?.signal,
+    timeoutMs: REVIEWER_TIMEOUT_MS,
+    descriptor: { runId: input.runId, role: "qa-reviewer", objective: input.objective },
+  });
   try {
-    const changeType = input.intent?.type ?? input.mode;
-    const specBlock = renderReviewSpecs(input);
-    const kind = input.target === "code" ? "tests" : "E2E tests";
-    // What these tests must defend — and how to name it — depends on the run mode. A diff run is
-    // judged against the commit's changed code; a MANUAL run against the user's guidance; a
-    // whole-repo (complete/exhaustive) run against each spec's own stated objective. Judging a
-    // manual/whole-repo run against the commit diff is the [wrong-objective] bug: it rejects good
-    // tests for "not testing the change" when the change was never the objective (e.g. a guided run
-    // that happens to sit on an unrelated commit).
-    const obj = reviewObjective(input);
-    // Arm the judge with PROVEN app-specific rules (when present) as extra reject criteria.
-    const rulesBlock = input.learnedRules ? [``, input.learnedRules] : [];
-    const rulesInstruction = input.learnedRules
-      ? [`5. Also REJECT if any spec violates an app-specific reject-on-sight rule listed above.`]
-      : [];
-    const prompt = [
-      `## Independent review — judge these ${kind} WITHOUT the generator's reasoning`,
-      ``,
-      `You are reviewing tests written for ${obj.subject}, but you have NO access to the`,
-      `generator's thought process. Judge the tests on their own merit using the`,
-      `test-value-review skill.`,
-      ``,
-      `## Review context`,
-      `- Run type: ${changeType}`,
-      `- Base URL: ${input.baseUrl ?? "(not provided)"}`,
-      ``,
-      obj.heading,
-      ...obj.body,
-      ``,
-      specBlock,
-      ...rulesBlock,
-      ``,
-      `## Instructions`,
-      `1. The spec contents are provided above — no need to read files.`,
-      `2. Apply the test-value-review skill from BOTH perspectives (value + robustness).`,
-      `3. Answer: could ${obj.targetNoun} be BROKEN and these tests STILL be green?`,
-      `4. Be strict — a single anti-pattern in any spec means rejection.`,
-      ...rulesInstruction,
-      ``,
-      `Output your verdict as JSON with no text before or after. Always include a one or two`,
-      `sentence "rationale" explaining the verdict — on APPROVAL too (why these tests genuinely`,
-      `defend ${obj.targetNoun}), not only on rejection.`,
-      `Prefix EVERY correction with exactly one class tag from this closed list so the failure`,
-      `is machine-classifiable: [false-positive] (asserts nothing / passes when the feature is`,
-      `broken), [wrong-objective] (does not test ${obj.targetNoun}), [fragile-selector] (ambiguous or`,
-      `brittle locator), [no-cleanup] (leaves test data behind), or [other].`,
-      `{"approved":false,"rationale":"why, in 1-2 sentences","corrections":["[fragile-selector] file.spec.ts: specific actionable fix"]}`,
-    ].join("\n");
+    // Phase 1a+1b: the initial prompt is built by the pure buildReviewerPromptAssembled() function.
+    // The assembled variant carries sectionSizes for turn telemetry. The contract-repair re-prompt
+    // and session lifecycle stay here (not extracted).
+    const assembled = buildReviewerPromptAssembled(input);
 
-    let output = await session.prompt(prompt);
+    let output = await session.prompt(assembled.text, { sectionSizes: assembled.sectionSizes });
     let v = parseReviewerVerdict(output);
     // The reviewer is the AUTHORITATIVE gate, so a formatting slip must not silently become a
     // fail-closed rejection (which would burn a regeneration round on non-actionable feedback).
@@ -771,92 +885,30 @@ export async function reviewIndependently(
     // repair reuses REVIEWER_TIMEOUT_MS, so worst case it is spent twice — error path only).
     if (!v.valid) {
       console.warn(`[qa] reviewer verdict failed the typed contract (${v.issues.join("; ")}); requesting one repair.`);
-      output = await session.prompt(repairInstruction("reviewer", v.issues));
+      // Phase 6a: notify the shared cycle counter before the repair re-prompt fires.
+      opts?.onRepair?.();
+      output = await session.prompt(repairInstruction("reviewer", v.issues), { isRepair: true });
       v = parseReviewerVerdict(output);
     }
     if (v.parsed && v.valid) {
       return {
         approved: v.approved,
         corrections: v.corrections,
+        // Phase 4: thread blockingCount so the caller's gate can pass on advisory-only
+        // verdicts without re-parsing the raw correction entries.
+        blockingCount: v.blockingCount,
         ...(v.rationale ? { rationale: v.rationale } : {}),
         parsed: true,
       };
     }
     // Still unusable after one repair. Fail-closed direction (no false green), flagged as a
     // PARSE MISS so the caller does not mistake it for an actionable rejection.
-    return { approved: false, corrections: ["the independent reviewer produced no parseable verdict"], parsed: false };
+    return { approved: false, corrections: ["the independent reviewer produced no parseable verdict"], blockingCount: 0, parsed: false };
   } finally {
     await session.dispose().catch((err) => {
       console.warn(`[qa] reviewer session dispose failed: ${err instanceof Error ? err.message : String(err)}`);
     });
   }
-}
-
-// The "what must these tests defend?" framing for the independent review, per run mode. Diff runs
-// judge against the commit's changed code; MANUAL runs against the user's guidance; whole-repo
-// (complete/exhaustive) runs against each spec's own stated objective (there is no single commit).
-// `targetNoun` flows into the question, the rationale ask, and the [wrong-objective] definition so
-// the judge measures the spec against the RIGHT goal.
-function reviewObjective(input: ReviewInput): { subject: string; heading: string; body: string[]; targetNoun: string } {
-  if (input.mode === "manual") {
-    const g = sanitizeText(((input.guidance ?? "").trim() || "(no guidance was provided)")).text;
-    return {
-      subject: "a guided (manual) run",
-      heading: `## Objective — the requested behavior (judge against THIS, NOT any commit diff)`,
-      body: [g],
-      targetNoun: "the requested behavior",
-    };
-  }
-  if (input.mode === "complete" || input.mode === "exhaustive") {
-    return {
-      subject: `a whole-repo ${input.mode} run`,
-      heading: `## Objective — there is no single commit; judge each spec against its OWN stated objective`,
-      body: [
-        `Each spec declares the user flow it targets (in its header comment / the manifest). Judge`,
-        `whether it meaningfully exercises that flow, or could the flow break while the test stays green.`,
-      ],
-      targetNoun: "the targeted user flow",
-    };
-  }
-  // diff (and any commit-driven run): the commit's changed code is the objective.
-  return {
-    subject: "this commit",
-    heading: `## Commit diff`,
-    body: ["```diff", sanitizeText(input.diff).text, "```"],
-    targetNoun: "the change",
-  };
-}
-
-const REVIEW_SPECS_MAX_BYTES = 40_000;
-
-function renderReviewSpecs(input: ReviewInput): string {
-  // e2e specs are e2e/-relative; code-mode tests are repo-relative (e2eRelDir = "").
-  const rel = (s: string) => (input.e2eRelDir ? `${input.e2eRelDir}/${s}` : s);
-  const contents: string[] = [];
-  let totalBytes = 0;
-  for (const s of input.specs) {
-    let content: string;
-    try {
-      content = readFileSync(join(input.mirrorDir, input.e2eRelDir, s), "utf8");
-    } catch {
-      contents.push(`### ${rel(s)}\n( could not read file — review skipped for this spec )`);
-      continue;
-    }
-    const block = `### ${rel(s)}\n\`\`\`typescript\n${content}\n\`\`\``;
-    totalBytes += Buffer.byteLength(block, "utf8");
-    if (totalBytes > REVIEW_SPECS_MAX_BYTES) {
-      // The review silently degrades from "judge inline content" (deterministic, what the
-      // orchestrator placed in the prompt) to "agent reads the files itself" (a weaker,
-      // agent-driven path). Surface that mode switch to the operator instead of hiding it.
-      console.warn(
-        `[qa] WARNING: the combined contents of ${input.specs.length} spec(s) exceed the ${REVIEW_SPECS_MAX_BYTES}-byte inline cap — ` +
-          `the reviewer will read files itself instead of judging inlined contents (weaker determinism).`,
-      );
-      return `## Specs to review\n\n${input.specs.map((n, i) => `${i + 1}. ${rel(n)}`).join("\n")}\n\n( spec contents exceed ${REVIEW_SPECS_MAX_BYTES} bytes — read each file with the read tool )`;
-    }
-    contents.push(block);
-  }
-  return `## Specs to review (${contents.length} file(s) — contents provided inline)\n\n${contents.join("\n\n")}`;
 }
 
 // ── complete/exhaustive: two-phase plan → fan-out ────────────────────────────
@@ -910,6 +962,16 @@ export function parsePlan(text: string): PlanObjective[] {
     const key = specFileForFlow(o.flow);
     return seen.has(key) ? false : (seen.add(key), true);
   });
+}
+
+// True when the planner's response INTENDED objectives (its text carries an `objectives` array with
+// at least one object entry) but NONE parsed — i.e. the JSON was malformed/over-nested, not a
+// genuine "nothing uncovered". Distinguishes a PARSE FAILURE (→ repair re-prompt, like the
+// generator/reviewer get) from a legitimate empty plan (`{"objectives":[]}` or no array at all,
+// which must be honored as a real no-op). Without this, a malformed whole-repo plan silently
+// produced 0 objectives → a false `skipped` after a full planner run.
+export function planNeedsRepair(planText: string): boolean {
+  return parsePlan(planText).length === 0 && /"objectives"\s*:\s*\[\s*\{/.test(planText);
 }
 
 
@@ -975,7 +1037,7 @@ export interface ParallelWorkerInput {
   objective: string;
   flow: string;
   symbols: string[];
-  needsUi: boolean; // selects qa-worker (with Playwright MCP) vs qa-worker-code (serena only)
+  needsUi: boolean; // selects qa-worker (UI — transcribes the injected a11y tree, browserless) vs qa-worker-code (code-only); BOTH are serena-only, neither has Playwright
   brief?: ExplorationBrief; // Fase 2: the distilled blast radius for this objective (rendered into the worker prompt)
   specFile: string; // orchestrator-assigned path under e2eRelDir (e.g. "flows/checkout.spec.ts")
   repo: string;
@@ -986,18 +1048,21 @@ export interface ParallelWorkerInput {
   appName: string;
   mode: RunMode;
   learnedRules?: string; // anti-pattern rules from past runs — injected so workers don't repeat them
+  domSnapshot?: string; // live DEV a11y tree of this flow's routes — the worker transcribes, not guesses
   runId?: string; // set on fan-out so the worker's live activity routes + carries a workerId
 }
 
 // Dispatch each worker objective to a SEPARATE qa-worker session, bounded concurrency.
 // Uses a racing pool: when one worker finishes the next starts immediately — no batch
-// blocked by the slowest member. Selects qa-worker-code (serena only, no Playwright MCP)
-// for objectives that don't need UI navigation, reducing DEV pressure and browser overhead.
+// blocked by the slowest member. BOTH qa-worker (UI) and qa-worker-code (code-only) are
+// browserless (serena only); needsUi only selects the prompt framing — the UI worker
+// transcribes the injected a11y tree, the code worker derives tests from the affected symbols.
 export async function generateParallel(
   workers: ParallelWorkerInput[],
   deps: AgentDeps,
-  opts?: { signal?: AbortSignal; concurrency?: number },
+  opts?: { signal?: AbortSignal; concurrency?: number; specExists?: (path: string) => boolean },
 ): Promise<{ results: Array<{ flow: string; spec: string }>; errors: string[] }> {
+  const exists = opts?.specExists ?? existsSync; // injectable for tests; defaults to the real FS check
   if (workers.length === 0) return { results: [], errors: [] };
   const concurrency = opts?.concurrency ?? Math.min(workers.length, 5);
   const results: Array<{ flow: string; spec: string }> = [];
@@ -1006,13 +1071,28 @@ export async function generateParallel(
   const runOne = async (w: ParallelWorkerInput) => {
     try {
       const agent = w.needsUi ? "qa-worker" : "qa-worker-code";
-      const session = await deps.open(agent, w.mirrorDir, { signal: opts?.signal });
+      const session = await deps.open(agent, w.mirrorDir, {
+        signal: opts?.signal,
+        descriptor: { runId: w.runId, role: agent, objective: w.objective },
+      });
       if (w.runId) registerRunSession(session.id, w.runId, w.mirrorDir, w.flow);
       try {
-        const output = await session.prompt(buildWorkerPrompt(w));
+        // Phase 1b: assembled variant carries sectionSizes for turn telemetry.
+        const workerAssembled = buildWorkerPromptAssembled(w);
+        const output = await session.prompt(workerAssembled.text, { sectionSizes: workerAssembled.sectionSizes });
         const json = lastJsonMatching(output, (x) => typeof x.spec === "string");
-        if (json?.spec) results.push({ flow: w.flow, spec: json.spec as string });
-        else errors.push(`${w.flow}: worker produced no parseable spec name`);
+        const spec = json?.spec as string | undefined;
+        // VERIFY on disk — a parsed spec NAME is the worker's CLAIM, not proof it wrote the file. A
+        // worker that reports a spec it never persisted (phantom) must count as a FAILURE, so the
+        // fan-out's "N written" is honest (the global reconcile drops phantoms later, but the
+        // per-worker count must not over-report; this was hiding that 1 of 4 workers actually landed).
+        if (spec && exists(join(w.mirrorDir, w.e2eRelDir, spec))) {
+          results.push({ flow: w.flow, spec });
+        } else if (spec) {
+          errors.push(`${w.flow}: worker reported spec '${spec}' but it is NOT on disk (phantom)`);
+        } else {
+          errors.push(`${w.flow}: worker produced no parseable spec name`);
+        }
       } finally {
         if (w.runId) unregisterRunSession(session.id);
         await session.dispose().catch(() => {});
@@ -1056,13 +1136,38 @@ export function shouldFanOut(input: {
 export async function runOpencodeParallel(
   input: OpencodeRunInput,
   deps: AgentDeps,
-  opts?: { signal?: AbortSignal; onProgress?: (msg: string) => void; concurrency?: number },
+  opts?: {
+    signal?: AbortSignal;
+    onProgress?: (msg: string) => void;
+    concurrency?: number;
+    specExists?: (path: string) => boolean;
+    // Deterministic DOM grounding for the workers — the orchestrator captures the live a11y tree of
+    // the planned routes (Playwright lives on the orchestrator side, so it is injected here, keeping
+    // this agent boundary free of browser code), returned PER ROUTE (route → formatted block) so each
+    // objective is grounded with only its own routes' DOM. Best-effort: a route absent from the map
+    // got no usable/route-specific DOM, and its objective degrades to the strong agent.
+    captureRoutesDom?: (routes: string[]) => Promise<Map<string, string>>;
+  },
   fs: ManifestFs = realManifestFs,
 ): Promise<AgentResult> {
-  const timeoutMs = agentTimeout(input.mode);
-
-  // Phase 1 — PLAN (strong model). Heartbeat while it analyses the whole repo.
-  const planSession = await deps.open("qa-generator", input.mirrorDir, { signal: opts?.signal, timeoutMs });
+  // Phase 1 — PLAN. For a SCOPED mode (diff/manual) the planner derives objectives from one commit /
+  // one guidance string and must not navigate (F3), so bound it with its OWN deadline
+  // (PLANNER_TIMEOUT_MS), which takes precedence over the global OPENCODE_TIMEOUT_MS so a misbehaving
+  // planner can never consume the generator's whole window (the hang that produced 0 specs). Keyed on
+  // the MODE, not on brief presence: a brief-less diff/manual planner still only plans a single scope —
+  // reverting it to the 5–10 min generator budget would re-open the hang. complete/exhaustive
+  // (whole-repo analysis) keep the per-mode generator budget (unchanged).
+  // NOTE: the planner stays on the qa-generator role — the production AgentDeps is the provider facade,
+  // whose roleForLegacyAgent() maps any unknown agent name back to "primary"→qa-generator, so a
+  // separate "qa-planner" agent would be inert without cross-cutting changes to the provider-agnostic +
+  // Codex role plumbing. The timeout is the fix that matters; F3's prompt already removed navigation.
+  const isScopedPlan = input.mode === "diff" || input.mode === "manual";
+  const timeoutMs = isScopedPlan ? PLANNER_TIMEOUT_MS : agentTimeout(input.mode);
+  const planSession = await deps.open("qa-generator", input.mirrorDir, {
+    signal: opts?.signal,
+    timeoutMs,
+    descriptor: { runId: input.runId, role: "qa-generator", objective: PLANNER_OBJECTIVE },
+  });
   if (input.runId) registerRunSession(planSession.id, input.runId, input.mirrorDir);
   const startedAt = Date.now();
   const heartbeat = opts?.onProgress
@@ -1070,7 +1175,22 @@ export async function runOpencodeParallel(
     : undefined;
   let planText: string;
   try {
-    planText = await planSession.prompt(buildPlanPrompt(input));
+    // Phase 1b: assembled variant carries sectionSizes for turn telemetry.
+    const planAssembled = buildPlanPromptAssembled(input);
+    planText = await planSession.prompt(planAssembled.text, { sectionSizes: planAssembled.sectionSizes });
+    // Typed-contract repair (parity with the generator/reviewer): a plan whose response INTENDED
+    // objectives but parsed to NONE was malformed/over-nested JSON — re-prompt ONCE for a clean,
+    // minimal plan before accepting a false "0 objectives" that would wrongly SKIP a whole-repo run
+    // (a real bug seen on exhaustive mode: the planner found 11 flows, the nested JSON did not parse,
+    // and the run skipped). A genuinely empty plan is left untouched.
+    if (planNeedsRepair(planText)) {
+      console.warn("[qa] planner plan did not parse (objectives intended but 0 extracted); requesting one repair.");
+      planText = await planSession.prompt(
+        'Your previous plan did not parse. Output ONLY a single JSON object — no prose, no markdown fences — ' +
+          'of the form {"objectives":[{"flow":"...","objective":"...","needsUi":true}, ...]}. ' +
+          "Keep it MINIMAL: omit the optional `brief`/blast-radius detail if it risks malforming the JSON.",
+      );
+    }
   } finally {
     if (heartbeat) clearInterval(heartbeat);
     if (input.runId) unregisterRunSession(planSession.id);
@@ -1084,9 +1204,11 @@ export async function runOpencodeParallel(
     return { output: planText, specs: [], reviewed: false, approved: true, note: "planner found no important uncovered flows" };
   }
 
-  // A diff plan with a single objective gains nothing from fan-out and would LOSE the
-  // single-agent prompt's full context (diff, fix/review blocks). Fall back.
-  if (input.mode === "diff" && objectives.length < 2) {
+  // A diff or manual plan with a single objective gains nothing from fan-out and would LOSE
+  // the single-agent prompt's full context (diff/guidance, fix/review blocks). Fall back to the
+  // strong agent. This is the unified diff/manual cardinality gate (Phase 5): both modes branch
+  // on objective count, not on the mode name — same logic, only the scope source differs.
+  if ((input.mode === "diff" || input.mode === "manual") && objectives.length < 2) {
     opts?.onProgress?.(`[qa] plan: ${objectives.length} objective(s) — falling back to the single-agent path`);
     // The planner already explored the repo (and may have distilled a brief for the single objective).
     // Reuse that brief and DISABLE the explorer pass so the fallback does not re-explore from scratch.
@@ -1100,7 +1222,12 @@ export async function runOpencodeParallel(
   if (process.env.PRE_INDEX_SERENA !== "0") {
     opts?.onProgress?.(`[qa] pre-indexing serena for ${objectives.length} workers...`);
     try {
-      const idxSession = await deps.open("qa-worker-code", input.mirrorDir, { timeoutMs: 120_000 });
+      // Phase 0b: thread role into the descriptor; runId is forwarded when available.
+      // The serena pre-index session has no per-objective context, so objective is left undefined.
+      const idxSession = await deps.open("qa-worker-code", input.mirrorDir, {
+        timeoutMs: 120_000,
+        descriptor: { runId: input.runId, role: "qa-worker-code" },
+      });
       try {
         await idxSession.prompt("Activate serena (activate_project) on the current directory. Do nothing else. End with {\"spec\":\"\"}.");
       } finally {
@@ -1111,9 +1238,80 @@ export async function runOpencodeParallel(
     }
   }
 
-  // Phase 2 — FAN-OUT to workers (one spec each).
+  // Ground the workers BEFORE they write: capture the live a11y tree of the planned routes and hand
+  // each worker ONLY its own objective's DOM (qa-worker has no browser MCP — it transcribes the
+  // injected tree instead of guessing real selectors, the #1 failure class). The whole route union is
+  // rendered ONCE (a shared route is not re-rendered) and returned per-route. Routes come from each
+  // brief's code-derived `routes[]` (the real router paths) — NOT filtered by the planner's `verified`
+  // flag: the planner no longer navigates to set it (F3), so grounding must not depend on it.
+  // Best-effort — a route absent from the map got no usable/route-specific DOM (capture unavailable,
+  // render failed, or a soft-404 shell), and its objective routes to the strong agent below.
+  let domByRoute = new Map<string, string>();
+  if (opts?.captureRoutesDom) {
+    const allRoutes = normalizeRoutes(objectives.flatMap((o) => o.brief?.routes?.map((r) => r.path) ?? []).filter((r): r is string => Boolean(r)));
+    if (allRoutes.length > 0) {
+      domByRoute = await opts.captureRoutesDom(allRoutes).catch(() => new Map<string, string>());
+      if (domByRoute.size > 0) opts?.onProgress?.(`[qa] grounding: captured the live a11y tree for ${domByRoute.size}/${allRoutes.length} planned route(s) → injected per-objective`);
+    }
+  }
+
+  // Phase 2 — FAN-OUT to workers (one spec each), with per-objective grounding (Phase 5 + F1).
+  //
+  // Grounding semantics, evaluated PER objective:
+  //   • code-only (needsUi:false) → grounded; no DOM needed at all.
+  //   • UI with NO routes in its brief → grounded; the worker self-guides from the brief hints (the
+  //     planner promised no concrete route to render — today's behavior, unchanged).
+  //   • UI WITH routes, and DOM was captured for >=1 of them → grounded WITH that per-objective DOM.
+  //     (PARTIAL is intentional: some-DOM is strictly better than none for the browserless worker —
+  //     it transcribes the captured routes and marks the rest unverified, the same as the no-DOM path.)
+  //   • UI WITH routes but NONE captured (capture unavailable, render failed, or a soft-404 shell) →
+  //     UNGROUNDED → strong agent (full Playwright MCP) which can navigate to recover — BUT bounded:
+  //     the strong-agent path is SEQUENTIAL, so a broad capture failure (e.g. every route soft-404s on
+  //     a hash SPA) must not serialize the whole plan. Beyond MAX_STRONG_FALLBACK ungrounded objectives
+  //     we stop serializing and dispatch the overflow to PARALLEL workers without DOM (the pre-F1 blind
+  //     path) so the run stays bounded — surfaced loudly.
+  //
+  // This heterogeneous partial fan-out (some objectives to workers, some to the strong agent) is an
+  // explicit Phase-5 design item; results are consolidated in Phase 3 below.
   const changeType = input.intent?.type ?? input.mode;
-  const workers: ParallelWorkerInput[] = objectives.map((o) => ({
+  const grounded: Array<{ objective: PlanObjective; dom?: string }> = [];
+  const ungrounded: PlanObjective[] = [];
+  for (const o of objectives) {
+    if (!o.needsUi) {
+      grounded.push({ objective: o }); // code-only: never needs DOM
+      continue;
+    }
+    // This objective's own routes, capped per-objective (MAX_ROUTES). The UNION cap (MAX_ROUTES_UNION,
+    // applied + logged in captureDomByRoute) can leave a late objective's route uncaptured → it falls
+    // to the bounded fallback below, never a silent drop.
+    const routes = normalizeRoutes(o.brief?.routes?.map((r) => r.path).filter((r): r is string => Boolean(r)) ?? []).slice(0, MAX_ROUTES);
+    if (routes.length === 0) {
+      grounded.push({ objective: o }); // no route promised → worker self-guides (today's behavior)
+      continue;
+    }
+    const dom = routes.map((r) => domByRoute.get(r)).filter((b): b is string => Boolean(b)).join("\n\n");
+    if (dom) {
+      grounded.push({ objective: o, dom });
+    } else {
+      ungrounded.push(o);
+    }
+  }
+
+  // Bound the SEQUENTIAL strong-agent fallback: only the first MAX_STRONG_FALLBACK ungrounded objectives
+  // get strong-agent recovery; a broad capture failure (many ungrounded) must not serialize the plan, so
+  // the overflow is dispatched to PARALLEL workers WITHOUT DOM (they mark selectors unverified — the
+  // pre-F1 blind path). Surfaced loudly: blind specs lean on the static + selector gates downstream.
+  if (ungrounded.length > MAX_STRONG_FALLBACK) {
+    const overflow = ungrounded.splice(MAX_STRONG_FALLBACK);
+    for (const o of overflow) grounded.push({ objective: o });
+    console.warn(`[qa] WARNING: ${overflow.length} ungrounded objective(s) beyond the strong-agent cap (${MAX_STRONG_FALLBACK}) dispatched to PARALLEL workers WITHOUT DOM (blind) to avoid serializing the run — broad DOM-capture failure (e.g. a soft-404 SPA). Flows: ${overflow.map((o) => o.flow).join(", ")}`);
+    opts?.onProgress?.(`[qa] grounding: ${overflow.length} ungrounded objective(s) over the cap → parallel blind workers (run stays bounded)`);
+  }
+  for (const o of ungrounded) {
+    opts?.onProgress?.(`[qa] grounding: objective '${o.flow}' has routes but no captured DOM — routing to strong agent`);
+  }
+
+  const workers: ParallelWorkerInput[] = grounded.map(({ objective: o, dom }) => ({
     objective: o.objective,
     flow: o.flow,
     symbols: o.symbols,
@@ -1128,27 +1326,58 @@ export async function runOpencodeParallel(
     appName: input.appName,
     mode: input.mode,
     learnedRules: input.learnedRules,
+    ...(dom ? { domSnapshot: dom } : {}),
     runId: input.runId,
   }));
-  const { results, errors } = await generateParallel(workers, deps, { signal: opts?.signal, concurrency: opts?.concurrency });
-  opts?.onProgress?.(`[qa] workers: ${results.length} spec(s) written, ${errors.length} error(s)`);
+
+  // Dispatch grounded objectives to lite workers in parallel.
+  const { results: workerResults, errors } = workers.length > 0
+    ? await generateParallel(workers, deps, { signal: opts?.signal, concurrency: opts?.concurrency, ...(opts?.specExists ? { specExists: opts.specExists } : {}) })
+    : { results: [], errors: [] };
+  opts?.onProgress?.(`[qa] workers: ${workerResults.length} spec(s) written, ${errors.length} error(s)`);
   if (errors.length > 0) {
     // A failed worker means a PLANNED flow is silently absent from the suite. Surface it loudly
     // (not only buried in the result note): when review is off, the run can otherwise report
     // approved over a partial suite, so the missing coverage must be visible to the operator.
-    const writtenFlows = new Set(results.map((r) => r.flow));
-    const failedFlows = objectives.filter((o) => !writtenFlows.has(o.flow)).map((o) => o.flow);
+    const writtenFlows = new Set(workerResults.map((r) => r.flow));
+    const failedFlows = grounded.filter(({ objective: o }) => !writtenFlows.has(o.flow)).map(({ objective: o }) => o.flow);
     console.warn(`[qa] WARNING: ${errors.length} worker(s) failed — these planned flows are NOT in the suite: ${failedFlows.join(", ") || "(unknown)"}. ${errors.join("; ")}`);
   }
 
-  // Phase 3 — CONSOLIDATE: the orchestrator writes the manifest from the plan (no worker race).
-  const written = new Set(results.map((r) => r.flow));
+  // Dispatch ungrounded objectives to the strong agent (sequentially, one per call).
+  // Each strong-agent call produces its own specs; they are appended to the results.
+  const strongResults: Array<{ flow: string; spec: string }> = [];
+  for (const o of ungrounded) {
+    try {
+      opts?.onProgress?.(`[qa] strong agent handling ungrounded objective '${o.flow}'...`);
+      const strongResult = await runOpencode(
+        {
+          ...input,
+          explorer: false, // planner already ran; skip redundant explorer
+          ...(o.brief ? { contextBrief: o.brief } : {}),
+        },
+        deps,
+        opts,
+      );
+      // Collect specs the strong agent wrote (may be multiple if the planner didn't scope tightly).
+      // Record them under this objective's flow so manifest consolidation can attribute them.
+      for (const s of strongResult.specs) {
+        strongResults.push({ flow: o.flow, spec: s });
+      }
+    } catch (err) {
+      console.warn(`[qa] WARNING: strong-agent fallback for objective '${o.flow}' failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // Phase 3 — CONSOLIDATE: merge worker specs + strong-agent specs; write manifest once (no race).
+  const allResults = [...workerResults, ...strongResults];
+  const written = new Set(allResults.map((r) => r.flow));
   const entries: ManifestEntry[] = objectives
     .filter((o) => written.has(o.flow))
     .map((o) => ({ id: o.flow, objective: o.objective, flow: o.flow, targets: o.symbols, changeRef: { sha: input.sha, type: changeType } }));
   upsertManifest(fs, join(input.mirrorDir, input.e2eRelDir, ".qa", "manifest.json"), entries);
 
-  const specs = results.map((r) => r.spec);
+  const specs = allResults.map((r) => r.spec);
   return {
     output: planText,
     specs,
@@ -1161,6 +1390,9 @@ export async function runOpencodeParallel(
     reviewed: false,
     approved: specs.length > 0, // overridden by the orchestrator's independent reviewer when enabled
     note: errors.length ? `worker errors: ${errors.join("; ")}` : undefined,
+    // Phase 6b: expose the planner's objective count so the pipeline can retroactively
+    // dimension the runaway backstop to the actual scope of this run.
+    objectiveCount: objectives.length,
   };
 }
 
@@ -1197,16 +1429,49 @@ export function agentTimeout(mode: RunMode): number {
 
 const MAX_AGENT_TIMEOUT_MS = Math.max(...Object.values(TIMEOUT_BY_MODE));
 
+// Wrap an AgentDeps so EVERY open() injects the per-run usage sink, including internal callers
+// (explorer, reviewer, parallel workers) that never set opts.onUsage themselves. A caller-supplied
+// opts.onUsage still wins (`opts?.onUsage ?? onUsage`). No sink ⇒ baseDeps is returned untouched.
+// Single home for this wrapper so the precedence cannot drift between the entrypoint (index.ts) and
+// the default pipeline factory (pipeline.ts), which both need identical behavior.
+//
+// `onTurn` is TEST-ONLY: production never passes it (both call sites supply onUsage alone, and turn
+// persistence runs via the defaultOnTurn sink inside defaultAgentDeps.open, not through this
+// wrapper). It is retained solely so the colocated tests can exercise the same caller-wins
+// threading contract for onTurn (`opts?.onTurn ?? onTurn`) that onUsage uses.
+export function withUsageSink(
+  baseDeps: AgentDeps,
+  onUsage?: (u: UsageSnapshot) => void,
+  onTurn?: (t: AgentTurnEvent) => void, // TEST-ONLY (see note above); production passes only onUsage.
+): AgentDeps {
+  if (!onUsage && !onTurn) return baseDeps;
+  return {
+    ...baseDeps,
+    open: (agent, cwd, opts) =>
+      baseDeps.open(agent, cwd, {
+        ...opts,
+        ...(onUsage ? { onUsage: opts?.onUsage ?? onUsage } : {}),
+        ...(onTurn ? { onTurn: opts?.onTurn ?? onTurn } : {}),
+      }),
+  };
+}
+
 // Integration boundary: real connection to `opencode serve`. Not covered by unit
 // tests (like the Playwright runner). The SDK is imported lazily so tests do not
 // require the package. OPENCODE_SERVE_URL points to the `opencode` container.
+//
+// Usage capture is driven SOLELY by `opts.onUsage` on each open() — the single, typed mechanism.
+// Callers that want the snapshots wrap this AgentDeps (via withUsageSink) to inject onUsage into
+// every open() (the runner/pipeline path via the facade). There is no factory-level usage sink (it
+// was dead in the production strategy path, which always constructs this with no argument).
 export async function defaultAgentDeps(): Promise<AgentDeps> {
   // The undici transport timeout must exceed EVERY per-prompt withTimeout, or it aborts the
-  // request before our own deadline fires. The reviewer has its OWN budget (REVIEWER_TIMEOUT_MS,
-  // 6 min) that is independent of the generator's; if an operator sets a small OPENCODE_TIMEOUT_MS
-  // it must NOT drag the transport below the reviewer's budget. Take the max of all of them + headroom.
+  // request before our own deadline fires. The reviewer, the explorer and the planner each have their
+  // OWN budget (REVIEWER_TIMEOUT_MS, EXPLORER_TIMEOUT_MS, PLANNER_TIMEOUT_MS) independent of the
+  // generator's; if an operator sets a small OPENCODE_TIMEOUT_MS (or raises a per-role one) it must NOT
+  // drag the transport below any of them. Take the max + headroom.
   const generatorMax = Number(process.env.OPENCODE_TIMEOUT_MS) || MAX_AGENT_TIMEOUT_MS;
-  const dispatcherTimeoutMs = Math.max(generatorMax, REVIEWER_TIMEOUT_MS) + 30_000;
+  const dispatcherTimeoutMs = Math.max(generatorMax, REVIEWER_TIMEOUT_MS, EXPLORER_TIMEOUT_MS, PLANNER_TIMEOUT_MS) + 30_000;
   await installHttpDispatcher(dispatcherTimeoutMs);
 
   const client = await getSharedClient();
@@ -1239,12 +1504,58 @@ export async function defaultAgentDeps(): Promise<AgentDeps> {
       // session, burning model tokens) until its natural end or the 30-min orphan sweep.
       const abortRun = () => client.session.abort({ path: { id } }).catch(() => {});
 
+      // Default turn sink: persist to agent_turns when a runId is available and no caller-supplied
+      // onTurn overrides it. Best-effort: a storage failure must not break the agent session.
+      const defaultOnTurn = opts?.descriptor?.runId
+        ? (t: AgentTurnEvent) => {
+            try {
+              saveAgentTurn({
+                runId: t.runId,
+                sessionId: t.sessionId,
+                role: t.role,
+                round: t.round,
+                isRepair: t.isRepair,
+                ts: t.ts,
+                objective: t.objective ?? null,
+                promptText: t.promptText,
+                outputText: t.outputText,
+                promptBytes: t.promptBytes,
+                tokensInput: t.tokensInput,
+                tokensOutput: t.tokensOutput,
+                tokensReasoning: t.tokensReasoning,
+                tokensCacheRead: t.tokensCacheRead,
+                tokensCacheWrite: t.tokensCacheWrite,
+                cost: t.cost,
+              });
+            } catch (err) {
+              console.warn(`[qa] agent_turns persist failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+        : undefined;
+      // The effective onTurn: caller-supplied wins; default sink fires when runId is present.
+      const effectiveOnTurn = opts?.onTurn ?? defaultOnTurn;
+
+      // Track the per-call round counter so `onTurn` can report which round produced each output.
+      // The counter starts at 0 for the first prompt() call on this session and increments each
+      // time prompt() is invoked (whether a normal generation round or an in-session repair).
+      //
+      // SEMANTICS: `round` is SESSION-LOCAL — a per-session prompt index, NOT a per-run regeneration
+      // index. Each regeneration pass (fix / reviewer-corrections / coverage) opens a NEW session,
+      // so every main generation turn is round=0; only in-session contract-repair re-prompts push it
+      // to 1, 2, … within the same session. Cross-session regeneration ORDERING is therefore NOT
+      // encoded in `round`; it is reconstructed from the turn `ts` (and run_id) when reading
+      // agent_turns. (Threading a run-level regeneration index is intentionally out of scope here.)
+      let _round = 0;
+
       return {
         id,
         prompt: (text, promptOpts) =>
           withTimeout(
             (() => {
               checkCircuit();
+              // Capture the round for this call (incremented after the closure captures it so
+              // round=0 on the first call, round=1 on the second, etc.).
+              const thisRound = _round++;
               const runPrompt = (modelOverride?: string) => {
                 const overrideModel = modelOverride ? parseModelRef(modelOverride) : undefined;
                 return client.session
@@ -1255,7 +1566,6 @@ export async function defaultAgentDeps(): Promise<AgentDeps> {
                   })
                   .then((res) => {
                     if (res.error) {
-                      recordCircuitFailure();
                       throw new Error(`OpenCode session.prompt failed: ${JSON.stringify(res.error)}`);
                     }
                     // ROOT-CAUSE FIX: a provider/agent fault (out of credits, auth, rate-limit,
@@ -1266,18 +1576,73 @@ export async function defaultAgentDeps(): Promise<AgentDeps> {
                     // Detect it at the source and throw it as a typed infra error.
                     const agentErr = (res.data?.info as { error?: AgentErrorPayload } | undefined)?.error;
                     if (agentErr) {
-                      recordCircuitFailure();
                       throw agentErrorToInfra(agentErr);
                     }
                     recordCircuitSuccess();
-                    return extractText(res.data?.parts, promptOpts);
+                    const infoRaw = res.data?.info as
+                      | { tokens?: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }; cost?: number }
+                      | undefined;
+                    // Emit a usage snapshot for the accumulator (observation-only). The ONLY sink is
+                    // opts.onUsage — callers that want capture pre-wrap this AgentDeps to inject it
+                    // into every open() (so internal callers like the explorer/reviewer are covered
+                    // without touching their individual call sites).
+                    if (infoRaw?.tokens) {
+                      const snapshot: UsageSnapshot = {
+                        input: infoRaw.tokens.input ?? 0,
+                        output: infoRaw.tokens.output ?? 0,
+                        reasoning: infoRaw.tokens.reasoning ?? 0,
+                        cacheRead: infoRaw.tokens.cache?.read ?? 0,
+                        cacheWrite: infoRaw.tokens.cache?.write ?? 0,
+                        cost: infoRaw.cost ?? 0,
+                      };
+                      opts?.onUsage?.(snapshot);
+                    }
+                    const outputRaw = extractText(res.data?.parts, promptOpts);
+                    // Emit a per-turn event alongside onUsage. Sanitize output_text before
+                    // emitting so any DEV-environment data in the agent reply is redacted at
+                    // the earliest point (before storage or logging by callers).
+                    if (effectiveOnTurn) {
+                      const sanitizedOutput = sanitizeText(outputRaw).text;
+                      const turnEvent: AgentTurnEvent = {
+                        runId: opts?.descriptor?.runId ?? null,
+                        sessionId: id,
+                        role: opts?.descriptor?.role ?? agent,
+                        objective: opts?.descriptor?.objective,
+                        round: promptOpts?.round ?? thisRound,
+                        isRepair: promptOpts?.isRepair ?? false,
+                        promptText: text,
+                        promptBytes: Buffer.byteLength(text, "utf8"),
+                        outputText: sanitizedOutput,
+                        tokensInput: infoRaw?.tokens?.input ?? null,
+                        tokensOutput: infoRaw?.tokens?.output ?? null,
+                        tokensReasoning: infoRaw?.tokens?.reasoning ?? null,
+                        tokensCacheRead: infoRaw?.tokens?.cache?.read ?? null,
+                        tokensCacheWrite: infoRaw?.tokens?.cache?.write ?? null,
+                        cost: infoRaw?.cost ?? null,
+                        ts: new Date().toISOString(),
+                        // Phase 1b: per-section byte map from the ContextAssembler. Null when
+                        // the prompt was not assembled (repairs, explorer, etc.).
+                        sectionSizes: promptOpts?.sectionSizes ?? null,
+                      };
+                      effectiveOnTurn(turnEvent);
+                    }
+                    return outputRaw;
                   })
+                  // Record the circuit failure in EXACTLY one place per attempt. The error
+                  // branches above throw without counting; this single trailing catch counts
+                  // the attempt once (a previous double-count opened the breaker after ~3
+                  // instead of CIRCUIT_THRESHOLD failures), then re-throws to the fallback retry.
                   .catch((err) => {
                     recordCircuitFailure();
                     throw err;
                   });
               };
               return runPrompt(opts?.model).catch((err) => {
+                // Only retry a TRANSIENT primary-model fault on the fallback model. Skip the
+                // retry (re-throw) on operator-abort (a cancel must not be defeated by a retry)
+                // and on infra errors like AgentUnavailableError (out-of-credits/auth hits the
+                // SAME OpenCode key — re-spending on the fallback is pointless and surfaces late).
+                if (opts?.signal?.aborted || isInfraError(err)) throw err;
                 const fallback = getFallbackModel(agent);
                 if (fallback) {
                   console.warn(`[qa] primary model failed for ${agent}, retrying with fallback ${fallback}: ${err instanceof Error ? err.message : String(err)}`);

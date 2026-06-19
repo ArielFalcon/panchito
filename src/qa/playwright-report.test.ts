@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parsePlaywrightReport } from "./playwright-report";
+import { parsePlaywrightReport, firstErrorContext } from "./playwright-report";
 
 test("maps nested specs to pass/fail cases", () => {
   const report = {
@@ -112,4 +112,119 @@ test("stats-only report passes only when tests actually executed", () => {
 test("a spec with one executed pass and one skipped test still passes", () => {
   const report = { suites: [{ specs: [{ title: "mixed", tests: [{ status: "expected" }, { status: "skipped" }] }] }] };
   assert.equal(parsePlaywrightReport(report).passed, true);
+});
+
+// ── firstErrorContext + PwCase.errorContext (Unit 2 — Task 2.11) ───────────────
+
+test("firstErrorContext returns the errorContext string from errors[0]", () => {
+  // A spec with a result that carries errors[].errorContext (simulated 1.60 shape).
+  const spec = {
+    title: "fails",
+    tests: [
+      {
+        status: "unexpected",
+        results: [
+          {
+            status: "failed",
+            error: { message: "expect failed" },
+            errors: [{ message: "expect failed", errorContext: "- button \"Submit\"" }],
+          },
+        ],
+      },
+    ],
+  };
+  assert.equal(firstErrorContext(spec), "- button \"Submit\"");
+});
+
+test("firstErrorContext returns undefined when errors[] is absent (pre-1.60 report)", () => {
+  const spec = {
+    title: "fails",
+    tests: [
+      {
+        status: "unexpected",
+        results: [{ status: "failed", error: { message: "boom" } }],
+      },
+    ],
+  };
+  assert.equal(firstErrorContext(spec), undefined);
+});
+
+test("firstErrorContext returns undefined when errors[] is present but errorContext is absent", () => {
+  const spec = {
+    title: "fails",
+    tests: [
+      {
+        status: "unexpected",
+        results: [
+          {
+            status: "failed",
+            errors: [{ message: "only message, no errorContext" }],
+          },
+        ],
+      },
+    ],
+  };
+  assert.equal(firstErrorContext(spec), undefined);
+});
+
+test("parsePlaywrightReport populates errorContext on a failed case when errors[] carries it", () => {
+  const report = {
+    suites: [
+      {
+        title: "s.spec.ts",
+        specs: [
+          {
+            title: "fails with context",
+            tests: [
+              {
+                status: "unexpected",
+                results: [
+                  {
+                    status: "failed",
+                    error: { message: "expect failed" },
+                    errors: [{ message: "expect failed", errorContext: "- button \"Submit\"" }],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  const parsed = parsePlaywrightReport(report);
+  const failed = parsed.cases.find((c) => c.status === "fail");
+  assert.ok(failed, "expected a failed case");
+  assert.equal(failed!.errorContext, "- button \"Submit\"");
+});
+
+test("parsePlaywrightReport backward-compat: errorContext absent on pre-1.60 report", () => {
+  const report = {
+    suites: [
+      {
+        specs: [
+          {
+            title: "old fail",
+            ok: false,
+            tests: [{ results: [{ status: "failed", error: { message: "classic error" } }] }],
+          },
+        ],
+      },
+    ],
+  };
+  const parsed = parsePlaywrightReport(report);
+  const failed = parsed.cases.find((c) => c.status === "fail");
+  assert.ok(failed);
+  assert.equal(failed!.errorContext, undefined);
+});
+
+test("firstErrorContext is defensive against null/undefined shape variants (no throw)", () => {
+  // Empty spec — nothing crashes.
+  assert.doesNotThrow(() => firstErrorContext({ title: "x", tests: [] }));
+  // Test with no results.
+  assert.doesNotThrow(() => firstErrorContext({ title: "x", tests: [{}] }));
+  // Result with empty errors array.
+  assert.doesNotThrow(() => firstErrorContext({ title: "x", tests: [{ results: [{ errors: [] }] }] }));
+  // All return undefined — never throw.
+  assert.equal(firstErrorContext({ title: "x", tests: [] }), undefined);
 });

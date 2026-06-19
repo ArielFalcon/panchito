@@ -25,6 +25,7 @@ const (
 	screenAppAdmin
 	screenHelp
 	screenIntelligence
+	screenReport
 )
 
 type Model struct {
@@ -42,6 +43,8 @@ type Model struct {
 	appAdmin      appAdminModel
 	help          helpModel
 	intelligence  intelligenceModel
+	report        reportModel
+	reportOrigin  screen // the screen the report was opened from, to return there on esc
 
 	// sys is the ambient control-plane snapshot the shell polls in the background;
 	// the persistent status bar (and the dashboard) read from it.
@@ -97,20 +100,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		prevRun := runningID(m.sys.queue)
 		m.sys = m.sys.fold(msg, time.Now())
 		m.dashboard.sys = m.sys
-		// Keep the fleet cursor in range if the app set shrank under us.
-		if n := len(m.sys.apps); m.dashboard.cursor >= n {
+		// Keep the fleet cursor in range if the app set shrank under us. The onboard row
+		// (cursor == len(apps)) is a valid position, so only clamp when strictly past it.
+		if n := len(m.sys.apps); m.dashboard.cursor > n {
 			m.dashboard.cursor = max(0, n-1)
 		}
-		// When the active run changes (a run started or finished), refresh the fleet so
-		// the board's verdicts and trends reflect the new outcome — only while it's shown.
-		if m.screen == screenDashboard && runningID(m.sys.queue) != prevRun {
-			return m, loadFleetCmd(m.client, appNames(m.sys.apps))
+		// Defensive parity: keep the RECENT cursor inside the feed too, so its caret never
+		// points past the last run regardless of how the board's data changed. (The feed
+		// derives from m.fleet, refreshed by fleetLoadedMsg — which clamps as well.)
+		if n := len(m.dashboard.recentRuns()); m.dashboard.recentCursor >= n {
+			m.dashboard.recentCursor = max(0, n-1)
+		}
+		// When the active run changes (a run started or finished), any transient note (e.g.
+		// "stop requested") is now stale — clear it regardless of the visible screen — and
+		// refresh the fleet so the board's verdicts and trends reflect the new outcome.
+		if runningID(m.sys.queue) != prevRun {
+			m.dashboard.status = ""
+			if m.screen == screenDashboard {
+				return m, loadFleetCmd(m.client, appNames(m.sys.apps))
+			}
 		}
 		return m, nil
 	case systemPollErrMsg:
 		m.sys.lastErr = msg.err.Error()
 		m.sys.lastPoll = time.Now()
 		return m, nil
+	case runCanceledMsg:
+		// A stop succeeded (from the NOW panel, a FLEET running row, or the live screen):
+		// clear any armed confirm, surface it, and poll immediately so the board reflects the
+		// wind-down without waiting for the next heartbeat — never silently swallow the ack.
+		m.dashboard.stopArmed = false
+		m.dashboard.status = "stop requested — the run is winding down"
+		if m.client == nil {
+			return m, nil
+		}
+		return m, pollSystemCmd(m.client)
 	case appSelectedMsg:
 		m.launcher = newLauncherModel(msg.app)
 		m.launcher.width = m.width
@@ -129,11 +153,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = screenLive
 		// A brand-new run starts empty and the stream delivers it from seq 0, so no snapshot
 		// backfill is needed here — only the re-attach path (watchRunMsg) seeds from a record.
-		return m, tea.Batch(startStreamCmd(ctx, m.client, msg.id, ch), waitForEventCmd(ch), m.live.spin.Tick)
+		return m, tea.Batch(startStreamCmd(ctx, m.client, msg.id, ch), waitForEventCmd(ch), m.live.spin.Tick, watchdogTickCmd())
 	case continueMsg:
 		return m, continueCmd(m.client, m.live.runID, msg.cases)
 	case backMsg:
 		m.screen = screenDashboard
+		// Refresh the board on return: a run finished while we were away (live/history), so RECENT
+		// and the fleet trends would otherwise show stale (or empty) data until the next manual reload.
+		if m.client != nil {
+			return m, loadFleetCmd(m.client, appNames(m.sys.apps))
+		}
 		return m, nil
 	case historySelectedMsg:
 		m.history = newHistoryModel(m.client, msg.app)
@@ -142,6 +171,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.history.Init()
 	case agentSelectedMsg:
 		m.agent = newAgentModel(m.client)
+		m.agent.focusRole = msg.role // jump into editing this model once the config loads ("" = full screen)
 		m.agent.width = m.width
 		m.screen = screenAgent
 		return m, m.agent.Init()
@@ -159,6 +189,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.screen = screenIntelligence
 		return m, m.intelligence.Init()
+	case reportSelectedMsg:
+		m.reportOrigin = m.screen // remember where we came from so esc returns there, not to the board
+		m.report = newReportModel(m.client, msg.runID, msg.app, msg.preloaded)
+		if m.width > 0 && m.height > 0 {
+			m.report.resize(m.width, m.bodyHeight())
+		}
+		m.screen = screenReport
+		return m, m.report.Init()
+	case reportBackMsg:
+		// Return to the live recap the report was opened from — the live model is not torn down, so
+		// its post-run recap is restored intact.
+		m.screen = m.reportOrigin
+		return m, nil
 	case onboardSelectedMsg:
 		m.appAdmin = newOnboardModel(m.client)
 		m.appAdmin.width = m.width
@@ -188,7 +231,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.live = newLiveModel(msg.id, msg.app, ch, cancel, m.width, m.bodyHeight())
 		m.live.client = m.client // enables the embedded assistant
 		m.screen = screenLive
-		return m, tea.Batch(fetchRunSnapshotCmd(m.client, msg.id), startStreamCmd(ctx, m.client, msg.id, ch), waitForEventCmd(ch), m.live.spin.Tick)
+		return m, tea.Batch(fetchRunSnapshotCmd(m.client, msg.id), startStreamCmd(ctx, m.client, msg.id, ch), waitForEventCmd(ch), m.live.spin.Tick, watchdogTickCmd())
 	}
 
 	var cmd tea.Cmd
@@ -211,6 +254,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.help, cmd = m.help.Update(msg)
 	case screenIntelligence:
 		m.intelligence, cmd = m.intelligence.Update(msg)
+	case screenReport:
+		m.report, cmd = m.report.Update(msg)
 	}
 	return m, cmd
 }
@@ -262,6 +307,8 @@ func (m Model) screenView() string {
 		return m.help.View()
 	case screenIntelligence:
 		return m.intelligence.View()
+	case screenReport:
+		return m.report.View()
 	default:
 		return m.connect.View()
 	}

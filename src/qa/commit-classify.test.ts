@@ -50,6 +50,16 @@ test("feat → generate", () => {
   assert.equal(classifyCommit("feat: new payment screen", logicDiff).action, "generate");
 });
 
+test("extracts the commit body (lines after the subject) as objective context", () => {
+  const c = classifyCommit("fix(checkout): rounding\n\nOwners with >10 pets were overcharged because the cart re-queried after the discount.", logicDiff);
+  assert.equal(c.message, "fix(checkout): rounding"); // the subject stays the first line (intent + type)
+  assert.match(c.body ?? "", /Owners with >10 pets were overcharged/);
+});
+
+test("single-line commit message → body is undefined (nothing to add)", () => {
+  assert.equal(classifyCommit("feat: new screen", logicDiff).body, undefined);
+});
+
 test("fix → generate (regression test for the bug)", () => {
   assert.equal(classifyCommit("fix(checkout): fails with >10 items", logicDiff).action, "generate");
 });

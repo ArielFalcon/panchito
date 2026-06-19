@@ -104,9 +104,18 @@ export function correctionToRuleUpsert(input: { correction: string; runId: strin
   };
 }
 
-// Off-path distillation of a rejection: every correction becomes a candidate rule,
-// deduped against ALL statuses (a pattern already tried and demoted must not respawn).
-// Same governance as oracle-born rules: candidates must EARN promotion via outcomes.
+// Phase 7 (J de-poison, corrected): off-path distillation of a reviewer rejection. Corrections
+// become CANDIDATE rules — retrievable, but rendered under the "experimental — consider, not
+// proven" header (renderRulesForPrompt) that strips their authority. THIS is the correct de-poison:
+// the generator EXERCISES the hypothesis (which is how it accumulates the outcomes that earn or deny
+// promotion) without being told to treat raw reviewer text as a proven prescription.
+//
+// The earlier "pending" path was inert: pending is excluded from retrieval (history.ts listRulesStmt
+// filters status IN ('active','candidate')), and the ONLY pending→candidate transition lives in
+// recordRuleOutcome, which only iterates RETRIEVED rules — so a pending rule was never retrieved,
+// never accrued an outcome, and stayed pending forever (permanently dead). Inserting as candidate
+// puts the rule on the live promotion flywheel from the first run. Same dedup semantics as
+// oracle-born rules: a pattern already tried and demoted must not respawn.
 export function distillReviewerCorrections(input: {
   app: string;
   runId: string;
@@ -126,6 +135,8 @@ export function distillReviewerCorrections(input: {
   const inserted: string[] = [];
   for (const c of toInsert) {
     const ruleId = `rule-${input.runId.slice(-8)}-${randomBytes(3).toString("hex")}`;
+    // Insert as "candidate" (the upsert default) so the rule is RETRIEVABLE and accumulates outcomes.
+    // De-poisoning is the experimental framing in renderRulesForPrompt, not exclusion from retrieval.
     upsertLearningRule({ ...c, app: input.app, id: ruleId });
     inserted.push(ruleId);
   }

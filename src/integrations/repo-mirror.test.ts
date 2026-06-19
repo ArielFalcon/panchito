@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ensureMirror, ensureMirrorAtBranch, getCommitDiff, listChangedSpecs, getCommitsBehind, getCommitMessage, resolveRef, MirrorDeps } from "./repo-mirror";
+import { ensureMirror, ensureMirrorAtBranch, getCommitDiff, listChangedSpecs, getCommitsBehind, getCommitMessage, resolveRef, getChangedFilesInRange, MirrorDeps } from "./repo-mirror";
 
 // authHeaderArgs() depends on GITHUB_TOKEN and the remote URL on GIT_REMOTE_BASE;
 // clear both to isolate the logic (token-bearing tests set GITHUB_TOKEN per-test).
@@ -342,4 +342,60 @@ test("ensureMirrorAtBranch propagates git checkout failure", async () => {
     },
   };
   await assert.rejects(() => ensureMirrorAtBranch("org/app", "main", d), /git checkout failed/);
+});
+
+// ── Slice G: getChangedFilesInRange (PR-aware ingestion) ─────────────────────
+
+test("getChangedFilesInRange: rejects non-hex baseSha before spawning git", async () => {
+  const d = gitStub(() => "");
+  await assert.rejects(() => getChangedFilesInRange("/dir", "--injection", "abc1234def", d), /invalid commit sha/);
+  assert.equal(d.calls.length, 0);
+});
+
+test("getChangedFilesInRange: rejects non-hex headSha before spawning git", async () => {
+  const d = gitStub(() => "");
+  await assert.rejects(() => getChangedFilesInRange("/dir", "abc1234def", "$(rm -rf /)", d), /invalid commit sha/);
+  assert.equal(d.calls.length, 0);
+});
+
+test("getChangedFilesInRange: returns empty list when baseSha === headSha (degenerate / single-commit PR)", async () => {
+  const sha = "abc1234def";
+  const d = gitStub(() => "src/foo.ts\n"); // should not be called
+  const result = await getChangedFilesInRange("/dir", sha, sha, d);
+  assert.deepEqual(result, [], "same-SHA range degrades to empty list without calling git");
+  assert.equal(d.calls.length, 0, "git must not be called for degenerate range");
+});
+
+test("getChangedFilesInRange: returns sorted deduplicated list of changed files across range", async () => {
+  const base = "aaaa1111";
+  const head = "bbbb2222";
+  const d = gitStub(() => "src/b.ts\nsrc/a.ts\nsrc/a.ts\ne2e/flows/login.spec.ts\n");
+  const result = await getChangedFilesInRange("/dir", base, head, d);
+  assert.deepEqual(result, ["e2e/flows/login.spec.ts", "src/a.ts", "src/b.ts"], "result must be sorted and deduplicated");
+  assert.deepEqual(d.calls[0], ["diff", "--name-only", `${base}..${head}`], "correct git command");
+});
+
+test("getChangedFilesInRange: handles empty output (no files changed in range)", async () => {
+  const d = gitStub(() => "\n  \n");
+  const result = await getChangedFilesInRange("/dir", "aaaa1111", "bbbb2222", d);
+  assert.deepEqual(result, []);
+});
+
+test("getChangedFilesInRange: propagates git diff failure", async () => {
+  const d = gitStub(() => { throw new Error("git diff failed: no common ancestor"); });
+  await assert.rejects(() => getChangedFilesInRange("/dir", "aaaa1111", "bbbb2222", d), /git diff failed/);
+});
+
+test("getChangedFilesInRange: uses diff --name-only with baseSha..headSha revspec", async () => {
+  const base = "aabb1234";
+  const head = "ccdd5678";
+  let capturedArgs: string[] = [];
+  const d: MirrorDeps = {
+    root: "/tmp/mirrors",
+    exists: () => true,
+    removeFile: () => {},
+    git: async (args) => { capturedArgs = args; return "src/changed.ts\n"; },
+  };
+  await getChangedFilesInRange("/dir", base, head, d);
+  assert.deepEqual(capturedArgs, ["diff", "--name-only", `${base}..${head}`]);
 });

@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { OpenCodeRuntimeStrategy } from "./opencode-strategy";
 import { CodexExecTransport, CodexRuntimeStrategy, SupervisorExecTransport, codexExecArgs, codexExecEnv, defaultCodexTransport } from "./codex-strategy";
 import { capabilitiesForRole, roleForLegacyAgent } from "./types";
-import type { AgentDeps } from "../integrations/opencode-client";
+import { getAgentTurns } from "../server/history";
+import type { AgentDeps, AgentTurnEvent } from "../integrations/opencode-client";
 
 // Capability policy is expressed ONCE, provider-agnostic; each strategy enforces it with its own
 // mechanism (OpenCode tools{} map, Codex --sandbox flag). The judge must not be able to write.
@@ -135,6 +136,66 @@ test("CodexRuntimeStrategy wraps a headless transport as an AgentRuntimeSession"
 test("defaultCodexTransport runs Codex over the supervisor when one is configured, else locally", () => {
   assert.ok(defaultCodexTransport({ AGENT_SUPERVISOR_URL: "http://agents:4097" }) instanceof SupervisorExecTransport);
   assert.ok(defaultCodexTransport({}) instanceof CodexExecTransport);
+});
+
+// #2 regression: the Codex runtime must emit an AgentTurnEvent per prompt (the Codex-side
+// turn-telemetry funnel), so Codex roles persist agent_turns with a real run_id. Token fields are
+// null (codex exec surfaces no usage), and output_text is sanitized before the event fires.
+function codexStrategyWithOutput(output: string): CodexRuntimeStrategy {
+  return new CodexRuntimeStrategy({
+    env: { CODEX_API_KEY: "codex-key" },
+    promptRoot: "/nonexistent-prompt-root", // role preamble degrades to empty; keeps the prompt deterministic
+    transport: {
+      start: async () => ({ id: "codex-turn-1", prompt: async () => output, dispose: async () => {} }),
+      health: async () => ({ provider: "codex", status: "healthy", configured: true }),
+      listModels: async () => [{ id: "gpt-5.4" }],
+    },
+  });
+}
+
+test("CodexRuntimeStrategy emits an AgentTurnEvent with run_id + null tokens + sanitized output", async () => {
+  const turns: AgentTurnEvent[] = [];
+  const strategy = codexStrategyWithOutput("verdict ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 done");
+  const session = await strategy.openSession("reviewer", "/repo", {
+    descriptor: { runId: "run-codex-turn", role: "qa-reviewer", objective: "guard the change" },
+    onTurn: (t) => turns.push(t),
+  });
+  await session.prompt("judge these tests");
+
+  assert.equal(turns.length, 1, "one turn event per prompt");
+  const t = turns[0]!;
+  assert.equal(t.runId, "run-codex-turn", "run_id threaded from the descriptor");
+  assert.equal(t.role, "qa-reviewer");
+  assert.equal(t.objective, "guard the change");
+  assert.equal(t.round, 0, "session-local round starts at 0");
+  // Token/cost fields are null on the Codex path.
+  assert.equal(t.tokensInput, null);
+  assert.equal(t.tokensOutput, null);
+  assert.equal(t.cost, null);
+  // Output is sanitized before the event fires (the GitHub token is redacted).
+  assert.doesNotMatch(t.outputText, /ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ/, "secret must be redacted in output_text");
+  assert.match(t.outputText, /REDACTED/);
+  assert.equal(t.promptBytes, Buffer.byteLength(t.promptText, "utf8"));
+});
+
+test("CodexRuntimeStrategy default sink persists a Codex turn to agent_turns when runId is present", async () => {
+  const runId = `run-codex-persist-${Date.now()}`;
+  const strategy = codexStrategyWithOutput("codex verdict ok");
+  // No caller onTurn → the strategy's default sink (saveAgentTurn) fires because runId is set.
+  const session = await strategy.openSession("primary", "/repo", {
+    descriptor: { runId, role: "qa-generator", objective: "manual objective" },
+  });
+  await session.prompt("write tests");
+
+  const rows = getAgentTurns(runId);
+  assert.equal(rows.length, 1, "the Codex turn was persisted with the run_id");
+  const row = rows[0]!;
+  assert.equal(row.runId, runId);
+  assert.equal(row.role, "qa-generator");
+  assert.equal(row.objective, "manual objective");
+  assert.equal(row.tokensInput, null, "codex exec surfaces no token usage");
+  assert.equal(row.cost, null);
+  assert.match(row.outputText, /codex verdict ok/);
 });
 
 test("SupervisorExecTransport posts a prompt to /codex/exec and returns the final message", async () => {

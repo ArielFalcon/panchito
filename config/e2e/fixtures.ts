@@ -73,7 +73,13 @@ export const test = base.extend<QaFixtures>({
     await use(async () => {
       const user = process.env.DEV_TEST_USER;
       const pass = process.env.DEV_TEST_PASS;
-      if (!user || !pass) throw new Error("Missing DEV_TEST_USER/PASS (Keycloak login)");
+      if (!user || !pass) {
+        // No creds configured → treat the app as PUBLIC and skip login (no-op). A public app
+        // (e.g. PetClinic) needs no auth; throwing here would fail every spec that defensively
+        // calls authenticate(). Set DEV_TEST_USER/PASS only if the app actually requires Keycloak login.
+        console.warn("[qa] authenticate(): DEV_TEST_USER/PASS not set — app treated as PUBLIC, skipping login.");
+        return;
+      }
       await page.goto("/");
       await page.getByRole("link", { name: /log ?in|sign ?in/i }).click(); // ADJUST to the real button
       // Now on the Keycloak domain (a different origin):
@@ -185,6 +191,51 @@ export const test = base.extend<QaFixtures>({
 });
 
 export { expect };
+
+// >>> qa-failure-capture (system-owned: do not edit) >>>
+// Captures the aria snapshot of the page at the failure point and writes it to
+// QA_FAILURE_CAPTURE_DIR so the orchestrator can ground the fix-loop regeneration
+// in the REAL post-failure DOM (not the pre-write snapshot). Best-effort only:
+// the page may be closed on a nav-crash (try/catch swallows), and the entire
+// block is a no-op when QA_FAILURE_CAPTURE_DIR is unset.
+//
+// SELF-CONTAINED: this exact block is also appended (append-only) into existing repos'
+// fixtures.ts by the orchestrator, so it CANNOT assume any top-level import is present.
+// node:fs/path/crypto are pulled in via dynamic import() INSIDE the async afterEach —
+// a CommonJS-style synchronous load is not defined in this native-ESM module
+// ("type":"module") and would throw a ReferenceError that the catch would swallow.
+test.afterEach(async ({ page }, testInfo) => {
+  const dir = process.env.QA_FAILURE_CAPTURE_DIR;
+  if (!dir) return;                                   // degrade to no-op when the orchestrator did not ask
+  if (testInfo.status === testInfo.expectedStatus) return; // only on unexpected status (a real failure)
+  try {
+    const { writeFileSync } = await import("node:fs");
+    const { join, basename } = await import("node:path");
+    const { createHash } = await import("node:crypto");
+    const yaml = await page.locator("body").ariaSnapshot(); // the REAL post-failure page state
+    // title = the describe › test chain (drop the leading project element), MATCHING the stream
+    // reporter's _name. The orchestrator's harvest keys off this: the JSON report's case name is
+    // `file › describe › test`, whose trailing segments equal this title's segments.
+    const title = testInfo.titlePath.filter(Boolean).slice(1).join(" › ");
+    const project = testInfo.project.name;
+    // file = the spec's basename. Two tests with the SAME describe › test chain in DIFFERENT spec
+    // files share a title; the file disambiguates them so neither the dump identity nor the harvest
+    // match attaches the wrong DOM. Stored in the body AND folded into the filename hash below.
+    const file = basename(testInfo.file ?? "");
+    // Filename: project + a short hash of file + title + retry. The project keeps two projects
+    // (desktop/mobile) running the same spec from clobbering each other; the (file + title) HASH
+    // (not an 80-char truncation) keeps two long titles sharing an 80-char prefix — or two same-titled
+    // tests in different files — from colliding. The body is authoritative for matching (project/file/
+    // title); the filename only guarantees uniqueness + retry.
+    const hash = createHash("sha1").update(`${file}/${title}`).digest("hex").slice(0, 12);
+    const safeProject = project.replace(/[^a-z0-9]+/gi, "-").slice(0, 40);
+    writeFileSync(
+      join(dir, `${safeProject}__${hash}__${testInfo.retry}.json`),
+      JSON.stringify({ project, file, title, retry: testInfo.retry, yaml }),
+    );
+  } catch { /* page may be closed on a nav-crash — best-effort, never fail the run */ }
+});
+// <<< qa-failure-capture <<<
 
 // Recursively corrupts JSON VALUES (numbers, booleans) while preserving structure, strings, nulls
 // and keys — so tokens/ids (usually strings) survive and the app keeps flowing, but any numeric or

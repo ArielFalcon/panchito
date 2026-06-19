@@ -116,6 +116,11 @@ type queueLoadedMsg struct{ queue contract.QueueStatus }
 // runCanceledMsg acknowledges a stop request; the ambient poll then reflects the wind-down.
 type runCanceledMsg struct{}
 
+// cancelErrMsg is a FAILED stop (server rejected it, or the request timed out) — distinct from
+// errMsg so neither screen has to guess the error's origin. The live screen routes it to its
+// run-control error surface (not the assistant chat); the dashboard shows it on its error line.
+type cancelErrMsg struct{ err error }
+
 // loadQueueCmd fetches the queue on demand (outside the ambient heartbeat).
 func loadQueueCmd(c *api.Client) tea.Cmd {
 	return func() tea.Msg {
@@ -130,12 +135,14 @@ func loadQueueCmd(c *api.Client) tea.Cmd {
 }
 
 // cancelRunCmd stops the active server-side run. Shared by the NOW panel and the live screen.
+// A failure reports as cancelErrMsg (not the generic errMsg) so the receiving screen surfaces it
+// as run-control feedback instead of mistaking it for an assistant error.
 func cancelRunCmd(c *api.Client, id string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := c.Cancel(ctx, id); err != nil {
-			return errMsg{err}
+			return cancelErrMsg{err}
 		}
 		return runCanceledMsg{}
 	}

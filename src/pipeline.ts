@@ -7,11 +7,13 @@
 // ordering and branches are verifiable with stubs.
 
 import { join, dirname } from "node:path";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync, lstatSync } from "node:fs";
 import { AppConfig } from "./orchestrator/config-loader";
 import { DeployTarget, waitForDeploy } from "./env/deploy-gate";
-import { ensureMirror, ensureMirrorAtBranch, getCommitDiff, getCommitMessage, listChangedSpecs as gitListChangedSpecs, getCommitsBehind, defaultMirrorDeps } from "./integrations/repo-mirror";
-import { runOpencode, runOpencodeParallel, shouldFanOut, defaultAgentDeps, reviewIndependently, getOpenSessionCount } from "./integrations/opencode-client";
+import { ensureMirror, ensureMirrorAtBranch, getCommitDiff, getCommitMessage, listChangedSpecs as gitListChangedSpecs, getCommitsBehind, defaultMirrorDeps, realGit } from "./integrations/repo-mirror";
+import { runConfinement, type ConfinementResult } from "./qa/confinement";
+import { createUsageAccumulator, type UsageSnapshot, type RunUsage } from "./qa/usage";
+import { runOpencode, runOpencodeParallel, shouldFanOut, defaultAgentDeps, reviewIndependently, getOpenSessionCount, withUsageSink, maybeExplore } from "./integrations/opencode-client";
 import { classifyCommit, CommitIntent } from "./qa/commit-classify";
 import { setupE2eProject, defaultSetupDeps } from "./qa/setup";
 import { validateSpecs, defaultValidateDeps } from "./qa/validate";
@@ -52,8 +54,15 @@ import { github } from "./integrations/github";
 import { capDiff } from "./orchestrator/sanitizer";
 import { renderIssue, type IssueContext, type TestedItem } from "./report/reporter";
 import { renderValueTag } from "./qa/value-report";
+import { captureDom, captureDomByRoute, defaultCaptureDomDeps } from "./qa/dom-snapshot";
+import { buildContextPack, defaultContextPackDeps } from "./qa/context-pack";
+import { loadContextCache as loadContextCacheDefault, saveContextCache as saveContextCacheDefault } from "./qa/context-cache";
 import { AgentResult, QaCase, QaRunResult, TriggerSource, RunMode, RunOptions, TestTarget, RunOutcome, SpecMeta } from "./types";
 import type { AgentDeps, ReviewInput, ReviewResult } from "./integrations/opencode-client";
+import type { AgentRuntimeConfig } from "./agent-runtime/types";
+import { decideProgress, bestRound, isLikelyRealBug, classifyFailure, type RoundResult } from "./qa/progress-gate";
+import { extractProposedSelectors, selectorPresent, selectorUnique, hasNonExtractableLocator, type ProposedSelector } from "./qa/selector-check";
+import { capDomLines } from "./qa/dom-snapshot";
 
 // Tests live in this folder inside the repo (git is the source of truth).
 const E2E_DIR = "e2e";
@@ -78,11 +87,22 @@ export interface GenerateInput {
   fixCases?: QaCase[]; // re-generation: failed cases from a previous execution to fix
   reviewCorrections?: string[]; // re-generation: corrections from a reviewer rejection
   coverageGap?: string; // re-generation: changed lines not yet exercised (change-coverage)
+  selectorContradictions?: string[]; // Lever-2 deterministic absent/ambiguous selector findings (W1) — rendered un-truncated
   learnedRules?: string; // retrieval: rules from past runs injected into the agent prompt
+  domSnapshot?: string; // live DEV a11y snapshot — grounds the generator's selectors in regeneration
+  failureSourced?: boolean; // true when domSnapshot is the failure-point capture (not a live pre-write snapshot) — switches the prompt framing to "GROUND TRUTH AT FAILURE"
   parallelDiff?: boolean; // qa.parallelDiff: diff-mode fan-out opt-in
   explorer?: boolean; // qa.explorer: read-only explorer pass before the generator (single-agent diff)
   runId?: string; // for SSE live activity: maps the OpenCode session to this run record
   contextMap?: ArchitectureContext; // cross-cutting: the FE↔BE map loaded from e2e/.qa/context.json
+  // Slice G: pre-built Context Pack text (blast-radius + DOM + contracts), assembled by the
+  // orchestrator before the first write and pushed into the generator prompt (VOLATILE band).
+  contextPack?: string;
+  // Slice H: the ExplorationBrief produced by the orchestrator-level explorer pass, carried into
+  // defaultPipelineDeps.generate so it can be forwarded as contextBrief to runOpencode WITHOUT
+  // triggering a second maybeExplore call (explorer flag cleared when this is set). The brief also
+  // fed buildContextPack before this GenerateInput is created — same brief, one pass, no double-run.
+  explorerBrief?: import("./qa/exploration-brief").ExplorationBrief;
   service?: { repo: string; mirrorDir: string; openapi?: string | string[] }; // cross-repo: the triggering microservice (read-only working copy)
   services?: Array<{ repo: string; mirrorDir: string; openapi?: string | string[] }>; // context mode: every declared service, mirrored read-only
 }
@@ -95,7 +115,9 @@ export interface PipelineDeps {
   // Cross-repo runs: the PRIMARY repo at the HEAD of its base branch (the triggering
   // SHA belongs to the service repo and does not exist in the primary).
   prepareAtBranch(repo: string, branch: string): Promise<{ mirrorDir: string }>;
-  generate(input: GenerateInput, signal?: AbortSignal, onProgress?: (msg: string) => void): Promise<AgentResult>;
+  // Phase 6a: `onRepair` fires once when the generator emits an in-session contract-repair
+  // re-prompt, so the shared cycle counter can account for repairs without polling the turn store.
+  generate(input: GenerateInput, signal?: AbortSignal, onProgress?: (msg: string) => void, onUsage?: (u: UsageSnapshot) => void, onRepair?: () => void): Promise<AgentResult>;
   // The *.spec.ts the agent actually wrote on disk (git status over e2e/), e2e-relative.
   // The authoritative spec set for the no-op decision and the reviewer's file list — the
   // orchestrator trusts the working copy, not the agent's self-report. Absent ⇒ no
@@ -106,7 +128,9 @@ export interface PipelineDeps {
   execute(e2eDir: string, opts: { baseUrl: string; namespace: string; onCase?: (c: QaCase) => void; onRunning?: (title: string) => void; onDiscovered?: (title: string, file?: string) => void; signal?: AbortSignal }): Promise<QaRunResult>;
   cleanup(e2eDir: string, opts: { baseUrl: string; namespace: string }): Promise<void>; // orphan-data cleanup (best-effort)
   isHealthy(versionUrl: string): Promise<boolean>; // is DEV healthy right now? (infra vs quality)
-  review?(input: ReviewInput, signal?: AbortSignal): Promise<ReviewResult>; // independent reviewer (null = disabled)
+  // Phase 6a: `onRepair` fires once when the reviewer emits an in-session contract-repair
+  // re-prompt, so the shared cycle counter can account for repairs without polling the turn store.
+  review?(input: ReviewInput, signal?: AbortSignal, onUsage?: (u: UsageSnapshot) => void, onRepair?: () => void): Promise<ReviewResult>; // independent reviewer (null = disabled)
   // Change-coverage provider (the value keystone). Returns the lines actually exercised by the
   // run, repo-relative, or null when no usable coverage was produced (→ "unknown", never blocks).
   // Absent (undefined) ⇒ the change-coverage step is skipped entirely.
@@ -129,7 +153,18 @@ export interface PipelineDeps {
   publishCode(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string; parentRunId?: string }): Promise<{ prUrl: string | null; merged: boolean; error?: string } | null>;
   publishContext(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string }): Promise<{ prUrl: string | null; merged: boolean; error?: string } | null>;
   openIssue(repo: string, title: string, body: string): Promise<{ url: string }>;
+  // Grounds the independent reviewer in the LIVE DEV DOM: renders the routes the spec targets and
+  // returns "role: name" lines so the reviewer judges UI facts against reality, not its training
+  // memory. Best-effort (undefined on any failure) — the review degrades to defer-on-unverifiable.
+  captureDom?(input: { e2eDir: string; baseUrl: string; specContents: string[] }): Promise<string | undefined>;
+  // Persistent context-map cache (qa-data). Skips the ~195s agent rebuild when a same-sha map exists.
+  loadContextCache?(app: string): ArchitectureContext | undefined;
+  saveContextCache?(app: string, map: ArchitectureContext): void;
   saveOutcome?(outcome: RunOutcome): Promise<void>; // learning layer: persist RunOutcome (off-path, never blocks)
+  // Post-run PROCESS audit (off-path, server-side): inspect this run's quality vs. recent history,
+  // self-heal the ledger (deprecate noise rules), and record an incident for the maintainer on a
+  // repeating engine defect. Absent ⇒ no audit.
+  auditProcess?(input: { app: string; runId: string }): Promise<void>;
   runOracle?(input: OracleInput): Promise<ValueOracleResult>; // Phase 1: mutation testing / benchmark replay (off-path, never blocks)
   retrieveRules?(app: string, errorClass?: string | null, archetypes?: string[]): RetrievalResult; // Phase 2: retrieval (archetypes bias relevance to the diff's structural shape)
   reflectAndDistill?(input: { app: string; runId: string; outcome: RunOutcome; archetype?: string | null }): Promise<StructuredReflection | null>; // Phase 2: reflect + distill (off-path, never blocks)
@@ -139,6 +174,13 @@ export interface PipelineDeps {
   // The app's most recent persisted outcome's errorClass — biases rule retrieval toward
   // rules that prevent the failure the engine made last. Absent ⇒ no bias.
   recentErrorClass?(app: string): Promise<string | null>;
+  // Slice H: run the read-only explorer pass BEFORE buildContextPack so the brief is available to
+  // feed both the pack (blast-radius + verified routes → DOM capture) and the generator (passed as
+  // explorerBrief on GenerateInput so runOpencode reuses it without re-running maybeExplore).
+  // Optional — absent ⇒ pack is built without a brief (DOM and contracts from contextMap only).
+  // Cost: one extra read-only explorer agent session for diff/manual first-pass only.
+  // Never called on regen passes (fix/review/coverage) or code-mode runs.
+  exploreForPack?(input: GenerateInput, signal?: AbortSignal, onProgress?: (msg: string) => void): Promise<import("./qa/exploration-brief").ExplorationBrief | null>;
   log?(msg: string): void;
   // Context mode: validates the produced context.json. Injected so tests can bypass file I/O.
   validateContextFn?(content: unknown): { ok: boolean; errors: string[] };
@@ -148,18 +190,36 @@ export interface PipelineDeps {
   // Diff mode: checks whether the deployed context.json is stale vs the current HEAD.
   // Returns a warning string if stale, empty string if fresh or no map exists.
   checkContextStaleness?(mirrorDir: string, sha: string): Promise<string>;
+  // Write-confinement guard: detects and reverts agent writes outside the allowed area
+  // (e2e/ for e2e-target; denylist for code-target). Non-blocking — the run continues.
+  // Absent ⇒ guard disabled (no-op). Result is always set when dep is wired, including
+  // the clean case ({ strays: 0, dangerous: 0, reverted: [] }).
+  confine?(mirrorDir: string, isCode: boolean): Promise<ConfinementResult>;
+  // The agent runtime config for this run — used to derive usage.complete.
+  // Absent ⇒ complete defaults to false.
+  agentRuntimeConfig?: AgentRuntimeConfig;
 }
 
 export interface DefaultPipelineDepsOptions {
-  agentDepsFactory?: () => Promise<AgentDeps>;
+  agentDepsFactory?: (onUsage?: (u: UsageSnapshot) => void) => Promise<AgentDeps>;
   hasOpenSessions?: () => boolean;
+  // The agent runtime config — forwarded to PipelineDeps.agentRuntimeConfig so runPipeline can
+  // derive usage.complete (true iff primary and reviewer are both opencode).
+  agentRuntimeConfig?: AgentRuntimeConfig;
 }
 
 export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): PipelineDeps {
-  const agentDepsFactory = options.agentDepsFactory ?? defaultAgentDeps;
+  // The default factory wraps defaultAgentDeps so the per-run usage sink is injected via the SINGLE
+  // typed mechanism — opts.onUsage on every open() — exactly as the production override in index.ts
+  // does. defaultAgentDeps itself takes no usage argument; capture is driven only through open opts.
+  // withUsageSink is the shared wrapper (also used in index.ts) so the precedence cannot drift.
+  const agentDepsFactory: (onUsage?: (u: UsageSnapshot) => void) => Promise<AgentDeps> =
+    options.agentDepsFactory ??
+    (async (onUsage) => withUsageSink(await defaultAgentDeps(), onUsage));
   const hasOpenSessions = options.hasOpenSessions ?? (() => getOpenSessionCount() > 0);
 
   return {
+    agentRuntimeConfig: options.agentRuntimeConfig,
     waitForDeploy: (target, sha, signal) => waitForDeploy(target, sha, undefined, signal),
     prepare: async (repo, sha, commits) => {
       const mirrorDir = await ensureMirror(repo, sha, defaultMirrorDeps);
@@ -169,7 +229,7 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
     },
     prepareAtBranch: async (repo, branch) => ({ mirrorDir: await ensureMirrorAtBranch(repo, branch, defaultMirrorDeps) }),
     listChangedSpecs: (mirrorDir, e2eRelDir) => gitListChangedSpecs(mirrorDir, e2eRelDir, defaultMirrorDeps),
-    generate: async (input, signal, onProgress) => {
+    generate: async (input, signal, onProgress, onUsage, onRepair) => {
       const ocInput = {
         repo: input.repo,
         sha: input.sha,
@@ -188,22 +248,100 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
         fixCases: input.fixCases,
         reviewCorrections: input.reviewCorrections,
         coverageGap: input.coverageGap,
+        selectorContradictions: input.selectorContradictions,
         learnedRules: input.learnedRules,
+        domSnapshot: input.domSnapshot,
+        failureSourced: input.failureSourced,
         runId: input.runId,
         contextMap: input.contextMap,
-        explorer: input.explorer,
+        // Slice H: no-double-run guarantee. When the orchestrator already ran the explorer
+        // pass (input.explorerBrief is set), forward the brief as contextBrief and clear
+        // the explorer flag so maybeExplore inside runOpencode returns null immediately.
+        // When explorerBrief is absent, preserve the explorer flag so runOpencode can still
+        // run maybeExplore if the app config requests it (opt-in backward-compat path).
+        contextBrief: input.explorerBrief ?? undefined,
+        explorer: input.explorerBrief ? false : input.explorer,
+        contextPack: input.contextPack,
         service: input.service,
         services: input.services,
       };
-      const oc = await agentDepsFactory();
-      // complete/exhaustive fan out to parallel workers (plan → workers → consolidate); the other
-      // modes (diff/manual) and any fix/review re-generation use the single-agent path. Code mode
-      // always uses the single agent (no web fan-out). Diff mode fans out only when
-      // qa.parallelDiff is explicitly enabled in the app config.
-      const useParallel = shouldFanOut(input);
+      // Build the AgentDeps with the per-run usage sink wired in (the factory injects onUsage into
+      // every open() via opts), so each session.prompt response emits a UsageSnapshot into the run's
+      // accumulator.
+      const oc = await agentDepsFactory(onUsage);
+      // Phase 5 — unified diff/manual engine + cardinality-keyed fan-out.
+      //
+      // Routing decision (three cases):
+      //   1. complete/exhaustive (e2e): always plan → fan-out via shouldFanOut (unchanged).
+      //   2. diff/manual (e2e, first-pass): always plan first, then branch on objective count
+      //      inside runOpencodeParallel (<2 → strong-agent fallback; ≥2 → fan-out workers).
+      //      Replaces the old shouldFanOut gate that required parallelDiff=true for diff fan-out.
+      //   3. regen passes (fix/review/coverage), code mode, or context mode: strong agent only
+      //      (same as before — feedback context cannot be split across workers).
+      //
+      // Phase 6a NOTE: generateParallel workers are intentionally NOT covered by the shared cycle
+      // counter. Workers are fire-and-join sessions bounded by OPENCODE_TIMEOUT_MS per session,
+      // not by an iterated loop — so the counter would double-count them against the per-loop
+      // ceiling and break fan-out. The counter covers only the main-agent iterated path.
+      const isReGen = Boolean(input.fixCases?.length || input.reviewCorrections?.length || input.coverageGap);
+      const isCodeMode = (input.target ?? "e2e") !== "e2e";
+      // complete/exhaustive: use shouldFanOut (unchanged — regression gate proves this).
+      const isCompleteExhaustive = shouldFanOut(input);
+      // diff/manual first-pass e2e: unified engine — always plan-first, cardinality decides fan-out.
+      const isDiffManualFirstPass = !isReGen && !isCodeMode && (input.mode === "diff" || input.mode === "manual");
+      const useParallel = isCompleteExhaustive || isDiffManualFirstPass;
       return useParallel
-        ? runOpencodeParallel(ocInput, oc, { signal, onProgress })
-        : runOpencode(ocInput, oc, { signal, onProgress });
+        ? runOpencodeParallel(ocInput, oc, {
+            signal,
+            onProgress,
+            // Deterministic DOM grounding for the fan-out workers: capture the planned routes' live
+            // a11y tree on the orchestrator (Playwright stays out of the agent boundary). Best-effort.
+            ...(input.baseUrl
+              ? { captureRoutesDom: (routes: string[]) => captureDomByRoute(routes, { e2eDir: join(input.mirrorDir, E2E_DIR), baseUrl: input.baseUrl }, defaultCaptureDomDeps) }
+              : {}),
+          })
+        : runOpencode(ocInput, oc, { signal, onProgress, onRepair });
+    },
+    // Slice H (fixed): run the read-only explorer pass at the orchestrator level UNIVERSALLY for
+    // every diff/manual e2e first-pass generation — no qa.explorer flag required. The explorer was
+    // previously opt-in; the fix makes it unconditional so apps without qa.explorer (e.g. portfolio)
+    // also get the blast-radius grounding. qa.explorer is now ONLY used as the maybeExplore fallback
+    // inside runOpencode when exploreForPack dep is absent (legacy path, no-op in production).
+    // Best-effort: error → null → pack degrades to DOM+contracts only.
+    exploreForPack: async (input, signal, onProgress) => {
+      if (input.target === "code") return null;
+      // Regen passes (fix/review/coverage) must not re-run the explorer — the pack is already present.
+      const isReGen = Boolean(input.fixCases?.length || input.reviewCorrections?.length || input.coverageGap);
+      if (isReGen) return null;
+      // Explorer runs on diff mode and manual mode (manual shares the same engine and benefits from
+      // the blast-radius/route grounding equally). complete/exhaustive do not build a per-commit pack.
+      if (input.mode !== "diff" && input.mode !== "manual") return null;
+      try {
+        // Build a minimal OpencodeRunInput just for the explorer pass (no contextPack, no contextBrief).
+        const explorerOcInput = {
+          repo: input.repo,
+          sha: input.sha,
+          diff: input.diff,
+          mirrorDir: input.mirrorDir,
+          e2eRelDir: E2E_DIR,
+          namespace: input.namespace,
+          needsReview: false,
+          target: (input.target ?? "e2e") as import("./types").TestTarget,
+          mode: input.mode as import("./types").RunMode,
+          appName: input.appName,
+          baseUrl: input.baseUrl,
+          intent: input.intent,
+          guidance: input.guidance,
+          runId: input.runId,
+          explorer: true, // force-enable so maybeExplore doesn't skip it
+          service: input.service,
+        };
+        const oc = await agentDepsFactory(undefined);
+        return maybeExplore(explorerOcInput, oc, { signal, onProgress });
+      } catch (err) {
+        console.warn(`[qa] exploreForPack failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
     },
     setupE2e: (e2eDir) => setupE2eProject(e2eDir, defaultSetupDeps),
     validate: (e2eDir) => validateSpecs(e2eDir, defaultValidateDeps),
@@ -249,8 +387,11 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
         return false;
       }
     },
-    review: async (input, signal) =>
-      reviewIndependently(input, await agentDepsFactory(), { signal }),
+    review: async (input, signal, onUsage, onRepair) =>
+      reviewIndependently(input, await agentDepsFactory(onUsage), { signal, onRepair }),
+    captureDom: (input) => captureDom(input, defaultCaptureDomDeps),
+    loadContextCache: (app) => loadContextCacheDefault(app),
+    saveContextCache: (app, map) => saveContextCacheDefault(app, map),
     collectCoverage: async (input) => {
       // Code runs emit no coverage report on their own, so produce one (best-effort, fully
       // decoupled from the pass/fail run) before reading it. e2e reads the V8 dumps the
@@ -271,11 +412,93 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
       if (input.coveredFiles.length) store = recordCoverage(store, input.coveredFiles);
       writeMeasured(mfs, measuredPath, store);
     },
+    confine: (mirrorDir, isCode) =>
+      runConfinement(mirrorDir, isCode, {
+        git: realGit,
+        realpath: (p) => realpathSync(p),
+        // Cheap symlink pre-filter so the escape check only resolves realpath for actual symlinks.
+        isSymlink: (p) => lstatSync(p).isSymbolicLink(),
+      }),
     publish: (input) => publishE2e(input, defaultPublishDeps),
     openIssue: (repo, title, body) => github.openIssue(repo, title, body),
     saveOutcome: async (outcome) => {
       const { saveRunOutcome } = await import("./server/history");
       saveRunOutcome(outcome);
+    },
+    auditProcess: async ({ app, runId }) => {
+      // The full post-run quality loop (server-side, off-path). (1) deterministic detection, (2) an
+      // LLM root-cause diagnosis enriches each engine-fix finding (the qa-reflector — Layer 2),
+      // (3) the router applies each by disposition: deprecate ledger noise + invalidate a stale map
+      // AUTONOMOUSLY (reversible DATA), surface engram for the agent layer, and record an incident
+      // for the qa-maintainer ONLY on an engine-code defect (which the maintainer turns into a
+      // human-gated fix PR — Layers 4-5). Best-effort throughout; never blocks.
+      const { getRunOutcome, listRunOutcomes, listLearningRules, setRuleStatusByHuman, markContextStale } = await import("./server/history");
+      const { auditProcess, applyAudit } = await import("./qa/learning/process-audit");
+      const { recordIncident } = await import("./server/maintainer");
+      const outcome = getRunOutcome(runId);
+      if (!outcome) return; // not persisted yet / nothing to audit
+      const recent = listRunOutcomes(app, 10);
+      const rules = listLearningRules(app, 50).map((r) => ({ id: r.id, errorClass: r.errorClass, status: r.status, usageCount: r.usageCount, successRate: r.successRate }));
+      const findings = auditProcess({ outcome, recent, rules });
+      if (findings.length === 0) return;
+
+      // Layer 2 — LLM root-cause diagnosis, ONLY for engine-fix findings (rare: a repeating defect),
+      // so the maintainer starts from a hypothesis, not a bare signal. qa-reflector is tool-less and
+      // read-only; a failure just leaves the finding undiagnosed (the deterministic evidence stands).
+      const engineFindings = findings.filter((f) => f.disposition === "engine-fix");
+      // Defer the LLM diagnosis when the system is busy: opening a qa-reflector session would
+      // contend for the OpenCode server + the LLM API with the active run (same guard as
+      // reflectAndDistill). The findings still record their deterministic evidence — only the
+      // optional root-cause hypothesis is skipped. Best-effort, never blocks the audit.
+      if (engineFindings.length > 0 && hasOpenSessions()) {
+        console.warn("[qa] engine-fix diagnosis skipped (non-blocking): another agent session is open; the incident records without a root-cause hypothesis");
+      } else if (engineFindings.length > 0) {
+        try {
+          const { askAssistant } = await import("./integrations/opencode-client");
+          const agentDeps = await agentDepsFactory();
+          const recentLine = recent.slice(0, 5).map((o) => `${o.at.slice(0, 19)} ${o.verdict}/${o.errorClass ?? "-"} ${o.sha.slice(0, 7)}`).join("\n");
+          for (const f of engineFindings) {
+            const prompt = [
+              `The ai-pipeline ENGINE (the deterministic orchestrator, NOT the watched app's tests) shows a repeating quality problem.`,
+              `Finding: ${f.summary}`,
+              `Evidence: ${f.evidence}`,
+              `Recent run outcomes (newest first):\n${recentLine}`,
+              `In 2-3 sentences: the most likely ROOT CAUSE in the ENGINE's own logic, and which area/file to inspect. Be concrete; do not blame the watched app.`,
+            ].join("\n\n");
+            // Phase 0b: pass runId so the qa-reflector session can be correlated to the run that triggered the audit.
+            f.diagnosis = (await askAssistant({ context: prompt, question: "Diagnose the engine defect.", instruction: "Output 2-3 plain sentences. No markdown.", agent: "qa-reflector", runId }, agentDeps, "/tmp")).trim() || undefined;
+          }
+        } catch {
+          // best-effort: an undiagnosed engine-fix still records its deterministic evidence
+        }
+      }
+
+      applyAudit(findings, {
+        log: (line) => console.log(line),
+        deprecateRule: (ruleId) => setRuleStatusByHuman(ruleId, "deprecated"),
+        recordEngineIncident: (f) =>
+          recordIncident({
+            source: "process-audit",
+            severity: f.severity === "error" ? "error" : "warn",
+            summary: f.summary,
+            detail: [f.evidence, f.diagnosis ? `\nLIKELY ROOT CAUSE (qa-reflector): ${f.diagnosis}` : ""].join(""),
+          }),
+        invalidateContext: (reason) => {
+          // Force the next generating run to rebuild the app's architecture map — a reversible DATA
+          // heal (the map regenerates), never a code change. Set a DB-backed staleness flag rather
+          // than writing the mirror's context.json: the mirror is reset by `git checkout -f`/`git
+          // clean -fd` on every run, so a file-level write would be undone before the next run reads
+          // it. The flag survives and is consumed by the context-bootstrap step.
+          try {
+            markContextStale(app);
+            console.log(`[audit] marked context stale for ${app} — rebuilds next run (${reason})`);
+            return true;
+          } catch { /* best-effort */ }
+          return false;
+        },
+        flagMemoryHeal: (f) =>
+          recordIncident({ source: "process-audit", severity: "warn", summary: `engram memory may be corrupt: ${f.summary}`, detail: `${f.evidence} — engram is agent-owned; an agent-layer cleanup is required (the orchestrator does not write engram).` }),
+      });
     },
     runOracle: async (input) =>
       input.target === "e2e" ? runFaultInjectionOracle(input) : runMutationOracle(input),
@@ -308,7 +531,8 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
         const raw = await askAssistant(
           // qa-reflector is a tool-less role: the reflection is a pure transform of the failure
           // context into a rule, with no engram/filesystem access (unlike the chat assistant).
-          { context: prompt, question: "Produce the StructuredReflection JSON.", instruction: "Output ONLY the JSON object. No markdown, no explanation.", agent: "qa-reflector" },
+          // Phase 0b: pass runId so the qa-reflector session is correlated to the run in telemetry.
+          { context: prompt, question: "Produce the StructuredReflection JSON.", instruction: "Output ONLY the JSON object. No markdown, no explanation.", agent: "qa-reflector", runId: input.runId },
           deps,
           "/tmp",
         );
@@ -392,12 +616,23 @@ async function foldValueLearning(
   }
 
   let valueScore: number | null = null;
-  // Shadow-aware default for both targets; an explicit qa.valueOracle always wins. e2e is diff-only
-  // on purpose (fault-injection re-runs the whole suite); both are signal-only and never block.
+  // Shadow-aware default for both targets; an explicit qa.valueOracle always wins. Both targets are
+  // signal-only and never block publish.
   const valueOraclePolicy = app.qa.valueOracle ?? (app.qa.shadow ? "off" : "signal");
-  const runValueOracle =
-    !!deps.runOracle && generating && run.verdict === "pass" && valueOraclePolicy === "signal" &&
-    (isCode || (mode === "diff" && !!app.dev?.baseUrl));
+  // The e2e fault-injection oracle scores the ASSERTION STRENGTH of baseline-PASSING specs, so its
+  // real precondition is "≥1 spec passed" — not a fully-green run, and not a specific mode. In the
+  // heavy, infrequent whole-suite modes (complete/exhaustive/manual) it runs on the passing SUBSET
+  // even when sibling specs failed, so a partially-red run still earns the learning signal. THIS WAS
+  // THE ORACLE GAP: exhaustive/complete runs (which generate the most tests) never reached the
+  // oracle, so their retrieved candidate rules never accumulated outcomes and never promoted. The
+  // frequent diff path keeps the conservative full-pass gate, so a run that already caught a
+  // regression doesn't also pay the 2× re-run cost. The code (mutation) oracle is unchanged: full
+  // pass, any mode.
+  const e2eOracle =
+    !isCode && !!app.dev?.baseUrl &&
+    (mode === "diff" ? run.verdict === "pass" : run.cases.some((c) => c.status === "pass"));
+  const codeOracle = isCode && run.verdict === "pass";
+  const runValueOracle = !!deps.runOracle && generating && valueOraclePolicy === "signal" && (codeOracle || e2eOracle);
   if (runValueOracle) {
     try {
       log(isCode ? "[qa] oracle: running mutation testing (diff-scoped)..." : "[qa] oracle: running response fault-injection (signal)...");
@@ -440,11 +675,22 @@ async function foldValueLearning(
 
   // Attribution: fold this run's valueScore into each retrieved rule's running statistics (running
   // mean + hysteresis). NEVER an overwrite, so a fluke cannot poison the ledger.
+  //
+  // FIX 1b: thread the run's change-coverage into recordRuleOutcome as coverageCreditConfirmed so
+  // the Phase-7 coverage-anchored promotion gate actually fires on this (the value-oracle) path —
+  // previously it passed no third arg, leaving it permanently null, so a candidate could promote on
+  // verdict signal alone even where coverage WAS measured and found zero credit. Mirrors the
+  // no-oracle prevention path (which already threads it):
+  //   true  → coverage measured AND ratio > 0 (the tests exercised changed lines) → promotion eligible
+  //   false → coverage measured AND ratio == 0 (no changed lines covered) → hold at candidate
+  //   null  → coverage not measured / cross-repo / unknown → no gate (promotion on verdict signal)
   if (retrievedRuleIds.length > 0 && valueScore !== null) {
+    const coverageMeasured = ccForPersistence?.measured ?? false;
+    const coverageCreditConfirmed = coverageMeasured ? ccForPersistence!.overall.ratio > 0 : null;
     const { recordRuleOutcome } = await import("./server/history");
     try {
-      for (const ruleId of retrievedRuleIds) recordRuleOutcome(ruleId, valueScore);
-      log(`[qa] attribution: recorded outcome (valueScore=${(valueScore * 100).toFixed(0)}%) for ${retrievedRuleIds.length} rule(s)`);
+      for (const ruleId of retrievedRuleIds) recordRuleOutcome(ruleId, valueScore, coverageCreditConfirmed);
+      log(`[qa] attribution: recorded outcome (valueScore=${(valueScore * 100).toFixed(0)}%, coverageCredit=${coverageCreditConfirmed ?? "unmeasured"}) for ${retrievedRuleIds.length} rule(s)`);
     } catch (err) {
       log(`[qa] WARNING: attribution update failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -461,6 +707,47 @@ async function foldValueLearning(
   }
 
   return { valueScore, curriculum };
+}
+
+// Regeneration-loop caps. Module-level so the runaway backstop (MAX_CYCLES, derived below)
+// and the loops that actually consume them share ONE source of truth — the derivation cannot
+// silently drift from the real loop bounds.
+//   MAX_REVIEW_ROUNDS    — reviewer reject→regenerate rounds inside one generateAndReview().
+//   MAX_STATIC_FIX_ROUNDS — static-gate (Filter B) repair rounds (tsc/eslint/list).
+const MAX_REVIEW_ROUNDS = 2;
+const MAX_STATIC_FIX_ROUNDS = 2;
+
+// Each generateAndReview() costs at most CYCLES_PER_GENERATE counter ticks: 1 for the entry
+// invocation + up to (MAX_REVIEW_ROUNDS - 1) in-loop review-round regenerations.
+const CYCLES_PER_GENERATE = 1 + (MAX_REVIEW_ROUNDS - 1);
+// In-session contract-repair headroom: each generateAndReview() may also fire up to ~2 repair
+// re-prompts (one generator, one reviewer) that each tick the shared counter via onRepair.
+const REPAIR_HEADROOM_PER_GENERATE = 2;
+
+// Derive the runaway BACKSTOP from the configured loop caps: the absolute ceiling above which the
+// shared cycle counter assumes a true runaway (a compounding generate→review→fix→coverage spiral),
+// NOT the symptom lever for tuning loop aggressiveness (that is Phases 3–4 — per-loop budgets).
+// The legitimate worst-case sequence of generateAndReview() entries is:
+//   initial(1) + static-fix loop(MAX_STATIC_FIX_ROUNDS) + exec-fix loop(maxRetries) + coverage-enforce(1)
+// and each of those entries costs up to CYCLES_PER_GENERATE counter ticks plus
+// REPAIR_HEADROOM_PER_GENERATE in-session repairs. So a default below this would TRUNCATE a
+// legitimate run; the backstop sits exactly at the worst case so only a true runaway above it stops.
+// Calibratable downward from Phase-0 agent-turn telemetry once real cycle distributions land.
+//
+// Phase 6b: scope-dimensioned budget. When the planner yields multiple objectives, each objective
+// is a legitimate unit of work (one agent session, one review). The base backstop covers a SINGLE
+// objective's full loop sequence; multi-objective runs get an additive per-objective increment so the
+// ceiling stays a TRUE backstop (never truncates legitimate work) while remaining meaningfully tighter
+// than an unconstrained product. Each extra objective adds CYCLES_PER_GENERATE + REPAIR_HEADROOM_PER_GENERATE
+// cycles (one session's max cost) — conservative and proportional without being multiplicative.
+// numObjectives defaults to 1 (single-agent path): the backstop reduces to the original derivation.
+export function deriveCycleBackstop(maxRetries: number, numObjectives = 1): number {
+  const generateEntries = 1 + MAX_STATIC_FIX_ROUNDS + maxRetries + 1;
+  const singleObjectiveBase = generateEntries * (CYCLES_PER_GENERATE + REPAIR_HEADROOM_PER_GENERATE);
+  // Additional objectives each add one session's worth of budget (not the full loop sequence, since
+  // worker sessions are bounded and do not go through the 4-loop generate→review→fix→coverage path).
+  const extraObjectives = Math.max(0, numObjectives - 1);
+  return singleObjectiveBase + extraObjectives * (CYCLES_PER_GENERATE + REPAIR_HEADROOM_PER_GENERATE);
 }
 
 export async function runPipeline(
@@ -509,11 +796,41 @@ export async function runPipeline(
   const reviewerCorrections: string[] = []; // accumulated across review rounds (for RunOutcome)
   let reviewerRationale: string | undefined; // the LAST round's reviewer reasoning (approve or reject)
   let retries = 0; // total regeneration attempts (review loop + failure retries)
+
+  // Phase 6a: shared iteration ceiling. One counter shared across all four regeneration loops
+  // (review for-loop, static-fix while, exec-fix for-loop, coverage-enforce if) plus the two
+  // in-session contract-repair re-prompts (generator and reviewer). A single ceiling is simpler
+  // and fairer than per-loop caps: a run that spends budget in the static-fix loop gets fewer
+  // remaining cycles in the exec-fix loop, which is the correct behaviour.
+  //
+  // NOTE: generateParallel workers are intentionally NOT counted here. Workers run in
+  // fire-and-join parallel sessions bounded by OPENCODE_TIMEOUT_MS, not by iterated loops.
+  // Counting them would require coordinating across goroutines and would double-penalise
+  // large-PR fan-out runs. The ceiling covers only the main-agent sequential path.
+  //
+  // Default ceiling: a runaway BACKSTOP derived from the configured loop caps (NOT a flat 12,
+  // which truncated a legitimate worst-case run with maxRetries=5). The default sits exactly at
+  // the legitimate worst case — initial + static-fix + exec-fix + coverage-enforce generateAndReview
+  // entries, each costing review-round + repair headroom — so only a TRUE runaway above it is cut.
+  // This is the safety backstop, not the symptom lever (per-loop budgets are Phases 3–4); it is
+  // calibratable downward from Phase-0 telemetry. Apps can still override via qa.iterationBudget.
+  // Phase 6b: let so it can be retroactively dimensioned by objectiveCount from the first generate.
+  let MAX_CYCLES = app.qa.iterationBudget ?? deriveCycleBackstop(app.qa.fixLoop?.maxRetries ?? 2);
+  let cycleCount = 0; // incremented BEFORE every generateAndReview() + before each repair re-prompt
   let retrievedRuleIds: string[] = []; // rule IDs retrieved for this run (for RunOutcome)
   let retrievedRules: LearningRule[] = []; // full retrieved rules (errorClass needed for governance)
   let curriculum: ReturnType<typeof initCurriculum> | null = null; // persisted across runs
+  // Per-run usage accumulator — sums token/cost snapshots from every agent call.
+  // Observation-only: never influences verdict, blocksPublish, or control flow.
+  const usage = createUsageAccumulator();
+  // complete = true iff both primary and reviewer are opencode (full picture).
+  // false when dual (only OpenCode roles fire) or config is absent.
+  const pipelineAgentConfig = deps.agentRuntimeConfig;
+  const usageComplete =
+    pipelineAgentConfig?.assignments.primary.provider === "opencode" &&
+    pipelineAgentConfig?.assignments.reviewer.provider === "opencode";
 
-  const persistOutcome = (verdict: QaRunResult, overrides?: { staticOk?: boolean; coverageRatio?: number | null; valueScore?: number | null; rulesRetrieved?: string[] }) => {
+  const persistOutcome = (verdict: QaRunResult, overrides?: { staticOk?: boolean; coverageRatio?: number | null; valueScore?: number | null; rulesRetrieved?: string[]; confinement?: ConfinementResult; usage?: RunUsage }) => {
     if (!deps.saveOutcome || !opts.runId) return;
     const outcome = labelRunOutcome({
       runId: opts.runId,
@@ -537,6 +854,12 @@ export async function runPipeline(
     }
     if (overrides?.rulesRetrieved) {
       outcome.rulesRetrieved = overrides.rulesRetrieved;
+    }
+    if (overrides?.confinement !== undefined) {
+      outcome.gateSignals.confinement = overrides.confinement;
+    }
+    if (overrides?.usage !== undefined) {
+      outcome.gateSignals.usage = overrides.usage;
     }
     deps.saveOutcome(outcome).catch((err) => {
       log(`[qa] WARNING: failed to persist RunOutcome (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
@@ -615,6 +938,26 @@ export async function runPipeline(
   const e2eDir = join(mirrorDir, E2E_DIR);
   const ns = testDataNamespace(app.qa.testDataPrefix, sha, opts.runId);
 
+  // Write-confinement guard, run on EVERY post-generation exit: green (after the LAST generation,
+  // i.e. past any coverage-enforce regen), the agent no-op skip, static-gate invalid/infra-error,
+  // health pre-flight, the no-dev infra exit, and both context exits (publish success + invalid).
+  // The pre-generation classify-skip exit does NOT run it (nothing ran, nothing to revert). Detects
+  // out-of-area writes that git status surfaces and reverts them (a symlink escape is detected + its
+  // link entry reverted — any external file written THROUGH it is NOT un-written). NON-BLOCKING: it
+  // never changes the verdict; git errors THROW (not swallowed). Each caller invokes it exactly ONCE
+  // on its own exit (no caching → no double-run). Absent dep ⇒ undefined (guard disabled).
+  const runConfine = async (): Promise<ConfinementResult | undefined> => {
+    if (!deps.confine) return undefined;
+    const result = await deps.confine(mirrorDir, isCode);
+    if (result.strays > 0) {
+      if (result.dangerous > 0)
+        log(`[qa] SECURITY: confinement reverted ${result.strays} out-of-area change(s), ${result.dangerous} DANGEROUS (secret/path-escape): ${result.reverted.join(", ")}`);
+      else
+        log(`[qa] confinement: reverted ${result.strays} out-of-area change(s): ${result.reverted.join(", ")}`);
+    }
+    return result;
+  };
+
   checkSignal();
 
   // 3. Classify the commit (Conventional Commits, cross-checked against the diff)
@@ -647,7 +990,9 @@ export async function runPipeline(
 
   // The PROMPT-facing diff is size-capped once here; every LLM consumer (generator, planner,
   // reviewer, regeneration rounds) receives this bounded form. Local consumers (the classifier
-  // above, parseDiffHunks for coverage/oracle scoping) keep the raw diff — they are free.
+  // above, parseDiffHunks for oracle scoping) keep the raw diff — they are free. Change-coverage
+  // is NOT one of them: it parses promptDiff (FIX 8a) so its denominator matches the lines the
+  // agent actually saw.
   const promptDiff = capDiff(diff);
   if (promptDiff.length < diff.length) {
     log(`[qa] diff capped for prompts: ${diff.length} → ${promptDiff.length} chars (full diff stays available in the working copy).`);
@@ -715,7 +1060,7 @@ export async function runPipeline(
       openapi: app.openapi,
       services: serviceRefs,
     };
-    const ctxResult = await deps.generate(genInput, signal, log);
+    const ctxResult = await deps.generate(genInput, signal, log, usage.add.bind(usage));
 
     log(`[qa] context agent: approved=${ctxResult.approved} specs=[${ctxResult.specs.join(", ")}]`);
 
@@ -752,6 +1097,10 @@ export async function runPipeline(
         return { run: undefined };
       }
       log(`[qa] context validation failed:\n${validated.errors.join("\n")}`);
+      // Post-generation exit (publish=true): the context agent ran, so revert any out-of-area
+      // strays before returning, consistent with the success path's confine-before-publish — the
+      // guarantee is that EVERY post-generation context exit reverts strays. Non-blocking.
+      await runConfine();
       await issueOrShadow(
         shadow, deps, log, app.repo,
         `QA context map for ${sha} is invalid`,
@@ -782,6 +1131,9 @@ export async function runPipeline(
     } else if (shadow) {
       log("[qa] (shadow) context map built; a PR would have been opened.");
     } else {
+      // Confinement BEFORE the context PR: the context agent just ran, so revert any out-of-area
+      // strays it wrote so they are not swept into the published context.json PR. Non-blocking.
+      await runConfine();
       const pr = await deps.publishContext({ repo: app.repo, sha, mirrorDir, baseBranch: app.baseBranch ?? "main" });
       log(pr
         ? pr.merged
@@ -824,12 +1176,42 @@ export async function runPipeline(
       const staleWarn = await deps.checkContextStaleness(mirrorDir, sha);
       if (staleWarn) refreshReason = staleWarn;
     }
+    // The process-audit context-heal sets a DB-backed staleness flag (the mirror file write would
+    // be wiped by the run's git checkout/clean, so it can't). Consume it here — one-shot — and force
+    // a rebuild even if the map looks current on disk. Best-effort: a flag-store error never blocks.
+    try {
+      const { consumeContextStale } = await import("./server/history");
+      if (consumeContextStale(app.name)) refreshReason = "operator/process-audit invalidated the map";
+    } catch { /* best-effort */ }
     if (refreshReason) {
-      log(`[qa] context bootstrap needed: ${refreshReason}`);
-      const built = await buildContextMap(false);
-      if (built.run) return built.run;
-      contextMap = built.contextMap;
-      if (!contextMap) log("[qa] WARNING: context bootstrap finished but the map could not be reloaded; continuing without architecture context.");
+      // Before paying the ~195s agent rebuild, try the persistent cache. The mirror is git-cleaned
+      // each run, so a map built on a PRIOR run of THIS exact sha is gone from disk but still cached.
+      // Restore it deterministically (no agent). ONLY for the "missing map" case AND when it was built
+      // from this exact sha — a staleness/invalidation reason must genuinely rebuild, and a same-sha
+      // map cannot be stale.
+      // Restored from cache? Gate the rebuild on THIS, not on whether a map is in memory — a STALE
+      // refresh has a (stale) map loaded but must still rebuild.
+      let restored = false;
+      const cached = refreshReason.startsWith("missing") && deps.loadContextCache ? deps.loadContextCache(app.name) : undefined;
+      if (cached && cached.builtAtSha === sha && validateContext(cached).ok) {
+        try {
+          mkdirSync(join(e2eDir, ".qa"), { recursive: true });
+          writeFileSync(join(e2eDir, ".qa", "context.json"), JSON.stringify(cached));
+          contextMap = cached;
+          restored = true;
+          log(`[qa] context bootstrap: restored the cached architecture map (built at ${sha.slice(0, 7)}) — skipped the ~195s rebuild.`);
+        } catch (err) {
+          log(`[qa] WARNING: could not restore cached context map (${err instanceof Error ? err.message : String(err)}); rebuilding.`);
+        }
+      }
+      if (!restored) {
+        log(`[qa] context bootstrap needed: ${refreshReason}`);
+        const built = await buildContextMap(false);
+        if (built.run) return built.run;
+        contextMap = built.contextMap;
+        if (contextMap) deps.saveContextCache?.(app.name, contextMap); // persist for the next same-sha run
+        if (!contextMap) log("[qa] WARNING: context bootstrap finished but the map could not be reloaded; continuing without architecture context.");
+      }
     }
   }
 
@@ -862,12 +1244,55 @@ export async function runPipeline(
     return { ...r, specs: onDisk };
   };
 
-  const MAX_REVIEW_ROUNDS = 2;
-  const generateAndReview = async (genInput: GenerateInput): Promise<AgentResult> => {
+  // MAX_REVIEW_ROUNDS and MAX_STATIC_FIX_ROUNDS are module-level constants (the same source of
+  // truth the runaway-backstop derivation reads). The static-gate repair budget (Filter B) mirrors
+  // the execution fix-loop: a trivial tsc/eslint/list error should get a bounded second chance, not
+  // fail the whole run on the first miss.
+
+  // Phase 6a: the shared cycle counter callback — wired as onRepair into every deps.generate()
+  // and deps.review() call so that in-session contract-repair re-prompts increment cycleCount.
+  // The counter itself is declared above alongside `retries`.
+  const onRepair = () => {
+    cycleCount++;
+    log(`[qa] cycle-counter: in-session repair re-prompt (cycleCount=${cycleCount}/${MAX_CYCLES})`);
+  };
+
+  const generateOnce = async (genInput: GenerateInput): Promise<AgentResult> => {
+    // Phase 6a: count this invocation toward the shared iteration budget BEFORE spending any
+    // tokens. The ceiling check happens at every generateAndReview() call-site AND here for the
+    // review-round internal re-generation. A ceiling hit returns the current state immediately
+    // with a log — no silent stop.
+    cycleCount++;
+    if (cycleCount > MAX_CYCLES) {
+      log(`[qa] cycle-ceiling reached (cycleCount=${cycleCount - 1}/${MAX_CYCLES}): skipping this generateAndReview call and returning current state.`);
+      // Return a neutral result: no specs, not approved, with an explanatory note.
+      return { output: "", specs: [], reviewed: false, approved: false, note: `iteration budget exhausted (maxCycles=${MAX_CYCLES})` };
+    }
+    log(`[qa] cycle-counter: generateAndReview invocation (cycleCount=${cycleCount}/${MAX_CYCLES})`);
+
     const genStart = Date.now();
-    let r = await reconcileSpecs(await deps.generate(genInput, signal, log));
+    let r = await reconcileSpecs(await deps.generate(genInput, signal, log, usage.add.bind(usage), onRepair));
     log(`[qa] [timing] generation produced ${r.specs.length} spec(s) in ${Math.round((Date.now() - genStart) / 1000)}s`);
+    return r;
+  };
+
+  const reviewGenerated = async (
+    initial: AgentResult,
+    genInput: GenerateInput,
+    reviewOpts: { allowRegeneration: boolean },
+  ): Promise<AgentResult> => {
+    let r = initial;
     if (!(app.qa.needsReview && deps.review)) return r;
+    // The live-DOM grounding only depends on the ROUTES the specs target, so capture it once and
+    // reuse it across review rounds — re-launching a browser every round (up to MAX_REVIEW_ROUNDS)
+    // is wasted cost when the spec set (hence the routes) is unchanged. Recompute only when the
+    // regenerated spec set differs.
+    let domSnapshot: string | undefined;
+    let lastSpecsKey = "";
+    // Phase 4: track the prior-round corrections to thread into the NEXT review call so the
+    // reviewer can converge (approve once BLOCKING issues are resolved; skip new nits on
+    // unchanged specs). Initialized to undefined (no prior corrections on round 0).
+    let previousRoundCorrections: string[] | undefined;
     for (let round = 0; round < MAX_REVIEW_ROUNDS; round++) {
       if (r.specs.length === 0) {
         // A FIRST-round empty result is a legitimate no-op. A LATER (post-rejection)
@@ -877,12 +1302,38 @@ export async function runPipeline(
       }
       let review: ReviewResult;
       const reviewStart = Date.now();
+      // Ground the reviewer in the LIVE DEV DOM (the routes these specs target) so it judges UI
+      // facts against reality, not training memory. Best-effort, e2e only, never blocks the review.
+      // Memoized by the spec set across rounds: re-capture only when the regenerated specs changed.
+      if (!isCode && deps.captureDom && app.dev?.baseUrl) {
+        const specsKey = r.specs.slice().sort().join(",");
+        if (specsKey !== lastSpecsKey) {
+          const specContents = r.specs.map((s) => {
+            try { return readFileSync(join(mirrorDir, E2E_DIR, s), "utf8"); } catch { return ""; }
+          });
+          domSnapshot = await deps.captureDom({ e2eDir, baseUrl: app.dev.baseUrl, specContents }).catch(() => undefined);
+          lastSpecsKey = specsKey;
+        }
+      }
       try {
         review = await deps.review(
           // Arm the independent judge with the PROVEN learned rules (active only — never unproven
           // candidates) so it enforces app-specific anti-patterns earned from past failures.
-          { diff: promptDiff, specs: r.specs, mirrorDir, e2eRelDir: isCode ? "" : E2E_DIR, baseUrl: app.dev?.baseUrl, intent, guidance: opts.guidance, appName: app.name, mode, target: opts.target, learnedRules: renderRulesForReviewer(retrievedRules) },
+          // Phase 0b: thread runId + objective so the reviewer's agent_turns row carries a
+          // non-null run_id, enabling per-role telemetry on the reviewer's turns.
+          // Phase 4: thread priorCorrections so the reviewer can converge across rounds.
+          {
+            diff: promptDiff, specs: r.specs, mirrorDir, e2eRelDir: isCode ? "" : E2E_DIR,
+            baseUrl: app.dev?.baseUrl, intent, guidance: opts.guidance, appName: app.name,
+            mode, target: opts.target, learnedRules: renderRulesForReviewer(retrievedRules),
+            domSnapshot,
+            runId: opts.runId,
+            objective: opts.guidance ?? intent?.message,
+            ...(previousRoundCorrections ? { priorCorrections: previousRoundCorrections } : {}),
+          },
           signal,
+          usage.add.bind(usage),
+          onRepair,
         );
       } catch (err) {
         // FAIL CLOSED: the reviewer is the only independent gate against the circular
@@ -910,26 +1361,93 @@ export async function runPipeline(
       }
       // Reset counter on successful reviewer response
       consecutiveReviewerFailures = 0;
-      log(`[qa] independent reviewer round ${round + 1}/${MAX_REVIEW_ROUNDS}: approved=${review.approved} corrections=${review.corrections.length} (${Math.round((Date.now() - reviewStart) / 1000)}s)`);
+      // Phase 4: the gate passes when zero BLOCKING corrections remain, regardless of advisory count.
+      // A correction without an explicit severity (plain string) is treated as blocking — fail-closed.
+      // `blockingCount` is absent on pre-Phase-4 verdicts and parse misses; treat absent as "all blocking".
+      const blockingCount = review.blockingCount ?? review.corrections.length;
+      const advisoryCount = review.corrections.length - blockingCount;
+      log(
+        `[qa] independent reviewer round ${round + 1}/${MAX_REVIEW_ROUNDS}: approved=${review.approved}` +
+        ` corrections=${review.corrections.length} (blocking=${blockingCount}, advisory=${advisoryCount})` +
+        ` (${Math.round((Date.now() - reviewStart) / 1000)}s)`,
+      );
       if (review.rationale) reviewerRationale = review.rationale; // the verdict that ultimately decides this run
-      onReviewer?.(review.approved, review.approved ? [] : review.corrections);
-      if (!review.approved) reviewerCorrections.push(...review.corrections);
-      if (review.approved) return { ...r, approved: true, note: undefined };
-      if (round === MAX_REVIEW_ROUNDS - 1) return { ...r, approved: false, note: review.corrections.join("; ") };
-      log(`[qa] applying ${review.corrections.length} reviewer correction(s) and regenerating...`);
+      // Phase 4 + FIX 4: the gate requires BOTH the reviewer's own approval AND zero blocking
+      // corrections. The earlier `blockingCount === 0` alone let an all-ADVISORY verdict publish even
+      // when the reviewer explicitly set approved:false (a gameable hole: a model could downgrade
+      // every correction to advisory and still flip the gate to publish). The severity gate still
+      // prevents advisory-only corrections from blocking a genuine approval — but it can no longer
+      // OVERRIDE an explicit rejection. (Grave class-tag corrections — [false-positive],
+      // [wrong-objective], [no-cleanup] — are forced to blocking in parseReviewerVerdict, so a
+      // mislabeled grave finding also keeps blockingCount > 0.)
+      const gateApproves = review.approved && blockingCount === 0;
+      // Surface the corrections to the live ReviewerCard on a non-approval. Severity is not
+      // re-derivable from the flat string list, so all corrections are surfaced when the gate fails —
+      // callers already tolerate this. (FIX 8b: dropped a dead no-op .filter(() => true).)
+      onReviewer?.(gateApproves, gateApproves ? [] : review.corrections);
+      if (!gateApproves) reviewerCorrections.push(...review.corrections);
+      // Phase 4: the gate requires BOTH review.approved AND zero blocking corrections. When it
+      // approves, any advisory corrections are stored as informational notes but do not regenerate.
+      if (gateApproves) {
+        if (advisoryCount > 0) {
+          log(`[qa] severity gate: ${advisoryCount} advisory correction(s) recorded but not blocking (zero blocking corrections).`);
+        }
+        return { ...r, reviewed: true, approved: true, note: undefined };
+      }
+      // Phase 4: save this round's corrections to thread into the NEXT review call.
+      previousRoundCorrections = review.corrections;
+      if (!reviewOpts.allowRegeneration) return { ...r, reviewed: true, approved: false, note: review.corrections.join("; ") };
+      if (round === MAX_REVIEW_ROUNDS - 1) return { ...r, reviewed: true, approved: false, note: review.corrections.join("; ") };
+      log(`[qa] applying ${blockingCount} blocking correction(s) (${advisoryCount} advisory) and regenerating...`);
       onStep?.("retry");
       retries++;
       const regenStart = Date.now();
-      r = await reconcileSpecs(await deps.generate({ ...genInput, reviewCorrections: review.corrections }, signal, log));
+      // Phase 6a: count the review-round internal re-generation against the shared budget.
+      // The ceiling check prevents unbounded rounds when a run has already spent budget elsewhere.
+      cycleCount++;
+      if (cycleCount > MAX_CYCLES) {
+        log(`[qa] cycle-ceiling reached mid-review-loop (cycleCount=${cycleCount - 1}/${MAX_CYCLES}): stopping regeneration, returning current reviewer-rejected state.`);
+        return { ...r, approved: false, note: `iteration budget exhausted mid-review (maxCycles=${MAX_CYCLES}); last reviewer correction: ${review.corrections.join("; ")}` };
+      }
+      log(`[qa] cycle-counter: review-round regeneration (cycleCount=${cycleCount}/${MAX_CYCLES})`);
+      // Ground the regeneration in the SAME live a11y snapshot the reviewer just judged against, so the
+      // generator fixes selectors against the real tree (e.g. no `columnheader` role on this table)
+      // instead of re-deriving them from HTML intuition — the captured tree already shows what roles
+      // actually exist and which names are duplicated (strict-mode risk).
+      r = await reconcileSpecs(await deps.generate({ ...genInput, reviewCorrections: review.corrections, domSnapshot }, signal, log, usage.add.bind(usage), onRepair));
       log(`[qa] [timing] regeneration produced ${r.specs.length} spec(s) in ${Math.round((Date.now() - regenStart) / 1000)}s`);
     }
     return r;
+  };
+
+  const generateAndReview = async (
+    genInput: GenerateInput,
+    opts: { review?: "full" | "skip" } = {},
+  ): Promise<AgentResult> => {
+    const r = await generateOnce(genInput);
+    if (opts.review === "skip") {
+      return app.qa.needsReview && deps.review ? { ...r, reviewed: false, approved: false } : r;
+    }
+    return reviewGenerated(r, genInput, { allowRegeneration: true });
   };
 
   // Learned rules + exemplars + curriculum, assembled once in the generation block below and
   // included in EVERY generation prompt by default — including the failure-retry and the
   // coverage-enforce regeneration, which previously dropped them.
   let promptSections: string | undefined;
+
+  // Slice G: the Context Pack is built once from the brief/DOM/contracts and stored here.
+  // Every generation call via baseGenInput receives the same pack — it is NOT rebuilt on
+  // regen passes (the pack is first-write ground truth; fix/review/coverage passes use
+  // domSnapshot instead which is sourced from the failure-point capture).
+  let builtContextPack: string | undefined;
+
+  // Slice H: the ExplorationBrief from the orchestrator-level explorer pass (run BEFORE the pack
+  // build so the brief drives route/blast-radius selection inside buildContextPack). The same brief
+  // is forwarded to every generation call via baseGenInput.explorerBrief, so defaultPipelineDeps.generate
+  // can set contextBrief on the OpencodeRunInput and clear explorer — guaranteeing at most ONE
+  // explorer pass per run (no double-run). Undefined when the explorer is disabled or fails.
+  let builtExplorerBrief: import("./qa/exploration-brief").ExplorationBrief | undefined;
 
   const baseGenInput = (extra: Partial<GenerateInput>): GenerateInput => ({
     repo: app.repo,
@@ -946,8 +1464,16 @@ export async function runPipeline(
     guidance: opts.guidance,
     openapi: app.openapi,
     parallelDiff: app.qa.parallelDiff,
-    explorer: app.qa.explorer,
+    // Slice H (fixed): when exploreForPack dep is wired (production), the orchestrator-level
+    // explorer already ran (or was attempted); the in-runOpencode maybeExplore must NEVER run
+    // again (no-double-run guarantee). Set explorer=false unconditionally in that case.
+    // When exploreForPack dep is absent (test stubs that don't inject it), fall back to the
+    // legacy flag: brief set → false (brief already forwarded as contextBrief); brief absent → app.qa.explorer.
+    // qa.explorer is now only a fallback for the stub/legacy path; it is ignored in production.
+    explorer: deps.exploreForPack ? false : (builtExplorerBrief ? false : app.qa.explorer),
+    explorerBrief: builtExplorerBrief,
     contextMap,
+    contextPack: builtContextPack,
     learnedRules: promptSections,
     service: triggerService
       ? { repo: triggerService.repo, mirrorDir: serviceMirrorDir!, openapi: triggerService.openapi }
@@ -1018,8 +1544,12 @@ export async function runPipeline(
       }
     }
 
-    // Inject curriculum archetypes into agent prompt
-    const activeArchetypes = selectActiveArchetypesCached(curriculum!);
+    // Inject curriculum archetypes into agent prompt — ONLY when intent (diff) is present.
+    // Phase 5: archetypes and exemplars are relevance-gated IDENTICALLY for both diff and manual.
+    // Archetypes are structural patterns derived from past diff runs (form-change, api-call, …);
+    // without a commit diff they have no scope signal and become noise in the manual prompt,
+    // competing with the user's guidance. Gate them the same way exemplars are gated (requires intent).
+    const activeArchetypes = generating && intent ? selectActiveArchetypesCached(curriculum!) : [];
     if (activeArchetypes.length > 0) {
       const archetypeText = renderArchetypesForPrompt(activeArchetypes);
       allPromptSections = (allPromptSections ? allPromptSections + "\n" : "") + archetypeText;
@@ -1027,8 +1557,85 @@ export async function runPipeline(
 
     promptSections = allPromptSections || undefined; // every later regeneration inherits this via baseGenInput
 
+    // Slice G/H — Context Pack: build and push BEFORE the first generation call.
+    // Slice H adds: (a) run the explorer pass FIRST to obtain the ExplorationBrief, which drives
+    // route selection for DOM capture and blast-radius content; (b) forward the same brief to every
+    // generation call via baseGenInput.explorerBrief so runOpencode does NOT re-run the explorer
+    // (no-double-run). The explorer is best-effort: failure → no brief → pack degrades to DOM+contracts.
+    // The pack itself is also best-effort: a failure logs a warning and the run continues with
+    // explore-first behaviour. Only built for e2e mode; code mode has no DOM and no blast radius.
+    // Re-generation passes inherit the same pack via baseGenInput so the generator always sees the
+    // same ground truth it was given on the first write.
+    if (!isCode && app.dev?.baseUrl) {
+      // Slice H step 1: orchestrator-level explorer pass — runs BEFORE the pack so the brief is
+      // available as input to buildContextPack. Gated to first-pass only (not regen) via exploreForPack.
+      // Cost: one extra read-only qa-explorer agent session on diff/manual e2e runs when qa.explorer
+      // is enabled. The agent pass distills blast-radius symbols + verified routes via Serena; this is
+      // the intended trade against expensive downstream re-navigation iterations.
+      if (deps.exploreForPack) {
+        try {
+          const explorerBrief = await deps.exploreForPack(
+            baseGenInput({ fixCases: opts.fixCases }),
+            signal,
+            (msg) => log(msg),
+          );
+          if (explorerBrief) {
+            builtExplorerBrief = explorerBrief;
+            log(`[qa] context-pack: explorer brief available (${builtExplorerBrief.blastRadius.length} symbol(s), ${(builtExplorerBrief.routes ?? []).length} candidate route(s); verified=${(builtExplorerBrief.routes ?? []).filter((r) => r.verified).length})`);
+          } else {
+            log("[qa] context-pack: no explorer brief — pack will use DOM+contracts only");
+          }
+        } catch (err) {
+          log(`[qa] context-pack: explorer pass FAILED (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
+      try {
+        const packResult = await buildContextPack(
+          {
+            // Slice H: the brief (from the orchestrator-level explorer pass above) now drives both
+            // route selection for DOM capture and blast-radius content in the pack. When absent the
+            // pack degrades to DOM-via-context-routes + contracts; explore-first mandate stays active.
+            brief: builtExplorerBrief,
+            baseUrl: app.dev.baseUrl,
+            e2eDir,
+            contextMap,
+            // prChangedFiles: will be wired from webhook PR-range in the follow-up TODO below.
+            // TODO (Slice H / webhook): wire the PR-range changed-file union here. The webhook
+            // currently delivers a single SHA; computing the PR base requires the GitHub API
+            // (GET /repos/{owner}/{repo}/pulls/{number}/commits or the compare endpoint).
+            // Until that wiring exists, prChangedFiles is undefined and contracts are filtered
+            // by the brief's feBe only (or contextMap feBe when no brief is present).
+            prChangedFiles: intent?.changedFiles,
+          },
+          defaultContextPackDeps,
+        );
+        if (packResult.text) {
+          builtContextPack = packResult.text;
+          log(`[qa] context-pack: built (blastRadius=${packResult.blastRadiusBytes}B, dom=${packResult.domBytes}B, contracts=${packResult.contractBytes}B)`);
+        } else {
+          log("[qa] context-pack: all components absent or failed — generator will use explore-first");
+        }
+      } catch (err) {
+        log(`[qa] context-pack: build FAILED (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
     log("[qa] generating E2E tests with OpenCode...");
     result = await generateAndReview(baseGenInput({ fixCases: opts.fixCases }));
+
+    // Phase 6b: retroactively dimension the runaway backstop to the actual scope when the planner
+    // produced multiple objectives. The app-level iterationBudget override is authoritative and is
+    // never replaced. The default backstop (numObjectives=1) is refined to the planner's count only
+    // on multi-objective runs: a 5-objective run gets a proportionally higher ceiling than a 1-objective
+    // run so we don't truncate legitimate parallel work.
+    if (!app.qa.iterationBudget && result.objectiveCount && result.objectiveCount > 1) {
+      const refined = deriveCycleBackstop(app.qa.fixLoop?.maxRetries ?? 2, result.objectiveCount);
+      if (refined > MAX_CYCLES) {
+        log(`[qa] cycle-counter: scope-dimensioned backstop raised to ${refined} (${result.objectiveCount} objective(s)); was ${MAX_CYCLES}`);
+        MAX_CYCLES = refined;
+      }
+    }
 
     // Wire the specs into the RunRecord so the TUI shows what was generated.
     // specMetas carries structured data (flow, objective); specs[] is the flat fallback.
@@ -1050,7 +1657,13 @@ export async function runPipeline(
     // complete run where everything important is already covered) → skip.
     if (result.approved && result.specs.length === 0) {
       log("[qa] the agent produced no tests (nothing to cover); nothing to run.");
-      return { sha: ns, verdict: "skipped", passed: true, cases: [], logs: result.note ?? result.output.slice(0, 300) };
+      // Post-generation exit: the agent ran (tokens spent) and may have written out-of-area strays
+      // even when it produced no specs. Revert/record strays AND record the token spend — a no-op
+      // is a common diff-mode outcome. Non-blocking; the verdict stays `skipped`.
+      const skipped: QaRunResult = { sha: ns, verdict: "skipped", passed: true, cases: [], logs: result.note ?? result.output.slice(0, 300) };
+      const confinement = await runConfine();
+      persistOutcome(skipped, { confinement, usage: usage.result(usageComplete) });
+      return skipped;
     }
   } else {
     log("[qa] regression: not generating tests; validating and running the existing suite.");
@@ -1073,7 +1686,7 @@ export async function runPipeline(
       try {
         const distilled = deps.distillCorrections({ app: app.name, runId: opts.runId, corrections: reviewerCorrections, archetype: runArchetype });
         if (distilled.inserted.length > 0) {
-          log(`[qa] learning: distilled ${distilled.inserted.length} candidate rule(s) from reviewer corrections`);
+          log(`[qa] learning: distilled ${distilled.inserted.length} candidate rule(s) from reviewer corrections (retrievable, rendered as experimental until measured outcomes promote them)`);
         }
       } catch (err) {
         log(`[qa] WARNING: reviewer-corrections distillation failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
@@ -1092,6 +1705,16 @@ export async function runPipeline(
     // errorClass — into the retrieved rules. This lets candidate rules earn or lose trust for
     // EVERY app, not just oracle-enabled ones, so the flywheel turns universally. Capped at
     // "medium" confidence (only the oracle lifts a rule to "high"). See preventionOutcome.
+    //
+    // Phase 7 coverage anchor: derive a coverage-credit signal to gate candidate → active promotion.
+    // coverageCreditConfirmed is true when coverage was measured AND the test covered changed lines
+    // (coverageRatio > 0), false when measured but found no coverage, null when not measured at all
+    // (cross-repo, policy=off, or unknown). This is the non-circular anchor: promotion requires that
+    // the tests the rule influenced actually exercised the diff's changed lines, not just green-lit by
+    // the reviewer. Coverage stays non-blocking where unmeasurable (null → promotion allowed).
+    const coverageRatio = o.coverageRatio ?? null;
+    const coverageMeasured = coverageRatio !== null; // true when the coverage step ran and produced a ratio
+    const coverageCreditConfirmed = coverageMeasured ? coverageRatio > 0 : null;
     if ((o.valueScore ?? null) === null && retrievedRules.length > 0 && opts.runId) {
       try {
         const { recordRuleOutcome } = await import("./server/history");
@@ -1099,11 +1722,12 @@ export async function runPipeline(
         for (const rule of retrievedRules) {
           const score = preventionOutcome(rule.errorClass, labeled.errorClass);
           if (score === null) continue; // no evidence about this rule from this run
-          recordRuleOutcome(rule.id, score);
+          // Pass the coverage-credit signal so the DB's promotion gate can apply it.
+          recordRuleOutcome(rule.id, score, coverageCreditConfirmed);
           folded++;
         }
         if (folded > 0) {
-          log(`[qa] governance: folded prevention signal into ${folded} rule(s) (no oracle; runErrorClass=${labeled.errorClass ?? "none"})`);
+          log(`[qa] governance: folded prevention signal into ${folded} rule(s) (no oracle; runErrorClass=${labeled.errorClass ?? "none"}; coverageCredit=${coverageCreditConfirmed ?? "unmeasured"})`);
         }
       } catch (err) {
         log(`[qa] WARNING: governance signal update failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
@@ -1126,6 +1750,19 @@ export async function runPipeline(
         // fail-open
       }
     }
+    // Post-run PROCESS audit — the engine reflecting on its OWN run quality (recurring defects,
+    // ledger noise, review churn) and routing each finding to the right remediation: deprecate
+    // noise rules autonomously (DATA), record an incident for the maintainer on an engine defect
+    // (CODE → human-gated PR). Server-side, off-path, independent of any client/TUI session.
+    if (deps.auditProcess && opts.runId) {
+      // AWAITED (not fire-and-forget): a manual/CLI run does `process.exit` right after the pipeline
+      // returns, which would kill an un-awaited audit mid-flight (its incident/deprecation never
+      // lands). The deterministic detection is cheap and the LLM diagnosis is already
+      // hasOpenSessions-gated, so awaiting adds no meaningful latency. Best-effort — never throws.
+      await deps
+        .auditProcess({ app: app.name, runId: opts.runId })
+        .catch((err) => log(`[qa] WARNING: process audit failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`));
+    }
   };
 
   checkSignal();
@@ -1135,7 +1772,35 @@ export async function runPipeline(
   if (!isCode) {
     onStep?.("validate");
     log("[qa] validating specs (typecheck + lint + list + manifest)...");
-    const validation = await deps.validate(e2eDir);
+    let validation = await deps.validate(e2eDir);
+    // Static-repair loop. A single trivial gate error (an unused var, a stray import) used to fail the
+    // WHOLE run `invalid` with no second chance — while EXECUTION failures already get a fix-loop. That
+    // asymmetry let one `no-unused-vars` discard 7 otherwise-good specs (observed on PetClinic). Mirror
+    // the execution loop: feed the EXACT tsc/eslint/list errors back to the agent (single-agent — a
+    // reviewCorrections payload forces shouldFanOut false) and re-validate, bounded. Only a gate still
+    // red after the budget is a real `invalid`. Skipped when nothing was generated to repair.
+    let staticFixRounds = 0;
+    while (
+      !validation.ok && !validation.infra && generating &&
+      (result?.specs.length ?? 0) > 0 &&
+      staticFixRounds < MAX_STATIC_FIX_ROUNDS && !signal?.aborted
+    ) {
+      staticFixRounds++;
+      retries++;
+      log(`[qa] static gate failed (repair ${staticFixRounds}/${MAX_STATIC_FIX_ROUNDS}); regenerating to fix:\n${validation.errors.join("\n")}`);
+      result = await generateAndReview(
+        baseGenInput({
+          reviewCorrections: [
+            `The generated specs FAILED the static gate (tsc + eslint + \`playwright --list\`). Fix EXACTLY these errors and change nothing else:\n${validation.errors.join("\n")}`,
+          ],
+        }),
+      );
+      checkSignal();
+      validation = await deps.validate(e2eDir);
+    }
+    if (staticFixRounds > 0 && validation.ok) {
+      log(`[qa] static gate PASSED after ${staticFixRounds} repair round(s).`);
+    }
     if (!validation.ok) {
       log(`[qa] static gate failed:\n${validation.errors.join("\n")}`);
       // When every failure is infrastructure (ENOENT, signal-kill), the gate itself
@@ -1143,12 +1808,15 @@ export async function runPipeline(
       // don't open an Issue on the watched repo for a missing binary or OOM.
       if (validation.infra) {
         const infra = resultOf(ns, "infra-error", validation.errors.join("\n\n"));
-        persistOutcome(infra);
+        // Post-generation exit: revert any strays the agent wrote, and record the tokens already spent.
+        const confinement = await runConfine();
+        persistOutcome(infra, { confinement, usage: usage.result(usageComplete) });
         await report(app, issueRepo, sha, infra, deps, log, shadow, isCode);
         return infra;
       }
       const invalid = resultOf(ns, "invalid", validation.errors.join("\n\n"));
-      persistOutcome(invalid, { staticOk: false });
+      const confinement = await runConfine();
+      persistOutcome(invalid, { staticOk: false, confinement, usage: usage.result(usageComplete) });
       await report(app, issueRepo, sha, invalid, deps, log, shadow, isCode, {
         note: `The generated tests did not pass the static gate (typecheck + lint + Playwright list).\n${validation.errors.join("\n")}`,
         tested: testedFrom(result),
@@ -1162,7 +1830,9 @@ export async function runPipeline(
     // healthy the run is inconclusive → infra error, not reported as a bug.
     if (!(await devHealthy())) {
       const infra = resultOf(ns, "infra-error", "DEV is not healthy before execution");
-      persistOutcome(infra);
+      // Post-generation exit: revert any strays the agent wrote, and record the tokens already spent.
+      const confinement = await runConfine();
+      persistOutcome(infra, { confinement, usage: usage.result(usageComplete) });
       await report(app, issueRepo, sha, infra, deps, log, shadow, isCode);
       return infra;
     }
@@ -1179,7 +1849,9 @@ export async function runPipeline(
   } else if (!app.dev) {
     // Defensive: an e2e run on an app with no dev environment is inconclusive.
     run = resultOf(ns, "infra-error", "e2e run requested but no dev environment is configured");
-    persistOutcome(run);
+    // Post-generation exit: revert any strays the agent wrote, and record the tokens already spent.
+    const confinement = await runConfine();
+    persistOutcome(run, { confinement, usage: usage.result(usageComplete) });
     await report(app, issueRepo, sha, run, deps, log, shadow, isCode);
     return run;
   } else {
@@ -1193,9 +1865,23 @@ export async function runPipeline(
     }
   }
 
-  // Re-generation on failure (max 1 retry): feed failed cases back to the agent
-  // so it can fix selector issues, scoping, and regex ambiguity before reporting.
-  const MAX_RETRIES = 1;
+  // Re-generation on failure: feed failed cases + their failure-point DOM back to the agent.
+  // The fix-loop is bounded by qa.fixLoop.maxRetries (default 2, was hard 1). A progress gate
+  // (decideProgress) stops early when no deterministic signal of improvement is observed:
+  //   (A) failing count decreased   (B) failing name set changed   (C) Lever-2 selector flip
+  // The regression guard keeps the best round (fewest failures). The real-bug branch short-
+  // circuits when all selectors resolve uniquely and the failure is a value mismatch — that
+  // is an app defect, not a selector problem; file an Issue immediately.
+  const MAX_RETRIES = app.qa.fixLoop?.maxRetries ?? 2;
+  let prevRound: RoundResult | null = null;
+  // Regression guard (W1): track the best EXECUTED run (fewest failures). A later retry that makes
+  // things worse must not ship — after the loop we restore this. bestRound (progress-gate) picks the
+  // fewest-failures round (ties → later), so an equal-or-better rewrite is still preferred.
+  let bestRunSoFar: QaRunResult = run;
+  const failCount = (r: QaRunResult): number => r.cases.filter((c) => c.status === "fail").length;
+  // Flag: the real-bug branch detected a genuine app defect → skip to Issue.
+  let realBugDetected = false;
+
   for (let retry = 0; retry < MAX_RETRIES && run.verdict === "fail" && generating; retry++) {
     const failed = run.cases.filter((c) => c.status === "fail");
     log(
@@ -1203,10 +1889,151 @@ export async function runPipeline(
         failed.map((c) => `  ❌ ${c.name}${c.detail ? ` — ${c.detail.slice(0, 200)}` : ""}`).join("\n"),
     );
 
+    // ── Lever-2 selector check (before spending the retry) ──────────────────
+    // Extract proposed selectors from the generated spec sources and verify them PER CASE (C2)
+    // against THAT case's own failure-point a11y tree — never a fused union, which would count a
+    // node present on page A as non-unique against page B. A selector is a real contradiction only
+    // when it is verifiable-ABSENT in every failed case's tree (present in none); it is non-unique
+    // only when it resolves to >1 nodes within a SINGLE case's tree. Absent → contradiction folded
+    // into the next prompt; non-unique → strict-mode ambiguity flag.
+    const failedTrees = failed
+      .map((c) => ({ case: c, lines: buildFailureDomLines(c.failureDom) }))
+      .filter((t) => t.lines.length > 0);
+    const haveTrees = !isCode && failedTrees.length > 0;
+    const selectorContradictions: string[] = [];
+    const absentKeys = new Set<string>(); // structured identity of verifiable-absent selectors (W2)
+    let anyVerifiedPresent = false;
+    // W5: when ANY generated spec uses a locator family Lever-2 cannot extract (getByTestId, raw
+    // CSS .locator(), getByPlaceholder/AltText/Title), the "all selectors present+unique" judgment
+    // is INCOMPLETE — a decorative getByRole could look unique while the ACTUAL failing locator is
+    // unseen. uniqueness then becomes indeterminate and the real-bug branch must NOT fire.
+    let anyNonExtractableLocator = false;
+    // W3: an extracted selector that is UNVERIFIABLE (its role is in NO tree, or appears only as a
+    // `(present)` marker whose name was dropped) is present in no `anyPresent` AND in no `absentKeys`
+    // — it falls through both branches. With one decorative present-unique getByRole setting
+    // anyVerifiedPresent, allUnique would wrongly become true and the real-bug branch could file a
+    // bogus "app defect" Issue for a selector we never actually confirmed. Track it so it forces
+    // allUnique=false: uniqueness is load-bearing only when EVERY extracted selector was verifiable.
+    let anyUnverifiableSelector = false;
+    if (haveTrees && result != null && result.specs.length > 0) {
+      for (const specFile of result.specs) {
+        const specPath = join(e2eDir, specFile);
+        if (!existsSync(specPath)) continue;
+        const specSrc = readFileSync(specPath, "utf8");
+        if (hasNonExtractableLocator(specSrc)) anyNonExtractableLocator = true;
+        for (const sel of extractProposedSelectors(specSrc)) {
+          const presences = failedTrees.map((t) => selectorPresent(sel, t.lines));
+          const anyPresent = presences.some((p) => p.present);
+          const anyVerifiable = presences.some((p) => p.verifiable);
+          if (anyPresent) {
+            anyVerifiedPresent = true;
+            // Non-unique within ANY single failed case's tree → strict-mode risk (per-tree, never fused).
+            if (failedTrees.some((t) => selectorPresent(sel, t.lines).present && !selectorUnique(sel, t.lines))) {
+              const roleLabel = sel.role ?? sel.kind;
+              const nameLabel = sel.name ? ` "${sel.name}"` : "";
+              selectorContradictions.push(`${roleLabel}:${nameLabel} matches MULTIPLE nodes (strict-mode ambiguity — scope to a unique parent)`);
+            }
+          } else if (anyVerifiable) {
+            // Verifiable-absent in EVERY tree (role is known to at least one tree, no name match
+            // anywhere, present nowhere) → a real contradiction. Unverifiable-everywhere is skipped (D4).
+            absentKeys.add(selectorKey(sel));
+            const roleLabel = sel.role ?? sel.kind;
+            const nameLabel = sel.name ? ` "${sel.name}"` : "";
+            const presentRoles = [...new Set(failedTrees.flatMap((t) => t.lines.map((l) => l.split(":")[0]?.trim())).filter(Boolean))].join(", ");
+            selectorContradictions.push(
+              `${roleLabel}:${nameLabel} is NOT in the captured failure-point tree. Present roles: ${presentRoles || "(none)"}`,
+            );
+          } else {
+            // Neither present nor verifiable-absent in any tree → UNVERIFIABLE (its role never appeared
+            // with a real name). Not a contradiction (D4: the snapshot may prune it), but it means the
+            // selector set is NOT fully confirmed — so uniqueness can't be trusted to attribute a value
+            // mismatch to an app defect. Force the real-bug branch closed (W3).
+            anyUnverifiableSelector = true;
+          }
+        }
+      }
+    }
+
+    // Lever-2 signal C, computed ONCE after the per-spec loop (W2): prev-round absent selectors that
+    // are NOT absent this round flipped (absent→present OR absent→ambiguous — both are progress). The
+    // comparison is by STRUCTURED identity (selectorKey), not human-string startsWith.
+    const lever2Flips =
+      prevRound && prevRound.absentSelectors.size > 0
+        ? [...prevRound.absentSelectors].filter((k) => !absentKeys.has(k)).length
+        : 0;
+
+    // ── Progress gate ────────────────────────────────────────────────────────
+    const curRound: RoundResult = {
+      failingNames: new Set(failed.map((c) => c.name)),
+      failingCount: failed.length,
+      absentSelectors: absentKeys,
+      lever2Flips,
+    };
+    const gate = decideProgress(prevRound, curRound);
+    log(`[qa] progress gate (retry ${retry + 1}/${MAX_RETRIES}): spend=${gate.spend} — ${gate.reason}`);
+
+    // Observability: the per-failure class (locator / timeout / value-mismatch / other), so the log
+    // shows WHY the real-bug branch did or did not fire (the branch needs every failure to be a value
+    // mismatch). Uses the same classifier isLikelyRealBug applies internally.
+    if (!isCode && failed.length > 0) {
+      const classes = failed.map((c) => `${c.name}=${classifyFailure(c.detail ?? "")}`);
+      log(`[qa] failure classes: ${classes.join(", ")}`);
+    }
+
+    // Real-bug branch (C4): fire ONLY when every checked selector was PRESENT and UNIQUE — i.e. at
+    // least one selector verified present, ZERO absent contradictions, AND ZERO MULTIPLE
+    // contradictions — and every failure is a value mismatch. An absent selector makes allUnique
+    // false (the test may simply be looking at the wrong element, not a real defect).
+    // W5: a non-extractable locator (getByTestId/.locator()/getByPlaceholder/…) anywhere in the spec
+    // makes uniqueness INDETERMINATE — the verified getByRole set is not the full locator set, so a
+    // value mismatch cannot be safely attributed to an app defect. Hold allUnique false → no misfire.
+    // W3: likewise an UNVERIFIABLE extracted selector (role in no tree / only a `(present)` marker) is
+    // never confirmed present, so a decorative present-unique getByRole must not make allUnique true
+    // on its own — require EVERY extracted selector to have been verifiable.
+    const allUnique =
+      anyVerifiedPresent &&
+      absentKeys.size === 0 &&
+      !anyNonExtractableLocator &&
+      !anyUnverifiableSelector &&
+      !selectorContradictions.some((c) => c.includes("MULTIPLE"));
+    if (
+      !isCode &&
+      isLikelyRealBug(allUnique, failed.map((c) => c.detail ?? ""))
+    ) {
+      log("[qa] real-bug branch: selectors resolve uniquely + value mismatch → likely app defect, not a selector problem. Filing an Issue.");
+      realBugDetected = true;
+      break;
+    }
+
+    if (!gate.spend) {
+      log("[qa] progress gate stopped the fix-loop (no improvement signal).");
+      break;
+    }
+
+    prevRound = curRound;
+
+    // ── Regeneration ─────────────────────────────────────────────────────────
+    // Build the failure-point DOM block (header + the case's tree, prompt-size-capped) as the
+    // authoritative grounding for the regeneration prompt.
+    const failureDomSnapshot = buildFailureDom(failed);
+
+    // Thread Lever-2 contradictions as their OWN field (W1) — NOT folded into the fixCases detail.
+    // The fix prompt renders `c.detail?.slice(0, 500)`; verbose PW 1.60 errors fill those 500 chars,
+    // so a contradiction appended to detail was truncated away exactly when an absent selector was
+    // found — silencing the deterministic compliance-wall closer. buildPrompt now renders these
+    // un-truncated in a dedicated section next to the GROUND TRUTH block.
     log("[qa] re-generating with failure feedback...");
     onStep?.("retry");
     retries++;
-    result = await generateAndReview(baseGenInput({ fixCases: failed }));
+    result = await generateAndReview(
+      baseGenInput({
+        fixCases: failed,
+        ...(selectorContradictions.length > 0 ? { selectorContradictions } : {}),
+        domSnapshot: failureDomSnapshot,
+        ...(failureDomSnapshot ? { failureSourced: true } : {}),
+      }),
+      { review: "skip" },
+    );
     if (result.specs.length > 0) {
       const entries = result.specMetas?.length
         ? result.specMetas.map((m) => ({ name: m.file, flow: m.flow, objective: m.objective }))
@@ -1223,11 +2050,23 @@ export async function runPipeline(
       break;
     }
 
+    // T2 (design §1.5b): when Lever-2 proved a selector ABSENT (verifiable), the contradiction is
+    // already folded into the prompt above — skip the wasted re-validate+re-execute for THIS round
+    // and loop straight to the next regeneration. The next iteration re-checks the new spec against
+    // the SAME (unchanged) failure trees: if the absent selector is now present, Lever-2 signal C
+    // fires (gate spends) and we DO re-execute; if it is still absent and nothing else moved, the
+    // gate stops the loop. Bounded by the same cap (the for-header) and gate; counts against budget.
+    if (!isCode && absentKeys.size > 0) {
+      log(`[qa] Lever-2 short-circuit: ${absentKeys.size} selector(s) verifiably absent — regenerated WITHOUT re-executing; re-checking against the known failure tree next round.`);
+      continue;
+    }
+
     if (isCode) {
       log("[qa] re-running the repo's test suite with the fixed tests...");
       run = await deps.executeCode(mirrorDir, { namespace: ns, onCase, signal });
     } else {
       // Re-validate the fixed specs and, if they pass, re-execute against DEV.
+      onStep?.("validate");
       const reValidation = await deps.validate(e2eDir);
       if (!reValidation.ok) {
         log(`[qa] retry validation failed:\n${reValidation.errors.join("\n")}`);
@@ -1238,8 +2077,16 @@ export async function runPipeline(
         break;
       }
       log("[qa] re-running E2E with fixed tests...");
-      deps.clearCoverage?.(e2eDir, ns);
-      const retryRun = await deps.execute(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: ns, onCase, onRunning: onRunningTest, signal });
+      // Fresh DATA namespace per retry. Apps whose backend has no delete (e.g. Spring PetClinic — the
+      // cleanup fixture's DELETE 404s) cannot remove the data a spec created. Re-executing the SAME spec
+      // under the SAME namespace then makes the retry collide with its OWN prior attempt's records (a
+      // second "qa-bot-<ns>-owner" → strict-mode), failing a spec that is actually CORRECT — which is
+      // exactly what masked an otherwise-green suite as `fail`. A per-attempt namespace keeps each
+      // retry's created data uniquely scoped, so a correct spec passes on re-run regardless of cleanup.
+      const retryNs = `${ns}-r${retry + 1}`;
+      deps.clearCoverage?.(e2eDir, retryNs);
+      onStep?.("execute");
+      const retryRun = await deps.execute(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: retryNs, onCase, onRunning: onRunningTest, signal });
       if (retryRun.verdict === "fail" && !(await devHealthy())) {
         run = resultOf(ns, "infra-error", "failures with an unhealthy DEV: treated as infrastructure");
         break;
@@ -1247,7 +2094,41 @@ export async function runPipeline(
       run = retryRun;
     }
     log(`[qa] retry verdict: ${run.verdict}`);
+
+    // Regression guard (W1): keep the best EXECUTED run seen so far (fewest failures). bestRound's
+    // tie-break prefers the later round, so an equal rewrite still wins — only a strictly-worse retry
+    // is discarded. infra-error is never "better" (it has no test cases to count as a fix).
+    if (run.verdict !== "infra-error") {
+      bestRunSoFar = bestRound([
+        { failingCount: failCount(bestRunSoFar), run: bestRunSoFar },
+        { failingCount: failCount(run), run },
+      ])!.run;
+    }
   }
+
+  // Regression guard (W1): restore the best executed run AFTER the loop, so a worse terminal retry
+  // never ships. Skip when the real-bug branch fired (the current fail run must reach the Issue) or
+  // when the loop ended on infra-error (that verdict must stand).
+  if (!realBugDetected && run.verdict !== "infra-error" && failCount(bestRunSoFar) < failCount(run)) {
+    log(`[qa] regression guard: discarding the final retry (${failCount(run)} failing) for an earlier better run (${failCount(bestRunSoFar)} failing).`);
+    run = bestRunSoFar;
+  }
+
+  // The real-bug branch overrides the verdict so the decide step files an Issue.
+  if (realBugDetected && run.verdict !== "infra-error") {
+    // Keep run as "fail" so the decide step (below) opens an Issue.
+    log("[qa] real-bug override: run kept as fail for Issue filing.");
+  }
+
+  if (run.verdict === "pass" && generating && result && app.qa.needsReview && deps.review && !result.reviewed) {
+    log("[qa] final independent review of fixed suite (no corrective regeneration before publish)...");
+    result = await reviewGenerated(result, baseGenInput({}), { allowRegeneration: false });
+  }
+
+  // NOTE: the green-path write-confinement guard runs LATER — after the change-coverage block, just
+  // before the decide/publish step. In `enforce` mode a coverage gap triggers ANOTHER generation
+  // (below), which can write fresh strays; reverting here would miss them and ship them in the PR.
+  // Deferring to after the LAST generation keeps the revert (and the persisted result) fresh.
 
   // 8. Filter D — change-coverage (the value keystone). Only for a per-commit DIFF run whose
   //    suite is GREEN: does executing the tests actually exercise the lines the commit changed?
@@ -1267,7 +2148,11 @@ export async function runPipeline(
     log(`[qa] change-coverage: skipped — the changed lines live in ${triggerService.repo}; browser coverage maps only the frontend (status=unknown).`);
   }
   if (deps.collectCoverage && generating && mode === "diff" && run.verdict === "pass" && covPolicy.mode !== "off" && !triggerService) {
-    const changed = parseDiffHunks(diff);
+    // FIX 8a: parse the CAPPED promptDiff (what the agent actually saw), not the raw diff. When a huge
+    // diff is capped for the prompt, the agent never saw the dropped hunks — demanding coverage of
+    // lines it could not have known about would be an unfair, unwinnable gate (and would mislabel a
+    // green run as a coverage gap). Coverage now scopes to exactly the changed lines the agent saw.
+    const changed = parseDiffHunks(promptDiff);
     if (changed.size > 0) {
       onStep?.("coverage");
       const changedFiles = [...changed.keys()];
@@ -1351,6 +2236,15 @@ export async function runPipeline(
   const valueScore = valueLearned.valueScore;
   curriculum = valueLearned.curriculum;
 
+  // Write-confinement guard on the green path — run here, AFTER the last generation (past any
+  // coverage-enforce regeneration above), so it reverts strays from that regen too and the persisted
+  // result is fresh, BEFORE the decide/publish step ships the suite. Detect + revert agent strays
+  // (out-of-area writes git status surfaces; symlink escapes detected + the link entry reverted) so a
+  // stray never reaches the suite PR. Non-blocking — the verdict is unchanged. runConfine() runs the
+  // guard exactly once on the green path (the earlier exits already returned), so green is never
+  // double-run.
+  const confinement = await runConfine();
+
   // 9. Final decision.
   const kind = isCode ? "code" : "E2E";
   if (run.verdict !== "pass") {
@@ -1430,7 +2324,7 @@ export async function runPipeline(
       reviewerRationale,
     });
   }
-  persistOutcome(run, { staticOk: !isCode && generating, coverageRatio: ratio, valueScore, rulesRetrieved: retrievedRuleIds });
+  persistOutcome(run, { staticOk: !isCode && generating, coverageRatio: ratio, valueScore, rulesRetrieved: retrievedRuleIds, confinement, usage: usage.result(usageComplete) });
 
   // Reviewer-corrections distillation, labeling, prevention governance, reflection and
   // curriculum persistence — shared with the static-gate (`invalid`) early return above.
@@ -1441,6 +2335,49 @@ export async function runPipeline(
 
 function resultOf(ns: string, verdict: QaRunResult["verdict"], logs: string, note?: string): QaRunResult {
   return { sha: ns, verdict, passed: verdict === "pass", cases: [], logs, note };
+}
+
+// Max "role: name" lines per case in the regeneration PROMPT (not the stored tree). The cap is
+// applied HERE, on the readable block, so a huge tree does not blow the prompt — while Lever-2 still
+// checks selectors against the FULL stored line set (capDomLines keeps every table/list node, so a
+// data table is never the thing that gets truncated away).
+const FAILURE_DOM_PROMPT_MAX_LINES = 80;
+
+// Builds the failure-point DOM block for the regeneration prompt from failed cases' failureDom.
+// Each case becomes a header + its captured a11y tree (size-capped, table-preserving). Returns
+// undefined when no failed case carries a failureDom (blind-fix fallback).
+//
+// failureDom is the RAW parseAriaSnapshot line set ("role: name", "\n"-joined) that execute.ts
+// stores — already human-readable, so we present it directly; we only ADD the header and apply the
+// prompt-size cap here (never on the stored tree, which Lever-2 needs complete).
+export function buildFailureDom(cases: QaCase[]): string | undefined {
+  const parts: string[] = [];
+  for (const c of cases) {
+    if (!c.failureDom) continue;
+    const lines = c.failureDom.split("\n").filter((l) => l.trim());
+    const { kept, dropped } = capDomLines(lines, FAILURE_DOM_PROMPT_MAX_LINES);
+    const body = dropped > 0 ? [...kept, `… (${dropped} more non-table elements omitted)`] : kept;
+    parts.push(`### ${c.name}\n${body.join("\n")}`);
+  }
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
+}
+
+// Splits a single case's stored failureDom into its "role: name" lines (blanks dropped). The stored
+// value is ALREADY parseAriaSnapshot output (execute.ts), so we MUST NOT re-parse it — re-parsing
+// the "role: name" form (no "- " markers) yields []. Used by the Lever-2 selector check, PER CASE
+// (C2): each spec's selectors are verified against that case's own tree, never a fused union (which
+// would make a node present on page A look non-unique against page B). Returns [] when absent.
+export function buildFailureDomLines(failureDom: string | undefined): string[] {
+  if (!failureDom) return [];
+  return failureDom.split("\n").filter((l) => l.trim());
+}
+
+// Stable STRUCTURED identity for a proposed selector (W2): role+name+exact+isRegex+kind. Used to
+// compare the prev round's absent selectors to the current round's by identity — NOT by startsWith
+// over the human-readable contradiction strings, which mis-counts an absent→ambiguous transition
+// (the same selector, now MULTIPLE instead of absent) as "still absent" and starves Lever-2 signal C.
+export function selectorKey(sel: ProposedSelector): string {
+  return `${sel.kind}|${sel.role ?? ""}|${sel.name ?? ""}|${sel.exact ? "1" : "0"}|${sel.isRegex ? "1" : "0"}`;
 }
 
 // What the agent reported testing (flow + objective per spec) — the "what was tested"

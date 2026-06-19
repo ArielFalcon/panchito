@@ -27,6 +27,12 @@ test("handshake without a client version assumes compatible (cannot judge)", () 
   assert.equal(handshake().compatible, true);
 });
 
+test("handshake advertises the GitHub OAuth client id when configured, omits it otherwise", () => {
+  assert.equal(handshake("0.1.0", "Ov23xyz").githubClientId, "Ov23xyz");
+  assert.equal(handshake("0.1.0").githubClientId, undefined);
+  assert.equal(handshake("0.1.0", "").githubClientId, undefined); // empty env var ⇒ not advertised
+});
+
 test("versionGte compares major.minor.patch numerically and tolerates a v prefix / pre-release", () => {
   assert.equal(versionGte("1.0.0", "0.9.9"), true);
   assert.equal(versionGte("0.1.0", "0.1.0"), true);

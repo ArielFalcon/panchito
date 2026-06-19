@@ -1,6 +1,15 @@
 import type { ErrorClass } from "./taxonomy";
 
-export type RuleStatus = "candidate" | "active" | "deprecated" | "superseded";
+// "pending" is a RETIRED status, kept in the enum only for backward-compat with any rows an older
+// build wrote. It was meant as a pre-candidate quarantine for correction-sourced rules, but it was
+// inert: pending is excluded from retrieval (history.ts listRulesStmt) and its only exit transition
+// (pending → candidate) lives in recordRuleOutcome, which iterates only RETRIEVED rules — so a
+// pending rule was never retrieved, never accrued an outcome, and stayed pending forever. The
+// distiller now inserts correction-sourced rules directly as "candidate"; the de-poison is the
+// "experimental — consider, not proven" framing in renderRulesForPrompt (exercise without authority),
+// NOT exclusion from retrieval. No code path inserts "pending" anymore; the nextStatus pending →
+// candidate edge below is dead-but-harmless (it self-heals any legacy pending row on first outcome).
+export type RuleStatus = "pending" | "candidate" | "active" | "deprecated" | "superseded";
 export type Confidence = "low" | "medium" | "high";
 
 export interface LearningRule {
@@ -46,11 +55,29 @@ export function deriveConfidence(outcomeCount: number, successRate: number | nul
   return "low";
 }
 
-function nextStatus(status: RuleStatus, outcomeCount: number, successRate: number): RuleStatus {
+// Phase 7: coverageCreditConfirmed is the coverage-anchor governance signal.
+//   true  → coverage was measured AND confirmed credit (covered lines in the changed diff) — promotion eligible
+//   false → coverage was measured but NO credit (covered 0 changed lines) — promotion blocked for this transition
+//   null  → coverage not measured / cross-repo / unknown — no gate (promotion proceeds normally)
+// This is the non-circular anchor: a rule can only earn `active` when the test that exercised it
+// also covered the diff's changed lines, not just made the reviewer happy. Coverage stays
+// non-blocking where unmeasurable (null), so the flywheel turns for every app.
+function nextStatus(status: RuleStatus, outcomeCount: number, successRate: number, coverageCreditConfirmed: boolean | null = null): RuleStatus {
+  // Phase 7: pending → candidate on first outcome. A correction-sourced rule starts as "pending"
+  // (excluded from retrieval) and graduates to "candidate" (eligible for retrieval) as soon as
+  // one run folds an outcome in. From then on the standard candidate → active promotion logic
+  // applies. This ensures at least one real-world measurement precedes generator injection.
+  if (status === "pending") return "candidate";
   if (outcomeCount < MIN_OUTCOMES) return status; // not enough evidence to move
   switch (status) {
-    case "candidate":
-      return successRate >= PROMOTE_RATE ? "active" : "candidate";
+    case "candidate": {
+      if (successRate < PROMOTE_RATE) return "candidate";
+      // Phase 7 coverage anchor: when coverage IS measured (non-null), require confirmed credit for
+      // promotion. When coverage is unmeasurable (null), allow promotion on verdict signal alone so
+      // the flywheel turns for every app, not just those with source-mapped DEV environments.
+      if (coverageCreditConfirmed === false) return "candidate"; // measured, no credit — hold
+      return "active";
+    }
     case "active":
       return successRate < DEMOTE_RATE ? "deprecated" : "active";
     case "deprecated":
@@ -89,7 +116,11 @@ export function preventionOutcome(ruleErrorClass: ErrorClass, runErrorClass: Err
 // Fold one objective outcome (a valueScore in [0,1]) into a rule. successRate is a RUNNING
 // MEAN over all outcomes — never an overwrite — so confidence is earned from many results.
 // Pure: no time, no I/O (the caller stamps lastVerified).
-export function applyOutcome(rule: LearningRule, score: number): LearningRule {
+//
+// Phase 7: coverageCreditConfirmed gates the candidate → active promotion step when coverage
+// is measurable. Pass true when coverage confirmed credit, false when measured but zero credit,
+// null (default) when coverage is not applicable/measured (promotion uses verdict signal only).
+export function applyOutcome(rule: LearningRule, score: number, coverageCreditConfirmed: boolean | null = null): LearningRule {
   const n = (rule.outcomeCount ?? 0) + 1;
   const prev = rule.successRate;
   const successRate = prev === null || prev === undefined ? score : prev + (score - prev) / n;
@@ -98,7 +129,7 @@ export function applyOutcome(rule: LearningRule, score: number): LearningRule {
     outcomeCount: n,
     successRate,
     confidence: deriveConfidence(n, successRate),
-    status: nextStatus(rule.status, n, successRate),
+    status: nextStatus(rule.status, n, successRate, coverageCreditConfirmed),
   };
 }
 
@@ -145,10 +176,14 @@ export function selectForRetrieval(
   },
 ): LearningRule[] {
   // Only proven (active) or still-exploring (candidate) rules are eligible; deprecated and
-  // superseded rules are never injected. Ranking: ACTIVE rules first (exploit what has earned
-  // its place), then by successRate (the attribution signal), then relevance to this run's
-  // errorClass AND the diff's structural shape. Candidates fill the remaining slots as a bounded
-  // exploration tail so they can accumulate the outcomes that earn — or deny — promotion.
+  // superseded rules are never injected (and the retired "pending" status, which nothing writes
+  // anymore, is excluded too). Correction-sourced rules now enter as CANDIDATES, so they ARE
+  // retrieved — the de-poison is the "experimental — consider" framing in renderRulesForPrompt
+  // (exercise without authority), not exclusion from retrieval. Ranking: ACTIVE rules first (exploit
+  // what has earned its place), then by successRate (the attribution signal), then relevance
+  // to this run's errorClass AND the diff's structural shape. Candidates fill the remaining
+  // slots as a bounded exploration tail so they can accumulate the outcomes that earn — or
+  // deny — promotion.
   const eligible = rules.filter((r) => r.status === "active" || r.status === "candidate");
 
   const score = (r: LearningRule): number => {
@@ -187,20 +222,44 @@ export function selectForRetrieval(
 // How many retrieval slots are reserved for unproven candidates when actives saturate the cap.
 export const EXPLORATION_SLOTS = 2;
 
+// Phase 7: split active (proven) rules from candidate (unproven) rules in the generator prompt so
+// the generator is NOT instructed to blindly apply speculative rules before they have earned trust
+// from measured outcomes. The candidate EXPLORATION FLOOR is preserved — candidates still appear in
+// the prompt so the generator EXERCISES them, which is how they accumulate the outcomes that earn
+// (or deny) promotion. Only the framing changes: active rules carry authority; candidate rules are
+// framed as "experimental — consider", making clear they are hypotheses, not proven prescriptions.
+// This strips the authority framing that caused Goodhart drift (generator optimizing speculative rules
+// rather than real test quality) without killing the promotion flywheel.
 export function renderRulesForPrompt(rules: LearningRule[]): string {
   if (rules.length === 0) return "";
 
-  const lines = [
-    "## Learned rules from past QA runs",
-    "These rules were derived from real failures. Apply them when they match the current change.",
-    "",
-  ];
+  const active = rules.filter((r) => r.status === "active");
+  const candidates = rules.filter((r) => r.status === "candidate");
 
-  for (const r of rules) {
-    lines.push(`### Rule (${r.errorClass}, confidence=${r.confidence})`);
-    lines.push(`- Trigger: ${r.trigger}`);
-    lines.push(`- Action: ${r.action}`);
+  const lines: string[] = [];
+
+  if (active.length > 0) {
+    lines.push("## Proven rules from past QA runs");
+    lines.push("These rules were earned from real failures and validated by measured outcomes. Apply them when they match the current change.");
     lines.push("");
+    for (const r of active) {
+      lines.push(`### Rule (${r.errorClass}, confidence=${r.confidence})`);
+      lines.push(`- Trigger: ${r.trigger}`);
+      lines.push(`- Action: ${r.action}`);
+      lines.push("");
+    }
+  }
+
+  if (candidates.length > 0) {
+    lines.push("## Experimental rules (unproven — consider, not prescriptive)");
+    lines.push("These are hypotheses from recent runs that have not yet been validated by enough measured outcomes. Consider them when clearly applicable, but do not let them override your judgment.");
+    lines.push("");
+    for (const r of candidates) {
+      lines.push(`### Experimental rule (${r.errorClass})`);
+      lines.push(`- Trigger: ${r.trigger}`);
+      lines.push(`- Consider: ${r.action}`);
+      lines.push("");
+    }
   }
 
   return lines.join("\n");

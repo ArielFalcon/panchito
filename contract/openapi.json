@@ -33,6 +33,43 @@
         }
       }
     },
+    "/api/v1/auth/login": {
+      "post": {
+        "operationId": "login",
+        "summary": "Exchange a GitHub user token (from the OAuth device flow) for a server session (unauthenticated)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "session minted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "the GitHub token was rejected"
+          },
+          "403": {
+            "description": "authenticated, but not a collaborator on any watched repo"
+          },
+          "501": {
+            "description": "GitHub login is not configured on this server"
+          }
+        }
+      }
+    },
     "/api/v1/runs": {
       "post": {
         "operationId": "createRun",
@@ -447,6 +484,153 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/IntelligenceView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runs/{id}/report": {
+      "get": {
+        "operationId": "getRunReport",
+        "summary": "Run-scoped report: the current-execution analysis plus the evolution-as-of-the-run (read-only)",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "window",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "json",
+                "csv"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "run report view (current + evolution)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunReportView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "run not found"
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{name}/trends": {
+      "get": {
+        "operationId": "getAppTrends",
+        "summary": "Period-over-period trends for an app: coverage, value-oracle, verdicts, error classes (read-only)",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "window",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "json",
+                "csv"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "trends view",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrendsView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{name}/report": {
+      "get": {
+        "operationId": "getAppReport",
+        "summary": "Ad-hoc report: interestingness-ranked insights with a recommended chart per metric (read-only)",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "window",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "json",
+                "csv"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "report view",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReportView"
                 }
               }
             }
@@ -1460,6 +1644,9 @@
           },
           "message": {
             "type": "string"
+          },
+          "githubClientId": {
+            "type": "string"
           }
         },
         "required": [
@@ -1468,6 +1655,39 @@
           "minClientVersion",
           "compatible",
           "capabilities"
+        ],
+        "additionalProperties": false
+      },
+      "LoginRequest": {
+        "type": "object",
+        "properties": {
+          "githubToken": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "githubToken"
+        ],
+        "additionalProperties": false
+      },
+      "LoginResponse": {
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "username",
+          "expiresAt"
         ],
         "additionalProperties": false
       },
@@ -2237,6 +2457,7 @@
           "status": {
             "type": "string",
             "enum": [
+              "pending",
               "candidate",
               "active",
               "deprecated",
@@ -2458,10 +2679,27 @@
             "properties": {
               "measured": {
                 "type": "boolean"
+              },
+              "avgRatio": {
+                "nullable": true,
+                "type": "number"
+              },
+              "measuredRuns": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "totalRuns": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
               }
             },
             "required": [
-              "measured"
+              "measured",
+              "avgRatio",
+              "measuredRuns",
+              "totalRuns"
             ],
             "additionalProperties": false
           }
@@ -2470,6 +2708,433 @@
           "valueOracle",
           "reviewer",
           "coverage"
+        ],
+        "additionalProperties": false
+      },
+      "TrendWindow": {
+        "type": "object",
+        "properties": {
+          "current": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "previous": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "current",
+          "previous"
+        ],
+        "additionalProperties": false
+      },
+      "CoverageTrend": {
+        "type": "object",
+        "properties": {
+          "measured": {
+            "type": "boolean"
+          },
+          "ratio": {
+            "nullable": true,
+            "type": "number"
+          },
+          "previousRatio": {
+            "nullable": true,
+            "type": "number"
+          },
+          "minRatio": {
+            "type": "number"
+          },
+          "series": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          }
+        },
+        "required": [
+          "measured",
+          "ratio",
+          "previousRatio",
+          "minRatio",
+          "series"
+        ],
+        "additionalProperties": false
+      },
+      "ValueTrend": {
+        "type": "object",
+        "properties": {
+          "measured": {
+            "type": "boolean"
+          },
+          "avgScore": {
+            "nullable": true,
+            "type": "number"
+          },
+          "previousAvgScore": {
+            "nullable": true,
+            "type": "number"
+          },
+          "series": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          }
+        },
+        "required": [
+          "measured",
+          "avgScore",
+          "previousAvgScore",
+          "series"
+        ],
+        "additionalProperties": false
+      },
+      "FlakyTrend": {
+        "type": "object",
+        "properties": {
+          "rate": {
+            "nullable": true,
+            "type": "number"
+          },
+          "previousRate": {
+            "nullable": true,
+            "type": "number"
+          },
+          "runs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "rate",
+          "previousRate",
+          "runs"
+        ],
+        "additionalProperties": false
+      },
+      "ErrorClassCount": {
+        "type": "object",
+        "properties": {
+          "errorClass": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "previousCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "multiplier": {
+            "nullable": true,
+            "type": "number"
+          }
+        },
+        "required": [
+          "errorClass",
+          "count",
+          "previousCount",
+          "multiplier"
+        ],
+        "additionalProperties": false
+      },
+      "TrendsView": {
+        "type": "object",
+        "properties": {
+          "app": {
+            "type": "string"
+          },
+          "generatedAt": {
+            "type": "string"
+          },
+          "window": {
+            "$ref": "#/components/schemas/TrendWindow"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/CoverageTrend"
+          },
+          "valueOracle": {
+            "$ref": "#/components/schemas/ValueTrend"
+          },
+          "verdictMix": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "reviewerPassRate": {
+            "nullable": true,
+            "type": "number"
+          },
+          "flaky": {
+            "$ref": "#/components/schemas/FlakyTrend"
+          },
+          "errorClasses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ErrorClassCount"
+            }
+          },
+          "duration": {
+            "type": "object",
+            "properties": {
+              "avgMs": {
+                "nullable": true,
+                "type": "number"
+              },
+              "previousMs": {
+                "nullable": true,
+                "type": "number"
+              },
+              "runs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "avgMs",
+              "previousMs",
+              "runs"
+            ],
+            "additionalProperties": false
+          },
+          "flows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "flow": {
+                  "type": "string"
+                },
+                "runs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "flaky": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "fail": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "flow",
+                "runs",
+                "flaky",
+                "fail"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "app",
+          "generatedAt",
+          "window",
+          "coverage",
+          "valueOracle",
+          "verdictMix",
+          "reviewerPassRate",
+          "flaky",
+          "errorClasses",
+          "duration",
+          "flows"
+        ],
+        "additionalProperties": false
+      },
+      "ReportInsight": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "intent": {
+            "type": "string",
+            "enum": [
+              "single-value",
+              "comparison",
+              "trend",
+              "composition",
+              "distribution"
+            ]
+          },
+          "chart": {
+            "type": "string",
+            "enum": [
+              "big-number",
+              "gauge",
+              "paired-bars",
+              "ranked-bars",
+              "stacked-bar",
+              "line",
+              "area",
+              "donut"
+            ]
+          },
+          "value": {
+            "nullable": true,
+            "type": "number"
+          },
+          "unit": {
+            "type": "string",
+            "enum": [
+              "ratio",
+              "percent",
+              "count",
+              "ms",
+              "score"
+            ]
+          },
+          "target": {
+            "nullable": true,
+            "type": "number"
+          },
+          "delta": {
+            "nullable": true,
+            "type": "number"
+          },
+          "multiplier": {
+            "nullable": true,
+            "type": "number"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "up",
+              "down",
+              "flat"
+            ]
+          },
+          "goodWhen": {
+            "type": "string",
+            "enum": [
+              "up",
+              "down",
+              "neutral"
+            ]
+          },
+          "caption": {
+            "type": "string"
+          },
+          "series": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "breakdown": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "value": {
+                  "type": "number"
+                },
+                "semantic": {
+                  "type": "string",
+                  "enum": [
+                    "good",
+                    "bad",
+                    "neutral"
+                  ]
+                }
+              },
+              "required": [
+                "label",
+                "value"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "score": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "intent",
+          "chart",
+          "value",
+          "delta",
+          "multiplier",
+          "direction",
+          "goodWhen",
+          "score"
+        ],
+        "additionalProperties": false
+      },
+      "ReportView": {
+        "type": "object",
+        "properties": {
+          "app": {
+            "type": "string"
+          },
+          "generatedAt": {
+            "type": "string"
+          },
+          "window": {
+            "$ref": "#/components/schemas/TrendWindow"
+          },
+          "headline": {
+            "type": "string"
+          },
+          "insights": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReportInsight"
+            }
+          }
+        },
+        "required": [
+          "app",
+          "generatedAt",
+          "window",
+          "headline",
+          "insights"
+        ],
+        "additionalProperties": false
+      },
+      "RunReportView": {
+        "type": "object",
+        "properties": {
+          "current": {
+            "$ref": "#/components/schemas/ReportView"
+          },
+          "evolution": {
+            "nullable": true,
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ReportView"
+              }
+            ]
+          }
+        },
+        "required": [
+          "current",
+          "evolution"
         ],
         "additionalProperties": false
       }

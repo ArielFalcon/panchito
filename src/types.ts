@@ -31,6 +31,13 @@ export interface SpecMeta {
 export type RunMode = "diff" | "complete" | "exhaustive" | "manual" | "context";
 export const RUN_MODES: readonly RunMode[] = ["diff", "complete", "exhaustive", "manual", "context"] as const;
 
+// The objective marker stamped on the fan-out PLANNER turn (a plan-only pass that produces the
+// objectives, carrying no Context Pack). Shared between the producer (opencode-client's planner
+// session descriptor) and the consumer (history's groundingPresence telemetry, which excludes the
+// planner so a fan-out run is not counted as partly ungrounded). One source of truth so the two
+// sides cannot silently drift.
+export const PLANNER_OBJECTIVE = "(planner)";
+
 export interface RunOptions {
   target?: TestTarget; // defaults to "e2e" when omitted
   mode: RunMode;
@@ -56,6 +63,11 @@ export interface AgentResult {
   reviewed: boolean; // whether review was enabled
   approved: boolean; // reviewer verdict (true when not reviewed)
   note?: string; // reason when not approved (e.g. did not converge)
+  // Phase 6b: the number of objectives the planner derived for this run. Set on plan-first paths
+  // (diff/manual fan-out) so the pipeline can retroactively adjust the runaway backstop to the
+  // actual scope — multi-objective runs legitimately need more cycles than single-objective ones.
+  // Absent on single-agent paths (defaults to 1 in the backstop calculation).
+  objectiveCount?: number;
 }
 
 // Outcome of RUNNING the E2E tests against DEV.
@@ -79,6 +91,11 @@ export interface QaCase {
   objective?: string;
   reason?: string;
   durationMs?: number; // wall-clock of the test, from the Playwright stream (live cases)
+  // Populated for failed cases: the accessible-role tree captured at the failure point (ariaSnapshot
+  // YAML parsed + formatted). Used by the fix-loop to ground the regeneration prompt in the REAL
+  // post-failure DOM instead of the pre-write grounding snapshot. Absent when capture missed
+  // (page closed on nav-crash, env var unset, or parse failure) — grounding gap is warned loudly.
+  failureDom?: string;
 }
 
 export interface QaRunResult {
@@ -139,7 +156,7 @@ export interface RunRecord {
 }
 
 export type IncidentSeverity = "warn" | "error" | "critical";
-export type IncidentSource = "health-check" | "log-scraper" | "qa-generator" | "qa-reviewer" | "cli";
+export type IncidentSource = "health-check" | "log-scraper" | "qa-generator" | "qa-reviewer" | "cli" | "process-audit";
 
 export interface Incident {
   id: string;
@@ -178,6 +195,12 @@ export interface RunOutcome {
     reviewerApproved?: boolean;
     flaky: boolean;
     retries: number;
+    // Write-confinement guard: set when the guard ran (dep wired), absent when dep not wired.
+    // { strays: 0, dangerous: 0, reverted: [] } is a positive "guard ran, clean" record.
+    confinement?: { strays: number; dangerous: number; reverted: string[] };
+    // Per-run agent token/cost usage — observation-only, never affects verdict or publish.
+    // Absent when no snapshot fired (Codex-only run or dep not wired); never a zero-filled object.
+    usage?: import("./qa/usage").RunUsage;
   };
   rulesRetrieved: string[];
   reflection?: StructuredReflection;

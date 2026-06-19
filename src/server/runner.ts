@@ -124,7 +124,10 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
           log: emitLog,
           // During generation, emit a heartbeat every 15s so the TUI and chat
           // have live feedback while the agent is working (blocking prompt call).
-          generate: async (input, signal) => {
+          // FORWARD onUsage (4th arg): the runner keeps its OWN progress callback for live
+          // heartbeats, but must pass the usage sink through or the generator's token spend is
+          // never captured in the webhook path (only the reviewer's would be).
+          generate: async (input, signal, _onProgress, onUsage) => {
             const onProgress = emitLog;
             return pipeline.generate({ ...input, runId: record.id }, signal, (msg) => {
               // Enrich heartbeat messages with live agent context.
@@ -137,7 +140,7 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
                 return;
               }
               onProgress(msg);
-            });
+            }, onUsage);
           },
         },
         req.source ?? "webhook",
@@ -228,4 +231,39 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
   }, record.id);
 
   return record.id;
+}
+
+// Cancels a tracked run on the shared queue, the counterpart to enqueueTrackedRun. Returns true
+// ONLY when a LIVE run was aborted (its in-flight turn interrupted via the queue's AbortSignal).
+//
+// The subtle case this exists for: a record can read "running"/"enqueued" while the in-memory
+// queue does NOT actually hold it — a zombie left by a process restart or crash race, or an
+// operator view that lagged a queue advance. The old path returned without finalizing such a
+// record, so the cancel endpoint answered 409 and the stuck run never cleared (it sat at "0%"
+// forever, deaf to every stop press). Here we ALWAYS finalize a cancellable record:
+//   - live run we hold        → abort its turn + finalize, return true
+//   - enqueued (not started)  → finalize so the queued job skips itself,       return false
+//   - stale "running" zombie  → finalize so the operator's stop clears it,      return false
+// queue.cancel(id) is what protects an innocent successor: it aborts ONLY when `id` is the run
+// currently holding the queue, so finalizing a stale record never touches the run that is
+// actually executing against DEV. The boolean return + the now-terminal record together let
+// handleCancelRun answer 200 vs 409 accurately.
+export function cancelTrackedRun(queue: JobQueue, id: string): boolean {
+  const record = getRecord(id);
+  if (!record) return false;
+  if (record.status !== "running" && record.status !== "enqueued") return false;
+
+  // Abort the live job first — succeeds only when this id is the one holding the queue.
+  if (record.status === "running" && queue.cancel(id)) {
+    updateRecord(id, { status: "done", step: "done", verdict: "infra-error", note: "cancelled by operator" });
+    return true;
+  }
+
+  // Not the live job: still enqueued (never started), or a "running" record the queue no longer
+  // holds. Finalize it either way so it stops being the active run; the successor is untouched.
+  const note = record.status === "enqueued"
+    ? "cancelled by operator"
+    : "cancelled by operator (run was no longer active)";
+  updateRecord(id, { status: "done", step: "done", verdict: "infra-error", note });
+  return false;
 }

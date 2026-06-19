@@ -206,17 +206,20 @@ func TestLiveExecutionViewFocusesCurrentTestAndKeepsLargeSuitesCompact(t *testin
 	}))
 
 	out := m.renderTests()
-	for _, want := range []string{"TESTS", "history", "40 passed", "now", "case-41", "e2e/case-41.spec.ts", "next", "case-42"} {
+	// The current case is now shown as a focus card (readable spec/flow, NOT the raw file path).
+	for _, want := range []string{"TESTS", "history", "40 passed", "NOW RUNNING", "case-41", "next", "case-42"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("renderTests() missing %q:\n%s", want, out)
 		}
 	}
-	for _, hidden := range []string{"case-01", "case-80", "e2e/case-80.spec.ts"} {
+	// The absolute path is deliberately no longer surfaced, and non-focused tests stay hidden.
+	for _, hidden := range []string{"case-01", "case-80", "e2e/case-80.spec.ts", "e2e/case-41.spec.ts"} {
 		if strings.Contains(out, hidden) {
-			t.Fatalf("renderTests() should not list non-focused test %q:\n%s", hidden, out)
+			t.Fatalf("renderTests() should not show %q:\n%s", hidden, out)
 		}
 	}
-	if lines := strings.Count(out, "\n"); lines > 8 {
+	// The card gives the current case more presence, so the compact ceiling is higher than before.
+	if lines := strings.Count(out, "\n"); lines > 13 {
 		t.Fatalf("renderTests() too tall for a large suite: %d lines\n%s", lines, out)
 	}
 }
@@ -234,7 +237,7 @@ func TestLiveRendersDedicatedComponentsAndSummary(t *testing.T) {
 	}
 
 	live := m.View()
-	for _, want := range []string{"SPECS", "flows/contact.spec.ts", "written", "SUBAGENTS", "explore checkout", "COVERAGE", "70%", "reviewer: rejected", "scope the selector"} {
+	for _, want := range []string{"SPECS", "flows/contact.spec.ts", "written", "SUBAGENTS", "explore checkout", "COVERAGE", "70%", "REVIEWER", "rejected", "scope the selector"} {
 		if !strings.Contains(live, want) {
 			t.Fatalf("live view missing %q:\n%s", want, live)
 		}
@@ -292,55 +295,57 @@ func TestSummaryListsWrittenFilesByNameForCodeRun(t *testing.T) {
 	}
 }
 
-func TestLiveSummaryNavigationWorksWithChatOpen(t *testing.T) {
+// Item navigation belongs to the CLOSED chat; once the chat is focused (via 'a'), the arrows scroll
+// the conversation and letters type into the question — they no longer move the item cursor.
+func TestLiveChatFocusScrollsAndNavigationIsForClosedChat(t *testing.T) {
 	m := newLiveModel("r", "portfolio", make(chan events.RunEvent, 1), func() {}, 0, 0)
 	m.client = api.New("http://x", "")
-	// Set up a finished run with a couple of cases so the test list is navigable.
 	m.done = true
 	m.verdict = "pass"
 	m.tests = []testItem{{name: "t1", status: "pass"}, {name: "t2", status: "fail", detail: "boom"}}
 	m.passed = 1
 
-	// Open chat with 'a'.
+	// Chat CLOSED → ↑↓ navigate the item list.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if m.sumFocus != 1 {
+		t.Fatalf("with chat closed, ↓ must advance sumFocus; got %d", m.sumFocus)
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if m.sumFocus != 0 {
+		t.Fatalf("with chat closed, ↑ must go back; got %d", m.sumFocus)
+	}
+
+	// Open the chat with 'a'.
 	var cmd tea.Cmd
 	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	if !m.chatActive || cmd == nil {
 		t.Fatalf("'a' must open the chat; active=%v cmd=%v", m.chatActive, cmd)
 	}
 
-	// Navigate the test list with 'j' even though chat is open.
-	prev := m.sumFocus
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	if m.sumFocus != prev+1 {
-		t.Fatalf("'j' must advance sumFocus even with chat open: %d → %d", prev, m.sumFocus)
-	}
-
-	// Navigate back with 'k'.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
-	if m.sumFocus != prev {
-		t.Fatalf("'k' must go back: got %d, want %d", m.sumFocus, prev)
-	}
-
-	// Arrow keys should also work.
+	// Chat FOCUSED → the arrows scroll the conversation; they must NOT move the item cursor.
+	before := m.sumFocus
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	if m.sumFocus != prev+1 {
-		t.Fatalf("down arrow must advance: %d → want %d", m.sumFocus, prev+1)
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if m.sumFocus != before {
+		t.Fatalf("with chat focused, arrows must scroll (not navigate); sumFocus %d→%d", before, m.sumFocus)
 	}
 
-	// Enter expands the focused test while chat is open.
-	m.sumFocus = 0
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if m.sumOpen != "t1" {
-		t.Fatalf("enter must expand the focused test; sumOpen=%q want t1", m.sumOpen)
+	// j/k are letters here — they type the question, they do not navigate.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if m.sumFocus != before {
+		t.Fatalf("'j' with chat focused must type, not navigate; sumFocus=%d", m.sumFocus)
+	}
+	if m.chatInput.Value() != "j" {
+		t.Fatalf("'j' must reach the chat input; got %q", m.chatInput.Value())
 	}
 
-	// Typing text still routes to the chat input.
+	// More typing still routes to the input.
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hi")})
-	if m.chatInput.Value() != "hi" {
+	if m.chatInput.Value() != "jhi" {
 		t.Fatalf("typing must reach chat input: got %q", m.chatInput.Value())
 	}
 
-	// esc still closes the chat.
+	// esc closes the chat.
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if m.chatActive {
 		t.Fatal("esc must close the chat")
@@ -449,6 +454,26 @@ func TestLiveEscCancelsAndGoesBack(t *testing.T) {
 	}
 	if _, ok := cmd().(backMsg); !ok {
 		t.Fatalf("expected backMsg, got %T", cmd())
+	}
+}
+
+// A failed stop on the live screen must surface as a run-control error, never as a fake
+// assistant chat entry. Regression: live.go treated EVERY errMsg as an assistant error, so a
+// cancel rejection (409/500/timeout) was misrendered as a chat bubble — invisible if the chat
+// pane was closed. cancelRunCmd now reports failures as cancelErrMsg so the origin is unambiguous.
+func TestLiveStopFailureSurfacesAsRunControlError(t *testing.T) {
+	m := newLiveModel("r", "a", make(chan events.RunEvent, 1), func() {}, 0, 0)
+	m.stopArmed = true
+	before := len(m.chatEntries)
+	m, _ = m.Update(cancelErrMsg{err: fmt.Errorf("run is no longer the active run")})
+	if len(m.chatEntries) != before {
+		t.Fatalf("a stop failure must NOT become a chat entry; chatEntries grew by %d", len(m.chatEntries)-before)
+	}
+	if m.stopArmed {
+		t.Fatal("a stop failure must disarm the stop confirmation")
+	}
+	if out := m.View(); !strings.Contains(out, "run is no longer the active run") {
+		t.Fatalf("the stop failure must surface in the live view as a run-control error; got:\n%s", out)
 	}
 }
 

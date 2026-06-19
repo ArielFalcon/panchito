@@ -1,5 +1,6 @@
-import type { AgentDeps, AgentSession } from "../integrations/opencode-client";
+import type { AgentDeps, AgentSession, AgentOpenDescriptor, AgentTurnEvent } from "../integrations/opencode-client";
 import type { LiveActivity } from "../integrations/opencode-client";
+import type { UsageSnapshot } from "../qa/usage";
 import type { RunEventBody } from "../contract/events";
 
 export type AgentProvider = "opencode" | "codex";
@@ -58,7 +59,24 @@ export interface AgentRuntimeStrategy {
   provider: AgentProvider;
   health(): Promise<AgentProviderHealth>;
   listModels(): Promise<AgentModelInfo[]>;
-  openSession(role: AgentRole, cwd: string, opts?: { signal?: AbortSignal; timeoutMs?: number; model?: string }): Promise<AgentRuntimeSession>;
+  // onUsage is part of the TYPED end-to-end usage path: the facade forwards it through to the
+  // underlying strategy's deps.open, where each session.prompt response emits a UsageSnapshot
+  // (observation-only — never influences any verdict). `descriptor`/`onTurn` are part of the
+  // analogous TYPED turn-telemetry path: the facade spreads them from opts into openSession, and
+  // each strategy emits an AgentTurnEvent per prompt so agent_turns rows are persisted with a real
+  // run_id regardless of provider (OpenCode fires it at the SDK funnel; Codex per `codex exec`).
+  openSession(
+    role: AgentRole,
+    cwd: string,
+    opts?: {
+      signal?: AbortSignal;
+      timeoutMs?: number;
+      model?: string;
+      onUsage?: (u: UsageSnapshot) => void;
+      descriptor?: AgentOpenDescriptor;
+      onTurn?: (t: AgentTurnEvent) => void;
+    },
+  ): Promise<AgentRuntimeSession>;
   startEventStream?(
     onActivity: (a: LiveActivity) => void,
     signal?: AbortSignal,

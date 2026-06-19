@@ -236,3 +236,119 @@ describe("renderRulesForPrompt", () => {
     assert.match(output, /assert outcome/);
   });
 });
+
+// ── Phase 7: de-poison learning ──────────────────────────────────────────────
+// P15: renderRulesForPrompt must frame candidate (unproven) rules as "experimental — consider",
+// not as authoritative instructions. Active (proven) rules keep their authority framing.
+// The exploration floor (candidates appear in the prompt) is preserved.
+//
+// P16: coverage-anchored promotion: applyOutcome with coverageCreditConfirmed=false must
+// block candidate → active promotion even when successRate >= PROMOTE_RATE.
+
+describe("Phase 7 (a): renderRulesForPrompt — candidate rules framed experimental, active rules keep authority", () => {
+  it("active rules appear under the 'Proven rules' heading with apply-them framing", () => {
+    const activeRule = rule({ status: "active", trigger: "active trigger", action: "active action" });
+    const output = renderRulesForPrompt([activeRule]);
+    assert.match(output, /Proven rules from past QA runs/i, "active rules must use the proven/authoritative heading");
+    assert.match(output, /Apply them when/i, "active framing must say 'apply'");
+    assert.match(output, /active trigger/);
+    assert.match(output, /active action/);
+    assert.doesNotMatch(output, /experimental/i, "active rules must NOT be labelled experimental");
+  });
+
+  it("candidate rules appear under the 'Experimental rules' heading with consider framing", () => {
+    const candidateRule = rule({ status: "candidate", trigger: "cand trigger", action: "cand action" });
+    const output = renderRulesForPrompt([candidateRule]);
+    assert.match(output, /Experimental rules/i, "candidate rules must use the experimental heading");
+    assert.match(output, /consider/i, "candidate framing must say 'consider', not 'apply'");
+    assert.match(output, /cand trigger/);
+    assert.match(output, /cand action/);
+    assert.doesNotMatch(output, /Proven rules/i, "no proven heading when only candidates are present");
+  });
+
+  it("mixed active + candidate: both sections appear, active before candidate", () => {
+    const active1 = rule({ id: "a1", status: "active", trigger: "proven trigger", action: "proven action" });
+    const cand1 = rule({ id: "c1", status: "candidate", trigger: "cand trigger", action: "cand action" });
+    const output = renderRulesForPrompt([active1, cand1]);
+    assert.match(output, /Proven rules/i);
+    assert.match(output, /Experimental rules/i);
+    const provenIdx = output.indexOf("Proven rules");
+    const expIdx = output.indexOf("Experimental rules");
+    assert.ok(provenIdx < expIdx, "proven section must appear before experimental section");
+  });
+
+  it("pending rules are excluded from renderRulesForPrompt (not injected into generator)", () => {
+    const pendingRule = rule({ status: "pending" as import("./learning-rule").RuleStatus, trigger: "pend trigger", action: "pend action" });
+    const output = renderRulesForPrompt([pendingRule]);
+    assert.equal(output, "", "pending rules must produce no output (not injected)");
+  });
+
+  it("empty rules list produces empty output (exploration floor still holds via selectForRetrieval)", () => {
+    assert.equal(renderRulesForPrompt([]), "");
+  });
+});
+
+describe("Phase 7 (b): pending rules excluded from selectForRetrieval (not injected before first outcome)", () => {
+  it("pending rules are NOT in the eligible set for retrieval", () => {
+    const pendingRule = rule({ id: "pend-1", status: "pending" as import("./learning-rule").RuleStatus });
+    const selected = selectForRetrieval([pendingRule], { app: "test-app" });
+    assert.equal(selected.length, 0, "pending rules must not be selected for retrieval");
+  });
+
+  it("candidate and active rules ARE in the eligible set", () => {
+    const candidateRule = rule({ id: "cand-1", status: "candidate" });
+    const activeRule = rule({ id: "act-1", status: "active", successRate: 0.8, outcomeCount: 5 });
+    const selected = selectForRetrieval([candidateRule, activeRule], { app: "test-app" });
+    assert.equal(selected.length, 2, "both candidate and active rules must be retrievable");
+  });
+});
+
+describe("Phase 7 (c): pending → candidate transition on first outcome (applyOutcome)", () => {
+  it("a pending rule becomes candidate on the first outcome (any score)", () => {
+    const pendingRule = rule({ status: "pending" as import("./learning-rule").RuleStatus, outcomeCount: 0, successRate: null });
+    const updated = applyOutcome(pendingRule, 0.9);
+    assert.equal(updated.status, "candidate", "first outcome on a pending rule must promote it to candidate");
+  });
+
+  it("a pending → candidate transition requires further outcomes before active promotion", () => {
+    let r = rule({ status: "pending" as import("./learning-rule").RuleStatus, outcomeCount: 0, successRate: null });
+    r = applyOutcome(r, 0.9); // pending → candidate
+    assert.equal(r.status, "candidate", "after one outcome: candidate");
+    // Not yet enough outcomes (MIN_OUTCOMES=3): stays candidate
+    r = applyOutcome(r, 0.9);
+    assert.equal(r.status, "candidate", "two outcomes: still candidate (not enough for promotion)");
+    r = applyOutcome(r, 0.9);
+    assert.equal(r.status, "active", "three outcomes above PROMOTE_RATE: promoted to active");
+  });
+});
+
+describe("Phase 7 (d): coverage-anchored promotion governance", () => {
+  it("candidate rule is promoted when coverage credit is confirmed (coverageCreditConfirmed=true)", () => {
+    // Build a candidate rule at the promotion threshold.
+    let r = rule({ status: "candidate", outcomeCount: 0, successRate: null });
+    for (let i = 0; i < 3; i++) r = applyOutcome(r, 0.7, true); // confirmed credit each time
+    assert.equal(r.status, "active", "promotion must proceed when coverage credit is confirmed");
+  });
+
+  it("candidate rule is NOT promoted when coverage is measured but no credit (coverageCreditConfirmed=false)", () => {
+    let r = rule({ status: "candidate", outcomeCount: 0, successRate: null });
+    // Apply enough outcomes at the promotion rate — but with no coverage credit.
+    for (let i = 0; i < 5; i++) r = applyOutcome(r, 0.7, false);
+    assert.equal(r.status, "candidate", "promotion must be blocked when coverage measured zero credit");
+  });
+
+  it("candidate rule IS promoted when coverage is unmeasurable (coverageCreditConfirmed=null) — non-blocking", () => {
+    let r = rule({ status: "candidate", outcomeCount: 0, successRate: null });
+    for (let i = 0; i < 3; i++) r = applyOutcome(r, 0.7, null); // null = unmeasured
+    assert.equal(r.status, "active", "promotion must proceed when coverage is not measurable (flywheel turns for all apps)");
+  });
+
+  it("demotion (active → deprecated) is NOT gated on coverage credit", () => {
+    // Start an active rule with a modest successRate and fold in enough bad outcomes (score=0)
+    // to push the running mean below DEMOTE_RATE (0.3). 20 bad outcomes from successRate=0.8
+    // bring the mean well below 0.3. coverageCreditConfirmed=false must not block demotion.
+    let r = rule({ status: "active", outcomeCount: 3, successRate: 0.8 });
+    for (let i = 0; i < 20; i++) r = applyOutcome(r, 0.0, false); // bad outcomes + no coverage credit
+    assert.equal(r.status, "deprecated", "demotion must happen regardless of coverage credit");
+  });
+});

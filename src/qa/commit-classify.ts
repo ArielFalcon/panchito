@@ -16,6 +16,7 @@ export interface CommitIntent {
   type: CommitType;
   breaking: boolean;
   message: string; // first line (what the agent uses as intent)
+  body?: string; // the commit message body (lines after the subject) — the richest statement of intent
   changedFiles: string[]; // the agent derives the scope/area from these
 }
 
@@ -46,6 +47,9 @@ const DEFAULT_ACTION: Record<CommitType, CommitAction> = {
 export function classifyCommit(message: string, diff: string): CommitClassification {
   const { type, breaking } = parseHeader(message);
   const firstLine = (message.split("\n")[0] ?? "").trim();
+  // The body (paragraphs after the subject) is the richest human statement of intent — what changed
+  // and WHY. The subject alone is often too terse to derive a concrete test objective from.
+  const body = message.split("\n").slice(1).join("\n").trim();
   const changedFiles = parseChangedFiles(diff);
   // Behavior can change in code (logic keywords) OR in config-as-code that the source-extension
   // logic check is blind to — a Spring application.yml/.properties setting under a chore/build
@@ -67,7 +71,7 @@ export function classifyCommit(message: string, diff: string): CommitClassificat
     reason = `message '${type}' expected no tests, but the diff adds ${what} → escalated to generate`;
   }
 
-  return { type, breaking, message: firstLine, changedFiles, hasLogicChange, contradiction, action, reason };
+  return { type, breaking, message: firstLine, body: body || undefined, changedFiles, hasLogicChange, contradiction, action, reason };
 }
 
 const TYPES = new Set<string>([

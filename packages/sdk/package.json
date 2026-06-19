@@ -1,0 +1,14 @@
+{
+  "name": "@ai-pipeline/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Typed client SDK for the ai-pipeline orchestrator control API. Types are generated from contract/openapi.json (the same artifact panchito's Go client consumes); only the transport + SSE layer is hand-written.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}
