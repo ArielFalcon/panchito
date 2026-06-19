@@ -202,8 +202,9 @@ export async function startScopedEventStream(
       // session so each generation cycle gets its own counts. Observability only.
       const reexKind = reexploreKindFromEvent(raw);
       if (reexKind) {
-        const sid = (raw.properties?.part as { sessionID?: string } | undefined)?.sessionID;
-        if (sid) reexploreTracker.record(sid, reexKind);
+        // Pass callID so the tracker dedups re-streamed updates for one tool call (a part emits many).
+        const part = raw.properties?.part as { sessionID?: string; callID?: string } | undefined;
+        if (part?.sessionID) reexploreTracker.record(part.sessionID, reexKind, part.callID);
       }
 
       // Rich contract RunEvents (agent.activity/plan.updated/…) from the RAW event,
@@ -780,14 +781,25 @@ export async function runOpencode(
     // navigate/snapshot is REDUNDANT — surface it so RE-1 non-compliance is visible in the logs.
     const reex = reexploreTracker.snapshot(session.id);
     if (reex.total > 0) {
-      opts?.onProgress?.(
-        `[qa] re-exploration this cycle: ${reex.navigate} navigate, ${reex.snapshot} snapshot, ${reex.serena} serena`,
-      );
-      if ((input.contextPack || input.domSnapshot) && reex.navigate + reex.snapshot > 0) {
-        console.warn(
-          `[qa] WARNING: agent ran ${reex.navigate + reex.snapshot} browser navigate/snapshot call(s) despite ` +
-            `injected grounding — RE-1 directive ignored or the route was uncovered.`,
-        );
+      const grounded = Boolean(input.contextPack || input.domSnapshot);
+      const browserCalls = reex.navigate + reex.snapshot;
+      // Label the turn: a FIRST pass is EXPECTED to explore/read heavily; only a REGEN with high counts
+      // is the re-exploration waste RE-1 targets. Without this the persisted counts are ambiguous.
+      const turnKind =
+        input.fixCases?.length || input.reviewCorrections?.length || input.coverageGap ? "regen" : "first-pass";
+      // C5: when grounding was present a non-zero browser count is a SIGNAL, not a proven violation —
+      // it is either RE-1 non-compliance OR a legitimately-uncovered route (the anti-blinding escape).
+      // We cannot tell which without per-route coverage, so qualify it rather than alarm.
+      const summary =
+        `re-exploration this cycle (${turnKind}): ${reex.navigate} navigate, ${reex.snapshot} snapshot, ${reex.serena} serena` +
+        (grounded && browserCalls > 0
+          ? ` — ${browserCalls} browser call(s) WITH grounding present (expected ~0 after RE-1; non-zero = either non-compliance or an uncovered route)`
+          : "");
+      opts?.onProgress?.(`[qa] ${summary}`);
+      // C4: persist durably to the run history so re-exploration can be compared across runs (the
+      // plan's decision gate) instead of being lost in stderr. Best-effort — telemetry must not fail a run.
+      if (input.runId) {
+        try { appendLog(input.runId, `[telemetry] ${summary}`); } catch { /* advisory */ }
       }
     }
     reexploreTracker.clear(session.id);

@@ -17,14 +17,18 @@ export interface ReexploreCounts {
   total: number;
 }
 
-// Serena's orientation / blast-radius tools (project activation + symbol navigation).
-const SERENA_RE = /(activate_project|find_referencing_symbols|find_symbol|get_symbols_overview)/i;
+// Serena's orientation / blast-radius surface — symbol navigation AND the read/search tools, since
+// regen-discipline forbids "re-skim the repository / re-read unchanged code", not just symbol lookups.
+const SERENA_RE =
+  /(activate_project|find_referencing_symbols|find_symbol|get_symbols_overview|read_file|search_for_pattern|find_file|list_dir)/i;
 
 // Classify a raw tool name as a re-exploration tool, or null. Matches even when an MCP namespaces the
 // tool id (e.g. "mcp__playwright__browser_snapshot"). browser_click/type are INTERACTION, not
 // re-exploration, so they return null.
 export function reexploreToolKind(tool: string): ReexploreKind | null {
-  if (/browser_navigate/i.test(tool)) return "navigate";
+  // `(?!_)` excludes browser_navigate_back / _forward (history INTERACTION, not orientation) while
+  // still matching `browser_navigate` and MCP-prefixed `…__browser_navigate`.
+  if (/browser_navigate(?!_)/i.test(tool)) return "navigate";
   if (/browser_snapshot/i.test(tool)) return "snapshot";
   if (SERENA_RE.test(tool)) return "serena";
   return null;
@@ -36,13 +40,15 @@ interface PartLike {
   state?: { status?: string };
 }
 
-// Extract the re-exploration kind from a raw OpenCode event — only a COMPLETED tool part counts (a
-// tool emits `running` then `completed`; counting `completed` only avoids double-counting one call).
+// Extract the re-exploration kind from a raw OpenCode event — only a TERMINAL tool part counts
+// (`completed` OR `error`: a failed navigation still happened and still burned time). `running` and
+// `pending` are skipped; the tracker dedups by callID so a re-streamed terminal update counts once.
 export function reexploreKindFromEvent(event: RawOpencodeEvent): ReexploreKind | null {
   if (event.type !== "message.part.updated") return null;
   const part = event.properties?.part as PartLike | undefined;
   if (!part || part.type !== "tool" || !part.tool) return null;
-  if (part.state?.status !== "completed") return null;
+  const status = part.state?.status;
+  if (status !== "completed" && status !== "error") return null;
   return reexploreToolKind(part.tool);
 }
 
@@ -51,8 +57,18 @@ export function reexploreKindFromEvent(event: RawOpencodeEvent): ReexploreKind |
 // and runOpencode (which reads + logs + clears at the end of a turn).
 export class ReexploreTracker {
   private counts = new Map<string, ReexploreCounts>();
+  private seen = new Map<string, Set<string>>(); // sessionId → callIDs already counted (dedup)
 
-  record(sessionId: string, kind: ReexploreKind): void {
+  // `callId` (the tool part's callID) dedups re-streamed terminal updates for ONE tool call: a part
+  // emits many `message.part.updated` events, so without this the same navigate/serena counts N times.
+  // Calls without a callId fall back to counting every record (no dedup key available).
+  record(sessionId: string, kind: ReexploreKind, callId?: string): void {
+    if (callId) {
+      const seenForSession = this.seen.get(sessionId) ?? new Set<string>();
+      if (seenForSession.has(callId)) return;
+      seenForSession.add(callId);
+      this.seen.set(sessionId, seenForSession);
+    }
     const c = this.counts.get(sessionId) ?? { navigate: 0, snapshot: 0, serena: 0, total: 0 };
     c[kind] += 1;
     c.total += 1;
@@ -66,6 +82,7 @@ export class ReexploreTracker {
 
   clear(sessionId: string): void {
     this.counts.delete(sessionId);
+    this.seen.delete(sessionId);
   }
 }
 

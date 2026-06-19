@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPrompt } from "./prompts";
+import { buildPrompt, buildPromptAssembled } from "./prompts";
 import type { OpencodeRunInput } from "./opencode-client";
 import type { QaCase } from "../types";
 
@@ -130,5 +130,56 @@ test("RE-1 regen-discipline: a FIRST-PASS (non-regen) turn keeps full orientatio
   assert.ok(
     !text.includes("Re-generation turn:"),
     "a first-pass turn must not carry the regen-discipline suppression",
+  );
+});
+
+// ── Judgment-day fixes (RE-1 efficacy hardening) ──────────────────────────────
+
+// JD-C1: the task's "Scope budget" re-commanded find_referencing_symbols on every diff regen,
+// directly contradicting regen-discipline. Gate it on the first pass only.
+test("JD-C1: a diff RE-gen prompt does NOT re-command the blast-radius scan (no contradiction)", () => {
+  const regen = buildPrompt(mkInput({ fixCases: [failingCase], contextPack: "## Context Pack\n\nDOM" }));
+  assert.ok(!regen.includes("Read ONLY the changed symbols"), "regen must not re-command find_referencing_symbols");
+  const firstPass = buildPrompt(mkInput());
+  assert.ok(firstPass.includes("Read ONLY the changed symbols"), "the first pass keeps the scope budget");
+});
+
+// JD-C3: hasInjectedGrounding is a coarse boolean; the grounding may not cover the failing route.
+// The agent must be explicitly told to navigate an uncovered route rather than guess blindly.
+test("JD-C3: a grounded RE-gen prompt MANDATES navigating a route absent from the grounding (anti-blinding)", () => {
+  const text = buildPrompt(mkInput({ fixCases: [failingCase], contextPack: "## Context Pack\n\nDOM" }));
+  assert.ok(
+    text.includes("you MUST still browser_navigate that specific route"),
+    "the agent must navigate an uncovered route, never guess its selectors from incomplete grounding",
+  );
+});
+
+// JD-S-A4: the serena suppression was absolute; a fix may legitimately need a symbol not in the brief.
+test("JD-SA4: regen-discipline carves out reading a symbol the grounding lacks", () => {
+  const text = buildPrompt(mkInput({ fixCases: [failingCase] }));
+  assert.ok(
+    text.includes("read ONLY that symbol"),
+    "the serena suppression must allow reading a symbol absent from the grounding",
+  );
+});
+
+// JD-C2: regen-discipline was VOLATILE, so it shed before the (TASK-band) command it overrides.
+// Moving it to the stable-prefix band makes it render before the volatile context-pack, proving it
+// sheds no earlier than the volatile/task content it must outlive.
+test("JD-C2: regen-discipline is in the stable band (renders before the volatile context-pack)", () => {
+  const a = buildPromptAssembled(mkInput({ fixCases: [failingCase], contextPack: "## CTXPACK-MARKER" }));
+  const iRegen = a.text.indexOf("do NOT re-run find_referencing_symbols");
+  const iPack = a.text.indexOf("CTXPACK-MARKER");
+  assert.ok(iRegen >= 0 && iPack >= 0, "both regen-discipline and the context-pack must be present");
+  assert.ok(iRegen < iPack, "regen-discipline (stable) must render before the volatile context-pack");
+});
+
+// JD-R2: the failure-sourced fix branch is also grounded (the captured failure tree), so it shares the
+// anti-blinding gap — a fix that must touch a route NOT in that tree needs the same escape.
+test("JD-R2: the failure-sourced fix branch carries the anti-blinding escape too", () => {
+  const text = buildPrompt(mkInput({ fixCases: [failingCase], domSnapshot: "button: Add Owner", failureSourced: true }));
+  assert.ok(
+    text.includes("you MUST still browser_navigate that specific route"),
+    "even a failure-sourced fix must navigate a route absent from the captured failure tree",
   );
 });

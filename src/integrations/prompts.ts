@@ -446,6 +446,13 @@ export function buildExplorerPrompt(input: OpencodeRunInput): string {
 //
 // Phase 1b: internally uses the ContextAssembler (P3 canonical order fix). Return type
 // is unchanged (string). Use buildPromptAssembled() to get the sectionSizes map for telemetry.
+// JD-C3: `hasInjectedGrounding` is a coarse boolean — the injected grounding (Context Pack ≤6 routes /
+// failure DOM ≤4 routes) may NOT cover the route a regen must touch. To avoid suppressing navigation
+// into a blind/wrong fix, every grounded regen branch carries this explicit anti-blinding escape.
+const GROUNDING_UNCOVERED_ESCAPE =
+  `If a route you must touch is NOT represented in the injected grounding above, you MUST still ` +
+  `browser_navigate that specific route before writing its selectors — never guess them.`;
+
 export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
   const isGenerationMode = input.mode !== "context";
   const openapiHint = Array.isArray(input.openapi) ? input.openapi.join(", ") : input.openapi;
@@ -635,6 +642,7 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
               `1. Read the test file to understand what it asserts`,
               `2. Consult ONLY the GROUND TRUTH tree above — do NOT navigate or snapshot the live page.`,
               `   The tree above is the page AT THE FAILURE POINT, not the current live state.`,
+              `   ${GROUNDING_UNCOVERED_ESCAPE}`,
               `3. Fix the ROOT CAUSE, guided by the error type:`,
               `   - "strict mode violation" → scope the selector to a section first`,
               `   - "locator.click: … not found" → the element doesn't exist; check role/label in the GROUND TRUTH tree`,
@@ -646,6 +654,7 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
           ? [
               `Fix from the injected grounding above (Context Pack / DOM tree) — do NOT navigate to re-derive`,
               `a route it already covers; navigate ONLY a route absent from the injected grounding.`,
+              GROUNDING_UNCOVERED_ESCAPE,
               `1. Read the test file to understand what it asserts`,
               `2. Resolve the failing selector/assertion against the injected grounding above`,
               `3. Fix the ROOT CAUSE, guided by the error type:`,
@@ -682,7 +691,7 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
         `An independent reviewer REJECTED the previous specs. Fix EACH item below precisely;`,
         `do NOT rewrite specs that were not flagged.`,
         hasInjectedGrounding
-          ? `Re-verify against the injected grounding above (Context Pack / DOM tree) before editing — do NOT re-navigate a route it already covers.`
+          ? `Re-verify against the injected grounding above (Context Pack / DOM tree) before editing — do NOT re-navigate a route it already covers. ${GROUNDING_UNCOVERED_ESCAPE}`
           : `Where a fix concerns a selector or an assertion, re-verify it against the live DOM with the Playwright MCP before editing.`,
         ``,
         ...input.reviewCorrections.map((c) => `- ${c}`),
@@ -702,6 +711,7 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
         ...(hasInjectedGrounding
           ? [
               `Resolve any new selectors from the injected grounding above — do NOT re-navigate routes it already covers.`,
+              GROUNDING_UNCOVERED_ESCAPE,
               ``,
             ]
           : []),
@@ -724,6 +734,7 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
         `Re-generation turn: the blast radius was already explored and distilled above. Do NOT re-activate`,
         `serena, do NOT re-run find_referencing_symbols, do NOT re-skim the repository or re-read unchanged`,
         `code. Work from the grounding already in this prompt and change only what the correction requires.`,
+        `(One exception: if a correction names a specific symbol that is NOT in the grounding above, read ONLY that symbol.)`,
         ``,
       ].join("\n")
     : "";
@@ -742,6 +753,10 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
   return assemble([
     // STABLE prefix: working rules (mode-specific but stable for the generator role per session).
     section("working-rules", "stable-prefix", workingRulesContent, { priority: 1, cacheable: true }),
+    // JD-C2: regen-discipline in the STABLE band (not volatile) so it sheds no earlier than the
+    // navigate/serena commands it overrides — a volatile placement shed FIRST under budget pressure,
+    // silently no-opping RE-1 exactly on the largest prompts. Renders right after working-rules.
+    ...(regenDisciplineContent ? [section("regen-discipline", "stable-prefix", regenDisciplineContent, { priority: 2 })] : []),
     // SEMI-STABLE: architecture map and exploration brief (change between runs, stable within).
     ...(archMapContent ? [section("arch-map", "semi-stable", archMapContent, { priority: 1, cacheable: true })] : []),
     ...(contextBriefContent ? [section("context-brief", "semi-stable", contextBriefContent, { priority: 2 })] : []),
@@ -755,8 +770,6 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
     // before the diff. Assembly POSITION is unchanged (still volatile, near the task); only the shed
     // precedence moves so the diff/task content is dropped before the unrecoverable pack.
     ...(contextPackContent ? [section("context-pack", "volatile", contextPackContent, { priority: 0, shedAs: "critical-recap" })] : []),
-    // RE-1: regen-discipline near the top of VOLATILE so "do not re-orient" is salient on regen turns.
-    ...(regenDisciplineContent ? [section("regen-discipline", "volatile", regenDisciplineContent, { priority: 0 })] : []),
     // VOLATILE: grounding (DOM snapshot — priority 1 within VOLATILE so it's first and the
     // selectorContradictions section can reference "the tree above" correctly).
     ...(domContent ? [section("dom-snapshot", "volatile", domContent, { priority: 1 })] : []),
@@ -1030,13 +1043,25 @@ function buildTask(input: OpencodeRunInput): string {
     `backend behaviour and vice-versa. If the map is missing or stale, note the`,
     `limitation explicitly in your verdict note.`,
     ``,
-    `## Scope budget (diff mode — do NOT over-work)`,
-    `The blast radius IS your budget. This is ONE commit, so keep generation fast and focused:`,
-    `- Read ONLY the changed symbols and their direct callers/callees (find_referencing_symbols).`,
-    `- Do NOT read the whole repository, the entire e2e suite, or unrelated flows/files.`,
-    `- Read existing specs ONLY for the one or two flows this commit actually touches.`,
-    `- Explore ONLY the page(s) the change affects — not the whole app.`,
-    `A handful of focused specs is the right output for a single-commit diff, not a suite rewrite.`,
+    // JD-C1: the first pass scopes the blast radius (serena + page exploration). A RE-generation pass
+    // already has that grounding distilled above and is governed by the regen-discipline section —
+    // re-commanding `find_referencing_symbols` / "explore the page" here would CONTRADICT it and let
+    // the agent justify re-exploring. So the scope-budget orientation lines are first-pass only.
+    ...(isReGen
+      ? [
+          `## Scope (re-generation pass)`,
+          `Change ONLY what the correction/coverage-gap above requires. Do not broaden scope or re-survey`,
+          `the repo — work from the grounding already in this prompt.`,
+        ]
+      : [
+          `## Scope budget (diff mode — do NOT over-work)`,
+          `The blast radius IS your budget. This is ONE commit, so keep generation fast and focused:`,
+          `- Read ONLY the changed symbols and their direct callers/callees (find_referencing_symbols).`,
+          `- Do NOT read the whole repository, the entire e2e suite, or unrelated flows/files.`,
+          `- Read existing specs ONLY for the one or two flows this commit actually touches.`,
+          `- Explore ONLY the page(s) the change affects — not the whole app.`,
+          `A handful of focused specs is the right output for a single-commit diff, not a suite rewrite.`,
+        ]),
   ].join("\n");
 }
 

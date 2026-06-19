@@ -65,3 +65,51 @@ test("RE-2 tracker: clear resets a session's counts", () => {
   t.clear("s1");
   assert.deepEqual(t.snapshot("s1"), { navigate: 0, snapshot: 0, serena: 0, total: 0 });
 });
+
+// ── Judgment-day fixes (RE-2 correctness) ─────────────────────────────────────
+
+// JD-S-B4: a tool part re-streams many "completed" updates (agent-activity.ts dedups for this very
+// reason). The RAW tap sits BEFORE that dedup, so counts must be deduped by callID or they inflate.
+test("JD-S-B4 tracker: the same tool call (callID) is counted ONCE across re-emitted updates", () => {
+  const t = new ReexploreTracker();
+  t.record("s1", "navigate", "call-1");
+  t.record("s1", "navigate", "call-1"); // re-emitted completed update for the SAME call
+  t.record("s1", "navigate", "call-2");
+  assert.deepEqual(t.snapshot("s1"), { navigate: 2, snapshot: 0, serena: 0, total: 2 });
+});
+
+test("JD-S-B4 tracker: callID dedup is scoped per session", () => {
+  const t = new ReexploreTracker();
+  t.record("s1", "serena", "call-1");
+  t.record("s2", "serena", "call-1"); // same callID, different session → distinct
+  assert.equal(t.snapshot("s1").serena, 1);
+  assert.equal(t.snapshot("s2").serena, 1);
+});
+
+// JD-C5: a browser_navigate that FAILS ends in the terminal "error" state, not "completed". It still
+// happened (still burned time), so it must be counted — otherwise RE-2 under-reports the exact
+// (often uncovered) routes of interest.
+test("JD-C5 event extractor: an ERROR-terminal tool part is counted", () => {
+  const raw = {
+    type: "message.part.updated",
+    properties: { part: { type: "tool", tool: "browser_navigate", sessionID: "s1", state: { status: "error" } } },
+  };
+  assert.equal(reexploreKindFromEvent(raw), "navigate");
+});
+
+// JD-C6: regen-discipline forbids "re-skim the repository / re-read unchanged code", but serena's read
+// surface is more than the 4 symbol tools — read_file/search_for_pattern/find_file/list_dir are also
+// repo re-exploration and must count, or RE-2 under-measures what RE-1 targets.
+test("JD-C6 classifier: serena read/search tools also count as re-exploration", () => {
+  for (const tool of ["read_file", "search_for_pattern", "find_file", "list_dir"]) {
+    assert.equal(reexploreToolKind(tool), "serena", `${tool} must count as serena re-exploration`);
+  }
+});
+
+// JD-R2: browser_navigate_back is a HISTORY interaction (going back), not orientation re-exploration.
+// The unanchored /browser_navigate/ matcher wrongly counted it, polluting the navigate signal.
+test("JD-R2 classifier: browser_navigate_back is interaction, NOT navigation re-exploration", () => {
+  assert.equal(reexploreToolKind("browser_navigate_back"), null);
+  assert.equal(reexploreToolKind("browser_navigate"), "navigate"); // the real navigate still matches
+  assert.equal(reexploreToolKind("mcp__playwright__browser_navigate"), "navigate"); // and MCP-prefixed
+});
