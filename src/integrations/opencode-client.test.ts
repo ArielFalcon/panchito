@@ -19,6 +19,7 @@ import {
   upsertManifest,
   generateParallel,
   runOpencodeParallel,
+  agentTimeout,
   buildWorkerPrompt,
   buildPlanPrompt,
   buildExplorerPrompt,
@@ -1905,13 +1906,15 @@ test("W1: buildPrompt omits the contradiction section when none are provided", (
   assert.doesNotMatch(p, /Lever-2 selector contradictions/i);
 });
 
-test("3.11(c) buildPlanPrompt diff mode instructs verified-route declaration via Playwright MCP", () => {
+test("3.11(c) F3: buildPlanPrompt diff mode declares routes from code, NOT via browser navigation", () => {
   const p = buildPlanPrompt(diffPlanInput);
-  // The planner must discover and verify post-interaction routes (Lever-3).
-  assert.match(p, /verified.*true/i);
-  assert.match(p, /Lever-3 route verification/i);
-  // The instruction explicitly says to use the Playwright MCP.
-  assert.match(p, /Playwright MCP/i);
+  // F3 removed the Lever-3 route-verification step: the planner no longer navigates or opens a browser.
+  assert.doesNotMatch(p, /Lever-3 route verification/);
+  assert.doesNotMatch(p, /Playwright MCP/i);
+  // It STILL declares candidate routes in the brief so the orchestrator can capture their live DOM.
+  assert.match(p, /routes\[\]/);
+  assert.match(p, /capture the live DOM/i);
+  assert.match(p, /do NOT navigate/i);
 });
 
 test("3.11(c) buildPlanPrompt complete mode does NOT have the Lever-3 route instruction (diff-mode only)", () => {
@@ -2634,9 +2637,10 @@ test("Phase 5 (c): runOpencodeParallel for manual mode with >=2 objectives dispa
   assert.equal(result.specs.length, 2, "two specs returned");
 });
 
-test("Phase 5 (d): per-objective grounding fallback — ungrounded UI objective (verified route, no DOM) routes to strong agent", async () => {
-  // An objective with a brief containing at least one verified route is "expecting" orchestrator DOM
-  // capture. If the orchestrator did NOT capture DOM (workerDom absent), it is ungrounded → strong agent.
+test("Phase 5 (d): per-objective grounding fallback — UI objective with routes but no captured DOM routes to strong agent", async () => {
+  // F1: grounding keys on captured DOM, not the `verified` flag. A UI objective whose brief has routes
+  // but for which NO DOM was captured cannot be transcribed by the browserless worker → strong agent.
+  // A UI objective with NO routes self-guides on a worker (the planner promised no route to render).
   const agents: string[] = [];
   const stub: AgentDeps = {
     open: async (agent) => {
@@ -2645,8 +2649,8 @@ test("Phase 5 (d): per-objective grounding fallback — ungrounded UI objective 
         id: agent,
         prompt: async (text: string) => {
           if (agent === "qa-generator" && text.includes("PLANNING ONLY")) {
-            // Two objectives: one with a verified route (will be ungrounded without DOM),
-            // one without a verified route (grounded — worker proceeds normally).
+            // Two objectives: 'owners' HAS a route (no DOM captured below → ungrounded → strong agent),
+            // 'pets' has NO route (→ grounded, self-guides on a worker).
             return JSON.stringify({
               objectives: [
                 {
@@ -2658,8 +2662,8 @@ test("Phase 5 (d): per-objective grounding fallback — ungrounded UI objective 
                     builtForSha: "abc123",
                     objective: "list owners",
                     blastRadius: [{ symbol: "OwnerList", file: "src/owners.ts", role: "lists owners" }],
-                    // This route is verified → objective expects DOM capture.
-                    routes: [{ path: "/#!/owners", verified: true }],
+                    // Has a route but no DOM is captured (captureRoutesDom absent) → ungrounded.
+                    routes: [{ path: "/#!/owners", verified: false }],
                     feBe: [],
                     contracts: [],
                     risks: [],
@@ -2674,8 +2678,8 @@ test("Phase 5 (d): per-objective grounding fallback — ungrounded UI objective 
                     builtForSha: "abc123",
                     objective: "list pets",
                     blastRadius: [{ symbol: "PetList", file: "src/pets.ts", role: "lists pets" }],
-                    // No verified routes → does NOT expect DOM capture → grounded to worker.
-                    routes: [{ path: "/#!/pets", verified: false }],
+                    // No routes in the brief → grounded → self-guides on a worker (no DOM needed).
+                    routes: [],
                     feBe: [],
                     contracts: [],
                     risks: [],
@@ -2694,25 +2698,26 @@ test("Phase 5 (d): per-objective grounding fallback — ungrounded UI objective 
     },
   };
   const fakeFs: ManifestFs = { read: () => null, write: () => {} };
-  // captureRoutesDom is NOT provided (no DOM capture) → owners is ungrounded, pets is grounded.
+  // captureRoutesDom is NOT provided (no DOM capture) → 'owners' (has a route) is ungrounded, 'pets'
+  // (no route) is grounded.
   const result = await runOpencodeParallel(
     { ...input, mode: "diff", intent: undefined },
     stub,
     { specExists: () => true, captureRoutesDom: undefined },
     fakeFs,
   );
-  // 'pets' objective has no verified routes → grounded → dispatched to qa-worker.
+  // 'pets' objective has no routes → grounded → dispatched to qa-worker (self-guides).
   assert.ok(agents.includes("qa-worker"), "grounded objective dispatched to qa-worker");
-  // 'owners' objective has a verified route but no DOM captured → ungrounded → qa-generator fallback.
+  // 'owners' objective has a route but no DOM captured → ungrounded → qa-generator fallback.
   assert.equal(agents.filter((a) => a === "qa-generator").length >= 2, true, "ungrounded objective dispatched to strong agent (qa-generator) in addition to the planner");
   // Both specs must appear in the result (merged from worker + strong-agent).
   assert.ok(result.specs.includes("flows/pets.spec.ts"), "grounded (worker) spec present");
   assert.ok(result.specs.includes("flows/owners.spec.ts"), "ungrounded (strong-agent) spec present");
 });
 
-test("Phase 5 (d): per-objective grounding — UI objective with verified route IS grounded when workerDom is captured", async () => {
-  // When the orchestrator captures DOM (workerDom present), even UI objectives with verified routes
-  // are grounded → dispatched to workers, NOT to the strong agent.
+test("Phase 5 (d): per-objective grounding — UI objectives with captured DOM are grounded to workers", async () => {
+  // When the orchestrator captures DOM for an objective's routes (per-route map), the objective is
+  // grounded → dispatched to a worker (transcribes the injected tree), NOT to the strong agent.
   const agents: string[] = [];
   const stub: AgentDeps = {
     open: async (agent) => {
@@ -2732,7 +2737,7 @@ test("Phase 5 (d): per-objective grounding — UI objective with verified route 
                     builtForSha: "abc123",
                     objective: "o",
                     blastRadius: [],
-                    routes: [{ path: "/#!/owners", verified: true }], // verified route
+                    routes: [{ path: "/#!/owners", verified: false }], // a candidate route (verified flag is no longer used)
                     feBe: [],
                     contracts: [],
                     risks: [],
@@ -2747,7 +2752,7 @@ test("Phase 5 (d): per-objective grounding — UI objective with verified route 
                     builtForSha: "abc123",
                     objective: "o",
                     blastRadius: [],
-                    routes: [{ path: "/#!/pets", verified: true }], // verified route
+                    routes: [{ path: "/#!/pets", verified: false }], // a candidate route (verified flag is no longer used)
                     feBe: [],
                     contracts: [],
                     risks: [],
@@ -2764,13 +2769,13 @@ test("Phase 5 (d): per-objective grounding — UI objective with verified route 
     },
   };
   const fakeFs: ManifestFs = { read: () => null, write: () => {} };
-  // captureRoutesDom returns a non-empty DOM → workerDom is set → all objectives are grounded.
+  // captureRoutesDom returns a per-route DOM map → both objectives grounded → dispatched to workers.
   const result = await runOpencodeParallel(
     { ...input, mode: "diff", intent: undefined },
     stub,
     {
       specExists: () => true,
-      captureRoutesDom: async () => "button: Add Owner\nbutton: Add Pet",
+      captureRoutesDom: async (routes) => new Map(routes.map((r) => [r, `route ${r}:\n  button: Add`])),
     },
     fakeFs,
   );
@@ -2779,6 +2784,78 @@ test("Phase 5 (d): per-objective grounding — UI objective with verified route 
   // The strong agent must NOT have been called for generation (only the planner).
   assert.equal(agents.filter((a) => a === "qa-generator").length, 1, "only the planner called qa-generator (no fallback)");
   assert.equal(result.specs.length, 2, "both specs returned");
+});
+
+// ── F2: planner budget — a scoped-mode planner is bounded by its own timeout ─────────────
+test("F2: scoped-mode (diff/manual) planner is bounded by PLANNER_TIMEOUT_MS (240s), brief or not", async () => {
+  // The planner for a scoped mode must NOT inherit the generator's long per-mode budget — that bound is
+  // the fix for the hang that produced 0 specs. Keyed on the MODE, not brief presence (a brief-less
+  // diff/manual planner is still scoped). It stays on qa-generator (the facade maps unknown agent names
+  // back to it anyway); only the timeout differs.
+  const opens: Array<{ agent: string; timeoutMs?: number }> = [];
+  const stub: AgentDeps = {
+    open: async (agent, _cwd, opts) => {
+      opens.push({ agent, timeoutMs: opts?.timeoutMs });
+      return { id: agent, prompt: async () => '{"objectives":[]}', dispose: async () => {} };
+    },
+  };
+  // diff WITHOUT a contextBrief still gets the planner bound (proves the brief-less case is not reverted).
+  await runOpencodeParallel({ ...input, mode: "diff", intent: undefined }, stub);
+  const planner = opens.find((o) => o.agent === "qa-generator");
+  assert.equal(planner?.timeoutMs, 240_000, "scoped-mode planner is bounded by PLANNER_TIMEOUT_MS (240s)");
+});
+
+test("F2: planner keeps the per-mode generator budget when there is NO brief (complete/exhaustive)", async () => {
+  const opens: Array<{ agent: string; timeoutMs?: number }> = [];
+  const stub: AgentDeps = {
+    open: async (agent, _cwd, opts) => {
+      opens.push({ agent, timeoutMs: opts?.timeoutMs });
+      return { id: agent, prompt: async () => '{"objectives":[]}', dispose: async () => {} };
+    },
+  };
+  await runOpencodeParallel({ ...input, mode: "complete", intent: undefined }, stub); // no contextBrief
+  const planner = opens.find((o) => o.agent === "qa-generator");
+  assert.equal(planner?.timeoutMs, agentTimeout("complete"), "brief-less planner keeps the per-mode budget (unchanged)");
+});
+
+test("F1: ungrounded objectives beyond MAX_STRONG_FALLBACK go to PARALLEL blind workers, not the sequential strong agent", async () => {
+  // 5 UI objectives with routes but NO DOM captured (captureRoutesDom undefined) → all ungrounded. The
+  // first 3 take the (sequential) strong-agent recovery; the 2 overflow must be dispatched to PARALLEL
+  // blind workers so a broad capture failure cannot serialize the whole run.
+  const agents: string[] = [];
+  const mkObj = (n: number) => ({
+    flow: `f${n}`, objective: `o${n}`, symbols: [], needsUi: true,
+    // Non-empty blastRadius so parsePlan keeps the brief (an empty blast radius is dropped, :949) → routes survive.
+    brief: { builtForSha: "abc1234", objective: "o", blastRadius: [{ symbol: `S${n}`, file: "f.ts", role: "r" }], routes: [{ path: `/r${n}`, verified: false }] },
+  });
+  const stub: AgentDeps = {
+    open: async (agent) => {
+      agents.push(agent);
+      return {
+        id: agent,
+        prompt: async (text: string) => {
+          if (agent === "qa-generator" && text.includes("PLANNING ONLY")) {
+            return JSON.stringify({ objectives: [mkObj(1), mkObj(2), mkObj(3), mkObj(4), mkObj(5)] });
+          }
+          if (agent === "qa-generator") return '{"approved":true,"specs":["flows/strong.spec.ts"]}'; // strong-agent fallback
+          if (agent === "qa-worker-code") return '{"spec":""}'; // serena pre-index
+          return '{"spec":"flows/w.spec.ts"}'; // blind worker
+        },
+        dispose: async () => {},
+      };
+    },
+  };
+  const fakeFs: ManifestFs = { read: () => null, write: () => {} };
+  await runOpencodeParallel(
+    { ...input, mode: "diff", intent: undefined },
+    stub,
+    { specExists: () => true, captureRoutesDom: undefined },
+    fakeFs,
+  );
+  // 2 overflow objectives → parallel qa-worker (the key behavior: no serialization beyond the cap of 3).
+  assert.equal(agents.filter((a) => a === "qa-worker").length, 2, "2 overflow ungrounded objectives → parallel blind workers");
+  // planner + 3 bounded strong-agent fallbacks (>=4; runOpencode may open its own sessions internally).
+  assert.ok(agents.filter((a) => a === "qa-generator").length >= 4, "planner + 3 bounded strong-agent fallbacks");
 });
 
 // ── Slice F Phase 2: budget wiring end-to-end through the *Assembled builders ─

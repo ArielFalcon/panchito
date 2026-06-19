@@ -17,6 +17,7 @@ import type { UsageSnapshot } from "../qa/usage";
 import { CommitIntent } from "../qa/commit-classify";
 import type { ArchitectureContext } from "../qa/context";
 import { coerceExplorationBrief, parseExplorationBrief, type ExplorationBrief } from "../qa/exploration-brief";
+import { normalizeRoutes, MAX_ROUTES } from "../qa/dom-snapshot";
 import { sanitizeText } from "../orchestrator/sanitizer";
 import { ActivityRouter } from "./agent-activity";
 import { mapOpencodeEvent, eventRunId } from "./activity-mapper";
@@ -830,9 +831,26 @@ export interface ReviewResult {
 // it must never inherit the generator's 25-minute worst-case budget: a hung reviewer would
 // add that whole window to the run before the loop fails closed.
 const REVIEWER_TIMEOUT_MS = Number(process.env.OPENCODE_REVIEWER_TIMEOUT_MS) || 6 * 60 * 1000;
-// The explorer is a cheap read-only PRE-pass; cap it well below the generator/diff budget so a hung
+// The explorer is a read-only PRE-pass; cap it well below the generator/diff budget so a hung
 // explorer cannot hold the sequential queue for the full window before the generator even starts.
-const EXPLORER_TIMEOUT_MS = Number(process.env.OPENCODE_EXPLORER_TIMEOUT_MS) || 90 * 1000;
+// 90s proved too tight on large microservice monorepos (petclinic): the read-only brief needs room
+// to finish; 240s still sits far under the generator's 25-minute worst case.
+const EXPLORER_TIMEOUT_MS = Number(process.env.OPENCODE_EXPLORER_TIMEOUT_MS) || 240 * 1000;
+// The fan-out planner for a SCOPED mode (diff/manual — one commit or one guidance string) derives
+// objectives from the brief + code; it must NOT navigate (F3), so it needs nowhere near the generator's
+// per-mode budget. Bound it with its OWN deadline: it reads OPENCODE_PLANNER_TIMEOUT_MS, NOT the global
+// OPENCODE_TIMEOUT_MS override (which, set to e.g. 900s, would otherwise let a misbehaving planner
+// consume the generator's whole window — the hang that produced 0 specs). Applied to diff/manual
+// REGARDLESS of whether the explorer brief arrived: a brief-less planner still only widens+plans a
+// single scope, and reverting it to the 5–10 min generator budget would re-open the hang on exactly the
+// monorepos this targets. Matched to EXPLORER_TIMEOUT_MS (240s) — the explorer does the comparable
+// read+widen and needed that much on petclinic — and folded into the dispatcher Math.max below.
+// complete/exhaustive (whole-repo analysis, no scope) keep the per-mode generator budget.
+const PLANNER_TIMEOUT_MS = Number(process.env.OPENCODE_PLANNER_TIMEOUT_MS) || 240 * 1000;
+// Cap on how many ungrounded objectives may take the SEQUENTIAL strong-agent recovery path before the
+// run starts serializing. Beyond this, the overflow is dispatched to parallel blind workers instead, so
+// a broad DOM-capture failure (e.g. every route soft-404s on a hash SPA) cannot stall the whole run.
+const MAX_STRONG_FALLBACK = Number(process.env.OPENCODE_MAX_STRONG_FALLBACK) || 3;
 
 export async function reviewIndependently(
   input: ReviewInput,
@@ -1019,7 +1037,7 @@ export interface ParallelWorkerInput {
   objective: string;
   flow: string;
   symbols: string[];
-  needsUi: boolean; // selects qa-worker (with Playwright MCP) vs qa-worker-code (serena only)
+  needsUi: boolean; // selects qa-worker (UI — transcribes the injected a11y tree, browserless) vs qa-worker-code (code-only); BOTH are serena-only, neither has Playwright
   brief?: ExplorationBrief; // Fase 2: the distilled blast radius for this objective (rendered into the worker prompt)
   specFile: string; // orchestrator-assigned path under e2eRelDir (e.g. "flows/checkout.spec.ts")
   repo: string;
@@ -1036,8 +1054,9 @@ export interface ParallelWorkerInput {
 
 // Dispatch each worker objective to a SEPARATE qa-worker session, bounded concurrency.
 // Uses a racing pool: when one worker finishes the next starts immediately — no batch
-// blocked by the slowest member. Selects qa-worker-code (serena only, no Playwright MCP)
-// for objectives that don't need UI navigation, reducing DEV pressure and browser overhead.
+// blocked by the slowest member. BOTH qa-worker (UI) and qa-worker-code (code-only) are
+// browserless (serena only); needsUi only selects the prompt framing — the UI worker
+// transcribes the injected a11y tree, the code worker derives tests from the affected symbols.
 export async function generateParallel(
   workers: ParallelWorkerInput[],
   deps: AgentDeps,
@@ -1124,14 +1143,26 @@ export async function runOpencodeParallel(
     specExists?: (path: string) => boolean;
     // Deterministic DOM grounding for the workers — the orchestrator captures the live a11y tree of
     // the planned routes (Playwright lives on the orchestrator side, so it is injected here, keeping
-    // this agent boundary free of browser code). Best-effort: undefined → workers explore themselves.
-    captureRoutesDom?: (routes: string[]) => Promise<string | undefined>;
+    // this agent boundary free of browser code), returned PER ROUTE (route → formatted block) so each
+    // objective is grounded with only its own routes' DOM. Best-effort: a route absent from the map
+    // got no usable/route-specific DOM, and its objective degrades to the strong agent.
+    captureRoutesDom?: (routes: string[]) => Promise<Map<string, string>>;
   },
   fs: ManifestFs = realManifestFs,
 ): Promise<AgentResult> {
-  const timeoutMs = agentTimeout(input.mode);
-
-  // Phase 1 — PLAN (strong model). Heartbeat while it analyses the whole repo.
+  // Phase 1 — PLAN. For a SCOPED mode (diff/manual) the planner derives objectives from one commit /
+  // one guidance string and must not navigate (F3), so bound it with its OWN deadline
+  // (PLANNER_TIMEOUT_MS), which takes precedence over the global OPENCODE_TIMEOUT_MS so a misbehaving
+  // planner can never consume the generator's whole window (the hang that produced 0 specs). Keyed on
+  // the MODE, not on brief presence: a brief-less diff/manual planner still only plans a single scope —
+  // reverting it to the 5–10 min generator budget would re-open the hang. complete/exhaustive
+  // (whole-repo analysis) keep the per-mode generator budget (unchanged).
+  // NOTE: the planner stays on the qa-generator role — the production AgentDeps is the provider facade,
+  // whose roleForLegacyAgent() maps any unknown agent name back to "primary"→qa-generator, so a
+  // separate "qa-planner" agent would be inert without cross-cutting changes to the provider-agnostic +
+  // Codex role plumbing. The timeout is the fix that matters; F3's prompt already removed navigation.
+  const isScopedPlan = input.mode === "diff" || input.mode === "manual";
+  const timeoutMs = isScopedPlan ? PLANNER_TIMEOUT_MS : agentTimeout(input.mode);
   const planSession = await deps.open("qa-generator", input.mirrorDir, {
     signal: opts?.signal,
     timeoutMs,
@@ -1207,62 +1238,80 @@ export async function runOpencodeParallel(
     }
   }
 
-  // Ground the workers BEFORE they write: capture the live a11y tree of the planned routes ONCE and
-  // hand it to each worker, so a worker TRANSCRIBES real selectors instead of guessing (the #1 failure
-  // class: getByRole roles / nav names that don't exist live). Best-effort — undefined when capture is
-  // unavailable or a route isn't navigable, and the worker falls back to its own Playwright MCP.
-  let workerDom: string | undefined;
+  // Ground the workers BEFORE they write: capture the live a11y tree of the planned routes and hand
+  // each worker ONLY its own objective's DOM (qa-worker has no browser MCP — it transcribes the
+  // injected tree instead of guessing real selectors, the #1 failure class). The whole route union is
+  // rendered ONCE (a shared route is not re-rendered) and returned per-route. Routes come from each
+  // brief's code-derived `routes[]` (the real router paths) — NOT filtered by the planner's `verified`
+  // flag: the planner no longer navigates to set it (F3), so grounding must not depend on it.
+  // Best-effort — a route absent from the map got no usable/route-specific DOM (capture unavailable,
+  // render failed, or a soft-404 shell), and its objective routes to the strong agent below.
+  let domByRoute = new Map<string, string>();
   if (opts?.captureRoutesDom) {
-    // ONLY verified routes (the explorer actually navigated the live DOM) — buildPlanPrompt promises
-    // the orchestrator renders verified routes as ground truth, so an unverified speculative route
-    // must not be rendered and injected as if it were real (it would re-introduce the hallucinated-
-    // selector failure class this grounding exists to prevent).
-    const routes = [...new Set(objectives.flatMap((o) => o.brief?.routes?.filter((r) => r.verified).map((r) => r.path) ?? []).filter((r): r is string => Boolean(r)))];
-    if (routes.length > 0) {
-      workerDom = await opts.captureRoutesDom(routes).catch(() => undefined);
-      if (workerDom) opts?.onProgress?.(`[qa] grounding: captured the live a11y tree for ${routes.length} route(s) → injected into the workers`);
+    const allRoutes = normalizeRoutes(objectives.flatMap((o) => o.brief?.routes?.map((r) => r.path) ?? []).filter((r): r is string => Boolean(r)));
+    if (allRoutes.length > 0) {
+      domByRoute = await opts.captureRoutesDom(allRoutes).catch(() => new Map<string, string>());
+      if (domByRoute.size > 0) opts?.onProgress?.(`[qa] grounding: captured the live a11y tree for ${domByRoute.size}/${allRoutes.length} planned route(s) → injected per-objective`);
     }
   }
 
-  // Phase 2 — FAN-OUT to workers (one spec each), with per-objective grounding check (Phase 5).
+  // Phase 2 — FAN-OUT to workers (one spec each), with per-objective grounding (Phase 5 + F1).
   //
-  // Grounding semantics: a UI objective is "grounded" if:
-  //   (a) the orchestrator captured DOM (workerDom is set), OR
-  //   (b) the planner did NOT verify any routes in its brief (no verified routes → no DOM was
-  //       promised, so the worker self-explores normally), OR
-  //   (c) it is a code-only objective (needsUi:false — no DOM grounding required at all).
+  // Grounding semantics, evaluated PER objective:
+  //   • code-only (needsUi:false) → grounded; no DOM needed at all.
+  //   • UI with NO routes in its brief → grounded; the worker self-guides from the brief hints (the
+  //     planner promised no concrete route to render — today's behavior, unchanged).
+  //   • UI WITH routes, and DOM was captured for >=1 of them → grounded WITH that per-objective DOM.
+  //     (PARTIAL is intentional: some-DOM is strictly better than none for the browserless worker —
+  //     it transcribes the captured routes and marks the rest unverified, the same as the no-DOM path.)
+  //   • UI WITH routes but NONE captured (capture unavailable, render failed, or a soft-404 shell) →
+  //     UNGROUNDED → strong agent (full Playwright MCP) which can navigate to recover — BUT bounded:
+  //     the strong-agent path is SEQUENTIAL, so a broad capture failure (e.g. every route soft-404s on
+  //     a hash SPA) must not serialize the whole plan. Beyond MAX_STRONG_FALLBACK ungrounded objectives
+  //     we stop serializing and dispatch the overflow to PARALLEL workers without DOM (the pre-F1 blind
+  //     path) so the run stays bounded — surfaced loudly.
   //
-  // An objective is "ungrounded" (→ strong-agent fallback) ONLY when the planner explicitly
-  // verified routes (promising orchestrator-captured DOM) but the orchestrator failed to capture
-  // them (workerDom is absent). Dispatching such an objective blind to a lite worker with no
-  // browser MCP is the failure class this fallback exists to prevent. The strong agent has the
-  // full Playwright MCP and can self-navigate to recover.
-  //
-  // This heterogeneous partial fan-out (some objectives to workers, some to the strong agent)
-  // is an explicit Phase-5 design item; results are consolidated in Phase 3 below.
+  // This heterogeneous partial fan-out (some objectives to workers, some to the strong agent) is an
+  // explicit Phase-5 design item; results are consolidated in Phase 3 below.
   const changeType = input.intent?.type ?? input.mode;
-  const grounded: PlanObjective[] = [];
+  const grounded: Array<{ objective: PlanObjective; dom?: string }> = [];
   const ungrounded: PlanObjective[] = [];
   for (const o of objectives) {
-    // Code-only objectives never need DOM — always grounded.
     if (!o.needsUi) {
-      grounded.push(o);
+      grounded.push({ objective: o }); // code-only: never needs DOM
       continue;
     }
-    // Does this objective's planner brief promise verified routes (that the orchestrator should capture)?
-    const hasVerifiedRoutes = Boolean(o.brief?.routes?.some((r) => r.verified));
-    // Grounded when: DOM was captured (workerDom set) OR the planner made no route promise.
-    if (workerDom || !hasVerifiedRoutes) {
-      grounded.push(o);
+    // This objective's own routes, capped per-objective (MAX_ROUTES). The UNION cap (MAX_ROUTES_UNION,
+    // applied + logged in captureDomByRoute) can leave a late objective's route uncaptured → it falls
+    // to the bounded fallback below, never a silent drop.
+    const routes = normalizeRoutes(o.brief?.routes?.map((r) => r.path).filter((r): r is string => Boolean(r)) ?? []).slice(0, MAX_ROUTES);
+    if (routes.length === 0) {
+      grounded.push({ objective: o }); // no route promised → worker self-guides (today's behavior)
+      continue;
+    }
+    const dom = routes.map((r) => domByRoute.get(r)).filter((b): b is string => Boolean(b)).join("\n\n");
+    if (dom) {
+      grounded.push({ objective: o, dom });
     } else {
-      // The planner promised verified routes, but the orchestrator failed to capture DOM.
-      // Dispatch to the strong agent instead of a lite worker without DOM grounding.
       ungrounded.push(o);
-      opts?.onProgress?.(`[qa] grounding: objective '${o.flow}' has verified routes but no captured DOM — routing to strong agent`);
     }
   }
 
-  const workers: ParallelWorkerInput[] = grounded.map((o) => ({
+  // Bound the SEQUENTIAL strong-agent fallback: only the first MAX_STRONG_FALLBACK ungrounded objectives
+  // get strong-agent recovery; a broad capture failure (many ungrounded) must not serialize the plan, so
+  // the overflow is dispatched to PARALLEL workers WITHOUT DOM (they mark selectors unverified — the
+  // pre-F1 blind path). Surfaced loudly: blind specs lean on the static + selector gates downstream.
+  if (ungrounded.length > MAX_STRONG_FALLBACK) {
+    const overflow = ungrounded.splice(MAX_STRONG_FALLBACK);
+    for (const o of overflow) grounded.push({ objective: o });
+    console.warn(`[qa] WARNING: ${overflow.length} ungrounded objective(s) beyond the strong-agent cap (${MAX_STRONG_FALLBACK}) dispatched to PARALLEL workers WITHOUT DOM (blind) to avoid serializing the run — broad DOM-capture failure (e.g. a soft-404 SPA). Flows: ${overflow.map((o) => o.flow).join(", ")}`);
+    opts?.onProgress?.(`[qa] grounding: ${overflow.length} ungrounded objective(s) over the cap → parallel blind workers (run stays bounded)`);
+  }
+  for (const o of ungrounded) {
+    opts?.onProgress?.(`[qa] grounding: objective '${o.flow}' has routes but no captured DOM — routing to strong agent`);
+  }
+
+  const workers: ParallelWorkerInput[] = grounded.map(({ objective: o, dom }) => ({
     objective: o.objective,
     flow: o.flow,
     symbols: o.symbols,
@@ -1277,7 +1326,7 @@ export async function runOpencodeParallel(
     appName: input.appName,
     mode: input.mode,
     learnedRules: input.learnedRules,
-    ...(workerDom ? { domSnapshot: workerDom } : {}),
+    ...(dom ? { domSnapshot: dom } : {}),
     runId: input.runId,
   }));
 
@@ -1291,7 +1340,7 @@ export async function runOpencodeParallel(
     // (not only buried in the result note): when review is off, the run can otherwise report
     // approved over a partial suite, so the missing coverage must be visible to the operator.
     const writtenFlows = new Set(workerResults.map((r) => r.flow));
-    const failedFlows = grounded.filter((o) => !writtenFlows.has(o.flow)).map((o) => o.flow);
+    const failedFlows = grounded.filter(({ objective: o }) => !writtenFlows.has(o.flow)).map(({ objective: o }) => o.flow);
     console.warn(`[qa] WARNING: ${errors.length} worker(s) failed — these planned flows are NOT in the suite: ${failedFlows.join(", ") || "(unknown)"}. ${errors.join("; ")}`);
   }
 
@@ -1417,11 +1466,12 @@ export function withUsageSink(
 // was dead in the production strategy path, which always constructs this with no argument).
 export async function defaultAgentDeps(): Promise<AgentDeps> {
   // The undici transport timeout must exceed EVERY per-prompt withTimeout, or it aborts the
-  // request before our own deadline fires. The reviewer and the explorer each have their OWN budget
-  // (REVIEWER_TIMEOUT_MS, EXPLORER_TIMEOUT_MS) independent of the generator's; if an operator sets a
-  // small OPENCODE_TIMEOUT_MS it must NOT drag the transport below any of them. Take the max + headroom.
+  // request before our own deadline fires. The reviewer, the explorer and the planner each have their
+  // OWN budget (REVIEWER_TIMEOUT_MS, EXPLORER_TIMEOUT_MS, PLANNER_TIMEOUT_MS) independent of the
+  // generator's; if an operator sets a small OPENCODE_TIMEOUT_MS (or raises a per-role one) it must NOT
+  // drag the transport below any of them. Take the max + headroom.
   const generatorMax = Number(process.env.OPENCODE_TIMEOUT_MS) || MAX_AGENT_TIMEOUT_MS;
-  const dispatcherTimeoutMs = Math.max(generatorMax, REVIEWER_TIMEOUT_MS, EXPLORER_TIMEOUT_MS) + 30_000;
+  const dispatcherTimeoutMs = Math.max(generatorMax, REVIEWER_TIMEOUT_MS, EXPLORER_TIMEOUT_MS, PLANNER_TIMEOUT_MS) + 30_000;
   await installHttpDispatcher(dispatcherTimeoutMs);
 
   const client = await getSharedClient();

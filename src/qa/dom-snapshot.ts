@@ -37,8 +37,20 @@ export interface CaptureDomDeps {
   render(e2eDir: string, baseUrl: string, routes: string[]): Promise<RouteSnapshot[]>;
 }
 
-const MAX_ROUTES = 4; // a spec rarely targets more; bound the render cost + the prompt size
+export const MAX_ROUTES = 4; // a spec/objective rarely targets more; bound the render cost + the prompt size
 const MAX_NODES_PER_ROUTE = 60; // keep the inlined snapshot compact
+// Bound the TOTAL routes rendered across a whole fan-out plan (the union of every objective's routes).
+// Kept low enough that the union render fits the scaled render budget below (12 × per-route ≈ the cap),
+// so the render finishes rather than getting killed mid-flight (which would lose ALL routes). MAX_ROUTES
+// still caps per objective. A truncated union is LOGGED (never silently dropped) — see captureDomByRoute.
+const MAX_ROUTES_UNION = 12;
+
+// Normalize an explicit route list the way capture does: trim, drop ${…}-interpolated and absolute
+// URLs (not a stable app route), and dedupe. Exported so the fan-out keys its per-objective lookups
+// IDENTICALLY to captureDomByRoute's map keys (a mismatch would silently lose grounding).
+export function normalizeRoutes(routes: string[]): string[] {
+  return [...new Set(routes.map((r) => r.trim()).filter((r) => r && !r.includes("${") && !/^https?:\/\//i.test(r)))];
+}
 
 // Extract the routes a spec navigates from its `page.goto(...)` calls. Deterministic (regex over
 // the source) — the routes are literal strings in the spec. Relative paths only (an absolute URL
@@ -141,7 +153,7 @@ export async function captureDomForRoutes(
   input: { e2eDir: string; baseUrl?: string },
   deps: CaptureDomDeps,
 ): Promise<string | undefined> {
-  const clean = [...new Set(routes.map((r) => r.trim()).filter((r) => r && !r.includes("${") && !/^https?:\/\//i.test(r)))].slice(0, MAX_ROUTES);
+  const clean = normalizeRoutes(routes).slice(0, MAX_ROUTES);
   if (clean.length === 0 || !input.baseUrl) return undefined;
   try {
     const text = formatDomSnapshot(await deps.render(input.e2eDir, input.baseUrl, clean));
@@ -149,6 +161,58 @@ export async function captureDomForRoutes(
   } catch {
     return undefined; // degrade to the worker's own exploration; never break the run
   }
+}
+
+// Capture the live a11y tree for explicit routes, returned PER ROUTE (route → formatted block) so the
+// fan-out can ground EACH objective with ONLY its own routes' DOM, not one shared blob. The whole set
+// is rendered ONCE (a route shared by two objectives is not re-rendered) and split by route. Routes
+// are taken from each brief's code-derived `routes[]` — the real router paths — so this does NOT key
+// on the planner's `verified` flag (the planner no longer navigates to set it; see the F1/F3 seam).
+// Best-effort: no routes / no baseUrl / a failed render → empty map, and each objective then degrades
+// independently (an objective whose routes are absent from the map routes to the strong agent).
+//
+// Soft-404 / SPA-shell guard: a hash-routed SPA (e.g. AngularJS "/#!/owners") answers 200 with the
+// SAME shell DOM for every path, so the rendered routes share one byte-identical node set. That is NOT
+// route-specific grounding — injecting it would teach a worker shell selectors as if they were the
+// route's. We drop a node set ONLY when it is shared by a MAJORITY of the rendered routes (the
+// signature of a real shell served for every path): `count >= 2 AND count > routes/2`. This avoids the
+// false-positive of dropping two genuinely-distinct pages that merely share interactive chrome (their
+// pair is not a majority of a >=4-route set), and a single unique route is never dropped (count 1).
+export async function captureDomByRoute(
+  routes: string[],
+  input: { e2eDir: string; baseUrl?: string },
+  deps: CaptureDomDeps,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const normalized = normalizeRoutes(routes);
+  const clean = normalized.slice(0, MAX_ROUTES_UNION);
+  if (clean.length === 0 || !input.baseUrl) return out;
+  // Surface a truncated union loudly (CLAUDE.md: never silently drop) — the dropped routes' objectives
+  // get no DOM and degrade to the fallback, so the operator must be able to see it happened.
+  if (normalized.length > clean.length) {
+    console.warn(`[qa] WARNING: ${normalized.length} planned routes exceed the render cap (${MAX_ROUTES_UNION}); ${normalized.length - clean.length} route(s) are NOT grounded this run: ${normalized.slice(clean.length).join(", ")}`);
+  }
+  let snaps: RouteSnapshot[];
+  try {
+    snaps = await deps.render(input.e2eDir, input.baseUrl, clean);
+  } catch {
+    return out; // degrade: every objective falls back independently
+  }
+  // Count how many routes produced each distinct node-set signature, to detect a shared-shell soft-404.
+  const sig = (s: RouteSnapshot): string => (s.nodes ?? []).join("\n");
+  const rendered = snaps.filter((s) => !s.error && s.nodes?.length);
+  const occurrences = new Map<string, number>();
+  for (const s of rendered) occurrences.set(sig(s), (occurrences.get(sig(s)) ?? 0) + 1);
+  const isSharedShell = (s: RouteSnapshot): boolean => {
+    const count = occurrences.get(sig(s)) ?? 0;
+    return count >= 2 && count > rendered.length / 2; // a real shell is served for the MAJORITY of paths
+  };
+  for (const s of rendered) {
+    if (isSharedShell(s)) continue; // shared shell across most routes → not route-specific
+    const text = formatDomSnapshot([s]);
+    if (text.trim()) out.set(s.route, text);
+  }
+  return out;
 }
 
 // Parses the YAML string returned by `locator('body').ariaSnapshot()` (Playwright >=1.57) into
@@ -184,10 +248,15 @@ export function parseAriaSnapshot(yaml: string): string[] {
     // author can see there is no columnheader and write accordingly.
     "text",
   ]);
-  // Roles whose mere PRESENCE is informative even without an accessible name — emitting a bare marker
-  // lets the author see "there is a table here" and reason about which roles it actually exposes
-  // (e.g. cells but no columnheader) instead of assuming HTML-implied roles.
-  const structural = new Set(["table", "grid", "list", "row"]);
+  // Roles whose mere PRESENCE is informative even WITHOUT an accessible name, so we emit a bare
+  // "(present)" marker instead of dropping them:
+  //  • landmarks (table/grid/list/row) — lets the author see "there is a table here" and reason about
+  //    which roles it actually exposes (e.g. cells but no columnheader) vs assuming HTML-implied roles.
+  //  • form inputs (textbox/combobox/checkbox/radio) — a form whose <label> is NOT associated (no
+  //    for/id, common in apps like PetClinic) leaves the input UNNAMED; without this it is DROPPED and
+  //    the whole form goes INVISIBLE to grounding, so the reviewer can't confirm the author's selectors
+  //    and falsely REJECTS them. The marker says the field EXISTS → target it by attribute/position.
+  const structural = new Set(["table", "grid", "list", "row", "textbox", "combobox", "checkbox", "radio"]);
 
   for (const rawLine of yaml.split("\n")) {
     const trimmed = rawLine.trimStart();
@@ -250,7 +319,15 @@ export function parseAriaSnapshot(yaml: string): string[] {
   return out;
 }
 
-const RENDER_TIMEOUT_MS = 30_000;
+// The render child loops routes SEQUENTIALLY (each goto bounded at 15s) and writes its result ONCE at
+// the end, so a kill mid-flight loses EVERY route, not just the slow one. Scale the kill deadline with
+// the route count (each route's 15s goto must fit) so the union render actually completes; cap it so a
+// pathological plan can't hold the orchestrator indefinitely. (For a single route this is still 35s.)
+const RENDER_BASE_TIMEOUT_MS = 20_000;
+const RENDER_PER_ROUTE_TIMEOUT_MS = 15_000;
+const RENDER_MAX_TIMEOUT_MS = 200_000;
+const renderTimeoutFor = (routeCount: number): number =>
+  Math.min(RENDER_BASE_TIMEOUT_MS + Math.max(1, routeCount) * RENDER_PER_ROUTE_TIMEOUT_MS, RENDER_MAX_TIMEOUT_MS);
 
 // Real render: a short Node script run with the e2e project's Playwright (its node_modules + the
 // baked browsers), under the same scrubbed env as execution. The orchestrator root has no
@@ -295,7 +372,7 @@ const { baseUrl, routes } = JSON.parse(process.env.PW_CAPTURE_INPUT || "{}");
         env: { ...scrubEnv(/^DEV_/), PW_BASE_URL: baseUrl, PW_CAPTURE_INPUT: JSON.stringify({ baseUrl, routes }) },
         detached: true,
       });
-      const timer = setTimeout(() => killTree(child), RENDER_TIMEOUT_MS);
+      const timer = setTimeout(() => killTree(child), renderTimeoutFor(routes.length));
       child.stdout.on("data", (d) => (stdout += d.toString()));
       const done = (snaps: RouteSnapshot[]): void => { clearTimeout(timer); try { rmSync(work, { recursive: true, force: true }); } catch { /* best-effort */ } resolve(snaps); };
       child.on("error", () => done([]));

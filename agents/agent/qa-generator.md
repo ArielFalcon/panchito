@@ -110,13 +110,23 @@ cookies/cache, file upload. Each test must:
 - Have **at least one real assert** on the observable outcome.
 - Be **deterministic** and **clean up** what it creates via `cleanup()`.
 
-### 4. Verify the tests compile (bash)
+### 4. Verify the tests COMPILE — do NOT run them (bash)
 
-After writing, run:
+After writing, verify they are DISCOVERABLE (parse + typecheck) and nothing more:
 ```bash
 cd e2e && npx playwright test --list 2>&1
 ```
-to verify the tests are discoverable. Fix any errors immediately.
+Fix any errors immediately. Then STOP touching the suite. Do **NOT**:
+- run the suite itself (`npx playwright test` WITHOUT `--list`),
+- `npx playwright install` browsers,
+- run mobile/desktop/project variants or any second execution.
+
+The ORCHESTRATOR executes the specs against live DEV (its deterministic Filter C) and then
+an independent reviewer judges them — running them yourself is wasted, duplicated work that
+can BLOCK your turn: a `playwright test` that waits on DEV (or a browser install) hangs your
+session, so you never emit the closing verdict and the whole run TIMES OUT and fails even
+though a correct spec is already on disk. Your deliverable is the written spec + a clean
+`--list`, nothing more.
 
 ### 5. Declare metadata in your verdict — do NOT edit manifest.json
 
@@ -144,6 +154,14 @@ to upsert so knowledge evolves across runs. **Always prefix topic_key with the
 test target** (e.g. `e2e/checkout`, `code/order-total`) so e2e and code-mode
 memory is isolated from each other. When searching, include the target in the
 query to avoid cross-mode contamination.
+
+## Stop when the spec is written — then emit the verdict
+
+Once your specs are written and `--list` is clean, you are DONE generating. Spend the rest
+of the turn on ONE thing: the closing JSON verdict below. Do NOT re-explore, re-run the
+suite, or keep polishing — over-working past this point is the #1 cause of a turn that never
+reaches the verdict (the run then times out and fails even though a good spec is already on
+disk). Keep step 7 (engram) to a single quick `mem_save`. The verdict is your LAST action.
 
 ## Final output
 

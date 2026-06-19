@@ -39,7 +39,11 @@ export interface RouteRecon {
   path: string; // entry route, e.g. "/checkout"
   component?: string; // the component/page it renders
   domLandmarks?: string[]; // HINTS only — NOT verified selectors (see module header)
-  verified: boolean; // true only if the explorer actually navigated the live DOM
+  // DEPRECATED (vestigial after F3): nothing PRODUCES `true` anymore — the explorer never navigates and
+  // the planner's Lever-3 route-verification step was removed — and grounding no longer reads it
+  // (captureDomByRoute renders all candidate routes, soft-404-guarded). Retained only so the schema /
+  // parser / older briefs stay backward-compatible; do not add new logic that branches on it.
+  verified: boolean;
 }
 
 export interface ExplorationBrief {

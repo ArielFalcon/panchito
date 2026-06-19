@@ -1612,6 +1612,44 @@ test("3.6 fix-loop: failureDom is threaded to domSnapshot in the retry generate 
   assert.equal(retryGenInput.failureSourced, true, "failureSourced should be true when domSnapshot is from failureDom");
 });
 
+test("3.x fix-loop: execution retries validate and execute before spending reviewer correction rounds", async () => {
+  const calls: string[] = [];
+  const failingRun: QaRunResult = {
+    sha: "s",
+    verdict: "fail",
+    passed: false,
+    cases: [{ name: "owners list", status: "fail", failureDom: "button: Add Owner" }],
+    logs: "",
+  };
+  const fixedRun: QaRunResult = { sha: "s", verdict: "pass", passed: true, cases: [], logs: "" };
+  const oneRetryApp: AppConfig = { ...app, qa: { ...app.qa, needsReview: true, fixLoop: { maxRetries: 1 } } };
+  const d = deps(failingRun, calls, {
+    agents: [generated, generated],
+    review: [
+      { approved: true, corrections: [] },
+      { approved: true, corrections: [] },
+    ],
+  });
+  let executeCall = 0;
+  d.execute = async () => {
+    calls.push("execute");
+    return executeCall++ === 0 ? failingRun : fixedRun;
+  };
+
+  const run = await runPipeline(oneRetryApp, "abc123", d, "manual", { mode: "manual", guidance: "test owner creation" });
+
+  assert.equal(run.verdict, "pass");
+  assert.equal(calls.filter((c) => c === "review").length, 2, `expected initial + final review only:\n${calls.join(",")}`);
+  const secondGenerate = calls.indexOf("generate", calls.indexOf("execute") + 1);
+  const retryValidate = calls.indexOf("validate", secondGenerate + 1);
+  const retryExecute = calls.indexOf("execute", secondGenerate + 1);
+  const finalReview = calls.indexOf("review", retryExecute + 1);
+  assert.ok(secondGenerate >= 0, `expected retry generation:\n${calls.join(",")}`);
+  assert.ok(retryValidate > secondGenerate, `retry should validate after generating the fix:\n${calls.join(",")}`);
+  assert.ok(retryExecute > retryValidate, `retry should execute after validation:\n${calls.join(",")}`);
+  assert.ok(finalReview > retryExecute, `final reviewer should run after the fixed suite passes, not before retry execution:\n${calls.join(",")}`);
+});
+
 test("3.6 fix-loop: absent failureDom degrades gracefully (no domSnapshot, blind fix fallback)", async () => {
   const calls: string[] = [];
   const caseWithoutDom: QaCase = { name: "owners list", status: "fail", detail: "element not found" };

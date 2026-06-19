@@ -54,7 +54,7 @@ import { github } from "./integrations/github";
 import { capDiff } from "./orchestrator/sanitizer";
 import { renderIssue, type IssueContext, type TestedItem } from "./report/reporter";
 import { renderValueTag } from "./qa/value-report";
-import { captureDom, captureDomForRoutes, defaultCaptureDomDeps } from "./qa/dom-snapshot";
+import { captureDom, captureDomByRoute, defaultCaptureDomDeps } from "./qa/dom-snapshot";
 import { buildContextPack, defaultContextPackDeps } from "./qa/context-pack";
 import { loadContextCache as loadContextCacheDefault, saveContextCache as saveContextCacheDefault } from "./qa/context-cache";
 import { AgentResult, QaCase, QaRunResult, TriggerSource, RunMode, RunOptions, TestTarget, RunOutcome, SpecMeta } from "./types";
@@ -297,7 +297,7 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
             // Deterministic DOM grounding for the fan-out workers: capture the planned routes' live
             // a11y tree on the orchestrator (Playwright stays out of the agent boundary). Best-effort.
             ...(input.baseUrl
-              ? { captureRoutesDom: (routes: string[]) => captureDomForRoutes(routes, { e2eDir: join(input.mirrorDir, E2E_DIR), baseUrl: input.baseUrl }, defaultCaptureDomDeps) }
+              ? { captureRoutesDom: (routes: string[]) => captureDomByRoute(routes, { e2eDir: join(input.mirrorDir, E2E_DIR), baseUrl: input.baseUrl }, defaultCaptureDomDeps) }
               : {}),
           })
         : runOpencode(ocInput, oc, { signal, onProgress, onRepair });
@@ -1257,7 +1257,7 @@ export async function runPipeline(
     log(`[qa] cycle-counter: in-session repair re-prompt (cycleCount=${cycleCount}/${MAX_CYCLES})`);
   };
 
-  const generateAndReview = async (genInput: GenerateInput): Promise<AgentResult> => {
+  const generateOnce = async (genInput: GenerateInput): Promise<AgentResult> => {
     // Phase 6a: count this invocation toward the shared iteration budget BEFORE spending any
     // tokens. The ceiling check happens at every generateAndReview() call-site AND here for the
     // review-round internal re-generation. A ceiling hit returns the current state immediately
@@ -1273,6 +1273,15 @@ export async function runPipeline(
     const genStart = Date.now();
     let r = await reconcileSpecs(await deps.generate(genInput, signal, log, usage.add.bind(usage), onRepair));
     log(`[qa] [timing] generation produced ${r.specs.length} spec(s) in ${Math.round((Date.now() - genStart) / 1000)}s`);
+    return r;
+  };
+
+  const reviewGenerated = async (
+    initial: AgentResult,
+    genInput: GenerateInput,
+    reviewOpts: { allowRegeneration: boolean },
+  ): Promise<AgentResult> => {
+    let r = initial;
     if (!(app.qa.needsReview && deps.review)) return r;
     // The live-DOM grounding only depends on the ROUTES the specs target, so capture it once and
     // reuse it across review rounds — re-launching a browser every round (up to MAX_REVIEW_ROUNDS)
@@ -1383,11 +1392,12 @@ export async function runPipeline(
         if (advisoryCount > 0) {
           log(`[qa] severity gate: ${advisoryCount} advisory correction(s) recorded but not blocking (zero blocking corrections).`);
         }
-        return { ...r, approved: true, note: undefined };
+        return { ...r, reviewed: true, approved: true, note: undefined };
       }
       // Phase 4: save this round's corrections to thread into the NEXT review call.
       previousRoundCorrections = review.corrections;
-      if (round === MAX_REVIEW_ROUNDS - 1) return { ...r, approved: false, note: review.corrections.join("; ") };
+      if (!reviewOpts.allowRegeneration) return { ...r, reviewed: true, approved: false, note: review.corrections.join("; ") };
+      if (round === MAX_REVIEW_ROUNDS - 1) return { ...r, reviewed: true, approved: false, note: review.corrections.join("; ") };
       log(`[qa] applying ${blockingCount} blocking correction(s) (${advisoryCount} advisory) and regenerating...`);
       onStep?.("retry");
       retries++;
@@ -1408,6 +1418,17 @@ export async function runPipeline(
       log(`[qa] [timing] regeneration produced ${r.specs.length} spec(s) in ${Math.round((Date.now() - regenStart) / 1000)}s`);
     }
     return r;
+  };
+
+  const generateAndReview = async (
+    genInput: GenerateInput,
+    opts: { review?: "full" | "skip" } = {},
+  ): Promise<AgentResult> => {
+    const r = await generateOnce(genInput);
+    if (opts.review === "skip") {
+      return app.qa.needsReview && deps.review ? { ...r, reviewed: false, approved: false } : r;
+    }
+    return reviewGenerated(r, genInput, { allowRegeneration: true });
   };
 
   // Learned rules + exemplars + curriculum, assembled once in the generation block below and
@@ -2011,6 +2032,7 @@ export async function runPipeline(
         domSnapshot: failureDomSnapshot,
         ...(failureDomSnapshot ? { failureSourced: true } : {}),
       }),
+      { review: "skip" },
     );
     if (result.specs.length > 0) {
       const entries = result.specMetas?.length
@@ -2044,6 +2066,7 @@ export async function runPipeline(
       run = await deps.executeCode(mirrorDir, { namespace: ns, onCase, signal });
     } else {
       // Re-validate the fixed specs and, if they pass, re-execute against DEV.
+      onStep?.("validate");
       const reValidation = await deps.validate(e2eDir);
       if (!reValidation.ok) {
         log(`[qa] retry validation failed:\n${reValidation.errors.join("\n")}`);
@@ -2062,6 +2085,7 @@ export async function runPipeline(
       // retry's created data uniquely scoped, so a correct spec passes on re-run regardless of cleanup.
       const retryNs = `${ns}-r${retry + 1}`;
       deps.clearCoverage?.(e2eDir, retryNs);
+      onStep?.("execute");
       const retryRun = await deps.execute(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: retryNs, onCase, onRunning: onRunningTest, signal });
       if (retryRun.verdict === "fail" && !(await devHealthy())) {
         run = resultOf(ns, "infra-error", "failures with an unhealthy DEV: treated as infrastructure");
@@ -2094,6 +2118,11 @@ export async function runPipeline(
   if (realBugDetected && run.verdict !== "infra-error") {
     // Keep run as "fail" so the decide step (below) opens an Issue.
     log("[qa] real-bug override: run kept as fail for Issue filing.");
+  }
+
+  if (run.verdict === "pass" && generating && result && app.qa.needsReview && deps.review && !result.reviewed) {
+    log("[qa] final independent review of fixed suite (no corrective regeneration before publish)...");
+    result = await reviewGenerated(result, baseGenInput({}), { allowRegeneration: false });
   }
 
   // NOTE: the green-path write-confinement guard runs LATER — after the change-coverage block, just

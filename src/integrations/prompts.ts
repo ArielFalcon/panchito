@@ -135,6 +135,8 @@ export function buildWorkerPromptAssembled(w: ParallelWorkerInput): AssembledPro
         `These are the roles + accessible names the browser ACTUALLY exposes for this flow's route(s).`,
         `You have NO browser MCP. You do NOT need to navigate or snapshot — the tree is below.`,
         `Author selectors ONLY from what appears here (transcribe, do NOT guess).`,
+        `ONLY the route(s) printed below are grounded. If your objective also touches a route that is NOT`,
+        `shown here, mark that route's selectors unverified (e.g. // selector unverified — route not captured).`,
         `If a role you expected (e.g. \`columnheader\`) is NOT listed, it is NOT in the tree:`,
         `use \`getByText\` or a scoped locator instead. If a name appears MORE THAN ONCE,`,
         `scope it to a unique parent (a bare getByRole/getByText would match multiple → strict-mode error).`,
@@ -197,14 +199,14 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
   const outputFormatContent = (input.mode === "diff" || input.mode === "manual")
     ? [
         `## Output — end with ONLY this JSON (no spec files):`,
-        `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","needsUi":true,"brief":{"builtForSha":"<the sha above>","objective":"…","blastRadius":[{"symbol":"CheckoutService.pay","file":"src/checkout/checkout.service.ts","role":"applies the bulk discount and creates the order"}],"routes":[{"path":"/#!/checkout","verified":true}],"feBe":[{"route":"/checkout","operationId":"createOrder","via":"OrderClient.create"}],"contracts":[{"operationId":"createOrder","method":"POST","path":"/orders","fields":["items","total"]}],"risks":["assert the discounted total AFTER the cart re-queries"]}}]}`,
+        `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","needsUi":true,"brief":{"builtForSha":"<the sha above>","objective":"…","blastRadius":[{"symbol":"CheckoutService.pay","file":"src/checkout/checkout.service.ts","role":"applies the bulk discount and creates the order"}],"routes":[{"path":"/#!/checkout"}],"feBe":[{"route":"/checkout","operationId":"createOrder","via":"OrderClient.create"}],"contracts":[{"operationId":"createOrder","method":"POST","path":"/orders","fields":["items","total"]}],"risks":["assert the discounted total AFTER the cart re-queries"]}}]}`,
         input.mode === "diff"
           ? `If the commit's change is not testable through a user flow, output {"objectives":[]}.`
           : `If the guidance does not yield any testable flow, output {"objectives":[]}.`,
       ].join("\n")
     : [
         `## Output — end with ONLY this JSON (no spec files):`,
-        `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","needsUi":true,"brief":{"builtForSha":"<the sha above>","objective":"…","blastRadius":[{"symbol":"CheckoutService.pay","file":"src/checkout/checkout.service.ts","role":"applies the bulk discount and creates the order"}],"routes":[{"path":"/#!/checkout","verified":true}],"feBe":[{"route":"/checkout","operationId":"createOrder","via":"OrderClient.create"}],"contracts":[{"operationId":"createOrder","method":"POST","path":"/orders","fields":["items","total"]}],"risks":["assert the discounted total AFTER the cart re-queries"]}}]}`,
+        `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","needsUi":true,"brief":{"builtForSha":"<the sha above>","objective":"…","blastRadius":[{"symbol":"CheckoutService.pay","file":"src/checkout/checkout.service.ts","role":"applies the bulk discount and creates the order"}],"routes":[{"path":"/#!/checkout"}],"feBe":[{"route":"/checkout","operationId":"createOrder","via":"OrderClient.create"}],"contracts":[{"operationId":"createOrder","method":"POST","path":"/orders","fields":["items","total"]}],"risks":["assert the discounted total AFTER the cart re-queries"]}}]}`,
         `If every important flow is already well covered, output {"objectives":[]}.`,
       ].join("\n");
 
@@ -229,7 +231,7 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
     const planProcedure = [
       `## Phase 1 of 2 — PLANNING ONLY. Do NOT write any .spec.ts in this phase.`,
       input.contextBrief
-        ? `1. The blast radius is ALREADY mapped in the Exploration brief below — read it (and the commit intent/diff) and derive the affected user flows from it. Do NOT re-run find_referencing_symbols to re-discover the blast radius. Activate serena only if you need to confirm a specific symbol.`
+        ? `1. The blast radius is ALREADY fully mapped in the Exploration brief below — derive the affected user flows by REASONING over it (with the commit intent/diff). The brief is COMPLETE: do NOT activate serena, do NOT re-run find_referencing_symbols, do NOT re-analyze the repo with code tools. Using them re-does the explorer's work and BURNS the planning budget — planning here is pure reasoning over the brief, not a second exploration.`
         : `1. Activate serena (activate_project). Read the commit intent and diff below; derive the\n   affected user flows (use find_referencing_symbols to widen from the changed symbols).`,
       `2. Plan one objective per INDEPENDENT affected flow. Do NOT plan flows the commit does not`,
       `   touch; if everything fits one flow, return a single objective.`,
@@ -241,12 +243,12 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
       `   links, the relevant contract facts (fields/enums/errors to assert), and risks/what-to-assert.`,
       `   Set the brief's builtForSha to ${input.sha}. The worker trusts the brief for CODE but still`,
       `   transcribes selectors from the injected a11y tree (workers have no browser MCP).`,
-      `4. Lever-3 route verification (REQUIRED for needsUi objectives): use the Playwright MCP to`,
-      `   navigate each flow — especially interaction flows that land on a NEW route (e.g.`,
-      `   owner-register → /#!/owners/{id}). Discover and verify the post-interaction landing routes.`,
-      `   Declare them in \`routes[]\` with \`"verified": true\`. Only mark verified routes you actually`,
-      `   navigated to and confirmed exist. Unverified (static/pattern) routes keep \`"verified": false\`.`,
-      `   The orchestrator captures the live DOM for ONLY the verified routes and injects it into workers.`,
+      `4. For each needsUi objective, declare its candidate entry routes in the brief's \`routes[]\`:`,
+      `   the CONCRETE, directly-navigable URL the worker will page.goto(...) (include any SPA/hash`,
+      `   prefix, e.g. "/#!/owners"; for a parameterized route use a real instance, e.g. "/#!/owners/1").`,
+      `   Derive them from the code and the architecture map — do NOT navigate or open a browser. The`,
+      `   orchestrator renders these routes to capture the live DOM and injects each objective's tree`,
+      `   into its worker.`,
     ].join("\n");
 
     // SEMI-STABLE: the change intent + diff (specific to this commit but stable within this planning session).
@@ -305,7 +307,7 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
     const manualPlanProcedure = [
       `## Phase 1 of 2 — PLANNING ONLY. Do NOT write any .spec.ts in this phase.`,
       input.contextBrief
-        ? `1. The blast radius is ALREADY mapped in the Exploration brief below — read it (and the guidance) and derive the affected flows from it. Do NOT re-run find_referencing_symbols to re-discover the blast radius. Activate serena only to confirm a specific symbol or to read the existing suite in ${input.e2eRelDir}/.`
+        ? `1. The blast radius is ALREADY fully mapped in the Exploration brief below — derive the affected flows by REASONING over it (with the guidance). It is COMPLETE: do NOT re-run find_referencing_symbols and do NOT re-analyze the blast radius — that re-does the explorer's work and burns the budget. You MAY read the existing suite in ${input.e2eRelDir}/ ONLY to avoid duplicating already-covered flows; do nothing else with serena.`
         : `1. Activate serena (activate_project). Read the guidance below and the existing suite in\n   ${input.e2eRelDir}/ to understand the scope.`,
       `2. Plan one objective per INDEPENDENT affected flow that the guidance asks to test. Stay`,
       `   strictly within the guidance scope; do NOT plan flows the guidance does not mention.`,
@@ -318,11 +320,11 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
       `   links, the relevant contract facts (fields/enums/errors to assert), and risks/what-to-assert.`,
       `   Set the brief's builtForSha to ${input.sha}. The worker trusts the brief for CODE but still`,
       `   transcribes selectors from the injected a11y tree (workers have no browser MCP).`,
-      `4. Lever-3 route verification (REQUIRED for needsUi objectives): use the Playwright MCP to`,
-      `   navigate each flow. Discover and verify the routes the guidance targets.`,
-      `   Declare them in \`routes[]\` with \`"verified": true\`. Only mark verified routes you actually`,
-      `   navigated to and confirmed exist. Unverified routes keep \`"verified": false\`.`,
-      `   The orchestrator captures the live DOM for ONLY the verified routes and injects it into workers.`,
+      `4. For each needsUi objective, declare its candidate entry routes in the brief's \`routes[]\`:`,
+      `   the CONCRETE, directly-navigable URL the worker will page.goto(...) (include any SPA/hash`,
+      `   prefix, e.g. "/#!/owners"). Derive them from the code and the existing suite — do NOT navigate`,
+      `   or open a browser. The orchestrator renders these routes to capture the live DOM and injects`,
+      `   each objective's tree into its worker.`,
     ].join("\n");
 
     // SEMI-STABLE: the guidance (verbatim user input — the scope driver for manual mode).

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { extractTargetRoutes, formatDomSnapshot, parseAriaSnapshot, captureDom, capDomLines, isPriorityNode, type CaptureDomDeps } from "./dom-snapshot";
+import { extractTargetRoutes, formatDomSnapshot, parseAriaSnapshot, captureDom, captureDomByRoute, normalizeRoutes, capDomLines, isPriorityNode, type CaptureDomDeps } from "./dom-snapshot";
 
 test("extractTargetRoutes pulls app-relative routes from page.goto, dedups, normalizes a leading slash", () => {
   const spec = `
@@ -207,6 +207,20 @@ test("parseAriaSnapshot: structural roles without a name get (present) marker", 
   assert.ok(lines.includes("cell: Helen"), "cell with name emitted");
 });
 
+test("parseAriaSnapshot: an UNNAMED form input surfaces as a presence marker (not dropped)", () => {
+  // PetClinic-style form: `<label>First name</label><input>` where the label is NOT associated (no
+  // for/id) → the input has NO accessible name. It must NOT vanish from the grounding, or the reviewer
+  // sees an empty form and falsely rejects the author's selectors. Surface a presence marker so the
+  // field is visible (the author then targets it by attribute/position, not a non-existent name).
+  const yaml = ["- text: First name", "- textbox", "- text: Last name", "- textbox", "- combobox", '- textbox "Search"'].join("\n");
+  const inputs = parseAriaSnapshot(yaml).filter((n) => n.startsWith("textbox") || n.startsWith("combobox"));
+  assert.deepEqual(
+    inputs,
+    ["textbox: (present)", "textbox: (present)", "combobox: (present)", "textbox: Search"],
+    "unnamed inputs surface as (present); a named input keeps its name",
+  );
+});
+
 test("parseAriaSnapshot: table/list priority roles preserved past the formatDomSnapshot node cap", () => {
   // Build a snapshot with 80 links (over the 60-node cap) and 5 table nodes — verify the TABLE
   // nodes survive in the formatted output even though they come last in document order.
@@ -294,4 +308,60 @@ test("S1: formatDomSnapshot keeps text: collapse nodes past the node cap (they s
   const out = formatDomSnapshot([{ route: "/vets", nodes: [...nav, ...collapse] }]); // text sorts LAST
   for (const t of collapse) assert.ok(out.includes(`  ${t}`), `text collapse node dropped by the cap: ${t}`);
   assert.match(out, /more non-table elements omitted/); // the dropped ones are nav links, not the text signal
+});
+
+// ── captureDomByRoute: per-objective grounding split + soft-404 guard (F1) ─────
+test("normalizeRoutes trims, drops absolute/interpolated URLs, and dedupes", () => {
+  assert.deepEqual(
+    normalizeRoutes([" /a ", "/a", "https://x.com/y", "/p/${id}", "/b"]),
+    ["/a", "/b"],
+  );
+});
+
+test("captureDomByRoute returns a per-route map keyed by the requested route", async () => {
+  const deps: CaptureDomDeps = {
+    render: async (_e2eDir, _baseUrl, routes) => routes.map((r) => ({ route: r, nodes: [`button: on ${r}`] })),
+  };
+  const map = await captureDomByRoute(["/a", "/b"], { e2eDir: "/m", baseUrl: "http://dev" }, deps);
+  assert.equal(map.size, 2, "one entry per distinct route");
+  assert.match(map.get("/a") ?? "", /route \/a:/);
+  assert.match(map.get("/a") ?? "", /button: on \/a/);
+  assert.match(map.get("/b") ?? "", /button: on \/b/);
+});
+
+test("captureDomByRoute drops shell-collision routes (soft-404: identical node sets across routes)", async () => {
+  // A hash-routed SPA answers every path with the same shell DOM → /owners and /vets collide; only
+  // the genuinely distinct route survives (the colliding ones degrade to the strong agent upstream).
+  const shell = ["link: Home", "link: Owners"];
+  const deps: CaptureDomDeps = {
+    render: async (_e2eDir, _baseUrl, routes) =>
+      routes.map((r) => ({ route: r, nodes: r === "/unique" ? ["heading: Unique", "button: Save"] : shell })),
+  };
+  const map = await captureDomByRoute(["/owners", "/vets", "/unique"], { e2eDir: "/m", baseUrl: "http://dev" }, deps);
+  assert.equal(map.size, 1, "only the unique snapshot is kept");
+  assert.ok(map.has("/unique"), "the route-specific snapshot survives");
+  assert.ok(!map.has("/owners") && !map.has("/vets"), "shared-shell routes (a 2/3 majority) are dropped");
+});
+
+test("captureDomByRoute does NOT drop a NON-majority coincidental match (avoids the soft-404 false positive)", async () => {
+  // 4 routes: /a and /b coincidentally share interactive chrome (count 2 — NOT a majority of 4); /c and
+  // /d are unique. The majority rule (count > routes/2) must keep all four — two similar real pages are
+  // not a shell, and dropping them would needlessly flood the (bounded) strong-agent fallback.
+  const shared = ["button: Save", "link: Back"];
+  const deps: CaptureDomDeps = {
+    render: async (_e2eDir, _baseUrl, routes) =>
+      routes.map((r) => ({ route: r, nodes: r === "/a" || r === "/b" ? shared : [`heading: ${r}`] })),
+  };
+  const map = await captureDomByRoute(["/a", "/b", "/c", "/d"], { e2eDir: "/m", baseUrl: "http://dev" }, deps);
+  assert.equal(map.size, 4, "a non-majority collision is not treated as a shell — all routes kept");
+});
+
+test("captureDomByRoute degrades to an empty map (no routes / no baseUrl / render throws / errored route)", async () => {
+  const ok: CaptureDomDeps = { render: async (_e2eDir, _baseUrl, routes) => routes.map((r) => ({ route: r, nodes: ["button: x"] })) };
+  assert.equal((await captureDomByRoute([], { e2eDir: "/m", baseUrl: "http://dev" }, ok)).size, 0, "no routes → empty");
+  assert.equal((await captureDomByRoute(["/a"], { e2eDir: "/m", baseUrl: undefined }, ok)).size, 0, "no baseUrl → empty");
+  const throwing: CaptureDomDeps = { render: async () => { throw new Error("browser launch failed"); } };
+  assert.equal((await captureDomByRoute(["/a"], { e2eDir: "/m", baseUrl: "http://dev" }, throwing)).size, 0, "render throws → empty");
+  const errored: CaptureDomDeps = { render: async () => [{ route: "/a", error: "nav failed" }] };
+  assert.equal((await captureDomByRoute(["/a"], { e2eDir: "/m", baseUrl: "http://dev" }, errored)).size, 0, "errored route excluded");
 });
