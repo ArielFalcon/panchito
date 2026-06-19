@@ -77,6 +77,12 @@ Each correction MUST be a structured object with two fields:
 - A Value Judge finding (the test would NOT catch a real regression) → ALWAYS `blocking`.
 - An unconfirmable UI fact (selector/label not confirmed by the Live DEV DOM or the spec itself)
   → ALWAYS `advisory` (re-verify), NEVER `blocking`.
+- A `[no-cleanup]` finding is `blocking` ONLY when the app HAS a delete affordance the test ignored.
+  If the app exposes NO delete affordance, namespaced data left behind is acceptable (each run is
+  isolated by its `namespace`) → `advisory` at most, NEVER `blocking` — do not demand cleanup that
+  cannot exist. Conversely, a test that fabricates a direct API/HTTP/curl DELETE to "clean up" IS a
+  defect: flag it `[other]` blocking (it breaks the UI-only contract and invents an endpoint that may
+  not exist) and tell it to rely on namespaced-and-left instead.
 - A Robustness Judge nit (fragile selector, timing, cleanup gap) on an otherwise-correct test
   → use judgment: if the fragility makes the test unreliable enough to be misleading, `blocking`;
   if it is a style improvement with no real false-negative risk, `advisory`.

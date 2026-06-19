@@ -43,8 +43,11 @@ concrete correction.
    in both Skills and Projects), scope to the target section first — never
    assert on `page.getByText("TypeScript")` alone. → Reject: any test where a
    `getByText` or regex could match >1 element at runtime (strict-mode violation).
-8. **No cleanup.** Creates data and does not register its removal with `cleanup`. →
-   Dirties DEV and degrades the environment.
+8. **No cleanup (ONLY when a delete affordance exists).** Creates data and ignores an available
+   UI delete affordance. → Dirties DEV. But if the app has NO delete affordance, namespaced data
+   left behind is acceptable (the run is namespace-isolated) — do NOT reject for it. And NEVER
+   accept a fabricated direct API/curl DELETE as "cleanup": it invents an endpoint that may not
+   exist and breaks the UI-only contract — reject THAT instead.
 9. **Coverage that ignores the change.** The diff touches a flow the test does not
    exercise. → The affected-flow test is missing.
 10. **Incoherent metadata.** The manifest's `objective`/`targets` do not match what
