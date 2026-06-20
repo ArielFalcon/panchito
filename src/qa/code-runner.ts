@@ -276,6 +276,105 @@ function nodeTestCommand(pm: "npm" | "pnpm" | "yarn", pkg: Record<string, unknow
   return { cmd: "node", args: ["--test"] };
 }
 
+// ── Module scoping (diff-driven) ──────────────────────────────────────────────
+// Running a monorepo's whole-repo test command on every diff is slow and lets an unrelated module's
+// failure mask (or be blamed on) the changed module. When the diff's changed files ALL resolve to a
+// build SUBMODULE, scope the command to those modules; otherwise fall back to the whole-repo command.
+// Pure (the fs probe is injected) so the resolution is fully unit-tested.
+
+const MODULE_DESCRIPTORS: Partial<Record<Ecosystem, readonly string[]>> = {
+  maven: ["pom.xml"],
+  gradle: ["build.gradle", "build.gradle.kts"],
+  go: ["go.mod"],
+  node: ["package.json"],
+};
+
+// Parent of a repo-relative POSIX path ("a/b/c" → "a/b", "pom.xml" → ""). Git always emits
+// "/"-separated paths, so this is deterministic regardless of host platform.
+function parentDir(p: string): string {
+  const i = p.lastIndexOf("/");
+  return i <= 0 ? "" : p.slice(0, i);
+}
+
+// Resolve each changed file to the nearest ancestor SUBMODULE (a dir below the repo root carrying the
+// ecosystem's build descriptor). Returns the unique submodule dirs (repo-relative, sorted) when EVERY
+// file resolves; null when scoping is unsafe — no files, an unsupported ecosystem, or any file that
+// lives only under the root descriptor (not a submodule). Null means "run the whole repo" (the safe
+// fallback). A file that IS a descriptor (e.g. `svc/pom.xml`) resolves to its own module.
+export function resolveChangedModules(
+  ecosystem: Ecosystem,
+  repoDir: string,
+  changedFiles: string[],
+  deps: Pick<DetectDeps, "exists">,
+): string[] | null {
+  const descriptors = MODULE_DESCRIPTORS[ecosystem];
+  if (!descriptors || changedFiles.length === 0) return null;
+  const hasDescriptor = (dir: string): boolean => descriptors.some((d) => deps.exists(join(repoDir, dir, d)));
+
+  const modules = new Set<string>();
+  for (const file of changedFiles) {
+    let dir = parentDir(file);
+    let resolved: string | null = null;
+    while (dir) {
+      if (hasDescriptor(dir)) {
+        resolved = dir;
+        break;
+      }
+      dir = parentDir(dir);
+    }
+    if (resolved === null) return null; // not in a submodule (root-level file) → cannot safely scope
+    modules.add(resolved);
+  }
+  return [...modules].sort();
+}
+
+// Narrow a project's TEST command to the resolved module(s). Pure. Caller guarantees `modules`
+// non-empty (it came from resolveChangedModules).
+export function scopeTestCommand(project: CodeProject, modules: string[]): Command {
+  switch (project.ecosystem) {
+    case "maven":
+      // -pl selects the module(s); -am also-makes their upstream deps so a clean checkout compiles.
+      return { cmd: "mvn", args: ["-B", "-pl", modules.join(","), "-am", "test"] };
+    case "gradle":
+      // One :module:test task per changed module; preserve the detected launcher (./gradlew | gradle).
+      return { cmd: project.test.cmd, args: modules.map((m) => `:${m.replace(/\//g, ":")}:test`) };
+    case "go":
+      // Scope to the changed packages (and their subpackages).
+      return { cmd: "go", args: ["test", ...modules.map((m) => `./${m}/...`)] };
+    default:
+      return project.test; // defensive: resolveChangedModules already returns null for these
+  }
+}
+
+export interface ScopedRun {
+  test: Command;
+  scoped: boolean;
+  note: string; // log-ready line explaining the decision (distinguishes the two fallback reasons)
+}
+
+// The single entry the runner + compile gate use. Returns the scoped command + a note; falls back to
+// the whole-repo command (with a DISTINCT note) when there is no changed-file list (non-diff run) vs.
+// when a diff's files did not all resolve to a submodule (a genuine scope-loss worth surfacing).
+export function scopeForChangedFiles(
+  project: CodeProject,
+  repoDir: string,
+  changedFiles: string[],
+  deps: Pick<DetectDeps, "exists"> = realDetectDeps,
+): ScopedRun {
+  if (changedFiles.length === 0) {
+    return { test: project.test, scoped: false, note: "non-diff run (no changed-file list) — running the whole repo" };
+  }
+  const modules = resolveChangedModules(project.ecosystem, repoDir, changedFiles, deps);
+  if (!modules || modules.length === 0) {
+    return {
+      test: project.test,
+      scoped: false,
+      note: `changed files did not all resolve to a ${project.ecosystem} submodule — running the whole repo`,
+    };
+  }
+  return { test: scopeTestCommand(project, modules), scoped: true, note: `scoped to module(s): ${modules.join(", ")}` };
+}
+
 // ── Setup (install deps) ──────────────────────────────────────────────────────
 
 export interface CodeSetupDeps {
@@ -360,6 +459,8 @@ export interface CodeExecuteOptions {
   onCase?: (c: QaCase) => void;
   signal?: AbortSignal;
   timeoutMs?: number;
+  changedFiles?: string[]; // diff-driven module scoping: the commit's changed files (repo-relative)
+  log?: (line: string) => void; // surface the scope decision into the run log
 }
 
 export const DEFAULT_CODE_MODE_TIMEOUT_MS = 600_000; // 10 min — prevents a hung suite from blocking the queue forever
@@ -429,7 +530,12 @@ export async function runCodeTests(
   opts: CodeExecuteOptions,
   deps: CodeExecuteDeps,
 ): Promise<QaRunResult> {
-  const project = deps.detect(repoDir);
+  const detected = deps.detect(repoDir);
+  // Diff-driven module scoping: narrow the command to the changed module(s) on a monorepo, else fall
+  // back to the whole repo. Surfaced so a scoped run is never confused with a whole-repo fallback.
+  const scope = scopeForChangedFiles(detected, repoDir, opts.changedFiles ?? []);
+  opts.log?.(`[qa] code-mode: ${scope.note}`);
+  const project: CodeProject = { ...detected, test: scope.test };
 
   // Already-aborted signal: don't even start the spawn.
   if (opts.signal?.aborted) {

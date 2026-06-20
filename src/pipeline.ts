@@ -61,7 +61,7 @@ import { loadContextCache as loadContextCacheDefault, saveContextCache as saveCo
 import { AgentResult, QaCase, QaRunResult, TriggerSource, RunMode, RunOptions, TestTarget, RunOutcome, SpecMeta } from "./types";
 import type { AgentDeps, ReviewInput, ReviewResult } from "./integrations/opencode-client";
 import type { AgentRuntimeConfig } from "./agent-runtime/types";
-import { decideProgress, bestRound, isLikelyRealBug, classifyFailure, type RoundResult } from "./qa/progress-gate";
+import { decideProgress, bestRound, classifyFailure, type RoundResult } from "./qa/progress-gate";
 import { adjudicate, ADJ_CLASS, type AdjudicatorEvidence, type AdjudicatorVerdict } from "./qa/failure-adjudicator";
 import { extractProposedSelectors, selectorPresent, selectorUnique, hasNonExtractableLocator, type ProposedSelector } from "./qa/selector-check";
 import { capDomLines } from "./qa/dom-snapshot";
@@ -168,7 +168,7 @@ export interface PipelineDeps {
   // Code mode (target "code"): no web env, no Playwright. Install the repo's deps,
   // run its own test suite, classify by exit code, and publish the new tests.
   setupCode(repoDir: string, opts?: { signal?: AbortSignal; timeoutMs?: number }): Promise<void>;
-  executeCode(repoDir: string, opts: { namespace: string; onCase?: (c: QaCase) => void; signal?: AbortSignal; timeoutMs?: number }): Promise<QaRunResult>;
+  executeCode(repoDir: string, opts: { namespace: string; onCase?: (c: QaCase) => void; signal?: AbortSignal; timeoutMs?: number; changedFiles?: string[]; log?: (line: string) => void }): Promise<QaRunResult>;
   publishCode(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string; parentRunId?: string }): Promise<{ prUrl: string | null; merged: boolean; error?: string } | null>;
   publishContext(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string }): Promise<{ prUrl: string | null; merged: boolean; error?: string } | null>;
   openIssue(repo: string, title: string, body: string): Promise<{ url: string }>;
@@ -1867,7 +1867,7 @@ export async function runPipeline(
   if (isCode) {
     onStep?.("execute");
     log("[qa] running the repo's own test suite (code mode)...");
-    run = await deps.executeCode(mirrorDir, { namespace: ns, onCase, signal });
+    run = await deps.executeCode(mirrorDir, { namespace: ns, onCase, signal, changedFiles: intent?.changedFiles ?? [], log });
   } else if (!app.dev) {
     // Defensive: an e2e run on an app with no dev environment is inconclusive.
     run = resultOf(ns, "infra-error", "e2e run requested but no dev environment is configured");
@@ -1903,10 +1903,9 @@ export async function runPipeline(
   const failCount = (r: QaRunResult): number => r.cases.filter((c) => c.status === "fail").length;
   // Flag: the real-bug branch detected a genuine app defect → skip to Issue.
   let realBugDetected = false;
-  // Flag: the adjudicator returned break-needs-human (ambiguous failure, no progress).
-  // The run stays fail; the Issue is labeled with the adjudication verdict.
-  let needsHuman = false;
   // The last adjudicator verdict — threaded into IssueContext for labeling.
+  // On break-needs-human the loop exits via `if (verdict.action !== "continue") break`
+  // and the Issue is labeled using adjVerdict/adjudicationCtx (needsHuman flag not needed).
   let adjVerdict: AdjudicatorVerdict | undefined;
 
   // The namespace whose on-disk coverage dumps correspond to the CURRENT `run`. Starts as the initial
@@ -2057,6 +2056,11 @@ export async function runPipeline(
     // ── Failure adjudicator (single decision point) ──────────────────────────
     // Replaces the two ad-hoc `isLikelyRealBug` and `!gate.spend` branches with a
     // single pure adjudicate() call. The function is deterministic and never throws.
+    //
+    // Intentional fresh check: this devHealthy() call is the decision-point snapshot
+    // (Rule 2 — dev_infra class). The separate call at ~2167 (pre-retry-execute) is
+    // also fresh and intentional — DEV may drop between these two points (e.g. during
+    // LLM regeneration). Do NOT share or memoize these two results.
     const devHealthyNow = isCode ? true : await devHealthy();
     const evidence: AdjudicatorEvidence = {
       isCode,
@@ -2064,8 +2068,6 @@ export async function runPipeline(
       failureDetails: failed.map((c) => c.detail ?? ""),
       failureClasses: failed.map((c) => classifyFailure(c.detail ?? "")),
       absentKeysCount: absentKeys.size,
-      anyVerifiedPresent,
-      contradictions: selectorContradictions,
       gateSpend: gate.spend,
       gateReason: gate.reason,
       devHealthy: devHealthyNow,
@@ -2095,7 +2097,8 @@ export async function runPipeline(
         }
         break;
       case "break-needs-human":
-        needsHuman = true;
+        // The loop exits via the `if (verdict.action !== "continue") break` guard below.
+        // adjVerdict is already set; the Issue will be labeled via adjudicationCtx.
         break;
       case "continue":
         break;
@@ -2155,7 +2158,7 @@ export async function runPipeline(
 
     if (isCode) {
       log("[qa] re-running the repo's test suite with the fixed tests...");
-      run = await deps.executeCode(mirrorDir, { namespace: ns, onCase, signal });
+      run = await deps.executeCode(mirrorDir, { namespace: ns, onCase, signal, changedFiles: intent?.changedFiles ?? [], log });
     } else {
       // Re-validate the fixed specs and, if they pass, re-execute against DEV.
       onStep?.("validate");
@@ -2335,7 +2338,7 @@ export async function runPipeline(
             if (!isCode) deps.clearCoverage?.(e2eDir, ns); // re-measure only the improved suite's dumps
             coverageNs = ns; // the enforce re-execute below runs under `ns`; align the re-collection
             const reRun = isCode
-              ? await deps.executeCode(mirrorDir, { namespace: ns, onCase, signal })
+              ? await deps.executeCode(mirrorDir, { namespace: ns, onCase, signal, changedFiles: intent?.changedFiles ?? [], log })
               : await deps.execute(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: ns, onCase, onRunning: onRunningTest, signal });
             if (reRun.verdict === "pass") {
               run = reRun;

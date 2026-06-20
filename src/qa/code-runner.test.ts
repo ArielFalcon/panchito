@@ -9,11 +9,107 @@ import {
   coverageCommand,
   resolveSandbox,
   sandboxSpawnOptions,
+  resolveChangedModules,
+  scopeTestCommand,
+  scopeForChangedFiles,
   DetectDeps,
   CodeProject,
   CodeExecuteDeps,
   CodeSetupDeps,
 } from "./code-runner";
+
+// ── Module scoping (diff-driven) ──────────────────────────────────────────────
+function existsFrom(paths: string[]): (p: string) => boolean {
+  const set = new Set(paths);
+  return (p) => set.has(p);
+}
+
+test("resolveChangedModules: maven files in one submodule resolve to that module", () => {
+  const exists = existsFrom(["/repo/customers-service/pom.xml", "/repo/pom.xml"]);
+  const mods = resolveChangedModules(
+    "maven",
+    "/repo",
+    ["customers-service/src/main/java/Owner.java", "customers-service/src/test/java/OwnerTest.java"],
+    { exists },
+  );
+  assert.deepEqual(mods, ["customers-service"]);
+});
+
+test("resolveChangedModules: files across two submodules resolve to both (sorted, deduped)", () => {
+  const exists = existsFrom(["/repo/vets-service/pom.xml", "/repo/customers-service/pom.xml", "/repo/pom.xml"]);
+  const mods = resolveChangedModules(
+    "maven",
+    "/repo",
+    ["vets-service/src/main/java/Vet.java", "customers-service/src/main/java/Owner.java"],
+    { exists },
+  );
+  assert.deepEqual(mods, ["customers-service", "vets-service"]);
+});
+
+test("resolveChangedModules: a changed module pom.xml resolves to its OWN module, not the root", () => {
+  const exists = existsFrom(["/repo/customers-service/pom.xml", "/repo/pom.xml"]);
+  assert.deepEqual(resolveChangedModules("maven", "/repo", ["customers-service/pom.xml"], { exists }), ["customers-service"]);
+});
+
+test("resolveChangedModules: a root-level change (root pom / CI file) cannot scope → null", () => {
+  const exists = existsFrom(["/repo/customers-service/pom.xml", "/repo/pom.xml"]);
+  assert.equal(resolveChangedModules("maven", "/repo", ["pom.xml"], { exists }), null);
+  assert.equal(resolveChangedModules("maven", "/repo", [".github/workflows/ci.yml"], { exists }), null);
+});
+
+test("resolveChangedModules: ANY unresolved file forces a whole-repo fallback (null)", () => {
+  const exists = existsFrom(["/repo/customers-service/pom.xml", "/repo/pom.xml"]);
+  assert.equal(
+    resolveChangedModules("maven", "/repo", ["customers-service/src/main/java/Owner.java", "README.md"], { exists }),
+    null,
+  );
+});
+
+test("resolveChangedModules: empty changed files and unsupported ecosystems return null", () => {
+  const exists = existsFrom(["/repo/pom.xml"]);
+  assert.equal(resolveChangedModules("maven", "/repo", [], { exists }), null);
+  assert.equal(resolveChangedModules("rust", "/repo", ["src/lib.rs"], { exists }), null);
+  assert.equal(resolveChangedModules("python", "/repo", ["pkg/mod.py"], { exists }), null);
+});
+
+test("scopeTestCommand: maven scopes with -pl <modules> -am (also-make upstream deps)", () => {
+  const project: CodeProject = { ecosystem: "maven", install: null, test: { cmd: "mvn", args: ["-B", "test"] } };
+  assert.deepEqual(scopeTestCommand(project, ["customers-service", "vets-service"]), {
+    cmd: "mvn",
+    args: ["-B", "-pl", "customers-service,vets-service", "-am", "test"],
+  });
+});
+
+test("scopeTestCommand: go scopes to the changed packages", () => {
+  const project: CodeProject = { ecosystem: "go", install: null, test: { cmd: "go", args: ["test", "./..."] } };
+  assert.deepEqual(scopeTestCommand(project, ["svc/users"]), { cmd: "go", args: ["test", "./svc/users/..."] });
+});
+
+test("scopeForChangedFiles: no changed files → whole-repo fallback (non-diff run)", () => {
+  const project: CodeProject = { ecosystem: "maven", install: null, test: { cmd: "mvn", args: ["-B", "test"] } };
+  const r = scopeForChangedFiles(project, "/repo", [], { exists: () => true });
+  assert.equal(r.scoped, false);
+  assert.deepEqual(r.test, project.test);
+  assert.match(r.note, /non-diff|whole repo/i);
+});
+
+test("scopeForChangedFiles: resolved modules → scoped command + a note naming the module", () => {
+  const exists = existsFrom(["/repo/customers-service/pom.xml", "/repo/pom.xml"]);
+  const project: CodeProject = { ecosystem: "maven", install: null, test: { cmd: "mvn", args: ["-B", "test"] } };
+  const r = scopeForChangedFiles(project, "/repo", ["customers-service/src/main/java/Owner.java"], { exists });
+  assert.equal(r.scoped, true);
+  assert.deepEqual(r.test.args, ["-B", "-pl", "customers-service", "-am", "test"]);
+  assert.match(r.note, /customers-service/);
+});
+
+test("scopeForChangedFiles: a diff-mode change that does not resolve → fallback with a DISTINCT note", () => {
+  const exists = existsFrom(["/repo/customers-service/pom.xml", "/repo/pom.xml"]);
+  const project: CodeProject = { ecosystem: "maven", install: null, test: { cmd: "mvn", args: ["-B", "test"] } };
+  const r = scopeForChangedFiles(project, "/repo", ["pom.xml"], { exists });
+  assert.equal(r.scoped, false);
+  assert.deepEqual(r.test, project.test);
+  assert.match(r.note, /did not all resolve|could not scope/i);
+});
 
 test("coverageCommand wraps a node suite with c8 → coverage/lcov.info", () => {
   const project: CodeProject = { ecosystem: "node", install: null, test: { cmd: "npm", args: ["test"] } };
