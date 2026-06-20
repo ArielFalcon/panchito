@@ -59,7 +59,7 @@ import { renderValueTag } from "./qa/value-report";
 import { captureDom, captureDomByRoute, defaultCaptureDomDeps } from "./qa/dom-snapshot";
 import { buildContextPack, defaultContextPackDeps } from "./qa/context-pack";
 import { loadContextCache as loadContextCacheDefault, saveContextCache as saveContextCacheDefault } from "./qa/context-cache";
-import { AgentResult, QaCase, QaRunResult, TriggerSource, RunMode, RunOptions, TestTarget, RunOutcome, SpecMeta } from "./types";
+import { AgentResult, QaCase, QaRunResult, TriggerSource, RunMode, RunOptions, TestTarget, RunOutcome, SpecMeta, RunVerdict } from "./types";
 import type { AgentDeps, ReviewInput, ReviewResult } from "./integrations/opencode-client";
 import type { AgentRuntimeConfig } from "./agent-runtime/types";
 import { decideProgress, bestRound, classifyFailure, type RoundResult } from "./qa/progress-gate";
@@ -757,6 +757,15 @@ const REPAIR_HEADROOM_PER_GENERATE = 2;
 // legitimate run; the backstop sits exactly at the worst case so only a true runaway above it stops.
 // Calibratable downward from Phase-0 agent-turn telemetry once real cycle distributions land.
 //
+// Whether a run's outcome should feed the learning flywheel's rule-distillation. A code-mode `fail`
+// means the agent's generated test CORRECTLY caught a real bug — distilling a "fix this test" rule
+// would teach the engine to weaken a test that did its job (Goodhart). Suppress distillation for that
+// case ONLY; every other verdict (incl. `invalid` — broken generated tests, where the lesson is real)
+// still feeds learning. e2e is unaffected.
+export function shouldDistillLearning(isCode: boolean, verdict: RunVerdict): boolean {
+  return !(isCode && verdict === "fail");
+}
+
 // Phase 6b: scope-dimensioned budget. When the planner yields multiple objectives, each objective
 // is a legitimate unit of work (one agent session, one review). The base backstop covers a SINGLE
 // objective's full loop sequence; multi-objective runs get an additive per-objective increment so the
@@ -1716,7 +1725,7 @@ export async function runPipeline(
     // on the same kind of change later. Only a SPECIFIC shape is useful as a tag — a purely
     // "generic" diff yields null (untagged), since "generic" matches everything and biases nothing.
     const runArchetype = diffPatternKinds.find((k) => k !== "generic") ?? null;
-    if (reviewerCorrections.length > 0 && opts.runId && deps.distillCorrections) {
+    if (reviewerCorrections.length > 0 && opts.runId && deps.distillCorrections && shouldDistillLearning(isCode, v.verdict)) {
       try {
         const distilled = deps.distillCorrections({ app: app.name, runId: opts.runId, corrections: reviewerCorrections, archetype: runArchetype });
         if (distilled.inserted.length > 0) {
@@ -1768,7 +1777,7 @@ export async function runPipeline(
         }
       }, undefined);
     }
-    if (deps.reflectAndDistill && opts.runId && !signal?.aborted) {
+    if (deps.reflectAndDistill && opts.runId && !signal?.aborted && shouldDistillLearning(isCode, v.verdict)) {
       if (labeled.errorClass && labeled.errorClass !== "E-INFRA" && labeled.errorClass !== "E-FLAKY") {
         const outcome: RunOutcome = { ...labeled, gateSignals: { ...labeled.gateSignals, valueScore: o.valueScore ?? null }, rulesRetrieved: retrievedRuleIds, at: labeled.at };
         void bestEffortAsync("reflect-distill", log, () => deps.reflectAndDistill!({ app: app.name, runId: opts.runId!, outcome, archetype: runArchetype }), null);
@@ -1792,6 +1801,10 @@ export async function runPipeline(
     }
   };
 
+  // Tracks whether the code-mode compile gate passed (for the learning record's staticOk). Optimistic
+  // default so an absent/not-applicable gate is not recorded as a misleading false; a FAILED gate
+  // returns early, so reaching the green-path persist below means the gate passed.
+  let codeValidated = true;
   checkSignal();
   // 6. Filter B — static gate. e2e: typecheck/lint/list/manifest over `e2e/`. Code
   //    mode has no separate static gate: running the repo's own suite IS the gate
@@ -1894,6 +1907,7 @@ export async function runPipeline(
     if (codeFixRounds > 0 && codeValidation.ok) {
       log(`[qa] compile gate PASSED after ${codeFixRounds} repair round(s).`);
     }
+    codeValidated = codeValidation.ok;
     if (!codeValidation.ok) {
       log(`[qa] compile gate failed:\n${codeValidation.errors.join("\n")}`);
       // A missing/broken toolchain (the gate itself couldn't run) is inconclusive infrastructure —
@@ -2216,6 +2230,15 @@ export async function runPipeline(
     }
 
     if (isCode) {
+      // Re-compile the regenerated tests before re-running (mirror e2e's re-validate). A regen that
+      // broke compilation must not silently re-run the prior/partial suite — keep the prior verdict.
+      if (deps.validateCode) {
+        const reCompile = await deps.validateCode(mirrorDir, { changedFiles: intent?.changedFiles ?? [] });
+        if (!reCompile.ok) {
+          log(`[qa] retry compile gate failed; keeping the prior verdict:\n${reCompile.errors.join("\n")}`);
+          break;
+        }
+      }
       log("[qa] re-running the repo's test suite with the fixed tests...");
       run = await deps.executeCode(mirrorDir, { namespace: ns, onCase, signal, changedFiles: intent?.changedFiles ?? [], log });
     } else {
@@ -2392,7 +2415,11 @@ export async function runPipeline(
         checkSignal();
         const improved = await generateAndReview(baseGenInput({ coverageGap: renderUncovered(cc) }));
         if (improved.specs.length > 0 && improved.approved) {
-          const okStatic = isCode ? { ok: true, errors: [] } : await deps.validate(e2eDir);
+          const okStatic = isCode
+            ? deps.validateCode
+              ? await deps.validateCode(mirrorDir, { changedFiles: intent?.changedFiles ?? [] })
+              : { ok: true, errors: [] }
+            : await deps.validate(e2eDir);
           if (okStatic.ok && (isCode || (await devHealthy()))) {
             if (!isCode) deps.clearCoverage?.(e2eDir, ns); // re-measure only the improved suite's dumps
             coverageNs = ns; // the enforce re-execute below runs under `ns`; align the re-collection
@@ -2553,11 +2580,11 @@ export async function runPipeline(
       reviewerRationale,
     });
   }
-  persistOutcome(run, { staticOk: !isCode && generating, coverageRatio: ratio, valueScore, rulesRetrieved: retrievedRuleIds, confinement, usage: usage.result(usageComplete) });
+  persistOutcome(run, { staticOk: generating && (isCode ? codeValidated : true), coverageRatio: ratio, valueScore, rulesRetrieved: retrievedRuleIds, confinement, usage: usage.result(usageComplete) });
 
   // Reviewer-corrections distillation, labeling, prevention governance, reflection and
   // curriculum persistence — shared with the static-gate (`invalid`) early return above.
-  await foldRunLearning(run, { staticOk: !isCode && generating, coverageRatio: ratio, valueScore });
+  await foldRunLearning(run, { staticOk: generating && (isCode ? codeValidated : true), coverageRatio: ratio, valueScore });
 
   return run;
 }

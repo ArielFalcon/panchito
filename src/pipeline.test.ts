@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { runPipeline, PipelineDeps, GenerateInput, buildFailureDom, buildFailureDomLines, deriveCycleBackstop } from "./pipeline";
+import { runPipeline, PipelineDeps, GenerateInput, buildFailureDom, buildFailureDomLines, deriveCycleBackstop, shouldDistillLearning } from "./pipeline";
 import { parseAriaSnapshot } from "./qa/dom-snapshot";
 import { ReviewResult } from "./integrations/opencode-client";
 import { CoveredLines } from "./qa/change-coverage";
@@ -1044,6 +1044,24 @@ test("diff mode refreshes a stale context map before generating tests", async ()
   assert.equal(h.genInputs[0]!.mode, "context");
   assert.equal(h.genInputs[1]!.mode, "diff");
   assert.equal(h.genInputs[1]!.contextMap, refreshedContext);
+});
+
+test("shouldDistillLearning: only a code-mode real-bug fail is suppressed (it caught a real defect)", () => {
+  // A code-mode `fail` means the agent's test CORRECTLY caught a real bug — distilling a "fix this
+  // test" rule would poison the flywheel. Everything else still feeds learning.
+  assert.equal(shouldDistillLearning(true, "fail"), false);
+  assert.equal(shouldDistillLearning(true, "invalid"), true); // broken generated tests → learning IS useful
+  assert.equal(shouldDistillLearning(true, "pass"), true);
+  assert.equal(shouldDistillLearning(false, "fail"), true); // an e2e fail distills normally
+});
+
+test("learning layer: a code-mode green run records staticOk=true (the compile gate is the static gate)", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { message: "feat: add x" });
+  await runPipeline(codeApp, "codeStatic1", d, "manual", { mode: "diff", target: "code", runId: "code-static-1" });
+  const o = d.savedOutcomes.at(-1)!;
+  assert.equal(o.verdict, "pass");
+  assert.equal(o.gateSignals.static, true, "code-mode green must record staticOk=true, not the old hardcoded false");
 });
 
 test("learning layer: saveOutcome is called on green runs with the labeled outcome", async () => {
