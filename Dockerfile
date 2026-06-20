@@ -29,14 +29,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 # maven/gradle/build-essential are all present in noble under the same names.
 # Go is NOT installed from apt (the noble `golang` package is 1.22 and would lag); we
 # install the upstream tarball below.
+# JDK (NOT just a JRE): the `maven`/`gradle` packages only pull a headless JRE, which has `java`
+# but NOT `javac`. `mvn test-compile`/`mvn test` then fail with "No compiler is provided in this
+# environment. Perhaps you are running on a JRE rather than a JDK?" — turning EVERY Java code-mode
+# run into an inconclusive infra-error. `default-jdk-headless` puts `javac` on PATH (via
+# update-alternatives) and `java-common` provides the arch-independent /usr/lib/jvm/default-java.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     build-essential \
+    default-jdk-headless \
     python3 python3-pip python3-venv \
     cargo rustc \
     maven \
     gradle \
   && rm -rf /var/lib/apt/lists/*
+# Maven/Gradle and many JVM tools consult JAVA_HOME; point it at the arch-independent symlink
+# java-common installs, so the same line works on amd64 and arm64.
+ENV JAVA_HOME=/usr/lib/jvm/default-java
 
 # --- Go upstream tarball install ------------------------------------------
 # apt-get install golang on noble gives Go 1.22 (lagging); use the upstream tarball
