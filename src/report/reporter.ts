@@ -125,7 +125,7 @@ export function renderIssue(run: QaRunResult, ctx: IssueContext = {}): string {
   }
   meta.push(`**SHA:** \`${s(run.sha)}\` · **Verdict:** ${run.verdict}`);
   if (ctx.adjudication) {
-    meta.push(`**Adjudicator:** \`${ctx.adjudication.class}\` — ${ctx.adjudication.reason}`);
+    meta.push(`**Adjudicator:** \`${s(ctx.adjudication.class)}\` — ${s(ctx.adjudication.reason)}`);
   }
   blocks.push(meta.join("\n"));
 

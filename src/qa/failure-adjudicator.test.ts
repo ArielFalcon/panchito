@@ -22,8 +22,6 @@ function base(): AdjudicatorEvidence {
     failureDetails: [],
     failureClasses: [],
     absentKeysCount: 0,
-    anyVerifiedPresent: false,
-    contradictions: [],
     gateSpend: true,
     gateReason: "first retry — baseline established",
     devHealthy: true,
@@ -39,7 +37,6 @@ test("R1: canonical true case — allUnique + value-mismatch → app_defect/brea
   const ev: AdjudicatorEvidence = {
     ...base(),
     allUnique: true,
-    anyVerifiedPresent: true,
     failureDetails: [
       "Error: expect(received).toBe(expected)\nExpected: 'Alice'\nReceived: 'Bob'",
     ],
@@ -58,7 +55,6 @@ test("R1: parity true — toHaveText with echoed locator+timeout (C2) → app_de
   const ev: AdjudicatorEvidence = {
     ...base(),
     allUnique: true,
-    anyVerifiedPresent: true,
     failureDetails: [detail],
     failureClasses: ["value-mismatch"],
     gateSpend: true,
@@ -83,7 +79,6 @@ test("R1: parity false — mixed failure classes (one locator) → NOT app_defec
   const ev: AdjudicatorEvidence = {
     ...base(),
     allUnique: true,
-    anyVerifiedPresent: true,
     failureDetails: [
       "Error: expect(received).toBe(expected)\nExpected: 'x'\nReceived: 'y'",
       "strict mode violation",
@@ -98,7 +93,6 @@ test("R1: parity false — empty failureDetails → NOT app_defect", () => {
   const ev: AdjudicatorEvidence = {
     ...base(),
     allUnique: true,
-    anyVerifiedPresent: true,
     failureDetails: [],
     failureClasses: [],
   };
@@ -112,7 +106,6 @@ test("R1: parity false — presence-matcher detail (C2/W3 guard) → NOT app_def
   const ev: AdjudicatorEvidence = {
     ...base(),
     allUnique: true,
-    anyVerifiedPresent: true,
     failureDetails: [detail],
     failureClasses: ["locator"],
   };
@@ -125,7 +118,6 @@ test("R1 beats R4: no progress + clean app_defect → break-issue (not break-nee
   const ev: AdjudicatorEvidence = {
     ...base(),
     allUnique: true,
-    anyVerifiedPresent: true,
     failureDetails: [
       "Error: expect(received).toBe(expected)\nExpected: 'Alice'\nReceived: 'Bob'",
     ],
@@ -303,7 +295,6 @@ test("R6: determinism — two calls with same evidence produce deepStrictEqual o
   const ev: AdjudicatorEvidence = {
     ...base(),
     allUnique: true,
-    anyVerifiedPresent: true,
     failureDetails: ["Error: expect(received).toBe(expected)\nExpected: 'A'\nReceived: 'B'"],
     failureClasses: ["value-mismatch"],
     gateSpend: true,
@@ -317,7 +308,7 @@ test("R6: purity — function never throws on any valid input", () => {
   const evidences: AdjudicatorEvidence[] = [
     base(),
     { ...base(), devHealthy: false },
-    { ...base(), allUnique: true, anyVerifiedPresent: true, failureDetails: ["expect(x).toBe(y)\nExpected: 'a'\nReceived: 'b'"], failureClasses: ["value-mismatch"] },
+    { ...base(), allUnique: true, failureDetails: ["expect(x).toBe(y)\nExpected: 'a'\nReceived: 'b'"], failureClasses: ["value-mismatch"] },
     { ...base(), gateSpend: false, failureDetails: ["error"], failureClasses: ["other"] },
     { ...base(), isCode: true, failureDetails: ["some code error"], failureClasses: ["other"] },
   ];
@@ -341,7 +332,6 @@ test("code mode: app_defect does NOT fire (isCode=true skips rule 2)", () => {
     ...base(),
     isCode: true,
     allUnique: true,
-    anyVerifiedPresent: true,
     failureDetails: ["Error: expect(received).toBe(expected)\nExpected: 'Alice'\nReceived: 'Bob'"],
     failureClasses: ["value-mismatch"],
     gateSpend: true,

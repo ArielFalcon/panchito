@@ -24,7 +24,6 @@ export const ADJ_CLASS = {
   GENERATED_TEST_DEFECT: "generated_test_defect",
   RUNNER_INFRA: "runner_infra",
   DEV_INFRA: "dev_infra",
-  FLAKY: "flaky",
   OBJECTIVE_GAP: "objective_gap",
 } as const;
 export type AdjudicatorClass = (typeof ADJ_CLASS)[keyof typeof ADJ_CLASS];
@@ -61,10 +60,6 @@ export interface AdjudicatorEvidence {
   failureClasses: AdjFailureClass[];
   /** Number of verifiable-absent selectors (Lever-2 absentKeys.size). */
   absentKeysCount: number;
-  /** True when at least one proposed selector was verified present in a failure tree. */
-  anyVerifiedPresent: boolean;
-  /** Selector contradiction strings from Lever-2 (MULTIPLE / absent labels). */
-  contradictions: string[];
   /** True if the fix-loop may spend another retry (decideProgress.spend). */
   gateSpend: boolean;
   /** Human-readable gate decision reason (carried into verdict.reason). */
