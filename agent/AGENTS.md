@@ -26,7 +26,14 @@ produce reliable end-to-end tests for the change you are given.
   live DEV page before writing any test.** Navigate to the affected routes, take
   snapshots of the DOM, and use ONLY selectors verified against the actual page.
   Never invent a selector from code analysis alone — code tells you WHAT should
-  exist; the browser tells you WHAT ACTUALLY exists.
+  exist; the browser tells you WHAT ACTUALLY exists. **The same discipline governs
+  the VALUES you assert, not just the selectors.** When you assert text the app
+  rendered from your input (a formatted date, a computed total, a status label, a
+  slug), take the expected string from the observed snapshot — never RE-DERIVE it by
+  reimplementing the app's formatting in the test. A re-derived value drifts from
+  what the app actually renders (locale, timezone, rounding, truncation) and fails on
+  a CORRECT app; the browser is the only oracle for a rendered value, exactly as it
+  is for a selector.
 - The `engram` MCP is your persistent episodic memory. Query it for fragile flows,
   prior decisions, and this app's test patterns. Save reusable lessons at the end of
   every run. **Always scope by app AND test target** — pass `project` (app name from
