@@ -48,6 +48,18 @@ test("deriveAction: skipped and infra-error produce no side effect", () => {
   assert.match(deriveAction("infra-error", null), /inconclusive/);
 });
 
+test("deriveAction: a fail is framed as a real bug found (engine succeeded → Issue), not a process failure", () => {
+  const a = deriveAction("fail", null);
+  assert.match(a, /Issue/);
+  assert.match(a, /real bug|defect/i);
+  assert.match(a, /succeed/i); // the run SUCCEEDED — it found a real defect
+});
+
+test("renderRunReport: a fail run reads as a real bug found, distinct from an engine error", () => {
+  const out = renderRunReport({ ...baseReport, verdict: "fail", passed: 0, failed: 1, signals: baseSignals });
+  assert.match(out, /real bug|defect/i);
+});
+
 // ── renderRunReport (default: plain, deterministic) ──────────────────────────────
 
 const baseReport: RunReportInput = {

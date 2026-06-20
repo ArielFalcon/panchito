@@ -1,9 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { RUN_MODES } from "../types";
+import { RUN_ENGINE_STATUSES } from "../types";
 import {
   RunEventSchema,
   RunEventBodySchema,
+  RunEngineStatusSchema,
   RunModeSchema,
   RunStepSchema,
   RunVerdictSchema,
@@ -22,7 +24,7 @@ test("a valid envelope with a test.passed body parses", () => {
 });
 
 test("the discriminated union narrows by `type`", () => {
-  const body = RunEventBodySchema.parse({ type: "run.verdict", verdict: "pass", passed: 4, failed: 0 });
+  const body = RunEventBodySchema.parse({ type: "run.verdict", verdict: "pass", engineStatus: "success", passed: 4, failed: 0 });
   // After parse, `type` narrows the union — the verdict field is only reachable here.
   if (body.type === "run.verdict") {
     assert.equal(body.verdict, "pass");
@@ -30,6 +32,22 @@ test("the discriminated union narrows by `type`", () => {
   } else {
     assert.fail("expected run.verdict");
   }
+});
+
+test("run.verdict carries the engineStatus (required) so consumers see success vs error directly", () => {
+  const body = RunEventBodySchema.parse({ type: "run.verdict", verdict: "fail", engineStatus: "success", passed: 0, failed: 1 });
+  if (body.type === "run.verdict") {
+    // A real bug found (fail) reports engineStatus=success — the engine did its job.
+    assert.equal(body.engineStatus, "success");
+  } else {
+    assert.fail("expected run.verdict");
+  }
+  // engineStatus is REQUIRED on the event (verdict is always present there).
+  assert.throws(() => RunEventBodySchema.parse({ type: "run.verdict", verdict: "pass" }));
+});
+
+test("RunEngineStatusSchema stays in lockstep with src/types.ts RUN_ENGINE_STATUSES", () => {
+  assert.deepEqual([...RunEngineStatusSchema.options], Object.values(RUN_ENGINE_STATUSES));
 });
 
 test("an unknown event type is rejected", () => {

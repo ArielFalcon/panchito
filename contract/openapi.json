@@ -1226,6 +1226,13 @@
                   "skipped"
                 ]
               },
+              "engineStatus": {
+                "type": "string",
+                "enum": [
+                  "success",
+                  "error"
+                ]
+              },
               "passed": {
                 "type": "integer",
                 "minimum": 0,
@@ -1242,7 +1249,8 @@
             },
             "required": [
               "type",
-              "verdict"
+              "verdict",
+              "engineStatus"
             ],
             "additionalProperties": false
           },
@@ -1350,6 +1358,13 @@
               "invalid",
               "infra-error",
               "skipped"
+            ]
+          },
+          "engineStatus": {
+            "type": "string",
+            "enum": [
+              "success",
+              "error"
             ]
           },
           "passed": {

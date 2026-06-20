@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { getRecord, getRunOutcome, listRunOutcomes, listLearningRules, loadCurriculum } from "./server/history";
 import { loadAppConfig } from "./orchestrator/config-loader";
 import { RUN_MODES, RunMode, TestTarget } from "./types";
+import { runSucceeded } from "./cli-exit";
 import { renderRunReport } from "./qa/value-report";
 
 // Probe the local service's unauthenticated liveness endpoint. A 200 means a long-lived
@@ -79,9 +80,9 @@ async function runViaService(args: { app: string; sha: string; mode: RunMode; ta
   }
   console.log(`\n[qa] run ${result.id} finished: verdict=${result.verdict ?? "?"} (${result.passed} passed, ${result.failed} failed)`);
   if (result.note) console.log(`[qa] ${result.note}`);
-  // pass and skipped are success; everything else is not.
-  const ok = result.verdict === "pass" || result.verdict === "skipped";
-  process.exit(ok ? 0 : 1);
+  // A run SUCCEEDED when the engine produced a trustworthy result — including a real bug found
+  // (verdict `fail` → Issue). Only an engine error (infra-error/invalid, or no verdict) exits non-zero.
+  process.exit(runSucceeded(result.verdict) ? 0 : 1);
 }
 
 async function main(): Promise<void> {
@@ -125,9 +126,9 @@ async function main(): Promise<void> {
   // shadow mode — where there is no PR/Issue artifact to inspect — the operator could not tell what
   // the run was WORTH. Print the deterministic value signals the run already persisted.
   if (record) printRunReport(record, appCfg);
-  // pass and skipped are success; fail/invalid/infra-error/flaky are not.
-  const ok = record?.verdict === "pass" || record?.verdict === "skipped";
-  process.exit(ok ? 0 : 1);
+  // A run SUCCEEDED when the engine produced a trustworthy result — including a real bug found
+  // (verdict `fail` → Issue). Only an engine error (infra-error/invalid, or no verdict) exits non-zero.
+  process.exit(runSucceeded(record?.verdict) ? 0 : 1);
 }
 
 // Compose the value report from the persisted run record + its RunOutcome (the structured gate

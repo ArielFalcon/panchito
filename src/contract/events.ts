@@ -16,6 +16,11 @@ import { z } from "zod";
 export const TestTargetSchema = z.enum(["e2e", "code"]);
 export const RunModeSchema = z.enum(["diff", "complete", "exhaustive", "manual", "context"]);
 export const RunVerdictSchema = z.enum(["pass", "fail", "flaky", "invalid", "infra-error", "skipped"]);
+// The run STATUS, derived from the verdict (src/types.ts engineStatus): success = the engine produced
+// a trustworthy result and acted (green→PR, real bug→Issue, flaky→quarantine, skip→no-op); error =
+// it could not run or could not produce runnable tests. Distinct from the verdict — a `fail` (real
+// bug) is engineStatus=success. Required on run.verdict (the verdict is always present there).
+export const RunEngineStatusSchema = z.enum(["success", "error"]);
 
 // Canonical pipeline phases for the PhaseProgress stepper. The orchestrator's
 // `onStep` callback is a loose string today; the producer adapter normalizes it
@@ -57,7 +62,7 @@ export const RunEventBodySchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("test.flaky"), name: z.string(), attempts: z.number().int().positive() }),
   z.object({ type: z.literal("reviewer.verdict"), approved: z.boolean(), reasons: z.array(z.string()) }),
   z.object({ type: z.literal("coverage.computed"), changedLines: z.number().int().nonnegative(), coveredLines: z.number().int().nonnegative() }),
-  z.object({ type: z.literal("run.verdict"), verdict: RunVerdictSchema, passed: z.number().int().nonnegative().optional(), failed: z.number().int().nonnegative().optional(), outcome: z.string().optional() }),
+  z.object({ type: z.literal("run.verdict"), verdict: RunVerdictSchema, engineStatus: RunEngineStatusSchema, passed: z.number().int().nonnegative().optional(), failed: z.number().int().nonnegative().optional(), outcome: z.string().optional() }),
   z.object({ type: z.literal("agent.error"), detail: z.string() }),
   z.object({ type: z.literal("log.line"), level: LogLevelSchema, text: z.string() }), // fallback: only what is NOT a domain event
 ]);

@@ -11,7 +11,7 @@ import { loadAppConfig, AppConfig } from "../orchestrator/config-loader";
 import { createRecord, updateRecord, addCase, getRecord, appendLog, appendActivity, listRecords } from "./history";
 import { recordIncident } from "./maintainer";
 import { testDataNamespace } from "../qa/test-data";
-import { RunMode, TestTarget, TriggerSource, QaCase } from "../types";
+import { RunMode, TestTarget, TriggerSource, QaCase, engineStatus } from "../types";
 import { activityRouter } from "../integrations/opencode-client";
 import { redactError } from "../util/redact";
 import { isInfraError } from "../errors";
@@ -187,6 +187,7 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
       deps.runEvents?.publish(record.id, {
         type: "run.verdict",
         verdict: run.verdict,
+        engineStatus: engineStatus(run.verdict),
         passed: run.cases.filter((x) => x.status === "pass").length,
         failed: run.cases.filter((x) => x.status === "fail").length,
         // What the run PRODUCED (PR/Issue URL + merged state, or the reason note) — so the
@@ -218,7 +219,7 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
       const note = infra ? msg : `unexpected internal error (not infrastructure — investigate): ${msg}`;
       updateRecord(record.id, { status: "done", step: "done", verdict: "infra-error", note });
       deps.runEvents?.publish(record.id, { type: "agent.error", detail: note });
-      deps.runEvents?.publish(record.id, { type: "run.verdict", verdict: "infra-error" });
+      deps.runEvents?.publish(record.id, { type: "run.verdict", verdict: "infra-error", engineStatus: engineStatus("infra-error") });
       console.error(`[qa] run ${infra ? "infra-error" : "CRASHED (internal error)"} ${req.app}@${req.sha}: ${msg}`);
 
       // Only a genuine infrastructure condition is exempt from a maintainer-eligible incident

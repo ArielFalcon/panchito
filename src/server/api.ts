@@ -6,7 +6,7 @@
 
 import { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
-import { RUN_MODES, RunMode, TestTarget, RunRecord } from "../types";
+import { RUN_MODES, RunMode, TestTarget, RunRecord, engineStatus } from "../types";
 import { AppConfig } from "../orchestrator/config-loader";
 import { sanitizeText } from "../orchestrator/sanitizer";
 import { redactError } from "../util/redact";
@@ -373,6 +373,10 @@ async function handleCreateRun(req: IncomingMessage, res: ServerResponse, deps: 
 function sanitizeRecord(record: RunRecord): RunRecord {
   return {
     ...record,
+    // Derive the run status on egress (never stored): present once a verdict exists, absent while the
+    // run is still in-flight (a running run is not an "error"). Lets REST consumers read success vs
+    // error directly instead of re-deriving from the verdict.
+    ...(record.verdict ? { engineStatus: engineStatus(record.verdict) } : {}),
     note: record.note ? sanitizeText(record.note).text : record.note,
     logs: record.logs.map((l) => sanitizeText(l).text),
     cases: record.cases.map((c) => {

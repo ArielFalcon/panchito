@@ -88,6 +88,23 @@ export interface AgentResult {
 export type RunVerdict = "pass" | "fail" | "flaky" | "invalid" | "infra-error" | "skipped";
 export type CaseStatus = "pass" | "fail" | "flaky";
 
+// The user-facing run STATUS, derived purely from the verdict — distinct from the test verdict.
+// It answers "did the engine do its job and produce a TRUSTWORTHY result?", not "did every test
+// pass?". A real bug found (verdict `fail` → Issue) is a SUCCESS: the engine ran and took the right
+// action. Only a run where the engine could not run, or could not produce runnable tests (`invalid`
+// — the generated specs never passed the static gate), is an `error`. Surfaced as the CLI exit code
+// (success → 0) and a contract field; the PR-vs-Issue distinction stays one level down, in the verdict.
+export const RUN_ENGINE_STATUSES = { SUCCESS: "success", ERROR: "error" } as const;
+export type RunEngineStatus = (typeof RUN_ENGINE_STATUSES)[keyof typeof RUN_ENGINE_STATUSES];
+
+// Pure derivation. null/undefined (never recorded, or a wire value that never arrived) is treated
+// as error — fail-safe: the engine did not produce a verdict, so it did not succeed.
+export function engineStatus(verdict: RunVerdict | null | undefined): RunEngineStatus {
+  return verdict == null || verdict === "infra-error" || verdict === "invalid"
+    ? RUN_ENGINE_STATUSES.ERROR
+    : RUN_ENGINE_STATUSES.SUCCESS;
+}
+
 export interface QaCase {
   name: string;
   status: CaseStatus;
@@ -150,6 +167,8 @@ export interface RunRecord {
   step?: string;
   stepDetail?: string;
   verdict?: RunVerdict;
+  // Derived from `verdict` at egress (never stored) — present only once the run is `done`.
+  engineStatus?: RunEngineStatus;
   passed?: number;
   failed?: number;
   note?: string;

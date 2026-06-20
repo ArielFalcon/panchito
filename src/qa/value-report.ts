@@ -54,7 +54,10 @@ function verdictStyle(v: RunVerdict): { glyph: string; color: (s: string, on: bo
   switch (v) {
     case "pass":
       return { glyph: "✓", color: green };
+    // A `fail` is a real bug FOUND — the engine succeeded and filed an Issue. It is NOT an engine
+    // error, so it must read distinctly from the red ✗ used for `invalid` (broken generated tests).
     case "fail":
+      return { glyph: "!", color: amber };
     case "invalid":
       return { glyph: "✗", color: red };
     case "skipped":
@@ -88,7 +91,7 @@ export function deriveAction(verdict: RunVerdict, reviewerApproved: boolean | nu
         ? "file an Issue (the reviewer rejected the suite)"
         : "open an auto-merge suite PR with the new tests";
     case "fail":
-      return "file an Issue (a test failed against DEV)";
+      return "file an Issue — a real bug was found (the run succeeded)";
     case "invalid":
       return "file an Issue (the generated specs failed the static gate)";
     case "flaky":
@@ -125,7 +128,7 @@ export interface ReportOptions {
 
 const verdictGloss: Record<RunVerdict, string> = {
   pass: "green and stable",
-  fail: "a test failed against DEV",
+  fail: "a real bug was found (engine succeeded → Issue)",
   flaky: "a case only passed on retry (quarantined)",
   invalid: "specs failed the static gate (never executed)",
   "infra-error": "inconclusive — infrastructure fault, not a code bug",
