@@ -56,7 +56,7 @@ import { github } from "./integrations/github";
 import { capDiff } from "./orchestrator/sanitizer";
 import { renderIssue, type IssueContext, type TestedItem, type AdjudicationLabel } from "./report/reporter";
 import { renderValueTag } from "./qa/value-report";
-import { captureDom, captureDomByRoute, defaultCaptureDomDeps } from "./qa/dom-snapshot";
+import { captureDom, captureDomByRoute, captureRouteTrees, defaultCaptureDomDeps, capDomLines, type CaptureDomInput, type RouteSnapshot } from "./qa/dom-snapshot";
 import { buildContextPack, defaultContextPackDeps } from "./qa/context-pack";
 import { loadContextCache as loadContextCacheDefault, saveContextCache as saveContextCacheDefault } from "./qa/context-cache";
 import { AgentResult, QaCase, QaRunResult, TriggerSource, RunMode, RunOptions, TestTarget, RunOutcome, SpecMeta, RunVerdict } from "./types";
@@ -64,8 +64,7 @@ import type { AgentDeps, ReviewInput, ReviewResult } from "./integrations/openco
 import type { AgentRuntimeConfig } from "./agent-runtime/types";
 import { decideProgress, bestRound, classifyFailure, type RoundResult } from "./qa/progress-gate";
 import { adjudicate, ADJ_CLASS, type AdjudicatorEvidence, type AdjudicatorVerdict } from "./qa/failure-adjudicator";
-import { extractProposedSelectors, selectorPresent, selectorUnique, hasNonExtractableLocator, type ProposedSelector } from "./qa/selector-check";
-import { capDomLines } from "./qa/dom-snapshot";
+import { checkSpecSelectors } from "./qa/selector-check";
 
 // Tests live in this folder inside the repo (git is the source of truth).
 const E2E_DIR = "e2e";
@@ -180,6 +179,11 @@ export interface PipelineDeps {
   // returns "role: name" lines so the reviewer judges UI facts against reality, not its training
   // memory. Best-effort (undefined on any failure) — the review degrades to defer-on-unverifiable.
   captureDom?(input: { e2eDir: string; baseUrl: string; specContents: string[] }): Promise<string | undefined>;
+  // Pre-execution per-route RAW a11y trees for the deterministic selector check (W1). Distinct from
+  // captureDom (which formats a fused string for the reviewer) — this returns raw `.nodes` per route for
+  // checkSpecSelectors. Best-effort and tech-agnostic; absent ⇒ the pre-execution check is skipped (no
+  // regression). The unit tests stub this to bypass the browser.
+  captureRouteTrees?(input: CaptureDomInput): Promise<RouteSnapshot[]>;
   // Persistent context-map cache (qa-data). Skips the ~195s agent rebuild when a same-sha map exists.
   loadContextCache?(app: string): ArchitectureContext | undefined;
   saveContextCache?(app: string, map: ArchitectureContext): void;
@@ -418,6 +422,7 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
     review: async (input, signal, onUsage, onRepair) =>
       reviewIndependently(input, await agentDepsFactory(onUsage), { signal, onRepair }),
     captureDom: (input) => captureDom(input, defaultCaptureDomDeps),
+    captureRouteTrees: (input) => captureRouteTrees(input, defaultCaptureDomDeps),
     loadContextCache: (app) => loadContextCacheDefault(app),
     saveContextCache: (app, map) => saveContextCacheDefault(app, map),
     collectCoverage: async (input) => {
@@ -938,6 +943,10 @@ export async function runPipeline(
     if (overrides?.phaseTimings !== undefined) {
       outcome.gateSignals.phaseTimings = overrides.phaseTimings;
     }
+    // W1/W2 observation-only counts (read from the run-level accumulators, like `result` above; never
+    // affect the verdict). Recorded on every outcome so the §9 catch/block rate is queryable.
+    outcome.gateSignals.preExecAmbiguityCatches = preExecAmbiguityCatches;
+    outcome.gateSignals.deterministicSelectorBlocks = deterministicSelectorBlocks;
     deps.saveOutcome(outcome).catch((err) => {
       log(`[qa] WARNING: failed to persist RunOutcome (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
     });
@@ -1604,6 +1613,31 @@ export async function runPipeline(
 
   // 5. Generate (only when applicable): the agent writes/improves `e2e/`.
   let result: AgentResult | null = null;
+  // Observation-only counts for §9 (gateSignals): ambiguities caught pre-execution, and how many
+  // persisted after the corrective regen to trigger the deterministic block.
+  let preExecAmbiguityCatches = 0;
+  let deterministicSelectorBlocks = 0;
+  // W1/W2 — deterministic pre-execution selector ambiguity check, reusable at the detect point (W1) AND
+  // the block point (W2). Re-checked FRESH at the static gate so a static-fix rewrite cannot leave a stale
+  // block and a no-op corrective regen is still caught (the on-disk specs are authoritative). Reads the
+  // CURRENT specs, renders their target routes' live DOM, and returns the strict-mode AMBIGUITY
+  // contradictions (present + non-unique). Agnostic to the app's stack; best-effort (variable grounding
+  // coverage degrades to []). A scoped `.locator(...)` locator (non-extractable → uniqueness INDETERMINATE)
+  // and absent/unverifiable selectors NEVER count, so the block fires only on a confirmed, unscoped fact.
+  const ambiguousSelectorsNow = async (): Promise<string[]> => {
+    const baseUrl = app.dev?.baseUrl;
+    if (isCode || !baseUrl || !deps.captureRouteTrees || result == null || result.specs.length === 0) return [];
+    const specSources = result.specs
+      .map((f) => join(e2eDir, f))
+      .filter((p) => existsSync(p))
+      .map((p) => readFileSync(p, "utf8"));
+    const trees = (await deps.captureRouteTrees({ e2eDir, baseUrl, specContents: specSources }))
+      .map((s) => s.nodes ?? [])
+      .filter((n) => n.length > 0);
+    const findings = checkSpecSelectors(specSources, trees, "pre-write");
+    if (findings.anyNonExtractable) return []; // a scoped `.locator(...)` makes uniqueness indeterminate
+    return findings.contradictions.filter((c) => c.includes("MULTIPLE"));
+  };
 
   // Load persisted curriculum (survives across runs — archetypes that caught real bugs)
   if (!curriculum) {
@@ -1735,6 +1769,22 @@ export async function runPipeline(
 
     log("[qa] generating E2E tests with OpenCode...");
     result = await generateAndReview(baseGenInput({ fixCases: opts.fixCases }));
+
+    // W1 — pre-execution corrective pass. Detect strict-mode ambiguity against the live DOM and, if found,
+    // feed it through the EXISTING selectorContradictions regen channel + generateAndReview (cycle-ceiling
+    // bounded) so the agent scopes the locator BEFORE the first execution. The deterministic BLOCK is
+    // re-checked FRESH at the static gate below (W2), so even a no-op corrective regen is still caught.
+    const preExecAmbiguities = await ambiguousSelectorsNow();
+    preExecAmbiguityCatches = preExecAmbiguities.length;
+    if (preExecAmbiguities.length > 0) {
+      log(`[qa] pre-exec selector check: ${preExecAmbiguities.length} strict-mode ambiguity contradiction(s) BEFORE execution — regenerating once to scope them: ${preExecAmbiguities.join("; ")}`);
+      const corrected = await generateAndReview(baseGenInput({ selectorContradictions: preExecAmbiguities }));
+      // ONLY adopt the corrective regen if it produced specs. An EMPTY result (cycle-ceiling hit, or an
+      // agent no-op) must NOT discard the original ambiguous specs — they remain on disk and WILL execute,
+      // so `result` must keep pointing at them for the W2 re-check (and the no-op-skip guard) to catch the
+      // on-disk ambiguity. This closes the empty-corrective-regen bypass.
+      if (corrected != null && corrected.specs.length > 0) result = corrected;
+    }
 
     // Phase 6b: retroactively dimension the runaway backstop to the actual scope when the planner
     // produced multiple objectives. The app-level iterationBudget override is authoritative and is
@@ -1914,6 +1964,24 @@ export async function runPipeline(
     }
     if (staticFixRounds > 0 && validation.ok) {
       log(`[qa] static gate PASSED after ${staticFixRounds} repair round(s).`);
+    }
+    // W2 — deterministic block: re-check the CURRENT (post static-fix) specs against the live DOM, and if a
+    // strict-mode ambiguity persists, fold it into the static gate so the EXISTING `invalid` path holds the
+    // run before execution. Re-checking FRESH here (not a value stored before the static-fix loop) means a
+    // static-fix rewrite cannot leave a stale block AND a no-op corrective regen is still caught (the
+    // on-disk specs are authoritative). Guarded by `preExecAmbiguityCatches > 0` (only re-render when W1
+    // found something) and `validation.ok` (a real tsc/eslint failure already routes to invalid first).
+    if (preExecAmbiguityCatches > 0 && validation.ok) {
+      const persistent = await ambiguousSelectorsNow();
+      deterministicSelectorBlocks = persistent.length;
+      if (persistent.length > 0) {
+        log(`[qa] pre-exec selector check: strict-mode ambiguity PERSISTS — holding the run (deterministic block): ${persistent.join("; ")}`);
+        validation = {
+          ok: false,
+          infra: false,
+          errors: persistent.map((a) => `strict-mode selector ambiguity (deterministic — would fail at runtime; scope to a unique parent): ${a}`),
+        };
+      }
     }
     if (!validation.ok) {
       log(`[qa] static gate failed:\n${validation.errors.join("\n")}`);
@@ -2098,59 +2166,28 @@ export async function runPipeline(
       .map((c) => ({ case: c, lines: buildFailureDomLines(c.failureDom) }))
       .filter((t) => t.lines.length > 0);
     const haveTrees = !isCode && failedTrees.length > 0;
-    const selectorContradictions: string[] = [];
-    const absentKeys = new Set<string>(); // structured identity of verifiable-absent selectors (W2)
-    let anyVerifiedPresent = false;
-    // W5: when ANY generated spec uses a locator family Lever-2 cannot extract (getByTestId, raw
-    // CSS .locator(), getByPlaceholder/AltText/Title), the "all selectors present+unique" judgment
-    // is INCOMPLETE — a decorative getByRole could look unique while the ACTUAL failing locator is
-    // unseen. uniqueness then becomes indeterminate and the real-bug branch must NOT fire.
-    let anyNonExtractableLocator = false;
-    // W3: an extracted selector that is UNVERIFIABLE (its role is in NO tree, or appears only as a
-    // `(present)` marker whose name was dropped) is present in no `anyPresent` AND in no `absentKeys`
-    // — it falls through both branches. With one decorative present-unique getByRole setting
-    // anyVerifiedPresent, allUnique would wrongly become true and the real-bug branch could file a
-    // bogus "app defect" Issue for a selector we never actually confirmed. Track it so it forces
-    // allUnique=false: uniqueness is load-bearing only when EVERY extracted selector was verifiable.
-    let anyUnverifiableSelector = false;
-    if (haveTrees && result != null && result.specs.length > 0) {
-      for (const specFile of result.specs) {
-        const specPath = join(e2eDir, specFile);
-        if (!existsSync(specPath)) continue;
-        const specSrc = readFileSync(specPath, "utf8");
-        if (hasNonExtractableLocator(specSrc)) anyNonExtractableLocator = true;
-        for (const sel of extractProposedSelectors(specSrc)) {
-          const presences = failedTrees.map((t) => selectorPresent(sel, t.lines));
-          const anyPresent = presences.some((p) => p.present);
-          const anyVerifiable = presences.some((p) => p.verifiable);
-          if (anyPresent) {
-            anyVerifiedPresent = true;
-            // Non-unique within ANY single failed case's tree → strict-mode risk (per-tree, never fused).
-            if (failedTrees.some((t) => selectorPresent(sel, t.lines).present && !selectorUnique(sel, t.lines))) {
-              const roleLabel = sel.role ?? sel.kind;
-              const nameLabel = sel.name ? ` "${sel.name}"` : "";
-              selectorContradictions.push(`${roleLabel}:${nameLabel} matches MULTIPLE nodes (strict-mode ambiguity — scope to a unique parent)`);
-            }
-          } else if (anyVerifiable) {
-            // Verifiable-absent in EVERY tree (role is known to at least one tree, no name match
-            // anywhere, present nowhere) → a real contradiction. Unverifiable-everywhere is skipped (D4).
-            absentKeys.add(selectorKey(sel));
-            const roleLabel = sel.role ?? sel.kind;
-            const nameLabel = sel.name ? ` "${sel.name}"` : "";
-            const presentRoles = [...new Set(failedTrees.flatMap((t) => t.lines.map((l) => l.split(":")[0]?.trim())).filter(Boolean))].join(", ");
-            selectorContradictions.push(
-              `${roleLabel}:${nameLabel} is NOT in the captured failure-point tree. Present roles: ${presentRoles || "(none)"}`,
-            );
-          } else {
-            // Neither present nor verifiable-absent in any tree → UNVERIFIABLE (its role never appeared
-            // with a real name). Not a contradiction (D4: the snapshot may prune it), but it means the
-            // selector set is NOT fully confirmed — so uniqueness can't be trusted to attribute a value
-            // mismatch to an app defect. Force the real-bug branch closed (W3).
-            anyUnverifiableSelector = true;
-          }
-        }
-      }
-    }
+    // Delegate to the reusable pure core (selector-check.ts checkSpecSelectors): read the generated
+    // spec sources here (file I/O stays in the orchestrator), then check their extractable selectors
+    // against THIS round's per-case failure-point trees. The pure function is agnostic to the tree
+    // source (per-tree, never fused) — the SAME function is reusable for a pre-execution grounding
+    // check. Absent → contradiction folded into the next prompt; non-unique → strict-mode flag;
+    // non-extractable (W5) / unverifiable (W3) → uniqueness indeterminate, real-bug branch held closed.
+    const specSources =
+      haveTrees && result != null
+        ? result.specs
+            .map((specFile) => join(e2eDir, specFile))
+            .filter((p) => existsSync(p))
+            .map((p) => readFileSync(p, "utf8"))
+        : [];
+    const lever2 = checkSpecSelectors(
+      specSources,
+      failedTrees.map((t) => t.lines),
+    );
+    const selectorContradictions = lever2.contradictions;
+    const absentKeys = lever2.absentKeys; // structured identity of verifiable-absent selectors (W2)
+    const anyVerifiedPresent = lever2.anyVerifiedPresent;
+    const anyNonExtractableLocator = lever2.anyNonExtractable; // W5
+    const anyUnverifiableSelector = lever2.anyUnverifiable; // W3
 
     // Lever-2 signal C, computed ONCE after the per-spec loop (W2): prev-round absent selectors that
     // are NOT absent this round flipped (absent→present OR absent→ambiguous — both are progress). The
@@ -2695,14 +2732,6 @@ export function buildFailureDom(cases: QaCase[]): string | undefined {
 export function buildFailureDomLines(failureDom: string | undefined): string[] {
   if (!failureDom) return [];
   return failureDom.split("\n").filter((l) => l.trim());
-}
-
-// Stable STRUCTURED identity for a proposed selector (W2): role+name+exact+isRegex+kind. Used to
-// compare the prev round's absent selectors to the current round's by identity — NOT by startsWith
-// over the human-readable contradiction strings, which mis-counts an absent→ambiguous transition
-// (the same selector, now MULTIPLE instead of absent) as "still absent" and starves Lever-2 signal C.
-export function selectorKey(sel: ProposedSelector): string {
-  return `${sel.kind}|${sel.role ?? ""}|${sel.name ?? ""}|${sel.exact ? "1" : "0"}|${sel.isRegex ? "1" : "0"}`;
 }
 
 // What the agent reported testing (flow + objective per spec) — the "what was tested"

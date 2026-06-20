@@ -3142,3 +3142,131 @@ test("adjudicator: break-needs-human → Issue body contains adjudication class 
     `Issue body must contain adjudication class or reason; got:\n${body.slice(0, 400)}`,
   );
 });
+
+// ── W1: pre-execution selector check → ONE corrective regen (increment 3) ──────
+
+test("W1 pre-exec: a strict-mode ambiguity found BEFORE execution triggers a corrective regen carrying the contradiction", async () => {
+  const calls: string[] = [];
+  // The post-failure fix-loop never fires on this path, so the ONLY source of a selectorContradictions
+  // regen is the pre-execution check (W1) — it runs in the main flow, independent of the reviewer (the
+  // base app has needsReview:true but no review dep wired). The stub spec stays ambiguous, so W2 then
+  // blocks the run as `invalid`; this test only asserts that W1 fired the corrective regen.
+  const d = deps(passing(), calls, { agents: [generated, generated] });
+  // Pre-write grounding for the spec's route: "heading: Owners" appears TWICE → the generated
+  // getByRole('heading', { name: 'Owners' }) is present-and-NON-UNIQUE (strict-mode ambiguity).
+  d.captureRouteTrees = async () => [{ route: "/owners", nodes: ["heading: Owners", "heading: Owners"] }];
+  writeFileSync(
+    join(d.mirrorDir, "e2e", "a.spec.ts"),
+    `import { test } from "./fixtures";\ntest("owners", async ({ page }) => {\n  await page.goto("/owners");\n  await page.getByRole("heading", { name: "Owners" }).click();\n});\n`,
+  );
+  await runPipeline(app, "abc123", d);
+  const corrective = d.genInputs.find((gi) => gi.selectorContradictions?.some((c) => c.includes("MULTIPLE")));
+  assert.ok(corrective, `expected a corrective regen carrying the pre-exec strict-mode ambiguity; gen inputs: ${d.genInputs.length}`);
+});
+
+test("W1 pre-exec: a UNIQUE selector in the pre-write grounding does NOT trigger a corrective regen", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { agents: [generated, generated] });
+  d.captureRouteTrees = async () => [{ route: "/owners", nodes: ["heading: Owners"] }]; // unique → no ambiguity
+  writeFileSync(
+    join(d.mirrorDir, "e2e", "a.spec.ts"),
+    `import { test } from "./fixtures";\ntest("owners", async ({ page }) => {\n  await page.goto("/owners");\n  await page.getByRole("heading", { name: "Owners" }).click();\n});\n`,
+  );
+  await runPipeline(app, "abc123", d);
+  const corrective = d.genInputs.find((gi) => gi.selectorContradictions?.some((c) => c.includes("MULTIPLE")));
+  assert.equal(corrective, undefined, "a unique selector must NOT trigger a corrective regen");
+});
+
+// ── W2: deterministic block when the ambiguity persists after the corrective regen (increment 4) ──
+
+test("W2 pre-exec: a strict-mode ambiguity that PERSISTS after the corrective regen blocks as invalid (no execute, no publish)", async () => {
+  const calls: string[] = [];
+  // captureRouteTrees ALWAYS reports the ambiguity, and the stub generate returns the same spec, so the
+  // corrective regen cannot clear it → the deterministic block must hold the run before execution.
+  const d = deps(passing(), calls, { agents: [generated, generated, generated] });
+  d.captureRouteTrees = async () => [{ route: "/owners", nodes: ["heading: Owners", "heading: Owners"] }];
+  writeFileSync(
+    join(d.mirrorDir, "e2e", "a.spec.ts"),
+    `import { test } from "./fixtures";\ntest("owners", async ({ page }) => {\n  await page.goto("/owners");\n  await page.getByRole("heading", { name: "Owners" }).click();\n});\n`,
+  );
+  const result = await runPipeline(app, "abc123", d);
+  assert.equal(result.verdict, "invalid", `a persistent strict-mode ambiguity must block as invalid; got ${result.verdict}`);
+  assert.equal(d.published, false, "must NOT publish a deterministically strict-mode-ambiguous spec");
+  assert.ok(!calls.includes("execute"), "must NOT spend an execution when blocked before it");
+});
+
+test("W2 pre-exec: a SCOPED `.locator(parent).getByRole(...)` is NOT blocked even if the bare name recurs in the tree", async () => {
+  const calls: string[] = [];
+  // The tree has two "heading: Owners", but the spec scopes the locator via `.locator(...)` — uniqueness
+  // is INDETERMINATE (Lever-2 cannot see the parent), so W2 must NOT block (no false positive).
+  const d = deps(passing(), calls, { agents: [generated, generated, generated] });
+  d.captureRouteTrees = async () => [{ route: "/owners", nodes: ["heading: Owners", "heading: Owners"] }];
+  writeFileSync(
+    join(d.mirrorDir, "e2e", "a.spec.ts"),
+    `import { test } from "./fixtures";\ntest("owners", async ({ page }) => {\n  await page.goto("/owners");\n  await page.locator(".container").getByRole("heading", { name: "Owners" }).click();\n});\n`,
+  );
+  const result = await runPipeline(app, "abc123", d);
+  assert.notEqual(result.verdict, "invalid", `a scoped locator must NOT be blocked; got ${result.verdict}`);
+  assert.ok(calls.includes("execute"), "a scoped locator must proceed to execution, not be held pre-execution");
+});
+
+test("W1+W2 happy path: a corrective regen that scopes the locator CLEARS the block and the run proceeds", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { agents: [generated, generated] });
+  d.captureRouteTrees = async () => [{ route: "/owners", nodes: ["heading: Owners", "heading: Owners"] }];
+  const specPath = join(d.mirrorDir, "e2e", "a.spec.ts");
+  // Initial spec: an UNSCOPED ambiguous getByRole → W1 fires the corrective regen.
+  writeFileSync(
+    specPath,
+    `import { test } from "./fixtures";\ntest("owners", async ({ page }) => {\n  await page.goto("/owners");\n  await page.getByRole("heading", { name: "Owners" }).click();\n});\n`,
+  );
+  let genN = 0;
+  const origGen = d.generate;
+  d.generate = async (input) => {
+    genN++;
+    // The corrective regen (2nd generate) SCOPES the locator via `.locator(...)` → no longer
+    // extractable-ambiguous, so W2's fresh re-check returns [] and the run is NOT blocked.
+    if (genN === 2) {
+      writeFileSync(
+        specPath,
+        `import { test } from "./fixtures";\ntest("owners", async ({ page }) => {\n  await page.goto("/owners");\n  await page.locator(".container").getByRole("heading", { name: "Owners" }).click();\n});\n`,
+      );
+    }
+    return origGen(input);
+  };
+  const result = await runPipeline(app, "abc123", d);
+  assert.notEqual(result.verdict, "invalid", `the corrective regen cleared the ambiguity → must NOT block; got ${result.verdict}`);
+  assert.ok(calls.includes("execute"), "after the ambiguity is scoped away, the run must proceed to execution");
+});
+
+// ── gateSignals: pre-exec ambiguity catch/block counts on the outcome (increment 5) ───────────
+
+test("gateSignals: pre-exec ambiguity catches AND deterministic blocks are recorded on the RunOutcome", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { agents: [generated, generated, generated] });
+  d.captureRouteTrees = async () => [{ route: "/owners", nodes: ["heading: Owners", "heading: Owners"] }];
+  writeFileSync(
+    join(d.mirrorDir, "e2e", "a.spec.ts"),
+    `import { test } from "./fixtures";\ntest("owners", async ({ page }) => {\n  await page.goto("/owners");\n  await page.getByRole("heading", { name: "Owners" }).click();\n});\n`,
+  );
+  await runPipeline(app, "abc123", d, "manual", { mode: "diff", runId: "run-gatesignals" });
+  const last = d.savedOutcomes.at(-1);
+  assert.ok(last, "an outcome must be persisted (runId set)");
+  assert.ok((last!.gateSignals.preExecAmbiguityCatches ?? 0) > 0, "must record preExecAmbiguityCatches");
+  assert.ok((last!.gateSignals.deterministicSelectorBlocks ?? 0) > 0, "must record deterministicSelectorBlocks");
+});
+
+test("gateSignals: a run with no pre-exec ambiguity records zero catches/blocks", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { diff: "DIFF", coverage: [] });
+  d.captureRouteTrees = async () => [{ route: "/owners", nodes: ["heading: Owners"] }]; // unique → no ambiguity
+  writeFileSync(
+    join(d.mirrorDir, "e2e", "a.spec.ts"),
+    `import { test } from "./fixtures";\ntest("owners", async ({ page }) => {\n  await page.goto("/owners");\n  await page.getByRole("heading", { name: "Owners" }).click();\n});\n`,
+  );
+  await runPipeline(app, "abc123", d, "manual", { mode: "diff", runId: "run-gatesignals-zero" });
+  const last = d.savedOutcomes.at(-1);
+  assert.ok(last, "an outcome must be persisted");
+  assert.equal(last!.gateSignals.preExecAmbiguityCatches ?? 0, 0, "no ambiguity → zero catches");
+  assert.equal(last!.gateSignals.deterministicSelectorBlocks ?? 0, 0, "no ambiguity → zero blocks");
+});

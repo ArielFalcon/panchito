@@ -232,6 +232,13 @@ export interface RunOutcome {
     // Per-subphase wall-clock timing (ms), accumulated per phase label. Observation-only.
     // Absent on a run that recorded nothing (e.g. a pre-classify skip). Never affects verdict.
     phaseTimings?: Record<string, number>;
+    // W1/W2 — pre-execution deterministic selector check (observation-only). `preExecAmbiguityCatches`:
+    // strict-mode ambiguities caught against the live pre-write DOM BEFORE execution; `deterministicSelectorBlocks`:
+    // how many persisted after the corrective regen and triggered the deterministic block. These make the
+    // §9 catch/block rate falsifiable; they never affect the verdict on their own (W2 routes through the
+    // static gate). Absent on runs where the check did not run (code mode, no-`dev` app, no grounding).
+    preExecAmbiguityCatches?: number;
+    deterministicSelectorBlocks?: number;
   };
   rulesRetrieved: string[];
   reflection?: StructuredReflection;

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { extractTargetRoutes, formatDomSnapshot, parseAriaSnapshot, captureDom, captureDomByRoute, normalizeRoutes, capDomLines, isPriorityNode, type CaptureDomDeps } from "./dom-snapshot";
+import { extractTargetRoutes, formatDomSnapshot, parseAriaSnapshot, captureDom, captureDomByRoute, captureRouteTrees, normalizeRoutes, capDomLines, isPriorityNode, type CaptureDomDeps } from "./dom-snapshot";
 
 test("extractTargetRoutes pulls app-relative routes from page.goto, dedups, normalizes a leading slash", () => {
   const spec = `
@@ -364,4 +364,41 @@ test("captureDomByRoute degrades to an empty map (no routes / no baseUrl / rende
   assert.equal((await captureDomByRoute(["/a"], { e2eDir: "/m", baseUrl: "http://dev" }, throwing)).size, 0, "render throws → empty");
   const errored: CaptureDomDeps = { render: async () => [{ route: "/a", error: "nav failed" }] };
   assert.equal((await captureDomByRoute(["/a"], { e2eDir: "/m", baseUrl: "http://dev" }, errored)).size, 0, "errored route excluded");
+});
+
+// ── captureRouteTrees: per-route RAW node lines for the pre-execution selector check (W1) ──────
+
+test("captureRouteTrees returns RouteSnapshot[] with raw nodes for the spec's target routes", async () => {
+  const spec = `await page.goto("/#!/owners"); await page.goto("/#!/vets");`;
+  const deps: CaptureDomDeps = {
+    render: async (_e2eDir, _baseUrl, routes) => routes.map((r) => ({ route: r, nodes: [`heading: ${r}`] })),
+  };
+  const trees = await captureRouteTrees({ e2eDir: "/m", baseUrl: "http://dev", specContents: [spec] }, deps);
+  assert.deepEqual(
+    trees.map((t) => t.route),
+    ["/#!/owners", "/#!/vets"],
+  );
+  assert.deepEqual(trees[0]!.nodes, ["heading: /#!/owners"]);
+});
+
+test("captureRouteTrees does NOT apply the shared-shell dedup (the shell IS the DOM to check for ambiguity)", async () => {
+  // Two hash routes serving an IDENTICAL shell — captureDomByRoute would DROP these, but the
+  // pre-execution ambiguity check must see the real rendered tree regardless of framework/routing.
+  const spec = `await page.goto("/#!/a"); await page.goto("/#!/b");`;
+  const deps: CaptureDomDeps = {
+    render: async (_e2eDir, _baseUrl, routes) => routes.map((r) => ({ route: r, nodes: ["heading: Owners", "heading: Owners"] })),
+  };
+  const trees = await captureRouteTrees({ e2eDir: "/m", baseUrl: "http://dev", specContents: [spec] }, deps);
+  assert.equal(trees.length, 2, "shared shell is kept, not deduped");
+  assert.deepEqual(trees[0]!.nodes, ["heading: Owners", "heading: Owners"]);
+});
+
+test("captureRouteTrees is best-effort: no routes / no baseUrl / render throws / errored or empty nodes → []", async () => {
+  const ok: CaptureDomDeps = { render: async (_e, _b, routes) => routes.map((r) => ({ route: r, nodes: ["button: x"] })) };
+  assert.deepEqual(await captureRouteTrees({ e2eDir: "/m", baseUrl: "http://dev", specContents: ["expect(1).toBe(1)"] }, ok), [], "no goto routes → []");
+  assert.deepEqual(await captureRouteTrees({ e2eDir: "/m", baseUrl: "", specContents: [`page.goto("/a")`] }, ok), [], "no baseUrl → []");
+  const throwing: CaptureDomDeps = { render: async () => { throw new Error("launch failed"); } };
+  assert.deepEqual(await captureRouteTrees({ e2eDir: "/m", baseUrl: "http://dev", specContents: [`page.goto("/a")`] }, throwing), [], "render throws → []");
+  const errored: CaptureDomDeps = { render: async () => [{ route: "/a", error: "nav failed" }, { route: "/b", nodes: [] }] };
+  assert.deepEqual(await captureRouteTrees({ e2eDir: "/m", baseUrl: "http://dev", specContents: [`page.goto("/a"); page.goto("/b")`] }, errored), [], "errored + empty-nodes excluded");
 });

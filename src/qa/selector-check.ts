@@ -283,3 +283,86 @@ function extractNameOpts(opts: string): { name?: string; exact?: boolean; isRege
 
   return { ...(name !== undefined ? { name } : {}), ...(exactMatch ? { exact: true } : {}) };
 }
+
+// Stable STRUCTURED identity for a proposed selector: role+name+exact+isRegex+kind. Used to
+// compare an absent selector across rounds by identity — NOT by startsWith over the human-readable
+// contradiction strings, which mis-counts an absent→ambiguous transition (the same selector, now
+// MULTIPLE instead of absent) as "still absent".
+export function selectorKey(sel: ProposedSelector): string {
+  return `${sel.kind}|${sel.role ?? ""}|${sel.name ?? ""}|${sel.exact ? "1" : "0"}|${sel.isRegex ? "1" : "0"}`;
+}
+
+// The structured findings of checking a spec's extractable selectors against a set of a11y trees.
+export interface SpecSelectorFindings {
+  // Human-readable MULTIPLE-nodes / NOT-in-tree messages, ready to fold into a regen prompt.
+  contradictions: string[];
+  // Structured identities of verifiable-absent selectors (for cross-round progress comparison).
+  absentKeys: Set<string>;
+  // At least one extracted selector resolved to ≥1 node in some tree.
+  anyVerifiedPresent: boolean;
+  // The spec uses a locator family Lever-2 cannot extract (.locator/getByTestId/…) — uniqueness
+  // is then INDETERMINATE (the visible getByRole set is not the full locator set).
+  anyNonExtractable: boolean;
+  // At least one extracted selector was neither present nor verifiable-absent in any tree (its
+  // role never appeared with a real name) — uniqueness cannot be trusted.
+  anyUnverifiable: boolean;
+}
+
+// The reusable Lever-2 core. Checks every extractable selector in each spec source against the
+// given a11y `trees` and returns the structured findings.
+//
+// AGNOSTIC TO THE TREE SOURCE: `trees` may be post-failure failureDom captures OR pre-write
+// per-route grounding OR anything else — this function never knows or cares which app, framework,
+// routing, or rendering produced them. Each tree is a `string[]` of `"role: name"` lines (the
+// parseAriaSnapshot shape). PER-TREE, NEVER FUSED: a selector is non-unique only when it resolves
+// to >1 nodes within a SINGLE tree (a real strict-mode trigger), and absent only when absent in
+// EVERY tree (so a node present on page A is never judged "absent" against page B). Pure; never
+// throws; empty `trees` yields empty findings (best-effort, safe no-op).
+//
+// `treeLabel` only names the tree in the absent message ("…NOT in the captured <label> tree");
+// it defaults to the post-failure wording for byte-identical behavior at the existing call site.
+export function checkSpecSelectors(
+  specSources: string[],
+  trees: string[][],
+  treeLabel = "failure-point",
+): SpecSelectorFindings {
+  const contradictions: string[] = [];
+  const absentKeys = new Set<string>();
+  let anyVerifiedPresent = false;
+  let anyNonExtractable = false;
+  let anyUnverifiable = false;
+
+  for (const specSrc of specSources) {
+    if (hasNonExtractableLocator(specSrc)) anyNonExtractable = true;
+    for (const sel of extractProposedSelectors(specSrc)) {
+      const presences = trees.map((t) => selectorPresent(sel, t));
+      const anyPresent = presences.some((p) => p.present);
+      const anyVerifiable = presences.some((p) => p.verifiable);
+      if (anyPresent) {
+        anyVerifiedPresent = true;
+        // Non-unique within ANY single tree → strict-mode risk (per-tree, never fused). Reuse the
+        // already-computed `presences` (selectorPresent is pure) — only the uniqueness count is new.
+        if (presences.some((p, i) => p.present && !selectorUnique(sel, trees[i]!))) {
+          const roleLabel = sel.role ?? sel.kind;
+          const nameLabel = sel.name ? ` "${sel.name}"` : "";
+          contradictions.push(`${roleLabel}:${nameLabel} matches MULTIPLE nodes (strict-mode ambiguity — scope to a unique parent)`);
+        }
+      } else if (anyVerifiable) {
+        // Verifiable-absent in EVERY tree (role known to ≥1 tree with a real name, no name match
+        // anywhere) → a real contradiction. Unverifiable-everywhere is skipped below.
+        absentKeys.add(selectorKey(sel));
+        const roleLabel = sel.role ?? sel.kind;
+        const nameLabel = sel.name ? ` "${sel.name}"` : "";
+        const presentRoles = [...new Set(trees.flatMap((t) => t.map((l) => l.split(":")[0]?.trim())).filter(Boolean))].join(", ");
+        contradictions.push(
+          `${roleLabel}:${nameLabel} is NOT in the captured ${treeLabel} tree. Present roles: ${presentRoles || "(none)"}`,
+        );
+      } else {
+        // Neither present nor verifiable-absent in any tree → UNVERIFIABLE (role never appeared with
+        // a real name). Not a contradiction (the snapshot may prune it), but uniqueness can't be trusted.
+        anyUnverifiable = true;
+      }
+    }
+  }
+  return { contradictions, absentKeys, anyVerifiedPresent, anyNonExtractable, anyUnverifiable };
+}

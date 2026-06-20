@@ -215,6 +215,24 @@ export async function captureDomByRoute(
   return out;
 }
 
+// Capture the per-route RAW node lines (`RouteSnapshot.nodes`) for the routes a SPEC targets — for the
+// PRE-EXECUTION deterministic selector check (Lever-2 / checkSpecSelectors). Unlike captureDomByRoute
+// (which formats per route and drops shared shells for worker grounding), this returns the raw nodes and
+// applies NO shell-dedup: for strict-mode AMBIGUITY the real rendered tree IS the thing to check against,
+// whatever the app's routing or rendering. Agnostic and best-effort: no routes / no baseUrl / a failed
+// render / errored or empty-node routes all yield [] — the pre-execution signal is simply absent, never a
+// break (the deterministic guarantee rests on the always-available post-failure path, not on this).
+export async function captureRouteTrees(input: CaptureDomInput, deps: CaptureDomDeps): Promise<RouteSnapshot[]> {
+  const routes = extractTargetRoutes(input.specContents);
+  if (routes.length === 0 || !input.baseUrl) return [];
+  try {
+    const snaps = await deps.render(input.e2eDir, input.baseUrl, routes);
+    return snaps.filter((s) => !s.error && (s.nodes?.length ?? 0) > 0);
+  } catch {
+    return []; // degrade: no pre-execution signal, never break the run
+  }
+}
+
 // Parses the YAML string returned by `locator('body').ariaSnapshot()` (Playwright >=1.57) into
 // "role: name" lines for the interactive/labelled nodes the reviewer cares about. Pure — exported
 // for testing. Replaces the JSON-tree walk of `flattenAccessibilityTree` (removed in PW 1.57);

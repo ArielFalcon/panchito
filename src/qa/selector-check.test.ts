@@ -9,6 +9,8 @@ import {
   selectorUnique,
   extractProposedSelectors,
   hasNonExtractableLocator,
+  checkSpecSelectors,
+  selectorKey,
   type ProposedSelector,
 } from "./selector-check";
 
@@ -462,4 +464,70 @@ test("end-to-end: absent role is UNVERIFIABLE — never a hard failure", () => {
   const result = selectorPresent(sels[0]!, tree);
   assert.equal(result.present, false);
   assert.equal(result.verifiable, false); // UNVERIFIABLE — never blocks the spec
+});
+
+// ── selectorKey (stable structured identity) ──────────────────────────────────
+
+test("selectorKey: same selector → same key; differing field → different key", () => {
+  const a: ProposedSelector = { kind: "role", role: "heading", name: "Owners" };
+  const b: ProposedSelector = { kind: "role", role: "heading", name: "Owners" };
+  const c: ProposedSelector = { kind: "role", role: "heading", name: "Owners", exact: true };
+  assert.equal(selectorKey(a), selectorKey(b));
+  assert.notEqual(selectorKey(a), selectorKey(c));
+});
+
+// ── checkSpecSelectors (the reusable core, agnostic to the tree's SOURCE) ──────
+
+test("checkSpecSelectors: present + non-unique WITHIN one tree → MULTIPLE contradiction", () => {
+  const spec = `await page.getByRole("heading", { name: "Owners" }).click();`;
+  const trees = [["heading: Owners", "heading: Owners"]]; // two matches in ONE tree
+  const r = checkSpecSelectors([spec], trees);
+  assert.equal(r.anyVerifiedPresent, true);
+  assert.ok(r.contradictions.some((c) => c.includes("MULTIPLE")), "expected a strict-mode ambiguity contradiction");
+  assert.equal(r.absentKeys.size, 0);
+});
+
+test("checkSpecSelectors: same name once in tree A and once in tree B → per-tree unique, NOT MULTIPLE", () => {
+  const spec = `await page.getByRole("heading", { name: "Owners" }).click();`;
+  const trees = [["heading: Owners"], ["heading: Owners"]]; // never fused across trees
+  const r = checkSpecSelectors([spec], trees);
+  assert.equal(r.anyVerifiedPresent, true);
+  assert.equal(r.contradictions.some((c) => c.includes("MULTIPLE")), false);
+});
+
+test("checkSpecSelectors: verifiable-absent in every tree → absentKey + default 'failure-point' label", () => {
+  const spec = `await page.getByRole("button", { name: "Ghost" }).click();`;
+  const trees = [["button: Save"]]; // role present with a real name, name does not match
+  const r = checkSpecSelectors([spec], trees);
+  assert.equal(r.absentKeys.size, 1);
+  assert.ok(r.contradictions.some((c) => c.includes("is NOT in the captured failure-point tree")));
+});
+
+test("checkSpecSelectors: treeLabel parameterizes the absent message (agnostic to tree source)", () => {
+  const spec = `await page.getByRole("button", { name: "Ghost" }).click();`;
+  const trees = [["button: Save"]];
+  const r = checkSpecSelectors([spec], trees, "pre-write");
+  assert.ok(r.contradictions.some((c) => c.includes("is NOT in the captured pre-write tree")));
+});
+
+test("checkSpecSelectors: a .locator(...) chain marks anyNonExtractable (scoped-locator guard)", () => {
+  const spec = `await page.locator(".table").getByRole("row", { name: "John" }).click();`;
+  const r = checkSpecSelectors([spec], [["row: John", "row: John"]]);
+  assert.equal(r.anyNonExtractable, true);
+});
+
+test("checkSpecSelectors: role never in any tree → anyUnverifiable, no absent contradiction", () => {
+  const spec = `await page.getByRole("columnheader", { name: "Name" }).isVisible();`;
+  const trees = [["text: Name", "text: Species"]]; // no columnheader role at all
+  const r = checkSpecSelectors([spec], trees);
+  assert.equal(r.anyUnverifiable, true);
+  assert.equal(r.absentKeys.size, 0);
+  assert.equal(r.contradictions.length, 0);
+});
+
+test("checkSpecSelectors: no trees → empty findings (best-effort, never throws)", () => {
+  const spec = `await page.getByRole("heading", { name: "Owners" }).click();`;
+  const r = checkSpecSelectors([spec], []);
+  assert.equal(r.contradictions.length, 0);
+  assert.equal(r.anyVerifiedPresent, false);
 });
