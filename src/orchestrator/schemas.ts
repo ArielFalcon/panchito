@@ -90,6 +90,12 @@ export const AppConfigSchema = z
       // run (including maxRetries=5); only a true runaway above it is stopped. Calibratable down
       // from Phase-0 telemetry. This is the safety backstop, NOT the symptom lever (Phases 3–4).
       iterationBudget: z.number().int().positive().optional(),
+      // Optional run-level wall-clock ceiling (ms). When the run's total elapsed time exceeds this at
+      // the ENTRY of a generation, no further generation starts and the run concludes on its current
+      // state — it NEVER aborts an in-flight execute/review or discards a green result. Default
+      // (undefined) → MAX_CYCLES * agentTimeout(mode), a conservative outer bound.
+      // Observation+safety, not a tuning lever.
+      wallClockBudgetMs: z.number().int().positive().optional(),
     }),
     code: z.boolean().optional(),
     report: z.object({

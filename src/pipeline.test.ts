@@ -12,6 +12,208 @@ import { AgentResult, QaCase, QaRunResult, RunMode, RunOutcome } from "./types";
 import type { OracleInput, ValueOracleResult } from "./qa/learning/oracle-types";
 import type { RetrievalResult } from "./qa/learning/retrieval";
 
+// ── Phase-timings type-level compile checks ────────────────────────────────────
+// These tests are compile-time assertions: if the types are wrong the file fails tsc.
+
+// 1.1 — phaseTimings is accepted as Record<string, number> | undefined on gateSignals
+test("phase-timings: phaseTimings compiles as optional Record<string,number> on gateSignals", () => {
+  const outcome: RunOutcome = {
+    runId: "r",
+    app: "demo",
+    sha: "abc",
+    mode: "diff",
+    target: "e2e",
+    verdict: "pass",
+    errorClass: null,
+    gateSignals: {
+      static: true,
+      coverageRatio: null,
+      valueScore: null,
+      reviewerCorrections: [],
+      flaky: false,
+      retries: 0,
+      phaseTimings: { generator: 1000, reviewer: 500 },
+    },
+    rulesRetrieved: [],
+    at: new Date().toISOString(),
+  };
+  assert.equal(typeof outcome.gateSignals.phaseTimings, "object");
+
+  // Also verify undefined is accepted (optional)
+  const outcomeNoTimings: RunOutcome = {
+    ...outcome,
+    gateSignals: { ...outcome.gateSignals, phaseTimings: undefined },
+  };
+  assert.equal(outcomeNoTimings.gateSignals.phaseTimings, undefined);
+});
+
+// 1.3 — wallClockBudgetMs is accepted as a positive integer or undefined on qa config
+test("phase-timings: wallClockBudgetMs compiles as optional positive integer on qa config", () => {
+  const withBudget: AppConfig = {
+    ...app,
+    qa: { ...app.qa, wallClockBudgetMs: 60_000 },
+  };
+  assert.equal(withBudget.qa.wallClockBudgetMs, 60_000);
+
+  const noBudget: AppConfig = {
+    ...app,
+    qa: { ...app.qa, wallClockBudgetMs: undefined },
+  };
+  assert.equal(noBudget.qa.wallClockBudgetMs, undefined);
+});
+
+// 2.1 — phaseTimings is populated on a normal green run (at least generator + reviewer keys present)
+test("phase-timings: phaseTimings is a non-null object with generator and reviewer keys on a green run", async () => {
+  const calls: string[] = [];
+  const d = deps({ sha: "s", verdict: "pass", passed: true, cases: [], logs: "" }, calls, {
+    review: [{ approved: true, corrections: [], parsed: true }],
+  });
+  await runPipeline(app, "abc123", d, "manual", { mode: "diff", runId: "run-phase-timings-1" });
+  assert.ok(d.savedOutcomes.length > 0, "outcome must be saved");
+  const outcome = d.savedOutcomes[0]!;
+  assert.ok(outcome.gateSignals.phaseTimings !== null && outcome.gateSignals.phaseTimings !== undefined, "phaseTimings must be present");
+  assert.ok(typeof outcome.gateSignals.phaseTimings!["generator"] === "number", "generator timing must be a number");
+  assert.ok(typeof outcome.gateSignals.phaseTimings!["reviewer"] === "number", "reviewer timing must be a number");
+});
+
+// ── Wall-clock ceiling tests (LOAD-BEARING SAFETY) ────────────────────────────
+
+// 3.1 Test A — ceiling stops new generation (DETERMINISTIC via injected clock).
+// Strategy: inject a `nowMs` sequence so the FIRST generateOnce call sees elapsed UNDER budget
+// (clock returns runStart + 0 on the guard check), then every subsequent call sees elapsed OVER
+// budget. The first generate SUCCEEDS (returns specs); execute fails so the fix-loop tries up to
+// 3 more generates — the guard fires on every retry because the clock is now PAST the budget.
+// Changing failing names (t, u, v, w) keep the progress gate allowing spend (signal B) so the
+// wall-clock guard is the ONLY thing that can stop the loop. Without the guard generateCallCount
+// would be 4 (1 initial + 3 retries); with the guard it must be exactly 1.
+// This test is MACHINE-SPEED INDEPENDENT: the clock is fully controlled, no real Date.now() used.
+test("wall-clock ceiling: stops starting new generation after budget is exhausted (Test A)", async () => {
+  const calls: string[] = [];
+  let generateCallCount = 0;
+  // Budget of 1000ms — injected clock will report 0ms elapsed on first call and 2000ms on subsequent.
+  const budgetMs = 1_000;
+  const twoRetryApp: AppConfig = {
+    ...app,
+    qa: { ...app.qa, needsReview: false, fixLoop: { maxRetries: 3 }, wallClockBudgetMs: budgetMs },
+  };
+  const failRun: QaRunResult = { sha: "s", verdict: "fail", passed: false, cases: [{ name: "t", status: "fail" }], logs: "" };
+  const d = deps(failRun, calls, {});
+
+  // Injected clock: first invocation is runStart; second is runStart+0 (under budget at first guard
+  // check); third+ return runStart+2000 (over budget, guard fires and blocks further generation).
+  // The injected sequence: [t0, t0, t0+2000, t0+2000, ...] — more values than needed so the clock
+  // never runs dry regardless of how many times now() is called.
+  const t0 = 1_000_000; // arbitrary epoch anchor; only deltas matter
+  const clockSeq = [t0, t0, t0 + 2_000, t0 + 2_000, t0 + 2_000, t0 + 2_000, t0 + 2_000, t0 + 2_000];
+  let clockIdx = 0;
+  d.nowMs = () => clockSeq[clockIdx++ % clockSeq.length]!;
+
+  // Changing failing names keep the progress gate allowing spend on every retry.
+  let execCall = 0;
+  const changingNames = [["t"], ["u"], ["v"], ["w"]];
+  d.execute = async () => {
+    calls.push("execute");
+    const ns = changingNames[execCall++ % changingNames.length]!;
+    return { sha: "s", verdict: "fail", passed: false, cases: ns.map((n) => ({ name: n, status: "fail" as const })), logs: "" };
+  };
+  const originalGenerate = d.generate;
+  d.generate = async (input) => {
+    generateCallCount++;
+    return originalGenerate(input);
+  };
+
+  const result = await runPipeline(twoRetryApp, "abc123", d, "manual", { mode: "diff", runId: "run-ceiling-a" });
+
+  // Must complete without crashing.
+  assert.ok(result, "pipeline must return a result (not crash)");
+  // Guard fires on every retry generate (clock is over budget after the first guard check).
+  // generateCallCount must be exactly 1 (initial generate succeeded; all retries blocked).
+  assert.equal(generateCallCount, 1, `ceiling must block all retry generates; got generateCallCount=${generateCallCount} (expected 1)`);
+  // No publish: run stayed fail, no approved green specs.
+  assert.equal(d.published, false, "must NOT publish when ceiling stops all retry generates");
+});
+
+// "A green-in-progress run is NEVER discarded by the ceiling" is a STRUCTURAL guarantee, not a
+// behavior we can cleanly stub. The ceiling guard fires only at a generation ENTRY and returns an
+// empty/unapproved result (specs:[], approved:false); every caller rejects that — e.g. the
+// coverage-enforce block guards `if (improved.specs.length > 0 && improved.approved)` before
+// replacing the run — so an already-green run object is left untouched, and the guard never sits
+// where it could abort an in-flight execute/review. A behavioral "ceiling fires AFTER green" test
+// would need enforce-mode + a deadline crossing mid-enforce; with the timing accumulator and the
+// guard sharing one injected clock that is fragile to wrap-point count, so we rely on the structural
+// guard above + Test A (which proves the guard's STOP behavior non-vacuously — it fails if the guard
+// is removed). This test is the backward-compat smoke: the phase-timing accumulator + ceiling
+// machinery must not break a normal green publish.
+test("phase-timings: a normal green run still publishes with the timing + ceiling machinery active", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { diff: DIFF_4, coverage: [cov([1, 2, 3, 4])] });
+  await runPipeline(covApp("signal"), "abc123", d, "manual", { mode: "diff", runId: "run-ceiling-b" });
+  assert.equal(d.published, true, "phase-timing instrumentation must not break a normal green publish");
+});
+
+// 3.4 — wallClockBudgetMs=1 config override terminates cleanly (no generation started beyond initial)
+test("wall-clock ceiling: qa.wallClockBudgetMs=1 override terminates cleanly with no crash", async () => {
+  const calls: string[] = [];
+  const zeroApp: AppConfig = {
+    ...app,
+    qa: { ...app.qa, needsReview: false, fixLoop: { maxRetries: 3 }, wallClockBudgetMs: 1 },
+  };
+  const failRun: QaRunResult = { sha: "s", verdict: "fail", passed: false, cases: [{ name: "t", status: "fail" }], logs: "" };
+  const d = deps(failRun, calls, {});
+  const result = await runPipeline(zeroApp, "abc123", d, "manual", { mode: "diff", runId: "run-ceiling-34" });
+  // Must complete without throwing
+  assert.ok(result, "pipeline must return a result with budget=1ms");
+  // No publish (ceiling fires on retries at latest, no approved green)
+  assert.equal(d.published, false, "must NOT publish on ceiling with budget=1ms");
+});
+
+// ── Phase-timings backward-compat tests (task 4.2) ────────────────────────────
+// Assert that early-return paths (infra-error, invalid, skipped) still produce valid RunOutcome
+// and do NOT crash after phaseTimings threading. These are the 8 persistOutcome call sites.
+
+test("phase-timings backward-compat: infra-error (DEV unhealthy) produces valid RunOutcome", async () => {
+  const calls: string[] = [];
+  const d = deps({ sha: "s", verdict: "pass", passed: true, cases: [], logs: "" }, calls, {
+    healthy: false, // DEV always unhealthy → infra-error at health pre-flight
+  });
+  const result = await runPipeline(app, "abc123", d, "manual", { mode: "diff", runId: "run-compat-infra" });
+  assert.ok(result, "must return a result");
+  assert.equal(result.verdict, "infra-error", "must be infra-error");
+  // Outcome must be saved and not crash
+  assert.ok(d.savedOutcomes.length > 0, "outcome must be persisted");
+  const outcome = d.savedOutcomes[0]!;
+  // phaseTimings is optional — may be {} if no wraps fired before this exit, but must not throw
+  assert.ok(outcome.gateSignals, "gateSignals must exist");
+  assert.equal(typeof (outcome.gateSignals.phaseTimings ?? {}), "object", "phaseTimings must be object or undefined");
+});
+
+test("phase-timings backward-compat: invalid (static gate fails) produces valid RunOutcome", async () => {
+  const calls: string[] = [];
+  const d = deps({ sha: "s", verdict: "pass", passed: true, cases: [], logs: "" }, calls, {
+    validation: { ok: false, errors: ["TS error"], infra: false },
+  });
+  const result = await runPipeline(app, "abc123", d, "manual", { mode: "diff", runId: "run-compat-invalid" });
+  assert.equal(result.verdict, "invalid", "must be invalid");
+  assert.ok(d.savedOutcomes.length > 0, "outcome must be persisted");
+  const outcome = d.savedOutcomes[0]!;
+  assert.ok(outcome.gateSignals, "gateSignals must exist");
+  assert.equal(typeof (outcome.gateSignals.phaseTimings ?? {}), "object", "phaseTimings must be object or undefined");
+});
+
+test("phase-timings backward-compat: agent no-op skip produces valid RunOutcome", async () => {
+  const calls: string[] = [];
+  // Agent approves but writes no specs → no-op skip
+  const d = deps({ sha: "s", verdict: "pass", passed: true, cases: [], logs: "" }, calls, {
+    agent: { output: "no tests needed", specs: [], reviewed: true, approved: true },
+  });
+  const result = await runPipeline(app, "abc123", d, "manual", { mode: "diff", runId: "run-compat-noop" });
+  assert.equal(result.verdict, "skipped", "must be skipped");
+  assert.ok(d.savedOutcomes.length > 0, "outcome must be persisted");
+  const outcome = d.savedOutcomes[0]!;
+  assert.ok(outcome.gateSignals, "gateSignals must exist");
+  assert.equal(typeof (outcome.gateSignals.phaseTimings ?? {}), "object", "phaseTimings must be object or undefined");
+});
+
 // A unified diff with one file and 4 added lines (1-4), so parseDiffHunks yields changed lines.
 const DIFF_4 = ["diff --git a/src/x.ts b/src/x.ts", "+++ b/src/x.ts", "@@ -0,0 +1,4 @@", "+a", "+b", "+c", "+d"].join("\n");
 const cov = (lines: number[]): CoveredLines => new Map([["src/x.ts", new Set(lines)]]);

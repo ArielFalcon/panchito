@@ -229,6 +229,9 @@ export interface RunOutcome {
     // Per-run agent token/cost usage — observation-only, never affects verdict or publish.
     // Absent when no snapshot fired (Codex-only run or dep not wired); never a zero-filled object.
     usage?: import("./qa/usage").RunUsage;
+    // Per-subphase wall-clock timing (ms), accumulated per phase label. Observation-only.
+    // Absent on a run that recorded nothing (e.g. a pre-classify skip). Never affects verdict.
+    phaseTimings?: Record<string, number>;
   };
   rulesRetrieved: string[];
   reflection?: StructuredReflection;

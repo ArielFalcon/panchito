@@ -13,7 +13,7 @@ import { DeployTarget, waitForDeploy } from "./env/deploy-gate";
 import { ensureMirror, ensureMirrorAtBranch, getCommitDiff, getCommitMessage, listChangedSpecs as gitListChangedSpecs, getCommitsBehind, defaultMirrorDeps, realGit } from "./integrations/repo-mirror";
 import { runConfinement, type ConfinementResult } from "./qa/confinement";
 import { createUsageAccumulator, type UsageSnapshot, type RunUsage } from "./qa/usage";
-import { runOpencode, runOpencodeParallel, shouldFanOut, defaultAgentDeps, reviewIndependently, getOpenSessionCount, withUsageSink, maybeExplore } from "./integrations/opencode-client";
+import { runOpencode, runOpencodeParallel, shouldFanOut, defaultAgentDeps, reviewIndependently, getOpenSessionCount, withUsageSink, maybeExplore, agentTimeout } from "./integrations/opencode-client";
 import { classifyCommit, CommitIntent } from "./qa/commit-classify";
 import { setupE2eProject, defaultSetupDeps } from "./qa/setup";
 import { validateSpecs, defaultValidateDeps } from "./qa/validate";
@@ -205,6 +205,10 @@ export interface PipelineDeps {
   // Never called on regen passes (fix/review/coverage) or code-mode runs.
   exploreForPack?(input: GenerateInput, signal?: AbortSignal, onProgress?: (msg: string) => void): Promise<import("./qa/exploration-brief").ExplorationBrief | null>;
   log?(msg: string): void;
+  // Injectable clock seam — returns the current time in milliseconds. Defaults to Date.now().
+  // Exposed so tests can control the clock for deterministic wall-clock guard assertions
+  // without relying on real elapsed time or monkey-patching globals.
+  nowMs?(): number;
   // Context mode: validates the produced context.json. Injected so tests can bypass file I/O.
   validateContextFn?(content: unknown): { ok: boolean; errors: string[] };
   // Context mode: reads the built map back for the per-service coverage warning.
@@ -617,6 +621,8 @@ interface ValueLearningInput {
   ccForPersistence?: ChangeCoverage;
   specMetas?: SpecMeta[];
   log: (m: string) => void;
+  // Optional timing sink — accumulates oracle wall-clock time into the run's phaseTimings.
+  addTiming?: (label: string, ms: number) => void;
 }
 
 // PIPE-02: the off-path VALUE-learning side-effects — suite-level measured persistence, the value
@@ -659,6 +665,7 @@ async function foldValueLearning(
   if (runValueOracle) {
     try {
       log(isCode ? "[qa] oracle: running mutation testing (diff-scoped)..." : "[qa] oracle: running response fault-injection (signal)...");
+      const _oracleT0 = Date.now();
       const oracleResult = await deps.runOracle!({
         target: isCode ? "code" : "e2e",
         repoDir: mirrorDir,
@@ -670,6 +677,7 @@ async function foldValueLearning(
         signal,
         onProgress: (msg) => log(`[qa] ${msg}`),
       });
+      input.addTiming?.("oracle", Date.now() - _oracleT0);
       valueScore = oracleResult.valueScore;
       if (valueScore !== null) {
         log(`[qa] oracle: valueScore=${(valueScore * 100).toFixed(0)}% (${oracleResult.details})`);
@@ -805,6 +813,10 @@ export async function runPipeline(
     if (signal?.aborted) throw new Error("run cancelled by operator");
   };
   const log = deps.log ?? (() => {});
+  // Clock seam: use the injected clock when present (deterministic tests), otherwise Date.now().
+  // Only the timing/guard code below uses `now()`. Unrelated Date.now() calls (e.g. genStart log
+  // lines) are intentionally left as-is to minimise the change footprint.
+  const now = deps.nowMs ?? (() => Date.now());
   const shadow = app.qa.shadow ?? false;
   const mode = opts.mode;
   const isCode = (opts.target ?? "e2e") === "code";
@@ -829,6 +841,31 @@ export async function runPipeline(
   let reviewerRationale: string | undefined; // the LAST round's reviewer reasoning (approve or reject)
   let retries = 0; // total regeneration attempts (review loop + failure retries)
 
+  // Phase-timings: accumulate per-subphase wall-clock time (ms). Observation-only.
+  const runStart = now();
+  const phaseTimings: Record<string, number> = {};
+  const softWarned = new Set<string>();
+  // Advisory soft budgets per label (ms). Derived from agentTimeout-scale; log-only, zero control flow.
+  const SOFT_BUDGET_MS: Record<string, number> = {
+    generator: 5 * 60_000,
+    reviewer: 3 * 60_000,
+    validate: 2 * 60_000,
+    execute: 5 * 60_000,
+    explorer: 2 * 60_000,
+    pack: 60_000,
+    coverage: 2 * 60_000,
+    oracle: 5 * 60_000,
+  };
+  // Accumulates timing per label; logs a one-time advisory when the cumulative time exceeds the
+  // soft budget. No return, no throw, no control-flow change — a warning string only.
+  const addTiming = (label: string, ms: number): void => {
+    phaseTimings[label] = (phaseTimings[label] ?? 0) + ms;
+    if (SOFT_BUDGET_MS[label] && phaseTimings[label]! > SOFT_BUDGET_MS[label]! && !softWarned.has(label)) {
+      softWarned.add(label);
+      log(`[qa] [timing] WARNING: phase '${label}' exceeded soft budget (${Math.round(phaseTimings[label]! / 1000)}s > ${Math.round(SOFT_BUDGET_MS[label]! / 1000)}s) — advisory only, not aborting`);
+    }
+  };
+
   // Phase 6a: shared iteration ceiling. One counter shared across all four regeneration loops
   // (review for-loop, static-fix while, exec-fix for-loop, coverage-enforce if) plus the two
   // in-session contract-repair re-prompts (generator and reviewer). A single ceiling is simpler
@@ -848,6 +885,11 @@ export async function runPipeline(
   // calibratable downward from Phase-0 telemetry. Apps can still override via qa.iterationBudget.
   // Phase 6b: let so it can be retroactively dimensioned by objectiveCount from the first generate.
   let MAX_CYCLES = app.qa.iterationBudget ?? deriveCycleBackstop(app.qa.fixLoop?.maxRetries ?? 2);
+  // Wall-clock ceiling: derived from MAX_CYCLES * per-session timeout (errs large — conservative outer
+  // bound). Override via qa.wallClockBudgetMs (wins unconditionally — never recomputed). Declared as
+  // `let` so the Phase-6b fan-out bump below can recompute it when MAX_CYCLES is raised (a
+  // 5-objective run gets a proportionally higher ceiling than a 1-objective run).
+  let wallClockBudget = app.qa.wallClockBudgetMs ?? (MAX_CYCLES * agentTimeout(mode));
   let cycleCount = 0; // incremented BEFORE every generateAndReview() + before each repair re-prompt
   let retrievedRuleIds: string[] = []; // rule IDs retrieved for this run (for RunOutcome)
   let retrievedRules: LearningRule[] = []; // full retrieved rules (errorClass needed for governance)
@@ -862,7 +904,7 @@ export async function runPipeline(
     pipelineAgentConfig?.assignments.primary.provider === "opencode" &&
     pipelineAgentConfig?.assignments.reviewer.provider === "opencode";
 
-  const persistOutcome = (verdict: QaRunResult, overrides?: { staticOk?: boolean; coverageRatio?: number | null; valueScore?: number | null; rulesRetrieved?: string[]; confinement?: ConfinementResult; usage?: RunUsage }) => {
+  const persistOutcome = (verdict: QaRunResult, overrides?: { staticOk?: boolean; coverageRatio?: number | null; valueScore?: number | null; rulesRetrieved?: string[]; confinement?: ConfinementResult; usage?: RunUsage; phaseTimings?: Record<string, number> }) => {
     if (!deps.saveOutcome || !opts.runId) return;
     const outcome = labelRunOutcome({
       runId: opts.runId,
@@ -892,6 +934,9 @@ export async function runPipeline(
     }
     if (overrides?.usage !== undefined) {
       outcome.gateSignals.usage = overrides.usage;
+    }
+    if (overrides?.phaseTimings !== undefined) {
+      outcome.gateSignals.phaseTimings = overrides.phaseTimings;
     }
     deps.saveOutcome(outcome).catch((err) => {
       log(`[qa] WARNING: failed to persist RunOutcome (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
@@ -1295,6 +1340,15 @@ export async function runPipeline(
   let genSession: GeneratorSession | null = null;
 
   const generateOnce = async (genInput: GenerateInput): Promise<AgentResult> => {
+    // Wall-clock ceiling guard (mirrors the cycle-ceiling below at the same choke point).
+    // Checked FIRST so a timed-out run does not even tick the cycle counter. Returns a neutral
+    // AgentResult identical in semantics to the cycle-ceiling return — "return current state".
+    // This guard is STRUCTURALLY INCAPABLE of aborting an in-flight deps.execute or deps.review:
+    // those awaits live OUTSIDE generateOnce, and the guard only fires at ENTRY.
+    if (now() - runStart > wallClockBudget) {
+      log(`[qa] [timing] wall-clock budget reached (${Math.round((now() - runStart) / 1000)}s > ${Math.round(wallClockBudget / 1000)}s): not starting another generation; returning current state.`);
+      return { output: "", specs: [], reviewed: false, approved: false, note: `wall-clock budget exhausted (${Math.round(wallClockBudget / 1000)}s)` };
+    }
     // Phase 6a: count this invocation toward the shared iteration budget BEFORE spending any
     // tokens. The ceiling check happens at every generateAndReview() call-site AND here for the
     // review-round internal re-generation. A ceiling hit returns the current state immediately
@@ -1329,6 +1383,7 @@ export async function runPipeline(
     }
     let r = await reconcileSpecs(raw);
     log(`[qa] [timing] generation produced ${r.specs.length} spec(s) in ${Math.round((Date.now() - genStart) / 1000)}s`);
+    addTiming("generator", Date.now() - genStart);
     return r;
   };
 
@@ -1402,6 +1457,7 @@ export async function runPipeline(
         } else {
           log(`[qa] WARNING: independent reviewer FAILED — failing closed: this run will not publish without independent review (${err instanceof Error ? err.message : String(err)}).`);
         }
+        addTiming("reviewer", Date.now() - reviewStart);
         return { ...r, approved: false, note: "independent review unavailable (reviewer error) — not publishing unreviewed tests" };
       }
       // A parse miss is NOT an actionable rejection: feeding the synthetic correction back
@@ -1413,6 +1469,7 @@ export async function runPipeline(
         } else {
           log(`[qa] WARNING: independent reviewer produced NO parseable verdict — failing closed (not burning a regeneration round).`);
         }
+        addTiming("reviewer", Date.now() - reviewStart);
         return { ...r, approved: false, note: "independent review unavailable (unparseable reviewer verdict) — not publishing unreviewed tests" };
       }
       // Reset counter on successful reviewer response
@@ -1427,6 +1484,7 @@ export async function runPipeline(
         ` corrections=${review.corrections.length} (blocking=${blockingCount}, advisory=${advisoryCount})` +
         ` (${Math.round((Date.now() - reviewStart) / 1000)}s)`,
       );
+      addTiming("reviewer", Date.now() - reviewStart);
       if (review.rationale) reviewerRationale = review.rationale; // the verdict that ultimately decides this run
       // Phase 4 + FIX 4: the gate requires BOTH the reviewer's own approval AND zero blocking
       // corrections. The earlier `blockingCount === 0` alone let an all-ADVISORY verdict publish even
@@ -1458,6 +1516,13 @@ export async function runPipeline(
       onStep?.("retry");
       retries++;
       const regenStart = Date.now();
+      // Wall-clock ceiling guard (mirror of the one at generateOnce entry, for the mid-review regen).
+      // Mirrors the cycle-ceiling that immediately follows. Returns the current reviewer-rejected state
+      // without starting another generation — identical semantics to the cycle-ceiling at 1515.
+      if (now() - runStart > wallClockBudget) {
+        log(`[qa] [timing] wall-clock budget reached mid-review (${Math.round((now() - runStart) / 1000)}s > ${Math.round(wallClockBudget / 1000)}s): stopping regeneration, returning current reviewer-rejected state.`);
+        return { ...r, approved: false, note: `wall-clock budget exhausted mid-review (${Math.round(wallClockBudget / 1000)}s); last reviewer correction: ${review.corrections.join("; ")}` };
+      }
       // Phase 6a: count the review-round internal re-generation against the shared budget.
       // The ceiling check prevents unbounded rounds when a run has already spent budget elsewhere.
       cycleCount++;
@@ -1617,11 +1682,13 @@ export async function runPipeline(
       // the intended trade against expensive downstream re-navigation iterations.
       if (deps.exploreForPack) {
         try {
+          const _exploreT0 = Date.now();
           const explorerBrief = await deps.exploreForPack(
             baseGenInput({ fixCases: opts.fixCases }),
             signal,
             (msg) => log(msg),
           );
+          addTiming("explorer", Date.now() - _exploreT0);
           if (explorerBrief) {
             builtExplorerBrief = explorerBrief;
             log(`[qa] context-pack: explorer brief available (${builtExplorerBrief.blastRadius.length} symbol(s), ${(builtExplorerBrief.routes ?? []).length} candidate route(s); verified=${(builtExplorerBrief.routes ?? []).filter((r) => r.verified).length})`);
@@ -1634,6 +1701,7 @@ export async function runPipeline(
       }
 
       try {
+        const _packT0 = Date.now();
         const packResult = await buildContextPack(
           {
             // Slice H: the brief (from the orchestrator-level explorer pass above) now drives both
@@ -1653,6 +1721,7 @@ export async function runPipeline(
           },
           defaultContextPackDeps,
         );
+        addTiming("pack", Date.now() - _packT0);
         if (packResult.text) {
           builtContextPack = packResult.text;
           log(`[qa] context-pack: built (blastRadius=${packResult.blastRadiusBytes}B, dom=${packResult.domBytes}B, contracts=${packResult.contractBytes}B)`);
@@ -1677,6 +1746,11 @@ export async function runPipeline(
       if (refined > MAX_CYCLES) {
         log(`[qa] cycle-counter: scope-dimensioned backstop raised to ${refined} (${result.objectiveCount} objective(s)); was ${MAX_CYCLES}`);
         MAX_CYCLES = refined;
+        // Also recompute the wall-clock ceiling to match the raised cycle ceiling. The
+        // qa.wallClockBudgetMs config override is never recomputed (it already won above).
+        if (!app.qa.wallClockBudgetMs) {
+          wallClockBudget = MAX_CYCLES * agentTimeout(mode);
+        }
       }
     }
 
@@ -1705,7 +1779,7 @@ export async function runPipeline(
       // is a common diff-mode outcome. Non-blocking; the verdict stays `skipped`.
       const skipped: QaRunResult = { sha: ns, verdict: "skipped", passed: true, cases: [], logs: result.note ?? result.output.slice(0, 300) };
       const confinement = await runConfine();
-      persistOutcome(skipped, { confinement, usage: usage.result(usageComplete) });
+      persistOutcome(skipped, { confinement, usage: usage.result(usageComplete), phaseTimings });
       return skipped;
     }
   } else {
@@ -1812,7 +1886,7 @@ export async function runPipeline(
   if (!isCode) {
     onStep?.("validate");
     log("[qa] validating specs (typecheck + lint + list + manifest)...");
-    let validation = await deps.validate(e2eDir);
+    let validation = await (async () => { const t0 = Date.now(); const v = await deps.validate(e2eDir); addTiming("validate", Date.now() - t0); return v; })();
     // Static-repair loop. A single trivial gate error (an unused var, a stray import) used to fail the
     // WHOLE run `invalid` with no second chance — while EXECUTION failures already get a fix-loop. That
     // asymmetry let one `no-unused-vars` discard 7 otherwise-good specs (observed on PetClinic). Mirror
@@ -1836,7 +1910,7 @@ export async function runPipeline(
         }),
       );
       checkSignal();
-      validation = await deps.validate(e2eDir);
+      validation = await (async () => { const t0 = Date.now(); const v = await deps.validate(e2eDir); addTiming("validate", Date.now() - t0); return v; })();
     }
     if (staticFixRounds > 0 && validation.ok) {
       log(`[qa] static gate PASSED after ${staticFixRounds} repair round(s).`);
@@ -1850,13 +1924,13 @@ export async function runPipeline(
         const infra = resultOf(ns, "infra-error", validation.errors.join("\n\n"));
         // Post-generation exit: revert any strays the agent wrote, and record the tokens already spent.
         const confinement = await runConfine();
-        persistOutcome(infra, { confinement, usage: usage.result(usageComplete) });
+        persistOutcome(infra, { confinement, usage: usage.result(usageComplete), phaseTimings });
         await report(app, issueRepo, sha, infra, deps, log, shadow, isCode);
         return infra;
       }
       const invalid = resultOf(ns, "invalid", validation.errors.join("\n\n"));
       const confinement = await runConfine();
-      persistOutcome(invalid, { staticOk: false, confinement, usage: usage.result(usageComplete) });
+      persistOutcome(invalid, { staticOk: false, confinement, usage: usage.result(usageComplete), phaseTimings });
       await report(app, issueRepo, sha, invalid, deps, log, shadow, isCode, {
         note: `The generated tests did not pass the static gate (typecheck + lint + Playwright list).\n${validation.errors.join("\n")}`,
         tested: testedFrom(result),
@@ -1872,7 +1946,7 @@ export async function runPipeline(
       const infra = resultOf(ns, "infra-error", "DEV is not healthy before execution");
       // Post-generation exit: revert any strays the agent wrote, and record the tokens already spent.
       const confinement = await runConfine();
-      persistOutcome(infra, { confinement, usage: usage.result(usageComplete) });
+      persistOutcome(infra, { confinement, usage: usage.result(usageComplete), phaseTimings });
       await report(app, issueRepo, sha, infra, deps, log, shadow, isCode);
       return infra;
     }
@@ -1885,7 +1959,7 @@ export async function runPipeline(
     //     (the generated tests are broken); a broken toolchain (ENOENT/JAVA_HOME) is `infra-error`.
     onStep?.("validate");
     log("[qa] code mode: compile-checking the generated tests (no run yet)...");
-    let codeValidation = await deps.validateCode(mirrorDir, { changedFiles: intent?.changedFiles ?? [] });
+    let codeValidation = await (async () => { const t0 = Date.now(); const v = await deps.validateCode!(mirrorDir, { changedFiles: intent?.changedFiles ?? [] }); addTiming("validate", Date.now() - t0); return v; })();
     let codeFixRounds = 0;
     while (
       !codeValidation.ok && !codeValidation.infra && generating &&
@@ -1902,7 +1976,7 @@ export async function runPipeline(
         }),
       );
       checkSignal();
-      codeValidation = await deps.validateCode(mirrorDir, { changedFiles: intent?.changedFiles ?? [] });
+      codeValidation = await (async () => { const t0 = Date.now(); const v = await deps.validateCode!(mirrorDir, { changedFiles: intent?.changedFiles ?? [] }); addTiming("validate", Date.now() - t0); return v; })();
     }
     if (codeFixRounds > 0 && codeValidation.ok) {
       log(`[qa] compile gate PASSED after ${codeFixRounds} repair round(s).`);
@@ -1916,13 +1990,13 @@ export async function runPipeline(
       if (codeValidation.infra) {
         const infra = resultOf(ns, "infra-error", codeValidation.errors.join("\n\n"));
         const confinement = await runConfine();
-        persistOutcome(infra, { confinement, usage: usage.result(usageComplete) });
+        persistOutcome(infra, { confinement, usage: usage.result(usageComplete), phaseTimings });
         await report(app, issueRepo, sha, infra, deps, log, shadow, isCode);
         return infra;
       }
       const invalid = resultOf(ns, "invalid", codeValidation.errors.join("\n\n"));
       const confinement = await runConfine();
-      persistOutcome(invalid, { staticOk: false, confinement, usage: usage.result(usageComplete) });
+      persistOutcome(invalid, { staticOk: false, confinement, usage: usage.result(usageComplete), phaseTimings });
       await report(app, issueRepo, sha, invalid, deps, log, shadow, isCode, {
         note: `The generated tests did not compile.\n${codeValidation.errors.join("\n")}`,
         tested: testedFrom(result),
@@ -1940,20 +2014,20 @@ export async function runPipeline(
   if (isCode) {
     onStep?.("execute");
     log("[qa] running the repo's own test suite (code mode)...");
-    run = await deps.executeCode(mirrorDir, { namespace: ns, onCase, signal, changedFiles: intent?.changedFiles ?? [], log });
+    run = await (async () => { const t0 = Date.now(); const r = await deps.executeCode!(mirrorDir, { namespace: ns, onCase, signal, changedFiles: intent?.changedFiles ?? [], log }); addTiming("execute", Date.now() - t0); return r; })();
   } else if (!app.dev) {
     // Defensive: an e2e run on an app with no dev environment is inconclusive.
     run = resultOf(ns, "infra-error", "e2e run requested but no dev environment is configured");
     // Post-generation exit: revert any strays the agent wrote, and record the tokens already spent.
     const confinement = await runConfine();
-    persistOutcome(run, { confinement, usage: usage.result(usageComplete) });
+    persistOutcome(run, { confinement, usage: usage.result(usageComplete), phaseTimings });
     await report(app, issueRepo, sha, run, deps, log, shadow, isCode);
     return run;
   } else {
     onStep?.("execute");
     log(`[qa] running E2E (namespace ${ns}) against ${app.dev.baseUrl}...`);
     deps.clearCoverage?.(e2eDir, ns); // fresh dumps only: never union a prior run's coverage
-    run = await deps.execute(e2eDir, { baseUrl: app.dev.baseUrl, namespace: ns, onCase, onRunning: onRunningTest, onDiscovered: onTestDiscovered, signal });
+    run = await (async () => { const t0 = Date.now(); const r = await deps.execute!(e2eDir, { baseUrl: app.dev!.baseUrl, namespace: ns, onCase, onRunning: onRunningTest, onDiscovered: onTestDiscovered, signal }); addTiming("execute", Date.now() - t0); return r; })();
     // Infra vs quality: failures with an unhealthy DEV are infrastructure, not code.
     if (run.verdict === "fail" && !(await devHealthy())) {
       run = resultOf(ns, "infra-error", "failures with an unhealthy DEV: treated as infrastructure");
@@ -2233,18 +2307,18 @@ export async function runPipeline(
       // Re-compile the regenerated tests before re-running (mirror e2e's re-validate). A regen that
       // broke compilation must not silently re-run the prior/partial suite — keep the prior verdict.
       if (deps.validateCode) {
-        const reCompile = await deps.validateCode(mirrorDir, { changedFiles: intent?.changedFiles ?? [] });
+        const reCompile = await (async () => { const t0 = Date.now(); const v = await deps.validateCode!(mirrorDir, { changedFiles: intent?.changedFiles ?? [] }); addTiming("validate", Date.now() - t0); return v; })();
         if (!reCompile.ok) {
           log(`[qa] retry compile gate failed; keeping the prior verdict:\n${reCompile.errors.join("\n")}`);
           break;
         }
       }
       log("[qa] re-running the repo's test suite with the fixed tests...");
-      run = await deps.executeCode(mirrorDir, { namespace: ns, onCase, signal, changedFiles: intent?.changedFiles ?? [], log });
+      run = await (async () => { const t0 = Date.now(); const r = await deps.executeCode!(mirrorDir, { namespace: ns, onCase, signal, changedFiles: intent?.changedFiles ?? [], log }); addTiming("execute", Date.now() - t0); return r; })();
     } else {
       // Re-validate the fixed specs and, if they pass, re-execute against DEV.
       onStep?.("validate");
-      const reValidation = await deps.validate(e2eDir);
+      const reValidation = await (async () => { const t0 = Date.now(); const v = await deps.validate(e2eDir); addTiming("validate", Date.now() - t0); return v; })();
       if (!reValidation.ok) {
         log(`[qa] retry validation failed:\n${reValidation.errors.join("\n")}`);
         break;
@@ -2304,14 +2378,7 @@ export async function runPipeline(
         log(`[qa] retry filtered: scoping re-run to ${failedSpecFiles.length} spec file(s): ${failedSpecFiles.join(", ")}`);
       }
 
-      const retryRun = await deps.execute(e2eDir, {
-        baseUrl: app.dev?.baseUrl ?? "",
-        namespace: retryNs,
-        onCase,
-        onRunning: onRunningTest,
-        signal,
-        ...(canFilter ? { specFiles: failedSpecFiles } : {}),
-      });
+      const retryRun = await (async () => { const t0 = Date.now(); const r = await deps.execute!(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: retryNs, onCase, onRunning: onRunningTest, signal, ...(canFilter ? { specFiles: failedSpecFiles } : {}) }); addTiming("execute", Date.now() - t0); return r; })();
       if (retryRun.verdict === "fail" && !(await devHealthy())) {
         run = resultOf(ns, "infra-error", "failures with an unhealthy DEV: treated as infrastructure");
         break;
@@ -2399,7 +2466,9 @@ export async function runPipeline(
       const changedFiles = [...changed.keys()];
       const collect = (): Promise<CoveredLines | null> =>
         deps.collectCoverage!({ target: isCode ? "code" : "e2e", repoDir: mirrorDir, e2eDir, changedFiles, namespace: coverageNs });
+      const _covT0 = Date.now();
       const collected = await collect();
+      addTiming("coverage", Date.now() - _covT0);
       let cc = computeChangeCoverage(changed, collected ?? new Map());
       ccForPersistence = cc;
       coverageStatus = decideCoverage(cc, covPolicy);
@@ -2417,15 +2486,15 @@ export async function runPipeline(
         if (improved.specs.length > 0 && improved.approved) {
           const okStatic = isCode
             ? deps.validateCode
-              ? await deps.validateCode(mirrorDir, { changedFiles: intent?.changedFiles ?? [] })
+              ? await (async () => { const t0 = Date.now(); const v = await deps.validateCode!(mirrorDir, { changedFiles: intent?.changedFiles ?? [] }); addTiming("validate", Date.now() - t0); return v; })()
               : { ok: true, errors: [] }
-            : await deps.validate(e2eDir);
+            : await (async () => { const t0 = Date.now(); const v = await deps.validate!(e2eDir); addTiming("validate", Date.now() - t0); return v; })();
           if (okStatic.ok && (isCode || (await devHealthy()))) {
             if (!isCode) deps.clearCoverage?.(e2eDir, ns); // re-measure only the improved suite's dumps
             coverageNs = ns; // the enforce re-execute below runs under `ns`; align the re-collection
             const reRun = isCode
-              ? await deps.executeCode(mirrorDir, { namespace: ns, onCase, signal, changedFiles: intent?.changedFiles ?? [], log })
-              : await deps.execute(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: ns, onCase, onRunning: onRunningTest, signal });
+              ? await (async () => { const t0 = Date.now(); const r = await deps.executeCode!(mirrorDir, { namespace: ns, onCase, signal, changedFiles: intent?.changedFiles ?? [], log }); addTiming("execute", Date.now() - t0); return r; })()
+              : await (async () => { const t0 = Date.now(); const r = await deps.execute!(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: ns, onCase, onRunning: onRunningTest, signal }); addTiming("execute", Date.now() - t0); return r; })();
             if (reRun.verdict === "pass") {
               run = reRun;
               result = improved;
@@ -2477,7 +2546,7 @@ export async function runPipeline(
     deps, app, run, isCode, generating, mode, mirrorDir, e2eDir, ns, diff, sha,
     runId: opts.runId, signal, retrievedRuleIds, retrievedRules, curriculum,
     changedFiles: intent?.changedFiles ?? [],
-    ccForPersistence, specMetas: result?.specMetas, log,
+    ccForPersistence, specMetas: result?.specMetas, log, addTiming,
   });
   const valueScore = valueLearned.valueScore;
   curriculum = valueLearned.curriculum;
@@ -2580,7 +2649,7 @@ export async function runPipeline(
       reviewerRationale,
     });
   }
-  persistOutcome(run, { staticOk: generating && (isCode ? codeValidated : true), coverageRatio: ratio, valueScore, rulesRetrieved: retrievedRuleIds, confinement, usage: usage.result(usageComplete) });
+  persistOutcome(run, { staticOk: generating && (isCode ? codeValidated : true), coverageRatio: ratio, valueScore, rulesRetrieved: retrievedRuleIds, confinement, usage: usage.result(usageComplete), phaseTimings });
 
   // Reviewer-corrections distillation, labeling, prevention governance, reflection and
   // curriculum persistence — shared with the static-gate (`invalid`) early return above.
