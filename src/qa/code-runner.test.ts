@@ -112,6 +112,17 @@ test("scopeForChangedFiles: a diff-mode change that does not resolve → fallbac
   assert.match(r.note, /did not all resolve|could not scope/i);
 });
 
+test("scopeForChangedFiles: node is NOT mislabeled as scoped — per-module RUN scoping is unsupported → whole repo", () => {
+  // node CAN resolve a package.json dir, but scopeTestCommand has no node case (workspace layouts
+  // vary), so the run must HONESTLY fall back to whole-repo, not claim a scope it does not apply.
+  const exists = existsFrom(["/repo/packages/billing/package.json", "/repo/package.json"]);
+  const project: CodeProject = { ecosystem: "node", install: null, test: { cmd: "npm", args: ["test"] } };
+  const r = scopeForChangedFiles(project, "/repo", ["packages/billing/src/x.ts"], { exists });
+  assert.equal(r.scoped, false);
+  assert.deepEqual(r.test, project.test);
+  assert.match(r.note, /not yet supported|whole repo/i);
+});
+
 // ── failureDetail: diagnosable code-mode failure output ───────────────────────
 test("failureDetail: short output is returned whole", () => {
   assert.equal(failureDetail("boom", 1500), "boom");

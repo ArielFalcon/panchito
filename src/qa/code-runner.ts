@@ -289,6 +289,11 @@ const MODULE_DESCRIPTORS: Partial<Record<Ecosystem, readonly string[]>> = {
   node: ["package.json"],
 };
 
+// Ecosystems whose TEST RUN command scopeTestCommand can actually narrow to a module. node resolves a
+// package.json dir but workspace layouts vary too much to scope its run generically (deferred), so it
+// is NOT here — listing it would mislabel a whole-repo node run as "scoped".
+const RUN_SCOPE_SUPPORTED = new Set<Ecosystem>(["maven", "gradle", "go"]);
+
 // Parent of a repo-relative POSIX path ("a/b/c" → "a/b", "pom.xml" → ""). Git always emits
 // "/"-separated paths, so this is deterministic regardless of host platform.
 function parentDir(p: string): string {
@@ -363,6 +368,9 @@ export function scopeForChangedFiles(
 ): ScopedRun {
   if (changedFiles.length === 0) {
     return { test: project.test, scoped: false, note: "non-diff run (no changed-file list) — running the whole repo" };
+  }
+  if (!RUN_SCOPE_SUPPORTED.has(project.ecosystem)) {
+    return { test: project.test, scoped: false, note: `per-module run scoping is not yet supported for ${project.ecosystem} — running the whole repo` };
   }
   const modules = resolveChangedModules(project.ecosystem, repoDir, changedFiles, deps);
   if (!modules || modules.length === 0) {
