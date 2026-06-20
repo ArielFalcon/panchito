@@ -29,6 +29,20 @@ function mkInput(overrides: Partial<OpencodeRunInput> = {}): OpencodeRunInput {
 
 const failingCase: QaCase = { name: "owners list", status: "fail", detail: "locator not found" };
 
+// ── Code mode: the task must be source-code-framed (no E2E/page/browser wording) and instruct a
+//    compile-before-finish step (the code analogue of e2e's `playwright test --list`). ──
+test("code mode task: frames source-code testing, not the e2e flow/page wording", () => {
+  const text = buildPrompt(mkInput({ target: "code" }));
+  assert.match(text, /UNIT\/INTEGRATION|source-code/i, "code task must be framed as source-code testing");
+  assert.doesNotMatch(text, /Generate\/update E2E tests for the flows affected/, "the e2e diff task must not leak into code mode");
+});
+
+test("code mode working-rules: instruct compile-before-finish", () => {
+  const text = buildPrompt(mkInput({ target: "code" }));
+  assert.match(text, /compile-check before finishing/i, "the agent must be told to compile before emitting its verdict");
+  assert.match(text, /test-compile|testClasses|go vet|cargo check|tsc --noEmit/, "with the per-ecosystem compile command");
+});
+
 // ── fixContent (the motivating bug: a backend-500 failure has no failure DOM, so failureSourced is
 //    false, but the Context Pack is still injected — the prompt must not order a re-navigation). ──
 

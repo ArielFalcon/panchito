@@ -494,6 +494,7 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
           `- Assert on BEHAVIOR, not implementation. Include edge cases from the diff.`,
           `- One objective per test, derived from commit intent. Use realistic test data.`,
           `- Never write a test whose only assertion is "does not throw".`,
+          `- COMPILE-CHECK before finishing: after writing/fixing the tests, compile them with the project's build tool (mvn -B test-compile · gradle testClasses · go vet ./... · cargo check --tests · npx tsc --noEmit) and FIX any errors BEFORE emitting your verdict. The orchestrator runs the suite only AFTER you finish — a compile failure costs a full regeneration round, so a clean compile is cheaper than a fix loop.`,
         ]
       : [
           `- Work in the repo's tests folder: ${input.e2eRelDir}/ (source of truth in git). Reuse and improve existing fixtures/specs; do not duplicate.`,
@@ -1022,7 +1023,67 @@ export function buildContextTask(input: OpencodeRunInput): string {
 }
 
 // The mode-specific task block.
+// The CODE-mode task: source-code testing framed for the agent. No "E2E", no page/browser, no
+// context.json, no page-scope budget — the code-mode failures the e2e tasks would otherwise inject.
+function buildCodeTask(input: OpencodeRunInput): string {
+  if (input.mode === "manual") {
+    return [
+      `Generate or update UNIT/INTEGRATION tests for the source code of ${input.repo}, FOCUSED on:`,
+      ``,
+      sanitizeText(input.guidance ?? "(no guidance provided)").text,
+      ``,
+      `## Objective — commit to this BEFORE writing`,
+      ACCEPTANCE_CRITERION_RULE,
+      ``,
+      `Read the relevant source and the repo's existing tests (serena); match their framework and conventions.`,
+      `Stay focused on the guidance; do not generate unrelated tests.`,
+    ].join("\n");
+  }
+  if (input.mode === "complete" || input.mode === "exhaustive") {
+    return [
+      input.mode === "exhaustive"
+        ? `Audit and REGENERATE the source-code test suite of ${input.repo} from scratch.`
+        : `Analyze the WHOLE repository ${input.repo} and grow its source-code test suite where it matters.`,
+      ``,
+      `Read the existing tests and the code (serena: activate_project, get_symbols_overview, find_symbol).`,
+      `Test important, UNCOVERED logic; match the repo's existing test framework and conventions.`,
+      input.mode === "exhaustive"
+        ? `Re-evaluate every existing test for correctness, value and necessity; remove or rewrite the trivial, false-positive, redundant or obsolete.`
+        : `Generate tests ONLY for important UNCOVERED logic (the delta). Do not duplicate existing coverage.`,
+    ].join("\n");
+  }
+
+  // diff (default): test the source-code change of one commit.
+  const intent = input.intent;
+  const isReGen = Boolean(input.fixCases?.length || input.reviewCorrections?.length || input.coverageGap);
+  return [
+    `Generate or update UNIT/INTEGRATION tests for the source-code changes in commit ${input.sha} of ${input.repo}.`,
+    ``,
+    `## Change intent (Conventional Commits)`,
+    `- Type: ${intent?.type ?? "unknown"}${intent?.breaking ? " (BREAKING)" : ""}`,
+    `- Changed files (derive the scope from these): ${sanitizeText(intent?.changedFiles?.join(", ") ?? "").text || "(unknown)"}`,
+    ``,
+    `## Commit message (the author's intent — derive each test's objective from this)`,
+    renderCommitMessage(intent, !isReGen),
+    ``,
+    `Cross-check against the diff: if the code does more than the message claims, test what the code`,
+    `actually changes, not just what the message promises.`,
+    ``,
+    `## Commit diff`,
+    "```diff",
+    sanitizeText(input.diff).text,
+    "```",
+    ``,
+    `Test the changed logic DIRECTLY (no web, no browser, no Playwright): call the changed functions/`,
+    `modules and assert behavior + edge cases. Match the repo's existing test framework and conventions.`,
+  ].join("\n");
+}
+
 function buildTask(input: OpencodeRunInput): string {
+  // CODE mode is source-code testing — no web/browser, no Playwright, no FE↔BE context map, no
+  // page-scope budget. Falling through to the e2e tasks below would tell the agent to "Generate E2E
+  // tests", read e2e/.qa/context.json, and "explore ONLY the page(s)" — all meaningless here.
+  if (input.target === "code") return buildCodeTask(input);
   if (input.mode === "complete" || input.mode === "exhaustive") {
     return [
       input.mode === "exhaustive"

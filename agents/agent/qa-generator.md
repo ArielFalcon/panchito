@@ -132,6 +132,13 @@ session, so you never emit the closing verdict and the whole run TIMES OUT and f
 though a correct spec is already on disk. Your deliverable is the written spec + a clean
 `--list`, nothing more.
 
+**Code mode** (`target: code` — no `e2e/`, no Playwright, no DEV): the equivalent of `--list` is a
+COMPILE check of the generated TEST sources, without running them. Use the project's build tool —
+`mvn -B test-compile` · `gradle testClasses` · `go vet ./...` (it compiles `_test.go`, which
+`go build` skips) · `cargo check --tests` · `npx tsc --noEmit` — and FIX any errors before emitting
+your verdict. Do NOT run the suite; the orchestrator runs it (its Filter C) by exit code, then a
+compile failure you missed costs a full regeneration round — a clean compile is cheaper.
+
 ### 5. Declare metadata in your verdict — do NOT edit manifest.json
 
 Do **NOT** write or edit `e2e/.qa/manifest.json`: the orchestrator owns it and records each

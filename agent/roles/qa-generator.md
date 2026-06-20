@@ -120,6 +120,12 @@ cd e2e && npx playwright test --list 2>&1
 ```
 to verify the tests are discoverable. Fix any errors immediately.
 
+**Code mode** (`target: code` — no `e2e/`, no Playwright, no DEV): the equivalent of `--list` is a
+COMPILE check of the generated TEST sources, without running them — `mvn -B test-compile` ·
+`gradle testClasses` · `go vet ./...` (it compiles `_test.go`, which `go build` skips) ·
+`cargo check --tests` · `npx tsc --noEmit`. Fix any errors before emitting your verdict. Do NOT run
+the suite; the orchestrator runs it (Filter C) by exit code.
+
 ### 5. Declare metadata in your verdict — do NOT edit manifest.json
 
 Do **NOT** write or edit `e2e/.qa/manifest.json`: the orchestrator owns it and records each
