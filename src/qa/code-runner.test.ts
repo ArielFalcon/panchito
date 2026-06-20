@@ -12,6 +12,7 @@ import {
   resolveChangedModules,
   scopeTestCommand,
   scopeForChangedFiles,
+  failureDetail,
   DetectDeps,
   CodeProject,
   CodeExecuteDeps,
@@ -109,6 +110,32 @@ test("scopeForChangedFiles: a diff-mode change that does not resolve → fallbac
   assert.equal(r.scoped, false);
   assert.deepEqual(r.test, project.test);
   assert.match(r.note, /did not all resolve|could not scope/i);
+});
+
+// ── failureDetail: diagnosable code-mode failure output ───────────────────────
+test("failureDetail: short output is returned whole", () => {
+  assert.equal(failureDetail("boom", 1500), "boom");
+});
+
+test("failureDetail: long output keeps the HEAD and the TAIL (a 1500-char tail alone drops the error)", () => {
+  const head = "HEAD_MARKER" + "a".repeat(1000);
+  const tail = "b".repeat(1000) + "TAIL_MARKER";
+  const out = failureDetail(head + tail, 400);
+  assert.match(out, /HEAD_MARKER/);
+  assert.match(out, /TAIL_MARKER/);
+  assert.match(out, /omitted/);
+});
+
+test("failureDetail: surfaces surefire failing-test lines so a large reactor failure is diagnosable", () => {
+  const log = [
+    "[INFO] Running com.example.OwnerResourceTest",
+    "testMapOwner(com.example.OwnerEntityMapperTest)  Time elapsed: 0.1 s  <<< FAILURE!",
+    "org.opentest4j.AssertionFailedError: expected: <X> but was: <Y>",
+    "[INFO] Tests run: 3, Failures: 1",
+  ].join("\n");
+  const out = failureDetail(log, 1500);
+  assert.match(out, /Failing tests/);
+  assert.match(out, /OwnerEntityMapperTest/);
 });
 
 test("coverageCommand wraps a node suite with c8 → coverage/lcov.info", () => {

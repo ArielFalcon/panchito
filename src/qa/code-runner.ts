@@ -606,7 +606,7 @@ export async function runCodeTests(
 
   const ok = out.exitCode === 0;
   const status = ok ? "pass" : "fail";
-  const detail = ok ? undefined : tail(sanitized.text, 1500);
+  const detail = ok ? undefined : failureDetail(sanitized.text, 1500);
   const counts = parseTestCounts(sanitized.text);
   const kase: QaCase = { name: label, status, detail, objective: "code test suite", flow: counts ? `${counts.pass} pass / ${counts.fail} fail / ${counts.total} total` : undefined };
   opts.onCase?.(kase);
@@ -620,8 +620,21 @@ export async function runCodeTests(
   };
 }
 
-function tail(s: string, n: number): string {
-  return s.length > n ? s.slice(-n) : s;
+// Build the failed-case detail from raw runner output. A single TAIL drops the real error on a large
+// monorepo build (the failing module's section scrolls off the end), so capture HEAD + TAIL, and for
+// surefire/JUnit output surface the failing test identifiers explicitly — otherwise the Issue carries
+// an uninformative "BUILD FAILURE" tail. Generic across ecosystems: the failing-test lines only appear
+// for JVM output; others fall back to head+tail of their (already concise) output.
+export function failureDetail(logs: string, maxChars = 1500): string {
+  const failing = [...new Set(logs.split("\n").filter((l) => /<<< (?:FAILURE|ERROR)!/.test(l)).map((l) => l.trim()))].slice(0, 20);
+  const body = headTail(logs, maxChars);
+  return failing.length > 0 ? `Failing tests:\n${failing.join("\n")}\n\n${body}` : body;
+}
+
+function headTail(s: string, maxChars: number): string {
+  if (s.length <= maxChars) return s;
+  const half = Math.floor(maxChars / 2);
+  return `${s.slice(0, half)}\n…[${s.length - maxChars} chars omitted]…\n${s.slice(-half)}`;
 }
 
 export const defaultCodeExecuteDeps: CodeExecuteDeps = {
