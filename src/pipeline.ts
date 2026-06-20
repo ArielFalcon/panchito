@@ -19,6 +19,7 @@ import { setupE2eProject, defaultSetupDeps } from "./qa/setup";
 import { validateSpecs, defaultValidateDeps } from "./qa/validate";
 import { runE2E, defaultExecuteDeps, defaultCleanupDeps } from "./qa/execute";
 import { setupCodeProject, defaultCodeSetupDeps, runCodeTests, defaultCodeExecuteDeps, runCodeCoverage } from "./qa/code-runner";
+import { validateCodeProject, defaultCodeValidateDeps } from "./qa/code-validate";
 import { publishE2e, publishCode, publishContext, defaultPublishDeps } from "./integrations/publish";
 import { testDataNamespace } from "./qa/test-data";
 import { labelRunOutcome } from "./qa/learning/labeler";
@@ -169,6 +170,9 @@ export interface PipelineDeps {
   // run its own test suite, classify by exit code, and publish the new tests.
   setupCode(repoDir: string, opts?: { signal?: AbortSignal; timeoutMs?: number }): Promise<void>;
   executeCode(repoDir: string, opts: { namespace: string; onCase?: (c: QaCase) => void; signal?: AbortSignal; timeoutMs?: number; changedFiles?: string[]; log?: (line: string) => void }): Promise<QaRunResult>;
+  // Code-mode compile-feedback gate (Filter B for code): compile the generated tests WITHOUT running
+  // them, per ecosystem. Optional — when unwired, code mode skips the gate (the suite is the gate).
+  validateCode?(repoDir: string, opts?: { changedFiles?: string[]; timeoutMs?: number }): Promise<{ ok: boolean; errors: string[]; infra: boolean }>;
   publishCode(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string; parentRunId?: string }): Promise<{ prUrl: string | null; merged: boolean; error?: string } | null>;
   publishContext(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string }): Promise<{ prUrl: string | null; merged: boolean; error?: string } | null>;
   openIssue(repo: string, title: string, body: string): Promise<{ url: string }>;
@@ -364,6 +368,7 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
     },
     setupE2e: (e2eDir) => setupE2eProject(e2eDir, defaultSetupDeps),
     validate: (e2eDir) => validateSpecs(e2eDir, defaultValidateDeps),
+    validateCode: (repoDir, opts) => validateCodeProject(repoDir, defaultCodeValidateDeps, opts),
     execute: (e2eDir, opts) => runE2E(e2eDir, opts, defaultExecuteDeps),
     cleanup: (e2eDir, opts) => defaultCleanupDeps.runCleanup({ dir: e2eDir, ...opts }),
     setupCode: (repoDir, opts) => setupCodeProject(repoDir, defaultCodeSetupDeps, opts),
@@ -1857,6 +1862,60 @@ export async function runPipeline(
       persistOutcome(infra, { confinement, usage: usage.result(usageComplete) });
       await report(app, issueRepo, sha, infra, deps, log, shadow, isCode);
       return infra;
+    }
+  } else if (deps.validateCode) {
+    // 6b. Filter B for CODE mode — a compile-feedback gate. Compile the generated tests WITHOUT
+    //     running them (per ecosystem, scoped to the changed module). e2e gets tsc/eslint/list; code
+    //     mode previously had NOTHING, so a compile error surfaced only as an opaque whole-build
+    //     failure with no structured feedback. Mirror the e2e static-fix loop: feed the (sanitized)
+    //     compile errors back to the agent and re-compile, bounded. A still-red gate is `invalid`
+    //     (the generated tests are broken); a broken toolchain (ENOENT/JAVA_HOME) is `infra-error`.
+    onStep?.("validate");
+    log("[qa] code mode: compile-checking the generated tests (no run yet)...");
+    let codeValidation = await deps.validateCode(mirrorDir, { changedFiles: intent?.changedFiles ?? [] });
+    let codeFixRounds = 0;
+    while (
+      !codeValidation.ok && !codeValidation.infra && generating &&
+      codeFixRounds < MAX_STATIC_FIX_ROUNDS && !signal?.aborted
+    ) {
+      codeFixRounds++;
+      retries++;
+      log(`[qa] compile gate failed (repair ${codeFixRounds}/${MAX_STATIC_FIX_ROUNDS}); regenerating to fix:\n${codeValidation.errors.join("\n")}`);
+      result = await generateAndReview(
+        baseGenInput({
+          reviewCorrections: [
+            `The generated tests FAILED TO COMPILE. Fix EXACTLY these errors and change nothing else, then re-compile with the project's build tool to confirm a clean compile before finishing:\n${codeValidation.errors.join("\n")}`,
+          ],
+        }),
+      );
+      checkSignal();
+      codeValidation = await deps.validateCode(mirrorDir, { changedFiles: intent?.changedFiles ?? [] });
+    }
+    if (codeFixRounds > 0 && codeValidation.ok) {
+      log(`[qa] compile gate PASSED after ${codeFixRounds} repair round(s).`);
+    }
+    if (!codeValidation.ok) {
+      log(`[qa] compile gate failed:\n${codeValidation.errors.join("\n")}`);
+      // A missing/broken toolchain (the gate itself couldn't run) is inconclusive infrastructure —
+      // never an Issue blaming the agent. A real compile error is `invalid` (the generated tests are
+      // broken) and feeds the flywheel, exactly like the e2e static gate.
+      if (codeValidation.infra) {
+        const infra = resultOf(ns, "infra-error", codeValidation.errors.join("\n\n"));
+        const confinement = await runConfine();
+        persistOutcome(infra, { confinement, usage: usage.result(usageComplete) });
+        await report(app, issueRepo, sha, infra, deps, log, shadow, isCode);
+        return infra;
+      }
+      const invalid = resultOf(ns, "invalid", codeValidation.errors.join("\n\n"));
+      const confinement = await runConfine();
+      persistOutcome(invalid, { staticOk: false, confinement, usage: usage.result(usageComplete) });
+      await report(app, issueRepo, sha, invalid, deps, log, shadow, isCode, {
+        note: `The generated tests did not compile.\n${codeValidation.errors.join("\n")}`,
+        tested: testedFrom(result),
+        intent,
+      });
+      await foldRunLearning(invalid, { staticOk: false });
+      return invalid;
     }
   }
 

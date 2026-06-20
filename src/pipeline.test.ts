@@ -60,6 +60,7 @@ function deps(
     message?: string; // commit message (classification)
     diff?: string;
     coverage?: Array<CoveredLines | null>; // a sequence of collectCoverage results, one per call
+    codeValidation?: { ok: boolean; errors: string[]; infra: boolean } | Array<{ ok: boolean; errors: string[]; infra: boolean }>;
     context?: "valid" | "missing";
   } = {},
 ): Harness {
@@ -76,6 +77,7 @@ function deps(
   const agentSeq = opts.agents ? [...opts.agents] : null;
   const reviewSeq = opts.review ? [...opts.review] : null;
   const covSeq = opts.coverage ? [...opts.coverage] : null;
+  const codeValSeq = Array.isArray(opts.codeValidation) ? [...opts.codeValidation] : null;
   Object.assign(h, {
     waitForDeploy: async () => {
       calls.push("gate");
@@ -135,6 +137,15 @@ function deps(
       calls.push("executeCode");
       return run;
     },
+    ...(opts.codeValidation
+      ? {
+          validateCode: async () => {
+            calls.push("validateCode");
+            if (codeValSeq) return codeValSeq.shift() ?? { ok: true, errors: [], infra: false };
+            return opts.codeValidation as { ok: boolean; errors: string[]; infra: boolean };
+          },
+        }
+      : {}),
     publishCode: async (input: { baseBranch: string }) => {
       calls.push("publishCode");
       assert.equal(input.baseBranch, "main");
@@ -881,6 +892,40 @@ test("code mode skip (no logic commit): does not generate or execute", async () 
   assert.equal(run.verdict, "skipped");
   assert.ok(!calls.includes("generate"));
   assert.ok(!calls.includes("executeCode"));
+});
+
+test("code mode compile gate: a persistent compile error → invalid, never reaches executeCode", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { codeValidation: { ok: false, errors: ["[compile] cannot find symbol method map()"], infra: false } });
+  const run = await runPipeline(codeApp, "abc123", d, "manual", { mode: "diff", target: "code" });
+  assert.equal(run.verdict, "invalid");
+  assert.ok(calls.includes("validateCode"), "the compile gate ran");
+  assert.ok(!calls.includes("executeCode"), "a non-compiling suite is never executed");
+  assert.equal(d.published, false);
+  assert.equal(d.issues.length, 1);
+});
+
+test("code mode compile gate: passes after one repair round → proceeds to executeCode", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, {
+    codeValidation: [
+      { ok: false, errors: ["[compile] boom"], infra: false },
+      { ok: true, errors: [], infra: false },
+    ],
+  });
+  await runPipeline(codeApp, "abc123", d, "manual", { mode: "diff", target: "code" });
+  assert.ok(calls.filter((c) => c === "validateCode").length >= 2, "gate failed, regenerated, re-validated");
+  assert.ok(calls.includes("executeCode"), "after a clean compile the suite runs");
+  assert.equal(d.published, true);
+});
+
+test("code mode compile gate: a broken toolchain (infra) → infra-error, no Issue, no execute", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { codeValidation: { ok: false, errors: ["[compile] Error: JAVA_HOME is not set and could not be found."], infra: true } });
+  const run = await runPipeline(codeApp, "abc123", d, "manual", { mode: "diff", target: "code" });
+  assert.equal(run.verdict, "infra-error");
+  assert.ok(!calls.includes("executeCode"));
+  assert.equal(d.issues.length, 0, "infra is inconclusive — no Issue on the watched repo");
 });
 
 test("context mode: generates context.json, validates it, publishes, skips validate/execute/review", async () => {
@@ -2833,5 +2878,47 @@ test("adjudicator: ambiguous + spend=false → break-needs-human → labeled Iss
   assert.ok(
     generateCalls.length <= executeCalls.length,
     `no extra generate after break-needs-human (generates=${generateCalls.length}, executes=${executeCalls.length}); calls: ${calls.join(",")}`,
+  );
+});
+
+// Integration 4b: break-needs-human → Issue body carries the adjudication class + reason
+test("adjudicator: break-needs-human → Issue body contains adjudication class and reason", async () => {
+  const calls: string[] = [];
+  const issueBodies: string[] = [];
+  const failingRun: QaRunResult = {
+    sha: "s",
+    verdict: "fail",
+    passed: false,
+    cases: [
+      {
+        name: "owners › create",
+        status: "fail",
+        detail: "strict mode violation: locator found 2 elements",
+      },
+    ],
+    logs: "",
+  };
+  const twoRetryApp: AppConfig = {
+    ...app,
+    qa: { ...app.qa, needsReview: false, fixLoop: { maxRetries: 2 } },
+  };
+  const d = deps(failingRun, calls, { agents: [generated, generated, generated] });
+  d.execute = async () => { calls.push("execute"); return failingRun; };
+  // Override openIssue to also capture the body
+  d.openIssue = async (_repo: string, _title: string, body: string) => {
+    issueBodies.push(body);
+    return { url: "https://github.com/org/demo/issues/1" };
+  };
+  await runPipeline(twoRetryApp, "abc123", d);
+  assert.ok(issueBodies.length > 0, "Issue must be filed on break-needs-human");
+  const body = issueBodies[0]!;
+  // The adjudicator label line format: **Adjudicator:** `{class}` — {reason}
+  assert.ok(
+    /Adjudicator/i.test(body),
+    `Issue body must contain adjudication label; got:\n${body.slice(0, 400)}`,
+  );
+  assert.ok(
+    /generated_test_defect|break-needs-human|no progress/i.test(body),
+    `Issue body must contain adjudication class or reason; got:\n${body.slice(0, 400)}`,
   );
 });
