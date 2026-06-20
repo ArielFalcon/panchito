@@ -69,8 +69,15 @@ export function compileCommand(
     case "node":
       // Only a TS project has a pre-run compile step; plain JS has none (errors surface at run).
       return deps.exists(join(repoDir, "tsconfig.json")) ? { cmd: "npx", args: ["tsc", "--noEmit"] } : null;
+    case "python": {
+      // python is file-based (no module compile): byte-compile the changed .py files for a fast SYNTAX
+      // gate. With G1 these are the agent's written tests on a manual run. Syntax-only — import/name
+      // errors still surface at pytest collection (the run), which the fix-loop already feeds back.
+      const py = changedFiles.filter((f) => f.endsWith(".py"));
+      return py.length > 0 ? { cmd: "python3", args: ["-m", "compileall", "-q", ...py] } : null;
+    }
     default:
-      return null; // python, unknown → interpreted; the suite is the gate
+      return null; // unknown → interpreted; the suite is the gate
   }
 }
 

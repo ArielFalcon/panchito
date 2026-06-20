@@ -38,7 +38,17 @@ test("compileCommand: node tsc --noEmit only with a tsconfig; plain JS has no co
   assert.equal(compileCommand(node, "/repo", [], { exists: () => false }), null);
 });
 
-test("compileCommand: interpreted/unknown ecosystems have no compile gate (null)", () => {
+test("compileCommand: unknown ecosystem has no compile gate (null)", () => {
+  const unknown: CodeProject = { ecosystem: "unknown", install: null, test: { cmd: "npm", args: ["test"] } };
+  assert.equal(compileCommand(unknown, "/repo", ["x.py"], { exists: () => true }), null);
+});
+
+test("compileCommand: python byte-compiles the changed .py files (syntax gate); none → null", () => {
+  assert.deepEqual(compileCommand(python, "/repo", ["pkg/test_owner.py", "README.md"], { exists: () => true }), {
+    cmd: "python3",
+    args: ["-m", "compileall", "-q", "pkg/test_owner.py"],
+  });
+  assert.equal(compileCommand(python, "/repo", ["README.md"], { exists: () => true }), null);
   assert.equal(compileCommand(python, "/repo", [], { exists: () => true }), null);
 });
 
