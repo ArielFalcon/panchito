@@ -292,7 +292,7 @@ const MODULE_DESCRIPTORS: Partial<Record<Ecosystem, readonly string[]>> = {
 // Ecosystems whose TEST RUN command scopeTestCommand can actually narrow to a module. node resolves a
 // package.json dir but workspace layouts vary too much to scope its run generically (deferred), so it
 // is NOT here — listing it would mislabel a whole-repo node run as "scoped".
-const RUN_SCOPE_SUPPORTED = new Set<Ecosystem>(["maven", "gradle", "go"]);
+const RUN_SCOPE_SUPPORTED = new Set<Ecosystem>(["maven", "gradle", "go", "node"]);
 
 // Parent of a repo-relative POSIX path ("a/b/c" → "a/b", "pom.xml" → ""). Git always emits
 // "/"-separated paths, so this is deterministic regardless of host platform.
@@ -334,8 +334,9 @@ export function resolveChangedModules(
 }
 
 // Narrow a project's TEST command to the resolved module(s). Pure. Caller guarantees `modules`
-// non-empty (it came from resolveChangedModules).
-export function scopeTestCommand(project: CodeProject, modules: string[]): Command {
+// non-empty (it came from resolveChangedModules). Returns null when THIS command cannot be safely
+// narrowed (e.g. an opaque package-manager `test` script) → the caller falls back to the whole repo.
+export function scopeTestCommand(project: CodeProject, modules: string[]): Command | null {
   switch (project.ecosystem) {
     case "maven":
       // -pl selects the module(s); -am also-makes their upstream deps so a clean checkout compiles.
@@ -346,6 +347,14 @@ export function scopeTestCommand(project: CodeProject, modules: string[]): Comma
     case "go":
       // Scope to the changed packages (and their subpackages).
       return { cmd: "go", args: ["test", ...modules.map((m) => `./${m}/...`)] };
+    case "node": {
+      // Only the DIRECT runners accept a path filter; an opaque `npm/pnpm/yarn test` SCRIPT is a black
+      // box we must not rewrite. A mis-scoped direct run that matches no tests is caught as
+      // `infra-error` (ranZeroTests), never a false pass — so path-scoping fails safe.
+      const t = project.test;
+      const direct = t.args.includes("jest") || t.args.includes("vitest") || (t.cmd === "node" && t.args.includes("--test"));
+      return direct ? { cmd: t.cmd, args: [...t.args, ...modules] } : null;
+    }
     default:
       return project.test; // defensive: resolveChangedModules already returns null for these
   }
@@ -380,7 +389,11 @@ export function scopeForChangedFiles(
       note: `changed files did not all resolve to a ${project.ecosystem} submodule — running the whole repo`,
     };
   }
-  return { test: scopeTestCommand(project, modules), scoped: true, note: `scoped to module(s): ${modules.join(", ")}` };
+  const scopedTest = scopeTestCommand(project, modules);
+  if (!scopedTest) {
+    return { test: project.test, scoped: false, note: `could not scope the ${project.ecosystem} run command — running the whole repo` };
+  }
+  return { test: scopedTest, scoped: true, note: `scoped to module(s): ${modules.join(", ")}` };
 }
 
 // Parse `git status --porcelain` into the changed/added/untracked file paths (repo-relative). For a

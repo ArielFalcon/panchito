@@ -88,6 +88,25 @@ test("scopeTestCommand: go scopes to the changed packages", () => {
   assert.deepEqual(scopeTestCommand(project, ["svc/users"]), { cmd: "go", args: ["test", "./svc/users/..."] });
 });
 
+test("scopeTestCommand: node scopes the DIRECT runners (jest/vitest/node --test) by path; an opaque script → null", () => {
+  const jest: CodeProject = { ecosystem: "node", install: null, test: { cmd: "npx", args: ["jest"] } };
+  assert.deepEqual(scopeTestCommand(jest, ["packages/billing"]), { cmd: "npx", args: ["jest", "packages/billing"] });
+  const vitest: CodeProject = { ecosystem: "node", install: null, test: { cmd: "npx", args: ["vitest", "run"] } };
+  assert.deepEqual(scopeTestCommand(vitest, ["packages/billing"]), { cmd: "npx", args: ["vitest", "run", "packages/billing"] });
+  const nodeTest: CodeProject = { ecosystem: "node", install: null, test: { cmd: "node", args: ["--test"] } };
+  assert.deepEqual(scopeTestCommand(nodeTest, ["pkg"]), { cmd: "node", args: ["--test", "pkg"] });
+  const script: CodeProject = { ecosystem: "node", install: null, test: { cmd: "npm", args: ["test"] } };
+  assert.equal(scopeTestCommand(script, ["pkg"]), null); // opaque `npm test` script — cannot scope safely
+});
+
+test("scopeForChangedFiles: node with a jest runner scopes to the changed package", () => {
+  const exists = existsFrom(["/repo/packages/billing/package.json", "/repo/package.json"]);
+  const project: CodeProject = { ecosystem: "node", install: null, test: { cmd: "npx", args: ["jest"] } };
+  const r = scopeForChangedFiles(project, "/repo", ["packages/billing/src/x.ts"], { exists });
+  assert.equal(r.scoped, true);
+  assert.deepEqual(r.test, { cmd: "npx", args: ["jest", "packages/billing"] });
+});
+
 test("scopeForChangedFiles: no changed files → whole-repo fallback (non-diff run)", () => {
   const project: CodeProject = { ecosystem: "maven", install: null, test: { cmd: "mvn", args: ["-B", "test"] } };
   const r = scopeForChangedFiles(project, "/repo", [], { exists: () => true });
