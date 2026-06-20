@@ -13,6 +13,8 @@ import {
   scopeTestCommand,
   scopeForChangedFiles,
   failureDetail,
+  parsePorcelain,
+  effectiveChangedFiles,
   DetectDeps,
   CodeProject,
   CodeExecuteDeps,
@@ -121,6 +123,33 @@ test("scopeForChangedFiles: node is NOT mislabeled as scoped — per-module RUN 
   assert.equal(r.scoped, false);
   assert.deepEqual(r.test, project.test);
   assert.match(r.note, /not yet supported|whole repo/i);
+});
+
+// ── G1: scope by the agent's git writes when there is no input diff (manual/complete) ─────────────
+test("parsePorcelain: extracts modified, added and untracked paths (rename → new path)", () => {
+  const out = [
+    " M src/foo.ts",
+    "A  src/added.go",
+    "?? customers-service/src/test/java/X.java",
+    "R  old/path.ts -> new/path.ts",
+  ].join("\n");
+  assert.deepEqual(parsePorcelain(out), ["src/foo.ts", "src/added.go", "customers-service/src/test/java/X.java", "new/path.ts"]);
+});
+
+test("effectiveChangedFiles: prefers the input diff; falls back to the agent's writes when empty", () => {
+  assert.deepEqual(effectiveChangedFiles(["a.ts"], "/repo", () => ["b.ts"]), ["a.ts"]);
+  assert.deepEqual(effectiveChangedFiles([], "/repo", () => ["b.ts"]), ["b.ts"]);
+  assert.deepEqual(effectiveChangedFiles([], "/repo", undefined), []);
+});
+
+test("manual scoping: with NO input diff, scope by the agent's git writes (the highest-impact gap)", () => {
+  const exists = existsFrom(["/repo/customers-service/pom.xml", "/repo/pom.xml"]);
+  const project: CodeProject = { ecosystem: "maven", install: null, test: { cmd: "mvn", args: ["-B", "test"] } };
+  // No input changedFiles (manual run) — derive the scope from what the agent wrote.
+  const changed = effectiveChangedFiles([], "/repo", () => ["customers-service/src/test/java/OwnerTest.java"]);
+  const r = scopeForChangedFiles(project, "/repo", changed, { exists });
+  assert.equal(r.scoped, true);
+  assert.match(r.test.args.join(" "), /-pl customers-service/);
 });
 
 // ── failureDetail: diagnosable code-mode failure output ───────────────────────

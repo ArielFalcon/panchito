@@ -383,6 +383,44 @@ export function scopeForChangedFiles(
   return { test: scopeTestCommand(project, modules), scoped: true, note: `scoped to module(s): ${modules.join(", ")}` };
 }
 
+// Parse `git status --porcelain` into the changed/added/untracked file paths (repo-relative). For a
+// rename ("R  old -> new") take the NEW path. Pure. (The agent's generated tests show up as untracked
+// "?? path" entries, which is exactly what we want to scope by.)
+export function parsePorcelain(output: string): string[] {
+  const files: string[] = [];
+  for (const line of output.split("\n")) {
+    if (line.length < 4) continue; // "XY path" — need at least a 2-char status + space + 1 char
+    const path = line.slice(3);
+    const arrow = path.indexOf(" -> ");
+    files.push(arrow >= 0 ? path.slice(arrow + 4) : path);
+  }
+  return files;
+}
+
+// The scope basis for a run: the input diff when present (diff mode), else the files the agent just
+// WROTE (manual/complete/exhaustive have no input diff, so scope by the agent's working-tree changes
+// — this is what lets manual/complete runs scope to a module instead of always running the whole repo).
+// Pure: the writes probe is injected.
+export function effectiveChangedFiles(
+  inputChangedFiles: string[],
+  repoDir: string,
+  listWrites?: (repoDir: string) => string[],
+): string[] {
+  if (inputChangedFiles.length > 0) return inputChangedFiles;
+  return listWrites ? listWrites(repoDir) : [];
+}
+
+// Default writes probe: the working-tree changes in the mirror (the agent's generated tests are
+// uncommitted there). Best-effort — any git failure yields [] (→ whole-repo fallback), never throws.
+export function gitWorkingChanges(repoDir: string): string[] {
+  try {
+    const out = execFileSync("git", ["status", "--porcelain"], { cwd: repoDir, encoding: "utf8" });
+    return parsePorcelain(out);
+  } catch {
+    return [];
+  }
+}
+
 // ── Setup (install deps) ──────────────────────────────────────────────────────
 
 export interface CodeSetupDeps {
@@ -460,6 +498,9 @@ export interface CodeRunOutput {
 export interface CodeExecuteDeps {
   detect(repoDir: string): CodeProject;
   runTests(project: CodeProject, repoDir: string, opts?: { signal?: AbortSignal; timeoutMs?: number }): Promise<CodeRunOutput>;
+  // The scope basis when there is no input diff (manual/complete): the files the agent wrote.
+  // Optional — absent ⇒ no derivation ⇒ whole-repo (the prior behavior). Default: git working changes.
+  listWrites?(repoDir: string): string[];
 }
 
 export interface CodeExecuteOptions {
@@ -539,9 +580,11 @@ export async function runCodeTests(
   deps: CodeExecuteDeps,
 ): Promise<QaRunResult> {
   const detected = deps.detect(repoDir);
-  // Diff-driven module scoping: narrow the command to the changed module(s) on a monorepo, else fall
-  // back to the whole repo. Surfaced so a scoped run is never confused with a whole-repo fallback.
-  const scope = scopeForChangedFiles(detected, repoDir, opts.changedFiles ?? []);
+  // Module scoping: narrow the command to the changed module(s) on a monorepo, else fall back to the
+  // whole repo. Scope basis = the input diff (diff mode) OR the agent's writes (manual/complete, which
+  // have no input diff). Surfaced so a scoped run is never confused with a whole-repo fallback.
+  const changed = effectiveChangedFiles(opts.changedFiles ?? [], repoDir, deps.listWrites);
+  const scope = scopeForChangedFiles(detected, repoDir, changed);
   opts.log?.(`[qa] code-mode: ${scope.note}`);
   const project: CodeProject = { ...detected, test: scope.test };
 
@@ -647,6 +690,7 @@ function headTail(s: string, maxChars: number): string {
 
 export const defaultCodeExecuteDeps: CodeExecuteDeps = {
   detect: (repoDir) => detectCodeProject(repoDir),
+  listWrites: (repoDir) => gitWorkingChanges(repoDir),
   runTests: (project, repoDir, opts) =>
     new Promise((resolve) => {
       const { cmd, args } = project.test;

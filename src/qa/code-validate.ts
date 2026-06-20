@@ -14,6 +14,8 @@ import {
   detectCodeProject,
   realDetectDeps,
   resolveChangedModules,
+  effectiveChangedFiles,
+  gitWorkingChanges,
   DEFAULT_CODE_MODE_TIMEOUT_MS,
   type CodeProject,
   type Command,
@@ -77,11 +79,14 @@ export interface CodeValidateDeps {
   // Spawn-and-classify, REUSING validate.ts's runCheck contract: ENOENT/signal-kill/timeout → infra,
   // non-zero exit → a real failure. Decoupled from runCodeTests/ranZeroTests on purpose.
   runCheck(cmd: string, args: string[], cwd: string, timeoutMs?: number): Promise<CheckResult>;
+  // Scope basis when there is no input diff (manual/complete): the files the agent wrote. Default: git.
+  listWrites?(repoDir: string): string[];
 }
 
 export const defaultCodeValidateDeps: CodeValidateDeps = {
   detect: (repoDir) => detectCodeProject(repoDir),
   runCheck: (cmd, args, cwd, timeoutMs) => runCheck(cmd, args, cwd, timeoutMs ?? DEFAULT_CODE_MODE_TIMEOUT_MS),
+  listWrites: (repoDir) => gitWorkingChanges(repoDir),
 };
 
 export async function validateCodeProject(
@@ -90,7 +95,9 @@ export async function validateCodeProject(
   opts: { changedFiles?: string[]; timeoutMs?: number } = {},
 ): Promise<ValidationResult> {
   const project = deps.detect(repoDir);
-  const cmd = compileCommand(project, repoDir, opts.changedFiles ?? []);
+  // Scope the compile to the input diff (diff mode) or the agent's writes (manual/complete).
+  const changed = effectiveChangedFiles(opts.changedFiles ?? [], repoDir, deps.listWrites);
+  const cmd = compileCommand(project, repoDir, changed);
   if (!cmd) return { ok: true, errors: [], infra: false }; // no compile step for this ecosystem
   const res = await deps.runCheck(cmd.cmd, cmd.args, repoDir, opts.timeoutMs);
   if (res.ok) return { ok: true, errors: [], infra: false };
