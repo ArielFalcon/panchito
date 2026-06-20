@@ -50,7 +50,9 @@ async function attachSourceMaps(entries: CoverageEntry[]): Promise<void> {
 }
 
 export interface QaFixtures {
-  namespace: string; // the run's data prefix (qa-bot-<sha>)
+  namespace: string; // PER-ATTEMPT data prefix `qa-bot-<sha>-w<worker>r<retry>` (use to NAME/find created
+                     // entities). The run-level BASE is `process.env.PW_NAMESPACE` (no -wXrY) — match by THAT
+                     // for cleanup/teardown so all workers' and retries' data is covered.
   authenticate: () => Promise<void>; // the app's real login (Keycloak)
   cleanup: (undo: () => Promise<void>) => void; // registers undo steps (LIFO, automatic)
   // system-owned: do not edit — the orchestrator reads these dumps for change-coverage.
@@ -60,8 +62,15 @@ export interface QaFixtures {
 }
 
 export const test = base.extend<QaFixtures>({
-  namespace: async ({}, use) => {
-    await use(process.env.PW_NAMESPACE ?? "qa-bot-local");
+  namespace: async ({}, use, testInfo) => {
+    const base = process.env.PW_NAMESPACE ?? "qa-bot-local";
+    // Per-ATTEMPT uniqueness, not just per-run. A data-creating test that retries (Playwright
+    // retry) or runs across parallel workers must NOT reuse the same namespace: on a DEV app with
+    // no delete affordance, each attempt creates a duplicate entity with an IDENTICAL name, so a
+    // later `getByRole("link", { name })` matches multiple rows → strict-mode violation — and the
+    // retry trips over the collision it itself just created. Folding in worker + retry makes every
+    // attempt's data unique while keeping the run prefix (`base`) intact for orphan cleanup/coverage.
+    await use(`${base}-w${testInfo.workerIndex}r${testInfo.retry}`);
   },
 
   // App login via Keycloak: pressing login redirects to the Keycloak domain
