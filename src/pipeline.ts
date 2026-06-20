@@ -2009,6 +2009,12 @@ export async function runPipeline(
       failingCount: failed.length,
       absentSelectors: absentKeys,
       lever2Flips,
+      // Option (c): route navigations of the latest generation (RE-2). The first-pass round carries
+      // the (expected) count, but iteration 0's gate is the baseline (prev=null) and never reads it —
+      // only regen-vs-regen comparisons are gated. On the Lever-2 short-circuit (regenerate WITHOUT
+      // re-executing) `run` is unchanged, so failingNames cannot differ and signal B — the only
+      // consumer of this count — never fires; the count is harmlessly unused on that path.
+      reexploreNavigations: result?.reexploreNavigations ?? 0,
     };
     const gate = decideProgress(prevRound, curRound);
     log(`[qa] progress gate (retry ${retry + 1}/${MAX_RETRIES}): spend=${gate.spend} — ${gate.reason}`);

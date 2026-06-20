@@ -63,6 +63,11 @@ export interface AgentResult {
   reviewed: boolean; // whether review was enabled
   approved: boolean; // reviewer verdict (true when not reviewed)
   note?: string; // reason when not approved (e.g. did not converge)
+  // Option (c): browser NAVIGATIONS (route visits) the agent made THIS turn (RE-2 telemetry; counts
+  // `navigate`, not snapshots). Threaded into the fix-loop's RoundResult so the progress gate can
+  // treat a heavy-re-navigation retry that merely reshuffles the failure set as "no progress".
+  // Absent ⇒ treated as 0 (no gating).
+  reexploreNavigations?: number;
   // Phase 6b: the number of objectives the planner derived for this run. Set on plan-first paths
   // (diff/manual fan-out) so the pipeline can retroactively adjust the runaway backstop to the
   // actual scope — multi-objective runs legitimately need more cycles than single-objective ones.

@@ -766,6 +766,13 @@ export async function runOpencode(
       }
     }
 
+    // Option (c): the turn's browser NAVIGATION count (RE-2) — all tool calls are done now that the
+    // prompt returned. We count `navigate` (one per route visit), NOT navigate+snapshot: the agent
+    // pairs navigate→snapshot per route, so counting both would put 2 legitimate uncovered-route
+    // visits over a small threshold and wrongly stop a progressing retry. Threaded to the fix-loop's
+    // progress gate (heavy re-navigation that merely reshuffles failures = no progress). Read before
+    // the `finally` clears the tracker.
+    const reexCounts = reexploreTracker.snapshot(session.id);
     return {
       output: finalText,
       specs: verdict.specs,
@@ -773,6 +780,7 @@ export async function runOpencode(
       reviewed: input.needsReview,
       approved,
       note: approved ? undefined : verdict.note ?? "the reviewer did not approve the E2E tests",
+      reexploreNavigations: reexCounts.navigate,
     };
   } finally {
     if (heartbeat) clearInterval(heartbeat);

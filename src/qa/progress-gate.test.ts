@@ -68,6 +68,39 @@ test("decideProgress: spend when completely different test fails (B)", () => {
   assert.equal(decideProgress(prev, cur).spend, true);
 });
 
+// ── decideProgress (option c): RE-2 re-exploration downgrades WEAK progress ──
+// A retry that merely RESHUFFLED which test fails (signal B, same count) while re-exploring heavily
+// (browser navigation it was told to skip on a grounded retry) is thrashing, not progress → stop
+// paying for it. A STRONG signal (fewer failures, A) is never downgraded.
+test("decideProgress (c): signal-B reshuffle with HEAVY re-exploration is thrashing → stop", () => {
+  const prev = round(["test A", "test B"]);
+  const cur: RoundResult = { ...round(["test A", "test C"]), reexploreNavigations: 5 };
+  const result = decideProgress(prev, cur);
+  assert.equal(result.spend, false);
+  assert.match(result.reason, /no progress/i);
+});
+
+test("decideProgress (c): signal-B reshuffle with LIGHT re-exploration is still progress → spend", () => {
+  const prev = round(["test A", "test B"]);
+  const cur: RoundResult = { ...round(["test A", "test C"]), reexploreNavigations: 1 };
+  assert.equal(decideProgress(prev, cur).spend, true);
+});
+
+test("decideProgress (c): signal-A (fewer failures) spends even with heavy re-exploration", () => {
+  const prev = round(["a", "b", "c"]);
+  const cur: RoundResult = { ...round(["a"]), reexploreNavigations: 9 };
+  assert.equal(decideProgress(prev, cur).spend, true);
+});
+
+// Calibration boundary: the count is NAVIGATIONS (one per route). The RE-1 anti-blinding escape lets
+// a grounded retry visit a couple of genuinely-uncovered routes, so the threshold must sit above
+// that — 2 navigations still spends; 3 (≈3 routes re-visited) on a mere reshuffle is thrashing.
+test("decideProgress (c): boundary — 2 navigations still spends, 3 stops", () => {
+  const prev = round(["test A", "test B"]);
+  assert.equal(decideProgress(prev, { ...round(["test A", "test C"]), reexploreNavigations: 2 }).spend, true);
+  assert.equal(decideProgress(prev, { ...round(["test A", "test C"]), reexploreNavigations: 3 }).spend, false);
+});
+
 // ── decideProgress: Signal C — lever2Flips > 0 ────────────────────────────
 
 test("decideProgress: spend when lever2Flips > 0 (C), same count and names", () => {

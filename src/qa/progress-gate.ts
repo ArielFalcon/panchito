@@ -29,7 +29,18 @@ export interface RoundResult {
   absentSelectors: Set<string>;
   // Number of selectors that flipped from absent → present this round (Lever-2 signal C).
   lever2Flips: number;
+  // Option (c): browser NAVIGATIONS (route visits) the agent made PRODUCING this round (RE-2; counts
+  // `navigate`, not snapshots). On a grounded regen this should be ~0; a high count means it
+  // re-navigated instead of fixing from the injected tree. Used to downgrade WEAK progress (a mere
+  // reshuffle) to "no progress". Optional; defaults to 0 so existing callers/tests are unaffected
+  // (and the first-pass round is never gated).
+  reexploreNavigations?: number;
 }
+
+// Option (c): a regen round with this many route NAVIGATIONS (or more) was re-exploring heavily — on
+// a grounded retry it should fix from the injected tree, not navigate. Sits ABOVE the anti-blinding
+// allowance (a regen may legitimately visit 1-2 genuinely-uncovered routes), so 3+ = thrashing.
+const REEXPLORE_FLAIL_THRESHOLD = 3;
 
 // The gate decision returned to the pipeline.
 export interface GateDecision {
@@ -155,6 +166,16 @@ export function decideProgress(prev: RoundResult | null, cur: RoundResult): Gate
 
   // Signal B: failing names set changed (a failure resolved, a different one surfaced).
   if (!setsEqual(cur.failingNames, prev.failingNames)) {
+    // Option (c): a mere RESHUFFLE (same count, different names) produced by HEAVY re-exploration is
+    // thrashing, not progress — the agent re-navigated instead of fixing from grounding and only
+    // shuffled which test fails. Stop rather than fund another expensive re-exploration cycle. A
+    // STRONG signal (A: fewer failures) already returned above and is never downgraded.
+    if ((cur.reexploreNavigations ?? 0) >= REEXPLORE_FLAIL_THRESHOLD) {
+      return {
+        spend: false,
+        reason: `no progress — the failure set only reshuffled after ${cur.reexploreNavigations} re-exploration call(s) on a grounded retry; stopping loop`,
+      };
+    }
     return { spend: true, reason: "progress (B): failing test set changed" };
   }
 
