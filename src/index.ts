@@ -20,7 +20,8 @@ import { handleMaintainerApi, recordIncident, getMaintainerStatus, getIncidents 
 import { getRecord, listRecords, currentRun, updateRecord, interruptedRecords, continuationDepth, MAX_CONTINUATION_DEPTH, listLearningRules, loadScorecard, loadCurriculum, listRunOutcomes, getRunOutcome, getAgentTurns, computeTelemetryAnalysis } from "./server/history";
 import { enqueueTrackedRun, cancelTrackedRun } from "./server/runner";
 import { defaultPipelineDeps } from "./pipeline";
-import { pruneMirrors, defaultMirrorPruneDeps } from "./server/mirror-prune";
+import { pruneMirrors, defaultMirrorPruneDeps, getDirectorySize } from "./server/mirror-prune";
+import { buildArtifactBytesMetrics, type ArtifactSizeCache } from "./server/metrics";
 import { createMaintainerRuntime } from "./server/maintainer-runtime";
 import { installHttpDispatcher } from "./util/net";
 import { resolveRef, defaultMirrorDeps } from "./integrations/repo-mirror";
@@ -230,6 +231,12 @@ async function cleanupOrphanedSessions(): Promise<void> {
   }
 }
 
+// Module-level cache for the artifact-bytes scan (TTL: 60 s). A fresh scan on every
+// scrape would block the response for large mirrors; this amortises the cost and ensures
+// a scan error never crashes the metrics endpoint.
+const artifactSizeCache: { current: ArtifactSizeCache | null } = { current: null };
+const ARTIFACT_SIZE_TTL_MS = 60_000;
+
 function generatePrometheusMetrics(queue: JobQueue, openSessions: number): string {
   const lines: string[] = [];
   lines.push(`# HELP panchito_queue_depth Current depth of the job queue`);
@@ -252,6 +259,19 @@ function generatePrometheusMetrics(queue: JobQueue, openSessions: number): strin
   for (const verdict of ["pass", "fail", "flaky", "invalid", "infra-error", "skipped"]) {
     lines.push(`panchito_runs_total{verdict="${verdict}"} ${counts[verdict] ?? 0}`);
   }
+  // Artifact size gauge: best-effort, TTL-cached. A scan error yields 0 for that app;
+  // the gauge block is omitted entirely when no apps are configured.
+  const artifactBlock = buildArtifactBytesMetrics(
+    {
+      listAppConfigs,
+      mirrorRoot: () => process.env.MIRROR_DIR ?? join(ROOT, ".mirrors"),
+      getDirectorySize,
+    },
+    artifactSizeCache,
+    ARTIFACT_SIZE_TTL_MS,
+    Date.now(),
+  );
+  if (artifactBlock) lines.push(artifactBlock);
   return lines.join("\n");
 }
 

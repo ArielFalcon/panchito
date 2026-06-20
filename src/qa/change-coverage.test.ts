@@ -15,7 +15,7 @@ import {
   parseIstanbulJson,
   parseV8Coverage,
   resolveUrlToRepoFile,
-  clearBrowserCoverage,
+  clearRunArtifacts,
   CoveredLines,
   DEFAULT_COVERAGE_POLICY,
 } from "./change-coverage";
@@ -30,18 +30,24 @@ function lines(m: CoveredLines): Record<string, number[]> {
 // survive `git clean -fd`) must be removed before a new measurement — otherwise
 // collectBrowserCoverage would union them and credit coverage to tests that did not run
 // this time, flipping a genuinely-uncovered change to a false "pass".
-test("clearBrowserCoverage removes a prior run's stale dumps (idempotent)", () => {
+// Also clears fault-injection oracle artifacts which accumulate in the gitignored mirror.
+test("clearRunArtifacts removes coverage AND fault-injection dirs (idempotent)", () => {
   const e2eDir = mkdtempSync(join(tmpdir(), "cc-clear-"));
   const ns = "qa-bot-abc1234";
-  const dir = join(e2eDir, ".qa", "coverage", ns);
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "stale-0-0.json"), "[]");
-  assert.equal(existsSync(dir), true);
+  const coverageDir = join(e2eDir, ".qa", "coverage", ns);
+  const faultDir = join(e2eDir, ".qa", "fault-injection", ns);
+  mkdirSync(coverageDir, { recursive: true });
+  mkdirSync(faultDir, { recursive: true });
+  writeFileSync(join(coverageDir, "stale-0-0.json"), "[]");
+  writeFileSync(join(faultDir, "oracle-0.json"), "{}");
+  assert.equal(existsSync(coverageDir), true);
+  assert.equal(existsSync(faultDir), true);
 
-  clearBrowserCoverage(e2eDir, ns);
-  assert.equal(existsSync(dir), false); // stale dumps gone
+  clearRunArtifacts(e2eDir, ns);
+  assert.equal(existsSync(join(e2eDir, ".qa", "coverage")), false); // whole coverage tree gone
+  assert.equal(existsSync(join(e2eDir, ".qa", "fault-injection")), false); // whole fault-injection tree gone
 
-  assert.doesNotThrow(() => clearBrowserCoverage(e2eDir, ns)); // idempotent on an absent dir
+  assert.doesNotThrow(() => clearRunArtifacts(e2eDir, ns)); // idempotent on absent dirs
   rmSync(e2eDir, { recursive: true, force: true });
 });
 

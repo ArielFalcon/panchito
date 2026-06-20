@@ -9,6 +9,8 @@ blob-report/
 # Volatile change-coverage dumps (system-owned, regenerated each run). The .qa/ manifest and
 # analysis.json ARE committed (suite metadata); the raw V8 coverage is not.
 .qa/coverage/
+# Fault-injection oracle artifacts (system-owned, per-run namespace subdirs).
+.qa/fault-injection/
 # Measured fields (stability, coverage) — system-owned, updated every run. Lives OUTSIDE
 # the commited manifest to avoid PR-spam from stability.runs++.
 .qa/measured.json

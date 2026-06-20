@@ -45,7 +45,7 @@ import {
   blocksPublish,
   renderUncovered,
   defaultCollectCoverage,
-  clearBrowserCoverage,
+  clearRunArtifacts,
   hasBrowserCoverageDumps,
   DEFAULT_COVERAGE_POLICY,
   type CoveredLines,
@@ -427,7 +427,7 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
       if (input.target === "code") await runCodeCoverage(input.repoDir).catch(() => {});
       return defaultCollectCoverage(input);
     },
-    clearCoverage: (e2eDir, ns) => clearBrowserCoverage(e2eDir, ns),
+    clearCoverage: (e2eDir, ns) => clearRunArtifacts(e2eDir, ns),
     hasCoverageDumps: (e2eDir, ns) => hasBrowserCoverageDumps(e2eDir, ns),
     recordMeasured: (e2eDir, input) => {
       const measuredPath = join(e2eDir, ".qa", "measured.json");
@@ -2057,7 +2057,7 @@ export async function runPipeline(
 
   // The namespace whose on-disk coverage dumps correspond to the CURRENT `run`. Starts as the initial
   // execute's namespace and follows the winning run through retries: a run that goes green only on a
-  // retry produced its V8 dumps under `retryNs`, and the per-retry whole-tree wipe (clearBrowserCoverage
+  // retry produced its V8 dumps under `retryNs`, and the per-retry whole-tree wipe (clearRunArtifacts
   // deletes the ENTIRE coverage tree, ignoring its namespace arg) deleted the base-ns dumps. Collecting
   // change-coverage from the base `ns` would then read an empty dir → the keystone silently lost to
   // "unknown" (which never blocks) for exactly the runs that needed fixing. Track the winner; collect

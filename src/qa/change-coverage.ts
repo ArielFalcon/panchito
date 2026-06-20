@@ -424,22 +424,29 @@ export function parseJacocoXml(xml: string, changedFiles: string[]): CoveredLine
 }
 
 // The run's V8 dump directory. Single source of truth for the path so the collector
-// and the cleaner (clearBrowserCoverage) can never drift apart.
+// and the cleaner (clearRunArtifacts) can never drift apart.
 function browserCoverageDir(e2eDir: string, namespace: string): string {
   return join(e2eDir, ".qa", "coverage", namespace);
 }
 
-// Remove a run's V8 dumps so a measurement reflects ONLY the execute that just ran.
-// Called before each measured execute: stale dumps from a prior same-sha run survive
-// `git clean -fd` (the dir is gitignored), and an enforce re-run would otherwise union
-// round-1 and round-2 dumps. force:true makes it idempotent when the dir is absent.
-export function clearBrowserCoverage(e2eDir: string, _namespace?: string): void {
+// Remove a run's V8 dumps and fault-injection oracle artifacts so a measurement reflects
+// ONLY the execute that just ran. Called before each measured execute: stale dumps from a
+// prior same-sha run survive `git clean -fd` (the dirs are gitignored), and an enforce
+// re-run would otherwise union round-1 and round-2 dumps. force:true makes it idempotent
+// when either directory is absent.
+export function clearRunArtifacts(e2eDir: string, _namespace?: string): void {
   // Remove the WHOLE per-run coverage tree (every namespace), not just one: each run uses a
   // fresh runId-scoped namespace, so old sibling dirs would otherwise accumulate forever in
   // the gitignored mirror (they survive `git clean -fd`). The sequential queue guarantees no
   // concurrent run's dumps live here; the current run repopulates coverage/<ns> during execute.
   rmSync(join(e2eDir, ".qa", "coverage"), { recursive: true, force: true });
+  // Also wipe fault-injection oracle artifacts — a confirmed orphan dir that accumulates
+  // per-run namespace subdirs indefinitely in the gitignored mirror.
+  rmSync(join(e2eDir, ".qa", "fault-injection"), { recursive: true, force: true });
 }
+
+// TODO (follow-on): opencode.db size gauge requires a /db-size endpoint in the agents
+// container (agents-container boundary) — out of scope for this change.
 
 // Did the suite emit ANY V8 dumps this run? Lets the orchestrator distinguish a benign
 // "no coverage data" (legitimately "unknown") from a STRUCTURAL NO-OP — dumps were
