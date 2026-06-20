@@ -21,7 +21,7 @@
 import type { RunOutcome } from "../../types";
 import type { ErrorClass } from "./taxonomy";
 
-export type Disposition = "engine-fix" | "ledger-heal" | "context-heal" | "memory-heal" | "observe";
+export type Disposition = "engine-fix" | "ledger-heal" | "context-heal" | "observe";
 
 export interface ProcessFinding {
   kind: string; // machine label, e.g. "recurring-error-class"
@@ -169,14 +169,12 @@ export interface AuditRouterDeps {
   deprecateRule: (ruleId: string, reason: string) => void; // ledger-heal: reversible (status → deprecated)
   recordEngineIncident: (finding: ProcessFinding) => void; // engine-fix: → qa-maintainer → human-gated PR
   invalidateContext: (reason: string) => boolean; // context-heal: force a map rebuild; true if it acted
-  flagMemoryHeal?: (finding: ProcessFinding) => void; // memory-heal: engram is the agent's — surface it
 }
 
 export interface AppliedAudit {
   deprecatedRules: string[];
   incidentsRecorded: number;
   contextInvalidated: number;
-  memoryFlagged: number;
   observed: number;
 }
 
@@ -184,7 +182,7 @@ export interface AppliedAudit {
 // engine-fix becomes a (human-gated) PR; the DATA dispositions self-heal autonomously and
 // reversibly. Returns what it did, for the audit log.
 export function applyAudit(findings: ProcessFinding[], deps: AuditRouterDeps): AppliedAudit {
-  const applied: AppliedAudit = { deprecatedRules: [], incidentsRecorded: 0, contextInvalidated: 0, memoryFlagged: 0, observed: 0 };
+  const applied: AppliedAudit = { deprecatedRules: [], incidentsRecorded: 0, contextInvalidated: 0, observed: 0 };
   for (const f of findings) {
     switch (f.disposition) {
       case "ledger-heal":
@@ -205,13 +203,6 @@ export function applyAudit(findings: ProcessFinding[], deps: AuditRouterDeps): A
         deps.log(`[audit] context-heal (${f.kind}): ${acted ? "invalidated the architecture map — it rebuilds next run" : "no map to invalidate"} — ${f.evidence}`);
         break;
       }
-      case "memory-heal":
-        // engram is the AGENT's memory (the orchestrator never writes it), so the orchestrator
-        // SURFACES a corrupt-memory finding for the agent layer instead of mutating it directly.
-        deps.flagMemoryHeal?.(f);
-        applied.memoryFlagged++;
-        deps.log(`[audit] memory-heal (${f.kind}): flagged for the agent layer (engram is agent-owned) — ${f.evidence}`);
-        break;
       case "observe":
         applied.observed++;
         deps.log(`[audit] observe (${f.kind}): ${f.summary}`);

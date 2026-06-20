@@ -33,6 +33,14 @@ export interface TestedItem {
   objective?: string;
 }
 
+// Flat adjudication label threaded into the Issue body so a human can see WHY the
+// fix-loop stopped (app_defect vs. break-needs-human). Decoupled from the adjudicator
+// module type to avoid a cross-module import dependency in reporter.
+export interface AdjudicationLabel {
+  class: string;   // AdjudicatorClass value (e.g. "app_defect", "generated_test_defect")
+  reason: string;  // human-legible explanation from the adjudicator verdict
+}
+
 // Everything the orchestrator hands the renderer beyond the run itself. All optional:
 // different failure paths have different context available (a context-map validation
 // failure has only a note; a reviewer rejection has the note + what was tested).
@@ -40,6 +48,7 @@ export interface IssueContext {
   note?: string; // reviewer corrections / coverage gap / skip reason — the "findings"
   tested?: TestedItem[]; // from the agent's specMetas — the "what was tested"
   intent?: { type: string; message: string; changedFiles?: string[] }; // commit context
+  adjudication?: AdjudicationLabel; // adjudicator class + reason — WHY the loop stopped
 }
 
 const cap = (v: string, max: number): string =>
@@ -115,6 +124,9 @@ export function renderIssue(run: QaRunResult, ctx: IssueContext = {}): string {
     meta.push(`**Change:** \`${s(ctx.intent.type)}\` — ${cap(s(ctx.intent.message), CAP_MESSAGE)}${files}`);
   }
   meta.push(`**SHA:** \`${s(run.sha)}\` · **Verdict:** ${run.verdict}`);
+  if (ctx.adjudication) {
+    meta.push(`**Adjudicator:** \`${ctx.adjudication.class}\` — ${ctx.adjudication.reason}`);
+  }
   blocks.push(meta.join("\n"));
 
   const tested = (ctx.tested ?? []).filter((t) => t.flow || t.objective).slice(0, MAX_ITEMS);

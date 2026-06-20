@@ -5,7 +5,7 @@
 // and then passes on a retry (retries are set in the base config). We treat that
 // instability as NOT trustworthy → quarantine, not a real failure.
 
-import { CaseStatus, RunVerdict } from "../types";
+import { CaseStatus, QaCase, RunVerdict } from "../types";
 
 export interface PwCase {
   name: string;
@@ -15,6 +15,10 @@ export interface PwCase {
   // result.errors[].errorContext. Absent on pre-1.60 reports (backward-compatible).
   // TODO(1.60-verify): confirm errors[].errorContext shape against a real 1.60 JSON report.
   errorContext?: string;
+  // The spec file basename this case belongs to (from the top-level suite title, e.g.
+  // "login.spec.ts"). Used by the filtered-retry optimization. Absent when the top-level
+  // suite has no title (unusual but defensive).
+  file?: string;
 }
 
 export interface ParsedReport {
@@ -70,14 +74,17 @@ export function parsePlaywrightReport(json: unknown): ParsedReport {
   const report = (json ?? {}) as PwReport;
   const cases: PwCase[] = [];
 
-  const walk = (suites: PwSuite[] | undefined, prefix: string): void => {
+  // `file` is the top-level suite title (the spec file basename, e.g. "login.spec.ts").
+  // It is captured at the first recursion level and forwarded unchanged to nested suites
+  // so that every case produced by a file-level suite carries the same file reference.
+  const walk = (suites: PwSuite[] | undefined, prefix: string, file: string | undefined): void => {
     for (const suite of suites ?? []) {
       const title = [prefix, suite.title].filter(Boolean).join(" › ");
       for (const spec of suite.specs ?? []) {
         const outcome = specOutcome(spec);
         if (outcome === "skipped") continue; // executed nothing → not a case, not a pass
         const ec = firstErrorContext(spec);
-        cases.push({
+        const c: PwCase & Pick<QaCase, "file"> = {
           name: [title, spec.title].filter(Boolean).join(" › "),
           status: outcome,
           // Always record WHY for a non-pass case. A flaky case is quarantined, not Issue-filed,
@@ -90,12 +97,21 @@ export function parsePlaywrightReport(json: unknown): ParsedReport {
                 ? `flaky — passed only after a retry; first-attempt failure: ${firstError(spec) ?? "(no error captured in the report)"}`
                 : firstError(spec),
           ...(ec !== undefined ? { errorContext: ec } : {}),
-        });
+          ...(file ? { file } : {}),
+        };
+        cases.push(c);
       }
-      walk(suite.suites, title);
+      // Nested suites inherit the same file — only the top-level suite title is the file.
+      walk(suite.suites, title, file);
     }
   };
-  walk(report.suites, "");
+
+  // Top-level iteration: each direct child of report.suites is a file-level suite.
+  // Capture its title as the `file` and forward it down through all nested walk calls.
+  for (const topSuite of report.suites ?? []) {
+    const fileTitle = topSuite.title || undefined;
+    walk([topSuite], "", fileTitle);
+  }
 
   const executed = countExecuted(report, cases);
   const verdict = aggregate(cases, report, executed);

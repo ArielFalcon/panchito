@@ -234,3 +234,39 @@ describe("FIX 1a: distilled correction-rules are RETRIEVABLE candidates rendered
     assert.doesNotMatch(rendered, /## Proven rules/, "an unpromoted correction-rule must NOT carry proven-rule authority");
   });
 });
+
+describe("distillReviewerCorrections — dedup-window saturation logging", () => {
+  it("logs a warning when the dedup window is at capacity (real-DB integration)", () => {
+    // Seed exactly DEDUP_WINDOW (200) rules for a fresh app. The 201st distillation call
+    // must emit the saturation warning via the optional log parameter.
+    const app = `dedup-sat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    // Seed 200 distinct rules into the DB for this app.
+    // IDs include the app suffix so upsert conflicts with prior test runs cannot collide.
+    for (let i = 0; i < 200; i++) {
+      upsertLearningRule({
+        id: `sat-rule-${app}-${i}`,
+        app,
+        trigger: `Applies when scenario ${i} arises`,
+        action: `check condition ${i}`,
+        errorClass: "E-FALSE-POSITIVE",
+        source: "seed",
+      });
+    }
+
+    const logs: string[] = [];
+    // This correction is DISTINCT from all 200 seeded rules, so listAllLearningRules returns 200
+    // before any insert. The saturation check must fire before the dedup comparison.
+    distillReviewerCorrections({
+      app,
+      runId: "run-sat-1",
+      corrections: ["[false-positive] asserts nothing meaningful"],
+      log: (l: string) => logs.push(l),
+    });
+
+    assert.ok(
+      logs.some((l) => /dedup window saturated/i.test(l)),
+      `expected a saturation warning; got: ${JSON.stringify(logs)}`,
+    );
+  });
+});

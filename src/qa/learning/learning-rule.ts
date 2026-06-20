@@ -199,7 +199,9 @@ export function selectForRetrieval(
   };
 
   const scored = eligible.map((r) => ({ rule: r, score: score(r) }));
-  scored.sort((a, b) => b.score - a.score);
+  // Stable, deterministic order: by score desc, ties broken by id asc so the same store contents
+  // always yield the same retrieval regardless of row read order.
+  scored.sort((a, b) => b.score - a.score || a.rule.id.localeCompare(b.rule.id));
 
   const limit = opts.maxRules ?? 8;
   const picked = scored.slice(0, limit).map((s) => s.rule);
@@ -208,11 +210,13 @@ export function selectForRetrieval(
   // candidates out of retrieval forever — they could never accumulate the outcomes that
   // earn (or deny) promotion, and the injected set would ossify. Reserve the last slots
   // for the NEWEST candidates not already selected, so rule turnover never stalls.
-  if (eligible.length > limit) {
+  // Only replace when picked is actually FULL — splicing past the end would append and grow
+  // the result beyond `limit`.
+  if (eligible.length > limit && picked.length >= limit) {
     const pickedIds = new Set(picked.map((r) => r.id));
     const freshCandidates = eligible
       .filter((r) => r.status === "candidate" && !pickedIds.has(r.id))
-      .sort((a, b) => b.at.localeCompare(a.at));
+      .sort((a, b) => b.at.localeCompare(a.at) || a.id.localeCompare(b.id));
     const slots = Math.min(EXPLORATION_SLOTS, freshCandidates.length);
     if (slots > 0) picked.splice(limit - slots, slots, ...freshCandidates.slice(0, slots));
   }
@@ -265,6 +269,28 @@ export function renderRulesForPrompt(rules: LearningRule[]): string {
   return lines.join("\n");
 }
 
+// The char budget for the rendered learning-rules prompt section. Lived in pipeline.ts as a
+// post-hoc string truncation that left retrievedRuleIds referencing rules whose text was cut —
+// inflating usageCount and folding outcomes onto rules the generator never saw. Centralized here
+// so the budget is part of SELECTION: the returned set is exactly the rendered set.
+export const DEFAULT_RULES_CHAR_BUDGET = 5000;
+
+// Greedily drop the lowest-ranked rules (the tail — `rules` arrives ranked by selectForRetrieval)
+// until renderRulesForPrompt fits the budget. Pure and deterministic: same input → same fitted set.
+// Cuts at a whole-rule boundary, never mid-rule. n ≤ maxRules (≤ 8) so the O(n²) render is trivial.
+export function fitRulesToBudget(
+  rules: LearningRule[],
+  maxChars: number,
+): { included: LearningRule[]; rendered: string } {
+  let included = [...rules];
+  let rendered = renderRulesForPrompt(included);
+  while (included.length > 0 && rendered.length > maxChars) {
+    included = included.slice(0, -1); // drop the lowest-ranked rule and re-render
+    rendered = renderRulesForPrompt(included);
+  }
+  return { included, rendered };
+}
+
 // Render the PROVEN learned rules as additional reject-on-sight criteria for the INDEPENDENT
 // reviewer. Only `active` rules are enforced: unproven candidates exist for the generator to
 // explore, never for the judge to gate on — rejecting tests over speculative rules would be a
@@ -284,4 +310,16 @@ export function renderRulesForReviewer(rules: LearningRule[]): string {
     lines.push(`- ${r.trigger} → ${r.action} (${r.errorClass})`);
   }
   return lines.join("\n");
+}
+
+// Context-directed attribution: fold an oracle outcome only onto rules that COULD have influenced it,
+// so a global suite-quality score is not smeared across genuinely-irrelevant rules. Fail-open on two
+// levels: (1) with no known diff archetypes, keep every rule; (2) PER RULE, an untagged rule (no
+// archetype) carries no signal to discriminate on, so it is kept — only a rule whose archetype is
+// PRESENT and does NOT match the diff is dropped as noise. This keeps the large body of legacy/untagged
+// rules eligible for oracle attribution instead of silently freezing them out. Pure and deterministic.
+export function attributableRules(rules: LearningRule[], ctx: { diffArchetypes: string[] }): LearningRule[] {
+  if (ctx.diffArchetypes.length === 0) return rules;
+  const shapes = new Set(ctx.diffArchetypes);
+  return rules.filter((r) => r.archetype == null || shapes.has(r.archetype));
 }

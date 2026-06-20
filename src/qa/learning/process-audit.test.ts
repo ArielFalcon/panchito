@@ -82,26 +82,29 @@ test("applyAudit ROUTES by disposition — DATA heals autonomously, only an engi
     { kind: "noise-rule", disposition: "ledger-heal", severity: "warn", summary: "noise", evidence: "e", ruleIds: ["n1", "n2"] },
     { kind: "recurring-error-class", disposition: "engine-fix", severity: "error", summary: "defect", evidence: "e" },
     { kind: "recurring-ui-mismatch", disposition: "context-heal", severity: "warn", summary: "stale map", evidence: "e" },
-    { kind: "corrupt-memory", disposition: "memory-heal", severity: "warn", summary: "bad engram", evidence: "e" },
     { kind: "review-churn-no-gain", disposition: "observe", severity: "warn", summary: "churn", evidence: "e" },
   ];
   const deprecated: string[] = [];
   const incidents: ProcessFinding[] = [];
   let contextReason = "";
-  const memFlagged: ProcessFinding[] = [];
   const deps: AuditRouterDeps = {
     log: () => {},
     deprecateRule: (id) => deprecated.push(id),
     recordEngineIncident: (f) => incidents.push(f),
     invalidateContext: (reason) => { contextReason = reason; return true; },
-    flagMemoryHeal: (f) => memFlagged.push(f),
   };
   const applied = applyAudit(findings, deps);
   assert.deepEqual(deprecated, ["n1", "n2"]); // ledger noise self-healed (no PR)
   assert.equal(incidents.length, 1); // ONLY the engine-code defect became an incident → human-gated PR
   assert.equal(applied.contextInvalidated, 1); // stale map rebuilt autonomously (no PR)
   assert.match(contextReason, /stale map/);
-  assert.equal(applied.memoryFlagged, 1); // engram surfaced for the agent layer (no PR, no direct mutation)
-  assert.equal(memFlagged[0]!.kind, "corrupt-memory");
   assert.equal(applied.observed, 1);
+});
+
+test("Disposition closed set — memory-heal was removed (no detector ever produced it)", () => {
+  // Runtime guard documenting the invariant: auditProcess emits only these four dispositions, and
+  // "memory-heal" is no longer one of them. The compile-time proof is separate: process-audit.ts only
+  // typechecks because the Disposition union has 4 members and applyAudit's switch is exhaustive.
+  const validDispositions = ["engine-fix", "ledger-heal", "context-heal", "observe"];
+  assert.equal(validDispositions.includes("memory-heal"), false);
 });

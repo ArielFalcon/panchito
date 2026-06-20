@@ -36,6 +36,26 @@ export function e2eTimeoutMs(): number {
 // child-process argv).
 export const PW_PROJECT_RE = /^[A-Za-z0-9_-]+$/;
 
+// Spec file basenames the orchestrator may pass as positional args for a filtered retry
+// (e.g. "login.spec.ts", "flows/checkout.spec.ts"). The allowlist keeps the spawn
+// arg-injection surface closed: each value reaches a child-process argv directly.
+// Rejects path traversal ("../"), leading dashes, and non-.spec.ts extensions.
+export const SPEC_FILE_RE = /^[A-Za-z0-9._/-]+\.spec\.ts$/;
+
+function assertSpecFiles(specFiles: string[]): void {
+  for (const f of specFiles) {
+    if (f.startsWith("-")) {
+      throw new Error(`invalid spec file ${JSON.stringify(f)}: must not start with "-"`);
+    }
+    if (f.includes("../")) {
+      throw new Error(`invalid spec file ${JSON.stringify(f)}: path traversal not allowed`);
+    }
+    if (!SPEC_FILE_RE.test(f)) {
+      throw new Error(`invalid spec file ${JSON.stringify(f)}: must match ${String(SPEC_FILE_RE)}`);
+    }
+  }
+}
+
 // Kills a spawned process AND its descendants. Spawns are `detached: true` so the
 // child is its own process-group leader; `process.kill(-pid)` signals the whole group
 // (npx/playwright fork browser grandchildren that a plain `child.kill()` would orphan).
@@ -60,6 +80,10 @@ export interface ExecuteOptions {
   signal?: AbortSignal;                // operator cancel: kills the runner's process tree → infra-error
   timeoutMs?: number;                  // wall-clock budget; defaults to e2eTimeoutMs()
   project?: string;                    // restrict to one Playwright --project (must match PW_PROJECT_RE)
+  // Filtered-retry optimization: when present and non-empty, only these spec file basenames
+  // are passed as positional args to Playwright (e.g. ["login.spec.ts"]).
+  // Each value is validated against SPEC_FILE_RE before it reaches the child-process argv.
+  specFiles?: string[];
 }
 
 // One streamed test-lifecycle event, parsed from the custom NDJSON reporter's stdout.
@@ -100,7 +124,7 @@ export function streamStatusToCase(status: string): CaseStatus | null {
 // `Target (page|context|browser) ... closed` is DELIBERATELY excluded: the app under test crashing
 // the tab (a real defect the test SHOULD surface) produces the same string, so reclassifying it
 // fail→infra-error would HIDE a genuine bug. Only unambiguous launch/host signatures stay here.
-const PLAYWRIGHT_INFRA_RE =
+export const PLAYWRIGHT_INFRA_RE =
   /browserType\.(?:launch|connect)|Executable doesn't exist|Failed to launch|missing dependencies to run browsers|Host system is missing dependencies/i;
 
 // True when the run failed but EVERY failed case is a runner-infrastructure fault (e.g. the browser
@@ -130,6 +154,7 @@ export interface ExecuteDeps {
     namespace: string;
     faultInject?: boolean;
     project?: string;
+    specFiles?: string[];
     signal?: AbortSignal;
     timeoutMs?: number;
     onEvent?: (ev: StreamEvent) => void;
@@ -206,6 +231,7 @@ export async function runE2E(
     namespace: opts.namespace,
     faultInject: opts.faultInject,
     project: opts.project,
+    specFiles: opts.specFiles,
     signal: opts.signal,
     timeoutMs: opts.timeoutMs,
     onEvent,
@@ -538,8 +564,9 @@ module.exports = QaStreamReporter;
 `;
 
 // Builds the args for the suite spawn (after the `npx` binary). Pure and exported so
-// the --project append + allowlist stay unit-testable without spawning Playwright.
-export function playwrightArgs(reporterPath: string, project?: string): string[] {
+// the --project append, --specFiles append, and allowlists stay unit-testable without
+// spawning Playwright.
+export function playwrightArgs(reporterPath: string, project?: string, specFiles?: string[]): string[] {
   const args = ["playwright", "test", `--reporter=${reporterPath},json`];
   if (project !== undefined) {
     if (!PW_PROJECT_RE.test(project)) {
@@ -547,11 +574,15 @@ export function playwrightArgs(reporterPath: string, project?: string): string[]
     }
     args.push(`--project=${project}`);
   }
+  if (specFiles !== undefined && specFiles.length > 0) {
+    assertSpecFiles(specFiles);
+    args.push(...specFiles);
+  }
   return args;
 }
 
 export const defaultExecuteDeps: ExecuteDeps = {
-  runSuite: ({ dir, baseUrl, namespace, faultInject, project, signal, timeoutMs, onEvent, failureCaptureDir }) =>
+  runSuite: ({ dir, baseUrl, namespace, faultInject, project, specFiles, signal, timeoutMs, onEvent, failureCaptureDir }) =>
     new Promise((resolve, reject) => {
       const work = mkdtempSync(join(tmpdir(), "qa-pw-"));
       const reporterPath = join(work, "qa-stream-reporter.cjs");
@@ -560,7 +591,7 @@ export const defaultExecuteDeps: ExecuteDeps = {
 
       // JSON → file (authoritative, via PLAYWRIGHT_JSON_OUTPUT_NAME); NDJSON → stdout
       // (live feed). The two reporters never collide on stdout.
-      const child = spawn("npx", playwrightArgs(reporterPath, project), {
+      const child = spawn("npx", playwrightArgs(reporterPath, project, specFiles), {
         cwd: dir,
         // Agent-written specs are untrusted code: scrub orchestrator secrets, keep DEV_* creds.
         // QA_FAILURE_CAPTURE_DIR: the qa-failure-capture afterEach fixture writes per-case aria

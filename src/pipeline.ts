@@ -26,7 +26,8 @@ import { runMutationOracle } from "./qa/learning/mutation-code";
 import { runFaultInjectionOracle } from "./qa/learning/fault-injection-e2e";
 import type { OracleInput, ValueOracleResult } from "./qa/learning/oracle-types";
 import { retrieveRules, type RetrievalResult } from "./qa/learning/retrieval";
-import { preventionOutcome, renderRulesForReviewer, type LearningRule } from "./qa/learning/learning-rule";
+import { preventionOutcome, renderRulesForReviewer, attributableRules, type LearningRule } from "./qa/learning/learning-rule";
+import { bestEffort, bestEffortAsync } from "./qa/learning/best-effort";
 import { distillReflection, distillReviewerCorrections } from "./qa/learning/distiller";
 import { detectStructuralPatterns } from "./qa/learning/structural-pattern";
 import { matchExemplars, renderExemplarsForPrompt } from "./qa/learning/skill-exemplar";
@@ -52,7 +53,7 @@ import {
 } from "./qa/change-coverage";
 import { github } from "./integrations/github";
 import { capDiff } from "./orchestrator/sanitizer";
-import { renderIssue, type IssueContext, type TestedItem } from "./report/reporter";
+import { renderIssue, type IssueContext, type TestedItem, type AdjudicationLabel } from "./report/reporter";
 import { renderValueTag } from "./qa/value-report";
 import { captureDom, captureDomByRoute, defaultCaptureDomDeps } from "./qa/dom-snapshot";
 import { buildContextPack, defaultContextPackDeps } from "./qa/context-pack";
@@ -61,6 +62,7 @@ import { AgentResult, QaCase, QaRunResult, TriggerSource, RunMode, RunOptions, T
 import type { AgentDeps, ReviewInput, ReviewResult } from "./integrations/opencode-client";
 import type { AgentRuntimeConfig } from "./agent-runtime/types";
 import { decideProgress, bestRound, isLikelyRealBug, classifyFailure, type RoundResult } from "./qa/progress-gate";
+import { adjudicate, ADJ_CLASS, type AdjudicatorEvidence, type AdjudicatorVerdict } from "./qa/failure-adjudicator";
 import { extractProposedSelectors, selectorPresent, selectorUnique, hasNonExtractableLocator, type ProposedSelector } from "./qa/selector-check";
 import { capDomLines } from "./qa/dom-snapshot";
 
@@ -513,8 +515,6 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
           } catch { /* best-effort */ }
           return false;
         },
-        flagMemoryHeal: (f) =>
-          recordIncident({ source: "process-audit", severity: "warn", summary: `engram memory may be corrupt: ${f.summary}`, detail: `${f.evidence} — engram is agent-owned; an agent-layer cleanup is required (the orchestrator does not write engram).` }),
       });
     },
     runOracle: async (input) =>
@@ -524,7 +524,7 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
       const { listRunOutcomes } = await import("./server/history");
       return listRunOutcomes(app, 1)[0]?.errorClass ?? null;
     },
-    distillCorrections: (input) => distillReviewerCorrections(input),
+    distillCorrections: (input) => distillReviewerCorrections({ ...input, log: console.log }),
     reflectAndDistill: async (input) => {
       // Defer: skip the reflection when the system is already busy with another
       // run. Opening a qa-assistant session would contend for the OpenCode server
@@ -606,6 +606,7 @@ interface ValueLearningInput {
   runId?: string;
   signal?: AbortSignal;
   retrievedRuleIds: string[];
+  retrievedRules: LearningRule[];
   curriculum: CurriculumState | null;
   changedFiles: string[];
   ccForPersistence?: ChangeCoverage;
@@ -622,7 +623,7 @@ interface ValueLearningInput {
 async function foldValueLearning(
   input: ValueLearningInput,
 ): Promise<{ valueScore: number | null; curriculum: CurriculumState | null }> {
-  const { deps, app, run, isCode, generating, mode, mirrorDir, e2eDir, ns, diff, sha, runId, signal, retrievedRuleIds, changedFiles, ccForPersistence, specMetas, log } = input;
+  const { deps, app, run, isCode, generating, mode, mirrorDir, e2eDir, ns, diff, sha, runId, signal, retrievedRuleIds, retrievedRules, changedFiles, ccForPersistence, specMetas, log } = input;
   let curriculum = input.curriculum;
 
   // Measured persistence (suite-level): suite stability + actually-covered files to measured.json
@@ -701,16 +702,16 @@ async function foldValueLearning(
   //   true  → coverage measured AND ratio > 0 (the tests exercised changed lines) → promotion eligible
   //   false → coverage measured AND ratio == 0 (no changed lines covered) → hold at candidate
   //   null  → coverage not measured / cross-repo / unknown → no gate (promotion on verdict signal)
-  if (retrievedRuleIds.length > 0 && valueScore !== null) {
+  if (retrievedRules.length > 0 && valueScore !== null) {
     const coverageMeasured = ccForPersistence?.measured ?? false;
     const coverageCreditConfirmed = coverageMeasured ? ccForPersistence!.overall.ratio > 0 : null;
+    const diffArchetypes = detectStructuralPatterns(diff, changedFiles).map((p) => p.kind);
+    const targets = attributableRules(retrievedRules, { diffArchetypes });
     const { recordRuleOutcome } = await import("./server/history");
-    try {
-      for (const ruleId of retrievedRuleIds) recordRuleOutcome(ruleId, valueScore, coverageCreditConfirmed);
-      log(`[qa] attribution: recorded outcome (valueScore=${(valueScore * 100).toFixed(0)}%, coverageCredit=${coverageCreditConfirmed ?? "unmeasured"}) for ${retrievedRuleIds.length} rule(s)`);
-    } catch (err) {
-      log(`[qa] WARNING: attribution update failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
-    }
+    bestEffort("attribution", log, () => {
+      for (const r of targets) recordRuleOutcome(r.id, valueScore, coverageCreditConfirmed);
+      log(`[qa] attribution: recorded outcome (valueScore=${(valueScore * 100).toFixed(0)}%, coverageCredit=${coverageCreditConfirmed ?? "unmeasured"}) for ${targets.length}/${retrievedRules.length} attributable rule(s)`);
+    }, undefined);
   }
 
   // Curriculum archetype credit ONLY when ground truth proves value (valueScore > 0). No-oracle apps
@@ -1537,16 +1538,12 @@ export async function runPipeline(
 
     let learnedRules: string | undefined;
     if (deps.retrieveRules && generating) {
-      try {
+      const retrieval = await bestEffortAsync("retrieval", log, async () => {
         // Bias retrieval toward the app's most recent failure class: rules that prevent
         // the error the engine just made are the most likely to matter on this run.
         let lastErrorClass: string | null = null;
         if (deps.recentErrorClass) {
-          try {
-            lastErrorClass = await deps.recentErrorClass(app.name);
-          } catch {
-            lastErrorClass = null; // relevance bias only — never blocks retrieval
-          }
+          lastErrorClass = await bestEffortAsync("recent-error-class", log, () => deps.recentErrorClass!(app.name), null);
         }
         // Bias retrieval ALSO toward the current diff's structural shape (form, api-call, …) so
         // rules learned on the same kind of change surface even before any failure class exists.
@@ -1554,23 +1551,14 @@ export async function runPipeline(
         // changedFiles is [] so file-extension-gated patterns (e.g. form) don't fire — content-only
         // patterns (api-call, …) still do. The same input is used at distill-time for symmetry.
         const diffArchetypes = detectStructuralPatterns(diff, intent?.changedFiles ?? []).map((p) => p.kind);
-        const retrieval = deps.retrieveRules(app.name, lastErrorClass, diffArchetypes);
-        if (retrieval.promptSection) {
-          learnedRules = retrieval.promptSection;
-          retrievedRuleIds = retrieval.rules.map((r) => r.id);
-          retrievedRules = retrieval.rules;
-          log(`[qa] retrieval: injected ${retrievedRuleIds.length} learning rule(s) into the agent prompt`);
-        }
-      } catch (err) {
-        log(`[qa] WARNING: rule retrieval failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+        return deps.retrieveRules!(app.name, lastErrorClass, diffArchetypes);
+      }, null);
+      if (retrieval?.promptSection) {
+        learnedRules = retrieval.promptSection;
+        retrievedRuleIds = retrieval.rules.map((r) => r.id);
+        retrievedRules = retrieval.rules;
+        log(`[qa] retrieval: injected ${retrievedRuleIds.length} learning rule(s) into the agent prompt`);
       }
-    }
-
-    // Cap learned rules to prevent context window exhaustion
-    const MAX_LEARNED_RULES_CHARS = 5000;
-    if (learnedRules && learnedRules.length > MAX_LEARNED_RULES_CHARS) {
-      log(`[qa] WARNING: learnedRules truncated from ${learnedRules.length} to ${MAX_LEARNED_RULES_CHARS} chars (cap exceeded)`);
-      learnedRules = learnedRules.substring(0, MAX_LEARNED_RULES_CHARS) + "\n...[truncated]";
     }
 
     let allPromptSections = learnedRules ?? "";
@@ -1717,12 +1705,12 @@ export async function runPipeline(
   // from static-gate failures — the most common failure mode of generated tests.
   // Off-path: every step is non-blocking and a failure is only a warning.
   const foldRunLearning = async (v: QaRunResult, o: { staticOk: boolean; coverageRatio?: number | null; valueScore?: number | null }) => {
+    // Compute diff pattern kinds ONCE and reuse for both archetype tagging and prevention filtering.
+    const diffPatternKinds = detectStructuralPatterns(diff, intent?.changedFiles ?? []).map((p) => p.kind);
     // Tag rules distilled from this run with the diff's dominant structural shape, so they recall
     // on the same kind of change later. Only a SPECIFIC shape is useful as a tag — a purely
     // "generic" diff yields null (untagged), since "generic" matches everything and biases nothing.
-    const runArchetype = detectStructuralPatterns(diff, intent?.changedFiles ?? [])
-      .map((p) => p.kind)
-      .find((k) => k !== "generic") ?? null;
+    const runArchetype = diffPatternKinds.find((k) => k !== "generic") ?? null;
     if (reviewerCorrections.length > 0 && opts.runId && deps.distillCorrections) {
       try {
         const distilled = deps.distillCorrections({ app: app.name, runId: opts.runId, corrections: reviewerCorrections, archetype: runArchetype });
@@ -1743,9 +1731,12 @@ export async function runPipeline(
     });
     // Governance WITHOUT an oracle: when the oracle produced no valueScore (off, or not
     // applicable), fold a CONSERVATIVE prevention signal — derived from this run's own
-    // errorClass — into the retrieved rules. This lets candidate rules earn or lose trust for
-    // EVERY app, not just oracle-enabled ones, so the flywheel turns universally. Capped at
-    // "medium" confidence (only the oracle lifts a rule to "high"). See preventionOutcome.
+    // errorClass — into the RELEVANT retrieved rules. Prevention is conditioned on structural
+    // relevance: a rule only earns or loses prevention trust on a change whose archetype matches
+    // the rule's tagged archetype. Untagged rules (no archetype field) stay eligible — attributableRules
+    // is fail-open per rule, so the large body of legacy untagged rules remains in the flywheel.
+    // This lets candidate rules earn or lose trust for EVERY app, not just oracle-enabled ones.
+    // Capped at "medium" confidence (only the oracle lifts a rule to "high"). See preventionOutcome.
     //
     // Phase 7 coverage anchor: derive a coverage-credit signal to gate candidate → active promotion.
     // coverageCreditConfirmed is true when coverage was measured AND the test covered changed lines
@@ -1757,10 +1748,10 @@ export async function runPipeline(
     const coverageMeasured = coverageRatio !== null; // true when the coverage step ran and produced a ratio
     const coverageCreditConfirmed = coverageMeasured ? coverageRatio > 0 : null;
     if ((o.valueScore ?? null) === null && retrievedRules.length > 0 && opts.runId) {
-      try {
-        const { recordRuleOutcome } = await import("./server/history");
+      const { recordRuleOutcome } = await import("./server/history");
+      bestEffort("governance", log, () => {
         let folded = 0;
-        for (const rule of retrievedRules) {
+        for (const rule of attributableRules(retrievedRules, { diffArchetypes: diffPatternKinds })) {
           const score = preventionOutcome(rule.errorClass, labeled.errorClass);
           if (score === null) continue; // no evidence about this rule from this run
           // Pass the coverage-credit signal so the DB's promotion gate can apply it.
@@ -1770,26 +1761,18 @@ export async function runPipeline(
         if (folded > 0) {
           log(`[qa] governance: folded prevention signal into ${folded} rule(s) (no oracle; runErrorClass=${labeled.errorClass ?? "none"}; coverageCredit=${coverageCreditConfirmed ?? "unmeasured"})`);
         }
-      } catch (err) {
-        log(`[qa] WARNING: governance signal update failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
-      }
+      }, undefined);
     }
     if (deps.reflectAndDistill && opts.runId && !signal?.aborted) {
       if (labeled.errorClass && labeled.errorClass !== "E-INFRA" && labeled.errorClass !== "E-FLAKY") {
         const outcome: RunOutcome = { ...labeled, gateSignals: { ...labeled.gateSignals, valueScore: o.valueScore ?? null }, rulesRetrieved: retrievedRuleIds, at: labeled.at };
-        deps
-          .reflectAndDistill({ app: app.name, runId: opts.runId, outcome, archetype: runArchetype })
-          .catch((err) => log(`[qa] WARNING: reflect/distill failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`));
+        void bestEffortAsync("reflect-distill", log, () => deps.reflectAndDistill!({ app: app.name, runId: opts.runId!, outcome, archetype: runArchetype }), null);
       }
     }
     // Persist curriculum (archetypes that caught real bugs survive across runs)
     if (curriculum) {
       const { saveCurriculum } = await import("./server/history");
-      try {
-        saveCurriculum(curriculum);
-      } catch {
-        // fail-open
-      }
+      bestEffort("curriculum-save", log, () => saveCurriculum(curriculum!), undefined);
     }
     // Post-run PROCESS audit — the engine reflecting on its OWN run quality (recurring defects,
     // ledger noise, review churn) and routing each finding to the right remediation: deprecate
@@ -1800,9 +1783,7 @@ export async function runPipeline(
       // returns, which would kill an un-awaited audit mid-flight (its incident/deprecation never
       // lands). The deterministic detection is cheap and the LLM diagnosis is already
       // hasOpenSessions-gated, so awaiting adds no meaningful latency. Best-effort — never throws.
-      await deps
-        .auditProcess({ app: app.name, runId: opts.runId })
-        .catch((err) => log(`[qa] WARNING: process audit failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`));
+      await bestEffortAsync("process-audit", log, () => deps.auditProcess!({ app: app.name, runId: opts.runId! }), undefined);
     }
   };
 
@@ -1922,6 +1903,36 @@ export async function runPipeline(
   const failCount = (r: QaRunResult): number => r.cases.filter((c) => c.status === "fail").length;
   // Flag: the real-bug branch detected a genuine app defect → skip to Issue.
   let realBugDetected = false;
+  // Flag: the adjudicator returned break-needs-human (ambiguous failure, no progress).
+  // The run stays fail; the Issue is labeled with the adjudication verdict.
+  let needsHuman = false;
+  // The last adjudicator verdict — threaded into IssueContext for labeling.
+  let adjVerdict: AdjudicatorVerdict | undefined;
+
+  // The namespace whose on-disk coverage dumps correspond to the CURRENT `run`. Starts as the initial
+  // execute's namespace and follows the winning run through retries: a run that goes green only on a
+  // retry produced its V8 dumps under `retryNs`, and the per-retry whole-tree wipe (clearBrowserCoverage
+  // deletes the ENTIRE coverage tree, ignoring its namespace arg) deleted the base-ns dumps. Collecting
+  // change-coverage from the base `ns` would then read an empty dir → the keystone silently lost to
+  // "unknown" (which never blocks) for exactly the runs that needed fixing. Track the winner; collect
+  // from it. The loop exits the instant a retry goes green (`run.verdict === "fail"` in the condition),
+  // so the green run is ALWAYS the last execute — no later wipe can clobber its namespace.
+  let coverageNs = ns;
+
+  // Hoisted before the fix-loop so the filtered-retry optimization can compute
+  // coverageWillMeasure inside the loop. Semantics are identical to the original
+  // post-loop definition — only the position has changed.
+  const covPolicy: ChangeCoveragePolicy = {
+    mode: app.qa.changeCoverage?.mode ?? DEFAULT_COVERAGE_POLICY.mode,
+    minRatio: app.qa.changeCoverage?.minRatio ?? DEFAULT_COVERAGE_POLICY.minRatio,
+  };
+
+  // Keystone guard: when change-coverage will be measured on this run, we must NEVER
+  // filter the retry to a subset of spec files — filtering would omit the passing specs
+  // and cause their lines to appear uncovered, silently undercounting coverage.
+  // This mirrors the exact condition used by the coverage-collect gate (step 8 below).
+  const coverageWillMeasure =
+    generating && mode === "diff" && covPolicy.mode !== "off" && !triggerService;
 
   for (let retry = 0; retry < MAX_RETRIES && run.verdict === "fail" && generating; retry++) {
     const failed = run.cases.filter((c) => c.status === "fail");
@@ -2043,19 +2054,53 @@ export async function runPipeline(
       !anyNonExtractableLocator &&
       !anyUnverifiableSelector &&
       !selectorContradictions.some((c) => c.includes("MULTIPLE"));
-    if (
-      !isCode &&
-      isLikelyRealBug(allUnique, failed.map((c) => c.detail ?? ""))
-    ) {
-      log("[qa] real-bug branch: selectors resolve uniquely + value mismatch → likely app defect, not a selector problem. Filing an Issue.");
-      realBugDetected = true;
-      break;
+    // ── Failure adjudicator (single decision point) ──────────────────────────
+    // Replaces the two ad-hoc `isLikelyRealBug` and `!gate.spend` branches with a
+    // single pure adjudicate() call. The function is deterministic and never throws.
+    const devHealthyNow = isCode ? true : await devHealthy();
+    const evidence: AdjudicatorEvidence = {
+      isCode,
+      allUnique,
+      failureDetails: failed.map((c) => c.detail ?? ""),
+      failureClasses: failed.map((c) => classifyFailure(c.detail ?? "")),
+      absentKeysCount: absentKeys.size,
+      anyVerifiedPresent,
+      contradictions: selectorContradictions,
+      gateSpend: gate.spend,
+      gateReason: gate.reason,
+      devHealthy: devHealthyNow,
+      mode,
+      objectiveSource:
+        mode === "diff"
+          ? (intent?.changedFiles ?? [])
+          : (opts.guidance ? [opts.guidance] : []),
+      failingFiles: failed.map((c) => c.file),
+    };
+    const verdict = adjudicate(evidence);
+    adjVerdict = verdict;
+    log(
+      `[qa] adjudicator: class=${verdict.class} confidence=${verdict.confidence} action=${verdict.action} — ${gate.reason}`,
+    );
+    switch (verdict.action) {
+      case "break-issue":
+        if (
+          verdict.class === ADJ_CLASS.RUNNER_INFRA ||
+          verdict.class === ADJ_CLASS.DEV_INFRA
+        ) {
+          // Infra failure: route to infra-error, never open a repo Issue.
+          run = resultOf(ns, "infra-error", verdict.reason);
+        } else {
+          // App defect or other non-infra break: reuse the proven Issue-filing flag.
+          realBugDetected = true;
+        }
+        break;
+      case "break-needs-human":
+        needsHuman = true;
+        break;
+      case "continue":
+        break;
     }
-
-    if (!gate.spend) {
-      log("[qa] progress gate stopped the fix-loop (no improvement signal).");
-      break;
-    }
+    if (verdict.action !== "continue") break; // exit the fix-loop on any break-* action
 
     prevRound = curRound;
 
@@ -2133,12 +2178,79 @@ export async function runPipeline(
       const retryNs = `${ns}-r${retry + 1}`;
       deps.clearCoverage?.(e2eDir, retryNs);
       onStep?.("execute");
-      const retryRun = await deps.execute(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: retryNs, onCase, onRunning: onRunningTest, signal });
+
+      // Filtered-retry optimization: if ALL currently-failing cases carry a `.file`
+      // basename, AND all newly-written spec files are within that failing set (i.e.
+      // the regen didn't widen the scope), AND change-coverage will NOT be measured
+      // (which requires a full-suite run to count every covered line), then scope the
+      // Playwright spawn to only the spec files that had failures — skipping
+      // already-passing specs and cutting E2E time on large suites.
+      const failedSpecFiles = [
+        ...new Set(
+          run.cases
+            .filter((c) => c.status === "fail" && c.file)
+            .map((c) => c.file as string),
+        ),
+      ];
+      const allFailedHaveFile = run.cases.filter((c) => c.status === "fail").every((c) => !!c.file);
+      // result.specs are the basenames the agent reported writing/updating this cycle. The ONLY way a
+      // filtered retry can ship a broken spec as green is the PARTIAL case: the regen rewrote a
+      // previously-passing spec (an OUTSIDER) into a broken state AND fixed the failing specs (an
+      // OVERLAP, so the failing files now pass and the suite goes green) — the outsider would never be
+      // re-run and would ship stale-green. Block filtering there. A regen entirely DISJOINT from the
+      // failed set (outsiders, no overlap) cannot produce a false green: the failing specs were not
+      // fixed, so they re-fail and the run stays red — safe to filter.
+      const regenSpecBasenames = (result?.specs ?? []).map((s) => s.replace(/.*\//, "").replace(/.*\\/, ""));
+      const regenHasOverlap = regenSpecBasenames.some((b) =>
+        failedSpecFiles.some((f) => f === b || f.endsWith(`/${b}`) || f.endsWith(`\\${b}`)),
+      );
+      const regenHasOutsiders = regenSpecBasenames.some(
+        (b) => !failedSpecFiles.some((f) => f === b || f.endsWith(`/${b}`) || f.endsWith(`\\${b}`)),
+      );
+      // True when the regen did NOT introduce new specs outside the failing set.
+      const regenStayedInFailedSet = !(regenHasOverlap && regenHasOutsiders);
+      const canFilter =
+        allFailedHaveFile &&
+        failedSpecFiles.length > 0 &&
+        regenStayedInFailedSet &&
+        !coverageWillMeasure;
+
+      if (canFilter) {
+        log(`[qa] retry filtered: scoping re-run to ${failedSpecFiles.length} spec file(s): ${failedSpecFiles.join(", ")}`);
+      }
+
+      const retryRun = await deps.execute(e2eDir, {
+        baseUrl: app.dev?.baseUrl ?? "",
+        namespace: retryNs,
+        onCase,
+        onRunning: onRunningTest,
+        signal,
+        ...(canFilter ? { specFiles: failedSpecFiles } : {}),
+      });
       if (retryRun.verdict === "fail" && !(await devHealthy())) {
         run = resultOf(ns, "infra-error", "failures with an unhealthy DEV: treated as infrastructure");
         break;
       }
-      run = retryRun;
+      if (canFilter) {
+        // Merge: the filtered retry only ran the failing spec FILES. Carry forward every prior case
+        // from files that were NOT re-run (preserving their pass/flaky/skipped status); the retry
+        // supplies fresh results for the re-run files. Keying by file (not by "pass") avoids both
+        // double-counting a passing test that shares a re-run file with a failing one, and dropping a
+        // flaky case in a non-re-run file (which would silently downgrade the run from flaky → pass).
+        const rerunFileSet = new Set(failedSpecFiles);
+        const carriedForward = run.cases.filter((c) => !(c.file && rerunFileSet.has(c.file)));
+        const mergedCases = [...carriedForward, ...retryRun.cases];
+        const mergedVerdict: typeof retryRun.verdict =
+          mergedCases.some((c) => c.status === "fail")
+            ? "fail"
+            : mergedCases.some((c) => c.status === "flaky")
+              ? "flaky"
+              : "pass";
+        run = { ...retryRun, cases: mergedCases, verdict: mergedVerdict, passed: mergedVerdict === "pass" };
+      } else {
+        run = retryRun;
+      }
+      coverageNs = retryNs; // the green dumps now live under retryNs; collect change-coverage from here
     }
     log(`[qa] retry verdict: ${run.verdict}`);
 
@@ -2182,10 +2294,7 @@ export async function runPipeline(
   //    Skipped when no provider is wired (unit tests) or the policy is off. Unmeasured coverage is
   //    "unknown" and NEVER blocks (determinism over zeal). signal = record only; enforce = try once
   //    to close the gap, then block publishing if it stays below the threshold.
-  const covPolicy: ChangeCoveragePolicy = {
-    mode: app.qa.changeCoverage?.mode ?? DEFAULT_COVERAGE_POLICY.mode,
-    minRatio: app.qa.changeCoverage?.minRatio ?? DEFAULT_COVERAGE_POLICY.minRatio,
-  };
+  // covPolicy is hoisted above the fix-loop — see declaration above.
   let coverageStatus: "pass" | "fail" | "unknown" = "unknown";
   let coverageSummary = "";
   let ccForPersistence: ChangeCoverage | undefined;
@@ -2204,7 +2313,7 @@ export async function runPipeline(
       onStep?.("coverage");
       const changedFiles = [...changed.keys()];
       const collect = (): Promise<CoveredLines | null> =>
-        deps.collectCoverage!({ target: isCode ? "code" : "e2e", repoDir: mirrorDir, e2eDir, changedFiles, namespace: ns });
+        deps.collectCoverage!({ target: isCode ? "code" : "e2e", repoDir: mirrorDir, e2eDir, changedFiles, namespace: coverageNs });
       const collected = await collect();
       let cc = computeChangeCoverage(changed, collected ?? new Map());
       ccForPersistence = cc;
@@ -2224,6 +2333,7 @@ export async function runPipeline(
           const okStatic = isCode ? { ok: true, errors: [] } : await deps.validate(e2eDir);
           if (okStatic.ok && (isCode || (await devHealthy()))) {
             if (!isCode) deps.clearCoverage?.(e2eDir, ns); // re-measure only the improved suite's dumps
+            coverageNs = ns; // the enforce re-execute below runs under `ns`; align the re-collection
             const reRun = isCode
               ? await deps.executeCode(mirrorDir, { namespace: ns, onCase, signal })
               : await deps.execute(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: ns, onCase, onRunning: onRunningTest, signal });
@@ -2246,7 +2356,7 @@ export async function runPipeline(
       // URLs don't resolve to repo source AND whose source maps the keystone could not
       // recover, or specs not importing ./fixtures) — the keystone is silently protecting
       // nothing. Surface it loudly instead of the benign "unknown".
-      if (coverageStatus === "unknown" && !isCode && deps.hasCoverageDumps?.(e2eDir, ns)) {
+      if (coverageStatus === "unknown" && !isCode && deps.hasCoverageDumps?.(e2eDir, coverageNs)) {
         log(
           `[qa] ⚠️  CHANGE-COVERAGE INACTIVE — Playwright ran and produced coverage data, ` +
             `but the V8 script URLs (hashed bundles like /assets/index-abc123.js) did not ` +
@@ -2276,7 +2386,7 @@ export async function runPipeline(
   // the non-deterministic learning side-effects. Fail-open; the score never gates publish.
   const valueLearned = await foldValueLearning({
     deps, app, run, isCode, generating, mode, mirrorDir, e2eDir, ns, diff, sha,
-    runId: opts.runId, signal, retrievedRuleIds, curriculum,
+    runId: opts.runId, signal, retrievedRuleIds, retrievedRules, curriculum,
     changedFiles: intent?.changedFiles ?? [],
     ccForPersistence, specMetas: result?.specMetas, log,
   });
@@ -2302,7 +2412,10 @@ export async function runPipeline(
   // 9. Final decision.
   const kind = isCode ? "code" : "E2E";
   if (run.verdict !== "pass") {
-    await report(app, issueRepo, sha, run, deps, log, shadow, isCode, { note: result?.note, tested: testedFrom(result), intent });
+    const adjudicationCtx: AdjudicationLabel | undefined = adjVerdict
+      ? { class: adjVerdict.class, reason: adjVerdict.reason }
+      : undefined;
+    await report(app, issueRepo, sha, run, deps, log, shadow, isCode, { note: result?.note, tested: testedFrom(result), intent, adjudication: adjudicationCtx });
   } else if (!generating) {
     // Regression passed: there are no new tests to publish.
     log(`[qa] OK — regression green for ${sha}.`);

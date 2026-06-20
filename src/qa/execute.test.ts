@@ -679,6 +679,53 @@ test("matchFailureDumps: single-project case name (file leads) still matches the
   assert.equal(matchFailureDumps(fileFirst, dumps)!.yaml, "- button \"Submit\"");
 });
 
+// ── playwrightArgs: specFiles support ──────────────────────────────────────────
+
+test("playwrightArgs: appends valid spec file basenames as positional args", () => {
+  const args = playwrightArgs("reporter.cjs", undefined, ["login.spec.ts", "checkout.spec.ts"]);
+  assert.ok(args.includes("login.spec.ts"), `expected login.spec.ts in args: ${args.join(" ")}`);
+  assert.ok(args.includes("checkout.spec.ts"), `expected checkout.spec.ts in args: ${args.join(" ")}`);
+  // The core args must still be present
+  assert.ok(args.includes("playwright"), "must include 'playwright'");
+  assert.ok(args.includes("test"), "must include 'test'");
+  assert.ok(args.some((a) => a.startsWith("--reporter=")), "must include --reporter arg");
+});
+
+test("playwrightArgs: empty specFiles has the same output as no specFiles (full suite)", () => {
+  const noSpec = playwrightArgs("reporter.cjs");
+  const emptySpec = playwrightArgs("reporter.cjs", undefined, []);
+  assert.deepEqual(noSpec, emptySpec, "empty specFiles must not append any extra args");
+});
+
+test("playwrightArgs: rejects a specFile with path traversal (../)", () => {
+  assert.throws(
+    () => playwrightArgs("reporter.cjs", undefined, ["../../../etc/passwd.spec.ts"]),
+    /invalid|spec file|path/i,
+    "path traversal in spec file name must throw",
+  );
+});
+
+test("playwrightArgs: rejects a specFile with a leading dash", () => {
+  assert.throws(
+    () => playwrightArgs("reporter.cjs", undefined, ["-delete-everything.spec.ts"]),
+    /invalid|spec file/i,
+    "leading dash in spec file name must throw",
+  );
+});
+
+test("playwrightArgs: rejects a specFile that does not end with .spec.ts", () => {
+  assert.throws(
+    () => playwrightArgs("reporter.cjs", undefined, ["login.spec.js"]),
+    /invalid|spec file/i,
+    "non-.spec.ts extension must throw",
+  );
+});
+
+test("playwrightArgs: accepts spec files with subdirectory paths (flows/login.spec.ts)", () => {
+  const args = playwrightArgs("reporter.cjs", undefined, ["flows/login.spec.ts"]);
+  assert.ok(args.includes("flows/login.spec.ts"), `subdirectory spec should be allowed: ${args.join(" ")}`);
+});
+
 test("killTree SIGKILLs a detached child (the helper behind every QA spawn)", async () => {
   // A real, cheap child that would otherwise hang forever — same shape as a wedged runner.
   const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true });

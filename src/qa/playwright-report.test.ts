@@ -218,6 +218,63 @@ test("parsePlaywrightReport backward-compat: errorContext absent on pre-1.60 rep
   assert.equal(failed!.errorContext, undefined);
 });
 
+// ── QaCase.file — spec file basename on parsed cases ─────────────────────────
+
+test("parsePlaywrightReport: a parsed QaCase carries the spec file basename from the enclosing suite title", () => {
+  const report = {
+    suites: [
+      {
+        title: "login.spec.ts",
+        specs: [
+          { title: "logs in", ok: true },
+          { title: "rejects bad pw", ok: false, tests: [{ results: [{ status: "failed", error: { message: "401" } }] }] },
+        ],
+      },
+    ],
+  };
+  const parsed = parsePlaywrightReport(report);
+  // Both cases must carry the enclosing suite title as .file
+  for (const c of parsed.cases) {
+    assert.equal((c as import("../types").QaCase).file, "login.spec.ts", `expected file="login.spec.ts" on case "${c.name}", got ${JSON.stringify((c as import("../types").QaCase).file)}`);
+  }
+});
+
+test("parsePlaywrightReport: nested suite (describe block) — file is still the TOP-LEVEL suite title", () => {
+  const report = {
+    suites: [
+      {
+        title: "checkout.spec.ts",
+        suites: [
+          {
+            title: "Checkout flow",
+            specs: [{ title: "completes order", ok: true }],
+          },
+        ],
+      },
+    ],
+  };
+  const parsed = parsePlaywrightReport(report);
+  assert.equal(parsed.cases.length, 1);
+  assert.equal((parsed.cases[0]! as import("../types").QaCase).file, "checkout.spec.ts");
+});
+
+test("parsePlaywrightReport: a spec at the root suite (no file title) leaves file undefined", () => {
+  // When there is no enclosing suite that looks like a spec file, file stays undefined.
+  const report = {
+    suites: [
+      {
+        // No title (or non-spec-file title) — file cannot be determined
+        specs: [{ title: "orphan test", ok: true }],
+      },
+    ],
+  };
+  const parsed = parsePlaywrightReport(report);
+  assert.equal(parsed.cases.length, 1);
+  // file is either undefined or empty — must NOT be a meaningful path
+  const file = (parsed.cases[0]! as import("../types").QaCase).file;
+  assert.ok(!file || file === "", `orphan test should have no meaningful file; got ${JSON.stringify(file)}`);
+});
+
 test("firstErrorContext is defensive against null/undefined shape variants (no throw)", () => {
   // Empty spec — nothing crashes.
   assert.doesNotThrow(() => firstErrorContext({ title: "x", tests: [] }));

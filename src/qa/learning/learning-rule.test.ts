@@ -8,6 +8,8 @@ import {
   applyOutcome,
   preventionOutcome,
   PREVENTION_HELD_SCORE,
+  fitRulesToBudget,
+  DEFAULT_RULES_CHAR_BUDGET,
   type LearningRule,
   type RuleUpsert,
 } from "./learning-rule";
@@ -350,5 +352,153 @@ describe("Phase 7 (d): coverage-anchored promotion governance", () => {
     let r = rule({ status: "active", outcomeCount: 3, successRate: 0.8 });
     for (let i = 0; i < 20; i++) r = applyOutcome(r, 0.0, false); // bad outcomes + no coverage credit
     assert.equal(r.status, "deprecated", "demotion must happen regardless of coverage credit");
+  });
+});
+
+// ── Task 2: fitRulesToBudget ──────────────────────────────────────────────────
+
+function mkRule(id: string, action: string, status: "active" | "candidate" = "active"): LearningRule {
+  return {
+    id,
+    trigger: "Applies when the diff adds a form",
+    action,
+    errorClass: "E-FALSE-POSITIVE",
+    confidence: "medium",
+    usageCount: 0,
+    outcomeCount: 3,
+    successRate: 0.6,
+    lastVerified: null,
+    source: "test",
+    status,
+    at: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+describe("fitRulesToBudget", () => {
+  it("returns all rules when they fit within the budget", () => {
+    const rules = [mkRule("a", "x"), mkRule("b", "y")];
+    const out = fitRulesToBudget(rules, DEFAULT_RULES_CHAR_BUDGET);
+    assert.equal(out.included.length, 2);
+    assert.ok(out.rendered.length <= DEFAULT_RULES_CHAR_BUDGET);
+  });
+
+  it("drops lowest-ranked rules from the tail to fit the budget", () => {
+    const big = "z".repeat(400);
+    const rules = [mkRule("a", big), mkRule("b", big), mkRule("c", big)];
+    const out = fitRulesToBudget(rules, 900);
+    // The fitted set never exceeds the budget and is a HEAD-prefix of the input ranking.
+    assert.ok(out.rendered.length <= 900);
+    assert.deepEqual(
+      out.included.map((r) => r.id),
+      rules.slice(0, out.included.length).map((r) => r.id),
+    );
+    assert.ok(out.included.length < 3);
+  });
+
+  it("renders only the included rules (no phantom rule IDs)", () => {
+    // Use distinct action strings so we can test which rules appear in rendered output.
+    const rules = [
+      mkRule("a", "z".repeat(400) + "-action-a"),
+      mkRule("b", "z".repeat(400) + "-action-b"),
+      mkRule("c", "z".repeat(400) + "-action-c"),
+    ];
+    const out = fitRulesToBudget(rules, 900);
+    for (const r of rules) {
+      const present = out.rendered.includes(r.action);
+      assert.equal(present, out.included.some((i) => i.id === r.id));
+    }
+  });
+});
+
+// ── Task 3: selectForRetrieval determinism ────────────────────────────────────
+
+describe("selectForRetrieval determinism", () => {
+  it("breaks score ties deterministically by id (same result regardless of input order)", () => {
+    const mk = (id: string): LearningRule => ({
+      id,
+      trigger: "Applies when x",
+      action: "do y",
+      errorClass: "E-FALSE-POSITIVE",
+      confidence: "medium",
+      usageCount: 0,
+      outcomeCount: 3,
+      successRate: 0.6,
+      lastVerified: null,
+      source: "test",
+      status: "active",
+      at: "2026-01-01T00:00:00.000Z",
+    });
+    const forward = selectForRetrieval([mk("c"), mk("a"), mk("b")], { app: "d", maxRules: 2 });
+    const reversed = selectForRetrieval([mk("b"), mk("a"), mk("c")], { app: "d", maxRules: 2 });
+    assert.deepEqual(
+      forward.map((r) => r.id),
+      reversed.map((r) => r.id),
+    );
+  });
+
+  it("never grows the result beyond maxRules when the exploration floor fires", () => {
+    const active = (id: string): LearningRule => ({
+      id,
+      trigger: "t",
+      action: "a",
+      errorClass: "E-FALSE-POSITIVE",
+      confidence: "high",
+      usageCount: 0,
+      outcomeCount: 3,
+      successRate: 0.9,
+      lastVerified: null,
+      source: "t",
+      status: "active",
+      at: "2026-01-01T00:00:00.000Z",
+    });
+    const candidate = (id: string): LearningRule => ({
+      ...active(id),
+      status: "candidate",
+      successRate: 0.1,
+      confidence: "low",
+    });
+    // 2 active + 3 candidates, limit 4: exploration floor must REPLACE, not append.
+    const out = selectForRetrieval(
+      [active("a1"), active("a2"), candidate("c1"), candidate("c2"), candidate("c3")],
+      { app: "d", maxRules: 4 },
+    );
+    assert.equal(out.length, 4);
+  });
+});
+
+import { attributableRules } from "./learning-rule";
+
+describe("attributableRules — context-directed attribution filter", () => {
+  function mkRule(id: string, archetype: string | null): LearningRule {
+    return {
+      id, trigger: "t", action: "a", errorClass: "E-FALSE-POSITIVE", archetype,
+      confidence: "medium", usageCount: 0, outcomeCount: 3, successRate: 0.6,
+      lastVerified: null, source: "t", status: "active", at: "2026-01-01T00:00:00.000Z",
+    };
+  }
+
+  it("keeps rules whose archetype matches the diff shapes, and untagged rules (fail-open per rule)", () => {
+    const rules = [mkRule("form", "form"), mkRule("api", "api-call"), mkRule("untagged", null)];
+    const kept = attributableRules(rules, { diffArchetypes: ["form"] });
+    // "form" matches; "api-call" is tagged but does not match → dropped; "untagged" has no signal → kept.
+    assert.deepEqual(kept.map((r) => r.id), ["form", "untagged"]);
+  });
+
+  it("keeps everything when no diff archetypes are known (fail-open)", () => {
+    const rules = [mkRule("a", "form"), mkRule("b", "api-call")];
+    assert.deepEqual(attributableRules(rules, { diffArchetypes: [] }).map((r) => r.id), ["a", "b"]);
+  });
+
+  it("drops tagged non-matching rules but keeps untagged ones", () => {
+    const rules = [mkRule("x", "form"), mkRule("y", null)];
+    const kept = attributableRules(rules, { diffArchetypes: ["data-list"] });
+    // "x" is tagged "form" and does not match "data-list" → dropped; "y" is untagged → kept.
+    assert.deepEqual(kept.map((r) => r.id), ["y"]);
+  });
+
+  it("handles multiple matching archetypes", () => {
+    const rules = [mkRule("form", "form"), mkRule("api", "api-call"), mkRule("nav", "navigation")];
+    const kept = attributableRules(rules, { diffArchetypes: ["form", "navigation"] });
+    assert.deepEqual(kept.map((r) => r.id), ["form", "nav"]);
   });
 });

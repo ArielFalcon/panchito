@@ -5,6 +5,11 @@ import { errorClassFromCorrections } from "./taxonomy";
 import { upsertLearningRule, listAllLearningRules } from "../../server/history";
 import { randomBytes } from "node:crypto";
 
+// Newest-N dedup window: above this number of rules, older entries fall out of the dedup scan and
+// duplicates may slip in silently. Per the no-DB-coupling constraint we do NOT add a unique index;
+// instead we make the loss VISIBLE when the cap is reached.
+const DEDUP_WINDOW = 200;
+
 // Cap distilled rule fields so a runaway reviewer correction cannot blow up the DB row size
 // or the prompt that later renders the rule.
 const RULE_FIELD_MAX = 400;
@@ -70,7 +75,10 @@ export function distillReflection(input: DistillerInput): { inserted: boolean; r
   const candidate = reflectionToRuleUpsert(input);
   // Dedup against ALL statuses (incl. deprecated/superseded): a recurring failure pattern must not
   // spawn a duplicate candidate for a rule that was already tried and demoted.
-  const existing = listAllLearningRules(input.app, 200);
+  const existing = listAllLearningRules(input.app, DEDUP_WINDOW);
+  if (existing.length >= DEDUP_WINDOW) {
+    console.warn(`[learn] WARNING: dedup window saturated at ${DEDUP_WINDOW} rules for ${input.app} — duplicate candidates beyond the window may not be detected`);
+  }
   const { toInsert, toSkip } = deduplicateRules([candidate], existing);
 
   if (toInsert.length === 0) {
@@ -121,6 +129,7 @@ export function distillReviewerCorrections(input: {
   runId: string;
   corrections: string[];
   archetype?: string | null;
+  log?: (line: string) => void;
 }): { inserted: string[] } {
   const candidates = input.corrections
     .map((c) => correctionToRuleUpsert({ correction: c, runId: input.runId, archetype: input.archetype }))
@@ -129,7 +138,10 @@ export function distillReviewerCorrections(input: {
 
   // Pre-dedupe locally so a correction repeated within ONE rejection only spawns one candidate.
   const unique = new Map(candidates.map((c) => [ruleKey(c), c]));
-  const existing = listAllLearningRules(input.app, 200);
+  const existing = listAllLearningRules(input.app, DEDUP_WINDOW);
+  if (existing.length >= DEDUP_WINDOW) {
+    input.log?.(`[learn] WARNING: dedup window saturated at ${DEDUP_WINDOW} rules for ${input.app} — duplicate candidates beyond the window may not be detected`);
+  }
   const { toInsert } = deduplicateRules([...unique.values()], existing);
 
   const inserted: string[] = [];

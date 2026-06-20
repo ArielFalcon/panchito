@@ -701,6 +701,43 @@ test("change-coverage off: the step is skipped entirely", async () => {
   assert.equal(d.published, true);
 });
 
+// Keystone integrity: a diff run that goes green only on a RETRY produces its V8 dumps under the
+// per-retry namespace (…-r1). The per-retry whole-tree coverage wipe deletes the base namespace's
+// dumps, so collecting change-coverage from the base `ns` reads an empty dir → the keystone is
+// silently lost ("unknown", which never blocks) for exactly the runs that needed fixing. Coverage
+// MUST be collected from the namespace of the run that actually produced the green result.
+test("change-coverage: a run green only on a retry is measured from the retry namespace (keystone not lost)", async () => {
+  const calls: string[] = [];
+  const failingRun: QaRunResult = { sha: "s", verdict: "fail", passed: false, cases: [{ name: "x", status: "fail" }], logs: "" };
+  const passingRun: QaRunResult = { sha: "s", verdict: "pass", passed: true, cases: [], logs: "" };
+  const oneRetryApp: AppConfig = { ...covApp("signal"), qa: { ...covApp("signal").qa, fixLoop: { maxRetries: 1 } } };
+  const d = deps(failingRun, calls, { diff: DIFF_4 });
+  let executeCall = 0;
+  d.execute = async () => {
+    calls.push("execute");
+    return executeCall++ === 0 ? failingRun : passingRun;
+  };
+  const coverageNsSeen: string[] = [];
+  // Models the real fixture: V8 dumps exist ONLY under the namespace the passing suite executed in.
+  d.collectCoverage = async (input) => {
+    coverageNsSeen.push(input.namespace);
+    return /-r\d+$/.test(input.namespace) ? cov([1, 2, 3, 4]) : null;
+  };
+  await runPipeline(oneRetryApp, "abc1234def", d, "manual", { mode: "diff", runId: "run-retry-cov" });
+  const outcome = d.savedOutcomes.at(-1)!;
+  assert.ok(outcome, "a runId was provided, so the outcome must be persisted");
+  assert.match(
+    coverageNsSeen[0] ?? "",
+    /-r\d+$/,
+    `coverage must be collected from the retry namespace, got "${coverageNsSeen[0]}" (calls: ${calls.join(",")})`,
+  );
+  assert.equal(
+    outcome.gateSignals.coverageRatio,
+    1,
+    "change-coverage must be MEASURED (1.0) on a retry-green run, not silently lost to unknown",
+  );
+});
+
 test("DEV unhealthy before execution: infra-error, neither executes nor reports as a bug", async () => {
   const calls: string[] = [];
   const d = deps(passing(), calls, { healthy: false });
@@ -1235,6 +1272,9 @@ test("FIX 1b: value-oracle attribution PROMOTES a candidate when coverage confir
   const creditApp = { ...app, name: ruleApp };
   const d = deps(passing(), [], { diff: DIFF_4, coverage: [cov([1, 2, 3, 4])], message: "feat: x" });
   // retrieveRules returns the seeded rule's id so the pipeline attributes its oracle outcome to it.
+  // The rule has NO archetype — context-directed attribution (Task 7) is fail-open PER RULE, so an
+  // untagged legacy rule still receives its oracle outcome (only a rule tagged with a NON-matching
+  // archetype is skipped). This guards the common case: most rules predate the archetype field.
   d.retrieveRules = () => ({
     rules: [{ id: ruleId, trigger: "Applies when t", action: "a", errorClass: "E-FALSE-POSITIVE" as const, confidence: "low" as const, usageCount: 0, outcomeCount: 2, successRate: 0.85, lastVerified: null, source: "seed", status: "candidate" as const, at: "" }],
     promptSection: "## Learned rules\n- x",
@@ -1257,6 +1297,8 @@ test("FIX 1b: value-oracle attribution HOLDS a candidate when coverage measured 
   const noCreditApp = { ...app, name: ruleApp };
   // cov([]) → the changed file is measured but ZERO changed lines covered → ratio 0 → credit=false.
   const d = deps(passing(), [], { diff: DIFF_4, coverage: [cov([])], message: "feat: x" });
+  // The rule has NO archetype — context-directed attribution (Task 7) is fail-open PER RULE, so the
+  // untagged rule still receives its oracle outcome and this test can verify the zero-credit hold gate.
   d.retrieveRules = () => ({
     rules: [{ id: ruleId, trigger: "Applies when t", action: "a", errorClass: "E-FALSE-POSITIVE" as const, confidence: "low" as const, usageCount: 0, outcomeCount: 2, successRate: 0.85, lastVerified: null, source: "seed", status: "candidate" as const, at: "" }],
     promptSection: "## Learned rules\n- x",
@@ -1266,6 +1308,58 @@ test("FIX 1b: value-oracle attribution HOLDS a candidate when coverage measured 
   const after = listAllLearningRules(ruleApp, 10).find((r) => r.id === ruleId);
   assert.equal(after?.outcomeCount, 3, "the outcome is still folded in (only the promotion is gated)");
   assert.equal(after?.status, "candidate", "measured coverage with ZERO credit must HOLD the candidate (gate fired → credit threaded)");
+});
+
+// ── Change 2: prevention relevance filter — attributableRules gates the no-oracle path ──────────
+// The prevention loop in foldRunLearning now calls attributableRules(retrievedRules, {diffArchetypes})
+// instead of iterating ALL retrievedRules. DIFF_4's detectStructuralPatterns yields only ["generic"],
+// which does NOT match a rule tagged archetype:"form" but DOES match (fail-open) an untagged rule.
+// Proof of the gate: the tagged-non-matching rule's outcomeCount must not increase; the untagged
+// rule's outcomeCount must increase by exactly 1.
+test("Change 2: prevention path skips non-matching tagged rules, keeps untagged (relevance filter)", async () => {
+  const { upsertLearningRule, recordRuleOutcome, listAllLearningRules } = await import("./server/history");
+
+  // Unique app name ensures a clean slate in the real DB.
+  const ruleApp = `c2-rel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  // Rule A: tagged archetype "form" — DIFF_4 yields only "generic", so "form" does NOT match.
+  // Expected: outcomeCount stays at 2 after the pipeline run.
+  const ruleIdA = `c2-form-${Math.random().toString(36).slice(2, 10)}`;
+  upsertLearningRule({ id: ruleIdA, app: ruleApp, trigger: "Applies when form changes", action: "check form", errorClass: "E-FALSE-POSITIVE" as const, source: "seed" });
+  recordRuleOutcome(ruleIdA, 0.6, null);
+  recordRuleOutcome(ruleIdA, 0.6, null);
+  assert.equal(listAllLearningRules(ruleApp, 10).find((r) => r.id === ruleIdA)?.outcomeCount, 2, "precondition: ruleA at 2 outcomes");
+
+  // Rule B: untagged (no archetype) — fail-open: kept by attributableRules.
+  // Expected: outcomeCount becomes 3 after the pipeline run.
+  const ruleIdB = `c2-untagged-${Math.random().toString(36).slice(2, 10)}`;
+  upsertLearningRule({ id: ruleIdB, app: ruleApp, trigger: "Applies when generic changes", action: "check all", errorClass: "E-FALSE-POSITIVE" as const, source: "seed" });
+  recordRuleOutcome(ruleIdB, 0.6, null);
+  recordRuleOutcome(ruleIdB, 0.6, null);
+  assert.equal(listAllLearningRules(ruleApp, 10).find((r) => r.id === ruleIdB)?.outcomeCount, 2, "precondition: ruleB at 2 outcomes");
+
+  const testApp = { ...app, name: ruleApp };
+  // DIFF_4 + no coverage → triggers the no-oracle prevention path (valueScore = null).
+  // The oracle must return no valueScore so the governance condition (o.valueScore === null) fires.
+  const d = deps(passing(), [], { diff: DIFF_4, message: "feat: x" });
+  // Override the oracle to produce no valueScore — this is the no-oracle governance path.
+  d.runOracle = async () => ({ valueScore: null, mutantCount: 0, killedCount: 0, details: "oracle disabled" });
+  // Two retrieved rules: one tagged "form" (non-matching) and one untagged (fail-open).
+  d.retrieveRules = () => ({
+    rules: [
+      { id: ruleIdA, trigger: "Applies when form changes", action: "check form", errorClass: "E-FALSE-POSITIVE" as const, archetype: "form", confidence: "low" as const, usageCount: 0, outcomeCount: 2, successRate: 0.6, lastVerified: null, source: "seed", status: "candidate" as const, at: "" },
+      { id: ruleIdB, trigger: "Applies when generic changes", action: "check all", errorClass: "E-FALSE-POSITIVE" as const, archetype: undefined, confidence: "low" as const, usageCount: 0, outcomeCount: 2, successRate: 0.6, lastVerified: null, source: "seed", status: "candidate" as const, at: "" },
+    ],
+    promptSection: "## Learned rules\n- form\n- untagged",
+  });
+
+  await runPipeline(testApp, "c2sha001", d, "manual", { mode: "diff", runId: "run-c2-rel-1" });
+
+  const afterA = listAllLearningRules(ruleApp, 10).find((r) => r.id === ruleIdA);
+  const afterB = listAllLearningRules(ruleApp, 10).find((r) => r.id === ruleIdB);
+
+  assert.equal(afterA?.outcomeCount, 2, "tagged 'form' rule must NOT receive outcome (diff is generic, not form)");
+  assert.equal(afterB?.outcomeCount, 3, "untagged rule must receive outcome (fail-open: no archetype → always kept)");
 });
 
 test("learning layer: reflectAndDistill is NOT called on green passes", async () => {
@@ -1867,7 +1961,7 @@ test("3.x fix-loop W5 control: real-bug branch DOES fire when every locator is e
   );
   d.execute = async () => { calls.push("execute"); return failing; };
   await runPipeline(issueApp, "abc123", d);
-  assert.ok(logs.some((l) => /real-bug branch/i.test(l)), `real-bug branch SHOULD fire when all locators are extractable + unique:\n${logs.join("\n")}`);
+  assert.ok(logs.some((l) => /adjudicator.*app_defect/i.test(l)), `adjudicator must classify as app_defect when all locators are extractable + unique:\n${logs.join("\n")}`);
 });
 
 // CROSS-BOUNDARY (W3): the real-bug branch must NOT fire when a failing case's spec contains an
@@ -2396,6 +2490,141 @@ test("Phase 6b (c): deriveCycleBackstop increments linearly per extra objective"
   assert.equal(three - two, delta, "increment must be constant per extra objective");
 });
 
+// ── Filtered retry (keystone-safe) ─────────────────────────────────────────────────────────────
+
+// MANUAL mode, fail-then-pass retry where the failed case has a .file:
+// the retry execute receives specFiles = [that file] (the optimization fires).
+test("filtered-retry: MANUAL mode + failed case has .file → retry execute receives specFiles", async () => {
+  const calls: string[] = [];
+  const logs: string[] = [];
+  const failingRun: QaRunResult = {
+    sha: "s", verdict: "fail", passed: false,
+    cases: [{ name: "login › works", status: "fail", file: "login.spec.ts" }],
+    logs: "",
+  };
+  const passingRun: QaRunResult = { sha: "s", verdict: "pass", passed: true, cases: [], logs: "" };
+  const oneRetryApp: AppConfig = { ...app, qa: { ...app.qa, needsReview: false, fixLoop: { maxRetries: 1 } } };
+  // No coverage → coverageWillMeasure is false (canFilter gate opens)
+  const d = deps(failingRun, calls, { agents: [generated, generated] });
+  d.log = (m: string) => logs.push(m);
+  const capturedSpecFiles: Array<string[] | undefined> = [];
+  let executeCall = 0;
+  d.execute = async (_dir, opts) => {
+    calls.push("execute");
+    capturedSpecFiles.push((opts as { specFiles?: string[] }).specFiles);
+    return executeCall++ === 0 ? failingRun : passingRun;
+  };
+  await runPipeline(oneRetryApp, "abc123", d, "manual", { mode: "manual" });
+  // The retry execute (second call) must receive specFiles = ["login.spec.ts"]
+  assert.equal(capturedSpecFiles.length, 2, "expected 2 execute calls");
+  assert.deepEqual(capturedSpecFiles[1], ["login.spec.ts"], `retry execute should receive specFiles; got ${JSON.stringify(capturedSpecFiles[1])}`);
+  assert.ok(logs.some((l) => /retry filtered/i.test(l)), `expected a "retry filtered" log; got:\n${logs.filter((l) => l.includes("retry")).join("\n")}`);
+});
+
+// DIFF mode + coverage signal/enforce: the retry execute receives NO specFiles (full re-run).
+// The keystone is protected: filtering would undercount coverage.
+test("filtered-retry: DIFF mode + coverage.signal → retry is NOT filtered (keystone protected)", async () => {
+  const calls: string[] = [];
+  const failingRun: QaRunResult = {
+    sha: "s", verdict: "fail", passed: false,
+    cases: [{ name: "login › works", status: "fail", file: "login.spec.ts" }],
+    logs: "",
+  };
+  const passingRun: QaRunResult = { sha: "s", verdict: "pass", passed: true, cases: [], logs: "" };
+  const oneRetryApp: AppConfig = { ...covApp("signal"), qa: { ...covApp("signal").qa, needsReview: false, fixLoop: { maxRetries: 1 } } };
+  const d = deps(failingRun, calls, { agents: [generated, generated], diff: DIFF_4, coverage: [cov([1, 2, 3, 4])] });
+  const capturedSpecFiles: Array<string[] | undefined> = [];
+  let executeCall = 0;
+  d.execute = async (_dir, opts) => {
+    calls.push("execute");
+    capturedSpecFiles.push((opts as { specFiles?: string[] }).specFiles);
+    return executeCall++ === 0 ? failingRun : passingRun;
+  };
+  await runPipeline(oneRetryApp, "abc123", d, "manual", { mode: "diff" });
+  assert.equal(capturedSpecFiles.length, 2, "expected 2 execute calls");
+  assert.equal(capturedSpecFiles[1], undefined, `diff+coverage retry must NOT filter (got specFiles=${JSON.stringify(capturedSpecFiles[1])})`);
+});
+
+// Regeneration writes a spec OUTSIDE the failed set → full re-run (no specFiles), even in manual.
+test("filtered-retry: regen writes a spec outside the failed set → full re-run", async () => {
+  const calls: string[] = [];
+  const failingRun: QaRunResult = {
+    sha: "s", verdict: "fail", passed: false,
+    cases: [{ name: "login › works", status: "fail", file: "login.spec.ts" }],
+    logs: "",
+  };
+  const passingRun: QaRunResult = { sha: "s", verdict: "pass", passed: true, cases: [], logs: "" };
+  const oneRetryApp: AppConfig = { ...app, qa: { ...app.qa, needsReview: false, fixLoop: { maxRetries: 1 } } };
+  // The regen writes "checkout.spec.ts" — outside the failed set (login.spec.ts only)
+  const regenOutsideSet: AgentResult = { output: "x", specs: ["login.spec.ts", "checkout.spec.ts"], reviewed: true, approved: true };
+  const d = deps(failingRun, calls, { agents: [generated, regenOutsideSet] });
+  const capturedSpecFiles: Array<string[] | undefined> = [];
+  let executeCall = 0;
+  d.execute = async (_dir, opts) => {
+    calls.push("execute");
+    capturedSpecFiles.push((opts as { specFiles?: string[] }).specFiles);
+    return executeCall++ === 0 ? failingRun : passingRun;
+  };
+  await runPipeline(oneRetryApp, "abc123", d, "manual", { mode: "manual" });
+  assert.equal(capturedSpecFiles.length, 2, "expected 2 execute calls");
+  assert.equal(capturedSpecFiles[1], undefined, `regen outside failed set must force full re-run (got specFiles=${JSON.stringify(capturedSpecFiles[1])})`);
+});
+
+// Merge: after a filtered manual retry, the final run/outcome reflects the full suite
+// (prior passing cases present), verdict pass.
+test("filtered-retry: after filtered retry, final run includes prior passing cases and verdict is pass", async () => {
+  const calls: string[] = [];
+  const passingCase: QaCase = { name: "checkout › completes", status: "pass", file: "checkout.spec.ts" };
+  const failingCase: QaCase = { name: "login › works", status: "fail", file: "login.spec.ts" };
+  const initialRun: QaRunResult = {
+    sha: "s", verdict: "fail", passed: false,
+    cases: [passingCase, failingCase],
+    logs: "",
+  };
+  // The retry run returns only the previously-failing spec's result (since we filtered to it)
+  const retryPassRun: QaRunResult = {
+    sha: "s", verdict: "pass", passed: true,
+    cases: [{ name: "login › works", status: "pass" }],
+    logs: "",
+  };
+  const oneRetryApp: AppConfig = { ...app, qa: { ...app.qa, needsReview: false, fixLoop: { maxRetries: 1 } } };
+  const d = deps(initialRun, calls, { agents: [generated, generated] });
+  let executeCall = 0;
+  d.execute = async (_dir, _opts) => {
+    calls.push("execute");
+    return executeCall++ === 0 ? initialRun : retryPassRun;
+  };
+  const finalRun = await runPipeline(oneRetryApp, "abc123", d, "manual", { mode: "manual" });
+  assert.equal(finalRun.verdict, "pass", "merged run should be pass");
+  // Prior passing case (checkout.spec.ts) must be in the merged result
+  assert.ok(finalRun.cases.some((c) => c.name === "checkout › completes"), `prior passing case must be in merged result; cases: ${JSON.stringify(finalRun.cases.map((c) => c.name))}`);
+  // The previously-failing case (now passing) must also be present
+  assert.ok(finalRun.cases.some((c) => c.name === "login › works" && c.status === "pass"), `fixed case must be in merged result; cases: ${JSON.stringify(finalRun.cases.map((c) => c.name))}`);
+});
+
+// Filtered retry with a failed case that has NO .file → full re-run (cannot safely filter).
+test("filtered-retry: failed case with no .file → full re-run (cannot safely filter)", async () => {
+  const calls: string[] = [];
+  const failingRun: QaRunResult = {
+    sha: "s", verdict: "fail", passed: false,
+    cases: [{ name: "login › works", status: "fail" /* no file */ }],
+    logs: "",
+  };
+  const passingRun: QaRunResult = { sha: "s", verdict: "pass", passed: true, cases: [], logs: "" };
+  const oneRetryApp: AppConfig = { ...app, qa: { ...app.qa, needsReview: false, fixLoop: { maxRetries: 1 } } };
+  const d = deps(failingRun, calls, { agents: [generated, generated] });
+  const capturedSpecFiles: Array<string[] | undefined> = [];
+  let executeCall = 0;
+  d.execute = async (_dir, opts) => {
+    calls.push("execute");
+    capturedSpecFiles.push((opts as { specFiles?: string[] }).specFiles);
+    return executeCall++ === 0 ? failingRun : passingRun;
+  };
+  await runPipeline(oneRetryApp, "abc123", d, "manual", { mode: "manual" });
+  assert.equal(capturedSpecFiles.length, 2, "expected 2 execute calls");
+  assert.equal(capturedSpecFiles[1], undefined, `case without .file must force full re-run (got specFiles=${JSON.stringify(capturedSpecFiles[1])})`);
+});
+
 test("Phase 6b (d): pipeline retroactively raises MAX_CYCLES when generate returns objectiveCount>1", async () => {
   // Arrange: iterationBudget=1 (very tight). A multi-objective result should raise the ceiling
   // above 1 so the run is NOT truncated just because the first cycle consumed the budget.
@@ -2416,5 +2645,193 @@ test("Phase 6b (d): pipeline retroactively raises MAX_CYCLES when generate retur
   assert.ok(
     logs.some((l) => /scope-dimensioned backstop raised/i.test(l)),
     `expected a scope-dimensioned backstop log; got:\n${logs.filter((l) => l.includes("cycle")).join("\n")}`,
+  );
+});
+
+// ── Adjudicator integration tests (task 3.1) ─────────────────────────────────
+
+// Integration 1: app_defect evidence → Issue filed, runVerdict=fail
+// This uses the same evidence that today's isLikelyRealBug would fire on:
+// allUnique=true (extractable+present-unique locators + all value-mismatch details),
+// gateSpend=true (first retry). The adjudicator must fire app_defect → break-issue →
+// Issue is opened.
+test("adjudicator: app_defect evidence → Issue filed, verdict=fail", async () => {
+  const calls: string[] = [];
+  const logs: string[] = [];
+  const failureDom = parseAriaSnapshot(
+    '- button "Add Owner"\n- heading "Find Owners"',
+  ).join("\n");
+  const failing: QaRunResult = {
+    sha: "s",
+    verdict: "fail",
+    passed: false,
+    cases: [
+      {
+        name: "owners › create",
+        status: "fail",
+        detail:
+          'Error: expect(locator).toHaveText(expected) failed\n\nLocator:  getByRole(\'heading\')\nExpected string: "Find Owners"\nReceived string: "Owners"\nTimeout:  5000ms',
+        failureDom,
+      },
+    ],
+    logs: "",
+  };
+  const oneRetryApp: AppConfig = {
+    ...app,
+    qa: { ...app.qa, needsReview: false, fixLoop: { maxRetries: 1 } },
+  };
+  const d = deps(failing, calls, { agents: [generated, generated] });
+  d.log = (m: string) => logs.push(m);
+  // Spec with extractable+unique locators so allUnique=true
+  writeFileSync(
+    join(d.mirrorDir, "e2e", "a.spec.ts"),
+    `import { test, expect } from "./fixtures";\n` +
+      `test("owners › create", async ({ page }) => {\n` +
+      `  await page.getByRole("button", { name: "Add Owner" }).click();\n` +
+      `  await expect(page.getByRole("heading", { name: "Find Owners" })).toHaveText("Find Owners");\n` +
+      `});\n`,
+  );
+  d.execute = async () => { calls.push("execute"); return failing; };
+  const result = await runPipeline(oneRetryApp, "abc123", d);
+  assert.equal(result.verdict, "fail", "verdict must be fail on app_defect");
+  assert.ok(
+    d.issues.length > 0,
+    `Issue must be filed on app_defect; calls: ${calls.join(",")}`,
+  );
+  assert.ok(
+    logs.some((l) => /adjudicator.*app_defect|real-bug branch/i.test(l)),
+    `expected adjudicator app_defect log; got:\n${logs.join("\n")}`,
+  );
+});
+
+// Integration 2: runner_infra evidence → infra-error verdict, NO repo Issue
+// All failure details match PLAYWRIGHT_INFRA_RE → adjudicator fires runner_infra →
+// break-issue → run set to infra-error → report() logs INFRA, no Issue.
+test("adjudicator: runner_infra evidence → infra-error verdict, NO repo Issue", async () => {
+  const calls: string[] = [];
+  const logs: string[] = [];
+  const failing: QaRunResult = {
+    sha: "s",
+    verdict: "fail",
+    passed: false,
+    cases: [
+      {
+        name: "owners › create",
+        status: "fail",
+        detail: "browserType.launch: Executable doesn't exist at /usr/bin/chromium",
+      },
+    ],
+    logs: "",
+  };
+  const oneRetryApp: AppConfig = {
+    ...app,
+    qa: { ...app.qa, needsReview: false, fixLoop: { maxRetries: 1 } },
+  };
+  const d = deps(failing, calls, { agents: [generated, generated] });
+  d.log = (m: string) => logs.push(m);
+  d.execute = async () => { calls.push("execute"); return failing; };
+  const result = await runPipeline(oneRetryApp, "abc123", d);
+  assert.equal(
+    result.verdict,
+    "infra-error",
+    `expected infra-error verdict on runner_infra; got ${result.verdict}`,
+  );
+  assert.equal(
+    d.issues.length,
+    0,
+    `No repo Issue must be filed on runner_infra; issues: ${JSON.stringify(d.issues)}`,
+  );
+  assert.ok(
+    logs.some((l) => /adjudicator.*runner_infra|runner.infra|INFRA/i.test(l)),
+    `expected adjudicator runner_infra or infra log; got:\n${logs.join("\n")}`,
+  );
+});
+
+// Integration 3: generated_test_defect + spend=true → loop does NOT break
+// (another agent session is invoked, meaning execute is called twice)
+test("adjudicator: generated_test_defect + spend=true → continue (loop does not break early)", async () => {
+  const calls: string[] = [];
+  const failingRun: QaRunResult = {
+    sha: "s",
+    verdict: "fail",
+    passed: false,
+    cases: [
+      {
+        name: "owners › create",
+        status: "fail",
+        // Locator failure detail — classifies as "locator", all locators → rule 4 fires if spend=true
+        detail: "strict mode violation: getByRole('button', { name: 'Add Owner' }) resolved to 3 elements",
+      },
+    ],
+    logs: "",
+  };
+  const passingRun: QaRunResult = { sha: "s", verdict: "pass", passed: true, cases: [], logs: "" };
+  const oneRetryApp: AppConfig = {
+    ...app,
+    qa: { ...app.qa, needsReview: false, fixLoop: { maxRetries: 1 } },
+  };
+  // First execute returns failing, second returns passing
+  let executeCall = 0;
+  const d = deps(failingRun, calls, { agents: [generated, generated] });
+  d.execute = async () => {
+    calls.push("execute");
+    return executeCall++ === 0 ? failingRun : passingRun;
+  };
+  const result = await runPipeline(oneRetryApp, "abc123", d);
+  const executeCalls = calls.filter((c) => c === "execute");
+  assert.ok(
+    executeCalls.length >= 2,
+    `loop must NOT break early on generated_test_defect+spend=true (expected ≥2 execute calls, got ${executeCalls.length}); calls: ${calls.join(",")}`,
+  );
+  assert.equal(result.verdict, "pass", "run should pass after the retry fixed the test");
+});
+
+// Integration 4: ambiguous + no-progress (spend=false, locator failures) →
+// break-needs-human → labeled Issue, no extra agent session
+test("adjudicator: ambiguous + spend=false → break-needs-human → labeled Issue, no extra generate", async () => {
+  const calls: string[] = [];
+  const logs: string[] = [];
+  // Failing run with locator failures (so rule 4 would fire IF spend=true, but spend=false
+  // because prev and cur have identical failing counts/names → decideProgress returns false).
+  // We need TWO retries: first retry establishes baseline (spend=true always on first retry);
+  // second retry has same failing count → no progress → spend=false → rule 5 fires.
+  const failingRun: QaRunResult = {
+    sha: "s",
+    verdict: "fail",
+    passed: false,
+    cases: [
+      {
+        name: "owners › create",
+        status: "fail",
+        detail: "strict mode violation: locator found 2 elements",
+      },
+    ],
+    logs: "",
+  };
+  const twoRetryApp: AppConfig = {
+    ...app,
+    qa: { ...app.qa, needsReview: false, fixLoop: { maxRetries: 2 } },
+  };
+  // Agent is called for generation + two retries, execute always returns failing
+  const d = deps(failingRun, calls, { agents: [generated, generated, generated] });
+  d.log = (m: string) => logs.push(m);
+  d.execute = async () => { calls.push("execute"); return failingRun; };
+  const result = await runPipeline(twoRetryApp, "abc123", d);
+  assert.equal(result.verdict, "fail", "verdict must be fail when needs-human");
+  assert.ok(
+    d.issues.length > 0,
+    `Issue must be filed on break-needs-human; calls: ${calls.join(",")}`,
+  );
+  // Adjudicator log line must appear
+  assert.ok(
+    logs.some((l) => /adjudicator.*break-needs-human|adjudicator.*class=/i.test(l)),
+    `expected adjudicator break-needs-human log; got:\n${logs.join("\n")}`,
+  );
+  // No extra generate should be attempted after break-needs-human
+  const generateCalls = calls.filter((c) => c === "generate");
+  const executeCalls = calls.filter((c) => c === "execute");
+  assert.ok(
+    generateCalls.length <= executeCalls.length,
+    `no extra generate after break-needs-human (generates=${generateCalls.length}, executes=${executeCalls.length}); calls: ${calls.join(",")}`,
   );
 });

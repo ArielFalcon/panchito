@@ -101,6 +101,10 @@ export interface QaCase {
   // post-failure DOM instead of the pre-write grounding snapshot. Absent when capture missed
   // (page closed on nav-crash, env var unset, or parse failure) — grounding gap is warned loudly.
   failureDom?: string;
+  // The spec file basename that contains this test (e.g. "login.spec.ts", "flows/checkout.spec.ts").
+  // Populated by the Playwright report parser from the enclosing top-level suite title.
+  // Used by the filtered-retry optimization to scope re-runs to only the files with failing cases.
+  file?: string;
 }
 
 export interface QaRunResult {
