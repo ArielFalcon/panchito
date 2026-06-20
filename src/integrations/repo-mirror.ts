@@ -165,7 +165,13 @@ export const realGit: Git = (args, cwd) =>
     // `.git/hooks/pre-commit` is a root-RCE escape. `-c core.hooksPath=/dev/null` on the COMMAND
     // LINE disables all hooks and cannot be overridden by the repo's own .git/config. The
     // orchestrator never relies on a repo's hooks, so this is uniformly safe.
-    const hardened = ["-c", "core.hooksPath=/dev/null", ...args];
+    // Mirrors live on a shared volume that may be owned by a different UID (host user,
+    // previous container, etc.). Git 2.35.2+ treats that as "dubious ownership" and
+    // refuses to operate unless the directory is explicitly marked safe. We do it on
+    // the command line for the working directory being operated on, scoped to that run.
+    const hardened = cwd
+      ? ["-c", `safe.directory=${cwd}`, "-c", "core.hooksPath=/dev/null", ...args]
+      : ["-c", "core.hooksPath=/dev/null", ...args];
     execFile("git", hardened, { cwd, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }, (err, stdout) =>
       err ? reject(err) : resolve(stdout.toString()),
     );
