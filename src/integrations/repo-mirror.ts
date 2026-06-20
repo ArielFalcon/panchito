@@ -157,16 +157,28 @@ export async function getCommitMessage(dir: string, sha: string, deps: MirrorDep
   return deps.git(["show", "-s", "--format=%B", sha], dir);
 }
 
+// Prepend the orchestrator's git hardening as COMMAND-LINE `-c` overrides (which a repo's own
+// .git/config cannot override) before the caller's subcommand. Two concerns, both stemming from
+// operating on UNTRUSTED, sandbox-touched working copies:
+//   - core.hooksPath=/dev/null — a commit/checkout would otherwise run the repo's hooks AS THE
+//     ORCHESTRATOR (root); a sandbox-planted `.git/hooks/pre-commit` is a root-RCE escape. The
+//     orchestrator never relies on a repo's hooks, so disabling them is uniformly safe.
+//   - safe.directory=* — after an e2e/code run the orchestrator chowns the working copy to the
+//     unprivileged sandbox uid (to execute untrusted specs). git-as-root then aborts the NEXT
+//     run's ops with "detected dubious ownership" (CVE-2022-24765 guard). These are the
+//     orchestrator's own mirror dirs and hooks are already disabled above, so opting out of the
+//     ownership check is safe and keeps the mirror reusable across privilege-dropped runs.
+//     SCOPE CAVEAT: `*` is intentionally broad (this pure helper has no path context) and ALL git
+//     callers go through here. That is acceptable because every current caller operates only on the
+//     orchestrator's own mirror dirs under MIRROR_DIR with hooks disabled; a future caller for a
+//     DIFFERENT context should scope this to a specific path (`safe.directory=<dir>`) instead.
+export function hardenGitArgs(args: readonly string[]): string[] {
+  return ["-c", "core.hooksPath=/dev/null", "-c", "safe.directory=*", ...args];
+}
+
 export const realGit: Git = (args, cwd) =>
   new Promise((resolve, reject) => {
-    // SECURITY: the orchestrator operates on UNTRUSTED working copies (watched repos, and — in
-    // code mode — trees that an unprivileged sandbox user has written to). A commit/push/checkout
-    // would otherwise run that repo's hooks AS THE ORCHESTRATOR (root): a sandbox-planted
-    // `.git/hooks/pre-commit` is a root-RCE escape. `-c core.hooksPath=/dev/null` on the COMMAND
-    // LINE disables all hooks and cannot be overridden by the repo's own .git/config. The
-    // orchestrator never relies on a repo's hooks, so this is uniformly safe.
-    const hardened = ["-c", "core.hooksPath=/dev/null", ...args];
-    execFile("git", hardened, { cwd, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }, (err, stdout) =>
+    execFile("git", hardenGitArgs(args), { cwd, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }, (err, stdout) =>
       err ? reject(err) : resolve(stdout.toString()),
     );
   });

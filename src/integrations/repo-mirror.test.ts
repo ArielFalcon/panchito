@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ensureMirror, ensureMirrorAtBranch, getCommitDiff, listChangedSpecs, getCommitsBehind, getCommitMessage, resolveRef, getChangedFilesInRange, MirrorDeps } from "./repo-mirror";
+import { ensureMirror, ensureMirrorAtBranch, getCommitDiff, listChangedSpecs, getCommitsBehind, getCommitMessage, resolveRef, getChangedFilesInRange, hardenGitArgs, MirrorDeps } from "./repo-mirror";
 
 // authHeaderArgs() depends on GITHUB_TOKEN and the remote URL on GIT_REMOTE_BASE;
 // clear both to isolate the logic (token-bearing tests set GITHUB_TOKEN per-test).
@@ -26,6 +26,18 @@ function recorder(exists: boolean | ((path: string) => boolean)): MirrorDeps & {
     },
   };
 }
+
+test("hardenGitArgs prepends hook + ownership hardening before the git subcommand", () => {
+  const out = hardenGitArgs(["remote", "set-url", "origin", "https://example.com/x.git"]);
+  // Two command-line hardening flags, in order, BEFORE the subcommand:
+  //  - core.hooksPath=/dev/null  → no repo hook runs as the orchestrator (root-RCE guard)
+  //  - safe.directory=*          → tolerate a mirror chowned to the sandbox uid by a prior
+  //                                 e2e/code execution (git-as-root would else abort with
+  //                                 "detected dubious ownership" and crash the next run).
+  assert.deepEqual(out.slice(0, 4), ["-c", "core.hooksPath=/dev/null", "-c", "safe.directory=*"]);
+  // The caller's args follow untouched.
+  assert.deepEqual(out.slice(4), ["remote", "set-url", "origin", "https://example.com/x.git"]);
+});
 
 test("clones, force-checks out and cleans when the working copy does not exist", async () => {
   const d = recorder(false);
