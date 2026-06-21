@@ -66,8 +66,10 @@ RUN GOARCH="$(dpkg --print-architecture)" \
 
 # Deterministic static-signal extractors (Stage 2). difft + ast-grep are arch-specific release binaries.
 RUN pip3 install --no-cache-dir --break-system-packages lizard==1.23.0
-# ast-grep publishes ONLY .zip Linux assets (no .tar.gz). The zip holds `sg` (small, the one we use)
-# and `ast-grep` (large alias); we extract ONLY `sg`. difft IS a .tar.gz (correct). Fail loud (no || true).
+# ast-grep publishes ONLY .zip Linux assets (no .tar.gz). The zip holds `sg` (a small launcher, ~440KB)
+# and `ast-grep` (the real engine, ~46MB). `sg` is NOT standalone — it execs `ast-grep`, so BOTH must be
+# extracted; with only `sg`, `sg --version` fails at runtime with `Os NotFound` (the build never runs sg,
+# so this surfaces only at runtime). difft IS a .tar.gz (correct). Fail loud (no || true).
 RUN apt-get update && apt-get install -y --no-install-recommends unzip && rm -rf /var/lib/apt/lists/*
 RUN ARCH="$(dpkg --print-architecture)" \
   && case "$ARCH" in \
@@ -77,7 +79,7 @@ RUN ARCH="$(dpkg --print-architecture)" \
      esac \
   && curl -fsSL "https://github.com/Wilfred/difftastic/releases/download/0.69.0/difft-${T}.tar.gz" | tar -C /usr/local/bin -xz difft \
   && curl -fsSL -o /tmp/sg.zip "https://github.com/ast-grep/ast-grep/releases/download/0.43.0/app-${T}.zip" \
-  && unzip -j /tmp/sg.zip sg -d /usr/local/bin \
+  && unzip -j /tmp/sg.zip sg ast-grep -d /usr/local/bin \
   && rm /tmp/sg.zip
 
 # Unprivileged user for executing UNTRUSTED code-mode commands (the watched repo's own
