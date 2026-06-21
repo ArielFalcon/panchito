@@ -64,6 +64,22 @@ RUN GOARCH="$(dpkg --print-architecture)" \
   && ln -sf /usr/local/go/bin/go /usr/local/bin/go \
   && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
 
+# Deterministic static-signal extractors (Stage 2). difft + ast-grep are arch-specific release binaries.
+RUN pip3 install --no-cache-dir --break-system-packages lizard==1.23.0
+# ast-grep publishes ONLY .zip Linux assets (no .tar.gz). The zip holds `sg` (small, the one we use)
+# and `ast-grep` (large alias); we extract ONLY `sg`. difft IS a .tar.gz (correct). Fail loud (no || true).
+RUN apt-get update && apt-get install -y --no-install-recommends unzip && rm -rf /var/lib/apt/lists/*
+RUN ARCH="$(dpkg --print-architecture)" \
+  && case "$ARCH" in \
+       amd64) T=x86_64-unknown-linux-gnu ;; \
+       arm64) T=aarch64-unknown-linux-gnu ;; \
+       *) echo "unsupported arch for static-signal binaries: $ARCH" >&2; exit 1 ;; \
+     esac \
+  && curl -fsSL "https://github.com/Wilfred/difftastic/releases/download/0.69.0/difft-${T}.tar.gz" | tar -C /usr/local/bin -xz difft \
+  && curl -fsSL -o /tmp/sg.zip "https://github.com/ast-grep/ast-grep/releases/download/0.43.0/app-${T}.zip" \
+  && unzip -j /tmp/sg.zip sg -d /usr/local/bin \
+  && rm /tmp/sg.zip
+
 # Unprivileged user for executing UNTRUSTED code-mode commands (the watched repo's own
 # install/test/coverage). The orchestrator runs as root and DROPS to this user for those spawns
 # (src/qa/code-runner.ts → resolveSandbox), so untrusted code cannot read the root-owned API token
