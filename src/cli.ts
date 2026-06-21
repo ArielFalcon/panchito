@@ -11,6 +11,7 @@
 // We therefore refuse to start when the local service answers its health probe, unless the
 // operator explicitly accepts the risk with --allow-concurrent.
 
+import { fileURLToPath } from "node:url";
 import { JobQueue } from "./server/queue";
 import { enqueueTrackedRun } from "./server/runner";
 import { createDurableRunEventStore } from "./server/durable-run-events";
@@ -115,6 +116,7 @@ async function main(): Promise<void> {
   const id = enqueueTrackedRun(queue, {
     app: args.app,
     sha: args.sha,
+    baseSha: args.baseSha,
     target,
     mode: args.mode,
     guidance: args.guidance,
@@ -168,7 +170,7 @@ function printRunReport(record: ReturnType<typeof getRecord> & {}, appCfg: Retur
 
 const TARGETS: TestTarget[] = ["e2e", "code"];
 
-function parseArgs(argv: string[]): { app: string; sha: string; mode: RunMode; target?: TestTarget; guidance?: string; learning: boolean; allowConcurrent: boolean } {
+export function parseArgs(argv: string[]): { app: string; sha: string; baseSha?: string; mode: RunMode; target?: TestTarget; guidance?: string; learning: boolean; allowConcurrent: boolean } {
   const out: Record<string, string> = {};
   let learning = false;
   let allowConcurrent = false;
@@ -181,7 +183,7 @@ function parseArgs(argv: string[]): { app: string; sha: string; mode: RunMode; t
   }
   if (!learning && (!out.app || !out.sha)) {
     console.error(
-      `Usage: npm run qa -- --app <app> --sha <sha> [--mode ${RUN_MODES.join("|")}] [--target e2e|code] [--guidance "..."] [--allow-concurrent]`,
+      `Usage: npm run qa -- --app <app> --sha <sha> [--base-sha <sha>] [--mode ${RUN_MODES.join("|")}] [--target e2e|code] [--guidance "..."] [--allow-concurrent]`,
     );
     console.error('       npm run qa -- --app <app> --learning');
     process.exit(2);
@@ -193,7 +195,7 @@ function parseArgs(argv: string[]): { app: string; sha: string; mode: RunMode; t
   const mode = (RUN_MODES as readonly string[]).includes(out.mode ?? "") ? (out.mode as RunMode) : "diff";
   // Undefined when not passed → the caller derives it from the app config (code vs e2e).
   const target = (TARGETS as string[]).includes(out.target ?? "") ? (out.target as TestTarget) : undefined;
-  return { app: out.app ?? "", sha: out.sha ?? "", mode, target, guidance: out.guidance, learning, allowConcurrent };
+  return { app: out.app ?? "", sha: out.sha ?? "", baseSha: out["base-sha"] || undefined, mode, target, guidance: out.guidance, learning, allowConcurrent };
 }
 
 function showLearning(app: string): void {
@@ -255,7 +257,9 @@ function showLearning(app: string): void {
   console.log(`  archetypes proven: ${curriculum?.archetypes.filter((a) => a.caughtRealBug).length ?? 0}/${curriculum?.archetypes.length ?? 10}`);
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
