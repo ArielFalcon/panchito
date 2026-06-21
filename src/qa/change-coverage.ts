@@ -413,6 +413,26 @@ function lineStartOffsets(source: string): number[] {
   return starts;
 }
 
+// Branch coverage from native reports: reads the SAME sources as collectNativeCoverage (lcov
+// first, then Istanbul JSON). JaCoCo XML is not parsed for branches (out of scope). Returns null
+// when no usable branch data is found. Code-mode-scoped. MUST be exported: pipeline.ts calls it.
+export function collectNativeBranchCoverage(repoDir: string): CoveredBranches | null {
+  const lcovPaths = ["coverage/lcov.info", "lcov.info", "coverage/lcov/lcov.info"];
+  for (const rel of lcovPaths) {
+    const p = join(repoDir, rel);
+    if (existsSync(p)) {
+      const cov = parseLcovBranches(readFileSync(p, "utf8"), repoDir);
+      if (cov.size) return cov;
+    }
+  }
+  const istanbul = join(repoDir, "coverage", "coverage-final.json");
+  if (existsSync(istanbul)) {
+    const cov = parseIstanbulBranches(JSON.parse(readFileSync(istanbul, "utf8")), repoDir);
+    if (cov.size) return cov;
+  }
+  return null;
+}
+
 // ── Default provider (the injected boundary) ─────────────────────────────────
 // Reads coverage produced by the run from conventional locations — NON-invasively (it never
 // changes how the suite runs). Returns null when nothing usable is found (→ "unknown").

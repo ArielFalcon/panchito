@@ -48,7 +48,9 @@ import {
   clearRunArtifacts,
   hasBrowserCoverageDumps,
   DEFAULT_COVERAGE_POLICY,
+  collectNativeBranchCoverage,
   type CoveredLines,
+  type CoveredBranches,
   type CoverageCollectInput,
   type ChangeCoveragePolicy,
 } from "./qa/change-coverage";
@@ -154,6 +156,9 @@ export interface PipelineDeps {
   // run, repo-relative, or null when no usable coverage was produced (→ "unknown", never blocks).
   // Absent (undefined) ⇒ the change-coverage step is skipped entirely.
   collectCoverage?(input: CoverageCollectInput): Promise<CoveredLines | null>;
+  // SEPARATE optional dep — adds branch-coverage signal without changing collectCoverage's
+  // CoveredLines | null return type. Absent → branches stay null (fail-open, never blocks).
+  collectBranchCoverage?(input: CoverageCollectInput): Promise<CoveredBranches | null>;
   // Clears the run's V8 coverage dumps before a measured execute, so a measurement
   // reflects ONLY the execute that just ran (never a prior same-sha run's stale dumps,
   // nor an earlier enforce round). Absent ⇒ no clear (the unit tests stub execute).
@@ -433,6 +438,10 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
       // suite already produced. A null result → "unmeasured", never a misleading 0%.
       if (input.target === "code") await runCodeCoverage(input.repoDir).catch(() => {});
       return defaultCollectCoverage(input);
+    },
+    collectBranchCoverage: async (input) => {
+      if (input.target !== "code") return null; // V8 branch parsing out of scope (code-mode-scoped)
+      try { return collectNativeBranchCoverage(input.repoDir); } catch { return null; }
     },
     clearCoverage: (e2eDir, ns) => clearRunArtifacts(e2eDir, ns),
     hasCoverageDumps: (e2eDir, ns) => hasBrowserCoverageDumps(e2eDir, ns),
@@ -2507,11 +2516,15 @@ export async function runPipeline(
         deps.collectCoverage!({ target: isCode ? "code" : "e2e", repoDir: mirrorDir, e2eDir, changedFiles, namespace: coverageNs });
       const _covT0 = Date.now();
       const collected = await collect();
+      const collectedBranches = deps.collectBranchCoverage
+        ? await deps.collectBranchCoverage({ target: isCode ? "code" : "e2e", repoDir: mirrorDir, e2eDir, changedFiles, namespace: coverageNs })
+        : null;
       addTiming("coverage", Date.now() - _covT0);
-      let cc = computeChangeCoverage(changed, collected ?? new Map());
+      let cc = computeChangeCoverage(changed, collected ?? new Map(), collectedBranches ?? undefined);
       ccForPersistence = cc;
       coverageStatus = decideCoverage(cc, covPolicy);
       log(`[qa] change-coverage: ${coverageStatus} — ${cc.overall.coveredChanged}/${cc.overall.changedLines} changed lines (${(cc.overall.ratio * 100).toFixed(0)}%, policy=${covPolicy.mode}, min=${Math.round(covPolicy.minRatio * 100)}%)`);
+      if (cc.branches) log(`[qa] branch-coverage: ${cc.branches.takenBranches}/${cc.branches.changedBranches} branches on changed lines (${(cc.branches.ratio * 100).toFixed(0)}%)`);
       // Surface a number to the TUI ONLY when coverage was actually measured. A null
       // collection (e.g. an ecosystem whose suite produced no report) must read as
       // "unmeasured" — never a misleading 0/N (0%).
@@ -2538,7 +2551,10 @@ export async function runPipeline(
               run = reRun;
               result = improved;
               const reCollected = await collect();
-              cc = computeChangeCoverage(changed, reCollected ?? new Map());
+              const reBranches = deps.collectBranchCoverage
+                ? await deps.collectBranchCoverage({ target: isCode ? "code" : "e2e", repoDir: mirrorDir, e2eDir, changedFiles, namespace: coverageNs })
+                : null;
+              cc = computeChangeCoverage(changed, reCollected ?? new Map(), reBranches ?? undefined);
               coverageStatus = decideCoverage(cc, covPolicy);
               log(`[qa] change-coverage after improvement: ${coverageStatus} (${(cc.overall.ratio * 100).toFixed(0)}%)`);
               if (reCollected !== null) onCoverage?.(cc.overall.changedLines, cc.overall.coveredChanged);

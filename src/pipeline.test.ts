@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { runPipeline, PipelineDeps, GenerateInput, buildFailureDom, buildFailureDomLines, deriveCycleBackstop, shouldDistillLearning } from "./pipeline";
 import { parseAriaSnapshot } from "./qa/dom-snapshot";
 import { ReviewResult } from "./integrations/opencode-client";
-import { CoveredLines } from "./qa/change-coverage";
+import { CoveredLines, CoveredBranches } from "./qa/change-coverage";
 import { AppConfig } from "./orchestrator/config-loader";
 import { AgentResult, QaCase, QaRunResult, RunMode, RunOutcome } from "./types";
 import type { OracleInput, ValueOracleResult } from "./qa/learning/oracle-types";
@@ -3281,4 +3281,17 @@ test("runPipeline forwards opts.baseSha to prepare (PR-range)", async () => {
   };
   await runPipeline(app, "bbbb222", d, "webhook", { mode: "diff", baseSha: "aaaa111" });
   assert.equal(prepareCalls[0]?.baseSha, "aaaa111");
+});
+
+test("runPipeline passes branch coverage to computeChangeCoverage when dep is wired", async () => {
+  const logs: string[] = [];
+  const branches: CoveredBranches = new Map([["src/x.ts", new Map([[1, { total: 2, taken: 1 }]])]]);
+  const d = deps(passing(), [], { diff: DIFF_4, coverage: [cov([1, 2, 3, 4])], message: "feat: x" });
+  d.collectBranchCoverage = async () => branches;
+  (d as { log?: (m: string) => void }).log = (m: string) => logs.push(m);
+  await runPipeline(covApp("signal"), "abcd1234", d, "webhook", { mode: "diff" });
+  assert.ok(
+    logs.some((l) => /branch-coverage/i.test(l)),
+    `expected a branch-coverage log line, got:\n${logs.join("\n")}`,
+  );
 });
