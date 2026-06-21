@@ -28,6 +28,10 @@ import { coveredOriginalLines, type RawSourceMap } from "./source-map";
 // file (repo-relative, POSIX) → set of line numbers (1-based, new-file side for the diff).
 export type CoveredLines = Map<string, Set<number>>;
 
+// file → line → branch tally on that line. lcov BRDA / Istanbul branchMap give per-branch
+// taken counts; we fold them to {total, taken} per line so it joins on the same changed-line keys.
+export type CoveredBranches = Map<string, Map<number, { total: number; taken: number }>>;
+
 export type CoverageStatus = "pass" | "fail" | "unknown";
 export type CoverageMode = "off" | "signal" | "enforce";
 
@@ -43,6 +47,9 @@ export interface ChangeCoverage {
   overall: { changedLines: number; coveredChanged: number; ratio: number };
   perFile: Array<{ file: string; changed: number; covered: number; ratio: number }>;
   uncovered: Array<{ file: string; lines: number[] }>; // changed lines NOT exercised
+  // Additive, signal-only: branch tally restricted to changed lines. null when no branch
+  // data was available (degrade-to-unknown, exactly like measured=false for lines).
+  branches: { changedBranches: number; takenBranches: number; ratio: number } | null;
 }
 
 // ── Path normalization ───────────────────────────────────────────────────────
@@ -114,26 +121,41 @@ export function parseDiffHunks(diff: string): CoveredLines {
 }
 
 // ── Intersection (pure) ──────────────────────────────────────────────────────
-export function computeChangeCoverage(changed: CoveredLines, covered: CoveredLines): ChangeCoverage {
+export function computeChangeCoverage(changed: CoveredLines, covered: CoveredLines, coveredBranches?: CoveredBranches): ChangeCoverage {
   const perFile: ChangeCoverage["perFile"] = [];
   const uncovered: ChangeCoverage["uncovered"] = [];
   let totalChanged = 0;
   let totalCovered = 0;
   let anyFileMeasured = false;
+  let branchTotal = 0;
+  let branchTaken = 0;
+  let anyBranchMeasured = false;
 
-  for (const [file, lines] of changed) {
+  for (const [file, lineSet] of changed) {
     const cov = covered.get(file);
     if (cov) anyFileMeasured = true;
     let fileCovered = 0;
     const fileUncovered: number[] = [];
-    for (const ln of lines) {
+    for (const ln of lineSet) {
       if (cov?.has(ln)) fileCovered++;
       else fileUncovered.push(ln);
     }
-    totalChanged += lines.size;
+    totalChanged += lineSet.size;
     totalCovered += fileCovered;
-    perFile.push({ file, changed: lines.size, covered: fileCovered, ratio: lines.size ? fileCovered / lines.size : 1 });
+    perFile.push({ file, changed: lineSet.size, covered: fileCovered, ratio: lineSet.size ? fileCovered / lineSet.size : 1 });
     if (fileUncovered.length) uncovered.push({ file, lines: fileUncovered.sort((a, b) => a - b) });
+
+    const branchesForFile = coveredBranches?.get(file);
+    if (branchesForFile) {
+      for (const ln of lineSet) {
+        const tally = branchesForFile.get(ln);
+        if (tally) {
+          anyBranchMeasured = true;
+          branchTotal += tally.total;
+          branchTaken += tally.taken;
+        }
+      }
+    }
   }
 
   return {
@@ -141,6 +163,7 @@ export function computeChangeCoverage(changed: CoveredLines, covered: CoveredLin
     overall: { changedLines: totalChanged, coveredChanged: totalCovered, ratio: totalChanged ? totalCovered / totalChanged : 1 },
     perFile,
     uncovered,
+    branches: anyBranchMeasured ? { changedBranches: branchTotal, takenBranches: branchTaken, ratio: branchTotal ? branchTaken / branchTotal : 1 } : null,
   };
 }
 
@@ -206,6 +229,35 @@ export function parseLcov(text: string, repoDir?: string): CoveredLines {
   return out;
 }
 
+// Branch coverage from lcov BRDA records: BRDA:<line>,<block>,<branch>,<taken>.
+// <taken> is a hit count, or "-" when the branch was never reached. We fold per line:
+// total = number of BRDA records on that line; taken = those with a numeric, >0 hit count.
+export function parseLcovBranches(text: string, repoDir?: string): CoveredBranches {
+  const out: CoveredBranches = new Map();
+  let file: string | null = null;
+  for (const line of text.split("\n")) {
+    if (line.startsWith("SF:")) {
+      file = normalizeRepoPath(line.slice(3).trim(), repoDir);
+      if (!out.has(file)) out.set(file, new Map());
+    } else if (line.startsWith("BRDA:") && file) {
+      const parts = line.slice(5).split(",");
+      const ln = Number(parts[0]);
+      // Guard: BRDA must have ≥4 fields (<line>,<block>,<branch>,<taken>). A truncated line is
+      // skipped, not miscounted as an untaken branch.
+      if (parts.length < 4 || !Number.isFinite(ln)) continue;
+      const takenRaw = parts[3];
+      const perLine = out.get(file)!;
+      const tally = perLine.get(ln) ?? { total: 0, taken: 0 };
+      tally.total += 1;
+      if (takenRaw !== "-" && Number(takenRaw) > 0) tally.taken += 1;
+      perLine.set(ln, tally);
+    } else if (line.startsWith("end_of_record")) {
+      file = null;
+    }
+  }
+  return out;
+}
+
 // Istanbul coverage-final.json (Node default from c8/nyc): { "<path>": { statementMap, s } }.
 export function parseIstanbulJson(json: unknown, repoDir?: string): CoveredLines {
   const out: CoveredLines = new Map();
@@ -224,6 +276,34 @@ export function parseIstanbulJson(json: unknown, repoDir?: string): CoveredLines
       if (typeof from === "number" && typeof to === "number") for (let l = from; l <= to; l++) set.add(l);
     }
     if (set.size) out.set(file, set);
+  }
+  return out;
+}
+
+// Branch coverage from Istanbul: branchMap[id] gives the branch location(s); b[id] is the
+// per-branch hit-count array. Anchor each branch to branchMap[id].loc.start.line and fold:
+// total = number of sub-branches (b[id].length); taken = those with count > 0.
+export function parseIstanbulBranches(json: unknown, repoDir?: string): CoveredBranches {
+  const out: CoveredBranches = new Map();
+  if (!json || typeof json !== "object") return out;
+  for (const [rawPath, entry] of Object.entries(json as Record<string, unknown>)) {
+    if (!entry || typeof entry !== "object") continue;
+    const e = entry as { path?: string; branchMap?: Record<string, { loc?: { start?: { line?: number } } }>; b?: Record<string, number[]> };
+    const map = e.branchMap;
+    const counts = e.b;
+    if (!map || !counts) continue;
+    const file = normalizeRepoPath(e.path ?? rawPath, repoDir);
+    const perLine = new Map<number, { total: number; taken: number }>();
+    for (const [id, meta] of Object.entries(map)) {
+      const ln = meta.loc?.start?.line;
+      const arr = counts[id];
+      if (typeof ln !== "number" || !Array.isArray(arr)) continue;
+      const tally = perLine.get(ln) ?? { total: 0, taken: 0 };
+      tally.total += arr.length;
+      tally.taken += arr.filter((c) => c > 0).length;
+      perLine.set(ln, tally);
+    }
+    if (perLine.size) out.set(file, perLine);
   }
   return out;
 }

@@ -11,12 +11,15 @@ import {
   renderUncovered,
   normalizeRepoPath,
   parseLcov,
+  parseLcovBranches,
   parseJacocoXml,
   parseIstanbulJson,
+  parseIstanbulBranches,
   parseV8Coverage,
   resolveUrlToRepoFile,
   clearRunArtifacts,
   CoveredLines,
+  CoveredBranches,
   DEFAULT_COVERAGE_POLICY,
 } from "./change-coverage";
 
@@ -228,6 +231,36 @@ test("parseV8Coverage still reports every line of a fully-covered function", () 
   const source = "a\nb\nc\n";
   const entries = [{ url: "http://dev/src/y.ts", source, functions: [{ ranges: [{ startOffset: 0, endOffset: 6, count: 1 }] }] }];
   assert.deepEqual(lines(parseV8Coverage(entries, ["src/y.ts"])), { "src/y.ts": [1, 2, 3] });
+});
+
+function branchTally(m: CoveredBranches): Record<string, Record<number, { total: number; taken: number }>> {
+  const o: Record<string, Record<number, { total: number; taken: number }>> = {};
+  for (const [f, perLine] of m) { o[f] = {}; for (const [ln, t] of perLine) o[f][ln] = t; }
+  return o;
+}
+
+test("parseLcovBranches: BRDA tallies total and taken per line", () => {
+  const lcov = ["SF:/repo/src/a.ts", "BRDA:5,0,0,1", "BRDA:5,0,1,-", "BRDA:8,0,0,3", "end_of_record"].join("\n");
+  assert.deepEqual(branchTally(parseLcovBranches(lcov, "/repo")), { "src/a.ts": { 5: { total: 2, taken: 1 }, 8: { total: 1, taken: 1 } } });
+});
+
+test("parseIstanbulBranches: branchMap loc.start.line with b>0 counts as taken", () => {
+  const json = { "/repo/src/a.ts": { path: "/repo/src/a.ts", branchMap: { "0": { loc: { start: { line: 5 } }, locations: [{ start: { line: 5 } }, { start: { line: 5 } }] } }, b: { "0": [3, 0] } } };
+  assert.deepEqual(branchTally(parseIstanbulBranches(json, "/repo")), { "src/a.ts": { 5: { total: 2, taken: 1 } } });
+});
+
+test("computeChangeCoverage folds branch tally restricted to changed lines", () => {
+  const changed: CoveredLines = new Map([["src/a.ts", new Set([5, 8])]]);
+  const coveredLines: CoveredLines = new Map([["src/a.ts", new Set([5, 8])]]);
+  const coveredBranches: CoveredBranches = new Map([["src/a.ts", new Map([[5, { total: 2, taken: 1 }], [99, { total: 4, taken: 4 }]])]]);
+  const cc = computeChangeCoverage(changed, coveredLines, coveredBranches);
+  assert.deepEqual(cc.branches, { changedBranches: 2, takenBranches: 1, ratio: 0.5 });
+});
+
+test("computeChangeCoverage: branches null when no branch data", () => {
+  const changed: CoveredLines = new Map([["src/a.ts", new Set([1])]]);
+  const cc = computeChangeCoverage(changed, new Map([["src/a.ts", new Set([1])]]));
+  assert.equal(cc.branches, null);
 });
 
 // An INDEPENDENT base64-VLQ encoder (the inverse of source-map.ts's decoder), so the realistic
