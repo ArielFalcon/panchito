@@ -51,6 +51,7 @@ export interface RunRequest {
   triggerRepo?: string; // cross-repo runs: the service repo whose commit originated this run
   previousNamespace?: string; // cleanup: namespace from an interrupted previous run
   commits?: number; // diff mode: how many commits ending at the SHA the diff spans (default 1)
+  baseSha?: string; // PR/push range: when set, diff spans baseSha..sha (range diff)
 }
 
 // Side-effecting collaborators, injected so the funnel is unit-testable with stubs.
@@ -144,7 +145,7 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
           },
         },
         req.source ?? "webhook",
-        { mode: req.mode, target: req.target, guidance: req.guidance, fixCases: req.fixCases, parentRunId: req.parentRunId, triggerRepo: req.triggerRepo, previousNamespace, runId: record.id, commits: req.commits },
+        { mode: req.mode, target: req.target, guidance: req.guidance, fixCases: req.fixCases, parentRunId: req.parentRunId, triggerRepo: req.triggerRepo, previousNamespace, runId: record.id, commits: req.commits, baseSha: req.baseSha },
         (step, detail) => {
           updateRecord(record.id, { step, stepDetail: detail, retrying: step === "retry" });
           const normalized = step === "publish" ? "decide" : step;

@@ -21,6 +21,7 @@ test("parseWebhook understands the simple shape { repo, sha } (mode defaults to 
     sha: SHA,
     mode: "diff",
     guidance: undefined,
+    baseSha: undefined,
   });
 });
 
@@ -30,6 +31,7 @@ test("parseWebhook reads mode and guidance", () => {
     sha: SHA,
     mode: "manual",
     guidance: "test login",
+    baseSha: undefined,
   });
   // unknown mode falls back to diff
   assert.equal(parseWebhook({ repo: "a", sha: SHA, mode: "nope" })?.mode, "diff");
@@ -40,7 +42,7 @@ test("parseWebhook reads mode and guidance", () => {
 test("parseWebhook understands the GitHub push event (mode diff)", () => {
   assert.deepEqual(
     parseWebhook({ repository: { full_name: "org/app" }, after: "deadbeef" }),
-    { repo: "org/app", sha: "deadbeef", mode: "diff" },
+    { repo: "org/app", sha: "deadbeef", mode: "diff", baseSha: undefined },
   );
 });
 
@@ -53,6 +55,16 @@ test("parseWebhook rejects a non-hex sha (argument-injection / garbage)", () => 
 test("parseWebhook returns null when it does not recognize the payload", () => {
   assert.equal(parseWebhook({ foo: 1 }), null);
   assert.equal(parseWebhook("not-an-object"), null);
+});
+
+test("parseWebhook captures push-event before as baseSha", () => {
+  const payload = parseWebhook({ repository: { full_name: "o/r" }, before: "a".repeat(40), after: "b".repeat(40) });
+  assert.equal(payload?.sha, "b".repeat(40));
+  assert.equal(payload?.baseSha, "a".repeat(40));
+});
+test("parseWebhook drops an all-zero before (new branch)", () => {
+  const payload = parseWebhook({ repository: { full_name: "o/r" }, before: "0".repeat(40), after: "b".repeat(40) });
+  assert.equal(payload?.baseSha, undefined);
 });
 
 test("handleWebhook: 401 when the signature does not validate", () => {
@@ -73,7 +85,7 @@ test("handleWebhook: 202 + payload with a correct signature", () => {
   const body = `{"repo":"org/app","sha":"${SHA}"}`;
   const r = handleWebhook(body, sign(body), { secret: SECRET });
   assert.equal(r.status, 202);
-  assert.deepEqual(r.payload, { repo: "org/app", sha: SHA, mode: "diff", guidance: undefined });
+  assert.deepEqual(r.payload, { repo: "org/app", sha: SHA, mode: "diff", guidance: undefined, baseSha: undefined });
 });
 
 test("handleWebhook: with no secret configured the CORE does not require a signature (the index.ts fail-closed gate is separate)", () => {

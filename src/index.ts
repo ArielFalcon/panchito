@@ -200,14 +200,14 @@ process.on("unhandledRejection", (reason) => {
   recordIncident({ source: "qa-generator", severity: "error", summary: `unhandled rejection: ${msg}` });
 });
 
-function enqueueApiRun(app: string, sha: string, target: string, mode: RunMode, guidance?: string, shadow?: boolean, commits?: number, triggerRepo?: string): string {
+function enqueueApiRun(app: string, sha: string, target: string, mode: RunMode, guidance?: string, shadow?: boolean, commits?: number, triggerRepo?: string, baseSha?: string): string {
   if (shuttingDown) {
     console.warn(`[qa] rejecting run ${app}@${sha} — shutting down`);
     return "";
   }
   // Orphan-data cleanup is reconstructed inside enqueueTrackedRun (the single funnel), so
   // every trigger gets it — not just this webhook path.
-  return enqueueTrackedRun(queue, { app, sha, target: target as TestTarget, mode, guidance, shadow, commits, source: "webhook", triggerRepo }, { runEvents, pipeline: currentPipelineDeps() });
+  return enqueueTrackedRun(queue, { app, sha, target: target as TestTarget, mode, guidance, shadow, commits, source: "webhook", triggerRepo, baseSha }, { runEvents, pipeline: currentPipelineDeps() });
 }
 
 // Orphan-session sweep threshold. Must always exceed the longest possible agent
@@ -582,13 +582,13 @@ const server = createServer(async (req, res) => {
           res.end(JSON.stringify({ message: "shutting down" }));
           return;
         }
-        const { repo, sha, mode, guidance } = result.payload;
+        const { repo, sha, mode, guidance, baseSha } = result.payload;
         const matches = loadAppConfigsByRepo(repo);
         if (matches.length === 0) logJson("warn", "no config/apps entry for repo; event ignored", { repo });
         for (const m of matches) {
           try {
             if (m.role === "primary") {
-              enqueueApiRun(m.app.name, sha, m.app.code ? "code" : "e2e", mode, guidance);
+              enqueueApiRun(m.app.name, sha, m.app.code ? "code" : "e2e", mode, guidance, undefined, undefined, undefined, baseSha);
             } else {
               enqueueApiRun(m.app.name, sha, "e2e", "diff", guidance, undefined, undefined, repo);
             }
