@@ -60,6 +60,9 @@ import { renderIssue, type IssueContext, type TestedItem, type AdjudicationLabel
 import { renderValueTag } from "./qa/value-report";
 import { captureDom, captureDomByRoute, captureRouteTrees, defaultCaptureDomDeps, capDomLines, type CaptureDomInput, type RouteSnapshot } from "./qa/dom-snapshot";
 import { buildContextPack, defaultContextPackDeps } from "./qa/context-pack";
+import { aggregateStaticSignal, type StaticSignalInput } from "./qa/static-signal/aggregate";
+import { EMPTY_STATIC_SIGNAL, type StaticSignal } from "./qa/static-signal/types";
+import { renderStaticSignal } from "./qa/static-signal/render";
 import { loadContextCache as loadContextCacheDefault, saveContextCache as saveContextCacheDefault } from "./qa/context-cache";
 import { AgentResult, QaCase, QaRunResult, TriggerSource, RunMode, RunOptions, TestTarget, RunOutcome, SpecMeta, RunVerdict } from "./types";
 import type { AgentDeps, ReviewInput, ReviewResult } from "./integrations/opencode-client";
@@ -102,6 +105,9 @@ export interface GenerateInput {
   // Slice G: pre-built Context Pack text (blast-radius + DOM + contracts), assembled by the
   // orchestrator before the first write and pushed into the generator prompt (VOLATILE band).
   contextPack?: string;
+  // Static signal: deterministic pre-computed analysis (symbols, relations, complexity, patterns)
+  // rendered as a prompt section by renderStaticSignal. Empty string or absent = no section added.
+  staticSignal?: string;
   // Slice H: the ExplorationBrief produced by the orchestrator-level explorer pass, carried into
   // defaultPipelineDeps.generate so it can be forwarded as contextBrief to runOpencode WITHOUT
   // triggering a second maybeExplore call (explorer flag cleared when this is set). The brief also
@@ -234,6 +240,9 @@ export interface PipelineDeps {
   // The agent runtime config for this run — used to derive usage.complete.
   // Absent ⇒ complete defaults to false.
   agentRuntimeConfig?: AgentRuntimeConfig;
+  // Static signal aggregator: deterministic pre-computed analysis (symbols, relations, complexity,
+  // patterns). Optional — absent ⇒ step skipped, no signal injected. Signal-only, fail-open.
+  aggregateStaticSignal?: (input: StaticSignalInput) => Promise<StaticSignal>;
 }
 
 export interface DefaultPipelineDepsOptions {
@@ -300,6 +309,7 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
         contextBrief: input.explorerBrief ?? undefined,
         explorer: input.explorerBrief ? false : input.explorer,
         contextPack: input.contextPack,
+        staticSignal: input.staticSignal,
         service: input.service,
         services: input.services,
       };
@@ -465,6 +475,7 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
       }),
     publish: (input) => publishE2e(input, defaultPublishDeps),
     openIssue: (repo, title, body) => github.openIssue(repo, title, body),
+    aggregateStaticSignal: (input) => Promise.resolve(EMPTY_STATIC_SIGNAL(input.sha)),
     saveOutcome: async (outcome) => {
       const { saveRunOutcome } = await import("./server/history");
       saveRunOutcome(outcome);
@@ -1778,8 +1789,15 @@ export async function runPipeline(
       }
     }
 
+    let staticSignalText: string | undefined;
+    if (deps.aggregateStaticSignal && !isCode && generating && !triggerService) {
+      const sig = await deps.aggregateStaticSignal({ sha, baseSha: opts.baseSha, repoDir: mirrorDir, changedFiles: [...parseDiffHunks(promptDiff).keys()], diff: promptDiff });
+      staticSignalText = renderStaticSignal(sig) || undefined;
+      if (sig.skipped.length) log(`[qa] static-signal: ${sig.symbols.length} symbols, ${sig.relations.length} relations, ${sig.complexity.length} hotspots (skipped: ${sig.skipped.length})`);
+    }
+
     log("[qa] generating E2E tests with OpenCode...");
-    result = await generateAndReview(baseGenInput({ fixCases: opts.fixCases }));
+    result = await generateAndReview(baseGenInput({ fixCases: opts.fixCases, staticSignal: staticSignalText }));
 
     // W1 — pre-execution corrective pass. Detect strict-mode ambiguity against the live DOM and, if found,
     // feed it through the EXISTING selectorContradictions regen channel + generateAndReview (cycle-ceiling

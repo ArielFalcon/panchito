@@ -154,6 +154,8 @@ export function buildWorkerPromptAssembled(w: ParallelWorkerInput): AssembledPro
     section("worker-rules", "stable-prefix", rulesBlock, { priority: 1, cacheable: true }),
     // SEMI-STABLE: objective + context (changes per worker assignment but stable within a turn).
     section("worker-context", "semi-stable", contextLines, { priority: 1 }),
+    // SEMI-STABLE: static signal — same priority/role as the single-agent path (priority 3).
+    ...(w.staticSignal ? [section("static-signal", "semi-stable", w.staticSignal, { priority: 3 })] : []),
     // VOLATILE: injected DOM (changes per captured route snapshot).
     ...(domContent ? [section("worker-dom", "volatile", domContent, { priority: 1 })] : []),
     // VOLATILE: learned rules (changes as the learning layer accumulates knowledge).
@@ -751,6 +753,9 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
   // TASK: mode-specific task (the concrete objective for this session).
   const taskContent = buildTask(input);
 
+  // SEMI-STABLE: static signal (deterministic pre-computed analysis — stable for this diff).
+  const staticSignalContent = input.staticSignal && isGenerationMode ? input.staticSignal : "";
+
   return assemble([
     // STABLE prefix: working rules (mode-specific but stable for the generator role per session).
     section("working-rules", "stable-prefix", workingRulesContent, { priority: 1, cacheable: true }),
@@ -761,6 +766,7 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
     // SEMI-STABLE: architecture map and exploration brief (change between runs, stable within).
     ...(archMapContent ? [section("arch-map", "semi-stable", archMapContent, { priority: 1, cacheable: true })] : []),
     ...(contextBriefContent ? [section("context-brief", "semi-stable", contextBriefContent, { priority: 2 })] : []),
+    ...(staticSignalContent ? [section("static-signal", "semi-stable", staticSignalContent, { priority: 3 })] : []),
     // VOLATILE priority 0: Context Pack (blast-radius + DOM + contracts, pushed by orchestrator).
     // Placed FIRST in VOLATILE so the ground-truth is nearest the task and within the
     // compaction-preserved tail. The domSnapshot (failure-point capture) stays at priority 1

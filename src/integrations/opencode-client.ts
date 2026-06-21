@@ -507,6 +507,9 @@ export interface OpencodeRunInput {
   // When present, the generator transcribes from this pack instead of re-exploring.
   // When absent, the explore-first mandate remains active (existing behaviour unchanged).
   contextPack?: string;
+  // Static signal: deterministic pre-computed analysis rendered as a prompt section.
+  // Empty string or absent = no section added. Signal-only, fail-open.
+  staticSignal?: string;
   service?: { repo: string; mirrorDir: string; openapi?: string | string[] }; // cross-repo: the triggering microservice (read-only working copy)
   services?: Array<{ repo: string; mirrorDir: string; openapi?: string | string[] }>; // context mode: every declared service, mirrored read-only
 }
@@ -1097,6 +1100,7 @@ export interface ParallelWorkerInput {
   learnedRules?: string; // anti-pattern rules from past runs — injected so workers don't repeat them
   domSnapshot?: string; // live DEV a11y tree of this flow's routes — the worker transcribes, not guesses
   runId?: string; // set on fan-out so the worker's live activity routes + carries a workerId
+  staticSignal?: string; // deterministic pre-computed analysis (signal-only, fail-open)
 }
 
 // Dispatch each worker objective to a SEPARATE qa-worker session, bounded concurrency.
@@ -1375,6 +1379,7 @@ export async function runOpencodeParallel(
     learnedRules: input.learnedRules,
     ...(dom ? { domSnapshot: dom } : {}),
     runId: input.runId,
+    staticSignal: input.staticSignal,
   }));
 
   // Dispatch grounded objectives to lite workers in parallel.
