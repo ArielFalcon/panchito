@@ -3270,3 +3270,15 @@ test("gateSignals: a run with no pre-exec ambiguity records zero catches/blocks"
   assert.equal(last!.gateSignals.preExecAmbiguityCatches ?? 0, 0, "no ambiguity → zero catches");
   assert.equal(last!.gateSignals.deterministicSelectorBlocks ?? 0, 0, "no ambiguity → zero blocks");
 });
+
+test("runPipeline forwards opts.baseSha to prepare (PR-range)", async () => {
+  const prepareCalls: Array<{ sha: string; baseSha?: string }> = [];
+  const calls: string[] = [];
+  const d = deps(passing(), calls, {});
+  d.prepare = async (_repo: string, sha: string, _commits?: number, baseSha?: string) => {
+    prepareCalls.push({ sha, baseSha });
+    return { mirrorDir: d.mirrorDir, diff: "diff --git a/x b/x\n", message: "feat: x" };
+  };
+  await runPipeline(app, "bbbb222", d, "webhook", { mode: "diff", baseSha: "aaaa111" });
+  assert.equal(prepareCalls[0]?.baseSha, "aaaa111");
+});

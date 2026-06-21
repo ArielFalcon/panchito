@@ -10,7 +10,7 @@ import { join, dirname } from "node:path";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync, lstatSync } from "node:fs";
 import { AppConfig } from "./orchestrator/config-loader";
 import { DeployTarget, waitForDeploy } from "./env/deploy-gate";
-import { ensureMirror, ensureMirrorAtBranch, getCommitDiff, getCommitMessage, listChangedSpecs as gitListChangedSpecs, getCommitsBehind, defaultMirrorDeps, realGit } from "./integrations/repo-mirror";
+import { ensureMirror, ensureMirrorAtBranch, getCommitDiff, getCommitMessage, getRangeDiff, listChangedSpecs as gitListChangedSpecs, getCommitsBehind, defaultMirrorDeps, realGit } from "./integrations/repo-mirror";
 import { runConfinement, type ConfinementResult } from "./qa/confinement";
 import { createUsageAccumulator, type UsageSnapshot, type RunUsage } from "./qa/usage";
 import { runOpencode, runOpencodeParallel, shouldFanOut, defaultAgentDeps, reviewIndependently, getOpenSessionCount, withUsageSink, maybeExplore, agentTimeout } from "./integrations/opencode-client";
@@ -123,7 +123,7 @@ export interface PipelineDeps {
   // The signal aborts the gate's poll loop early (run cancelled, or the commit was
   // classified as a skip while the gate was still polling in the background).
   waitForDeploy(target: DeployTarget, sha: string, signal?: AbortSignal): Promise<void>;
-  prepare(repo: string, sha: string, commits?: number): Promise<{ mirrorDir: string; diff: string; message: string }>;
+  prepare(repo: string, sha: string, commits?: number, baseSha?: string): Promise<{ mirrorDir: string; diff: string; message: string }>;
   // Cross-repo runs: the PRIMARY repo at the HEAD of its base branch (the triggering
   // SHA belongs to the service repo and does not exist in the primary).
   prepareAtBranch(repo: string, branch: string): Promise<{ mirrorDir: string }>;
@@ -252,9 +252,11 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
   return {
     agentRuntimeConfig: options.agentRuntimeConfig,
     waitForDeploy: (target, sha, signal) => waitForDeploy(target, sha, undefined, signal),
-    prepare: async (repo, sha, commits) => {
+    prepare: async (repo, sha, commits, baseSha) => {
       const mirrorDir = await ensureMirror(repo, sha, defaultMirrorDeps);
-      const diff = await getCommitDiff(mirrorDir, sha, defaultMirrorDeps, commits);
+      const diff = baseSha && baseSha !== sha
+        ? await getRangeDiff(mirrorDir, baseSha, sha, defaultMirrorDeps)
+        : await getCommitDiff(mirrorDir, sha, defaultMirrorDeps, commits);
       const message = await getCommitMessage(mirrorDir, sha, defaultMirrorDeps);
       return { mirrorDir, diff, message };
     },
@@ -1019,7 +1021,7 @@ export async function runPipeline(
     // commits>1 widens the diff window — only meaningful in diff mode (the others scan the
     // whole repo, not a commit's blast radius).
     const commits = mode === "diff" ? opts.commits : undefined;
-    ({ mirrorDir, diff, message } = await deps.prepare(app.repo, sha, commits));
+    ({ mirrorDir, diff, message } = await deps.prepare(app.repo, sha, commits, opts.baseSha));
   }
   const e2eDir = join(mirrorDir, E2E_DIR);
   const ns = testDataNamespace(app.qa.testDataPrefix, sha, opts.runId);

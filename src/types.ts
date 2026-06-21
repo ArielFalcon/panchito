@@ -50,6 +50,9 @@ export interface RunOptions {
   runId?: string; // the tracked run id; scopes the data/coverage namespace per run
   triggerRepo?: string; // cross-repo: the service repo whose commit triggered this run
   commits?: number; // diff mode: how many commits ending at the SHA the diff spans (default 1)
+  // PR/push range: when set and != the head sha, the diff spans baseSha..sha (the whole PR),
+  // not just the tip commit. Absent → single-commit behavior (unchanged).
+  baseSha?: string;
 }
 
 // Outcome of an OpenCode agent run. The agent writes the E2E tests directly into
