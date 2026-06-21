@@ -61,6 +61,7 @@ import { renderValueTag } from "./qa/value-report";
 import { captureDom, captureDomByRoute, captureRouteTrees, defaultCaptureDomDeps, capDomLines, type CaptureDomInput, type RouteSnapshot } from "./qa/dom-snapshot";
 import { buildContextPack, defaultContextPackDeps } from "./qa/context-pack";
 import { aggregateStaticSignal, type StaticSignalInput } from "./qa/static-signal/aggregate";
+import { defaultStaticSignalDeps } from "./qa/static-signal/aggregate.defaults";
 import { EMPTY_STATIC_SIGNAL, type StaticSignal } from "./qa/static-signal/types";
 import { renderStaticSignal } from "./qa/static-signal/render";
 import { loadContextCache as loadContextCacheDefault, saveContextCache as saveContextCacheDefault } from "./qa/context-cache";
@@ -475,7 +476,7 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
       }),
     publish: (input) => publishE2e(input, defaultPublishDeps),
     openIssue: (repo, title, body) => github.openIssue(repo, title, body),
-    aggregateStaticSignal: (input) => Promise.resolve(EMPTY_STATIC_SIGNAL(input.sha)),
+    aggregateStaticSignal: (input) => aggregateStaticSignal(input, defaultStaticSignalDeps),
     saveOutcome: async (outcome) => {
       const { saveRunOutcome } = await import("./server/history");
       saveRunOutcome(outcome);
