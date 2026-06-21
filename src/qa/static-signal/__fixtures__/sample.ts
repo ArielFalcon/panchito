@@ -1,3 +1,5 @@
+import { OrderService } from "./order";
+
 export function pay(amount: number, currency: string): void {
   console.log(`Paying ${amount} ${currency}`);
 }
