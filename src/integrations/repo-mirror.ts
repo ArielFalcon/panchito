@@ -265,3 +265,18 @@ export async function getChangedFilesInRange(
   // Deduplicate and sort for determinism (renames can appear twice under both paths).
   return [...new Set(files)].sort();
 }
+
+// Full unified diff across a commit RANGE (base..head) — the union of everything a PR
+// introduced, not just its tip. Twin of getChangedFilesInRange, but returns the diff WITH
+// line content so parseDiffHunks derives both changed files AND changed lines. Single-commit
+// callers keep using getCommitDiff; this is only taken when a base SHA is known (PR/push range).
+export async function getRangeDiff(
+  dir: string,
+  baseSha: string,
+  headSha: string,
+  deps: MirrorDeps,
+): Promise<string> {
+  assertHexSha(baseSha);
+  assertHexSha(headSha);
+  return deps.git(["diff", `${baseSha}..${headSha}`], dir);
+}

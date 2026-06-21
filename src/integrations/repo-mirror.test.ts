@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ensureMirror, ensureMirrorAtBranch, getCommitDiff, listChangedSpecs, getCommitsBehind, getCommitMessage, resolveRef, getChangedFilesInRange, hardenGitArgs, MirrorDeps } from "./repo-mirror";
+import { ensureMirror, ensureMirrorAtBranch, getCommitDiff, listChangedSpecs, getCommitsBehind, getCommitMessage, resolveRef, getChangedFilesInRange, getRangeDiff, hardenGitArgs, MirrorDeps } from "./repo-mirror";
 
 // authHeaderArgs() depends on GITHUB_TOKEN and the remote URL on GIT_REMOTE_BASE;
 // clear both to isolate the logic (token-bearing tests set GITHUB_TOKEN per-test).
@@ -410,4 +410,23 @@ test("getChangedFilesInRange: uses diff --name-only with baseSha..headSha revspe
   };
   await getChangedFilesInRange("/dir", base, head, d);
   assert.deepEqual(capturedArgs, ["diff", "--name-only", `${base}..${head}`]);
+});
+
+// ── Slice H: getRangeDiff (PR-range full diff for line-level coverage) ────────
+
+test("getRangeDiff diffs base..head as one range", async () => {
+  const d = gitStub(() => "range-diff");
+  const diff = await getRangeDiff("/dir", "aaaa1111", "bbbb2222", d);
+  assert.equal(diff, "range-diff");
+  assert.deepEqual(d.calls[0], ["diff", "aaaa1111..bbbb2222"]);
+});
+
+test("getRangeDiff rejects a non-hex base sha", async () => {
+  const d = gitStub(() => "");
+  await assert.rejects(() => getRangeDiff("/dir", "not-a-sha", "bbbb2222", d), /invalid commit sha/);
+});
+
+test("getRangeDiff rejects a non-hex head sha", async () => {
+  const d = gitStub(() => "");
+  await assert.rejects(() => getRangeDiff("/dir", "aaaa1111", "not-a-sha", d), /invalid commit sha/);
 });
