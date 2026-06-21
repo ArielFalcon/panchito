@@ -1602,6 +1602,11 @@ export async function runPipeline(
   // explorer pass per run (no double-run). Undefined when the explorer is disabled or fails.
   let builtExplorerBrief: import("./qa/exploration-brief").ExplorationBrief | undefined;
 
+  // Declared here (before baseGenInput) so the closure captures it; assigned after the
+  // context-pack block. All real baseGenInput() call sites are after the assignment, so
+  // every generation and re-generation pass receives the computed value (or undefined).
+  let staticSignalText: string | undefined;
+
   const baseGenInput = (extra: Partial<GenerateInput>): GenerateInput => ({
     repo: app.repo,
     sha,
@@ -1628,6 +1633,7 @@ export async function runPipeline(
     contextMap,
     contextPack: builtContextPack,
     learnedRules: promptSections,
+    staticSignal: staticSignalText,
     service: triggerService
       ? { repo: triggerService.repo, mirrorDir: serviceMirrorDir!, openapi: triggerService.openapi }
       : undefined,
@@ -1790,15 +1796,17 @@ export async function runPipeline(
       }
     }
 
-    let staticSignalText: string | undefined;
     if (deps.aggregateStaticSignal && !isCode && generating && !triggerService) {
       const sig = await deps.aggregateStaticSignal({ sha, baseSha: opts.baseSha, repoDir: mirrorDir, changedFiles: [...parseDiffHunks(promptDiff).keys()], diff: promptDiff });
       staticSignalText = renderStaticSignal(sig) || undefined;
-      if (sig.skipped.length) log(`[qa] static-signal: ${sig.symbols.length} symbols, ${sig.relations.length} relations, ${sig.complexity.length} hotspots (skipped: ${sig.skipped.length})`);
+      const hasContent = sig.symbols.length > 0 || sig.relations.length > 0 || sig.complexity.length > 0 || sig.patterns.length > 0;
+      if (hasContent || sig.skipped.length > 0) {
+        log(`[qa] static-signal: ${sig.symbols.length} symbols, ${sig.relations.length} relations, ${sig.complexity.length} hotspots, ${sig.patterns.length} patterns${sig.skipped.length > 0 ? ` (skipped: ${sig.skipped.length})` : ""}`);
+      }
     }
 
     log("[qa] generating E2E tests with OpenCode...");
-    result = await generateAndReview(baseGenInput({ fixCases: opts.fixCases, staticSignal: staticSignalText }));
+    result = await generateAndReview(baseGenInput({ fixCases: opts.fixCases }));
 
     // W1 — pre-execution corrective pass. Detect strict-mode ambiguity against the live DOM and, if found,
     // feed it through the EXISTING selectorContradictions regen channel + generateAndReview (cycle-ceiling

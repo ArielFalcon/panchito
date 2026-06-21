@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import type { FileChangeKind } from "./types";
 import { runBinary } from "./exec";
+import { scrubEnv } from "../code-runner";
 
 // ── NDJSON record types (difft 0.69.0) ───────────────────────────────────────
 
@@ -68,7 +69,7 @@ function isDifftRecord(value: unknown): value is DifftRecord {
 function materializeBlob(ref: string, filePath: string, repoDir: string): string | null {
   const tmp = join(tmpdir(), `difft-${randomUUID()}`);
   try {
-    const content = execFileSync("git", ["show", `${ref}:${filePath}`], { cwd: repoDir });
+    const content = execFileSync("git", ["show", `${ref}:${filePath}`], { cwd: repoDir, env: scrubEnv() });
     writeFileSync(tmp, content);
     return tmp;
   } catch {

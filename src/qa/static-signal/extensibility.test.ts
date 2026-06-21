@@ -15,3 +15,10 @@ test("signal is project-agnostic: no app/config reference in the module", async 
     assert.equal(/config\/apps|portfolio|petclinic/.test(src), false, `${f} must be project-agnostic`);
   }
 });
+test("defaultStaticSignalDeps has all five extractor keys as functions", async () => {
+  const { defaultStaticSignalDeps } = await import("./aggregate.defaults");
+  const keys = ["symbols", "relations", "complexity", "semanticDiff", "patterns"] as const;
+  for (const key of keys) {
+    assert.equal(typeof defaultStaticSignalDeps[key], "function", `defaultStaticSignalDeps.${key} must be a function`);
+  }
+});

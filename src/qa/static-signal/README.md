@@ -24,14 +24,17 @@ any single extractor that throws is fail-open (error recorded in `sig.skipped`, 
 
 2. **`symbols.ts` + `relations.ts`** — add the grammar wasm. `tree-sitter-wasms` ships grammars for
    most languages; confirm the wasm name (e.g. `tree-sitter-ruby.wasm`) is present in the installed
-   package, then add a `case "ruby":` branch in `ensureInit` / `resolveLanguage` that calls
-   `Parser.Language.load(wasmPath)`. Add the corresponding Tree-sitter query file at
-   `queries/<lang>.scm` (symbols extractor reads it; relations extractor reuses the same grammar).
+   package, then add an entry to the `GRAMMAR_FILE` map in `symbols.ts` (e.g. `ruby: "tree-sitter-ruby.wasm"`).
+   The parser is loaded lazily from that map — no other function needs to change. Add the corresponding
+   Tree-sitter query file at `queries/<lang>.scm` (symbols extractor reads it; relations extractor reuses
+   the same grammar).
 
-3. **`patterns.ts`** — add ast-grep rules for the new language in `patternsForLanguage` and the
-   `RULES` map, or rely on the built-in regex fallback (which fires when no ast-grep rules are
-   configured for a language). The regex fallback captures `TODO/FIXME/HACK` and long-function
-   heuristics generically and requires no per-language work.
+3. **`patterns.ts`** — to enable structured ast-grep rules for the new language, add it to the
+   `AST_GREP_LANGUAGES` set and add per-pattern entries to the `AST_GREP_RULES` map. If no ast-grep
+   rules are needed, rely on the built-in regex fallback: any language absent from `AST_GREP_LANGUAGES`
+   is automatically routed to the regex engine via `patternsForLanguage`, which returns `"regex"`. The
+   regex fallback captures `TODO/FIXME/HACK` and long-function heuristics generically and requires no
+   per-language work.
 
 4. **`complexity.ts` + `semantic-diff.ts`** — no changes needed. Lizard and difftastic detect the
    language automatically from the file extension; there is no per-language configuration here.
