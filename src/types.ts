@@ -230,7 +230,9 @@ export interface RunOutcome {
     // { strays: 0, dangerous: 0, reverted: [] } is a positive "guard ran, clean" record.
     confinement?: { strays: number; dangerous: number; reverted: string[] };
     // Per-run agent token/cost usage — observation-only, never affects verdict or publish.
-    // Absent when no snapshot fired (Codex-only run or dep not wired); never a zero-filled object.
+    // Absent only when no snapshot fired AND no provider attribution is available (dep not wired).
+    // For Codex runs (no token snapshots), present with zero tokens and provider attribution fields
+    // so the run is attributable without re-deriving provider from config. complete=false for Codex.
     usage?: import("./qa/usage").RunUsage;
     // Per-subphase wall-clock timing (ms), accumulated per phase label. Observation-only.
     // Absent on a run that recorded nothing (e.g. a pre-classify skip). Never affects verdict.

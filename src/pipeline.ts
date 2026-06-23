@@ -936,6 +936,14 @@ export async function runPipeline(
   const usageComplete =
     pipelineAgentConfig?.assignments.primary.provider === "opencode" &&
     pipelineAgentConfig?.assignments.reviewer.provider === "opencode";
+  // Provider attribution persisted on RunUsage so a Codex run is attributable without
+  // relying on a caller to re-derive it from config. Absent when no runtime config is known.
+  const usageAttribution = pipelineAgentConfig
+    ? {
+        primaryProvider: pipelineAgentConfig.assignments.primary.provider,
+        reviewerProvider: pipelineAgentConfig.assignments.reviewer.provider,
+      }
+    : undefined;
 
   const persistOutcome = (verdict: QaRunResult, overrides?: { staticOk?: boolean; coverageRatio?: number | null; valueScore?: number | null; rulesRetrieved?: string[]; confinement?: ConfinementResult; usage?: RunUsage; phaseTimings?: Record<string, number> }) => {
     if (!deps.saveOutcome || !opts.runId) return;
@@ -1883,7 +1891,7 @@ export async function runPipeline(
       // is a common diff-mode outcome. Non-blocking; the verdict stays `skipped`.
       const skipped: QaRunResult = { sha: ns, verdict: "skipped", passed: true, cases: [], logs: result.note ?? result.output.slice(0, 300) };
       const confinement = await runConfine();
-      persistOutcome(skipped, { confinement, usage: usage.result(usageComplete), phaseTimings });
+      persistOutcome(skipped, { confinement, usage: usage.result(usageComplete, usageAttribution), phaseTimings });
       return skipped;
     }
   } else {
@@ -2048,13 +2056,13 @@ export async function runPipeline(
         const infra = resultOf(ns, "infra-error", validation.errors.join("\n\n"));
         // Post-generation exit: revert any strays the agent wrote, and record the tokens already spent.
         const confinement = await runConfine();
-        persistOutcome(infra, { confinement, usage: usage.result(usageComplete), phaseTimings });
+        persistOutcome(infra, { confinement, usage: usage.result(usageComplete, usageAttribution), phaseTimings });
         await report(app, issueRepo, sha, infra, deps, log, shadow, isCode);
         return infra;
       }
       const invalid = resultOf(ns, "invalid", validation.errors.join("\n\n"));
       const confinement = await runConfine();
-      persistOutcome(invalid, { staticOk: false, confinement, usage: usage.result(usageComplete), phaseTimings });
+      persistOutcome(invalid, { staticOk: false, confinement, usage: usage.result(usageComplete, usageAttribution), phaseTimings });
       await report(app, issueRepo, sha, invalid, deps, log, shadow, isCode, {
         note: `The generated tests did not pass the static gate (typecheck + lint + Playwright list).\n${validation.errors.join("\n")}`,
         tested: testedFrom(result),
@@ -2070,7 +2078,7 @@ export async function runPipeline(
       const infra = resultOf(ns, "infra-error", "DEV is not healthy before execution");
       // Post-generation exit: revert any strays the agent wrote, and record the tokens already spent.
       const confinement = await runConfine();
-      persistOutcome(infra, { confinement, usage: usage.result(usageComplete), phaseTimings });
+      persistOutcome(infra, { confinement, usage: usage.result(usageComplete, usageAttribution), phaseTimings });
       await report(app, issueRepo, sha, infra, deps, log, shadow, isCode);
       return infra;
     }
@@ -2200,13 +2208,13 @@ export async function runPipeline(
       if (codeValidation.infra) {
         const infra = resultOf(ns, "infra-error", codeValidation.errors.join("\n\n"));
         const confinement = await runConfine();
-        persistOutcome(infra, { confinement, usage: usage.result(usageComplete), phaseTimings });
+        persistOutcome(infra, { confinement, usage: usage.result(usageComplete, usageAttribution), phaseTimings });
         await report(app, issueRepo, sha, infra, deps, log, shadow, isCode);
         return infra;
       }
       const invalid = resultOf(ns, "invalid", codeValidation.errors.join("\n\n"));
       const confinement = await runConfine();
-      persistOutcome(invalid, { staticOk: false, confinement, usage: usage.result(usageComplete), phaseTimings });
+      persistOutcome(invalid, { staticOk: false, confinement, usage: usage.result(usageComplete, usageAttribution), phaseTimings });
       await report(app, issueRepo, sha, invalid, deps, log, shadow, isCode, {
         note: `The generated tests did not compile.\n${codeValidation.errors.join("\n")}`,
         tested: testedFrom(result),
@@ -2230,7 +2238,7 @@ export async function runPipeline(
     run = resultOf(ns, "infra-error", "e2e run requested but no dev environment is configured");
     // Post-generation exit: revert any strays the agent wrote, and record the tokens already spent.
     const confinement = await runConfine();
-    persistOutcome(run, { confinement, usage: usage.result(usageComplete), phaseTimings });
+    persistOutcome(run, { confinement, usage: usage.result(usageComplete, usageAttribution), phaseTimings });
     await report(app, issueRepo, sha, run, deps, log, shadow, isCode);
     return run;
   } else {
@@ -2835,7 +2843,7 @@ export async function runPipeline(
       reviewerRationale,
     });
   }
-  persistOutcome(run, { staticOk: generating && (isCode ? codeValidated : true), coverageRatio: ratio, valueScore, rulesRetrieved: retrievedRuleIds, confinement, usage: usage.result(usageComplete), phaseTimings });
+  persistOutcome(run, { staticOk: generating && (isCode ? codeValidated : true), coverageRatio: ratio, valueScore, rulesRetrieved: retrievedRuleIds, confinement, usage: usage.result(usageComplete, usageAttribution), phaseTimings });
 
   // Reviewer-corrections distillation, labeling, prevention governance, reflection and
   // curriculum persistence — shared with the static-gate (`invalid`) early return above.
