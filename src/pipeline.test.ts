@@ -259,6 +259,7 @@ function deps(
     agents?: AgentResult[]; // a sequence of agent results, one per generate() call
     review?: ReviewResult[]; // a sequence of independent-review verdicts, one per review() call
     healthy?: boolean | boolean[]; // a single value, or a sequence per call
+    reachable?: boolean; // generic DEV reachability (isReachable stub)
     message?: string; // commit message (classification)
     diff?: string;
     coverage?: Array<CoveredLines | null>; // a sequence of collectCoverage results, one per call
@@ -327,6 +328,10 @@ function deps(
       calls.push("health");
       if (healthSeq) return healthSeq.shift() ?? true;
       return opts.healthy ?? true;
+    },
+    isReachable: async () => {
+      calls.push("reachable");
+      return opts.reachable ?? true;
     },
     execute: async () => {
       calls.push("execute");
@@ -3466,17 +3471,22 @@ test("feedback-execute: skipped when app has no dev — pipeline proceeds as bas
   assert.equal(result.verdict, "infra-error", "no-dev e2e must be infra-error");
 });
 
-// FIX 4: when the health probe is false (DEV down), the feedback execute is SKIPPED (not failed).
-// The pipeline proceeds normally: reviewer still runs, verdictual Filter C still runs.
-// Spec R4: DEV-unreachable → skip, never fail/infra-error from the feedback gate.
-test("feedback-execute (FIX 4): skipped when devHealthy() is false — reviewer and verdictual Filter C still run", async () => {
+// FIX 4 (REAL): generic DEV-reachability probe for apps without versionUrl.
+//
+// Non-vacuity proof: the old FIX-4 test used healthy:false on a versionUrl app, which exits at the
+// health pre-flight (step 6) BEFORE the feedback block — removing the gate clause doesn't change it.
+// These two tests use an app WITHOUT versionUrl so devHealthy() is vacuously true and the health
+// pre-flight is transparent. The only gate that can suppress the feedback execute is devReachable().
+//
+// Test A: no-versionUrl app + unreachable → feedback execute must NOT fire (skipped), pipeline
+//         completes normally (pass — verdictual Filter C still runs).
+test("feedback-execute (FIX 4, non-vacuous): no-versionUrl app + unreachable → feedback skipped, pipeline completes pass", async () => {
   const calls: string[] = [];
   const execNamespaces: string[] = [];
-  // DEV is down (health probe returns false). The gate sees versionUrl is set, so isHealthy is called.
-  // devHealthy() = false → feedbackEligible must be false → no feedback execute.
-  const devDownApp: AppConfig = { ...app, dev: { baseUrl: "https://dev.example.com", versionUrl: "https://dev.example.com/version" } };
+  // App WITHOUT versionUrl: devHealthy() is vacuously true. The only DEV-down signal is isReachable.
+  const noVersionApp: AppConfig = { ...app, dev: { baseUrl: "https://dev.example.com" } };
   const d = deps(passing(), calls, {
-    healthy: false,
+    reachable: false,
     review: [{ approved: true, corrections: [], parsed: true }],
   });
   d.execute = async (_dir: string, opts: { namespace: string }) => {
@@ -3484,13 +3494,39 @@ test("feedback-execute (FIX 4): skipped when devHealthy() is false — reviewer 
     execNamespaces.push(opts.namespace);
     return passing();
   };
-  const result = await runPipeline(devDownApp, "abc1234fix4", d, "manual", { mode: "diff" });
-  // With DEV down, the deploy gate fires infra-error — so there are 0 execute calls and verdict is infra-error.
-  // This confirms: no feedback execute fires when health probe is false (the gate short-circuits).
+  const result = await runPipeline(noVersionApp, "abc1234fix4a", d, "manual", { mode: "diff" });
   const fbExecCount = execNamespaces.filter((ns) => ns.endsWith("-fb")).length;
-  assert.equal(fbExecCount, 0, `feedback execute must NOT fire when DEV is unhealthy; got ${fbExecCount}: ${execNamespaces.join(",")}`);
-  // The run must not be a phantom regen fail — it exits cleanly (infra-error from health pre-flight)
-  assert.ok(result.verdict === "infra-error" || result.verdict === "skipped" || result.verdict === "pass", `verdict must be clean (not a feedback-phantom fail): ${result.verdict}`);
+  // Feedback execute must be suppressed by the unreachable probe.
+  assert.equal(fbExecCount, 0, `feedback execute must NOT fire when DEV is unreachable; got ${fbExecCount}: ${execNamespaces.join(",")}`);
+  // The run must complete cleanly — unreachability of the reachability probe must NEVER produce a
+  // phantom fail or infra-error; the pipeline skips the feedback block and proceeds.
+  assert.ok(
+    result.verdict === "pass" || result.verdict === "skipped",
+    `verdict must be pass or skipped (not phantom-fail): ${result.verdict}`,
+  );
+});
+
+// Test B: no-versionUrl app + reachable → feedback execute DOES fire.
+// Non-vacuity: if the gate were removed, Test A would PASS (feedback fires and passes). With the
+// gate in place, A=0 fb executes, B>0. Both A and B together prove the gate is load-bearing.
+test("feedback-execute (FIX 4, non-vacuous): no-versionUrl app + reachable → feedback execute fires", async () => {
+  const calls: string[] = [];
+  const execNamespaces: string[] = [];
+  const noVersionApp: AppConfig = { ...app, dev: { baseUrl: "https://dev.example.com" } };
+  const d = deps(passing(), calls, {
+    reachable: true,
+    review: [{ approved: true, corrections: [], parsed: true }],
+  });
+  d.execute = async (_dir: string, opts: { namespace: string }) => {
+    calls.push("execute");
+    execNamespaces.push(opts.namespace);
+    return passing();
+  };
+  const result = await runPipeline(noVersionApp, "abc1234fix4b", d, "manual", { mode: "diff" });
+  const fbExecCount = execNamespaces.filter((ns) => ns.endsWith("-fb")).length;
+  // Feedback execute MUST fire when DEV is reachable.
+  assert.ok(fbExecCount >= 1, `feedback execute MUST fire when DEV is reachable; got ${fbExecCount}: ${execNamespaces.join(",")}`);
+  assert.ok(result.verdict === "pass" || result.verdict === "skipped", `verdict must be clean: ${result.verdict}`);
 });
 
 test("feedback-execute: skipped on complete mode — exactly ONE execute (the verdictual one)", async () => {

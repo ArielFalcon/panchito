@@ -156,6 +156,7 @@ export interface PipelineDeps {
   execute(e2eDir: string, opts: { baseUrl: string; namespace: string; onCase?: (c: QaCase) => void; onRunning?: (title: string) => void; onDiscovered?: (title: string, file?: string) => void; signal?: AbortSignal }): Promise<QaRunResult>;
   cleanup(e2eDir: string, opts: { baseUrl: string; namespace: string }): Promise<void>; // orphan-data cleanup (best-effort)
   isHealthy(versionUrl: string): Promise<boolean>; // is DEV healthy right now? (infra vs quality)
+  isReachable(url: string): Promise<boolean>; // generic DEV reachability — does the host respond at all (no /version contract)
   // Phase 6a: `onRepair` fires once when the reviewer emits an in-session contract-repair
   // re-prompt, so the shared cycle counter can account for repairs without polling the turn store.
   review?(input: ReviewInput, signal?: AbortSignal, onUsage?: (u: UsageSnapshot) => void, onRepair?: () => void): Promise<ReviewResult>; // independent reviewer (null = disabled)
@@ -436,6 +437,10 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
       } catch {
         return false;
       }
+    },
+    isReachable: async (url) => {
+      try { await fetch(url, { signal: AbortSignal.timeout(10_000) }); return true; }
+      catch { return false; }
     },
     review: async (input, signal, onUsage, onRepair) =>
       reviewIndependently(input, await agentDepsFactory(onUsage), { signal, onRepair }),
@@ -988,6 +993,12 @@ export async function runPipeline(
   //    up to the whole deploy wait, and a skip-classified commit never waits for DEV.
   const versionUrl = (isCode || mode === "context") ? undefined : app.dev?.versionUrl;
   const devHealthy = () => (versionUrl ? deps.isHealthy(versionUrl) : Promise.resolve(true));
+  // Generic reachability probe for the feedback gate. versionUrl apps use the /version health
+  // contract (same as the health pre-flight). Apps without versionUrl use a bare fetch against
+  // baseUrl — any HTTP response (even 4xx/5xx) means DEV is UP; only a network failure/timeout
+  // means unreachable. Falls back to true only when there is no URL at all (no-dev apps are
+  // excluded from the feedback block by the !!app.dev?.baseUrl guard already).
+  const devReachable = () => (versionUrl ? deps.isHealthy(versionUrl) : (app.dev?.baseUrl ? deps.isReachable(app.dev.baseUrl) : Promise.resolve(true)));
   const gateAbort = new AbortController();
   if (signal) signal.addEventListener("abort", () => gateAbort.abort(), { once: true });
   const gatePromise: Promise<void> = (async () => {
@@ -2069,20 +2080,23 @@ export async function runPipeline(
     // diff|manual (the commit-blast-radius modes) where the ~+15 min cost is justified. Excluded on
     // complete/exhaustive (whole-suite scans, wall-clock cost unjustified). Skipped on code-mode
     // and no-dev (handled by the outer generating && !isCode guard above and the app.dev check).
-    // FIX 4: also gated on devHealthy() so a DEV-down condition produces a SKIP (not a phantom fail
-    // → phantom regen), matching spec R4. For apps without versionUrl, devHealthy() is vacuously
-    // true; this check adds no regression. REUSES deps.execute() — the same Filter C machinery.
-    // No new PipelineDeps member. Filter C (verdictual, retries:2) stays byte-for-byte unchanged.
+    // Gated on devReachable() so a DEV-down condition produces a SKIP (not a phantom fail →
+    // phantom regen), matching spec R4. versionUrl apps use the /version health contract (same as
+    // the health pre-flight). Apps without versionUrl use a bare fetch against baseUrl — any HTTP
+    // response means DEV is UP; only a network failure/timeout means unreachable. REUSES
+    // deps.execute() — the same Filter C machinery. Filter C (verdictual, retries:2) stays
+    // byte-for-byte unchanged.
     const feedbackEligible =
       result != null && result.specs.length > 0 &&
       !!app.dev?.baseUrl &&
       (mode === "diff" || mode === "manual") &&
-      (await devHealthy());
+      (await devReachable());
     if (feedbackEligible) {
-      // Bump wall-clock budget by one e2e timeout when the feedback gate fires, UNLESS the app
-      // has an explicit qa.wallClockBudgetMs override (which is unconditionally authoritative).
+      // Bump wall-clock budget to cover up to TWO feedback executes (initial + possible re-execute
+      // on the fixCases path), UNLESS the app has an explicit qa.wallClockBudgetMs override (which
+      // is unconditionally authoritative).
       if (!app.qa.wallClockBudgetMs) {
-        wallClockBudget += e2eTimeoutMs();
+        wallClockBudget += 2 * e2eTimeoutMs();
       }
       const fbNs = `${ns}-fb`;
       // D4: clear any stale V8 dumps from the feedback namespace before the feedback execute so
@@ -2103,7 +2117,7 @@ export async function runPipeline(
       // spec — even on the failure path. On budget exhaustion or all-runner-infra, proceed to the
       // reviewer with the last assembled spec without re-executing. (FIX 1: S2 compliance)
       const fbFailed = fb.verdict === "fail" && fb.cases.some((c) => c.status === "fail");
-      if (fbFailed && !allFailuresAreRunnerInfra(fb.cases) && (await devHealthy())) {
+      if (fbFailed && !allFailuresAreRunnerInfra(fb.cases) && (await devReachable())) {
         const fbFailedCases = fb.cases.filter((c) => c.status === "fail");
         log(`[qa] feedback fail: ${fbFailedCases.length} case(s) failed — regenerating via fixCases (budget=1) to surface runtime evidence...`);
         const fbDomSnapshot = buildFailureDom(fbFailedCases);
