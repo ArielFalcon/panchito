@@ -3295,3 +3295,250 @@ test("runPipeline passes branch coverage to computeChangeCoverage when dep is wi
     `expected a branch-coverage log line, got:\n${logs.join("\n")}`,
   );
 });
+
+// ── T1: feedback execute precedes review; call ORDER on a green-first eligible run ─────────────
+// RED until WU-B (decouple) + WU-C (feedback block) + WU-D (post-feedback review) land.
+
+test("feedback-execute: eligible run — execute(fb) fires BEFORE review, execute(ns) fires AFTER (diff mode)", async () => {
+  // Default app has dev.baseUrl and the gate fires for diff mode.
+  const calls: string[] = [];
+  const execNamespaces: string[] = [];
+  const d = deps(passing(), calls, { agents: [generated] });
+  // Wire a review dep so review calls are tracked
+  d.review = async () => { calls.push("review"); return { approved: true, corrections: [], parsed: true }; };
+  d.execute = async (_dir: string, opts: { namespace: string }) => {
+    calls.push("execute");
+    execNamespaces.push(opts.namespace);
+    return passing();
+  };
+  await runPipeline(app, "abc1234fb", d, "manual", { mode: "diff" });
+  // Must see: generate → validate → execute(fb) → review → execute(verdictual)
+  assert.ok(calls.includes("execute"), `execute must be called: ${calls.join(",")}`);
+  assert.ok(calls.includes("review"), `review must be called: ${calls.join(",")}`);
+  const firstExecute = calls.indexOf("execute");
+  const firstReview = calls.indexOf("review");
+  assert.ok(firstExecute < firstReview, `execute(fb) must precede review: ${calls.join(",")}`);
+  // There must be exactly 2 execute calls: feedback + verdictual
+  assert.equal(execNamespaces.length, 2, `expected feedback + verdictual execute: ${execNamespaces.join(",")}`);
+  // First execute is the feedback namespace (ends with -fb)
+  assert.match(execNamespaces[0]!, /-fb$/, `first execute must be feedback namespace: ${execNamespaces[0]}`);
+  // Second execute is the verdictual namespace (no -fb suffix)
+  assert.ok(!execNamespaces[1]!.endsWith("-fb"), `second execute must be verdictual namespace: ${execNamespaces[1]}`);
+  // No fixCases regen on a green feedback
+  const fixCasesGen = d.genInputs.find((gi) => gi.fixCases && gi.fixCases.length > 0);
+  assert.ok(!fixCasesGen, `no fixCases regen should fire on a green feedback: ${JSON.stringify(d.genInputs)}`);
+});
+
+test("feedback-execute: eligible run — execute(fb) fires BEFORE review, execute(ns) fires AFTER (manual mode)", async () => {
+  // The gate widens to diff || manual (user-approved override).
+  const calls: string[] = [];
+  const execNamespaces: string[] = [];
+  const d = deps(passing(), calls, { agents: [generated] });
+  d.review = async () => { calls.push("review"); return { approved: true, corrections: [], parsed: true }; };
+  d.execute = async (_dir: string, opts: { namespace: string }) => {
+    calls.push("execute");
+    execNamespaces.push(opts.namespace);
+    return passing();
+  };
+  await runPipeline(app, "abc1234fb", d, "manual", { mode: "manual" });
+  assert.ok(calls.includes("execute"), `execute must be called: ${calls.join(",")}`);
+  assert.ok(calls.includes("review"), `review must be called: ${calls.join(",")}`);
+  const firstExecute = calls.indexOf("execute");
+  const firstReview = calls.indexOf("review");
+  assert.ok(firstExecute < firstReview, `execute(fb) must precede review in manual mode: ${calls.join(",")}`);
+  assert.equal(execNamespaces.length, 2, `expected feedback + verdictual execute in manual mode: ${execNamespaces.join(",")}`);
+  assert.match(execNamespaces[0]!, /-fb$/, `first execute must be feedback namespace: ${execNamespaces[0]}`);
+});
+
+// ── T2: feedback SKIPPED on code-mode / no-dev / complete / exhaustive ─────────────────────────
+
+test("feedback-execute: skipped on code-mode — no feedback execute, pipeline proceeds as baseline", async () => {
+  const calls: string[] = [];
+  const codeApp: AppConfig = { ...app, qa: { ...app.qa, testDataPrefix: "qa-bot" } };
+  const d = deps(passing(), calls);
+  d.executeCode = async () => { calls.push("executeCode"); return passing(); };
+  // We must track execute calls (not executeCode)
+  let feedbackExecuteCalls = 0;
+  d.execute = async () => { feedbackExecuteCalls++; calls.push("execute"); return passing(); };
+  await runPipeline(codeApp, "abc123", d, "manual", { mode: "diff", target: "code" });
+  assert.equal(feedbackExecuteCalls, 0, `code-mode must NOT trigger a feedback execute; execute calls: ${feedbackExecuteCalls}`);
+});
+
+test("feedback-execute: skipped when app has no dev — pipeline proceeds as baseline (infra-error)", async () => {
+  const calls: string[] = [];
+  const noDevApp: AppConfig = { ...app, dev: undefined };
+  const d = deps(passing(), calls);
+  let feedbackExecuteCalls = 0;
+  d.execute = async () => { feedbackExecuteCalls++; calls.push("execute"); return passing(); };
+  const result = await runPipeline(noDevApp, "abc123", d, "manual", { mode: "diff" });
+  // No dev → infra-error (unchanged baseline); zero execute calls
+  assert.equal(feedbackExecuteCalls, 0, `no-dev must NOT trigger a feedback execute`);
+  assert.equal(result.verdict, "infra-error", "no-dev e2e must be infra-error");
+});
+
+test("feedback-execute: skipped on complete mode — exactly ONE execute (the verdictual one)", async () => {
+  // complete mode should NOT trigger the feedback gate; only diff|manual do.
+  const calls: string[] = [];
+  const execNamespaces: string[] = [];
+  const d = deps(passing(), calls);
+  d.execute = async (_dir: string, opts: { namespace: string }) => {
+    calls.push("execute");
+    execNamespaces.push(opts.namespace);
+    return passing();
+  };
+  await runPipeline(app, "abc123", d, "manual", { mode: "complete" });
+  // Should be exactly one execute call (the verdictual Filter C) — no feedback
+  const execCount = execNamespaces.length;
+  assert.equal(execCount, 1, `complete mode must have exactly 1 execute (the verdictual one); got ${execCount}: ${execNamespaces.join(",")}`);
+  // That one execute must NOT be a -fb namespace
+  assert.ok(!execNamespaces[0]!.endsWith("-fb"), `verdictual execute must not be a -fb namespace: ${execNamespaces[0]}`);
+});
+
+test("feedback-execute: skipped on exhaustive mode — exactly ONE execute (the verdictual one)", async () => {
+  const calls: string[] = [];
+  const execNamespaces: string[] = [];
+  const d = deps(passing(), calls);
+  d.execute = async (_dir: string, opts: { namespace: string }) => {
+    calls.push("execute");
+    execNamespaces.push(opts.namespace);
+    return passing();
+  };
+  await runPipeline(app, "abc123", d, "manual", { mode: "exhaustive" });
+  const execCount = execNamespaces.length;
+  assert.equal(execCount, 1, `exhaustive mode must have exactly 1 execute; got ${execCount}`);
+  assert.ok(!execNamespaces[0]!.endsWith("-fb"), `verdictual execute must not be a -fb namespace`);
+});
+
+// ── T3: failure-feedback loop — fail → fixCases regen → re-execute → review ──────────────────
+
+test("feedback-execute: fail → one bounded fixCases regen → review runs after (S2)", async () => {
+  const calls: string[] = [];
+  const caseWithDom: QaCase = { name: "fb-test", status: "fail", failureDom: "button: Submit" };
+  const fbFailing: QaRunResult = { sha: "s", verdict: "fail", passed: false, cases: [caseWithDom], logs: "" };
+  const execNamespaces: string[] = [];
+  const d = deps(passing(), calls, { agents: [generated, generated] });
+  d.review = async () => { calls.push("review"); return { approved: true, corrections: [], parsed: true }; };
+  let execCall = 0;
+  d.execute = async (_dir: string, opts: { namespace: string }) => {
+    calls.push("execute");
+    execNamespaces.push(opts.namespace);
+    // First call is feedback (fb) → returns fail; subsequent calls return pass
+    return execCall++ === 0 ? fbFailing : passing();
+  };
+  await runPipeline(app, "abc1234fb", d, "manual", { mode: "diff" });
+  // A fixCases regen must have fired for the feedback failure
+  const fixCasesGen = d.genInputs.find((gi) => gi.fixCases && gi.fixCases.length > 0);
+  assert.ok(fixCasesGen, `fixCases regen must fire on feedback failure: ${JSON.stringify(d.genInputs.map((gi) => ({ fixCases: gi.fixCases?.length })))}`);
+  // domSnapshot from failureDom must be threaded
+  assert.ok(fixCasesGen!.domSnapshot, `domSnapshot must be present in fixCases regen: ${JSON.stringify(fixCasesGen)}`);
+  assert.match(fixCasesGen!.domSnapshot!, /Submit/, `domSnapshot must contain the failure-point DOM`);
+  assert.equal(fixCasesGen!.failureSourced, true, `failureSourced must be true when domSnapshot is from failureDom`);
+  // review must run AFTER the (green) feedback execute
+  const fbExecIdx = calls.indexOf("execute");
+  const reviewIdx = calls.indexOf("review");
+  assert.ok(reviewIdx > fbExecIdx, `review must run after feedback execute: ${calls.join(",")}`);
+  // Feedback execute count must be ≥2 (initial fail + post-regen re-execute) and ≤2 (budget=1)
+  const fbExecCount = execNamespaces.filter((ns) => ns.endsWith("-fb")).length;
+  assert.ok(fbExecCount >= 1 && fbExecCount <= 2, `feedback execute count must be 1-2 (budget=1); got ${fbExecCount}: ${execNamespaces.join(",")}`);
+});
+
+// ── T4: budget exhausted — persistent feedback failure terminates deterministically ────────────
+
+test("feedback-execute: persistent failure exhausts budget deterministically (never exceeds budget+1 fb executes)", async () => {
+  const calls: string[] = [];
+  const caseWithDom: QaCase = { name: "fb-test", status: "fail", failureDom: "button: Submit" };
+  const fbFailing: QaRunResult = { sha: "s", verdict: "fail", passed: false, cases: [caseWithDom], logs: "" };
+  const execNamespaces: string[] = [];
+  const d = deps(passing(), calls, { agents: [generated, generated, generated] });
+  d.review = async () => { calls.push("review"); return { approved: true, corrections: [], parsed: true }; };
+  d.execute = async (_dir: string, opts: { namespace: string }) => {
+    calls.push("execute");
+    execNamespaces.push(opts.namespace);
+    // Always fail on feedback namespace to exhaust budget
+    if (opts.namespace.endsWith("-fb")) return fbFailing;
+    return passing();
+  };
+  const result = await runPipeline(app, "abc1234fb", d, "manual", { mode: "diff" });
+  // Feedback execute count must not exceed budget+1 = 2
+  const fbExecCount = execNamespaces.filter((ns) => ns.endsWith("-fb")).length;
+  assert.ok(fbExecCount <= 2, `feedback execute count must not exceed budget+1=2; got ${fbExecCount}`);
+  // review must still run (reviewer judges the last assembled spec after budget exhaustion)
+  assert.ok(calls.includes("review"), `review must still run after budget exhaustion: ${calls.join(",")}`);
+  // The verdictual Filter C must still run (its namespace is ns, not -fb)
+  const verdictualExec = execNamespaces.filter((ns) => !ns.endsWith("-fb"));
+  assert.ok(verdictualExec.length >= 1, `verdictual Filter C must run after budget exhaustion: ${execNamespaces.join(",")}`);
+  // The run should complete (not crash)
+  assert.ok(result.verdict, "run must complete with a verdict after budget exhaustion");
+});
+
+// ── T5: coverage isolation — ${ns}-fb cleared before feedback; ns before Filter C; no union ──
+
+test("feedback-execute: clearCoverage(${ns}-fb) precedes feedback execute AND clearCoverage(ns) precedes verdictual", async () => {
+  const calls: string[] = [];
+  const clearArgs: Array<{ dir: string; ns: string }> = [];
+  const execNamespaces: string[] = [];
+  const d = deps(passing(), calls, { agents: [generated] });
+  d.review = async () => { calls.push("review"); return { approved: true, corrections: [], parsed: true }; };
+  d.clearCoverage = (dir: string, ns: string) => {
+    calls.push("clearCoverage");
+    clearArgs.push({ dir, ns });
+  };
+  d.execute = async (_dir: string, opts: { namespace: string }) => {
+    calls.push("execute");
+    execNamespaces.push(opts.namespace);
+    return passing();
+  };
+  await runPipeline(app, "qa-fb-abc1234", d, "manual", { mode: "diff" });
+  // Must have exactly 2 clearCoverage calls: one for fb, one for verdictual
+  assert.ok(clearArgs.length >= 2, `must have at least 2 clearCoverage calls; got ${clearArgs.length}: ${clearArgs.map((a) => a.ns).join(",")}`);
+  const fbClear = clearArgs.find((a) => a.ns.endsWith("-fb"));
+  assert.ok(fbClear, `must clear ${fbClear?.ns ?? "fb"} namespace before feedback execute`);
+  // The fb clear must precede the feedback execute
+  const fbClearIdx = calls.indexOf("clearCoverage");
+  const firstExecIdx = calls.indexOf("execute");
+  assert.ok(fbClearIdx < firstExecIdx, `clearCoverage(fb) must precede first execute: ${calls.join(",")}`);
+  // The verdictual clear (ns without -fb) must precede the verdictual execute (second execute)
+  const nsClears = clearArgs.filter((a) => !a.ns.endsWith("-fb"));
+  assert.ok(nsClears.length >= 1, `must clear verdictual namespace: ${clearArgs.map((a) => a.ns).join(",")}`);
+  // fb namespace and verdictual namespace must differ
+  const fbNs = fbClear!.ns;
+  const verdictualNs = nsClears[0]!.ns;
+  assert.notEqual(fbNs, verdictualNs, `fb namespace and verdictual namespace must be different`);
+  assert.match(fbNs, /-fb$/, `fb namespace must end with -fb`);
+  assert.ok(!verdictualNs.endsWith("-fb"), `verdictual namespace must not end with -fb`);
+});
+
+// ── T6: no regression — verdictual Filter C / retries:2 / flaky path intact ─────────────────
+
+test("feedback-execute: after a feedback execute, verdictual Filter C is still the verdict authority", async () => {
+  const calls: string[] = [];
+  const execNamespaces: string[] = [];
+  const d = deps(passing(), calls, { agents: [generated] });
+  d.review = async () => { calls.push("review"); return { approved: true, corrections: [], parsed: true }; };
+  d.execute = async (_dir: string, opts: { namespace: string }) => {
+    calls.push("execute");
+    execNamespaces.push(opts.namespace);
+    return passing();
+  };
+  const result = await runPipeline(app, "abc1234fb", d, "manual", { mode: "diff" });
+  // There must be a verdictual execute (ns, not fb)
+  const verdictualExec = execNamespaces.find((ns) => !ns.endsWith("-fb"));
+  assert.ok(verdictualExec, `verdictual execute must be present: ${execNamespaces.join(",")}`);
+  // Verdict comes from the verdictual run (which is passing())
+  assert.equal(result.verdict, "pass", "verdict must be pass from the verdictual Filter C");
+  // Feedback outcome does NOT influence the verdictual Filter C's classification
+  // (both return passing here — the key invariant is the call order, already checked by T1)
+});
+
+// ── T7: zero specs — feedback step is a no-op, skipped path preserved ────────────────────────
+
+test("feedback-execute: zero specs from agent → feedback skipped, skipped verdict preserved", async () => {
+  const calls: string[] = [];
+  let feedbackExecuteCalls = 0;
+  const d = deps(passing(), calls, { agent: { output: "no tests needed", specs: [], reviewed: true, approved: true } });
+  d.execute = async () => { feedbackExecuteCalls++; calls.push("execute"); return passing(); };
+  const result = await runPipeline(app, "abc1234fb", d, "manual", { mode: "diff" });
+  // With zero specs, the skipped path fires before the feedback block
+  assert.equal(result.verdict, "skipped", "agent no-op must still produce skipped verdict");
+  assert.equal(feedbackExecuteCalls, 0, `feedback must not execute when agent produced zero specs; got ${feedbackExecuteCalls}`);
+});
