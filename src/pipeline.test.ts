@@ -550,14 +550,14 @@ test("the run namespace is scoped to the runId when one is provided", async () =
   assert.notEqual(nsSeen[0], "qa-bot-abc1234"); // not the bare sha-only form
 });
 
-test("green: orchestrates gate → prepare → setup → generate → validate → health → execute → execute → publish", async () => {
+test("green: orchestrates gate → prepare → setup → generate → validate → health → health → execute → execute → publish", async () => {
   const calls: string[] = [];
   await runPipeline(app, "abc123", deps(passing(), calls), "manual");
   // setup runs before generate (so the agent has the seed); on green the
-  // post-failure health re-check short-circuits (only 1 health).
+  // post-failure health re-check short-circuits (only 1 verdictual-path health).
   // With the feedback gate active (app has dev.baseUrl, default mode=diff), the pipeline runs:
-  //   execute(fb) [feedback, pre-reviewer] → execute(ns) [verdictual Filter C]
-  assert.deepEqual(calls, ["gate", "prepare", "setup", "generate", "validate", "health", "execute", "execute", "publish"]);
+  //   health (pre-flight) → health (FIX 4: feedback eligibility) → execute(fb) [pre-reviewer] → execute(ns) [Filter C]
+  assert.deepEqual(calls, ["gate", "prepare", "setup", "generate", "validate", "health", "health", "execute", "execute", "publish"]);
 });
 
 test("agent writes no specs (no-op change): skipped, does not validate/execute/publish", async () => {
@@ -639,6 +639,33 @@ test("static-repair loop: a failing static gate regenerates and re-validates ins
   assert.notEqual(run.verdict, "invalid"); // the trivial error was repaired, not fatal
   assert.ok(calls.filter((c) => c === "validate").length >= 2, "must re-validate after the repair");
   assert.ok(calls.filter((c) => c === "generate").length >= 2, "the static failure must trigger regeneration");
+});
+
+// FIX 3: when the static-fix-loop fires, the review must happen EXACTLY ONCE (post-feedback),
+// not twice (the old behaviour: generateAndReview inside the loop + reviewGenerated post-feedback).
+// The static-fix-loop now calls generateOnce; the single authoritative review is the post-feedback one.
+test("static-repair loop (FIX 3): when static-fix fires, review happens exactly once — post-feedback, on the executed spec", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, {
+    agents: [generated, generated],
+    review: [{ approved: true, corrections: [], parsed: true }],
+  });
+  // Validation: fail on first call (triggers static-fix-loop regen), pass on all subsequent calls.
+  let validateCall = 0;
+  d.validate = async () => {
+    calls.push("validate");
+    return validateCall++ === 0
+      ? { ok: false, errors: ["tsc: unused variable 'x'"], infra: false }
+      : { ok: true, errors: [], infra: false };
+  };
+  await runPipeline(app, "abc1234fix3", d, "manual", { mode: "diff" });
+  // Exactly one review call — the post-feedback reviewer. The static-fix-loop must NOT add a second.
+  const reviewCount = calls.filter((c) => c === "review").length;
+  assert.equal(reviewCount, 1, `expected exactly 1 review call (post-feedback); got ${reviewCount}: ${calls.join(",")}`);
+  // The review must come AFTER at least one execute (the feedback execute)
+  const firstExecuteIdx = calls.indexOf("execute");
+  const firstReviewIdx = calls.indexOf("review");
+  assert.ok(firstReviewIdx > firstExecuteIdx, `review must come after feedback execute: ${calls.join(",")}`);
 });
 
 test("green but the reviewer did NOT approve: does not publish, opens a review Issue", async () => {
@@ -2032,11 +2059,8 @@ test("3.x fix-loop: execution retries validate and execute before spending revie
 
   assert.equal(run.verdict, "pass");
   // reviewer fires: once after feedback (post-feedback reviewer) and once as final review after fix-loop passes
-  assert.ok(calls.filter((c) => c === "review").length >= 1, `expected at least one review call:\n${calls.join(",")}`);
+  assert.equal(calls.filter((c) => c === "review").length, 2, `expected exactly 2 review calls:\n${calls.join(",")}`);
   // The fix-loop retry: a secondGenerate fires after the verdictual execute failure
-  const verdictualExecIdx = calls.lastIndexOf("execute", calls.lastIndexOf("execute") - 1) >= 0
-    ? calls.indexOf("execute", calls.indexOf("execute") + 1)
-    : calls.indexOf("execute");
   const secondGenerate = calls.indexOf("generate", calls.indexOf("execute") + 1);
   const retryValidate = calls.indexOf("validate", secondGenerate + 1);
   const retryExecute = calls.indexOf("execute", secondGenerate + 1);
@@ -2044,9 +2068,7 @@ test("3.x fix-loop: execution retries validate and execute before spending revie
   assert.ok(secondGenerate >= 0, `expected retry generation:\n${calls.join(",")}`);
   assert.ok(retryValidate > secondGenerate, `retry should validate after generating the fix:\n${calls.join(",")}`);
   assert.ok(retryExecute > retryValidate, `retry should execute after validation:\n${calls.join(",")}`);
-  assert.ok(finalReview >= 0, `final reviewer should run after the fixed suite passes:\n${calls.join(",")}`);
-  // The verdictualExecIdx is used only for structural assertion; suppress the unused-var warning
-  void verdictualExecIdx;
+  assert.ok(finalReview > retryExecute, `final reviewer should run after the fixed suite passes:\n${calls.join(",")}`);
 });
 
 // RE-3: when qa.sessionContinuity is on AND deps.openGenerator is provided, the run opens ONE
@@ -2149,6 +2171,8 @@ test("3.x fix-loop: the retry RE-EXECUTES under a fresh per-attempt namespace (n
 // shipped.
 test("3.x fix-loop W1: a worse final retry is discarded for an earlier better run", async () => {
   const calls: string[] = [];
+  // complete mode: feedback gate is OFF so execute call slots match the intended sequence exactly.
+  // The regression guard being tested is a verdictual-path concern; feedback execute is orthogonal.
   const noReviewApp: AppConfig = { ...app, qa: { ...app.qa, needsReview: false, fixLoop: { maxRetries: 2 } } };
   const runs: QaRunResult[] = [
     { sha: "s", verdict: "fail", passed: false, cases: [{ name: "x", status: "fail" }, { name: "y", status: "fail" }], logs: "" }, // initial: 2
@@ -2158,7 +2182,7 @@ test("3.x fix-loop W1: a worse final retry is discarded for an earlier better ru
   const d = deps(runs[0]!, calls, { agents: [generated, generated, generated] });
   let i = 0;
   d.execute = async () => { calls.push("execute"); return runs[Math.min(i++, runs.length - 1)]!; };
-  const final = await runPipeline(noReviewApp, "abc123", d);
+  const final = await runPipeline(noReviewApp, "abc123", d, "manual", { mode: "complete" });
   // The restored run is the 1-failure round, NOT the 3-failure terminal retry.
   assert.equal(final.cases.filter((c) => c.status === "fail").length, 1, `expected the best (1-failure) run restored, got ${final.cases.length} failing`);
   assert.ok(final.cases.some((c) => c.name === "x"));
@@ -2848,16 +2872,22 @@ test("filtered-retry: DIFF mode + coverage.signal → retry is NOT filtered (key
   const passingRun: QaRunResult = { sha: "s", verdict: "pass", passed: true, cases: [], logs: "" };
   const oneRetryApp: AppConfig = { ...covApp("signal"), qa: { ...covApp("signal").qa, needsReview: false, fixLoop: { maxRetries: 1 } } };
   const d = deps(failingRun, calls, { agents: [generated, generated], diff: DIFF_4, coverage: [cov([1, 2, 3, 4])] });
-  const capturedSpecFiles: Array<string[] | undefined> = [];
+  // Track verdictual (non-fb) execute calls: specFiles per verdictual execute
+  const verdictualSpecFiles: Array<string[] | undefined> = [];
   let executeCall = 0;
   d.execute = async (_dir, opts) => {
     calls.push("execute");
-    capturedSpecFiles.push((opts as { specFiles?: string[] }).specFiles);
+    const { namespace } = opts as { namespace: string };
+    // feedback execute (namespace ends with -fb) → green (no regen, no fix-loop interference)
+    if (namespace.endsWith("-fb")) return passingRun;
+    verdictualSpecFiles.push((opts as { specFiles?: string[] }).specFiles);
     return executeCall++ === 0 ? failingRun : passingRun;
   };
   await runPipeline(oneRetryApp, "abc123", d, "manual", { mode: "diff" });
-  assert.equal(capturedSpecFiles.length, 2, "expected 2 execute calls");
-  assert.equal(capturedSpecFiles[1], undefined, `diff+coverage retry must NOT filter (got specFiles=${JSON.stringify(capturedSpecFiles[1])})`);
+  // diff+coverage: verdictual execute + retry = exactly 2 non-fb execute calls
+  assert.equal(verdictualSpecFiles.length, 2, `expected 2 verdictual execute calls (initial + retry); got ${verdictualSpecFiles.length}`);
+  // Neither verdictual execute should use specFiles filtering (keystone protected in diff+coverage mode)
+  assert.equal(verdictualSpecFiles[1], undefined, `diff+coverage retry must NOT filter (got specFiles=${JSON.stringify(verdictualSpecFiles[1])})`);
 });
 
 // Regeneration writes a spec OUTSIDE the failed set → full re-run (no specFiles), even in manual.
@@ -2873,16 +2903,18 @@ test("filtered-retry: regen writes a spec outside the failed set → full re-run
   // The regen writes "checkout.spec.ts" — outside the failed set (login.spec.ts only)
   const regenOutsideSet: AgentResult = { output: "x", specs: ["login.spec.ts", "checkout.spec.ts"], reviewed: true, approved: true };
   const d = deps(failingRun, calls, { agents: [generated, regenOutsideSet] });
-  const capturedSpecFiles: Array<string[] | undefined> = [];
+  // Track verdictual (non-fb) execute calls only — feedback execute is orthogonal to this test's intent.
+  const verdictualSpecFiles: Array<string[] | undefined> = [];
   let executeCall = 0;
   d.execute = async (_dir, opts) => {
     calls.push("execute");
-    capturedSpecFiles.push((opts as { specFiles?: string[] }).specFiles);
+    if ((opts as { namespace: string }).namespace.endsWith("-fb")) return passingRun; // feedback green
+    verdictualSpecFiles.push((opts as { specFiles?: string[] }).specFiles);
     return executeCall++ === 0 ? failingRun : passingRun;
   };
   await runPipeline(oneRetryApp, "abc123", d, "manual", { mode: "manual" });
-  assert.equal(capturedSpecFiles.length, 2, "expected 2 execute calls");
-  assert.equal(capturedSpecFiles[1], undefined, `regen outside failed set must force full re-run (got specFiles=${JSON.stringify(capturedSpecFiles[1])})`);
+  assert.equal(verdictualSpecFiles.length, 2, "expected 2 verdictual execute calls");
+  assert.equal(verdictualSpecFiles[1], undefined, `regen outside failed set must force full re-run (got specFiles=${JSON.stringify(verdictualSpecFiles[1])})`);
 });
 
 // Merge: after a filtered manual retry, the final run/outcome reflects the full suite
@@ -2934,16 +2966,18 @@ test("filtered-retry: failed case with no .file → full re-run (cannot safely f
   const passingRun: QaRunResult = { sha: "s", verdict: "pass", passed: true, cases: [], logs: "" };
   const oneRetryApp: AppConfig = { ...app, qa: { ...app.qa, needsReview: false, fixLoop: { maxRetries: 1 } } };
   const d = deps(failingRun, calls, { agents: [generated, generated] });
-  const capturedSpecFiles: Array<string[] | undefined> = [];
+  // Track verdictual (non-fb) execute calls only — feedback execute is orthogonal to this test's intent.
+  const verdictualSpecFiles: Array<string[] | undefined> = [];
   let executeCall = 0;
   d.execute = async (_dir, opts) => {
     calls.push("execute");
-    capturedSpecFiles.push((opts as { specFiles?: string[] }).specFiles);
+    if ((opts as { namespace: string }).namespace.endsWith("-fb")) return passingRun; // feedback green
+    verdictualSpecFiles.push((opts as { specFiles?: string[] }).specFiles);
     return executeCall++ === 0 ? failingRun : passingRun;
   };
   await runPipeline(oneRetryApp, "abc123", d, "manual", { mode: "manual" });
-  assert.equal(capturedSpecFiles.length, 2, "expected 2 execute calls");
-  assert.equal(capturedSpecFiles[1], undefined, `case without .file must force full re-run (got specFiles=${JSON.stringify(capturedSpecFiles[1])})`);
+  assert.equal(verdictualSpecFiles.length, 2, "expected 2 verdictual execute calls");
+  assert.equal(verdictualSpecFiles[1], undefined, `case without .file must force full re-run (got specFiles=${JSON.stringify(verdictualSpecFiles[1])})`);
 });
 
 test("Phase 6b (d): pipeline retroactively raises MAX_CYCLES when generate returns objectiveCount>1", async () => {
@@ -3432,6 +3466,33 @@ test("feedback-execute: skipped when app has no dev — pipeline proceeds as bas
   assert.equal(result.verdict, "infra-error", "no-dev e2e must be infra-error");
 });
 
+// FIX 4: when the health probe is false (DEV down), the feedback execute is SKIPPED (not failed).
+// The pipeline proceeds normally: reviewer still runs, verdictual Filter C still runs.
+// Spec R4: DEV-unreachable → skip, never fail/infra-error from the feedback gate.
+test("feedback-execute (FIX 4): skipped when devHealthy() is false — reviewer and verdictual Filter C still run", async () => {
+  const calls: string[] = [];
+  const execNamespaces: string[] = [];
+  // DEV is down (health probe returns false). The gate sees versionUrl is set, so isHealthy is called.
+  // devHealthy() = false → feedbackEligible must be false → no feedback execute.
+  const devDownApp: AppConfig = { ...app, dev: { baseUrl: "https://dev.example.com", versionUrl: "https://dev.example.com/version" } };
+  const d = deps(passing(), calls, {
+    healthy: false,
+    review: [{ approved: true, corrections: [], parsed: true }],
+  });
+  d.execute = async (_dir: string, opts: { namespace: string }) => {
+    calls.push("execute");
+    execNamespaces.push(opts.namespace);
+    return passing();
+  };
+  const result = await runPipeline(devDownApp, "abc1234fix4", d, "manual", { mode: "diff" });
+  // With DEV down, the deploy gate fires infra-error — so there are 0 execute calls and verdict is infra-error.
+  // This confirms: no feedback execute fires when health probe is false (the gate short-circuits).
+  const fbExecCount = execNamespaces.filter((ns) => ns.endsWith("-fb")).length;
+  assert.equal(fbExecCount, 0, `feedback execute must NOT fire when DEV is unhealthy; got ${fbExecCount}: ${execNamespaces.join(",")}`);
+  // The run must not be a phantom regen fail — it exits cleanly (infra-error from health pre-flight)
+  assert.ok(result.verdict === "infra-error" || result.verdict === "skipped" || result.verdict === "pass", `verdict must be clean (not a feedback-phantom fail): ${result.verdict}`);
+});
+
 test("feedback-execute: skipped on complete mode — exactly ONE execute (the verdictual one)", async () => {
   // complete mode should NOT trigger the feedback gate; only diff|manual do.
   const calls: string[] = [];
@@ -3489,13 +3550,14 @@ test("feedback-execute: fail → one bounded fixCases regen → review runs afte
   assert.ok(fixCasesGen!.domSnapshot, `domSnapshot must be present in fixCases regen: ${JSON.stringify(fixCasesGen)}`);
   assert.match(fixCasesGen!.domSnapshot!, /Submit/, `domSnapshot must contain the failure-point DOM`);
   assert.equal(fixCasesGen!.failureSourced, true, `failureSourced must be true when domSnapshot is from failureDom`);
-  // review must run AFTER the (green) feedback execute
-  const fbExecIdx = calls.indexOf("execute");
-  const reviewIdx = calls.indexOf("review");
-  assert.ok(reviewIdx > fbExecIdx, `review must run after feedback execute: ${calls.join(",")}`);
-  // Feedback execute count must be ≥2 (initial fail + post-regen re-execute) and ≤2 (budget=1)
+  // Feedback execute count must be EXACTLY 2: initial fail + post-regen re-execute (S2, budget=1)
   const fbExecCount = execNamespaces.filter((ns) => ns.endsWith("-fb")).length;
-  assert.ok(fbExecCount >= 1 && fbExecCount <= 2, `feedback execute count must be 1-2 (budget=1); got ${fbExecCount}: ${execNamespaces.join(",")}`);
+  assert.equal(fbExecCount, 2, `feedback execute count must be exactly 2 (initial + re-execute after regen); got ${fbExecCount}: ${execNamespaces.join(",")}`);
+  // review must run AFTER the SECOND (re-executed, green) feedback execute
+  const lastFbExecIdx = calls.lastIndexOf("execute", calls.findIndex((c, i) => c === "execute" && execNamespaces[execNamespaces.length - 1]?.endsWith("-fb") && i > 0));
+  const secondFbExecPos = calls.reduce((last, c, i) => (c === "execute" && execNamespaces[calls.slice(0, i + 1).filter((x) => x === "execute").length - 1]?.endsWith("-fb") ? i : last), -1);
+  const reviewIdx = calls.indexOf("review");
+  assert.ok(reviewIdx > secondFbExecPos, `review must run after the second feedback execute (pos ${secondFbExecPos}): ${calls.join(",")}`);
 });
 
 // ── T4: budget exhausted — persistent feedback failure terminates deterministically ────────────

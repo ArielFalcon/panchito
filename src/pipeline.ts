@@ -1995,7 +1995,9 @@ export async function runPipeline(
       staticFixRounds++;
       retries++;
       log(`[qa] static gate failed (repair ${staticFixRounds}/${MAX_STATIC_FIX_ROUNDS}); regenerating to fix:\n${validation.errors.join("\n")}`);
-      result = await generateAndReview(
+      // D1 (FIX 3): generate only — review is centralized post-feedback (L2122), so the static-fix
+      // loop must NOT call generateAndReview here, which would double-review when the loop fires.
+      result = await generateOnce(
         baseGenInput({
           reviewCorrections: [
             `The generated specs FAILED the static gate (tsc + eslint + \`playwright --list\`). Fix EXACTLY these errors and change nothing else:\n${validation.errors.join("\n")}`,
@@ -2067,12 +2069,15 @@ export async function runPipeline(
     // diff|manual (the commit-blast-radius modes) where the ~+15 min cost is justified. Excluded on
     // complete/exhaustive (whole-suite scans, wall-clock cost unjustified). Skipped on code-mode
     // and no-dev (handled by the outer generating && !isCode guard above and the app.dev check).
-    // REUSES deps.execute() — the same Filter C machinery that resolves browser/env/namespace.
+    // FIX 4: also gated on devHealthy() so a DEV-down condition produces a SKIP (not a phantom fail
+    // → phantom regen), matching spec R4. For apps without versionUrl, devHealthy() is vacuously
+    // true; this check adds no regression. REUSES deps.execute() — the same Filter C machinery.
     // No new PipelineDeps member. Filter C (verdictual, retries:2) stays byte-for-byte unchanged.
     const feedbackEligible =
       result != null && result.specs.length > 0 &&
       !!app.dev?.baseUrl &&
-      (mode === "diff" || mode === "manual");
+      (mode === "diff" || mode === "manual") &&
+      (await devHealthy());
     if (feedbackEligible) {
       // Bump wall-clock budget by one e2e timeout when the feedback gate fires, UNLESS the app
       // has an explicit qa.wallClockBudgetMs override (which is unconditionally authoritative).
@@ -2085,13 +2090,18 @@ export async function runPipeline(
       deps.clearCoverage?.(e2eDir, fbNs);
       log(`[qa] feedback execute (namespace ${fbNs}): running the assembled spec once before the reviewer...`);
       const fbT0 = Date.now();
-      const fb = await deps.execute!(e2eDir, { baseUrl: app.dev!.baseUrl, namespace: fbNs, onCase, onRunning: onRunningTest, onDiscovered: onTestDiscovered, signal });
+      // Streaming callbacks omitted — feedback execute is informational, not the verdict.
+      // Passing onCase/onRunning/onDiscovered would double-count discovered tests in the TUI.
+      const fb = await deps.execute!(e2eDir, { baseUrl: app.dev!.baseUrl, namespace: fbNs, signal });
       addTiming("feedback-execute", Date.now() - fbT0);
       log(`[qa] feedback execute: ${fb.verdict} (${Math.round((Date.now() - fbT0) / 1000)}s)`);
 
       // D3/D5: on a feedback failure that is NOT all runner-infra, do ONE bounded fixCases regen
-      // to give the agent first-hand runtime evidence. Budget = 1 regen (finite, not configurable).
-      // On budget exhaustion or all-runner-infra, proceed to the reviewer with the last assembled spec.
+      // to give the agent first-hand runtime evidence. Budget = 1 regen + 1 re-execute (finite,
+      // not configurable). After a successful regen that passes the static gate, RE-EXECUTE the
+      // regenerated spec under the same feedback namespace so the reviewer always judges an EXECUTED
+      // spec — even on the failure path. On budget exhaustion or all-runner-infra, proceed to the
+      // reviewer with the last assembled spec without re-executing. (FIX 1: S2 compliance)
       const fbFailed = fb.verdict === "fail" && fb.cases.some((c) => c.status === "fail");
       if (fbFailed && !allFailuresAreRunnerInfra(fb.cases) && (await devHealthy())) {
         const fbFailedCases = fb.cases.filter((c) => c.status === "fail");
@@ -2104,13 +2114,24 @@ export async function runPipeline(
           const fbValidation = await (async () => { const t0 = Date.now(); const v = await deps.validate!(e2eDir); addTiming("validate", Date.now() - t0); return v; })();
           if (fbValidation.ok) {
             result = fbRegen;
-            log(`[qa] feedback regen: static gate passed after fixCases; proceeding to reviewer.`);
+            log(`[qa] feedback regen: static gate passed after fixCases; re-executing the regenerated spec before the reviewer...`);
+            // Re-execute the regenerated spec under the same feedback namespace so the reviewer
+            // always judges a spec that has EXECUTED (not just a statically-validated one).
+            // Streaming callbacks omitted — this is informational, not the verdict.
+            const fbReExecT0 = Date.now();
+            const fbReExec = await deps.execute!(e2eDir, { baseUrl: app.dev!.baseUrl, namespace: fbNs, signal });
+            addTiming("feedback-execute", Date.now() - fbReExecT0);
+            log(`[qa] feedback re-execute: ${fbReExec.verdict} (${Math.round((Date.now() - fbReExecT0) / 1000)}s)`);
           } else {
             log(`[qa] feedback regen: static gate FAILED after fixCases (${fbValidation.errors.join("; ")}); keeping prior assembled spec.`);
           }
         }
       } else if (fb.verdict === "infra-error" || allFailuresAreRunnerInfra(fb.cases)) {
         log(`[qa] feedback execute: runner-infra failure or infra-error — skipping regen, proceeding to reviewer.`);
+      } else if (fbFailed) {
+        // fbFailed is true but devHealthy() flipped false between the gate check and the regen guard —
+        // DEV went down mid-run. Skip regen (spec R4: DEV-unreachable → skip, never fail).
+        log(`[qa] feedback fail: DEV became unreachable before regen could fire — skipping feedback regen, proceeding to reviewer.`);
       }
     }
 
