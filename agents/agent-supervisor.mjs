@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { existsSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, rmSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -374,11 +374,139 @@ async function shutdown() {
   server.close(() => process.exit(0));
 }
 
+// ──────────────────────────────────────────────────────────────────────────────────────
+// ensureCodexConfig — supervisor writes $CODEX_HOME/config.toml at boot (T-P0-2 / C0.1)
+// ──────────────────────────────────────────────────────────────────────────────────────
+// Generates a Codex config.toml with [mcp_servers.*] blocks matching opencode.json:97-121.
+// Translation rules (design D2):
+//   - opencode `command` array → TOML `command` = head, `args` = tail
+//   - opencode `environment` object → TOML `env` table, with `{env:X}` placeholders
+//     RESOLVED from process.env at config-gen time (supervisor side, NOT the agent)
+//
+// CRITICAL: ENGRAM_DATA_DIR is NOT in CODEX_EXEC_ENV_EXACT and does NOT match the
+// /^(?:DEV_|AGENT_)/ prefix, so `codex exec` children do NOT inherit it from the
+// supervisor env. Without an explicit `env` in config.toml, engram boots pointing at
+// the wrong data dir (memory silently broken). This function fixes that gap.
+//
+// Idempotent: if config.toml already exists, existing content (e.g. [auth] from the
+// codex-data volume) is preserved; only the [mcp_servers.*] sections are replaced/added.
+//
+// PATH A (design D2): supervisor generates config.toml; agent never writes it.
+// FALLBACK (if T-P0-1 smoke proves config.toml MCPs are not loaded by codex 0.139):
+//   wire MCP supervisor-side in runCodexExec (agent-supervisor.mjs ~268, already owns
+//   the spawn) or add an explicit MCP flag in buildCodexExecArgs. Re-scope T-P0-2/3 to
+//   the fallback shape and record the decision in apply-progress.
+//
+// @param {string} codexHome - path to $CODEX_HOME (e.g. /root/.codex)
+// @param {Record<string,string|undefined>} [env] - environment to resolve {env:X} from
+export function ensureCodexConfig(codexHome, env = process.env) {
+  // Resolve an {env:X} placeholder from the supplied env map.
+  function resolveEnvPlaceholder(value) {
+    const match = /^\{env:([^}]+)\}$/.exec(value);
+    if (!match) return value;
+    return env[match[1]] ?? "";
+  }
+
+  // MCP server definitions (mirroring opencode.json:97-121).
+  // Each entry: { command: string[], environment?: Record<string,string> }
+  const MCP_SERVERS = [
+    {
+      name: "serena",
+      command: ["serena", "start-mcp-server", "--transport", "stdio", "--context", "ide-assistant"],
+    },
+    {
+      name: "engram",
+      command: ["engram", "mcp", "--tools=agent"],
+      environment: { ENGRAM_DATA_DIR: "{env:ENGRAM_DATA_DIR}" },
+    },
+    {
+      name: "playwright",
+      command: ["npx", "@playwright/mcp", "--browser", "chromium", "--headless"],
+    },
+  ];
+
+  // Build a TOML string for an array of strings (inline).
+  function tomlStringArray(arr) {
+    return "[" + arr.map((s) => JSON.stringify(s)).join(", ") + "]";
+  }
+
+  // Build the [mcp_servers.*] TOML sections.
+  let mcpToml = "";
+  for (const server of MCP_SERVERS) {
+    const [cmd, ...args] = server.command;
+    mcpToml += `[mcp_servers.${server.name}]\n`;
+    mcpToml += `command = ${JSON.stringify(cmd)}\n`;
+    mcpToml += `args = ${tomlStringArray(args)}\n`;
+    if (server.environment) {
+      // Inline TOML table for env: { KEY = "resolved_value", ... }
+      const resolvedPairs = Object.entries(server.environment)
+        .map(([k, v]) => `${k} = ${JSON.stringify(resolveEnvPlaceholder(v))}`)
+        .join(", ");
+      mcpToml += `env = { ${resolvedPairs} }\n`;
+    }
+    mcpToml += "\n";
+  }
+
+  const configPath = join(codexHome, "config.toml");
+
+  // Ensure the directory exists (codex-data volume may not have pre-created it).
+  mkdirSync(codexHome, { recursive: true });
+
+  if (existsSync(configPath)) {
+    // Preserve any non-mcp_servers content (e.g. [auth] from the codex-data volume).
+    // Strip all existing [mcp_servers.*] sections from the file and append fresh ones.
+    //
+    // Strategy: split the file into "blocks" by top-level section headers (lines that
+    // start with "[" but are NOT continuation lines of a value). Each block starts at a
+    // section header line. Skip any block whose header starts with [mcp_servers.
+    const existing = readFileSync(configPath, "utf8");
+    const lines = existing.split(/\r?\n/);
+    const blocks = []; // [{header: string|null, body: string[]}]
+    let current = { header: null, body: [] };
+    for (const line of lines) {
+      // A top-level section header: starts with '[' at column 0, not '[[' (TOML array).
+      if (/^\[[^\[]/.test(line)) {
+        blocks.push(current);
+        current = { header: line, body: [] };
+      } else {
+        current.body.push(line);
+      }
+    }
+    blocks.push(current);
+
+    // Keep only non-mcp_servers blocks (discard any [mcp_servers.*] block).
+    const kept = blocks.filter(
+      (b) => b.header === null || !b.header.startsWith("[mcp_servers.")
+    );
+
+    // Reconstruct retained content.
+    const retained = kept.map((b) => {
+      const parts = b.header !== null ? [b.header, ...b.body] : b.body;
+      return parts.join("\n");
+    }).join("").trimEnd();
+
+    const mcpBlock = mcpToml.trimEnd() + "\n";
+    const merged = (retained ? retained + "\n\n" : "") + mcpBlock;
+    // Idempotent: only write if content differs.
+    if (merged !== existing) {
+      writeFileSync(configPath, merged, "utf8");
+    }
+  } else {
+    writeFileSync(configPath, mcpToml.trimEnd() + "\n", "utf8");
+  }
+}
+
 // Bootstrap only when run as the entrypoint (`node agent-supervisor.mjs`), NOT when imported by a
 // test. Importing the module must be side-effect-free so the exported pure helpers can be unit-tested
 // without binding the port or registering signal handlers.
 const isMainModule = process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMainModule) {
+  // Generate the Codex config.toml BEFORE ensureDesired so MCP servers are available
+  // from the first codex exec turn. CODEX_HOME defaults to /root/.codex.
+  const codexHome = process.env.CODEX_HOME || join(process.env.HOME || "/root", ".codex");
+  ensureCodexConfig(codexHome, process.env);
+  console.log(`[agent-supervisor] codex config.toml written to ${codexHome}/config.toml`);
+
   // Clean the session DB ONCE, synchronously, before any `opencode serve` spawns (ensureDesired).
   wipeOpencodeDbOnce();
   process.on("SIGTERM", () => void shutdown());
