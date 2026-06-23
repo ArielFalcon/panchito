@@ -5,6 +5,10 @@
 // Decision precedence (first match wins):
 //   1. runner_infra — all failure details match the Playwright launcher infra pattern
 //   2. dev_infra    — DEV health check failed (pre-computed boolean, no I/O here)
+//   2.5 app_defect (5xx) — objective server error: one or more failing cases carry an attributed
+//       5xx status (D2-attributed, same-origin, foreground-scoped). Sits BELOW runner_infra + dev_infra
+//       so a 5xx during DEV downtime stays dev_infra; sits ABOVE isLikelyRealBug (Rule 3) so a
+//       backend 500 is recognized as an app fault even when the failure detail is not a value-matcher.
 //   3. app_defect   — isLikelyRealBug fires (exact parity, calls the same predicate)
 //   4. generated_test_defect/continue — absent selector or all-locator class + spend allowed
 //   5. break-needs-human — gate closed and no deterministic class above fired (ambiguous)
@@ -72,6 +76,9 @@ export interface AdjudicatorEvidence {
   objectiveSource: string[];
   /** Failing case file basenames: `failed.map(c => c.file)` (may contain undefined). */
   failingFiles: (string | undefined)[];
+  /** Per-failed-case attributed HTTP status (D1/D2 capture): `failed.map(c => c.httpStatus)`.
+   *  Entries are undefined when capture missed for that case. Mirrors the failingFiles pattern. */
+  httpStatuses: (number | undefined)[];
 }
 
 export interface AdjudicatorVerdict {
@@ -101,6 +108,7 @@ export function adjudicate(evidence: AdjudicatorEvidence): AdjudicatorVerdict {
     mode,
     objectiveSource,
     failingFiles,
+    httpStatuses,
   } = evidence;
 
   // Rule 1: runner_infra — every failure matches the Playwright launcher infra pattern.
@@ -123,6 +131,29 @@ export function adjudicate(evidence: AdjudicatorEvidence): AdjudicatorVerdict {
       confidence: ADJ_CONFIDENCE.HIGH,
       action: ADJ_ACTION.BREAK_ISSUE, // caller routes to infra-error, no repo Issue
       reason: "DEV environment unhealthy — failures are infra-related, not code defects",
+    };
+  }
+
+  // Rule 2.5 (NEW): server-error app_defect — an objective 5xx is the app's fault, not the test's.
+  // Sits BELOW runner_infra (Rule 1) + dev_infra (Rule 2): a 5xx during DEV downtime is infra, caught above.
+  // Sits ABOVE isLikelyRealBug (Rule 3) so an objective server error is recognized even when the failure
+  // detail is NOT a value-matcher string (the #681 hole). 5xx ONLY — 4xx is ambiguous (deferred).
+  //
+  // MIXED-RUN CHOICE (deliberate, contrasts with Rule 1's .every): uses a .some-style filter —
+  // ONE genuine attributed 5xx routes the run to app_defect→Issue even alongside a co-failing locator
+  // defect. A real, D2-attributed 5xx is a high-confidence app fault warranting human triage; the
+  // co-failing defect is surfaced in the Issue body's failed-case list, so it is NOT lost.
+  // Rule 1 (runner_infra) uses .every because a launcher crash is not per-case attributable; an
+  // attributed 5xx IS tied to a specific case via D2, so the asymmetry is justified.
+  // Not applicable in code mode (no web environment, no HTTP responses).
+  const fiveXx = httpStatuses.filter((s): s is number => s !== undefined && s >= 500 && s <= 599);
+  if (!isCode && fiveXx.length > 0) {
+    const reported = fiveXx[fiveXx.length - 1]!; // the last (most-recent) attributed 5xx
+    return {
+      class: ADJ_CLASS.APP_DEFECT,
+      confidence: ADJ_CONFIDENCE.HIGH,
+      action: ADJ_ACTION.BREAK_ISSUE,
+      reason: `App defect detected: backend returned a 5xx server error (status ${reported}). ${gateReason}`,
     };
   }
 

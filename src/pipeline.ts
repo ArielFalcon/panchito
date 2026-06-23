@@ -67,6 +67,7 @@ import { renderStaticSignal } from "./qa/static-signal/render";
 import { loadContextCache as loadContextCacheDefault, saveContextCache as saveContextCacheDefault } from "./qa/context-cache";
 import { AgentResult, QaCase, QaRunResult, TriggerSource, RunMode, RunOptions, TestTarget, RunOutcome, SpecMeta, RunVerdict } from "./types";
 import type { AgentDeps, ReviewInput, ReviewResult } from "./integrations/opencode-client";
+import { renderExecutionResult } from "./integrations/opencode-client";
 import type { AgentRuntimeConfig } from "./agent-runtime/types";
 import { decideProgress, bestRound, classifyFailure, type RoundResult } from "./qa/progress-gate";
 import { adjudicate, ADJ_CLASS, type AdjudicatorEvidence, type AdjudicatorVerdict } from "./qa/failure-adjudicator";
@@ -1442,6 +1443,14 @@ export async function runPipeline(
     initial: AgentResult,
     genInput: GenerateInput,
     reviewOpts: { allowRegeneration: boolean },
+    // D4/D5: the feedback execute result (pre-reviewer run). When present and verdict is "fail",
+    // the orchestrator applies an !executedRed override on round 0 to prevent the circular-approval
+    // hole (#669): a reviewer LLM that receives evidence of a red spec must not be allowed to
+    // approve it, even if the model returns approved:true. This is a deterministic orchestrator
+    // gate — mirrors the fail-closed `return {...r, approved:false}` precedents at :1512/:1524.
+    // Round-0-only: after the internal mid-loop regen at :1589, `r` is a fresh unexecuted spec
+    // and the evidence is stale, so the override MUST NOT fire on round >= 1.
+    executionEvidence?: { verdict: string; cases: QaCase[] },
   ): Promise<AgentResult> => {
     let r = initial;
     if (!(app.qa.needsReview && deps.review)) return r;
@@ -1477,6 +1486,21 @@ export async function runPipeline(
           lastSpecsKey = specsKey;
         }
       }
+      // D4/D5: render execution evidence for the reviewer prompt (round 0 only).
+      // After the internal mid-loop regen at :1589, the spec is fresh and has not been
+      // executed — the evidence is stale and MUST NOT be injected on round >= 1.
+      // Best-effort: absent or empty evidence means no section is injected (no-op).
+      const fbExecResult: string | undefined =
+        round === 0 && executionEvidence && executionEvidence.cases.length > 0
+          ? renderExecutionResult({
+              verdict: executionEvidence.verdict,
+              cases: executionEvidence.cases.map((c) => ({
+                name: c.name,
+                httpStatus: c.httpStatus,
+                finalUrl: c.finalUrl,
+              })),
+            })
+          : undefined;
       try {
         review = await deps.review(
           // Arm the independent judge with the PROVEN learned rules (active only — never unproven
@@ -1484,6 +1508,7 @@ export async function runPipeline(
           // Phase 0b: thread runId + objective so the reviewer's agent_turns row carries a
           // non-null run_id, enabling per-role telemetry on the reviewer's turns.
           // Phase 4: thread priorCorrections so the reviewer can converge across rounds.
+          // D4/D5: thread executionResult (sanitized HTTP evidence) on round 0 only.
           {
             diff: promptDiff, specs: r.specs, mirrorDir, e2eRelDir: isCode ? "" : E2E_DIR,
             baseUrl: app.dev?.baseUrl, intent, guidance: opts.guidance, appName: app.name,
@@ -1492,6 +1517,7 @@ export async function runPipeline(
             runId: opts.runId,
             objective: opts.guidance ?? intent?.message,
             ...(previousRoundCorrections ? { priorCorrections: previousRoundCorrections } : {}),
+            ...(fbExecResult ? { executionResult: fbExecResult } : {}),
           },
           signal,
           usage.add.bind(usage),
@@ -1545,6 +1571,24 @@ export async function runPipeline(
       // OVERRIDE an explicit rejection. (Grave class-tag corrections — [false-positive],
       // [wrong-objective], [no-cleanup] — are forced to blocking in parseReviewerVerdict, so a
       // mislabeled grave finding also keeps blockingCount > 0.)
+      //
+      // D4 (#669 close): the `executedRed` guard is a deterministic orchestrator override.
+      // On round 0, when the feedback execute returned "fail", the spec being reviewed is a
+      // KNOWN-RED spec: it failed against the live DEV environment. The reviewer LLM cannot
+      // approve it — even a model-returned approved:true is overridden fail-closed.
+      // Round-0-only: after the internal mid-loop regen at :1589 the spec is fresh and
+      // unexecuted, so the override MUST NOT fire on round >= 1 (stale-evidence guard).
+      // Mirrors the fail-closed `return {...r, approved:false}` precedents at :1512/:1524
+      // (reviewer error / unparseable verdict). Logic: any fail verdict means the spec is red.
+      // D4 (#669 close, cont.): fail-closed immediately when executedRed is true. Do NOT
+      // enter the regeneration loop — the problem is a known-red executed spec, not a test defect
+      // that regen can fix. Mirrors the early-return precedents at :1521/:1533.
+      const executedRed = round === 0 && executionEvidence?.verdict === "fail";
+      if (executedRed) {
+        log("[qa] executedRed override (D4/#669): feedback execute was red — reviewer approval overridden fail-closed (round 0, known-red spec, no regeneration).");
+        addTiming("reviewer", Date.now() - reviewStart);
+        return { ...r, reviewed: true, approved: false, note: "feedback execute was red on round 0 — reviewer approval not accepted for a known-red spec (D4/#669)" };
+      }
       const gateApproves = review.approved && blockingCount === 0;
       // Surface the corrections to the live ReviewerCard on a non-approval. Severity is not
       // re-derivable from the flat string list, so all corrections are surfaced when the gate fails —
@@ -2099,6 +2143,11 @@ export async function runPipeline(
       !!app.dev?.baseUrl &&
       (mode === "diff" || mode === "manual") &&
       (await devReachable());
+    // D4: the last feedback execute result (fb or fbReExec), used as executionEvidence for
+    // the reviewer. Initialized to undefined (absent on non-eligible runs: complete/exhaustive/
+    // code/no-dev). After the feedback block, this holds the LAST executed result so the reviewer
+    // always receives evidence from the most recent execution of the spec being reviewed.
+    let lastFbRun: QaRunResult | undefined;
     if (feedbackEligible) {
       // Bump wall-clock budget to cover up to TWO feedback executes (initial + possible re-execute
       // on the fixCases path), UNLESS the app has an explicit qa.wallClockBudgetMs override (which
@@ -2117,6 +2166,7 @@ export async function runPipeline(
       const fb = await deps.execute!(e2eDir, { baseUrl: app.dev!.baseUrl, namespace: fbNs, signal });
       addTiming("feedback-execute", Date.now() - fbT0);
       log(`[qa] feedback execute: ${fb.verdict} (${Math.round((Date.now() - fbT0) / 1000)}s)`);
+      lastFbRun = fb; // D4: record as initial evidence (may be superseded by fbReExec below)
 
       // D3/D5: on a feedback failure that is NOT all runner-infra, do ONE bounded fixCases regen
       // to give the agent first-hand runtime evidence. Budget = 1 regen + 1 re-execute (finite,
@@ -2148,6 +2198,7 @@ export async function runPipeline(
             const fbReExec = await deps.execute!(e2eDir, { baseUrl: app.dev!.baseUrl, namespace: fbReExecNs, signal });
             addTiming("feedback-execute", Date.now() - fbReExecT0);
             log(`[qa] feedback re-execute (namespace ${fbReExecNs}): ${fbReExec.verdict} (${Math.round((Date.now() - fbReExecT0) / 1000)}s)`);
+            lastFbRun = fbReExec; // D4: supersede initial fb with the re-execute result
           } else {
             log(`[qa] feedback regen: static gate FAILED after fixCases (${fbValidation.errors.join("; ")}); keeping prior assembled spec.`);
           }
@@ -2165,8 +2216,10 @@ export async function runPipeline(
     // actually executed against DEV. On non-eligible runs (complete/exhaustive/code/no-dev) the
     // reviewer runs here too — its position relative to Filter B is unchanged in those cases.
     // Guard mirrors the existing final-review guard: only when needsReview + deps.review present.
+    // D4: pass the last feedback execute result as executionEvidence so reviewGenerated can apply
+    // the !executedRed gate on round 0 (deterministic #669 close).
     if (result != null && result.specs.length > 0) {
-      result = await reviewGenerated(result, baseGenInput({}), { allowRegeneration: true });
+      result = await reviewGenerated(result, baseGenInput({}), { allowRegeneration: true }, lastFbRun);
     }
   } else if (deps.validateCode) {
     // 6b. Filter B for CODE mode — a compile-feedback gate. Compile the generated tests WITHOUT
@@ -2411,6 +2464,7 @@ export async function runPipeline(
           ? (intent?.changedFiles ?? [])
           : (opts.guidance ? [opts.guidance] : []),
       failingFiles: failed.map((c) => c.file),
+      httpStatuses: failed.map((c) => c.httpStatus),
     };
     const verdict = adjudicate(evidence);
     adjVerdict = verdict;

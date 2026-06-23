@@ -202,17 +202,27 @@ export const test = base.extend<QaFixtures>({
 export { expect };
 
 // >>> qa-failure-capture (system-owned: do not edit) >>>
-// Captures the aria snapshot of the page at the failure point and writes it to
-// QA_FAILURE_CAPTURE_DIR so the orchestrator can ground the fix-loop regeneration
-// in the REAL post-failure DOM (not the pre-write snapshot). Best-effort only:
-// the page may be closed on a nav-crash (try/catch swallows), and the entire
-// block is a no-op when QA_FAILURE_CAPTURE_DIR is unset.
+// Captures the aria snapshot of the page at the failure point, the page's final URL, and the HTTP
+// status of the most-recent correlated 5xx server error, writing them to QA_FAILURE_CAPTURE_DIR so
+// the orchestrator can ground the fix-loop regeneration and surface runtime evidence to the adjudicator
+// and reviewer. Best-effort only: the page may be closed on a nav-crash (try/catch swallows), and the
+// entire block is a no-op when QA_FAILURE_CAPTURE_DIR is unset.
 //
 // SELF-CONTAINED: this exact block is also appended (append-only) into existing repos'
 // fixtures.ts by the orchestrator, so it CANNOT assume any top-level import is present.
 // node:fs/path/crypto are pulled in via dynamic import() INSIDE the async afterEach —
 // a CommonJS-style synchronous load is not defined in this native-ESM module
 // ("type":"module") and would throw a ReferenceError that the catch would swallow.
+let errorResponses: { url: string; status: number; resourceType: string }[] = [];
+test.beforeEach(async ({ page }) => {
+  if (!process.env.QA_FAILURE_CAPTURE_DIR) return; // no-op when capture is disabled (zero overhead)
+  errorResponses = [];                               // reset unconditionally so reused pages never cross-attribute
+  try {
+    page.on('response', (r) => {
+      try { const s = r.status(); if (s >= 400) errorResponses.push({ url: r.url(), status: s, resourceType: r.request().resourceType() }); } catch {}
+    });
+  } catch {}
+});
 test.afterEach(async ({ page }, testInfo) => {
   const dir = process.env.QA_FAILURE_CAPTURE_DIR;
   if (!dir) return;                                   // degrade to no-op when the orchestrator did not ask
@@ -238,9 +248,32 @@ test.afterEach(async ({ page }, testInfo) => {
     // title); the filename only guarantees uniqueness + retry.
     const hash = createHash("sha1").update(`${file}/${title}`).digest("hex").slice(0, 12);
     const safeProject = project.replace(/[^a-z0-9]+/gi, "-").slice(0, 40);
+    // D1/D2: compute finalUrl (sync, always available in afterEach) and the attributed httpStatus
+    // via the D2 heuristic (5xx-only, resource-type-gated, same-origin correlated, last).
+    // (Path-family intentionally omitted: in a SPA the finalUrl is the UI route (e.g. /orders) while
+    // the causing 5xx is the API call (e.g. /api/orders) — different path segments — so path-family
+    // would drop legitimate API 5xxs; same-origin is the correct, not-too-tight correlation.)
+    const finalUrl = page.url();
+    let httpStatus: number | undefined;
+    try {
+      let finalUrlOrigin = '';
+      try { finalUrlOrigin = new URL(finalUrl).origin; } catch {}
+      const FOREGROUND = new Set(['document', 'fetch', 'xhr']);
+      const BACKGROUND = new Set(['ping', 'beacon', 'image', 'stylesheet', 'font', 'media']);
+      const survivors = errorResponses.filter((e) => {
+        if (e.status < 500 || e.status > 599) return false; // 5xx only
+        if (BACKGROUND.has(e.resourceType)) return false;    // exclude background resource types
+        if (!FOREGROUND.has(e.resourceType)) return false;   // keep only foreground interactions
+        try {
+          const eOrigin = new URL(e.url).origin;
+          return eOrigin === finalUrlOrigin;                  // same-origin correlation
+        } catch { return false; }
+      });
+      if (survivors.length > 0) httpStatus = survivors[survivors.length - 1]!.status; // last survivor
+    } catch {}
     writeFileSync(
       join(dir, `${safeProject}__${hash}__${testInfo.retry}.json`),
-      JSON.stringify({ project, file, title, retry: testInfo.retry, yaml }),
+      JSON.stringify({ project, file, title, retry: testInfo.retry, yaml, finalUrl, httpStatus }),
     );
   } catch { /* page may be closed on a nav-crash — best-effort, never fail the run */ }
 });

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -157,7 +158,7 @@ test("ensureFailureCapture: first injection appends the block; existing lines un
     assert.match(after, /basename\(testInfo\.file/, "the injected block must record the spec file basename (W1)");
     assert.match(after, /createHash\("sha1"\)\.update\(`\$\{file\}\/\$\{title\}`\)/, "the filename hash must fold in the file AND the full title (no 80-char truncation)");
     assert.match(after, /\$\{safeProject\}__\$\{hash\}__\$\{testInfo\.retry\}\.json/, "the filename must be project__hash__retry");
-    assert.match(after, /JSON\.stringify\(\{ project, file, title, retry: testInfo\.retry, yaml \}\)/, "the body must carry project, file, title, retry, yaml");
+    assert.match(after, /JSON\.stringify\(\{ project, file, title, retry: testInfo\.retry, yaml, finalUrl, httpStatus \}\)/, "the body must carry project, file, title, retry, yaml, finalUrl, httpStatus");
     // C1: ESM-safe — the appended block runs in a native-ESM fixtures.ts where require() is undefined.
     assert.doesNotMatch(after, /require\(/, "the injected block must not use require() (ReferenceError in ESM — dead capture)");
     assert.match(after, /await import\("node:fs"\)/, "the injected block must pull node:fs via dynamic import()");
@@ -263,15 +264,15 @@ test("C1: FAILURE_CAPTURE_BLOCK contains no require( token (ESM-safe)", () => {
 test("C1: the afterEach body, run as a real ES module, writes a dump (no ReferenceError)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "qa-c1-esm-"));
   try {
-    // Extract the afterEach callback source from the block and run it inside a genuine .mjs module —
-    // the SAME module kind (ESM) the seed fixtures.ts is, where `require` is undefined. We stub `test`
-    // so `test.afterEach(cb)` just captures cb; then we invoke cb with a fake page + testInfo. If the
-    // block still used require(), this would throw ReferenceError (caught, no dump) and the assertion
-    // on a written file would fail — exactly the dead-capture bug C1 fixes.
+    // Extract the beforeEach+afterEach callbacks from the block and run them inside a genuine .mjs
+    // module — the SAME module kind (ESM) the seed fixtures.ts is, where `require` is undefined.
+    // We stub `test` so `test.beforeEach(cb)` and `test.afterEach(cb)` capture their callbacks.
+    // A synthetic 5xx Response (fetch, same-origin) is fired into the on('response') handler
+    // between beforeEach and afterEach, so the dump carries httpStatus:500 + finalUrl.
     const moduleSrc =
-      `const test = { afterEach(fn) { globalThis.__qaCapture = fn; } };\n` +
+      `const test = { beforeEach(fn) { globalThis.__qaBeforeEach = fn; }, afterEach(fn) { globalThis.__qaCapture = fn; } };\n` +
       FAILURE_CAPTURE_BLOCK +
-      `\nexport const afterEachFn = globalThis.__qaCapture;\n`;
+      `\nexport const beforeEachFn = globalThis.__qaBeforeEach;\nexport const afterEachFn = globalThis.__qaCapture;\n`;
     const modPath = join(dir, "capture.mjs");
     writeFileSync(modPath, moduleSrc);
     const captureDir = join(dir, "dumps");
@@ -280,11 +281,20 @@ test("C1: the afterEach body, run as a real ES module, writes a dump (no Referen
     mkdirSync(captureDir, { recursive: true });
 
     const mod = await import(pathToFileURL(modPath).href);
+    assert.equal(typeof mod.beforeEachFn, "function", "the block must register a beforeEach callback");
     assert.equal(typeof mod.afterEachFn, "function", "the block must register an afterEach callback");
 
-    // The afterEach signature is `async ({ page }, testInfo) => …` — page is destructured from the
-    // FIRST argument object, exactly as Playwright invokes it.
-    const fakePage = { locator: (_sel: string) => ({ ariaSnapshot: async () => '- button "Submit"\n- heading "Owners"' }) };
+    // The beforeEach signature is `async ({ page }) => …`. We build a fake page that:
+    // (a) has an `on(event, cb)` that records the 'response' handler;
+    // (b) has a `url()` returning the test's final URL;
+    // (c) has a `locator(...).ariaSnapshot()` for the DOM capture.
+    let responseHandler: ((r: unknown) => void) | undefined;
+    const fakeFinalUrl = "http://localhost:3000/owners/new";
+    const fakePage = {
+      on(event: string, cb: (r: unknown) => void) { if (event === "response") responseHandler = cb; },
+      url: () => fakeFinalUrl,
+      locator: (_sel: string) => ({ ariaSnapshot: async () => '- button "Submit"\n- heading "Owners"' }),
+    };
     const fakeTestInfo = {
       status: "failed",
       expectedStatus: "passed",
@@ -293,9 +303,23 @@ test("C1: the afterEach body, run as a real ES module, writes a dump (no Referen
       file: "/repo/e2e/owners.spec.ts",
       retry: 0,
     };
+
+    // Set QA_FAILURE_CAPTURE_DIR BEFORE beforeEach so the handler registration is not gated out.
     const prev = process.env.QA_FAILURE_CAPTURE_DIR;
     process.env.QA_FAILURE_CAPTURE_DIR = captureDir;
     try {
+      // Run beforeEach to set up the listener.
+      await mod.beforeEachFn({ page: fakePage });
+      assert.ok(responseHandler, "beforeEach must register a response handler via page.on('response', ...)");
+
+      // Fire a synthetic 5xx correlated response (same-origin fetch) into the handler.
+      const syntheticResponse = {
+        url: () => "http://localhost:3000/api/owners",
+        status: () => 500,
+        request: () => ({ resourceType: () => "fetch" }),
+      };
+      responseHandler!(syntheticResponse);
+
       await mod.afterEachFn({ page: fakePage }, fakeTestInfo);
     } finally {
       if (prev === undefined) delete process.env.QA_FAILURE_CAPTURE_DIR;
@@ -310,8 +334,179 @@ test("C1: the afterEach body, run as a real ES module, writes a dump (no Referen
     assert.equal(body.title, "owner registration › create owner", "title is titlePath without the leading project element");
     assert.equal(body.retry, 0);
     assert.match(body.yaml, /button "Submit"/, "the dump must carry the post-failure aria YAML");
+    // D1/D2: the dump must carry the attributed 5xx httpStatus and the finalUrl.
+    assert.equal(body.httpStatus, 500, "dump must carry the attributed 5xx httpStatus");
+    assert.equal(body.finalUrl, fakeFinalUrl, "dump must carry the finalUrl from page.url()");
     // The filename encodes project + a hash + retry (the file is folded into the hash, not the name).
     assert.match(dumps[0]!, /^desktop__[0-9a-f]{12}__0\.json$/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("C1/D2: httpStatus is absent when no ≥500 response was observed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "qa-c1-no5xx-"));
+  try {
+    const moduleSrc =
+      `const test = { beforeEach(fn) { globalThis.__qaBefore_no5xx = fn; }, afterEach(fn) { globalThis.__qaAfter_no5xx = fn; } };\n` +
+      FAILURE_CAPTURE_BLOCK +
+      `\nexport const beforeEachFn = globalThis.__qaBefore_no5xx;\nexport const afterEachFn = globalThis.__qaAfter_no5xx;\n`;
+    const modPath = join(dir, "no5xx.mjs");
+    writeFileSync(modPath, moduleSrc);
+    const captureDir = join(dir, "dumps");
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(captureDir, { recursive: true });
+
+    const mod = await import(pathToFileURL(modPath).href);
+    let responseHandler: ((r: unknown) => void) | undefined;
+    const fakePage = {
+      on(event: string, cb: (r: unknown) => void) { if (event === "response") responseHandler = cb; },
+      url: () => "http://localhost:3000/owners",
+      locator: () => ({ ariaSnapshot: async () => '- button "X"' }),
+    };
+    const fakeTestInfo = { status: "failed", expectedStatus: "passed", titlePath: ["p", "s", "t"], project: { name: "desktop" }, file: "x.spec.ts", retry: 0 };
+
+    const prev = process.env.QA_FAILURE_CAPTURE_DIR;
+    process.env.QA_FAILURE_CAPTURE_DIR = captureDir;
+    try {
+      await mod.beforeEachFn({ page: fakePage });
+      // Fire a 4xx (not 5xx) — must NOT produce httpStatus on the dump.
+      responseHandler!({ url: () => "http://localhost:3000/api/x", status: () => 404, request: () => ({ resourceType: () => "fetch" }) });
+      await mod.afterEachFn({ page: fakePage }, fakeTestInfo);
+    } finally { if (prev === undefined) delete process.env.QA_FAILURE_CAPTURE_DIR; else process.env.QA_FAILURE_CAPTURE_DIR = prev; }
+
+    const dumps = readdirSync(captureDir);
+    const body = JSON.parse(readFileSync(join(captureDir, dumps[0]!), "utf8"));
+    assert.equal(body.httpStatus, undefined, "4xx must NOT produce httpStatus on the dump");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("C1/D2: httpStatus is absent when only a background ping/beacon 500 was observed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "qa-c1-bgping-"));
+  try {
+    const moduleSrc =
+      `const test = { beforeEach(fn) { globalThis.__qaBefore_bgping = fn; }, afterEach(fn) { globalThis.__qaAfter_bgping = fn; } };\n` +
+      FAILURE_CAPTURE_BLOCK +
+      `\nexport const beforeEachFn = globalThis.__qaBefore_bgping;\nexport const afterEachFn = globalThis.__qaAfter_bgping;\n`;
+    const modPath = join(dir, "bgping.mjs");
+    writeFileSync(modPath, moduleSrc);
+    const captureDir = join(dir, "dumps");
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(captureDir, { recursive: true });
+
+    const mod = await import(pathToFileURL(modPath).href);
+    let responseHandler: ((r: unknown) => void) | undefined;
+    const fakePage = {
+      on(event: string, cb: (r: unknown) => void) { if (event === "response") responseHandler = cb; },
+      url: () => "http://localhost:3000/owners",
+      locator: () => ({ ariaSnapshot: async () => '- button "X"' }),
+    };
+    const fakeTestInfo = { status: "failed", expectedStatus: "passed", titlePath: ["p", "s", "t"], project: { name: "desktop" }, file: "x.spec.ts", retry: 0 };
+
+    const prev = process.env.QA_FAILURE_CAPTURE_DIR;
+    process.env.QA_FAILURE_CAPTURE_DIR = captureDir;
+    try {
+      await mod.beforeEachFn({ page: fakePage });
+      // Background ping with 500 — resource type "ping" must be excluded by D2 heuristic.
+      responseHandler!({ url: () => "http://localhost:3000/telemetry", status: () => 500, request: () => ({ resourceType: () => "ping" }) });
+      await mod.afterEachFn({ page: fakePage }, fakeTestInfo);
+    } finally { if (prev === undefined) delete process.env.QA_FAILURE_CAPTURE_DIR; else process.env.QA_FAILURE_CAPTURE_DIR = prev; }
+
+    const dumps = readdirSync(captureDir);
+    const body = JSON.parse(readFileSync(join(captureDir, dumps[0]!), "utf8"));
+    assert.equal(body.httpStatus, undefined, "background ping 500 must be excluded by D2 heuristic — httpStatus must be absent");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("C1/D2: httpStatus is absent when only a cross-origin 500 was observed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "qa-c1-xorigin-"));
+  try {
+    const moduleSrc =
+      `const test = { beforeEach(fn) { globalThis.__qaBefore_xorigin = fn; }, afterEach(fn) { globalThis.__qaAfter_xorigin = fn; } };\n` +
+      FAILURE_CAPTURE_BLOCK +
+      `\nexport const beforeEachFn = globalThis.__qaBefore_xorigin;\nexport const afterEachFn = globalThis.__qaAfter_xorigin;\n`;
+    const modPath = join(dir, "xorigin.mjs");
+    writeFileSync(modPath, moduleSrc);
+    const captureDir = join(dir, "dumps");
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(captureDir, { recursive: true });
+
+    const mod = await import(pathToFileURL(modPath).href);
+    let responseHandler: ((r: unknown) => void) | undefined;
+    // finalUrl is on localhost:3000 but the 500 comes from a different origin (cdn.example.com).
+    const fakePage = {
+      on(event: string, cb: (r: unknown) => void) { if (event === "response") responseHandler = cb; },
+      url: () => "http://localhost:3000/owners",
+      locator: () => ({ ariaSnapshot: async () => '- button "X"' }),
+    };
+    const fakeTestInfo = { status: "failed", expectedStatus: "passed", titlePath: ["p", "s", "t"], project: { name: "desktop" }, file: "x.spec.ts", retry: 0 };
+
+    const prev = process.env.QA_FAILURE_CAPTURE_DIR;
+    process.env.QA_FAILURE_CAPTURE_DIR = captureDir;
+    try {
+      await mod.beforeEachFn({ page: fakePage });
+      // Cross-origin 500 — different host than finalUrl, must be excluded.
+      responseHandler!({ url: () => "https://cdn.example.com/asset.js", status: () => 500, request: () => ({ resourceType: () => "fetch" }) });
+      await mod.afterEachFn({ page: fakePage }, fakeTestInfo);
+    } finally { if (prev === undefined) delete process.env.QA_FAILURE_CAPTURE_DIR; else process.env.QA_FAILURE_CAPTURE_DIR = prev; }
+
+    const dumps = readdirSync(captureDir);
+    const body = JSON.parse(readFileSync(join(captureDir, dumps[0]!), "utf8"));
+    assert.equal(body.httpStatus, undefined, "cross-origin 500 must be excluded by D2 same-origin gate — httpStatus must be absent");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("C1/D2: errorResponses resets between tests — reused page does not cross-attribute", async () => {
+  // Two sequential tests on a reused page: beforeEach resets errorResponses unconditionally.
+  // The second test must NOT inherit the first test's 500 response.
+  const dir = mkdtempSync(join(tmpdir(), "qa-c1-reset-"));
+  try {
+    const moduleSrc =
+      `const test = { beforeEach(fn) { globalThis.__qaBefore_reset = fn; }, afterEach(fn) { globalThis.__qaAfter_reset = fn; } };\n` +
+      FAILURE_CAPTURE_BLOCK +
+      `\nexport const beforeEachFn = globalThis.__qaBefore_reset;\nexport const afterEachFn = globalThis.__qaAfter_reset;\n`;
+    const modPath = join(dir, "reset.mjs");
+    writeFileSync(modPath, moduleSrc);
+    const captureDir = join(dir, "dumps");
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(captureDir, { recursive: true });
+
+    const mod = await import(pathToFileURL(modPath).href);
+    let responseHandler: ((r: unknown) => void) | undefined;
+    const fakePage = {
+      on(event: string, cb: (r: unknown) => void) { if (event === "response") responseHandler = cb; },
+      url: () => "http://localhost:3000/owners",
+      locator: () => ({ ariaSnapshot: async () => '- button "X"' }),
+    };
+    const fakeTestInfo1 = { status: "failed", expectedStatus: "passed", titlePath: ["p", "test-1", "t1"], project: { name: "desktop" }, file: "x.spec.ts", retry: 0 };
+    const fakeTestInfo2 = { status: "failed", expectedStatus: "passed", titlePath: ["p", "test-2", "t2"], project: { name: "desktop" }, file: "x.spec.ts", retry: 0 };
+
+    const prev = process.env.QA_FAILURE_CAPTURE_DIR;
+    process.env.QA_FAILURE_CAPTURE_DIR = captureDir;
+    try {
+      // Test 1: fire a 500 and let it be captured.
+      await mod.beforeEachFn({ page: fakePage });
+      responseHandler!({ url: () => "http://localhost:3000/api/owners", status: () => 500, request: () => ({ resourceType: () => "fetch" }) });
+      await mod.afterEachFn({ page: fakePage }, fakeTestInfo1);
+
+      // Test 2: beforeEach MUST reset errorResponses. No new 500 fired. Dump must NOT carry httpStatus.
+      await mod.beforeEachFn({ page: fakePage });
+      await mod.afterEachFn({ page: fakePage }, fakeTestInfo2);
+    } finally {
+      if (prev === undefined) delete process.env.QA_FAILURE_CAPTURE_DIR;
+      else process.env.QA_FAILURE_CAPTURE_DIR = prev;
+    }
+
+    const dumps = readdirSync(captureDir).sort();
+    assert.equal(dumps.length, 2, "two dumps must be written");
+    const body2 = JSON.parse(readFileSync(join(captureDir, dumps[1]!), "utf8"));
+    assert.equal(body2.httpStatus, undefined, "second test must NOT inherit the first test's 500 — errorResponses must have been reset");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -320,18 +515,25 @@ test("C1: the afterEach body, run as a real ES module, writes a dump (no Referen
 test("C1: the afterEach body is a no-op when QA_FAILURE_CAPTURE_DIR is unset (no dump, no throw)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "qa-c1-noop-"));
   try {
+    // The block now uses BOTH test.beforeEach and test.afterEach — the stub must provide both.
     const moduleSrc =
-      `const test = { afterEach(fn) { globalThis.__qaCaptureNoop = fn; } };\n` +
+      `const test = { beforeEach(fn) { globalThis.__qaBeforeNoop = fn; }, afterEach(fn) { globalThis.__qaCaptureNoop = fn; } };\n` +
       FAILURE_CAPTURE_BLOCK +
-      `\nexport const afterEachFn = globalThis.__qaCaptureNoop;\n`;
+      `\nexport const beforeEachFn = globalThis.__qaBeforeNoop;\nexport const afterEachFn = globalThis.__qaCaptureNoop;\n`;
     const modPath = join(dir, "capture-noop.mjs");
     writeFileSync(modPath, moduleSrc);
     const mod = await import(pathToFileURL(modPath).href);
-    const fakePage = { locator: () => ({ ariaSnapshot: async () => "- button \"X\"" }) };
+    const fakePage = {
+      on(_event: string, _cb: unknown) {},
+      url: () => "http://localhost:3000/",
+      locator: () => ({ ariaSnapshot: async () => "- button \"X\"" }),
+    };
     const fakeTestInfo = { status: "failed", expectedStatus: "passed", titlePath: ["p", "s", "t"], project: { name: "desktop" }, file: "x.spec.ts", retry: 0 };
     const prev = process.env.QA_FAILURE_CAPTURE_DIR;
     delete process.env.QA_FAILURE_CAPTURE_DIR;
     try {
+      // beforeEach must be a no-op (env unset), afterEach must be a no-op (env unset), no dump, no throw.
+      await assert.doesNotReject(() => mod.beforeEachFn({ page: fakePage }));
       await assert.doesNotReject(() => mod.afterEachFn({ page: fakePage }, fakeTestInfo));
     } finally {
       if (prev !== undefined) process.env.QA_FAILURE_CAPTURE_DIR = prev;
@@ -339,4 +541,56 @@ test("C1: the afterEach body is a no-op when QA_FAILURE_CAPTURE_DIR is unset (no
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── FIX 4: byte-twin token guard for config/e2e/fixtures.ts ─────────────────
+// The setup.ts FAILURE_CAPTURE_BLOCK is asserted by the tests above (C1 block).
+// Nothing asserted that config/e2e/fixtures.ts's qa-failure-capture block stays in sync.
+// These token-presence tests catch a future edit that updates one twin but not the other.
+
+test("FIX4: config/e2e/fixtures.ts qa-failure-capture block contains test.beforeEach", () => {
+  const fixturesPath = fileURLToPath(new URL("../../config/e2e/fixtures.ts", import.meta.url));
+  const content = readFileSync(fixturesPath, "utf8");
+  const start = content.indexOf(">>> qa-failure-capture");
+  const end = content.indexOf("<<< qa-failure-capture");
+  assert.ok(start !== -1, "fixtures.ts must contain the qa-failure-capture start marker");
+  assert.ok(end !== -1, "fixtures.ts must contain the qa-failure-capture end marker");
+  const block = content.slice(start, end);
+  assert.ok(block.includes("test.beforeEach"), "fixtures.ts qa-failure-capture block must contain test.beforeEach");
+});
+
+test("FIX4: config/e2e/fixtures.ts qa-failure-capture block contains page.on('response'", () => {
+  const fixturesPath = fileURLToPath(new URL("../../config/e2e/fixtures.ts", import.meta.url));
+  const content = readFileSync(fixturesPath, "utf8");
+  const start = content.indexOf(">>> qa-failure-capture");
+  const end = content.indexOf("<<< qa-failure-capture");
+  const block = content.slice(start, end);
+  assert.ok(block.includes("page.on('response'"), "fixtures.ts qa-failure-capture block must contain page.on('response'");
+});
+
+test("FIX4: config/e2e/fixtures.ts qa-failure-capture block contains errorResponses", () => {
+  const fixturesPath = fileURLToPath(new URL("../../config/e2e/fixtures.ts", import.meta.url));
+  const content = readFileSync(fixturesPath, "utf8");
+  const start = content.indexOf(">>> qa-failure-capture");
+  const end = content.indexOf("<<< qa-failure-capture");
+  const block = content.slice(start, end);
+  assert.ok(block.includes("errorResponses"), "fixtures.ts qa-failure-capture block must contain errorResponses");
+});
+
+test("FIX4: config/e2e/fixtures.ts qa-failure-capture block contains finalUrl", () => {
+  const fixturesPath = fileURLToPath(new URL("../../config/e2e/fixtures.ts", import.meta.url));
+  const content = readFileSync(fixturesPath, "utf8");
+  const start = content.indexOf(">>> qa-failure-capture");
+  const end = content.indexOf("<<< qa-failure-capture");
+  const block = content.slice(start, end);
+  assert.ok(block.includes("finalUrl"), "fixtures.ts qa-failure-capture block must contain finalUrl");
+});
+
+test("FIX4: config/e2e/fixtures.ts qa-failure-capture block contains httpStatus", () => {
+  const fixturesPath = fileURLToPath(new URL("../../config/e2e/fixtures.ts", import.meta.url));
+  const content = readFileSync(fixturesPath, "utf8");
+  const start = content.indexOf(">>> qa-failure-capture");
+  const end = content.indexOf("<<< qa-failure-capture");
+  const block = content.slice(start, end);
+  assert.ok(block.includes("httpStatus"), "fixtures.ts qa-failure-capture block must contain httpStatus");
 });

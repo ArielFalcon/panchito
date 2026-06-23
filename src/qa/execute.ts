@@ -359,6 +359,10 @@ export async function runE2E(
         const nodes = parseAriaSnapshot(dump.yaml);
         if (nodes.length > 0) qa.failureDom = nodes.join("\n");
       }
+      // D1/D2 runtime evidence: fold finalUrl and httpStatus onto the same QaCase object,
+      // best-effort — absent on older dumps or when capture missed (no new warning beyond failureDom's).
+      if (dump?.httpStatus !== undefined) qa.httpStatus = dump.httpStatus;
+      if (dump?.finalUrl !== undefined) qa.finalUrl = dump.finalUrl;
       // Fallback: try errorContext from the JSON report (PW 1.60 expect() failures).
       // errorContext is the SAME raw ariaSnapshot YAML the fixture writes (Playwright's
       // `- role "name"` form), so it MUST be flattened through parseAriaSnapshot to the
@@ -423,12 +427,17 @@ export function segmentsAreTail(full: string[], tail: string[]): boolean {
 // the failure point. `file` disambiguates two tests that share the SAME describe›test chain across
 // DIFFERENT spec files (their `title` collides — only the file tells them apart). Optional for
 // backward compatibility with dumps written before the file was recorded (then matching is title-only).
+// httpStatus and finalUrl are runtime evidence fields added by the D1/D2 capture layer: both are
+// optional for backward compatibility with dumps written before this change.
 export interface FailureDump {
   project: string; // testInfo.project.name — disambiguates desktop/mobile runs of the same spec
   file?: string; // basename(testInfo.file) — disambiguates same-titled tests in different spec files
   title: string; // titlePath.filter(Boolean).slice(1).join(" › ") — the stream reporter's _name
   retry: number;
   yaml?: string;
+  // D1/D2 runtime evidence (optional, best-effort, absent on older dumps and when capture missed).
+  httpStatus?: number; // the attributed 5xx status (integer in [500,599]), or absent
+  finalUrl?: string;   // page.url() at the failure point, or absent
 }
 
 // Reads every qa-failure-capture dump from the capture dir into a parsed list. Best-effort: an
@@ -444,13 +453,16 @@ export function readFailureDumps(dir: string): FailureDump[] {
     const m = RETRY_RE.exec(f);
     if (!m) continue;
     try {
-      const body = JSON.parse(readFileSync(join(dir, f), "utf8")) as { project?: unknown; file?: unknown; title?: unknown; retry?: unknown; yaml?: unknown };
+      const body = JSON.parse(readFileSync(join(dir, f), "utf8")) as { project?: unknown; file?: unknown; title?: unknown; retry?: unknown; yaml?: unknown; httpStatus?: unknown; finalUrl?: unknown };
       out.push({
         project: typeof body.project === "string" ? body.project : "",
         ...(typeof body.file === "string" ? { file: body.file } : {}),
         title: typeof body.title === "string" ? body.title : "",
         retry: typeof body.retry === "number" ? body.retry : parseInt(m[1]!, 10),
         ...(typeof body.yaml === "string" ? { yaml: body.yaml } : {}),
+        // D1/D2 runtime evidence — parsed defensively: absent/garbage → undefined, never throw.
+        ...(typeof body.httpStatus === "number" && Number.isInteger(body.httpStatus) ? { httpStatus: body.httpStatus } : {}),
+        ...(typeof body.finalUrl === "string" ? { finalUrl: body.finalUrl } : {}),
       });
     } catch (err) {
       console.warn(`[qa] WARNING: failed to read failure capture dump ${f}: ${err instanceof Error ? err.message : String(err)}`);

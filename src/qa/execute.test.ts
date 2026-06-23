@@ -734,3 +734,89 @@ test("killTree SIGKILLs a detached child (the helper behind every QA spawn)", as
   killTree(child);
   assert.equal(await closed, "SIGKILL");
 });
+
+// ── T5: Harvest fold — finalUrl + httpStatus onto QaCase (D1) ─────────────────
+// RED test (T5): the harvest must fold dump.finalUrl and dump.httpStatus onto the SAME QaCase
+// object that today receives failureDom. Asserts the carry-through, the absent-warned path being
+// unchanged (failureDom's WARNING is still the only loud one), and best-effort absence.
+
+test("T5: harvest folds dump.finalUrl and dump.httpStatus onto the failed QaCase", async () => {
+  // Write a real capture dump (with finalUrl + httpStatus) into the captureDir that runE2E
+  // mints and passes to runSuite. The runSuite intercepts the dir, writes the dump into it,
+  // and returns a report with the matching case. Assert the QaCase carries both fields.
+  const title = "owner registration › create owner";
+  const file = "owners.spec.ts";
+  const hash = createHash("sha1").update(`${file}/${title}`).digest("hex").slice(0, 12);
+
+  const deps: ExecuteDeps = {
+    runSuite: async (args) => {
+      // Write the dump into the captureDir that runE2E minted.
+      if (args.failureCaptureDir) {
+        writeFileSync(
+          join(args.failureCaptureDir, `desktop__${hash}__0.json`),
+          JSON.stringify({ project: "desktop", file, title, retry: 0, yaml: "- button \"Submit\"", finalUrl: "http://localhost:3000/owners/new", httpStatus: 500 }),
+        );
+      }
+      return {
+        report: {
+          suites: [{
+            title: "owners.spec.ts",
+            specs: [{
+              title: "owner registration › create owner",
+              ok: false,
+              tests: [{ results: [{ status: "failed", error: { message: "timeout" } }] }],
+            }],
+          }],
+        },
+        logs: "failed",
+        ran: true,
+      };
+    },
+  };
+  const run = await runE2E("/e2e", { baseUrl: "https://dev", namespace: "desktop" }, deps);
+  const failed = run.cases.find((c) => c.status === "fail");
+  assert.ok(failed, "the failing case must be present");
+  // T5 assertion: the harvest must carry finalUrl and httpStatus on the SAME object.
+  assert.equal((failed as QaCase).httpStatus, 500, "harvest must fold dump.httpStatus onto the QaCase");
+  assert.equal((failed as QaCase).finalUrl, "http://localhost:3000/owners/new", "harvest must fold dump.finalUrl onto the QaCase");
+});
+
+test("T5: harvest leaves httpStatus/finalUrl absent when dump has neither (absent-warned path unchanged)", async () => {
+  // A dump with only yaml (no finalUrl, no httpStatus) — QaCase must not have them, and the
+  // only loud WARNING is still the existing failureDom one (no new WARNING introduced).
+  const title = "form › submit";
+  const file = "form.spec.ts";
+  const hash = createHash("sha1").update(`${file}/${title}`).digest("hex").slice(0, 12);
+
+  const deps: ExecuteDeps = {
+    runSuite: async (args) => {
+      if (args.failureCaptureDir) {
+        writeFileSync(
+          join(args.failureCaptureDir, `desktop__${hash}__0.json`),
+          JSON.stringify({ project: "desktop", file, title, retry: 0, yaml: "- button \"Submit\"" }), // no finalUrl/httpStatus
+        );
+      }
+      return {
+        report: {
+          suites: [{ title: "form.spec.ts", specs: [{ title: "form › submit", ok: false, tests: [{ results: [{ status: "failed", error: { message: "timeout" } }] }] }] }],
+        },
+        logs: "failed",
+        ran: true,
+      };
+    },
+  };
+  const warnings: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...a: unknown[]) => { warnings.push(a.map(String).join(" ")); realWarn(...a); };
+  let run;
+  try { run = await runE2E("/e2e", { baseUrl: "https://dev", namespace: "desktop" }, deps); }
+  finally { console.warn = realWarn; }
+
+  const failed = run.cases.find((c) => c.status === "fail");
+  assert.ok(failed);
+  assert.equal((failed as QaCase).httpStatus, undefined, "httpStatus must be absent when dump has none");
+  assert.equal((failed as QaCase).finalUrl, undefined, "finalUrl must be absent when dump has none");
+  // No new WARNING for absent httpStatus/finalUrl (only failureDom has the loud warning path).
+  const newWarnings = warnings.filter((w) => /httpStatus|finalUrl/i.test(w));
+  assert.equal(newWarnings.length, 0, `must NOT emit new warnings for absent httpStatus/finalUrl: ${JSON.stringify(newWarnings)}`);
+});

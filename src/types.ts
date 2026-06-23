@@ -125,6 +125,15 @@ export interface QaCase {
   // Populated by the Playwright report parser from the enclosing top-level suite title.
   // Used by the filtered-retry optimization to scope re-runs to only the files with failing cases.
   file?: string;
+  // Structured runtime evidence captured at the execution boundary. Both fields are optional and
+  // follow the same absent-warned best-effort contract as failureDom: absent when capture missed
+  // (page closed, env unset, no correlated 5xx observed) — the run degrades to string-only behaviour.
+  // httpStatus: the HTTP status of the most-recent correlated 5xx server error observed during the
+  // failing case (5xx range only; 4xx is never attributed). Integer or absent (never a guessed value).
+  httpStatus?: number;
+  // finalUrl: the page URL at the failure point (page.url() synchronously in afterEach). Absent when
+  // capture missed. Never written to Issue bodies in this slice — only threaded into the reviewer prompt.
+  finalUrl?: string;
 }
 
 export interface QaRunResult {

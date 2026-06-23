@@ -1283,6 +1283,61 @@ export function renderReviewSpecs(input: ReviewInput): string {
   return `## Specs to review (${contents.length} file(s) — contents provided inline)\n\n${contents.join("\n\n")}`;
 }
 
+// Renders a deterministic RUNTIME EXECUTION RESULT section from the orchestrator's
+// evidence (HTTP status codes and final URLs captured during test execution). This is
+// authoritative evidence the reviewer can use to distinguish an app defect (5xx) from a
+// test defect — injected by the orchestrator, not inferred from the generator's reasoning,
+// so reviewer independence is preserved.
+//
+// Output is bounded at 4000 chars total; per-case detail is capped at 500 chars.
+// finalUrl is sanitized via sanitizeText before being included in the prompt (prevents
+// secrets in redirect URLs from leaking to the reviewer model).
+export interface ExecutionResultCase {
+  name: string;
+  httpStatus?: number;
+  finalUrl?: string;
+  detail?: string;
+}
+
+export function renderExecutionResult(evidence: {
+  verdict: string;
+  cases: ExecutionResultCase[];
+}): string {
+  // 4000 is the user-visible bound; capText appends a truncation note of up to ~120 chars
+  // when the raw content exceeds the limit. Reserve that headroom so the FINAL output
+  // (including the note) stays at or below 4000 chars.
+  const CAP_TOTAL = 4000;
+  const CAP_TOTAL_INTERNAL = CAP_TOTAL - 130; // truncation note headroom
+  const CAP_DETAIL = 500;
+  const CAP_DETAIL_INTERNAL = CAP_DETAIL - 130;
+
+  const lines: string[] = [
+    `## RUNTIME EXECUTION RESULT (authoritative — captured by the orchestrator, not inferred)`,
+    ``,
+    `Verdict: ${evidence.verdict}`,
+    ``,
+  ];
+
+  for (const c of evidence.cases) {
+    lines.push(`- ${c.name}`);
+    if (c.httpStatus !== undefined) {
+      lines.push(`  httpStatus: ${c.httpStatus}`);
+    }
+    if (c.finalUrl !== undefined) {
+      const { text: sanitized } = sanitizeText(c.finalUrl);
+      lines.push(`  finalUrl: ${sanitized}`);
+    }
+    if (c.detail !== undefined) {
+      const capped = capText(c.detail, CAP_DETAIL_INTERNAL);
+      lines.push(`  detail: ${capped}`);
+    }
+  }
+
+  const raw = lines.join("\n");
+  if (raw.length <= CAP_TOTAL) return raw;
+  return capText(raw, CAP_TOTAL_INTERNAL);
+}
+
 // Assemble the reviewer prompt string for `input`. Pure: reads spec files from disk
 // (paths come from ReviewInput) but otherwise depends only on its argument. The
 // contract-repair re-prompt and session lifecycle stay in reviewIndependently —
@@ -1406,6 +1461,13 @@ export function buildReviewerPromptAssembled(input: ReviewInput): AssembledPromp
     return raw;
   })();
 
+  // VOLATILE: runtime execution evidence — D4/D5 injection. Deterministic orchestrator evidence
+  // (HTTP status codes + final URLs captured via page.on('response')) injected BEFORE the spec
+  // contents so the reviewer can weigh the objective server-error signal before reading test code.
+  // Priority 1.5 — after DOM grounding (which grounds UI facts) but before specs themselves.
+  // Absent when the run produced no execution evidence (first-time generate, code mode, etc.).
+  const executionResultContent = input.executionResult ?? "";
+
   return assemble([
     // STABLE prefix: role framing + independence mandate.
     section("reviewer-role-framing", "stable-prefix", roleFramingContent, { priority: 1, cacheable: true }),
@@ -1416,6 +1478,10 @@ export function buildReviewerPromptAssembled(input: ReviewInput): AssembledPromp
     // VOLATILE: DOM grounding (priority 1 — first in VOLATILE so it precedes the spec contents that
     // reference it; the instructions refer to it position-independently as "the Live DEV DOM section").
     ...(domContent ? [section("reviewer-dom", "volatile", domContent, { priority: 1 })] : []),
+    // VOLATILE: runtime execution result — authoritative orchestrator evidence (HTTP statuses,
+    // final URLs). Priority 1.5 (after DOM, before specs) so the reviewer weighs the objective
+    // 5xx signal before reading test code. Absent when execution evidence is not available.
+    ...(executionResultContent ? [section("reviewer-execution-result", "volatile", executionResultContent, { priority: 1.5 })] : []),
     // VOLATILE: spec contents (priority 2 — the primary content the reviewer judges).
     section("reviewer-specs", "volatile", specContent, { priority: 2 }),
     // VOLATILE: proven app-specific learned rules (priority 3 — supplementary reject criteria).

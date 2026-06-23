@@ -3702,3 +3702,237 @@ test("feedback-execute: zero specs from agent → feedback skipped, skipped verd
   assert.equal(result.verdict, "skipped", "agent no-op must still produce skipped verdict");
   assert.equal(feedbackExecuteCalls, 0, `feedback must not execute when agent produced zero specs; got ${feedbackExecuteCalls}`);
 });
+
+// ── T9: #669 keystone — deterministic executedRed override ──────────────────
+//
+// When the feedback execute (pre-reviewer) returns a FAIL result, the orchestrator
+// MUST NOT allow the reviewer to approve that run on round 0, even if the reviewer
+// LLM returns approved:true. The `executedRed` gate (`round===0 && fb.verdict==="fail"`)
+// is an orchestrator-level deterministic override that closes the circular-approval hole.
+//
+// Tests are written BEFORE T10 (STRICT TDD / RED phase). They will fail until T10 wires
+// the executionEvidence into reviewGenerated and adds the !executedRed guard at :1548.
+
+test("T9 S9.1: feedback-execute fail → reviewer approved:true is overridden (executedRed gate, round 0)", async () => {
+  // Feedback execute returns fail with an attributed 5xx case. Reviewer returns approved:true.
+  // The executedRed gate fires: gateApproves=false on round 0 → no publish → Issue filed.
+  //
+  // All feedback-namespace executes (both initial fb and the fb-r1 re-execute) return fail
+  // so that lastFbRun.verdict === "fail" regardless of whether the regen path fires.
+  // Verdictual Filter C (non-fb namespace) returns pass.
+  const calls: string[] = [];
+  const fbFail: QaRunResult = {
+    sha: "s",
+    verdict: "fail",
+    passed: false,
+    cases: [{ name: "login test", status: "fail", httpStatus: 500, finalUrl: "https://dev.example.com/login" }],
+    logs: "",
+  };
+  const d = deps(passing(), calls, {
+    review: [{ approved: true, corrections: [], parsed: true, blockingCount: 0 }],
+  });
+  // Feedback executes (ns containing -fb) return fail; verdictual (no -fb) returns pass.
+  d.execute = async (_dir: string, opts: { namespace: string }) => {
+    calls.push("execute");
+    return opts.namespace.includes("-fb") ? fbFail : passing();
+  };
+  await runPipeline(app, "abc1234exec", d, "manual", { mode: "diff" });
+  // The executedRed gate overrides the reviewer's approval on round 0.
+  // The run should NOT publish — reviewer saw an executed-red spec and the gate closes.
+  assert.equal(d.published, false, "must NOT publish when feedback execute was red (executedRed gate)");
+});
+
+test("T9 S9.2: feedback-execute pass → reviewer approved:true is honored (no executedRed)", async () => {
+  // The executedRed gate is round-0-and-fail-only. A passing feedback run must not trigger it.
+  const calls: string[] = [];
+  const d = deps(passing(), calls, {
+    review: [{ approved: true, corrections: [], parsed: true, blockingCount: 0 }],
+  });
+  d.execute = async (_dir: string, opts: { namespace: string }) => {
+    calls.push("execute");
+    // Both feedback and verdictual return pass → no executedRed
+    return passing();
+  };
+  const result = await runPipeline(app, "abc1234exec2", d, "manual", { mode: "diff" });
+  // Green + reviewer approved → must publish
+  assert.equal(d.published, true, "must publish when feedback execute was green and reviewer approved");
+});
+
+test("T9 S9.3: adjudicator httpStatuses carry-through to pipeline (5xx → Issue via Rule 2.5, not break-needs-human)", async () => {
+  // Pipeline-level assertion: the adjudicator's Rule 2.5 routes a failing run with a
+  // 5xx case to app_defect → Issue. The httpStatus must reach the adjudicator from
+  // the execute stub via the execute→QaCase→adjudicator chain.
+  //
+  // CLASS-AWARE: asserts the Issue body contains the Rule 2.5 reason ("5xx server error (status 500)")
+  // — not just that an Issue was opened. Without this, gutting httpStatuses wiring still passes
+  // because the 5xx case (no value-mismatch detail) falls through to break-needs-human which also
+  // opens an Issue with a DIFFERENT reason. The regex distinguishes Rule 2.5 from break-needs-human.
+  const calls: string[] = [];
+  const failWith5xx: QaRunResult = {
+    sha: "s",
+    verdict: "fail",
+    passed: false,
+    cases: [{ name: "submit test", status: "fail", httpStatus: 500, finalUrl: "https://dev.example.com/submit" }],
+    logs: "",
+  };
+  const issueBodies: string[] = [];
+  // No review configured — if the adjudicator flags it as app_defect, the fix-loop should
+  // break-issue and file an Issue without needing a reviewer (realBugDetected path).
+  const d = deps(failWith5xx, calls, {
+    review: [{ approved: true, corrections: [], parsed: true, blockingCount: 0 }],
+  });
+  // Override openIssue to capture the body so we can assert on the adjudicator reason.
+  d.openIssue = async (_repo: string, _title: string, body: string) => {
+    issueBodies.push(body);
+    return { url: "https://github.com/org/demo/issues/1" };
+  };
+  // Feedback pass, verdictual fail with 5xx (so the adjudicator Rule 2.5 fires in the fix-loop).
+  d.execute = async (_dir: string, opts: { namespace: string }) => {
+    calls.push("execute");
+    return opts.namespace.endsWith("-fb") ? passing() : failWith5xx;
+  };
+  const result = await runPipeline(app, "abc1234htt5", d, "manual", { mode: "diff" });
+  assert.equal(d.published, false, "5xx failing run must not publish");
+  assert.ok(issueBodies.length > 0, "5xx failing run must open an Issue");
+  // The Issue body must carry the Rule 2.5 adjudicator reason — proving Rule 2.5 fired, not break-needs-human.
+  assert.match(
+    issueBodies[0]!,
+    /5xx server error \(status 500\)/,
+    `Issue body must contain the Rule 2.5 reason; got:\n${issueBodies[0]?.slice(0, 400)}`,
+  );
+});
+
+test("T9 S9.4: stale-evidence guard — round ≥ 1 ReviewInput must NOT carry executionResult (only round 0 does)", async () => {
+  // Design §6 / must-fix 2: after the internal mid-loop regen at ~:1589, `r` is a fresh
+  // never-executed spec but `executionEvidence` still points at the round-0 result. Injecting
+  // executionResult on round 1 would judge a DIFFERENT, already-discarded spec.
+  // The `round === 0` guard on both (A) prompt injection and (B) executedRed override must ensure
+  // round 1 sees NO executionResult and the override cannot fire for the regenerated spec.
+  //
+  // Setup:
+  //  - feedback execute returns GREEN (verdict:pass with one case) → executedRed=false on round 0
+  //    → the reviewer's round-0 rejection is a NORMAL reviewer rejection (not an executedRed early-return)
+  //    → the internal regen fires at ~:1589 (a new, never-executed spec)
+  //  - reviewer: round 0 → approved:false with a BLOCKING correction (forces internal regen)
+  //              round 1 → approved:true (the regenerated spec is judged normally)
+  //  - all executes (fb and verdictual) return pass so the run publishes
+  //  We capture every ReviewInput the stub receives and assert on executionResult per round.
+  const calls: string[] = [];
+  const capturedReviewInputs: Array<import("./integrations/opencode-client").ReviewInput> = [];
+
+  // Feedback execute is GREEN with one passed case (so executionEvidence.cases.length > 0
+  // and renderExecutionResult produces a non-empty string for round 0).
+  const fbPass: QaRunResult = {
+    sha: "s",
+    verdict: "pass",
+    passed: true,
+    cases: [{ name: "login test", status: "pass" }],
+    logs: "",
+  };
+
+  const d = deps(fbPass, calls, {
+    // Two agents: first for the initial generate, second for the round-0 internal regen.
+    agents: [generated, generated],
+    // Reviewer: round 0 rejects (blocking), round 1 approves.
+    review: [
+      { approved: false, corrections: ["[false-positive] a.spec.ts: stale-evidence guard test correction"], blockingCount: 1, parsed: true },
+      { approved: true, corrections: [], blockingCount: 0, parsed: true },
+    ],
+  });
+
+  // All executes return pass (feedback and verdictual).
+  d.execute = async () => { calls.push("execute"); return fbPass; };
+
+  // Intercept review calls to capture the ReviewInput for each round.
+  const origReview = d.review!;
+  d.review = async (input, ...rest) => {
+    capturedReviewInputs.push(input as import("./integrations/opencode-client").ReviewInput);
+    return origReview(input, ...rest);
+  };
+
+  await runPipeline(app, "abc1234stale", d, "manual", { mode: "diff" });
+
+  assert.equal(capturedReviewInputs.length, 2, "reviewer must be called twice (round 0 rejects, round 1 approves)");
+
+  // Round 0: feedback execute was GREEN, so executionResult must be injected (the evidence is fresh
+  // and matches the spec under review at this point).
+  assert.ok(
+    capturedReviewInputs[0]!.executionResult !== undefined,
+    `round-0 ReviewInput must carry executionResult (feedback GREEN result); got: ${JSON.stringify(capturedReviewInputs[0]!.executionResult)}`,
+  );
+
+  // Round 1: after the internal regen the spec is fresh and unexecuted — injecting the stale
+  // round-0 evidence would misattribute an OLD result to a NEW spec. The guard must suppress it.
+  assert.equal(
+    capturedReviewInputs[1]!.executionResult,
+    undefined,
+    "round-1 ReviewInput must NOT carry executionResult (stale-evidence guard: spec was regenerated after round 0)",
+  );
+});
+
+// ── T12: app-agnostic acceptance regression ──────────────────────────────────
+//
+// Verifies that the runtime-evidence-propagation change does NOT break existing
+// pipeline invariants: honor-no-op, executedRed absent on ineligible modes,
+// and the httpStatuses carry-through is generic (no app-specific logic).
+
+test("T12 A1: no-dev app → feedback gate skipped, evidence absent, reviewer runs (e2e=infra-error, reviewer still called)", async () => {
+  // An app with no dev.baseUrl is ineligible for feedback execute — feedbackEligible=false,
+  // lastFbRun=undefined. The reviewer runs post-generate (before Filter C), and the review call
+  // sees no executionResult in the ReviewInput (executionEvidence is undefined on this path).
+  // The e2e run itself will be infra-error (no dev env) but the reviewer still fires.
+  const calls: string[] = [];
+  const noDevApp: AppConfig = { ...app, dev: undefined };
+  let reviewCalled = false;
+  let reviewInput: unknown;
+  const d = deps(passing(), calls, {}); // no review option → we set it directly below
+  d.review = async (input) => {
+    reviewCalled = true;
+    reviewInput = input;
+    calls.push("review");
+    return { approved: true, corrections: [], parsed: true, blockingCount: 0 };
+  };
+  await runPipeline(noDevApp, "abc1234nodev", d, "manual", { mode: "diff" });
+  // Reviewer fires on ineligible runs (no feedback execute → no executionResult injected)
+  assert.ok(reviewCalled, "reviewer must be called even on a no-dev app (runs post-generate)");
+  assert.ok(
+    !(reviewInput as { executionResult?: string }).executionResult,
+    "executionResult must be absent in ReviewInput when there is no feedback execute",
+  );
+});
+
+test("T12 A2: complete mode → feedback gate skipped (mode-gated), evidence absent, decisions unchanged", async () => {
+  // Feedback execute is gated to diff|manual only. complete/exhaustive modes skip it entirely.
+  // executedRed is absent → reviewer's verdict is the sole gate, same as before this change.
+  const calls: string[] = [];
+  const d = deps(passing(), calls, {
+    review: [{ approved: true, corrections: [], parsed: true, blockingCount: 0 }],
+  });
+  let feedbackCallCount = 0;
+  d.execute = async (_dir: string, opts: { namespace: string }) => {
+    calls.push("execute");
+    if (opts.namespace.includes("-fb")) feedbackCallCount++;
+    return passing();
+  };
+  await runPipeline(app, "abc1234complete", d, "manual", { mode: "complete" });
+  // No feedback execute in complete mode → no evidence → publisher should proceed as before
+  assert.equal(feedbackCallCount, 0, "complete mode must not run the feedback execute");
+  assert.equal(d.published, true, "complete mode green + reviewer approved must publish");
+});
+
+test("T12 A3: honor-no-op intact — agent approves with zero specs, no executedRed, returns skipped", async () => {
+  // The honor-no-op invariant: approved + zero specs → skipped, never affected by executedRed.
+  // executedRed only fires when the feedback execute verdict is "fail" AND round===0.
+  // A no-op (zero specs) skips the feedback block entirely — executedRed can never fire.
+  const calls: string[] = [];
+  const d = deps(passing(), calls, {
+    agent: { output: "no tests needed", specs: [], reviewed: true, approved: true },
+    review: [{ approved: true, corrections: [], parsed: true, blockingCount: 0 }],
+  });
+  let executeCalls = 0;
+  d.execute = async () => { executeCalls++; calls.push("execute"); return passing(); };
+  const result = await runPipeline(app, "abc1234noop", d, "manual", { mode: "diff" });
+  assert.equal(result.verdict, "skipped", "no-op agent must still produce skipped verdict");
+  assert.equal(executeCalls, 0, "honor-no-op: execute must not be called when agent produced zero specs");
+  assert.equal(d.published, false, "no-op must not publish");
+});

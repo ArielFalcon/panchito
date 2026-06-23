@@ -48,9 +48,9 @@ export { extractJsonObjects, parseVerdict };
 // on the prompts side, so there is no runtime import cycle.
 // Phase 1b: also re-exports the assembled variants (return AssembledPrompt) and the Section type
 // so callers that need sectionSizes for telemetry can import directly from this module.
-import { specFileForFlow, buildWorkerPrompt, buildWorkerPromptAssembled, buildPlanPrompt, buildPlanPromptAssembled, buildPrompt, buildPromptAssembled, buildExplorerPrompt, buildContextTask, renderArchitectureContext, buildReviewerPrompt, buildReviewerPromptAssembled, reviewObjective, renderReviewSpecs } from "./prompts";
-export { specFileForFlow, buildWorkerPrompt, buildWorkerPromptAssembled, buildPlanPrompt, buildPlanPromptAssembled, buildPrompt, buildPromptAssembled, buildExplorerPrompt, buildContextTask, renderArchitectureContext, buildReviewerPrompt, buildReviewerPromptAssembled, reviewObjective, renderReviewSpecs };
-export type { AssembledPrompt } from "./prompts";
+import { specFileForFlow, buildWorkerPrompt, buildWorkerPromptAssembled, buildPlanPrompt, buildPlanPromptAssembled, buildPrompt, buildPromptAssembled, buildExplorerPrompt, buildContextTask, renderArchitectureContext, buildReviewerPrompt, buildReviewerPromptAssembled, reviewObjective, renderReviewSpecs, renderExecutionResult } from "./prompts";
+export { specFileForFlow, buildWorkerPrompt, buildWorkerPromptAssembled, buildPlanPrompt, buildPlanPromptAssembled, buildPrompt, buildPromptAssembled, buildExplorerPrompt, buildContextTask, renderArchitectureContext, buildReviewerPrompt, buildReviewerPromptAssembled, reviewObjective, renderReviewSpecs, renderExecutionResult };
+export type { AssembledPrompt, ExecutionResultCase } from "./prompts";
 // Typed verdict contract + bounded repair (post-ADR-001, Phase 1 / 3.1). Schema validation of
 // the agent's generator + reviewer output, and the targeted re-prompt used on a contract miss.
 import { checkGeneratorVerdict, repairInstruction, parseReviewerVerdict } from "./verdict-validate";
@@ -857,6 +857,12 @@ export interface ReviewInput {
   // reviewer can judge convergence: approve once the previously-raised BLOCKING issues
   // are resolved; do not invent new nits on unchanged specs.
   priorCorrections?: string[];
+  // D4/D5: runtime execution evidence rendered by renderExecutionResult (sanitized HTTP
+  // statuses + final URLs captured via page.on('response') during Filter C). Injected as
+  // an authoritative VOLATILE section so the reviewer can weigh an objective 5xx server
+  // error before judging the test code. Absent when no execution has run yet (first-time
+  // generate, code mode, cross-repo runs where browser coverage cannot map service lines).
+  executionResult?: string;
 }
 
 export interface ReviewResult {

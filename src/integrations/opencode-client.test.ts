@@ -30,6 +30,7 @@ import {
   withUsageSink,
   buildReviewerPrompt,
   buildReviewerPromptAssembled,
+  renderExecutionResult,
   ManifestFs,
   ParallelWorkerInput,
   AgentDeps,
@@ -2938,6 +2939,126 @@ test("Slice F F.3: buildReviewerPromptAssembled applies qa-reviewer budget — o
     assert.ok(
       totalBytes <= budget,
       `surviving prompt (${totalBytes} bytes) must be within qa-reviewer budget (${budget} bytes)`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── T8: renderExecutionResult + ReviewInput.executionResult ──────────────────
+//
+// These tests drive the T8 reviewer-consumer chain:
+//   - renderExecutionResult is a pure renderer: sanitizes finalUrl, bounds total
+//     output at 4000 chars, caps per-case detail at 500 chars.
+//   - ReviewInput gains an optional executionResult field.
+//   - buildReviewerPromptAssembled emits a VOLATILE "RUNTIME EXECUTION RESULT"
+//     section when executionResult is present, and omits it when absent.
+//
+// Tests are written BEFORE implementation (STRICT TDD / RED phase).
+
+test("T8 R1: renderExecutionResult is exported from opencode-client", () => {
+  // The function must exist and be callable as a named export.
+  assert.strictEqual(typeof renderExecutionResult, "function");
+});
+
+test("T8 R2: renderExecutionResult returns a non-empty string with the authoritative heading", () => {
+  const result = renderExecutionResult({
+    verdict: "fail",
+    cases: [{ name: "login test", httpStatus: 500, finalUrl: "https://app.example.com/login" }],
+  });
+  assert.strictEqual(typeof result, "string");
+  assert.match(result, /RUNTIME EXECUTION RESULT/i, "heading must mention RUNTIME EXECUTION RESULT");
+  assert.match(result, /authoritative/i, "heading must be marked as authoritative");
+});
+
+test("T8 R3: renderExecutionResult sanitizes finalUrl (strips token query param)", () => {
+  const result = renderExecutionResult({
+    verdict: "fail",
+    cases: [
+      {
+        name: "auth test",
+        httpStatus: 500,
+        finalUrl: "https://app.example.com/callback?token=ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      },
+    ],
+  });
+  assert.doesNotMatch(result, /ghp_AAAA/, "finalUrl token must be redacted before reaching the reviewer");
+});
+
+test("T8 R4: renderExecutionResult total output is bounded at 4000 chars", () => {
+  // Generate a case with very long detail to trigger the cap.
+  const cases = Array.from({ length: 20 }, (_, i) => ({
+    name: `test ${i}`,
+    detail: "x".repeat(1000),
+    httpStatus: 500,
+    finalUrl: `https://app.example.com/page${i}`,
+  }));
+  const result = renderExecutionResult({ verdict: "fail", cases });
+  assert.ok(result.length <= 4000, `total output must be <= 4000 chars, got ${result.length}`);
+});
+
+test("T8 R5: renderExecutionResult caps per-case detail at 500 chars", () => {
+  const longDetail = "z".repeat(1000);
+  const result = renderExecutionResult({
+    verdict: "fail",
+    cases: [{ name: "verbose test", detail: longDetail }],
+  });
+  // The long detail must be truncated — the result cannot contain 600 consecutive z's.
+  assert.doesNotMatch(
+    result,
+    /z{600}/,
+    "per-case detail must be capped at 500 chars",
+  );
+});
+
+test("T8 R6: buildReviewerPrompt omits execution-result section when executionResult is absent", () => {
+  const dir = mkdtempSync(join(tmpdir(), "qa-rev-no-execresult-"));
+  mkdirSync(join(dir, "e2e"), { recursive: true });
+  writeFileSync(join(dir, "e2e", "login.spec.ts"), "// spec");
+  try {
+    const p = buildReviewerPrompt(makeReviewInput(dir)); // no executionResult
+    assert.doesNotMatch(p, /RUNTIME EXECUTION RESULT/i, "no execution-result section when field is absent");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("T8 R7: buildReviewerPrompt injects execution-result section when executionResult is present", () => {
+  const dir = mkdtempSync(join(tmpdir(), "qa-rev-execresult-"));
+  mkdirSync(join(dir, "e2e"), { recursive: true });
+  writeFileSync(join(dir, "e2e", "login.spec.ts"), "// spec");
+  try {
+    const executionResult = renderExecutionResult({
+      verdict: "fail",
+      cases: [{ name: "login", httpStatus: 500, finalUrl: "https://app.example.com/login" }],
+    });
+    const p = buildReviewerPrompt(makeReviewInput(dir, { executionResult }));
+    assert.match(p, /RUNTIME EXECUTION RESULT/i, "execution-result section must appear when field is set");
+    assert.match(p, /authoritative/i, "section heading must include the authoritative qualifier");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("T8 R8: buildReviewerPrompt execution-result section is VOLATILE (precedes output contract)", () => {
+  // The execution-result section is VOLATILE evidence — it must appear BEFORE the
+  // CRITICAL-recap output contract so the contract is always last (as the assembler guarantees).
+  const dir = mkdtempSync(join(tmpdir(), "qa-rev-execresult-order-"));
+  mkdirSync(join(dir, "e2e"), { recursive: true });
+  writeFileSync(join(dir, "e2e", "login.spec.ts"), "// spec");
+  try {
+    const executionResult = renderExecutionResult({
+      verdict: "fail",
+      cases: [{ name: "login", httpStatus: 500 }],
+    });
+    const p = buildReviewerPrompt(makeReviewInput(dir, { executionResult }));
+    const execIdx = p.indexOf("RUNTIME EXECUTION RESULT");
+    const contractIdx = p.indexOf('{"approved":false');
+    assert.ok(execIdx >= 0, "execution-result section must be present");
+    assert.ok(contractIdx >= 0, "output contract must be present");
+    assert.ok(
+      execIdx < contractIdx,
+      "execution-result section must appear BEFORE the output contract",
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
