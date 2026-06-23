@@ -17,7 +17,7 @@ import { runOpencode, runOpencodeParallel, shouldFanOut, defaultAgentDeps, revie
 import { classifyCommit, CommitIntent } from "./qa/commit-classify";
 import { setupE2eProject, defaultSetupDeps } from "./qa/setup";
 import { validateSpecs, defaultValidateDeps } from "./qa/validate";
-import { runE2E, defaultExecuteDeps, defaultCleanupDeps } from "./qa/execute";
+import { runE2E, defaultExecuteDeps, defaultCleanupDeps, e2eTimeoutMs, allFailuresAreRunnerInfra } from "./qa/execute";
 import { setupCodeProject, defaultCodeSetupDeps, runCodeTests, defaultCodeExecuteDeps, runCodeCoverage } from "./qa/code-runner";
 import { validateCodeProject, defaultCodeValidateDeps } from "./qa/code-validate";
 import { publishE2e, publishCode, publishContext, defaultPublishDeps } from "./integrations/publish";
@@ -1806,21 +1806,26 @@ export async function runPipeline(
     }
 
     log("[qa] generating E2E tests with OpenCode...");
-    result = await generateAndReview(baseGenInput({ fixCases: opts.fixCases }));
+    // D1: generate without review here. The reviewer is moved to after the feedback execute
+    // (see the feedback block below) so it judges a spec that has actually executed against DEV.
+    // On runs where the feedback execute is skipped (code-mode, no-dev, complete, exhaustive),
+    // the reviewer still runs — it just runs at the post-feedback position, which is identical
+    // to the post-static-gate position in those cases.
+    result = await generateOnce(baseGenInput({ fixCases: opts.fixCases }));
 
     // W1 — pre-execution corrective pass. Detect strict-mode ambiguity against the live DOM and, if found,
-    // feed it through the EXISTING selectorContradictions regen channel + generateAndReview (cycle-ceiling
+    // feed it through the EXISTING selectorContradictions regen channel + generateOnce (cycle-ceiling
     // bounded) so the agent scopes the locator BEFORE the first execution. The deterministic BLOCK is
     // re-checked FRESH at the static gate below (W2), so even a no-op corrective regen is still caught.
     const preExecAmbiguities = await ambiguousSelectorsNow();
     preExecAmbiguityCatches = preExecAmbiguities.length;
     if (preExecAmbiguities.length > 0) {
       log(`[qa] pre-exec selector check: ${preExecAmbiguities.length} strict-mode ambiguity contradiction(s) BEFORE execution — regenerating once to scope them: ${preExecAmbiguities.join("; ")}`);
-      const corrected = await generateAndReview(baseGenInput({ selectorContradictions: preExecAmbiguities }));
+      const corrected = await generateOnce(baseGenInput({ selectorContradictions: preExecAmbiguities }));
       // ONLY adopt the corrective regen if it produced specs. An EMPTY result (cycle-ceiling hit, or an
       // agent no-op) must NOT discard the original ambiguous specs — they remain on disk and WILL execute,
       // so `result` must keep pointing at them for the W2 re-check (and the no-op-skip guard) to catch the
-      // on-disk ambiguity. This closes the empty-corrective-regen bypass.
+      // on-op ambiguity. This closes the empty-corrective-regen bypass.
       if (corrected != null && corrected.specs.length > 0) result = corrected;
     }
 
@@ -2055,6 +2060,66 @@ export async function runPipeline(
       persistOutcome(infra, { confinement, usage: usage.result(usageComplete), phaseTimings });
       await report(app, issueRepo, sha, infra, deps, log, shadow, isCode);
       return infra;
+    }
+
+    // Pre-reviewer feedback execute (D2/D3/D4/D5): run the assembled spec ONCE against live DEV
+    // BEFORE the reviewer, so the reviewer judges a spec that has actually executed. Gated to
+    // diff|manual (the commit-blast-radius modes) where the ~+15 min cost is justified. Excluded on
+    // complete/exhaustive (whole-suite scans, wall-clock cost unjustified). Skipped on code-mode
+    // and no-dev (handled by the outer generating && !isCode guard above and the app.dev check).
+    // REUSES deps.execute() — the same Filter C machinery that resolves browser/env/namespace.
+    // No new PipelineDeps member. Filter C (verdictual, retries:2) stays byte-for-byte unchanged.
+    const feedbackEligible =
+      result != null && result.specs.length > 0 &&
+      !!app.dev?.baseUrl &&
+      (mode === "diff" || mode === "manual");
+    if (feedbackEligible) {
+      // Bump wall-clock budget by one e2e timeout when the feedback gate fires, UNLESS the app
+      // has an explicit qa.wallClockBudgetMs override (which is unconditionally authoritative).
+      if (!app.qa.wallClockBudgetMs) {
+        wallClockBudget += e2eTimeoutMs();
+      }
+      const fbNs = `${ns}-fb`;
+      // D4: clear any stale V8 dumps from the feedback namespace before the feedback execute so
+      // they never union into the verdictual coverage measurement (coverageNs = ns, not fbNs).
+      deps.clearCoverage?.(e2eDir, fbNs);
+      log(`[qa] feedback execute (namespace ${fbNs}): running the assembled spec once before the reviewer...`);
+      const fbT0 = Date.now();
+      const fb = await deps.execute!(e2eDir, { baseUrl: app.dev!.baseUrl, namespace: fbNs, onCase, onRunning: onRunningTest, onDiscovered: onTestDiscovered, signal });
+      addTiming("feedback-execute", Date.now() - fbT0);
+      log(`[qa] feedback execute: ${fb.verdict} (${Math.round((Date.now() - fbT0) / 1000)}s)`);
+
+      // D3/D5: on a feedback failure that is NOT all runner-infra, do ONE bounded fixCases regen
+      // to give the agent first-hand runtime evidence. Budget = 1 regen (finite, not configurable).
+      // On budget exhaustion or all-runner-infra, proceed to the reviewer with the last assembled spec.
+      const fbFailed = fb.verdict === "fail" && fb.cases.some((c) => c.status === "fail");
+      if (fbFailed && !allFailuresAreRunnerInfra(fb.cases) && (await devHealthy())) {
+        const fbFailedCases = fb.cases.filter((c) => c.status === "fail");
+        log(`[qa] feedback fail: ${fbFailedCases.length} case(s) failed — regenerating via fixCases (budget=1) to surface runtime evidence...`);
+        const fbDomSnapshot = buildFailureDom(fbFailedCases);
+        const fbRegen = await generateOnce(baseGenInput({ fixCases: fbFailedCases, domSnapshot: fbDomSnapshot, failureSourced: !!fbDomSnapshot }));
+        if (fbRegen.specs.length > 0) {
+          // Re-validate the regenerated spec to ensure it still passes the static gate.
+          // On static fail, keep the prior assembled spec (do NOT fail the run — Filter C judges).
+          const fbValidation = await (async () => { const t0 = Date.now(); const v = await deps.validate!(e2eDir); addTiming("validate", Date.now() - t0); return v; })();
+          if (fbValidation.ok) {
+            result = fbRegen;
+            log(`[qa] feedback regen: static gate passed after fixCases; proceeding to reviewer.`);
+          } else {
+            log(`[qa] feedback regen: static gate FAILED after fixCases (${fbValidation.errors.join("; ")}); keeping prior assembled spec.`);
+          }
+        }
+      } else if (fb.verdict === "infra-error" || allFailuresAreRunnerInfra(fb.cases)) {
+        log(`[qa] feedback execute: runner-infra failure or infra-error — skipping regen, proceeding to reviewer.`);
+      }
+    }
+
+    // D1/D3: post-feedback reviewer. The reviewer now judges a spec that (on eligible runs) has
+    // actually executed against DEV. On non-eligible runs (complete/exhaustive/code/no-dev) the
+    // reviewer runs here too — its position relative to Filter B is unchanged in those cases.
+    // Guard mirrors the existing final-review guard: only when needsReview + deps.review present.
+    if (result != null && result.specs.length > 0) {
+      result = await reviewGenerated(result, baseGenInput({}), { allowRegeneration: true });
     }
   } else if (deps.validateCode) {
     // 6b. Filter B for CODE mode — a compile-feedback gate. Compile the generated tests WITHOUT
