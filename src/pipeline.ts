@@ -2115,13 +2115,17 @@ export async function runPipeline(
           if (fbValidation.ok) {
             result = fbRegen;
             log(`[qa] feedback regen: static gate passed after fixCases; re-executing the regenerated spec before the reviewer...`);
-            // Re-execute the regenerated spec under the same feedback namespace so the reviewer
-            // always judges a spec that has EXECUTED (not just a statically-validated one).
-            // Streaming callbacks omitted — this is informational, not the verdict.
+            // Re-execute the regenerated spec before the reviewer so it always judges a spec that has
+            // EXECUTED (not just a statically-validated one). Use a FRESH per-attempt namespace (mirrors
+            // the verdictual fix-loop's `retryNs`): on an app with no delete affordance the first
+            // feedback run's data persists, so reusing fbNs would re-create identically-named entities
+            // and inflate selector cardinality. Streaming callbacks omitted — informational, not the verdict.
+            const fbReExecNs = `${fbNs}-r1`;
+            deps.clearCoverage?.(e2eDir, fbReExecNs);
             const fbReExecT0 = Date.now();
-            const fbReExec = await deps.execute!(e2eDir, { baseUrl: app.dev!.baseUrl, namespace: fbNs, signal });
+            const fbReExec = await deps.execute!(e2eDir, { baseUrl: app.dev!.baseUrl, namespace: fbReExecNs, signal });
             addTiming("feedback-execute", Date.now() - fbReExecT0);
-            log(`[qa] feedback re-execute: ${fbReExec.verdict} (${Math.round((Date.now() - fbReExecT0) / 1000)}s)`);
+            log(`[qa] feedback re-execute (namespace ${fbReExecNs}): ${fbReExec.verdict} (${Math.round((Date.now() - fbReExecT0) / 1000)}s)`);
           } else {
             log(`[qa] feedback regen: static gate FAILED after fixCases (${fbValidation.errors.join("; ")}); keeping prior assembled spec.`);
           }

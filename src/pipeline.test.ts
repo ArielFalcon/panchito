@@ -3550,14 +3550,20 @@ test("feedback-execute: fail → one bounded fixCases regen → review runs afte
   assert.ok(fixCasesGen!.domSnapshot, `domSnapshot must be present in fixCases regen: ${JSON.stringify(fixCasesGen)}`);
   assert.match(fixCasesGen!.domSnapshot!, /Submit/, `domSnapshot must contain the failure-point DOM`);
   assert.equal(fixCasesGen!.failureSourced, true, `failureSourced must be true when domSnapshot is from failureDom`);
-  // Feedback execute count must be EXACTLY 2: initial fail + post-regen re-execute (S2, budget=1)
-  const fbExecCount = execNamespaces.filter((ns) => ns.endsWith("-fb")).length;
-  assert.equal(fbExecCount, 2, `feedback execute count must be exactly 2 (initial + re-execute after regen); got ${fbExecCount}: ${execNamespaces.join(",")}`);
-  // review must run AFTER the SECOND (re-executed, green) feedback execute
-  const lastFbExecIdx = calls.lastIndexOf("execute", calls.findIndex((c, i) => c === "execute" && execNamespaces[execNamespaces.length - 1]?.endsWith("-fb") && i > 0));
-  const secondFbExecPos = calls.reduce((last, c, i) => (c === "execute" && execNamespaces[calls.slice(0, i + 1).filter((x) => x === "execute").length - 1]?.endsWith("-fb") ? i : last), -1);
+  // Feedback execute count must be EXACTLY 2: initial fail + post-regen re-execute (S2, budget=1).
+  // Match by `includes("-fb")` so a fresh per-attempt re-execute namespace is still counted.
+  const fbExecNamespaces = execNamespaces.filter((ns) => ns.includes("-fb"));
+  assert.equal(fbExecNamespaces.length, 2, `feedback execute count must be exactly 2 (initial + re-execute after regen); got ${fbExecNamespaces.length}: ${execNamespaces.join(",")}`);
+  // The re-execute MUST use a FRESH namespace, never reuse the first feedback namespace: on an app
+  // with no delete affordance the first run's data persists, so reusing it would re-create
+  // identically-named entities and inflate selector cardinality. Mirrors the verdictual fix-loop's
+  // per-attempt `retryNs`. (Generic harness property — not specific to any configured test project.)
+  assert.notEqual(fbExecNamespaces[0], fbExecNamespaces[1], `feedback re-execute must use a namespace distinct from the initial feedback execute; both were ${fbExecNamespaces[0]}`);
+  // review must run AFTER the last feedback execute (the re-executed, green spec)
+  const executePositions = calls.map((c, i) => (c === "execute" ? i : -1)).filter((i) => i >= 0);
+  const lastFbExecPos = executePositions.filter((_, idx) => execNamespaces[idx]?.includes("-fb")).pop() ?? -1;
   const reviewIdx = calls.indexOf("review");
-  assert.ok(reviewIdx > secondFbExecPos, `review must run after the second feedback execute (pos ${secondFbExecPos}): ${calls.join(",")}`);
+  assert.ok(reviewIdx > lastFbExecPos, `review must run after the last feedback execute (pos ${lastFbExecPos}): ${calls.join(",")}`);
 });
 
 // ── T4: budget exhausted — persistent feedback failure terminates deterministically ────────────
