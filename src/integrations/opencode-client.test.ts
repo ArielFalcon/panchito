@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { TimeoutError } from "../errors";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1084,6 +1085,14 @@ test("withTimeout resolves if the promise arrives in time", async () => {
 test("withTimeout rejects when the deadline elapses", async () => {
   const slow = new Promise((r) => setTimeout(() => r("late"), 50));
   await assert.rejects(() => withTimeout(slow, 5, "agent"), /timed out after 5ms/);
+});
+
+test("withTimeout throws TimeoutError so runner classifies it as infrastructure", async () => {
+  const slow = new Promise((r) => setTimeout(() => r("late"), 50));
+  await assert.rejects(
+    () => withTimeout(slow, 5, "OpenCode prompt"),
+    (err: unknown) => err instanceof TimeoutError && /timed out after 5ms/.test((err as Error).message),
+  );
 });
 
 test("buildPrompt renders the cross-repo service section in diff mode", () => {

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { InfraError, AgentUnavailableError, isInfraError } from "./errors";
+import { InfraError, AgentUnavailableError, TimeoutError, isInfraError } from "./errors";
 
 test("InfraError is recognized as infrastructure", () => {
   assert.equal(isInfraError(new InfraError("DEV is unreachable")), true);
@@ -21,6 +21,17 @@ test("a DeployTimeoutError-shaped error (matched by name) is infrastructure", ()
   const e = new Error("deploy timed out");
   e.name = "DeployTimeoutError";
   assert.equal(isInfraError(e), true);
+});
+
+test("TimeoutError (agent prompt exceeded its budget) is infrastructure, not a crash", () => {
+  const e = new TimeoutError("OpenCode prompt: timed out after 900000ms");
+  assert.equal(isInfraError(e), true);
+  assert.ok(e instanceof InfraError);
+  assert.equal(e.name, "TimeoutError");
+  // name fallback path (cross-realm instanceof miss)
+  const shaped = new Error("OpenCode prompt: timed out after 900000ms");
+  shaped.name = "TimeoutError";
+  assert.equal(isInfraError(shaped), true);
 });
 
 test("an operator cancel is infrastructure (transient, not a code fault)", () => {

@@ -55,7 +55,7 @@ export type { AssembledPrompt } from "./prompts";
 // the agent's generator + reviewer output, and the targeted re-prompt used on a contract miss.
 import { checkGeneratorVerdict, repairInstruction, parseReviewerVerdict } from "./verdict-validate";
 import { ManifestEntrySchema } from "../orchestrator/schemas";
-import { AgentUnavailableError, isInfraError } from "../errors";
+import { AgentUnavailableError, TimeoutError, isInfraError } from "../errors";
 
 // Read fallback model mapping from opencode.json (root-level key). Keeps the
 // fallback logic in one place so the orchestrator can retry with a different
@@ -1453,7 +1453,7 @@ export async function runOpencodeParallel(
 // with stubs.
 export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${label}: timed out after ${ms}ms`)), ms);
+    const timer = setTimeout(() => reject(new TimeoutError(`${label}: timed out after ${ms}ms`)), ms);
     p.then(
       (v) => {
         clearTimeout(timer);

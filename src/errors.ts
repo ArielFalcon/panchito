@@ -29,13 +29,26 @@ export class AgentUnavailableError extends InfraError {
   }
 }
 
+// A deadline elapsed while waiting for an operation (e.g. an OpenCode prompt exceeded its
+// per-call budget). It is a kind of InfraError: the run is inconclusive because the environment
+// (model/provider/runtime) could not meet the time budget, NOT because of a bug in the
+// orchestrator. Throwing this instead of a generic Error prevents the runner from misclassifying
+// agent timeouts as "unexpected internal error" pipeline crashes.
+export class TimeoutError extends InfraError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "TimeoutError";
+  }
+}
+
 // True when a thrown error is genuine infrastructure: an InfraError (incl. AgentUnavailableError),
 // the deploy-gate timeout (DeployTimeoutError, matched by name so this module need not import env/),
-// or an operator cancel. The name fallbacks cover the case where `instanceof` fails across module/
-// bundle realms (the dual OpenCode SDK is loaded in two realms).
+// an elapsed operation deadline (TimeoutError), or an operator cancel. The name fallbacks cover the
+// case where `instanceof` fails across module/bundle realms (the dual OpenCode SDK is loaded in two
+// realms).
 export function isInfraError(err: unknown): boolean {
   if (err instanceof InfraError) return true;
-  if (err instanceof Error && (err.name === "InfraError" || err.name === "AgentUnavailableError" || err.name === "DeployTimeoutError")) return true;
+  if (err instanceof Error && (err.name === "InfraError" || err.name === "AgentUnavailableError" || err.name === "DeployTimeoutError" || err.name === "TimeoutError")) return true;
   if (err instanceof Error && /\brun cancelled by operator\b/i.test(err.message)) return true;
   return false;
 }
