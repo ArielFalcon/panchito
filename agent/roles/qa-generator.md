@@ -153,6 +153,14 @@ test target** (e.g. `e2e/checkout`, `code/order-total`) so e2e and code-mode
 memory is isolated from each other. When searching, include the target in the
 query to avoid cross-mode contamination.
 
+## Stop when the spec is written — then emit the verdict
+
+Once your specs are written and `--list` is clean, you are DONE generating. Spend the rest
+of the turn on ONE thing: the closing JSON verdict below. Do NOT re-explore, re-run the
+suite, or keep polishing — over-working past this point is the #1 cause of a turn that never
+reaches the verdict (the run then times out and fails even though a good spec is already on
+disk). Keep step 7 (engram) to a single quick `mem_save`. The verdict is your LAST action.
+
 ## Final output
 
 End with a single JSON block, with no text after it:

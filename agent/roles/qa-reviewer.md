@@ -65,8 +65,35 @@ parses it to classify the failure for the learning ledger — free-form prose is
 (does not test the change), `[fragile-selector]` (ambiguous or brittle locator), `[no-cleanup]`
 (leaves test data behind), or `[other]`.
 
+Each correction MUST be a structured object with two fields:
+- `"text"`: the actionable message, prefixed with the class tag (as above).
+- `"severity"`: either `"blocking"` or `"advisory"`.
+  - **blocking**: the test is worthless or actively harmful (false-positive, wrong-objective,
+    missing-cleanup). The gate FAILS unless all blocking corrections are resolved.
+  - **advisory**: style or robustness nit that does not make the test worthless on its own.
+    The gate PASSES with advisory-only corrections — they are recorded as notes, not requirements.
+
+**Severity rules:**
+- A Value Judge finding (the test would NOT catch a real regression) → ALWAYS `blocking`.
+- An unconfirmable UI fact (selector/label not confirmed by the Live DEV DOM or the spec itself)
+  → ALWAYS `advisory` (re-verify), NEVER `blocking`.
+- A `[no-cleanup]` finding is `blocking` ONLY when the app HAS a delete affordance the test ignored.
+  If the app exposes NO delete affordance, namespaced data left behind is acceptable (each run is
+  isolated by its `namespace`) → `advisory` at most, NEVER `blocking` — do not demand cleanup that
+  cannot exist. Conversely, a test that fabricates a direct API/HTTP/curl DELETE to "clean up" IS a
+  defect: flag it `[other]` blocking (it breaks the UI-only contract and invents an endpoint that may
+  not exist) and tell it to rely on namespaced-and-left instead.
+- A Robustness Judge nit (fragile selector, timing, cleanup gap) on an otherwise-correct test
+  → use judgment: if the fragility makes the test unreliable enough to be misleading, `blocking`;
+  if it is a style improvement with no real false-negative risk, `advisory`.
+
+**Convergence rule (when "Prior-round corrections" are provided):**
+- APPROVE if the previously-raised BLOCKING issues are now resolved — do NOT re-raise them.
+- Raise NEW blocking corrections ONLY if the generator's fix introduced a new anti-pattern.
+- Advisory nits on specs that are functionally identical to the prior round → omit entirely.
+
 Evaluate from BOTH perspectives (Value Judge + Robustness Judge), but emit ONLY this
-flat verdict. Every value gap AND every robustness issue you find must appear as a tagged
+flat verdict. Every value gap AND every robustness issue you find must appear as a
 `corrections` entry — there is no separate perspective object (only `approved`, `rationale`
 and `corrections` are read; anything not in `corrections` is silently discarded).
 
@@ -75,8 +102,14 @@ and `corrections` are read; anything not in `corrections` is silently discarded)
   "approved": false,
   "rationale": "Rejected: the checkout discount logic this commit added is never asserted, so the suite would stay green if the discount broke.",
   "corrections": [
-    "[false-positive] checkout.spec.ts: no assertion verifies the >10 items discount was applied — add one (Value Judge)",
-    "[fragile-selector] checkout.spec.ts: replace page.getByText('Pay') with section-scoped getByRole('button', { name: /pay/i }) — 'Pay' matches payment history text too (Robustness Judge)"
+    {
+      "text": "[false-positive] checkout.spec.ts: no assertion verifies the >10 items discount was applied — add one (Value Judge)",
+      "severity": "blocking"
+    },
+    {
+      "text": "[fragile-selector] checkout.spec.ts: replace page.getByText('Pay') with section-scoped getByRole('button', { name: /pay/i }) — 'Pay' matches payment history text too (Robustness Judge)",
+      "severity": "advisory"
+    }
   ]
 }
 ```
