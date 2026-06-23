@@ -1457,9 +1457,14 @@ export async function runOpencodeParallel(
 // Timeout wrapper for a promise: rejects if it elapses. Prevents a hung agent run
 // from blocking the (sequential) queue, which would block every repo. Verifiable
 // with stubs.
-export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+export function withTimeout<T>(
+  p: Promise<T>,
+  ms: number,
+  label: string,
+  ErrorClass: new (message: string) => Error = Error,
+): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${label}: timed out after ${ms}ms`)), ms);
+    const timer = setTimeout(() => reject(new ErrorClass(`${label}: timed out after ${ms}ms`)), ms);
     p.then(
       (v) => {
         clearTimeout(timer);
@@ -1711,6 +1716,7 @@ export async function defaultAgentDeps(): Promise<AgentDeps> {
             })(),
             promptTimeoutMs,
             "OpenCode prompt",
+            AgentUnavailableError,
           ).catch((err: unknown) => {
             // On timeout (or any failure that left work in flight), interrupt the server run
             // so it stops consuming compute after the orchestrator has already given up.
