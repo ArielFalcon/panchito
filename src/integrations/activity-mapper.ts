@@ -131,6 +131,84 @@ export function eventRunId(
   return sessionID ? sessions.get(sessionID) : undefined;
 }
 
+// ---------------------------------------------------------------------------
+// Codex JSONL event mapper (C1.4 / AC1.4.1-2)
+//
+// Maps one line from `codex exec --json` stdout to 0..N RunEventBody entries.
+//
+// PROVISIONAL SHAPE — the exact `codex exec --json` JSONL event schema is UNVERIFIED.
+// T-P1-0 (image-gated) must capture a real fixture from the built agents image and this
+// mapper re-validated against it. The defensive multi-field probe below mirrors
+// extractCodexLastMessage (codex-strategy.ts) which was written precisely because the
+// real shape is unknown. Fields checked: msg, message, text, content (same order).
+//
+// Known signal types from OpenAI Codex CLI docs and extractCodexLastMessage observation:
+//   message  — final assistant message (msg / message / text / content)
+//   tool_use — a tool call being executed (name, input)
+//   error    — an error event (message / error / text)
+// Any other type is silently skipped (forward-compatible).
+// ---------------------------------------------------------------------------
+
+export interface RawCodexEvent {
+  type?: string;
+  msg?: string;
+  message?: string;
+  text?: string;
+  content?: string;
+  // Tool call fields
+  name?: string;
+  input?: unknown;
+  // Error fields
+  error?: string;
+}
+
+// Extract the message text from a codex JSONL event using the same defensive probe as
+// extractCodexLastMessage — field order: msg → message → text → content.
+function codexEventText(event: RawCodexEvent): string {
+  const v = event.msg ?? event.message ?? event.text ?? event.content;
+  return typeof v === "string" ? v.trim() : "";
+}
+
+// Map one raw codex --json JSONL line to 0..N RunEventBody entries.
+// Malformed JSON or unknown event types produce []; they do NOT throw (AC1.4.2).
+export function mapCodexExecEvent(line: string): RunEventBody[] {
+  if (!line.trim()) return [];
+  let event: RawCodexEvent;
+  try {
+    event = JSON.parse(line) as RawCodexEvent;
+  } catch {
+    // Non-JSON lines (stderr-like output) are skipped without throwing.
+    return [];
+  }
+
+  const type = String(event.type ?? "").toLowerCase();
+
+  // Tool-use event: map to agent.activity
+  if (type === "tool_use" || type === "tool") {
+    const tool = String(event.name ?? "tool");
+    const input = event.input as Record<string, unknown> | undefined ?? {};
+    const file = input.filePath ?? input.path ?? input.file;
+    const target = (typeof file === "string" && file) ? basename(file) : cap(tool);
+    const kind = kindForTool(tool);
+    return [{ type: "agent.activity", kind, target, status: "running" }];
+  }
+
+  // Error event: map to agent.error
+  if (type === "error") {
+    const detail = codexEventText(event) || String(event.error ?? "codex error");
+    return [{ type: "agent.error", detail: cap(detail) }];
+  }
+
+  // Message/assistant event: prose only — drop (same as OpenCode text part).
+  // The final message is extracted separately via extractCodexLastMessage.
+  if (type === "message" || type === "assistant" || type === "response") {
+    return [];
+  }
+
+  // Unknown type: skip (forward-compatible).
+  return [];
+}
+
 // Maps one raw OpenCode event to 0..N contract event bodies. Returns [] when the
 // event cannot be attributed to a known session or carries only prose/control.
 export function mapOpencodeEvent(

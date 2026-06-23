@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { singleProviderConfig } from "./config";
+import { CODEX_MODELS } from "./codex-strategy";
 
 // Guard against the model "split-brain": config.ts's DEFAULT_MODELS (used by the runtime
 // reconfig layer) and opencode/opencode.json (the file that actually runs the agents) must
@@ -59,5 +60,33 @@ test("config.ts default reviewer matches opencode.json's qa-reviewer (single sou
     cfg.assignments.reviewer.model,
     models["qa-reviewer"],
     "config.ts DEFAULT_MODELS.opencode.reviewer must equal the model opencode.json actually runs for qa-reviewer.",
+  );
+});
+
+// T-P0-4: generalize the reviewer!=primary guard to cover BOTH providers (AC0.2.1, AC0.2.3).
+// This test is RED until DEFAULT_MODELS.codex.reviewer is set to a model distinct from primary.
+test("reviewer differs from primary for EVERY provider (independent judgment guard)", () => {
+  const providers = ["opencode", "codex"] as const;
+  for (const provider of providers) {
+    const cfg = singleProviderConfig(provider, {});
+    assert.notEqual(
+      cfg.assignments.reviewer.model,
+      cfg.assignments.primary.model,
+      `[${provider}] reviewer must be a DIFFERENT model from primary — otherwise the quality loop is the generator grading its own homework.`,
+    );
+  }
+});
+
+// T-P0-4: codex reviewer model must exist in CODEX_MODELS catalog (AC0.2.2) so
+// validateAssignedModels does not throw on applyConfig.
+// Driven by the real exported CODEX_MODELS catalog so that a catalog change that removes or
+// renames a model automatically breaks this test — hardcoded IDs would silently miss drift.
+test("codex reviewer model id is present in the CODEX_MODELS catalog (AC0.2.2)", () => {
+  const catalogIds = new Set(CODEX_MODELS.map((m) => m.id));
+  const cfg = singleProviderConfig("codex", {});
+  assert.ok(
+    catalogIds.has(cfg.assignments.reviewer.model),
+    `codex reviewer model '${cfg.assignments.reviewer.model}' is not in CODEX_MODELS ` +
+      `(${[...catalogIds].join(", ")}). An out-of-catalog model makes validateAssignedModels throw.`,
   );
 });

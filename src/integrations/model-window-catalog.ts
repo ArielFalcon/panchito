@@ -84,6 +84,12 @@ const MODEL_WINDOW_TOKENS: Record<string, number> = {
   // Worker / flash tier models: deepseek-v4-flash.
   // Workers receive per-objective prompts (smaller scope), 32K is safe.
   "deepseek-v4-flash": 32_000,
+  // Codex models (T-P2-4): gpt-5.4 and gpt-5.4-mini.
+  // GPT-5 series supports 128K+ context (conservative entry; raise after telemetry confirms).
+  // Without entries these fall to the 32K default, silently truncating context on large runs.
+  // ⚠ PROVISIONAL — confirm the exact window via `openai models` or OpenAI docs once available.
+  "gpt-5.4": 128_000,
+  "gpt-5.4-mini": 128_000,
 };
 
 // Fallback window in tokens when the role or model is not in the catalog.

@@ -139,6 +139,49 @@ test("catalog: roleWindowBytes returns fallback for unparseable config", () => {
   assert.equal(bytes, fallbackBytes, "unparseable config must return the DEFAULT_WINDOW_TOKENS fallback");
 });
 
+// ── T-P2-4: Codex model catalog entries (AC2.4.1-2) ──────────────────────────
+// gpt-5.4 and gpt-5.4-mini must NOT fall through to the 32K default.
+
+test("catalog: gpt-5.4 has a dedicated catalog entry and does NOT fall back to DEFAULT (AC2.4.1)", () => {
+  const bytes = modelWindowBytes("gpt-5.4");
+  const fallbackBytes = Math.floor(DEFAULT_WINDOW_TOKENS * INPUT_PROMPT_SAFETY_MARGIN * BYTES_PER_TOKEN);
+  assert.notEqual(
+    bytes,
+    fallbackBytes,
+    `gpt-5.4 must have a dedicated catalog entry, not the 32K default. Got ${bytes} bytes (default would be ${fallbackBytes})`,
+  );
+  // Must be materially larger than the default (it's a large frontier model).
+  assert.ok(
+    bytes > fallbackBytes,
+    `gpt-5.4 context window must exceed the 32K fallback. Got: ${bytes} bytes`,
+  );
+});
+
+test("catalog: gpt-5.4-mini has a dedicated catalog entry and does NOT fall back to DEFAULT (AC2.4.1)", () => {
+  const bytes = modelWindowBytes("gpt-5.4-mini");
+  const fallbackBytes = Math.floor(DEFAULT_WINDOW_TOKENS * INPUT_PROMPT_SAFETY_MARGIN * BYTES_PER_TOKEN);
+  assert.notEqual(
+    bytes,
+    fallbackBytes,
+    `gpt-5.4-mini must have a dedicated catalog entry, not the 32K default. Got ${bytes} bytes (default would be ${fallbackBytes})`,
+  );
+  assert.ok(
+    bytes > fallbackBytes,
+    `gpt-5.4-mini context window must exceed the 32K fallback. Got: ${bytes} bytes`,
+  );
+});
+
+test("catalog: unknown model id still falls back to DEFAULT_WINDOW_TOKENS (AC2.4.2 regression)", () => {
+  // The codex entries must not break the existing fallback contract for unknown models.
+  const unknownBytes = modelWindowBytes("__unknown_codex_model__");
+  const fallbackBytes = Math.floor(DEFAULT_WINDOW_TOKENS * INPUT_PROMPT_SAFETY_MARGIN * BYTES_PER_TOKEN);
+  assert.equal(
+    unknownBytes,
+    fallbackBytes,
+    "unknown model must still fall back to DEFAULT_WINDOW_TOKENS",
+  );
+});
+
 test("catalog: roleWindowBytes resolves correctly for all roster roles via a full config mock", () => {
   const cfg = {
     agent: {

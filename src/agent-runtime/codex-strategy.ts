@@ -3,9 +3,18 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { capabilitiesForRole } from "./types";
+import { AgentUnavailableError } from "../errors";
 import { sanitizeText } from "../orchestrator/sanitizer";
 import { saveAgentTurn } from "../server/history";
-import type { AgentOpenDescriptor, AgentTurnEvent } from "../integrations/opencode-client";
+import { mapCodexExecEvent } from "../integrations/activity-mapper";
+import {
+  checkCodexCircuit,
+  recordCodexCircuitFailure,
+  recordCodexCircuitSuccess,
+  resetCodexCircuit,
+} from "../integrations/codex-circuit-breaker";
+import type { AgentOpenDescriptor, AgentTurnEvent, LiveActivity } from "../integrations/opencode-client";
+import type { RunEventBody } from "../contract/events";
 import type {
   AgentModelInfo,
   AgentProviderHealth,
@@ -13,6 +22,68 @@ import type {
   AgentRuntimeSession,
   AgentRuntimeStrategy,
 } from "./types";
+
+// T-P3-3 — onUsage honesty / PENDING_USAGE_HOOK.
+//
+// `codex exec --json` does NOT expose token usage in the JSONL schema currently verified
+// (pending the T-P1-0 image-gated fixture from the real @openai/codex@0.139.0 binary).
+//
+// CONTRACT (AC3.3.1):
+//   - openSession intentionally does NOT accept an `onUsage` callback: emitting null snapshots
+//     would look like real data. See AgentRuntimeStrategy.openSession comment in types.ts.
+//   - All token fields in AgentTurnEvent are set to null (see the prompt() funnel below).
+//   - pipeline.ts:937 already yields `usageComplete = false` for codex — honest, not fabricated.
+//
+// PENDING HOOK — activate this when the T-P1-0 real-fixture capture proves the JSONL schema:
+//   1. Set CODEX_USAGE_AVAILABLE = true
+//   2. Parse the relevant usage field from the JSONL (e.g. event.usage.input_tokens)
+//   3. Emit a UsageSnapshot via the caller-supplied onUsage callback in openSession opts
+//   4. Update the agentTurnEvent token fields from the parsed values
+//   5. Wire `onUsage` into openSession's opts type (matching OpenCodeRuntimeStrategy)
+//
+// Until those steps are done, CODEX_USAGE_AVAILABLE must remain false. This flag is exported
+// so the unit test can assert the pending hook is NOT yet activated (T-P3-3).
+export const CODEX_USAGE_AVAILABLE = false as boolean;
+
+// ROOT-CAUSE classifier for Codex: mirrors agentErrorToInfra (opencode-client.ts:1754) for the
+// Codex path. Maps `codex exec` non-zero exit / auth / out-of-credits / timeout to
+// AgentUnavailableError (infra-error) so billing/auth failures never surface as false `fail`/`invalid`
+// verdicts that open a spurious GitHub Issue. Returns null for non-infra outcomes (real test failures).
+//
+// IMPORTANT: This classifier operates on a plain Error — `codex exec` (or the supervisor transport)
+// throws bare Error objects; the classification inspects the message for known infra signals.
+// Do NOT extend this to substring-match test-output prose: only known provider/infra error patterns
+// belong here. Any non-matching error returns null (caller decides the verdict).
+export function codexErrorToInfra(error: unknown): AgentUnavailableError | null {
+  if (!(error instanceof Error)) return null;
+  const msg = error.message.toLowerCase();
+  const tail = "INCONCLUSIVE (infrastructure), not a test failure";
+
+  // Timeout is the highest-priority check: it's the controlled case (CodexExecTransport fires SIGTERM).
+  if (/timed out after \d+ms/.test(msg)) {
+    return new AgentUnavailableError(`Codex prompt timed out. ${tail}.`, { cause: error });
+  }
+
+  // Auth / credits / billing signals in stderr surfaced through the exit-code path.
+  if (
+    /\b(401|403|unauthorized|authentication failed|forbidden)\b/.test(msg) ||
+    /\b(402|out of credits|payment required|billing)\b/.test(msg) ||
+    /\b(429|too many requests|rate.?limit)\b/.test(msg)
+  ) {
+    return new AgentUnavailableError(
+      `Codex provider rejected the request (auth / credits / rate-limit): ${error.message}. ${tail}.`,
+      { cause: error },
+    );
+  }
+
+  // Abort/SIGTERM from an external AbortSignal (not our internal timeout).
+  if (/\b(aborted|sigterm|abort)\b/.test(msg)) {
+    return new AgentUnavailableError(`Codex exec was aborted. ${tail}.`, { cause: error });
+  }
+
+  // Not an infra error — a genuine non-infra outcome (real test failure, script error, etc.).
+  return null;
+}
 
 // Codex's translation of the provider-agnostic capability policy: filesystem write maps to the
 // `codex exec --sandbox` mode. Read-only roles (the judge, the reflector) cannot write the workspace.
@@ -56,7 +127,7 @@ export function defaultCodexTransport(env: Record<string, string | undefined> = 
   return base ? new SupervisorExecTransport({ baseUrl: base, env }) : new CodexExecTransport(env);
 }
 
-const CODEX_MODELS: AgentModelInfo[] = [
+export const CODEX_MODELS: AgentModelInfo[] = [
   { id: "gpt-5.4", label: "GPT-5.4" },
   { id: "gpt-5.4-mini", label: "GPT-5.4 Mini" },
 ];
@@ -177,7 +248,22 @@ export class CodexRuntimeStrategy implements AgentRuntimeStrategy {
       // event fires (same as OpenCode), so any DEV-environment data is redacted before storage.
       prompt: async (text, promptOpts) => {
         const thisRound = round++;
-        const output = await session.prompt(withCodexRolePreamble(role, text, this.promptRoot));
+        // Circuit breaker guard (mirrors checkCircuit() in opencode-client.ts:1607).
+        // If the codex circuit is open (repeated infra failures), reject immediately
+        // without spending a codex exec — the error surfaces as infra-error via codexErrorToInfra.
+        checkCodexCircuit();
+        let rawOutput: string;
+        try {
+          rawOutput = await session.prompt(withCodexRolePreamble(role, text, this.promptRoot));
+          recordCodexCircuitSuccess();
+        } catch (err) {
+          recordCodexCircuitFailure();
+          throw err;
+        }
+        // textOnly: strip chain-of-thought reasoning wrappers (<think>…</think> etc.) from the
+        // output, mirroring OpenCode's extractText({textOnly:true}) path (opencode-client.ts:1811).
+        // Used by chat/Q&A so the operator receives only the final answer without reasoning traces.
+        const output = promptOpts?.textOnly ? stripCodexReasoningWrappers(rawOutput) : rawOutput;
         if (effectiveOnTurn) {
           effectiveOnTurn({
             runId: opts?.descriptor?.runId ?? null,
@@ -207,18 +293,53 @@ export class CodexRuntimeStrategy implements AgentRuntimeStrategy {
 
   async restart(opts?: { apiKey?: string; reason?: string; env?: Record<string, string> }): Promise<AgentProviderHealth> {
     if (opts?.apiKey) this.env.CODEX_API_KEY = opts.apiKey;
+    // Clear the circuit breaker on restart so the operator's recovery action (rotate API key)
+    // is not blocked by stale failures — mirrors resetCircuit() in opencode-client.ts.
+    resetCodexCircuit();
     const supervised = await supervisorRestart(this.env, this.provider, opts?.apiKey, opts?.env);
     if (supervised) return supervised;
     if (this.transport.restart) return this.transport.restart(opts);
     return this.health();
   }
+
+  // startEventStream for Codex (C1.4 / AC1.4.3).
+  //
+  // ARCHITECTURAL NOTE — Codex is exec-per-prompt (no global SSE server):
+  // Unlike OpenCode's persistent session server, `codex exec` is a one-shot process per prompt.
+  // There is no global event bus to subscribe to. The stream here is a no-op registration
+  // that provides structural parity with the OpenCode strategy's optional method. Live events
+  // for individual codex prompts are emitted via the JSONL mapper (mapCodexExecEvent) inside
+  // runExec when a caller supplies an onRunEvent hook — that per-exec streaming is separate from
+  // this session-lifetime subscription.
+  //
+  // PROVISIONAL: the exact `codex exec --json` JSONL event shape is UNVERIFIED (T-P1-0 image-gated
+  // fixture not yet captured). The mapper in activity-mapper.ts uses the same defensive probe
+  // (event.msg ?? event.message ?? event.text ?? event.content) as extractCodexLastMessage.
+  // This MUST be re-validated once the real fixture is committed from the built agents image.
+  async startEventStream(
+    _onActivity: (a: LiveActivity) => void,
+    _signal?: AbortSignal,
+    _onRunEvent?: (runId: string, body: RunEventBody) => void,
+  ): Promise<void> {
+    // No persistent event stream for exec-per-prompt Codex sessions.
+    // Per-exec activity is emitted inline during runExec (see CodexExecTransport).
+    return;
+  }
 }
 
+// Dependency type for the spawn side-effect in CodexExecTransport.
+// Injected so tests can supply a fake child-process stub without spawning a real binary.
+export type SpawnFn = typeof spawn;
+
 export class CodexExecTransport implements CodexHeadlessTransport {
+  private readonly spawnFn: SpawnFn;
   constructor(
     private readonly env: Record<string, string | undefined> = process.env,
     private readonly command = process.env.CODEX_BIN ?? "codex",
-  ) {}
+    spawnFn?: SpawnFn,
+  ) {
+    this.spawnFn = spawnFn ?? spawn;
+  }
 
   async start(input: CodexTransportStartInput): Promise<CodexTransportSession> {
     const id = randomUUID();
@@ -246,7 +367,7 @@ export class CodexExecTransport implements CodexHeadlessTransport {
   private runExec(prompt: string, input: CodexTransportStartInput): Promise<string> {
     const args = codexExecArgs(input);
     return new Promise((resolve, reject) => {
-      const child = spawn(this.command, args, {
+      const child = this.spawnFn(this.command, args, {
         cwd: input.cwd,
         env: codexExecEnv({ ...process.env, ...this.env }),
         stdio: ["pipe", "pipe", "pipe"],
@@ -270,7 +391,13 @@ export class CodexExecTransport implements CodexHeadlessTransport {
       child.on("close", (code) => {
         if (timeout) clearTimeout(timeout);
         if (code === 0) resolve(extractCodexLastMessage(stdout) || stdout.trim());
-        else reject(new Error(`codex exec exited ${code}: ${stderr.trim() || stdout.trim()}`));
+        else {
+          const raw = new Error(`codex exec exited ${code}: ${stderr.trim() || stdout.trim()}`);
+          // Classify the exit error: infra faults (auth/credits/timeout/abort) become
+          // AgentUnavailableError so the pipeline surfaces infra-error, never a false Issue.
+          const infra = codexErrorToInfra(raw);
+          reject(infra ?? raw);
+        }
       });
       child.stdin.end(prompt);
     });
@@ -329,9 +456,21 @@ export class SupervisorExecTransport implements CodexHeadlessTransport {
       ...(input.signal ? { signal: input.signal } : {}),
     });
     const body = (await res.json().catch(() => ({}))) as { message?: string; error?: string };
-    if (!res.ok) throw new Error(`codex exec via supervisor failed (${res.status}): ${body.error ?? "unknown"}`);
+    if (!res.ok) {
+      const raw = new Error(`codex exec via supervisor failed (${res.status}): ${body.error ?? "unknown"}`);
+      // Classify infra errors (auth/credits/rate-limit) so the pipeline can surface infra-error.
+      const infra = codexErrorToInfra(raw);
+      throw infra ?? raw;
+    }
     return body.message ?? "";
   }
+}
+
+// Strips chain-of-thought reasoning wrappers that models may include in their output.
+// Mirrors OpenCode's stripReasoningWrappers (opencode-client.ts:1790) — used on the textOnly
+// path so a leaked <think>…</think> block is removed before the text reaches the operator.
+function stripCodexReasoningWrappers(s: string): string {
+  return s.replace(/<(think|thought|reasoning)>[\s\S]*?<\/\1>/gi, "").trim();
 }
 
 function withCodexRolePreamble(role: AgentRole, text: string, promptRoot: string): string {
@@ -369,7 +508,7 @@ function readPrompt(path: string): string {
   }
 }
 
-function extractCodexLastMessage(jsonl: string): string {
+export function extractCodexLastMessage(jsonl: string): string {
   let last = "";
   for (const line of jsonl.split(/\r?\n/)) {
     if (!line.trim()) continue;
