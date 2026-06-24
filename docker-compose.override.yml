@@ -17,10 +17,24 @@ services:
     # add it explicitly. host-gateway resolves to the host on both Docker Desktop and Linux.
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    environment:
+      # Opt-in clone base for the local jhipster-store target. Defaults to github.com, so other
+      # apps clone normally UNLESS you boot with GIT_REMOTE_BASE=/app/local-repos set in the host
+      # env — then the orchestrator clones the bind-mounted jhipster-store for this probe session.
+      GIT_REMOTE_BASE: ${GIT_REMOTE_BASE:-https://github.com}
     volumes:
       - ./src:/app/src
       - ./package.json:/app/package.json
       - ./package-lock.json:/app/package-lock.json
+      # Local test target (config/apps/jhipster-store.yaml): the orchestrator clones this read-only
+      # from the in-container path. Only the orchestrator clones — the agents read the working copy
+      # from the shared `mirrors` volume, so they do NOT need this mount. Activate per-run with
+      # GIT_REMOTE_BASE=/app/local-repos so the clone source is /app/local-repos/jhipster-store
+      # (matches `repo: "jhipster-store"`). The webhook service keeps the default github.com base,
+      # so portfolio/petclinic cloning is untouched.
+      # Mount target ends in .git because repo-mirror clones ${GIT_REMOTE_BASE}/${repo}.git — so for
+      # repo "jhipster-store" the clone source resolves to /app/local-repos/jhipster-store.git.
+      - ../jhipster-store:/app/local-repos/jhipster-store.git:ro
 
   # The agent navigates the DEV site through its Playwright MCP during generation, so it ALSO
   # needs to reach a host-local DEV target.

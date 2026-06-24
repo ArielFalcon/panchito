@@ -1,0 +1,70 @@
+# JHipster microservices e-commerce store — a modern local target (Angular 21 gateway +
+# Spring Boot microservices), the up-to-date counterpart to spring-petclinic-microservices.
+# Generated from store.jdl; brought up with one `docker compose up` from jhipster-store/docker-compose.
+#
+# Architecture (all in ONE repo → monorepo, like petclinic, so NO cross-repo `services:`):
+#   - store        : Spring Cloud Gateway + Angular 21 SPA, JWT auth   (the single UI entrypoint, :8080)
+#   - invoice      : Spring Boot microservice, MySQL
+#   - notification : Spring Boot microservice, MongoDB
+#   - jhipster-registry (Eureka) : service discovery
+# Fully local, no API keys.
+#
+# How to run DEV (bring it up yourself; panchito never builds/starts it):
+#   cd ../jhipster-store/docker-compose && docker compose up -d
+#   → the gateway UI is at http://localhost:8080  (login admin/admin)
+#   (needs ~3-4GB Docker RAM — stop the petclinic stack first if it's up.)
+#
+# How to run panchito over it (manual mode; the CLI runs INSIDE the orchestrator so the working
+# copy lands in the shared `mirrors` volume the agents read). GIT_REMOTE_BASE points the clone at
+# the bind-mounted local repo, per-run only:
+#   SHA=$(git -C ../jhipster-store rev-parse HEAD)
+#   docker compose exec orchestrator env GIT_REMOTE_BASE=/app/local-repos \
+#     npm run qa -- --app jhipster-store --sha "$SHA" --mode manual \
+#     --guidance "smoke-test login and the product catalog"
+# If git reports "dubious ownership" on the bind-mounted source, run once inside the container:
+#   docker compose exec orchestrator git config --global --add safe.directory '/app/local-repos/jhipster-store'
+
+name: "jhipster-store"
+
+# LOCAL clone (no GitHub): the orchestrator clones from GIT_REMOTE_BASE + "/<repo>". The dev override
+# (docker-compose.override.yml) bind-mounts the host dir to /app/local-repos/jhipster-store, so run
+# jhipster-store with GIT_REMOTE_BASE=/app/local-repos and this bare `repo` name. GIT_REMOTE_BASE is
+# passed PER-RUN (see the run command in the file header), NOT baked into the service — so the
+# webhook keeps the default https://github.com base and portfolio/petclinic cloning is untouched.
+repo: "jhipster-store"
+baseBranch: "main"
+
+# JHipster exposes springdoc OpenAPI at runtime (/v3/api-docs per service). There is no static
+# contract file in the repo by default, so no `openapi:` hint — the agent drives through the UI.
+
+dev:
+  baseUrl: "http://host.docker.internal:8080"   # the Spring Cloud Gateway — the single UI entrypoint.
+  # host.docker.internal = the HOST's localhost as seen from inside the orchestrator/agent
+  # containers (Docker Desktop). If you run the CLI on the host instead, change to localhost:8080.
+  # no versionUrl → the deploy gate is SKIPPED (you bring DEV up with docker compose yourself).
+
+qa:
+  needsReview: true
+  shadow: true                # validate end-to-end WITHOUT opening PRs/Issues — only logs what it
+                              # WOULD do. Lift to false only once you trust the output.
+  testDataPrefix: "qa-bot"    # entities created by the bot are namespaced per SHA
+
+  # Read-only explorer pass before the generator (single-agent diff): distils the change's blast
+  # radius into a focused brief so the test-writer gets a CONCRETE objective. On by intent — diff is
+  # the primary, reliable path for a rich app like this.
+  explorer: true
+
+  # Change-coverage — the value keystone. "signal" measures + records without ever blocking. JHipster
+  # ships its Angular SPA via the gateway; enable DEV source maps to make coverage MEASURE (not
+  # "unknown"). Move to "enforce" only after a run reports a real %.
+  changeCoverage:
+    mode: signal
+    minRatio: 0.7
+
+  # Value oracle (response fault-injection) re-runs the green suite against DEV with corrupted JSON to
+  # measure assertion strength. Would be OFF by default under shadow:true; enabled explicitly here
+  # because a real backend makes it meaningful (≈2× exec per green diff). Signal-only, never blocks.
+  valueOracle: signal
+
+report:
+  onFailure: "github-issue"
