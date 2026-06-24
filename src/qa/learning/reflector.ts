@@ -1,5 +1,6 @@
 import type { RunOutcome, StructuredReflection } from "../../types";
 import type { ErrorClass } from "./taxonomy";
+import { lastJsonMatching } from "../../integrations/verdict-parse";
 
 export interface ReflectionInput {
   errorClass: ErrorClass;
@@ -11,6 +12,34 @@ export interface ReflectionInput {
 
 export interface ReflectorDeps {
   reflect(input: ReflectionInput): Promise<StructuredReflection>;
+}
+
+// Shape guard for a complete StructuredReflection (every field the distiller needs).
+function isStructuredReflection(o: Record<string, unknown>): boolean {
+  const pr = o.preventiveRule as Record<string, unknown> | undefined;
+  return (
+    typeof o.goal === "string" &&
+    typeof o.decision === "string" &&
+    typeof o.assumption === "string" &&
+    typeof o.errorClass === "string" &&
+    typeof o.gateSignal === "string" &&
+    typeof o.evidence === "string" &&
+    typeof o.rootCause === "string" &&
+    !!pr &&
+    typeof pr === "object" &&
+    typeof pr.trigger === "string" &&
+    typeof pr.action === "string"
+  );
+}
+
+// Parse the qa-reflector's StructuredReflection out of its raw output. The role is told to emit
+// "ONLY the JSON object, no markdown", but models do not always comply — they may wrap the object
+// in a ```json fence or surround it with prose, which makes a raw JSON.parse throw
+// "Unexpected token '`'". Routing through the shared balanced-brace extractor (lastJsonMatching)
+// makes reflection parsing robust to fences/prose, exactly like every other agent-JSON boundary in
+// the codebase. Returns null when no complete reflection object is present (never throws).
+export function parseStructuredReflection(raw: string): StructuredReflection | null {
+  return lastJsonMatching<StructuredReflection>(raw, isStructuredReflection) ?? null;
 }
 
 export function buildReflectionPrompt(input: ReflectionInput): string {
