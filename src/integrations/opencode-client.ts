@@ -55,7 +55,9 @@ export type { AssembledPrompt, ExecutionResultCase } from "./prompts";
 // the agent's generator + reviewer output, and the targeted re-prompt used on a contract miss.
 import { checkGeneratorVerdict, repairInstruction, parseReviewerVerdict } from "./verdict-validate";
 import { ManifestEntrySchema } from "../orchestrator/schemas";
-import { AgentUnavailableError, isInfraError } from "../errors";
+import { AgentUnavailableError, StalledAgentError, isInfraError } from "../errors";
+import { createStallWatchdog } from "./stall-watchdog";
+import type { StallWatchdog } from "./stall-watchdog";
 
 // Read fallback model mapping from opencode.json (root-level key). Keeps the
 // fallback logic in one place so the orchestrator can retry with a different
@@ -144,6 +146,28 @@ export function disposeSharedClient(): void {
 // SSE live activity: routes OpenCode events to RunRecord logs in real time.
 export const activityRouter = new ActivityRouter();
 
+// Per-session liveness registry. withStallWatchdog registers a notify() callback keyed by
+// session ID; the SSE event loop calls notifySessionActivity(sessionId) on every event that
+// carries a sessionID so the watchdog can reset its timer. This is the only coupling between
+// the event stream (observability) and the watchdog (resilience) — single-direction, zero
+// verdict risk, and advisory-safe: a missed notify is a watchdog miss, not a data loss.
+const sessionWatchdogNotifiers = new Map<string, () => void>();
+
+/** Called by withStallWatchdog when a session opens. Not part of the public API surface. */
+export function registerSessionWatchdogNotify(sessionId: string, notify: () => void): void {
+  sessionWatchdogNotifiers.set(sessionId, notify);
+}
+
+/** Called by withStallWatchdog when a session is disposed or the watchdog stops. */
+export function unregisterSessionWatchdogNotify(sessionId: string): void {
+  sessionWatchdogNotifiers.delete(sessionId);
+}
+
+/** Notify the watchdog for a session (called from the SSE event loop on each activity). */
+export function notifySessionActivity(sessionId: string): void {
+  sessionWatchdogNotifiers.get(sessionId)?.();
+}
+
 // Maps an OpenCode session to a run so SSE events are routed to the correct RunRecord.
 export function registerRunSession(sessionId: string, runId: string, directory: string, workerId?: string): void {
   activityRouter.register(sessionId, runId, workerId);
@@ -201,11 +225,15 @@ export async function startScopedEventStream(
       // `part.tool` — before mapOpencodeEvent collapses every tool into a 4-value `kind`. Keyed by
       // session so each generation cycle gets its own counts. Observability only.
       const reexKind = reexploreKindFromEvent(raw);
-      if (reexKind) {
+      // Extract part.sessionID once for both reexplore tracking and the liveness watchdog.
+      const rawPart = raw.properties?.part as { sessionID?: string; callID?: string } | undefined;
+      if (reexKind && rawPart?.sessionID) {
         // Pass callID so the tracker dedups re-streamed updates for one tool call (a part emits many).
-        const part = raw.properties?.part as { sessionID?: string; callID?: string } | undefined;
-        if (part?.sessionID) reexploreTracker.record(part.sessionID, reexKind, part.callID);
+        reexploreTracker.record(rawPart.sessionID, reexKind, rawPart.callID);
       }
+      // Notify the liveness watchdog for this session: any event proves the agent is alive.
+      // Advisory-only: if the sessionID is not in the registry (no watchdog) this is a no-op.
+      if (rawPart?.sessionID) notifySessionActivity(rawPart.sessionID);
 
       // Rich contract RunEvents (agent.activity/plan.updated/…) from the RAW event,
       // so ToolState.title/callID survive. Published to the owning run; a malformed
@@ -1511,6 +1539,98 @@ export function withUsageSink(
         ...(onUsage ? { onUsage: opts?.onUsage ?? onUsage } : {}),
         ...(onTurn ? { onTurn: opts?.onTurn ?? onTurn } : {}),
       }),
+  };
+}
+
+// Default stall threshold: STRICTLY less than the shortest mode timeout (diff = 5 min).
+// Configurable via OPENCODE_STALL_MS. 180 seconds without any agent activity event triggers the
+// watchdog — tight enough to catch a truly hung session well before the coarse deadline, yet with
+// headroom for a single legitimately-long tool call (e.g. a large Serena index scan) that emits no
+// intermediate SSE events. Raise OPENCODE_STALL_MS for very large repos if healthy runs trip it.
+const DEFAULT_STALL_MS = 180_000;
+
+export function stallMs(): number {
+  return Number(process.env.OPENCODE_STALL_MS) || DEFAULT_STALL_MS;
+}
+
+// Factory type for injecting a custom watchdog in tests. Receives onStall; must
+// return a StallWatchdog. The real path uses createStallWatchdog with the real clock.
+export type WatchdogFactory = (onStall: () => void) => StallWatchdog;
+
+// Wrap an AgentDeps so EVERY session gets an inactivity watchdog. If notify() is not
+// called within stallMs, the in-flight prompt() is rejected with StalledAgentError and
+// the session is disposed. notify() must be called from the SSE event stream on each
+// activity event received for this session.
+//
+// `watchdogFactory` is TEST-ONLY: production never passes it. The real path uses
+// createStallWatchdog with the global clock. The `stallMs` option is forwarded from
+// the stallMs() helper (defaulting to OPENCODE_STALL_MS or DEFAULT_STALL_MS).
+export function withStallWatchdog(
+  baseDeps: AgentDeps,
+  opts: {
+    stallMs?: number;
+    watchdogFactory?: WatchdogFactory;
+  } = {},
+): AgentDeps {
+  const threshold = opts.stallMs ?? stallMs();
+  const factory: WatchdogFactory = opts.watchdogFactory ?? ((onStall) => createStallWatchdog({ stallMs: threshold, onStall }));
+
+  return {
+    ...baseDeps,
+    open: async (agent, cwd, openOpts) => {
+      // Track the in-flight prompt's reject handle so the stall callback can surface
+      // StalledAgentError from inside the watchdog (which runs on the timer thread).
+      let rejectInFlight: ((err: unknown) => void) | undefined;
+
+      const watchdog = factory(() => {
+        // The stall callback: reject the in-flight prompt and dispose the session.
+        const err = new StalledAgentError(
+          `Agent session stalled: no activity for ${threshold}ms. Aborting session to free resources.`,
+        );
+        rejectInFlight?.(err);
+        // Clean up the session→notify registry on the stall path too. wrapped.dispose() also
+        // unregisters, but a caller that swallows the rejection without reaching its finally
+        // (e.g. maybeExplore) would otherwise leak the entry for the process lifetime. Idempotent.
+        unregisterSessionWatchdogNotify(inner.id);
+        // Best-effort dispose — do not await (we are inside a timer callback).
+        inner.dispose().catch(() => {});
+      });
+
+      const inner = await baseDeps.open(agent, cwd, openOpts);
+
+      // Register this session's watchdog notify with the SSE event loop so that
+      // every incoming activity event for this session resets the stall timer.
+      registerSessionWatchdogNotify(inner.id, () => watchdog.notify());
+
+      const wrapped: typeof inner = {
+        id: inner.id,
+        prompt: (text, promptOpts) =>
+          new Promise<string>((resolve, reject) => {
+            rejectInFlight = reject;
+            // Arm the watchdog at prompt-start; subsequent SSE events reset it.
+            watchdog.notify();
+            inner.prompt(text, promptOpts).then(
+              (v) => {
+                rejectInFlight = undefined;
+                watchdog.stop();
+                resolve(v);
+              },
+              (e) => {
+                rejectInFlight = undefined;
+                watchdog.stop();
+                reject(e);
+              },
+            );
+          }),
+        dispose: async () => {
+          watchdog.stop();
+          unregisterSessionWatchdogNotify(inner.id);
+          await inner.dispose();
+        },
+      };
+
+      return wrapped;
+    },
   };
 }
 

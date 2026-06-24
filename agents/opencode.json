@@ -115,7 +115,13 @@
     },
     "playwright": {
       "type": "local",
-      "command": ["npx", "@playwright/mcp", "--browser", "chromium", "--headless"],
+      "command": [
+        "npx", "@playwright/mcp",
+        "--browser", "chromium",
+        "--headless",
+        "--timeout-action", "30000",
+        "--timeout-navigation", "30000"
+      ],
       "enabled": true
     }
   }

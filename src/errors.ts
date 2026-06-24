@@ -29,13 +29,25 @@ export class AgentUnavailableError extends InfraError {
   }
 }
 
-// True when a thrown error is genuine infrastructure: an InfraError (incl. AgentUnavailableError),
-// the deploy-gate timeout (DeployTimeoutError, matched by name so this module need not import env/),
-// or an operator cancel. The name fallbacks cover the case where `instanceof` fails across module/
-// bundle realms (the dual OpenCode SDK is loaded in two realms).
+// The agent session produced no activity for longer than the liveness-watchdog window. This is an
+// engine-resilience event (the agent stalled, not the DEV environment) — it is still INCONCLUSIVE
+// (no verdict was produced) and must surface as infra-error so the operator can investigate the
+// model/MCP layer, never blamed on the watched repo's tests. It is distinct from AgentUnavailableError
+// (provider auth/credits) so the operator message and alert routing can be specific.
+export class StalledAgentError extends InfraError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "StalledAgentError";
+  }
+}
+
+// True when a thrown error is genuine infrastructure: an InfraError (incl. AgentUnavailableError,
+// StalledAgentError), the deploy-gate timeout (DeployTimeoutError, matched by name so this module
+// need not import env/), or an operator cancel. The name fallbacks cover the case where `instanceof`
+// fails across module/bundle realms (the dual OpenCode SDK is loaded in two realms).
 export function isInfraError(err: unknown): boolean {
   if (err instanceof InfraError) return true;
-  if (err instanceof Error && (err.name === "InfraError" || err.name === "AgentUnavailableError" || err.name === "DeployTimeoutError")) return true;
+  if (err instanceof Error && (err.name === "InfraError" || err.name === "AgentUnavailableError" || err.name === "StalledAgentError" || err.name === "DeployTimeoutError")) return true;
   if (err instanceof Error && /\brun cancelled by operator\b/i.test(err.message)) return true;
   return false;
 }

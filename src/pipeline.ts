@@ -13,7 +13,7 @@ import { DeployTarget, waitForDeploy } from "./env/deploy-gate";
 import { ensureMirror, ensureMirrorAtBranch, getCommitDiff, getCommitMessage, getRangeDiff, listChangedSpecs as gitListChangedSpecs, getCommitsBehind, defaultMirrorDeps, realGit } from "./integrations/repo-mirror";
 import { runConfinement, type ConfinementResult } from "./qa/confinement";
 import { createUsageAccumulator, type UsageSnapshot, type RunUsage } from "./qa/usage";
-import { runOpencode, runOpencodeParallel, shouldFanOut, defaultAgentDeps, reviewIndependently, getOpenSessionCount, withUsageSink, maybeExplore, agentTimeout } from "./integrations/opencode-client";
+import { runOpencode, runOpencodeParallel, shouldFanOut, defaultAgentDeps, reviewIndependently, getOpenSessionCount, withUsageSink, withStallWatchdog, maybeExplore, agentTimeout } from "./integrations/opencode-client";
 import { classifyCommit, CommitIntent } from "./qa/commit-classify";
 import { setupE2eProject, defaultSetupDeps } from "./qa/setup";
 import { validateSpecs, defaultValidateDeps } from "./qa/validate";
@@ -263,7 +263,7 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
   // withUsageSink is the shared wrapper (also used in index.ts) so the precedence cannot drift.
   const agentDepsFactory: (onUsage?: (u: UsageSnapshot) => void) => Promise<AgentDeps> =
     options.agentDepsFactory ??
-    (async (onUsage) => withUsageSink(await defaultAgentDeps(), onUsage));
+    (async (onUsage) => withStallWatchdog(withUsageSink(await defaultAgentDeps(), onUsage)));
   const hasOpenSessions = options.hasOpenSessions ?? (() => getOpenSessionCount() > 0);
 
   return {

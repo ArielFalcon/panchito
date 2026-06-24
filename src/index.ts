@@ -25,7 +25,7 @@ import { buildArtifactBytesMetrics, type ArtifactSizeCache } from "./server/metr
 import { createMaintainerRuntime } from "./server/maintainer-runtime";
 import { installHttpDispatcher } from "./util/net";
 import { resolveRef, defaultMirrorDeps } from "./integrations/repo-mirror";
-import { askAssistant, AgentDeps, getOpenSessionCount, withUsageSink } from "./integrations/opencode-client";
+import { askAssistant, AgentDeps, getOpenSessionCount, withUsageSink, withStallWatchdog } from "./integrations/opencode-client";
 import { createAgentRuntimeManager } from "./server/agent-runtime";
 import { CodexRuntimeStrategy, OpenCodeRuntimeStrategy } from "./agent-runtime";
 import { appendLog, appendActivity, deleteAppHistory, runVerdictCounts } from "./server/history";
@@ -134,7 +134,7 @@ function currentPipelineDeps() {
     // where the snapshot is emitted after recordCircuitSuccess(). withUsageSink is the shared
     // wrapper (also used in defaultPipelineDeps) so the opts.onUsage precedence cannot drift; it
     // injects onUsage into every open() — including internal callers (explorer, reviewer, etc.).
-    agentDepsFactory: async (onUsage) => withUsageSink(currentAgentDeps(), onUsage),
+    agentDepsFactory: async (onUsage) => withStallWatchdog(withUsageSink(currentAgentDeps(), onUsage)),
     hasOpenSessions: () => agentRuntime.hasOpenSessions(),
     agentRuntimeConfig: agentRuntime.facade().config,
   });
