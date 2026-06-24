@@ -21,5 +21,9 @@
       "@interface/*": ["src/interface/*"]
     }
   },
-  "include": ["src", "test"]
+  "include": ["src", "test"],
+  "exclude": [
+    "test/characterization/scenarios.ts",
+    "test/characterization/capture-goldens.ts"
+  ]
 }

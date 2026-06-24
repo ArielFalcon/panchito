@@ -1,0 +1,24 @@
+{
+  "app": "demo",
+  "sha": "abc123",
+  "mode": "diff",
+  "target": "e2e",
+  "verdict": "skipped",
+  "errorClass": null,
+  "gateSignals": {
+    "static": false,
+    "coverageRatio": null,
+    "valueScore": null,
+    "reviewerCorrections": [],
+    "reviewerApproved": true,
+    "flaky": false,
+    "retries": 0,
+    "phaseTimings": {
+      "pack": 0,
+      "generator": 0
+    },
+    "preExecAmbiguityCatches": 0,
+    "deterministicSelectorBlocks": 0
+  },
+  "rulesRetrieved": []
+}

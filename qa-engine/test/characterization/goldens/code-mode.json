@@ -1,0 +1,25 @@
+{
+  "app": "panchito",
+  "sha": "abc123",
+  "mode": "diff",
+  "target": "code",
+  "verdict": "pass",
+  "errorClass": null,
+  "gateSignals": {
+    "static": true,
+    "coverageRatio": null,
+    "valueScore": 0.85,
+    "reviewerCorrections": [],
+    "reviewerApproved": true,
+    "flaky": false,
+    "retries": 0,
+    "phaseTimings": {
+      "generator": 0,
+      "execute": 0,
+      "oracle": 0
+    },
+    "preExecAmbiguityCatches": 0,
+    "deterministicSelectorBlocks": 0
+  },
+  "rulesRetrieved": []
+}

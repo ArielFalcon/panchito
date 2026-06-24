@@ -1,0 +1,17 @@
+{
+  "app": "demo",
+  "sha": "abc123",
+  "mode": "context",
+  "target": "e2e",
+  "verdict": "pass",
+  "errorClass": null,
+  "gateSignals": {
+    "static": false,
+    "coverageRatio": null,
+    "valueScore": null,
+    "reviewerCorrections": [],
+    "flaky": false,
+    "retries": 0
+  },
+  "rulesRetrieved": []
+}

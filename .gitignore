@@ -23,3 +23,5 @@ data/
 # TypeScript project-references build artifacts (qa-engine)
 qa-engine/.tsbuild/
 *.tsbuildinfo
+# tsc --build emits .d.ts declarations next to source files when noEmit is ignored in build mode
+src/**/*.d.ts

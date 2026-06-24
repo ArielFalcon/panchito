@@ -1,0 +1,27 @@
+{
+  "app": "shop",
+  "sha": "a1b2c3d",
+  "mode": "diff",
+  "target": "e2e",
+  "verdict": "pass",
+  "errorClass": null,
+  "gateSignals": {
+    "static": true,
+    "coverageRatio": null,
+    "valueScore": 0.85,
+    "reviewerCorrections": [],
+    "flaky": false,
+    "retries": 0,
+    "phaseTimings": {
+      "pack": 1,
+      "generator": 0,
+      "validate": 0,
+      "feedback-execute": 0,
+      "execute": 0,
+      "oracle": 0
+    },
+    "preExecAmbiguityCatches": 0,
+    "deterministicSelectorBlocks": 0
+  },
+  "rulesRetrieved": []
+}
