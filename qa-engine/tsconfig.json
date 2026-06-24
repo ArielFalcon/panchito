@@ -10,6 +10,7 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "noUncheckedIndexedAccess": true,
+    "allowImportingTsExtensions": true,
     "emitDeclarationOnly": true,
     "outDir": ".tsbuild",
     "types": ["node"],
