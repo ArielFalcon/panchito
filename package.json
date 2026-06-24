@@ -17,8 +17,8 @@
     "sdk:gen": "openapi-typescript contract/openapi.json -o packages/sdk/src/types.gen.ts",
     "sdk:typecheck": "tsc -p packages/sdk",
     "start": "node boot-guard.mjs && tsx src/index.ts",
-    "test": "node --import ./test-setup.mjs --import tsx --test \"src/**/*.test.ts\" \"packages/sdk/**/*.test.ts\" \"agents/**/*.test.mjs\"",
-    "typecheck": "tsc --noEmit"
+    "test": "node --import ./test-setup.mjs --import tsx --test \"src/**/*.test.ts\" \"qa-engine/test/**/*.test.ts\" \"packages/sdk/**/*.test.ts\" \"agents/**/*.test.mjs\"",
+    "typecheck": "tsc --build --force"
   },
   "dependencies": {
     "@opencode-ai/sdk": "1.17.7",

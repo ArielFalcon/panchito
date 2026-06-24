@@ -10,7 +10,8 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "noUncheckedIndexedAccess": true,
-    "noEmit": true,
+    "emitDeclarationOnly": true,
+    "outDir": ".tsbuild",
     "types": ["node"],
     "baseUrl": ".",
     "paths": {
