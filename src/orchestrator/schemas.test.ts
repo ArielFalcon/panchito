@@ -83,3 +83,41 @@ test("ManifestEntrySchema rejects empty targets / empty objective — write uses
   assert.equal(ManifestEntrySchema.safeParse({ ...manifestEntry, targets: [] }).success, false);
   assert.equal(ManifestEntrySchema.safeParse({ ...manifestEntry, objective: "" }).success, false);
 });
+
+// ── e2e.testIdAttribute config field ─────────────────────────────────────────
+
+test("AppConfigSchema accepts e2e.testIdAttribute override (e.g. data-cy)", () => {
+  const cfg = AppConfigSchema.parse({ ...base, e2e: { testIdAttribute: "data-cy" } });
+  assert.equal(cfg.e2e?.testIdAttribute, "data-cy");
+});
+
+test("AppConfigSchema accepts e2e block with no testIdAttribute (field optional)", () => {
+  const cfg = AppConfigSchema.parse({ ...base, e2e: {} });
+  assert.equal(cfg.e2e?.testIdAttribute, undefined);
+});
+
+test("AppConfigSchema accepts no e2e block at all (block optional)", () => {
+  const cfg = AppConfigSchema.parse(base);
+  assert.equal(cfg.e2e, undefined);
+});
+
+test("AppConfigSchema rejects testIdAttribute: empty string", () => {
+  assert.throws(() => AppConfigSchema.parse({ ...base, e2e: { testIdAttribute: "" } }));
+});
+
+// ── qa.specTriage config flag ─────────────────────────────────────────────────
+
+test("qa.specTriage: true parses without error", () => {
+  const cfg = AppConfigSchema.parse({ ...base, qa: { ...base.qa, specTriage: true } });
+  assert.equal(cfg.qa.specTriage, true);
+});
+
+test("qa.specTriage: absent defaults to undefined (falsy, feature is default-OFF)", () => {
+  const cfg = AppConfigSchema.parse(base);
+  assert.equal(cfg.qa.specTriage, undefined);
+});
+
+test("qa.specTriage: false parses without error", () => {
+  const cfg = AppConfigSchema.parse({ ...base, qa: { ...base.qa, specTriage: false } });
+  assert.equal(cfg.qa.specTriage, false);
+});

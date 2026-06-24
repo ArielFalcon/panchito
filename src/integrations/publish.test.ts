@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { publishE2e, publishCode, publishContext, PublishDeps } from "./publish";
+import { publishE2e, publishCode, publishContext, publishE2eSubset, PublishDeps } from "./publish";
 
 function deps(status: string, opts: { autoMergeFails?: boolean; mergeFails?: boolean } = {}): PublishDeps & {
   gitCalls: string[][];
@@ -156,6 +156,60 @@ test("publishCode: git failure is caught — pass preserved", async () => {
   assert.equal(res?.prUrl, null);
   assert.equal(res?.merged, false);
   assert.match(res?.error ?? "", /git add failed/);
+});
+
+// ── publishE2eSubset ──────────────────────────────────────────────────────────
+
+test("publishE2eSubset: non-empty files list → publishChanges called with per-file pathspecs (NOT e2e/)", async () => {
+  const d = deps(" M e2e/login.spec.ts");
+  const res = await publishE2eSubset(input, ["login.spec.ts"], d);
+  assert.equal(res?.prUrl, "https://github.com/org/app/pull/7");
+  // Must use explicit per-file pathspecs, not ["e2e"]
+  const addCall = d.gitCalls.find((c) => c[0] === "add");
+  assert.ok(addCall, "git add should be called");
+  // Should include the file explicitly
+  assert.ok(addCall!.includes("e2e/login.spec.ts"), "should include the spec file explicitly");
+  // Should NOT use directory-wide "e2e" staging
+  assert.ok(!addCall!.some((a: string) => a === "e2e"), "should NOT stage the whole e2e/ dir");
+});
+
+test("publishE2eSubset: includes DEP_CLOSURE (e2e/.qa/) along with spec files", async () => {
+  const d = deps(" M e2e/login.spec.ts");
+  await publishE2eSubset(input, ["login.spec.ts"], d);
+  const addCall = d.gitCalls.find((c) => c[0] === "add");
+  assert.ok(addCall, "git add should be called");
+  // DEP_CLOSURE includes e2e/.qa/
+  assert.ok(addCall!.includes("e2e/.qa/"), "should include the .qa/ dependency closure");
+});
+
+test("publishE2eSubset: no-change-skip → returns null (no PR opened)", async () => {
+  const d = deps("  \n  "); // empty status
+  const res = await publishE2eSubset(input, ["login.spec.ts"], d);
+  assert.equal(res, null);
+  assert.equal(d.pr.created, false);
+});
+
+test("publishE2eSubset: uses qa/e2e- branch (same naming as publishE2e)", async () => {
+  const d = deps(" M e2e/login.spec.ts");
+  await publishE2eSubset(input, ["login.spec.ts"], d);
+  const checkoutCall = d.gitCalls.find((c) => c[0] === "checkout");
+  assert.ok(checkoutCall?.some((a: string) => a.startsWith("qa/e2e-")), "branch should start with qa/e2e-");
+});
+
+test("publishE2eSubset: applies E2E_EXCLUDES (same as publishE2e)", async () => {
+  const d = deps(" M e2e/login.spec.ts");
+  await publishE2eSubset(input, ["login.spec.ts"], d);
+  assert.ok(d.excludes.includes("node_modules/"), "should apply node_modules/ exclude");
+  assert.ok(d.excludes.includes(".qa/measured.json"), "should apply .qa/measured.json exclude");
+});
+
+test("publishE2e (whole-dir) still works unchanged — non-regression", async () => {
+  const d = deps(" M e2e/login.spec.ts");
+  const res = await publishE2e(input, d);
+  assert.equal(res?.prUrl, "https://github.com/org/app/pull/7");
+  const addCall = d.gitCalls.find((c) => c[0] === "add");
+  // Whole-dir publish uses ["e2e"]
+  assert.ok(addCall?.includes("e2e"), "publishE2e should still use e2e/ whole-dir staging");
 });
 
 test("publishContext: git commit failure is caught — pass preserved", async () => {

@@ -192,6 +192,44 @@ export async function publishCode(input: PublishInput, deps: PublishDeps): Promi
   });
 }
 
+// Dependency-closure for per-file subset publish: shared non-spec e2e infra that kept
+// specs may import. Staged alongside the selected spec files; NEVER includes volatile
+// coverage/measured fields (already in E2E_EXCLUDES) or unselected spec files.
+const DEP_CLOSURE_PATHS = ["e2e/.qa/"];
+
+/**
+ * Publishes only a specified subset of spec files to a PR (quality-filtered-dual-publish).
+ *
+ * Stages `files` (triage `pr[]` basenames mapped to `e2e/<file>` pathspecs) + the DEP_CLOSURE
+ * (`e2e/.qa/`) via EXPLICIT per-file git pathspecs — NOT the directory pathspec `["e2e"]`.
+ * Reuses `publishChanges` with the same branch/commit/PR/auto-merge + `E2E_EXCLUDES`.
+ * No-change-skip still applies: if the subset produces no diff, returns null.
+ *
+ * `files` are e2e-relative basenames from the triage `pr[]` (e.g. `["login.spec.ts"]` or
+ * `["flows/checkout.spec.ts"]`). They are mapped to repo-relative pathspecs (`e2e/<file>`).
+ *
+ * `publishE2e` (whole-dir) is left intact and called on the flag-OFF path.
+ */
+export async function publishE2eSubset(
+  input: PublishInput,
+  files: string[],
+  deps: PublishDeps,
+): Promise<PublishResult | null> {
+  const short = shortSha(input.sha);
+  // Map triage basenames to repo-relative pathspecs
+  const filePathspecs = files.map((f) => `e2e/${f}`);
+  const addDir = [...filePathspecs, ...DEP_CLOSURE_PATHS];
+  return publishChanges(input, deps, {
+    addDir,
+    excludes: E2E_EXCLUDES,
+    branch: `qa/e2e-${short}`,
+    commitMsg: `test(e2e): automated QA for ${short} (subset: ${files.join(", ")})`,
+    title: `QA E2E for ${short} (subset)`,
+    body: renderPrBody({ sha: input.sha, isCode: false, tested: input.tested, parentRunId: input.parentRunId }),
+    noChangeLog: "[qa] no changes in e2e/ subset — the selected specs already match the base, no PR opened.",
+  });
+}
+
 export const defaultPublishDeps: PublishDeps = {
   git: realGit,
   createPullRequest: (repo, args) => github.createPullRequest(repo, args),

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { runPipeline, PipelineDeps, GenerateInput, buildFailureDom, buildFailureDomLines, deriveCycleBackstop, shouldDistillLearning } from "./pipeline";
+import { runPipeline, PipelineDeps, GenerateInput, buildFailureDom, buildFailureDomLines, deriveCycleBackstop, shouldDistillLearning, resolveTestIdAttribute } from "./pipeline";
 import { parseAriaSnapshot } from "./qa/dom-snapshot";
 import { ReviewResult } from "./integrations/opencode-client";
 import { CoveredLines, CoveredBranches } from "./qa/change-coverage";
@@ -3935,4 +3935,64 @@ test("T12 A3: honor-no-op intact — agent approves with zero specs, no executed
   assert.equal(result.verdict, "skipped", "no-op agent must still produce skipped verdict");
   assert.equal(executeCalls, 0, "honor-no-op: execute must not be called when agent produced zero specs");
   assert.equal(d.published, false, "no-op must not publish");
+});
+
+// ── testIdAttribute resolution ────────────────────────────────────────────────
+
+test("resolveTestIdAttribute: returns the configured value when e2e.testIdAttribute is set", () => {
+  const config = { e2e: { testIdAttribute: "data-cy" } };
+  assert.equal(resolveTestIdAttribute(config), "data-cy");
+});
+
+test("resolveTestIdAttribute: defaults to data-testid when no e2e block is present", () => {
+  assert.equal(resolveTestIdAttribute({}), "data-testid");
+});
+
+test("resolveTestIdAttribute: defaults to data-testid when e2e block has no testIdAttribute", () => {
+  assert.equal(resolveTestIdAttribute({ e2e: {} }), "data-testid");
+});
+
+// ── testIdAttribute wired into execute/cleanup call sites ─────────────────────
+// W1 regression guard: resolveTestIdAttribute must be called in runPipeline and
+// the resolved value must reach EVERY deps.execute call site so PW_TEST_ID_ATTRIBUTE
+// reaches the Playwright spawn env and getByTestId resolves against the right attr.
+
+test("pipeline threads testIdAttribute from app config into deps.execute calls (data-cy)", async () => {
+  const executeCalls: Array<{ testIdAttribute?: string }> = [];
+  const appWithAttr: AppConfig = {
+    ...app,
+    e2e: { testIdAttribute: "data-cy" },
+  };
+  const d = deps({ sha: "s", verdict: "pass", passed: true, cases: [], logs: "" }, [], {});
+  d.execute = async (_dir: string, opts: { baseUrl: string; namespace: string; testIdAttribute?: string }) => {
+    executeCalls.push({ testIdAttribute: opts.testIdAttribute });
+    return { sha: "s", verdict: "pass", passed: true, cases: [], logs: "" };
+  };
+  await runPipeline(appWithAttr, "abc123", d, "manual", { mode: "diff", runId: "run-tid-1" });
+  assert.ok(executeCalls.length > 0, "execute must be called at least once");
+  for (const call of executeCalls) {
+    assert.equal(
+      call.testIdAttribute,
+      "data-cy",
+      `every deps.execute call must receive testIdAttribute="data-cy", got: ${JSON.stringify(call.testIdAttribute)}`,
+    );
+  }
+});
+
+test("pipeline threads default testIdAttribute (data-testid) into deps.execute when app config omits e2e.testIdAttribute", async () => {
+  const executeCalls: Array<{ testIdAttribute?: string }> = [];
+  const d = deps({ sha: "s", verdict: "pass", passed: true, cases: [], logs: "" }, [], {});
+  d.execute = async (_dir: string, opts: { baseUrl: string; namespace: string; testIdAttribute?: string }) => {
+    executeCalls.push({ testIdAttribute: opts.testIdAttribute });
+    return { sha: "s", verdict: "pass", passed: true, cases: [], logs: "" };
+  };
+  await runPipeline(app, "abc123", d, "manual", { mode: "diff", runId: "run-tid-2" });
+  assert.ok(executeCalls.length > 0, "execute must be called at least once");
+  for (const call of executeCalls) {
+    assert.equal(
+      call.testIdAttribute,
+      "data-testid",
+      `every deps.execute call must receive the default testIdAttribute="data-testid", got: ${JSON.stringify(call.testIdAttribute)}`,
+    );
+  }
 });

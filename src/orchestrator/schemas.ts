@@ -63,6 +63,11 @@ export const AppConfigSchema = z
       // green suite with corrupted responses and record the catch-rate. NEVER blocks publish, and
       // it DOUBLES the DEV run — so it is opt-in.
       valueOracle: z.enum(["off", "signal"]).optional(),
+      // Per-spec-file triage and dual publish (quality-filtered-dual-publish). Default OFF.
+      // When true the decide step classifies each spec file into PR / ISSUE / DROP and can
+      // simultaneously open a PR for the green subset and an Issue for the real-bug subset.
+      // Flag OFF (the default) → today's all-or-nothing decide path verbatim.
+      specTriage: z.boolean().optional(),
       // Run-intelligence report tuning. `weights` overrides the ranker's per-insight interestingness
       // weight by insight id (e.g. { "change-coverage": 1.5 }); ids left out keep their defaults.
       reports: z
@@ -97,6 +102,11 @@ export const AppConfigSchema = z
       // Observation+safety, not a tuning lever.
       wallClockBudgetMs: z.number().int().positive().optional(),
     }),
+    // Per-app Playwright configuration. testIdAttribute overrides the default "data-testid"
+    // for apps that use a different test-id convention (e.g. "data-cy" for JHipster apps).
+    // Flows into PW_TEST_ID_ATTRIBUTE env, threading through capture and execute spawns.
+    // No app-specific names are hardcoded in src/ — the value comes from config only.
+    e2e: z.object({ testIdAttribute: z.string().min(1).optional() }).optional(),
     code: z.boolean().optional(),
     report: z.object({
       onFailure: z.string().min(1),

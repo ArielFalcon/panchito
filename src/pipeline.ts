@@ -20,7 +20,8 @@ import { validateSpecs, defaultValidateDeps } from "./qa/validate";
 import { runE2E, defaultExecuteDeps, defaultCleanupDeps, e2eTimeoutMs, allFailuresAreRunnerInfra } from "./qa/execute";
 import { setupCodeProject, defaultCodeSetupDeps, runCodeTests, defaultCodeExecuteDeps, runCodeCoverage } from "./qa/code-runner";
 import { validateCodeProject, defaultCodeValidateDeps } from "./qa/code-validate";
-import { publishE2e, publishCode, publishContext, defaultPublishDeps } from "./integrations/publish";
+import { publishE2e, publishCode, publishContext, publishE2eSubset, defaultPublishDeps } from "./integrations/publish";
+import { perFileSelectorPresence, attributeCorrections, triagePublish, findDanglingPrSpecs } from "./qa/spec-triage";
 import { testDataNamespace } from "./qa/test-data";
 import { labelRunOutcome } from "./qa/learning/labeler";
 import { runMutationOracle } from "./qa/learning/mutation-code";
@@ -154,8 +155,8 @@ export interface PipelineDeps {
   listChangedSpecs?(mirrorDir: string, e2eRelDir: string): Promise<string[]>;
   setupE2e(e2eDir: string): Promise<void>; // installs the e2e project's dependencies
   validate(e2eDir: string): Promise<{ ok: boolean; errors: string[]; infra: boolean }>;
-  execute(e2eDir: string, opts: { baseUrl: string; namespace: string; onCase?: (c: QaCase) => void; onRunning?: (title: string) => void; onDiscovered?: (title: string, file?: string) => void; signal?: AbortSignal }): Promise<QaRunResult>;
-  cleanup(e2eDir: string, opts: { baseUrl: string; namespace: string }): Promise<void>; // orphan-data cleanup (best-effort)
+  execute(e2eDir: string, opts: { baseUrl: string; namespace: string; testIdAttribute?: string; onCase?: (c: QaCase) => void; onRunning?: (title: string) => void; onDiscovered?: (title: string, file?: string) => void; signal?: AbortSignal }): Promise<QaRunResult>;
+  cleanup(e2eDir: string, opts: { baseUrl: string; namespace: string; testIdAttribute?: string }): Promise<void>; // orphan-data cleanup (best-effort)
   isHealthy(versionUrl: string): Promise<boolean>; // is DEV healthy right now? (infra vs quality)
   isReachable(url: string): Promise<boolean>; // generic DEV reachability — does the host respond at all (no /version contract)
   // Phase 6a: `onRepair` fires once when the reviewer emits an in-session contract-repair
@@ -179,6 +180,9 @@ export interface PipelineDeps {
   // e2e-only; absent ⇒ no persistence (unit tests stub it). Injected so it is stubbable.
   recordMeasured?(e2eDir: string, input: { cases: QaCase[]; coveredFiles: string[] }): void;
   publish(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string; parentRunId?: string }): Promise<{ prUrl: string | null; merged: boolean; error?: string } | null>;
+  /** Selective publish: stages only the given spec files + DEP_CLOSURE (e2e/.qa/), not whole e2e/.
+   *  Used by the specTriage dual decide-step. Absent ⇒ subset publish unavailable (falls back to flag-OFF path). */
+  publishSubset?(input: { repo: string; sha: string; mirrorDir: string; baseBranch: string; parentRunId?: string; tested?: import("./report/reporter").TestedItem[] }, files: string[]): Promise<{ prUrl: string | null; merged: boolean; error?: string } | null>;
   // Code mode (target "code"): no web env, no Playwright. Install the repo's deps,
   // run its own test suite, classify by exit code, and publish the new tests.
   setupCode(repoDir: string, opts?: { signal?: AbortSignal; timeoutMs?: number }): Promise<void>;
@@ -481,6 +485,7 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
         isSymlink: (p) => lstatSync(p).isSymbolicLink(),
       }),
     publish: (input) => publishE2e(input, defaultPublishDeps),
+    publishSubset: (input, files) => publishE2eSubset(input, files, defaultPublishDeps),
     openIssue: (repo, title, body) => github.openIssue(repo, title, body),
     aggregateStaticSignal: (input) => aggregateStaticSignal(input, defaultStaticSignalDeps),
     saveOutcome: async (outcome) => {
@@ -577,7 +582,7 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
         console.warn("[qa] reflection skipped (non-blocking): another agent session is open; this failure will not produce a rule");
         return null;
       }
-      const { buildReflectionPrompt } = await import("./qa/learning/reflector");
+      const { buildReflectionPrompt, parseStructuredReflection } = await import("./qa/learning/reflector");
       const prompt = buildReflectionPrompt({
         errorClass: input.outcome.errorClass!,
         gateSignals: input.outcome.gateSignals,
@@ -596,27 +601,16 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
           deps,
           "/tmp",
         );
-        const json = JSON.parse(raw);
-        const valid =
-          json &&
-          typeof json.goal === "string" &&
-          typeof json.decision === "string" &&
-          typeof json.assumption === "string" &&
-          typeof json.errorClass === "string" &&
-          typeof json.gateSignal === "string" &&
-          typeof json.evidence === "string" &&
-          typeof json.rootCause === "string" &&
-          json.preventiveRule &&
-          typeof json.preventiveRule === "object" &&
-          typeof (json.preventiveRule as Record<string, unknown>).trigger === "string" &&
-          typeof (json.preventiveRule as Record<string, unknown>).action === "string";
-        if (valid) {
-          distillReflection({ app: input.app, runId: input.runId, reflection: json as StructuredReflection, archetype: input.archetype });
+        // Robust parse (handles ```json fences / surrounding prose) instead of a raw JSON.parse,
+        // which threw "Unexpected token '`'" when the qa-reflector wrapped its output in a fence.
+        const json = parseStructuredReflection(raw);
+        if (json) {
+          distillReflection({ app: input.app, runId: input.runId, reflection: json, archetype: input.archetype });
           // Back-fill the reflection onto its run_outcomes row so it is durable and queryable,
           // not just consumed once to distill a rule and then thrown away (best-effort).
           try {
             const { updateRunOutcomeReflection } = await import("./server/history");
-            updateRunOutcomeReflection(input.runId, json as StructuredReflection);
+            updateRunOutcomeReflection(input.runId, json);
           } catch (err) {
             console.warn(`[qa] WARNING: persisting reflection failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
           }
@@ -808,6 +802,13 @@ export function shouldDistillLearning(isCode: boolean, verdict: RunVerdict): boo
   return !(isCode && verdict === "fail");
 }
 
+// Resolves the testIdAttribute from the app config, defaulting to "data-testid" when absent.
+// The resolved value flows into PW_TEST_ID_ATTRIBUTE in capture and execute spawn envs.
+// No app-specific name is hardcoded in src/ — it comes from config only.
+export function resolveTestIdAttribute(config: { e2e?: { testIdAttribute?: string } }): string {
+  return config.e2e?.testIdAttribute ?? "data-testid";
+}
+
 // Phase 6b: scope-dimensioned budget. When the planner yields multiple objectives, each objective
 // is a legitimate unit of work (one agent session, one review). The base backstop covers a SINGLE
 // objective's full loop sequence; multi-objective runs get an additive per-objective increment so the
@@ -871,6 +872,9 @@ export async function runPipeline(
     throw new Error(`context mode cannot be triggered by a service repo (${triggerService.repo}); run it from the primary repo ${app.repo}`);
   }
   const issueRepo = triggerService ? triggerService.repo : app.repo;
+  // Resolved once from config (mirrors PW_BASE_URL pattern): threaded into every execute + cleanup
+  // spawn so PW_TEST_ID_ATTRIBUTE reaches the Playwright runner and getByTestId resolves correctly.
+  const testIdAttribute = resolveTestIdAttribute(app);
   const reviewerCorrections: string[] = []; // accumulated across review rounds (for RunOutcome)
   let reviewerRationale: string | undefined; // the LAST round's reviewer reasoning (approve or reject)
   let retries = 0; // total regeneration attempts (review loop + failure retries)
@@ -1288,7 +1292,7 @@ export async function runPipeline(
   //     and never blocks the new run. Only applies to e2e (code mode has no web data).
   if (opts.previousNamespace && !isCode && app.dev?.baseUrl) {
     log(`[qa] cleaning up orphaned data from interrupted run (namespace ${opts.previousNamespace})...`);
-    await deps.cleanup(e2eDir, { baseUrl: app.dev.baseUrl, namespace: opts.previousNamespace }).catch((err) => {
+    await deps.cleanup(e2eDir, { baseUrl: app.dev.baseUrl, namespace: opts.previousNamespace, testIdAttribute }).catch((err) => {
       log(`[qa] cleanup warning (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
     });
   }
@@ -2163,7 +2167,7 @@ export async function runPipeline(
       const fbT0 = Date.now();
       // Streaming callbacks omitted — feedback execute is informational, not the verdict.
       // Passing onCase/onRunning/onDiscovered would double-count discovered tests in the TUI.
-      const fb = await deps.execute!(e2eDir, { baseUrl: app.dev!.baseUrl, namespace: fbNs, signal });
+      const fb = await deps.execute!(e2eDir, { baseUrl: app.dev!.baseUrl, namespace: fbNs, testIdAttribute, signal });
       addTiming("feedback-execute", Date.now() - fbT0);
       log(`[qa] feedback execute: ${fb.verdict} (${Math.round((Date.now() - fbT0) / 1000)}s)`);
       lastFbRun = fb; // D4: record as initial evidence (may be superseded by fbReExec below)
@@ -2195,7 +2199,7 @@ export async function runPipeline(
             const fbReExecNs = `${fbNs}-r1`;
             deps.clearCoverage?.(e2eDir, fbReExecNs);
             const fbReExecT0 = Date.now();
-            const fbReExec = await deps.execute!(e2eDir, { baseUrl: app.dev!.baseUrl, namespace: fbReExecNs, signal });
+            const fbReExec = await deps.execute!(e2eDir, { baseUrl: app.dev!.baseUrl, namespace: fbReExecNs, testIdAttribute, signal });
             addTiming("feedback-execute", Date.now() - fbReExecT0);
             log(`[qa] feedback re-execute (namespace ${fbReExecNs}): ${fbReExec.verdict} (${Math.round((Date.now() - fbReExecT0) / 1000)}s)`);
             lastFbRun = fbReExec; // D4: supersede initial fb with the re-execute result
@@ -2298,7 +2302,7 @@ export async function runPipeline(
     onStep?.("execute");
     log(`[qa] running E2E (namespace ${ns}) against ${app.dev.baseUrl}...`);
     deps.clearCoverage?.(e2eDir, ns); // fresh dumps only: never union a prior run's coverage
-    run = await (async () => { const t0 = Date.now(); const r = await deps.execute!(e2eDir, { baseUrl: app.dev!.baseUrl, namespace: ns, onCase, onRunning: onRunningTest, onDiscovered: onTestDiscovered, signal }); addTiming("execute", Date.now() - t0); return r; })();
+    run = await (async () => { const t0 = Date.now(); const r = await deps.execute!(e2eDir, { baseUrl: app.dev!.baseUrl, namespace: ns, testIdAttribute, onCase, onRunning: onRunningTest, onDiscovered: onTestDiscovered, signal }); addTiming("execute", Date.now() - t0); return r; })();
     // Infra vs quality: failures with an unhealthy DEV are infrastructure, not code.
     if (run.verdict === "fail" && !(await devHealthy())) {
       run = resultOf(ns, "infra-error", "failures with an unhealthy DEV: treated as infrastructure");
@@ -2619,7 +2623,7 @@ export async function runPipeline(
         log(`[qa] retry filtered: scoping re-run to ${failedSpecFiles.length} spec file(s): ${failedSpecFiles.join(", ")}`);
       }
 
-      const retryRun = await (async () => { const t0 = Date.now(); const r = await deps.execute!(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: retryNs, onCase, onRunning: onRunningTest, signal, ...(canFilter ? { specFiles: failedSpecFiles } : {}) }); addTiming("execute", Date.now() - t0); return r; })();
+      const retryRun = await (async () => { const t0 = Date.now(); const r = await deps.execute!(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: retryNs, testIdAttribute, onCase, onRunning: onRunningTest, signal, ...(canFilter ? { specFiles: failedSpecFiles } : {}) }); addTiming("execute", Date.now() - t0); return r; })();
       if (retryRun.verdict === "fail" && !(await devHealthy())) {
         run = resultOf(ns, "infra-error", "failures with an unhealthy DEV: treated as infrastructure");
         break;
@@ -2739,7 +2743,7 @@ export async function runPipeline(
             coverageNs = ns; // the enforce re-execute below runs under `ns`; align the re-collection
             const reRun = isCode
               ? await (async () => { const t0 = Date.now(); const r = await deps.executeCode!(mirrorDir, { namespace: ns, onCase, signal, changedFiles: intent?.changedFiles ?? [], log }); addTiming("execute", Date.now() - t0); return r; })()
-              : await (async () => { const t0 = Date.now(); const r = await deps.execute!(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: ns, onCase, onRunning: onRunningTest, signal }); addTiming("execute", Date.now() - t0); return r; })();
+              : await (async () => { const t0 = Date.now(); const r = await deps.execute!(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: ns, testIdAttribute, onCase, onRunning: onRunningTest, signal }); addTiming("execute", Date.now() - t0); return r; })();
             if (reRun.verdict === "pass") {
               run = reRun;
               result = improved;
@@ -2817,61 +2821,215 @@ export async function runPipeline(
 
   // 9. Final decision.
   const kind = isCode ? "code" : "E2E";
-  if (run.verdict !== "pass") {
-    const adjudicationCtx: AdjudicationLabel | undefined = adjVerdict
-      ? { class: adjVerdict.class, reason: adjVerdict.reason }
-      : undefined;
-    await report(app, issueRepo, sha, run, deps, log, shadow, isCode, { note: result?.note, tested: testedFrom(result), intent, adjudication: adjudicationCtx });
-  } else if (!generating) {
-    // Regression passed: there are no new tests to publish.
-    log(`[qa] OK — regression green for ${sha}.`);
-  } else if (app.qa.needsReview && !result!.approved) {
-    // Green in the harness BUT the independent reviewer rejected it (it catches
-    // false positives the harness cannot) → do not publish; report for iteration.
-    const url = await issueOrShadow(
-      shadow,
-      deps,
-      log,
-      issueRepo,
-      `QA: the reviewer did not approve the ${kind} tests for ${sha}`,
-      renderIssue(run, { note: result!.note, tested: testedFrom(result), intent }),
-    );
-    run.outcome = outcomeForIssue(url, "Issue filed (reviewer rejected the suite)");
-  } else if (blocksPublish(coverageStatus, covPolicy)) {
-    // Green AND reviewer-approved, but the tests do not exercise enough of the change (enforce):
-    // do NOT publish a suite that would not catch a regression in the changed code.
-    const url = await issueOrShadow(
-      shadow,
-      deps,
-      log,
-      issueRepo,
-      `QA: ${kind} tests for ${sha} are below the change-coverage threshold`,
-      renderIssue(run, { note: coverageSummary || result?.note, tested: testedFrom(result), intent }),
-    );
-    run.outcome = outcomeForIssue(url, "Issue filed (below the change-coverage threshold)");
-  } else if (shadow) {
-    log(`[qa] (shadow) ${kind} green; a suite PR would have been opened.`);
-    run.outcome = "shadow · would open an auto-merge suite PR";
-  } else {
-    const prInput = { repo: app.repo, sha, mirrorDir, baseBranch: app.baseBranch ?? "main", parentRunId: opts.parentRunId, tested: testedFrom(result) };
-    const pr = isCode ? await deps.publishCode(prInput) : await deps.publish(prInput);
-    run.outcome = !pr
-      ? "green — the suite already covers the change, no PR"
-      : pr.error
-        ? `green — tests ready but publish FAILED (${pr.error}); verdict preserved, re-run or publish manually`
-        : pr.merged
-          ? `suite PR merged · ${pr.prUrl}`
-          : `suite PR opened — NOT auto-merged, merge it manually · ${pr.prUrl}`;
-    if (pr?.error && !run.note) run.note = `tests passed but publish failed: ${pr.error}`;
+
+  // ── specTriage dual decide-step (quality-filtered-dual-publish) ──────────────
+  // Activated only when: generating + !isCode + qa.specTriage=true + deps.publishSubset wired.
+  // Flag OFF or undefined → TODAY'S EXACT CODE (verbatim, zero behavioral diff on the flag-OFF path).
+  if (generating && !isCode && (app.qa.specTriage ?? false) && deps.publishSubset) {
+    // Recompute per-file selector-presence at decide time from run.cases[].failureDom via the pure
+    // helper (Option B from the design: recompute from the winning run, not thread out of the loop).
+    const specSourcesByFile: Record<string, string[]> = {};
+    if (result?.specs) {
+      for (const specFile of result.specs) {
+        const specPath = join(e2eDir, specFile);
+        if (existsSync(specPath)) {
+          const src = readFileSync(specPath, "utf8");
+          // QaCase.file is the basename; specFile may have subdirs (flows/x.spec.ts)
+          const basename = specFile.includes("/") ? specFile.split("/").pop()! : specFile;
+          specSourcesByFile[specFile] = [src];
+          if (basename !== specFile) specSourcesByFile[basename] = [src]; // also by basename
+        }
+      }
+    }
+    const presenceByFile = perFileSelectorPresence(run.cases, specSourcesByFile);
+
+    // Parse reviewer corrections for GRAVE attribution
+    const allSpecFiles = [...new Set(run.cases.map((c) => c.file).filter((f): f is string => f !== undefined))];
+    const correctionStrings = reviewerCorrections;
+    const graveByFile = attributeCorrections(correctionStrings, allSpecFiles);
+
+    // Detect if any GRAVE came from an unattributable correction (conservative: demote to ISSUE, not DROP)
+    const hasUnattributableGrave =
+      correctionStrings.length > 0 &&
+      correctionStrings.some((c) => {
+        const tagMatch = /^\s*\[([a-z][a-z-]*)\]/i.exec(c as string);
+        if (!tagMatch) return false;
+        const tag = tagMatch[1]!.toLowerCase();
+        // GRAVE_TAGS doesn't include fragile-selector
+        const isGraveTag = tag !== "fragile-selector" && /^(false-positive|wrong-objective|no-cleanup)$/.test(tag);
+        if (!isGraveTag) return false;
+        const afterTag = (c as string).slice(tagMatch[0].length).trim();
+        return !/^[^\s:]+\.spec\.ts/i.test(afterTag); // no filename token → unattributable
+      });
+
+    const triageInput = {
+      cases: run.cases,
+      presenceByFile,
+      graveByFile,
+      mode,
+      objectiveSource: mode === "diff" ? (intent?.changedFiles ?? []) : (opts.guidance ? [opts.guidance] : []),
+      allFilesGraveUnattributable: hasUnattributableGrave,
+    };
+    const t = triagePublish(triageInput);
+
     log(
-      !pr
-        ? `[qa] OK — ${kind} green (no new tests to publish).`
-        : pr.error
-          ? `[qa] ${kind} green but publish FAILED — the tests are committed locally but did NOT land; verdict preserved.`
-          : pr.merged
-            ? `[qa] OK — ${kind} green; suite PR merged: ${pr.prUrl}`
-            : `[qa] OK — ${kind} green; suite PR opened but NOT merged (merge it manually): ${pr.prUrl}`,
+      `[qa] specTriage: pr=[${t.pr.join(", ")}] issue=[${t.issue.map((v) => v.file).join(", ")}] drop=[${t.drop.join(", ")}]`,
     );
+
+    // ── PR side (green subset) ────────────────────────────────────────────────
+    const outcomeparts: string[] = [];
+    let prFiles = [...t.pr];
+
+    // Spec-Req-4: a PR-bucket spec importing a sibling that will NOT be published (an issue/drop
+    // file) would dangle once that sibling is excluded from the commit → the committed subset would
+    // not compile. Demote such importers to ISSUE so a broken subset is never published. The
+    // whole-suite static gate already passed pre-decide; this is the only new failure subsetting adds.
+    const unpublishedSpecFiles = [...t.issue.map((v) => v.file), ...t.drop];
+    const danglingPr = findDanglingPrSpecs(prFiles, unpublishedSpecFiles, (f) => {
+      try {
+        return readFileSync(join(e2eDir, f), "utf8");
+      } catch {
+        return null;
+      }
+    });
+    if (danglingPr.length > 0) {
+      prFiles = prFiles.filter((f) => !danglingPr.includes(f));
+      log(`[qa] specTriage: ${danglingPr.length} PR spec(s) demoted to ISSUE (dangling import to a non-published spec) — ${danglingPr.join(", ")}`);
+    }
+
+    if (prFiles.length > 0) {
+      if (app.qa.needsReview && !result!.approved) {
+        // Reviewer rejected → demote all PR-bucket files to ISSUE (same gate as today)
+        const issueFiles = prFiles;
+        prFiles = [];
+        const url = await issueOrShadow(
+          shadow, deps, log, issueRepo,
+          `QA: the reviewer did not approve the ${kind} tests for ${sha}`,
+          renderIssue(run, { note: result!.note, tested: testedFrom(result), intent }),
+        );
+        outcomeparts.push(outcomeForIssue(url, "Issue filed (reviewer rejected the suite)"));
+        log(`[qa] specTriage: PR subset demoted to ISSUE (reviewer rejection) — files: ${issueFiles.join(", ")}`);
+      } else if (blocksPublish(coverageStatus, covPolicy)) {
+        // Coverage gate holds the PR-bucket subset (enforce mode, same as today)
+        prFiles = [];
+        const url = await issueOrShadow(
+          shadow, deps, log, issueRepo,
+          `QA: ${kind} tests for ${sha} are below the change-coverage threshold`,
+          renderIssue(run, { note: coverageSummary || result?.note, tested: testedFrom(result), intent }),
+        );
+        outcomeparts.push(outcomeForIssue(url, "Issue filed (below the change-coverage threshold)"));
+        log(`[qa] specTriage: PR subset held (coverage gate)`);
+      } else if (shadow) {
+        log(`[qa] (shadow) specTriage: would open PR for subset [${prFiles.join(", ")}]`);
+        outcomeparts.push(`shadow · would open subset PR for [${prFiles.join(", ")}]`);
+        prFiles = []; // no real publish in shadow
+      } else {
+        const prInput = {
+          repo: app.repo, sha, mirrorDir,
+          baseBranch: app.baseBranch ?? "main",
+          parentRunId: opts.parentRunId,
+          tested: testedFrom(result),
+        };
+        const pr = await deps.publishSubset(prInput, prFiles);
+        if (!pr) {
+          outcomeparts.push("subset already in base — no PR");
+          log("[qa] specTriage: subset has no diff — no PR opened.");
+        } else if (pr.error) {
+          outcomeparts.push(`subset tests ready but publish FAILED (${pr.error}); verdict preserved`);
+          log(`[qa] specTriage: subset publish FAILED — tests committed locally but did NOT land.`);
+          if (!run.note) run.note = `subset publish failed: ${pr.error}`;
+        } else {
+          outcomeparts.push(pr.merged ? `subset PR merged · ${pr.prUrl}` : `subset PR opened · ${pr.prUrl}`);
+          log(pr.merged ? `[qa] OK — specTriage subset PR merged: ${pr.prUrl}` : `[qa] OK — specTriage subset PR opened: ${pr.prUrl}`);
+        }
+      }
+    }
+
+    // ── ISSUE side (real-bug + ambiguous subset + PR specs demoted for dangling imports) ──
+    const allIssueFiles = [...t.issue.map((v) => v.file), ...danglingPr];
+    if (allIssueFiles.length > 0) {
+      const issueTitle = `QA: ${kind} tests for ${sha} found failures in ${allIssueFiles.length} spec file(s)`;
+      const issueBody = renderIssue(run, {
+        note: `Files with failures: ${allIssueFiles.join(", ")}\n\n` + (result?.note ?? ""),
+        tested: testedFrom(result),
+        intent,
+        adjudication: adjVerdict ? { class: adjVerdict.class, reason: adjVerdict.reason } : undefined,
+      });
+      if (shadow) {
+        log(`[qa] (shadow) specTriage: would file Issue for [${allIssueFiles.join(", ")}]`);
+        outcomeparts.push(`shadow · would file Issue for [${allIssueFiles.join(", ")}]`);
+      } else {
+        const url = await issueOrShadow(false, deps, log, issueRepo, issueTitle, issueBody);
+        outcomeparts.push(outcomeForIssue(url, `Issue filed (failures in: ${allIssueFiles.join(", ")})`));
+      }
+    }
+
+    // ── DROP side (log + outcome note) ────────────────────────────────────────
+    if (t.drop.length > 0) {
+      const dropReasons = t.drop.map((f) => `${f}: ${t.reasons[f] ?? "dropped"}`).join("; ");
+      log(`[qa] specTriage: dropped ${t.drop.length} file(s) — ${dropReasons}`);
+      outcomeparts.push(`dropped: ${t.drop.join(", ")}`);
+    }
+
+    run.outcome = outcomeparts.join(" · ") || "specTriage: no action (all files dropped or no changes)";
+  } else {
+    // ── TODAY'S EXACT PATH (verbatim — flag OFF or code mode or no publishSubset dep) ──
+    if (run.verdict !== "pass") {
+      const adjudicationCtx: AdjudicationLabel | undefined = adjVerdict
+        ? { class: adjVerdict.class, reason: adjVerdict.reason }
+        : undefined;
+      await report(app, issueRepo, sha, run, deps, log, shadow, isCode, { note: result?.note, tested: testedFrom(result), intent, adjudication: adjudicationCtx });
+    } else if (!generating) {
+      // Regression passed: there are no new tests to publish.
+      log(`[qa] OK — regression green for ${sha}.`);
+    } else if (app.qa.needsReview && !result!.approved) {
+      // Green in the harness BUT the independent reviewer rejected it (it catches
+      // false positives the harness cannot) → do not publish; report for iteration.
+      const url = await issueOrShadow(
+        shadow,
+        deps,
+        log,
+        issueRepo,
+        `QA: the reviewer did not approve the ${kind} tests for ${sha}`,
+        renderIssue(run, { note: result!.note, tested: testedFrom(result), intent }),
+      );
+      run.outcome = outcomeForIssue(url, "Issue filed (reviewer rejected the suite)");
+    } else if (blocksPublish(coverageStatus, covPolicy)) {
+      // Green AND reviewer-approved, but the tests do not exercise enough of the change (enforce):
+      // do NOT publish a suite that would not catch a regression in the changed code.
+      const url = await issueOrShadow(
+        shadow,
+        deps,
+        log,
+        issueRepo,
+        `QA: ${kind} tests for ${sha} are below the change-coverage threshold`,
+        renderIssue(run, { note: coverageSummary || result?.note, tested: testedFrom(result), intent }),
+      );
+      run.outcome = outcomeForIssue(url, "Issue filed (below the change-coverage threshold)");
+    } else if (shadow) {
+      log(`[qa] (shadow) ${kind} green; a suite PR would have been opened.`);
+      run.outcome = "shadow · would open an auto-merge suite PR";
+    } else {
+      const prInput = { repo: app.repo, sha, mirrorDir, baseBranch: app.baseBranch ?? "main", parentRunId: opts.parentRunId, tested: testedFrom(result) };
+      const pr = isCode ? await deps.publishCode(prInput) : await deps.publish(prInput);
+      run.outcome = !pr
+        ? "green — the suite already covers the change, no PR"
+        : pr.error
+          ? `green — tests ready but publish FAILED (${pr.error}); verdict preserved, re-run or publish manually`
+          : pr.merged
+            ? `suite PR merged · ${pr.prUrl}`
+            : `suite PR opened — NOT auto-merged, merge it manually · ${pr.prUrl}`;
+      if (pr?.error && !run.note) run.note = `tests passed but publish failed: ${pr.error}`;
+      log(
+        !pr
+          ? `[qa] OK — ${kind} green (no new tests to publish).`
+          : pr.error
+            ? `[qa] ${kind} green but publish FAILED — the tests are committed locally but did NOT land; verdict preserved.`
+            : pr.merged
+              ? `[qa] OK — ${kind} green; suite PR merged: ${pr.prUrl}`
+              : `[qa] OK — ${kind} green; suite PR opened but NOT merged (merge it manually): ${pr.prUrl}`,
+      );
+    }
   }
   // Surface the agent's note (reviewer rejection, generation summary) in the
   // result so the TUI/chat can show why a retry or skip happened.
