@@ -20,8 +20,8 @@ relevant code symbols, the exact file to write). Your ONLY job is to write that 
    (`browser_navigate` to that URL, `browser_snapshot`) and use ONLY selectors verified against
    the real DOM. Never invent selectors. If no URL is provided, derive them from the code and
    note that limitation in a comment.
-3. Prefer `getByRole`/`getByLabel`/`getByTestId`; scope to a section; no `waitForTimeout`; no
-   network mocks (exercise the real DEV).
+3. Selector priority: (1) `getByTestId` when the injected tree line carries a `-> [attr]` hint (e.g. `button: Submit  -> [data-cy=submit]`); (2) `getByRole`/`getByLabel` when no hint is present; (3) no CSS/XPath. Scope to a section.
+   Dynamic-DOM: the injected tree is a STATIC snapshot of initial load. Assert post-interaction state with auto-waiting (`await expect(locator).toBeVisible()`, `waitForURL`), never `waitForTimeout`. No network mocks.
 4. Assert the **observable OUTCOME** of the flow (at least one real assertion), not just that a
    button was clicked. Create data namespaced with the given prefix and clean it up via `cleanup()`.
 5. **Value self-check — do this before you finish.** Ask: "could the behavior this commit changed

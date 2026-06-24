@@ -89,8 +89,8 @@ injected a11y / "GROUND TRUTH AT FAILURE" tree, covers it):
   3. **Interact** with forms and navigation to verify the exact user flow.
   4. **Read runtime signals**: `browser_console_messages` (a JS error/warning on the changed flow
      is a real bug) and `browser_network_requests` (assert the ACTUAL API status/shape).
-  5. **Document the real selectors** — prefer `getByRole` with `{ name }`, then `getByLabel`,
-     then `getByTestId`. Never use CSS classes or XPath.
+  5. **Document the real selectors** — selector priority: (1) `getByTestId` when a `-> [attr]` hint is visible in the injected tree line (e.g. `button: Submit  -> [data-cy=submit]`); (2) `getByRole` with `{ name }` when no hint is present; (3) `getByLabel`/`getByText`; (4) scoped locator. Never use CSS classes or XPath.
+  5a. **Dynamic-DOM awareness**: the injected tree is a STATIC snapshot of initial load. Post-interaction elements (modals, dynamic lists, multi-step form steps) are NOT in this tree. Assert them with auto-waiting (`await expect(locator).toBeVisible()`, `waitForURL`), never `waitForTimeout`.
   6. **Verify page transitions**: loading states, success messages, error displays.
 
 **If you cannot reach DEV** (network error, auth): note this in your verdict and

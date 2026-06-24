@@ -4,10 +4,40 @@ Adapted from [TestDino playwright-skill](https://github.com/testdino-hq/playwrig
 
 ## Locators (best to worst)
 
-1. `getByRole("button", { name: /publish/i })` — semantic, accessible. **Preferred.**
-2. `getByLabel`, `getByPlaceholder`, `getByText` — for forms/content.
-3. `getByTestId("...")` — when there is no clear role (`data-testid` attribute).
-4. ❌ Raw CSS/XPath, auto-generated classes, `nth-child` — fragile, forbidden.
+1. `getByTestId("...")` — **when a `-> [attr]` hint appears on the injected tree line**. The hint signals a stable test-id attribute (e.g. `data-testid=submit` or `data-cy=submit`). Use `getByTestId('submit')` — Playwright resolves it via the per-app `testIdAttribute` config. This is the most stable selector and MUST be preferred when available.
+2. `getByRole("button", { name: /publish/i })` — semantic, accessible. Preferred when no test-id hint is present.
+3. `getByLabel`, `getByPlaceholder`, `getByText` — for forms/content when role+name is unavailable.
+4. Scoped locator (`section.locator("th")`) — when neither test-id nor role is present.
+5. ❌ Raw CSS/XPath, auto-generated classes, `nth-child` — fragile, forbidden.
+
+## Dynamic-DOM awareness (CRITICAL)
+
+**The injected tree is a STATIC snapshot of initial page load.** The real DOM is DYNAMIC — modals, dynamic lists, and multi-step forms appear only AFTER user interaction. Do NOT assert that a post-interaction element exists in this static tree.
+
+After an action (click, fill, submit), assert the resulting transition with Playwright's built-in **auto-waiting**:
+- `await expect(locator).toBeVisible()` — waits until the element is visible
+- `await page.waitForURL(/\/success/)` — waits until the URL changes
+
+**Never** use `waitForTimeout(ms)` (static sleep). **Never** assume a post-interaction element was in the initial snapshot.
+
+## ⚠ CRITICAL: `getByRole` matches the ACCESSIBILITY TREE, not the HTML tag
+
+A role-locator resolves ONLY if that role is present in the **live accessibility tree** — which
+is NOT the same as the HTML element's implied role. CSS (`display:block/flex/grid` on a `<table>`,
+Bootstrap's `.table`, custom widgets) routinely STRIPS or changes implicit ARIA roles, so an
+element that "should" have a role often does not:
+
+- A `<th>` is frequently **NOT** exposed as `columnheader` (very common with `.table`/styled tables).
+- `<table>`/`<tr>`/`<td>` may lose `table`/`row`/`cell`; `<ul>`/`<li>` may lose `list`/`listitem`.
+
+So **NEVER infer a role from the HTML tag.** With the Playwright MCP, take a `browser_snapshot` of
+the page under test and use ONLY the roles + accessible names that LITERALLY appear in that snapshot.
+If the role you want is absent there, do NOT use `getByRole` for it — fall back (in order) to
+`getByText` / `getByLabel`, or a SCOPED stable locator (`page.getByRole("table").locator("td")`,
+`section.locator("th")`), anchored to a heading/landmark first. A `getByRole` that matches **0**
+elements is the single most common cause of a spec that looks green in review but TIMES OUT on
+execution (observed: `getByRole("columnheader", { name: /name/i })` matched 0 on a Bootstrap table
+whose `<th>Name</th>` was real but not exposed as a columnheader).
 
 ## Hard rules for selectors (MANDATORY)
 

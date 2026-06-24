@@ -4,10 +4,21 @@ Adapted from [TestDino playwright-skill](https://github.com/testdino-hq/playwrig
 
 ## Locators (best to worst)
 
-1. `getByRole("button", { name: /publish/i })` — semantic, accessible. **Preferred.**
-2. `getByLabel`, `getByPlaceholder`, `getByText` — for forms/content.
-3. `getByTestId("...")` — when there is no clear role (`data-testid` attribute).
-4. ❌ Raw CSS/XPath, auto-generated classes, `nth-child` — fragile, forbidden.
+1. `getByTestId("...")` — **when a `-> [attr]` hint appears on the injected tree line**. The hint signals a stable test-id attribute (e.g. `data-testid=submit` or `data-cy=submit`). Use `getByTestId('submit')` — Playwright resolves it via the per-app `testIdAttribute` config. This is the most stable selector and MUST be preferred when available.
+2. `getByRole("button", { name: /publish/i })` — semantic, accessible. Preferred when no test-id hint is present.
+3. `getByLabel`, `getByPlaceholder`, `getByText` — for forms/content when role+name is unavailable.
+4. Scoped locator (`section.locator("th")`) — when neither test-id nor role is present.
+5. ❌ Raw CSS/XPath, auto-generated classes, `nth-child` — fragile, forbidden.
+
+## Dynamic-DOM awareness (CRITICAL)
+
+**The injected tree is a STATIC snapshot of initial page load.** The real DOM is DYNAMIC — modals, dynamic lists, and multi-step forms appear only AFTER user interaction. Do NOT assert that a post-interaction element exists in this static tree.
+
+After an action (click, fill, submit), assert the resulting transition with Playwright's built-in **auto-waiting**:
+- `await expect(locator).toBeVisible()` — waits until the element is visible
+- `await page.waitForURL(/\/success/)` — waits until the URL changes
+
+**Never** use `waitForTimeout(ms)` (static sleep). **Never** assume a post-interaction element was in the initial snapshot.
 
 ## ⚠ CRITICAL: `getByRole` matches the ACCESSIBILITY TREE, not the HTML tag
 

@@ -27,7 +27,7 @@ export default defineConfig({
   use: {
     baseURL: process.env.PW_BASE_URL,
     trace: "on-first-retry",
-    testIdAttribute: "data-testid",
+    testIdAttribute: process.env.PW_TEST_ID_ATTRIBUTE ?? "data-testid",
     // Layer 1: gets past the DEV environment's HTTP Basic gate. `origin` scopes it
     // to the app so these credentials are NOT sent to Keycloak (a different origin).
     httpCredentials: process.env.DEV_ENV_USER

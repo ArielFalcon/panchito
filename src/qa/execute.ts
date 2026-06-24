@@ -152,6 +152,7 @@ export interface ExecuteDeps {
     dir: string;
     baseUrl: string;
     namespace: string;
+    testIdAttribute?: string; // the configured testIdAttribute; injected as PW_TEST_ID_ATTRIBUTE so playwright.config.ts resolves getByTestId correctly
     faultInject?: boolean;
     project?: string;
     specFiles?: string[];
@@ -517,17 +518,17 @@ export function matchFailureDumps(caseName: string, dumps: FailureDump[]): Failu
 // run's namespace, so a crashed run's namespaced test data is deleted before the next
 // run. Best-effort: it never throws and never blocks the new run (failures are warnings).
 export interface CleanupDeps {
-  runCleanup(args: { dir: string; baseUrl: string; namespace: string; signal?: AbortSignal; timeoutMs?: number }): Promise<void>;
+  runCleanup(args: { dir: string; baseUrl: string; namespace: string; testIdAttribute?: string; signal?: AbortSignal; timeoutMs?: number }): Promise<void>;
 }
 
 export const defaultCleanupDeps: CleanupDeps = {
-  runCleanup: ({ dir, baseUrl, namespace, signal, timeoutMs }) =>
+  runCleanup: ({ dir, baseUrl, namespace, testIdAttribute, signal, timeoutMs }) =>
     new Promise((resolve) => {
       const child = spawn("npx", ["playwright", "test", "cleanup.spec.ts", "--reporter=line"], {
         cwd: dir,
         // Agent-written specs run here: scrub the orchestrator's secrets (GITHUB_TOKEN etc.)
         // while keeping the app's DEV_* login creds the fixtures need.
-        env: { ...scrubEnv(/^DEV_/), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PW_CLEANUP: "1" },
+        env: { ...scrubEnv(/^DEV_/), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PW_CLEANUP: "1", ...(testIdAttribute ? { PW_TEST_ID_ATTRIBUTE: testIdAttribute } : {}) },
         detached: true, // own process group → killTree can reap browser grandchildren
       });
       let settled = false;
@@ -594,7 +595,7 @@ export function playwrightArgs(reporterPath: string, project?: string, specFiles
 }
 
 export const defaultExecuteDeps: ExecuteDeps = {
-  runSuite: ({ dir, baseUrl, namespace, faultInject, project, specFiles, signal, timeoutMs, onEvent, failureCaptureDir }) =>
+  runSuite: ({ dir, baseUrl, namespace, testIdAttribute, faultInject, project, specFiles, signal, timeoutMs, onEvent, failureCaptureDir }) =>
     new Promise((resolve, reject) => {
       const work = mkdtempSync(join(tmpdir(), "qa-pw-"));
       const reporterPath = join(work, "qa-stream-reporter.cjs");
@@ -609,7 +610,9 @@ export const defaultExecuteDeps: ExecuteDeps = {
         // QA_FAILURE_CAPTURE_DIR: the qa-failure-capture afterEach fixture writes per-case aria
         // snapshot dumps here on failure; the orchestrator harvests them post-run to populate
         // QaCase.failureDom for the fix-loop grounding prompt.
-        env: { ...scrubEnv(/^DEV_/), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonPath, ...(faultInject ? { QA_FAULT_INJECT: "1" } : {}), ...(failureCaptureDir ? { QA_FAILURE_CAPTURE_DIR: failureCaptureDir } : {}) },
+        // PW_TEST_ID_ATTRIBUTE: threads the configured testIdAttribute into the runner so
+        // playwright.config.ts resolves getByTestId correctly for the app's convention.
+        env: { ...scrubEnv(/^DEV_/), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonPath, ...(testIdAttribute ? { PW_TEST_ID_ATTRIBUTE: testIdAttribute } : {}), ...(faultInject ? { QA_FAULT_INJECT: "1" } : {}), ...(failureCaptureDir ? { QA_FAILURE_CAPTURE_DIR: failureCaptureDir } : {}) },
         detached: true, // own process group → killTree reaps npx/playwright/browser grandchildren
       });
 

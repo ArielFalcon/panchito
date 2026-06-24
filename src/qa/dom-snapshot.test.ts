@@ -1,6 +1,68 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { extractTargetRoutes, formatDomSnapshot, parseAriaSnapshot, captureDom, captureDomByRoute, captureRouteTrees, normalizeRoutes, capDomLines, isPriorityNode, type CaptureDomDeps } from "./dom-snapshot";
+import { extractTargetRoutes, formatDomSnapshot, parseAriaSnapshot, captureDom, captureDomByRoute, captureRouteTrees, normalizeRoutes, capDomLines, isPriorityNode, mergeAttrs, type CaptureDomDeps, type NodeAttr, type RouteSnapshot } from "./dom-snapshot";
+
+// ── Phase 1: NodeAttr / RouteSnapshot.attrs types ───────────────────────────
+
+test("RouteSnapshot accepts attrs?: NodeAttr[] without TS error and NodeAttr has the expected shape", () => {
+  // Compile-time shape validation: constructing these values must not produce type errors.
+  const attr: NodeAttr = { key: "button: Submit" };
+  assert.equal(attr.key, "button: Submit");
+  // Optional fields
+  const full: NodeAttr = { key: "button: Submit", testId: "submit-btn", id: "save-entity", name: "submit", href: "/go" };
+  assert.equal(full.testId, "submit-btn");
+  assert.equal(full.id, "save-entity");
+  assert.equal(full.name, "submit");
+  assert.equal(full.href, "/go");
+
+  // RouteSnapshot with attrs populated and absent are both valid shapes
+  const withAttrs: RouteSnapshot = { route: "/form", nodes: ["button: Submit"], attrs: [attr] };
+  assert.equal(withAttrs.attrs?.length, 1);
+  const withoutAttrs: RouteSnapshot = { route: "/home", nodes: ["link: Home"] };
+  assert.equal(withoutAttrs.attrs, undefined);
+});
+
+// ── Phase 2: mergeAttrs ──────────────────────────────────────────────────────
+
+test("mergeAttrs maps RawAttr[] keyed by role:name join key; unmatched attrs are dropped", () => {
+  const nodes = ["button: Submit", "link: Home", "textbox: Username"];
+  const rawAttrs = [
+    { key: "button: Submit", testId: "submit-btn" },
+    { key: "textbox: Username", name: "username" },
+    { key: "link: NonExistent", id: "never" }, // not in nodes → dropped
+  ];
+  const result = mergeAttrs(nodes, rawAttrs);
+  assert.equal(result.length, 2, "unmatched raw attrs are dropped");
+  const btn = result.find((a) => a.key === "button: Submit");
+  assert.ok(btn, "button: Submit merged");
+  assert.equal(btn?.testId, "submit-btn");
+  assert.equal(btn?.id, undefined);
+  const txt = result.find((a) => a.key === "textbox: Username");
+  assert.ok(txt, "textbox: Username merged");
+  assert.equal(txt?.name, "username");
+});
+
+test("mergeAttrs([], []) returns []", () => {
+  assert.deepEqual(mergeAttrs([], []), []);
+});
+
+test("mergeAttrs: collision on same key takes first occurrence", () => {
+  const nodes = ["button: Submit"];
+  const rawAttrs = [
+    { key: "button: Submit", testId: "first" },
+    { key: "button: Submit", testId: "second" },
+  ];
+  const result = mergeAttrs(nodes, rawAttrs);
+  assert.equal(result.length, 1);
+  assert.equal(result[0]?.testId, "first", "first occurrence wins on collision");
+});
+
+test("mergeAttrs: a RawAttr with no stable attributes (no testId/id/name/href) is not emitted", () => {
+  const nodes = ["button: Submit"];
+  const rawAttrs = [{ key: "button: Submit" }]; // no stable attributes
+  const result = mergeAttrs(nodes, rawAttrs);
+  assert.equal(result.length, 0, "no-attr raw entries are not emitted");
+});
 
 test("extractTargetRoutes pulls app-relative routes from page.goto, dedups, normalizes a leading slash", () => {
   const spec = `
@@ -243,6 +305,92 @@ test("parseAriaSnapshot: table/list priority roles preserved past the formatDomS
   assert.ok(out.includes("  cell: Helen Leary"), "cell Helen survives cap");
   assert.equal((out.match(/cell: radiology/g) ?? []).length, 2, "duplicate radiology still visible");
   assert.match(out, /more non-table elements omitted/, "nav links are the truncated set");
+});
+
+// ── Phase 2: formatDomSnapshot with attrs ────────────────────────────────────
+
+test("formatDomSnapshot: a node with testId appends -> [data-testid=submit] hint (default attr name)", () => {
+  // testIdAttrName on RouteSnapshot carries the configured attribute name.
+  // When absent, "data-testid" is the default.
+  const snap: RouteSnapshot[] = [{
+    route: "/form",
+    nodes: ["button: Submit"],
+    attrs: [{ key: "button: Submit", testId: "submit" }],
+  }];
+  const out = formatDomSnapshot(snap);
+  assert.match(out, /button: Submit\s+->\s+\[data-testid=submit\]/, "default attr name data-testid used");
+});
+
+test("formatDomSnapshot: a node with testId uses testIdAttrName from RouteSnapshot when provided", () => {
+  const snap: RouteSnapshot[] = [{
+    route: "/form",
+    nodes: ["button: Submit"],
+    testIdAttrName: "data-cy",
+    attrs: [{ key: "button: Submit", testId: "submit-cy" }],
+  }];
+  const out = formatDomSnapshot(snap);
+  assert.match(out, /button: Submit.*->\s+\[data-cy=submit-cy\]/, "configured attr name appears in hint");
+});
+
+test("formatDomSnapshot: a node with only id appends -> [id=save-entity]", () => {
+  const snap: RouteSnapshot[] = [{
+    route: "/form",
+    nodes: ["button: Save"],
+    attrs: [{ key: "button: Save", id: "save-entity" }],
+  }];
+  const out = formatDomSnapshot(snap);
+  assert.match(out, /button: Save.*->\s+\[id=save-entity\]/, "id attr in hint");
+});
+
+test("formatDomSnapshot: a node with only name appends -> [name=username]", () => {
+  const snap: RouteSnapshot[] = [{
+    route: "/form",
+    nodes: ["textbox: Username"],
+    attrs: [{ key: "textbox: Username", name: "username" }],
+  }];
+  const out = formatDomSnapshot(snap);
+  assert.match(out, /textbox: Username.*->\s+\[name=username\]/, "name attr in hint");
+});
+
+test("formatDomSnapshot: a (present) marker NEVER gets a hint even when attrs has a matching key", () => {
+  const snap: RouteSnapshot[] = [{
+    route: "/form",
+    nodes: ["table: (present)", "textbox: (present)"],
+    attrs: [
+      { key: "table: (present)", id: "main-table" },
+      { key: "textbox: (present)", testId: "search-box" },
+    ],
+  }];
+  const out = formatDomSnapshot(snap);
+  assert.ok(!out.includes("->"), "(present) markers never get an attr hint");
+});
+
+test("formatDomSnapshot: a text: marker NEVER gets a hint", () => {
+  const snap: RouteSnapshot[] = [{
+    route: "/form",
+    nodes: ["text: Some inline content"],
+    attrs: [{ key: "text: Some inline content", id: "txt1" }],
+  }];
+  const out = formatDomSnapshot(snap);
+  assert.ok(!out.includes("->"), "text: nodes never get an attr hint");
+});
+
+test("formatDomSnapshot: a node with no matching NodeAttr emits the line unmodified", () => {
+  const snap: RouteSnapshot[] = [{
+    route: "/form",
+    nodes: ["link: About"],
+    attrs: [{ key: "button: Other", testId: "other" }],
+  }];
+  const out = formatDomSnapshot(snap);
+  assert.ok(out.includes("  link: About"), "unmatched node kept as-is");
+  assert.ok(!out.includes("->"), "no hint for unmatched node");
+});
+
+test("formatDomSnapshot with attrs:[] is byte-identical to attrs absent", () => {
+  const nodes = ["button: Submit", "link: Home", "table: (present)"];
+  const withEmpty = formatDomSnapshot([{ route: "/x", nodes, attrs: [] }]);
+  const withAbsent = formatDomSnapshot([{ route: "/x", nodes }]);
+  assert.equal(withEmpty, withAbsent, "attrs:[] is byte-identical to attrs absent");
 });
 
 test("captureDom renders the spec's routes and formats the real DOM (the grounding the reviewer judges against)", async () => {

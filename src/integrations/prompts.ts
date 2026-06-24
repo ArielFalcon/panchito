@@ -74,7 +74,8 @@ export function buildWorkerPromptAssembled(w: ParallelWorkerInput): AssembledPro
         w.domSnapshot
           ? `- You have NO browser. The injected a11y tree section in this prompt is your ONLY source of DOM truth — transcribe it directly into selectors; do NOT navigate or snapshot.`
           : `- You have NO browser. No a11y tree was injected — derive selectors from the brief and mark them unverified in a comment (e.g. // selector unverified — no snapshot available).`,
-        `- Prefer getByRole/getByLabel/getByTestId; scope to a section; no waitForTimeout; no network mocks.`,
+        `- Selector priority: (1) when a tree line carries a trailing \`-> [attr]\` hint, use \`getByTestId('value')\` — Playwright resolves it against the per-app testIdAttribute config; (2) fall back to \`getByRole\`/\`getByLabel\` when no hint is present; (3) no CSS/XPath.`,
+        `- Dynamic-DOM: the injected tree is a STATIC snapshot of initial load. Post-interaction elements (modals, dynamic lists) are NOT in this tree — assert them with auto-waiting (\`await expect(locator).toBeVisible()\`, \`waitForURL\`), never \`waitForTimeout\`.`,
         `- getByRole matches the ACCESSIBILITY TREE, not the HTML tag: a <th> is often NOT a "columnheader", a <table> may lose its "table"/"row"/"cell" roles (Bootstrap/CSS strips them). Use ONLY roles + names you LITERALLY SEE in the injected tree; if the role isn't there, use getByText or a scoped locator. A getByRole that matches 0 elements passes review but TIMES OUT on execution.`,
         `- At least ONE real assertion on the observable OUTCOME (not just a click). Clean up created data via cleanup().`,
       ]
@@ -592,11 +593,17 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
           `## Live DEV accessibility tree (GROUND TRUTH for selectors — trust this over HTML intuition)`,
           ``,
           `These are the roles + accessible names the browser ACTUALLY exposes for the target routes.`,
+          `Lines may carry a trailing \`-> [attr=…]\` hint showing the stable test-id attribute — when present, prefer \`getByTestId('value')\``,
+          `(Playwright resolves it against the per-app testIdAttribute config) over \`getByRole\`/\`getByLabel\`.`,
+          `When no \`-> [...]\` hint is present, use \`getByRole\` with the accessible name from the tree.`,
           `Author selectors ONLY from what appears below:`,
           `- If a role you expected (e.g. \`columnheader\`) is NOT listed, it is NOT in the a11y tree —`,
           `  do NOT use \`getByRole\` for it. Fall back to \`getByText\` or a scoped locator.`,
           `- If a name appears MORE THAN ONCE, a bare \`getByRole\`/\`getByText\` matches multiple elements`,
           `  (strict-mode violation) — scope it to a unique parent/section, or use a unique attribute.`,
+          `- This tree is a STATIC snapshot of initial load. Post-interaction elements (modals, dynamic`,
+          `  lists, multi-step form steps) are NOT here. Assert them with auto-waiting`,
+          `  (\`await expect(locator).toBeVisible()\`, \`waitForURL\`), never \`waitForTimeout\`.`,
           ``,
           input.domSnapshot,
           ``,

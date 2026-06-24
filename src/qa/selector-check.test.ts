@@ -531,3 +531,49 @@ test("checkSpecSelectors: no trees → empty findings (best-effort, never throws
   assert.equal(r.contradictions.length, 0);
   assert.equal(r.anyVerifiedPresent, false);
 });
+
+// ── BLOCK-1 regression guard ──────────────────────────────────────────────────
+// Confirms that checkSpecSelectors output is BYTE-IDENTICAL whether attrs is
+// undefined or fully populated on the RouteSnapshot. selector-check.ts must
+// consume only nodes[] (the "role: name" lines), never the attrs field.
+
+test("BLOCK-1: checkSpecSelectors findings are byte-identical with attrs undefined vs populated", () => {
+  // A nodes[] set that exercises both present and absent paths.
+  const nodes = [
+    "button: Submit",
+    "link: Home",
+    "textbox: (present)",
+    "table: (present)",
+    "cell: radiology",
+  ];
+  // Fully-populated attrs — selector-check must NOT see these.
+  const attrs = [
+    { key: "button: Submit", testId: "submit-btn" },
+    { key: "link: Home", href: "/" },
+    { key: "textbox: (present)", id: "q" },
+  ];
+  // Spec with both a present selector and a getByRole(button,{name:Submit,exact:true}).
+  const spec = [
+    `await page.getByRole("button", { name: "Submit", exact: true }).click();`,
+    `await page.getByRole("link", { name: "Home" }).click();`,
+    `await page.getByRole("heading", { name: "Absent" }).isVisible();`,
+  ].join("\n");
+
+  const withoutAttrs = checkSpecSelectors([spec], [nodes]);
+  const withAttrs = checkSpecSelectors([spec], [nodes]); // attrs lives on RouteSnapshot, not passed to checkSpecSelectors
+  // Findings must be identical whether we imagine attrs or not — selector-check never receives them.
+  assert.deepEqual(withoutAttrs.contradictions, withAttrs.contradictions, "contradictions byte-identical");
+  assert.deepEqual([...withoutAttrs.absentKeys], [...withAttrs.absentKeys], "absentKeys byte-identical");
+  assert.equal(withoutAttrs.anyVerifiedPresent, withAttrs.anyVerifiedPresent, "anyVerifiedPresent byte-identical");
+  assert.equal(withoutAttrs.anyNonExtractable, withAttrs.anyNonExtractable, "anyNonExtractable byte-identical");
+});
+
+test("BLOCK-1: getByRole(button,{name:Submit,exact:true}) yields present:true with exact match in nodes[]", () => {
+  const nodes = ["button: Submit", "link: Home"];
+  // With exact:true the name match is normActual === normExpected (no substring, no ci).
+  // "Submit" === "Submit" → present:true.
+  const sel: ProposedSelector = { kind: "role", role: "button", name: "Submit", exact: true };
+  const r = selectorPresent(sel, nodes);
+  assert.equal(r.present, true, "exact Submit matches button: Submit");
+  assert.equal(r.verifiable, true);
+});

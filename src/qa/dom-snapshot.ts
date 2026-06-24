@@ -18,10 +18,34 @@ import { join } from "node:path";
 import { scrubEnv } from "./code-runner";
 import { killTree } from "./execute";
 
+// Stable HTML attributes for one interactive or labelled node. `key` equals the
+// "role: name" line that parseAriaSnapshot produced for this node — it is the join key
+// between attrs[] and nodes[]. All attribute fields are optional; an entry with no
+// stable attributes is not emitted. selector-check.ts NEVER reads attrs[]; only
+// formatDomSnapshot does, for the PROMPT text only.
+export interface NodeAttr {
+  key: string; // "role: name" join key (e.g. "button: Submit")
+  testId?: string; // value of the configured testIdAttribute (e.g. data-testid or data-cy)
+  id?: string; // HTML id attribute
+  name?: string; // HTML name attribute (inputs, forms)
+  href?: string; // relative href (links) — a same-origin path hint, not the full URL
+}
+
+// Raw attribute entry from the in-page walk before merging.
+export interface RawAttr {
+  key: string; // "role: name" join key — computedRole + ": " + computedName
+  testId?: string;
+  id?: string;
+  name?: string;
+  href?: string;
+}
+
 // One captured route: the accessible roles+names the reviewer judges UI facts against.
 export interface RouteSnapshot {
   route: string;
-  nodes?: string[]; // "role: name" lines (interactive/labelled elements only)
+  nodes?: string[]; // "role: name" lines (interactive/labelled elements only) — BYTE-IDENTICAL to parseAriaSnapshot output
+  attrs?: NodeAttr[]; // parallel stable-attribute map, keyed by the same "role: name" join key; NEVER modifies nodes[]
+  testIdAttrName?: string; // the configured testIdAttribute name used during capture (e.g. "data-cy"); defaults to "data-testid" in formatDomSnapshot
   error?: string; // capture failed for this route (degrade — never blocks review)
 }
 
@@ -34,7 +58,9 @@ export interface CaptureDomInput {
 export interface CaptureDomDeps {
   // Renders each route against DEV and returns its accessible nodes. Injected so the deterministic
   // core is testable without a browser; defaultCaptureDomDeps spawns the e2e project's Playwright.
-  render(e2eDir: string, baseUrl: string, routes: string[]): Promise<RouteSnapshot[]>;
+  // testIdAttribute is the configured attribute name for getByTestId (e.g. "data-cy"). Defaults to
+  // "data-testid" when absent. Passed through to the in-page attribute walk and the spawn env.
+  render(e2eDir: string, baseUrl: string, routes: string[], testIdAttribute?: string): Promise<RouteSnapshot[]>;
 }
 
 export const MAX_ROUTES = 4; // a spec/objective rarely targets more; bound the render cost + the prompt size
@@ -103,7 +129,34 @@ export function capDomLines(lines: string[], max: number): { kept: string[]; dro
   return { kept, dropped: lines.length - kept.length };
 }
 
+// Build a compact attribute hint bracket for a node's NodeAttr, e.g. "[data-cy=submit id=btn]".
+// Rules: testId first, then id, then name, then href (relative only). Budget ~40 chars.
+// Returns empty string when no stable value is present (caller must suppress the hint).
+function buildAttrHint(attr: NodeAttr, testIdAttrName: string): string {
+  const parts: string[] = [];
+  if (attr.testId !== undefined) parts.push(`${testIdAttrName}=${attr.testId}`);
+  else if (attr.id !== undefined) parts.push(`id=${attr.id}`);
+  else if (attr.name !== undefined) parts.push(`name=${attr.name}`);
+  else if (attr.href !== undefined) parts.push(attr.href);
+  if (parts.length === 0) return "";
+  const raw = parts.join(" ");
+  // Bracket budget: keep it compact (≤40 chars inside the brackets).
+  const inner = raw.length > 40 ? raw.slice(0, 40) : raw;
+  return `[${inner}]`;
+}
+
+// Whether a "role: name" line is a structural marker or text node that must NEVER receive an
+// attribute hint. Markers carry no stable identity that maps to an HTML element attribute.
+function isMarkerLine(line: string): boolean {
+  return line.includes(": (present)") || line.startsWith("text: ");
+}
+
 // Format the captured snapshots into the compact text block inlined in the prompt.
+// When a RouteSnapshot carries attrs[], a compact " -> [attr]" hint is appended AFTER
+// each kept line whose join key matches a NodeAttr with at least one stable value.
+// Structural markers ("(present)") and text: lines NEVER receive a hint.
+// The nodes[] array is NEVER modified — the hint is PROMPT TEXT ONLY.
+// selector-check.ts consumes only raw nodes[], not the formatted prompt text.
 export function formatDomSnapshot(snaps: RouteSnapshot[]): string {
   const lines: string[] = [];
   for (const s of snaps) {
@@ -115,8 +168,25 @@ export function formatDomSnapshot(snaps: RouteSnapshot[]): string {
     // Over budget: keep EVERY priority (table/list) node, then fill the remaining budget with the
     // rest in document order. Guarantees the author always sees the table that drives its selectors.
     const { kept: nodes } = capDomLines(all, MAX_NODES_PER_ROUTE);
+    // Build lookup map for attrs if present (O(1) per line).
+    const attrMap = s.attrs && s.attrs.length > 0
+      ? new Map(s.attrs.map((a) => [a.key, a]))
+      : null;
+    const testIdAttrName = s.testIdAttrName ?? "data-testid";
     lines.push(`route ${s.route}:`);
-    for (const n of nodes) lines.push(`  ${n}`);
+    for (const n of nodes) {
+      if (attrMap && !isMarkerLine(n)) {
+        const attr = attrMap.get(n);
+        if (attr) {
+          const hint = buildAttrHint(attr, testIdAttrName);
+          if (hint) {
+            lines.push(`  ${n}  -> ${hint}`);
+            continue;
+          }
+        }
+      }
+      lines.push(`  ${n}`);
+    }
     if (all.length > nodes.length) lines.push(`  … (${all.length - nodes.length} more non-table elements omitted)`);
   }
   return lines.join("\n");
@@ -337,6 +407,36 @@ export function parseAriaSnapshot(yaml: string): string[] {
   return out;
 }
 
+// Merges a RawAttr[] (from the in-page walk) into NodeAttr[] keyed by the same "role: name"
+// join key that parseAriaSnapshot produces. Unmatched RawAttrs (keys not in nodes[]) are
+// dropped. On collision (two entries with the same key) the first wins. Pure and exported
+// for unit testing.
+export function mergeAttrs(nodes: string[], rawAttrs: RawAttr[]): NodeAttr[] {
+  if (rawAttrs.length === 0) return [];
+  // Index raw attrs by key for O(1) lookup. First occurrence wins on collision.
+  const byKey = new Map<string, RawAttr>();
+  for (const r of rawAttrs) {
+    if (!byKey.has(r.key)) byKey.set(r.key, r);
+  }
+  const out: NodeAttr[] = [];
+  const seen = new Set<string>(); // only one NodeAttr per key (first node wins)
+  for (const node of nodes) {
+    if (seen.has(node)) continue;
+    const raw = byKey.get(node);
+    if (!raw) continue;
+    // Only emit when at least one stable attribute is present
+    if (raw.testId === undefined && raw.id === undefined && raw.name === undefined && raw.href === undefined) continue;
+    seen.add(node);
+    const attr: NodeAttr = { key: node };
+    if (raw.testId !== undefined) attr.testId = raw.testId;
+    if (raw.id !== undefined) attr.id = raw.id;
+    if (raw.name !== undefined) attr.name = raw.name;
+    if (raw.href !== undefined) attr.href = raw.href;
+    out.push(attr);
+  }
+  return out;
+}
+
 // The render child loops routes SEQUENTIALLY (each goto bounded at 15s) and writes its result ONCE at
 // the end, so a kill mid-flight loses EVERY route, not just the slow one. Scale the kill deadline with
 // the route count (each route's 15s goto must fit) so the union render actually completes; cap it so a
@@ -351,7 +451,7 @@ const renderTimeoutFor = (routeCount: number): number =>
 // baked browsers), under the same scrubbed env as execution. The orchestrator root has no
 // Playwright, so we borrow the watched repo's — exactly as execute.ts spawns it.
 export const defaultCaptureDomDeps: CaptureDomDeps = {
-  render: (e2eDir, baseUrl, routes) =>
+  render: (e2eDir, baseUrl, routes, testIdAttribute = "data-testid") =>
     new Promise<RouteSnapshot[]>((resolve) => {
       const work = mkdtempSync(join(tmpdir(), "qa-dom-"));
       const script = join(work, "capture.cjs");
@@ -364,6 +464,7 @@ export const defaultCaptureDomDeps: CaptureDomDeps = {
         script,
         `const { chromium } = require(${JSON.stringify(join(e2eDir, "node_modules", "playwright"))});
 const { baseUrl, routes } = JSON.parse(process.env.PW_CAPTURE_INPUT || "{}");
+const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
 (async () => {
   const out = [];
   let browser;
@@ -374,7 +475,39 @@ const { baseUrl, routes } = JSON.parse(process.env.PW_CAPTURE_INPUT || "{}");
       try {
         await page.goto(new URL(route, baseUrl).toString(), { waitUntil: "networkidle", timeout: 15000 });
         // ariaSnapshot() (PW >=1.57) returns a YAML string; page.accessibility.snapshot() was removed.
-        out.push({ route, yaml: await page.locator('body').ariaSnapshot() });
+        const yaml = await page.locator('body').ariaSnapshot();
+        // Attribute walk: after ariaSnapshot(), query interactive/labelled nodes to extract stable
+        // HTML attributes. Chromium-only cast for computedRole/computedName (best-effort; wrapped in
+        // try/catch — if it throws, attrs is empty and the run degrades to a11y-only grounding).
+        let rawAttrs = [];
+        try {
+          rawAttrs = await page.evaluate(function(testIdAttrName) {
+            var sel = 'a[href], button, input, select, textarea, [role], [' + testIdAttrName + '], [id], [name]';
+            var els = Array.from(document.querySelectorAll(sel));
+            return els.map(function(el) {
+              var casted = el;
+              var computedRole = '';
+              var computedName = '';
+              try { computedRole = casted.computedRole || ''; } catch(_e) {}
+              try { computedName = casted.computedName || ''; } catch(_e) {}
+              if (!computedRole) return null;
+              var key = computedRole + ': ' + (computedName || '(present)');
+              var result = { key: key };
+              var testIdVal = el.getAttribute(testIdAttrName);
+              if (testIdVal) result.testId = testIdVal;
+              var idVal = el.getAttribute('id');
+              if (idVal) result.id = idVal;
+              var nameVal = el.getAttribute('name');
+              if (nameVal) result.name = nameVal;
+              var href = el.getAttribute('href');
+              if (href && href.startsWith('/')) result.href = href;
+              // Only emit if at least one stable attribute is present
+              if (!result.testId && !result.id && !result.name && !result.href) return null;
+              return result;
+            }).filter(Boolean);
+          }, testIdAttr);
+        } catch(_attrErr) { rawAttrs = []; }
+        out.push({ route, yaml, rawAttrs, testIdAttr });
       } catch (e) { out.push({ route, error: String(e && e.message || e).slice(0, 200) }); }
     }
   } catch (e) { process.stderr.write(String(e)); } finally { if (browser) await browser.close().catch(() => {}); }
@@ -387,7 +520,7 @@ const { baseUrl, routes } = JSON.parse(process.env.PW_CAPTURE_INPUT || "{}");
       // gated routes snapshot the real page, not the login screen (same env as execute.ts).
       const child = spawn("node", [script], {
         cwd: e2eDir,
-        env: { ...scrubEnv(/^DEV_/), PW_BASE_URL: baseUrl, PW_CAPTURE_INPUT: JSON.stringify({ baseUrl, routes }) },
+        env: { ...scrubEnv(/^DEV_/), PW_BASE_URL: baseUrl, PW_TEST_ID_ATTRIBUTE: testIdAttribute, PW_CAPTURE_INPUT: JSON.stringify({ baseUrl, routes }) },
         detached: true,
       });
       const timer = setTimeout(() => killTree(child), renderTimeoutFor(routes.length));
@@ -396,8 +529,16 @@ const { baseUrl, routes } = JSON.parse(process.env.PW_CAPTURE_INPUT || "{}");
       child.on("error", () => done([]));
       child.on("close", () => {
         try {
-          const raw = JSON.parse(stdout) as Array<{ route: string; yaml?: string; error?: string }>;
-          done(raw.map((r) => (r.error ? { route: r.route, error: r.error } : { route: r.route, nodes: parseAriaSnapshot(r.yaml ?? "") })));
+          const raw = JSON.parse(stdout) as Array<{ route: string; yaml?: string; rawAttrs?: RawAttr[]; testIdAttr?: string; error?: string }>;
+          done(raw.map((r) => {
+            if (r.error) return { route: r.route, error: r.error };
+            const nodes = parseAriaSnapshot(r.yaml ?? "");
+            const attrs = r.rawAttrs && r.rawAttrs.length > 0 ? mergeAttrs(nodes, r.rawAttrs) : undefined;
+            const snap: RouteSnapshot = { route: r.route, nodes };
+            if (attrs && attrs.length > 0) snap.attrs = attrs;
+            if (r.testIdAttr) snap.testIdAttrName = r.testIdAttr;
+            return snap;
+          }));
         } catch {
           done([]);
         }
