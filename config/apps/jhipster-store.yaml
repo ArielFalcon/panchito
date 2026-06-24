@@ -37,6 +37,12 @@ baseBranch: "main"
 # JHipster exposes springdoc OpenAPI at runtime (/v3/api-docs per service). There is no static
 # contract file in the repo by default, so no `openapi:` hint — the agent drives through the UI.
 
+# JHipster components emit `data-cy` attributes (not `data-testid`). This makes the grounding capture
+# surface data-cy as the stable test-id AND makes Playwright's getByTestId resolve against data-cy at
+# runtime — so the agent stays on stable selectors instead of i18n-fragile accessible-name labels.
+e2e:
+  testIdAttribute: "data-cy"
+
 dev:
   baseUrl: "http://host.docker.internal:8080"   # the Spring Cloud Gateway — the single UI entrypoint.
   # host.docker.internal = the HOST's localhost as seen from inside the orchestrator/agent
