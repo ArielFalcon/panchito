@@ -1,0 +1,10 @@
+{
+  "name": "@panchito/qa-engine",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Hexagonal QA engine — built in parallel to src/, switched in via PIPELINE_ENGINE.",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}
