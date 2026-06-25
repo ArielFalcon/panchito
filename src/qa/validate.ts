@@ -64,9 +64,11 @@ export async function validateSpecs(
     }
   }
 
-  // B2: detect spec files with zero assertions. A generated Playwright spec that never calls
-  // expect() is almost always a trivially-passing false-positive. Flag it as a code quality
-  // failure (not infra) so the run becomes `invalid` and feeds a corrective regeneration.
+  // B2: detect GENERATED spec files with zero assertions. A generated Playwright spec that never
+  // calls expect() is almost always a trivially-passing false-positive. Flag it as a code quality
+  // failure (not infra) so the run becomes `invalid` and feeds a corrective regeneration. Scoped to
+  // the `flows/` subdir (where the agent writes generated specs) so the assertion-free `cleanup.spec.ts`
+  // SEED at the e2e root — and any pre-existing non-generated spec — is never falsely flagged.
   const zeroAssertionErrors = checkZeroAssertionSpecs(specDir);
   for (const e of zeroAssertionErrors) {
     errors.push(e);
@@ -76,10 +78,11 @@ export async function validateSpecs(
   return { ok: errors.length === 0, errors, infra: errors.length > 0 && allFailuresAreInfra };
 }
 
-// B2: deterministic check — scan all *.spec.ts files under specDir (recursively) and return one
-// error string per file that has ZERO `expect(` occurrences. Counts `expect(`, `expect.soft(`, and
-// `await expect(` — any of these proves the spec has at least one assertion.
-// Non-spec files (no `.spec.ts` suffix) are ignored so this never flags helpers or fixtures.
+// B2: deterministic check — scan *.spec.ts files under specDir/flows (the GENERATED-spec dir;
+// panchito writes generated specs there) and return one error per file with NO assertion. Detects
+// `expect(`, `await expect(`, `expect.soft(`, `expect.poll(`. Scoping to flows/ keeps the
+// assertion-free seed `cleanup.spec.ts` (at the e2e root) and any pre-existing non-generated spec
+// out of scope. A missing flows/ dir yields no errors (fail-safe — readdirSync throws → skip).
 function checkZeroAssertionSpecs(specDir: string): string[] {
   const errors: string[] = [];
   const walk = (dir: string): void => {
@@ -116,7 +119,7 @@ function checkZeroAssertionSpecs(specDir: string): string[] {
       }
     }
   };
-  walk(specDir);
+  walk(join(specDir, "flows"));
   return errors;
 }
 

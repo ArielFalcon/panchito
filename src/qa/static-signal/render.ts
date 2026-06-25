@@ -25,9 +25,10 @@ export function renderStaticSignal(sig: StaticSignal): string {
   const markerBytes = Buffer.byteLength(marker, "utf8");
   const buf = Buffer.from(out, "utf8");
   if (buf.length <= MAX_LEN) return out;
-  // Walk back from (MAX_LEN - markerBytes) to find the last newline whose position, combined with
-  // the marker, stays within MAX_LEN total bytes.
-  let cut = MAX_LEN - markerBytes;
+  // Walk back from (MAX_LEN - markerBytes - 1) to find the last newline. Starting one byte BELOW
+  // (MAX_LEN - markerBytes) guarantees body (cut+1 bytes) + marker stays ≤ MAX_LEN even when that
+  // boundary byte is itself a newline — the off-by-one that would otherwise emit MAX_LEN + 1 bytes.
+  let cut = MAX_LEN - markerBytes - 1;
   while (cut > 0 && buf[cut] !== 0x0a /* '\n' */) cut--;
   // Include the newline itself in the surviving body so body ends with '\n'.
   const body = buf.subarray(0, cut + 1).toString("utf8");

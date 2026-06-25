@@ -108,13 +108,15 @@ test("a timed-out check routes through validateSpecs as pure infra", async () =>
 
 // ── B2: zero-assertion spec detection ───────────────────────────────────────
 
-import { readFileSync as _readFileSync, writeFileSync as _writeFileSync, mkdtempSync as _mkdtempSync, rmSync as _rmSync } from "node:fs";
+import { readFileSync as _readFileSync, writeFileSync as _writeFileSync, mkdtempSync as _mkdtempSync, mkdirSync as _mkdirSync, rmSync as _rmSync } from "node:fs";
 import { tmpdir as _tmpdir } from "node:os";
 import { join as _join } from "node:path";
 
 function makeTmpSpecDir(specContent: string): string {
   const dir = _mkdtempSync(_join(_tmpdir(), "qa-validate-b2-"));
-  _writeFileSync(_join(dir, "login.spec.ts"), specContent);
+  // B2 scans the flows/ subdir (the generated-spec dir), so place the spec there.
+  _mkdirSync(_join(dir, "flows"));
+  _writeFileSync(_join(dir, "flows", "login.spec.ts"), specContent);
   return dir;
 }
 
@@ -188,5 +190,34 @@ test("B2: a spec asserting ONLY via expect.poll() is NOT flagged (regression —
     assert.equal(res.ok, true, "expect.poll() must count as an assertion (not a zero-assertion false-flag)");
   } finally {
     _rmSync(specDir, { recursive: true });
+  }
+});
+
+test("B2: a zero-assertion spec at the e2e ROOT (the cleanup seed) is NOT flagged — only flows/ is checked", async () => {
+  const dir = _mkdtempSync(_join(_tmpdir(), "qa-validate-b2-seed-"));
+  try {
+    // The seed cleanup.spec.ts sits at the e2e ROOT and has no expect() by design (skip-guarded).
+    _writeFileSync(_join(dir, "cleanup.spec.ts"), `import { test } from "@playwright/test";\ntest.skip("cleanup", async () => {});\n`);
+    _mkdirSync(_join(dir, "flows"));
+    _writeFileSync(_join(dir, "flows", "login.spec.ts"), `import { test, expect } from "@playwright/test";\ntest("login", async ({ page }) => { await expect(page).toHaveURL("/"); });\n`);
+    const deps: ValidateDeps = { typecheck: ok, lint: ok, listTests: ok, checkManifest: ok };
+    const res = await validateSpecs(dir, deps);
+    assert.equal(res.ok, true, "the assertion-free seed spec at the e2e root must NOT be flagged");
+  } finally {
+    _rmSync(dir, { recursive: true });
+  }
+});
+
+test("B2: a zero-assertion GENERATED spec under flows/ IS flagged", async () => {
+  const dir = _mkdtempSync(_join(_tmpdir(), "qa-validate-b2-flows-"));
+  try {
+    _mkdirSync(_join(dir, "flows"));
+    _writeFileSync(_join(dir, "flows", "trivial.spec.ts"), `import { test } from "@playwright/test";\ntest("trivial", async ({ page }) => { await page.goto("/"); });\n`);
+    const deps: ValidateDeps = { typecheck: ok, lint: ok, listTests: ok, checkManifest: ok };
+    const res = await validateSpecs(dir, deps);
+    assert.equal(res.ok, false, "a generated spec under flows/ with no expect must be flagged");
+    assert.ok(res.errors.some((e) => /zero.assertion|trivial\.spec\.ts/i.test(e)), `expected a zero-assertion error; got ${JSON.stringify(res.errors)}`);
+  } finally {
+    _rmSync(dir, { recursive: true });
   }
 });
