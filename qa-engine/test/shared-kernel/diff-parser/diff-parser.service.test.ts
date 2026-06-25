@@ -62,3 +62,59 @@ test("modifiedFiles: only files present on BOTH sides (a pure add is excluded)",
   // added.ts has --- /dev/null (not --- a/...), so it is NOT a modification
   assert.deepEqual(svc.modifiedFiles(d), ["src/mod.ts"]);
 });
+
+import type { ChangedElement } from "@kernel/diff-parser/changed-element.ts";
+
+function htmlDiff(lines: string[], file = "src/home.component.html"): string {
+  return [
+    `diff --git a/${file} b/${file}`, `--- a/${file}`, `+++ b/${file}`,
+    `@@ -1,3 +1,${lines.length + 2} @@`, ` <div>`, ...lines, ` </div>`,
+  ].join("\n");
+}
+
+test("changedElements: data-cy → testId", () => {
+  const els = svc.changedElements(htmlDiff([`+<button data-cy="submit-order">Place Order</button>`]));
+  assert.ok(els.find((e) => e.testId === "submit-order"));
+});
+
+test("changedElements: routerLink literal resolves to href, not the attr name", () => {
+  const els = svc.changedElements(htmlDiff([`+<a routerLink="/products">Products</a>`]));
+  assert.ok(els.find((e) => e.href === "/products"));
+  assert.ok(!els.some((e) => "routerLink" in (e as unknown as Record<string, unknown>)));
+});
+
+test("changedElements: bare relative routerLink (no leading / or #) is skipped", () => {
+  const els = svc.changedElements(htmlDiff([`+<a routerLink="products">Products</a>`]));
+  assert.equal(els.filter((e) => e.href !== undefined).length, 0);
+});
+
+test("changedElements: interpolated {{...}} text is skipped", () => {
+  const els = svc.changedElements(htmlDiff([`+<button>{{ submitLabel }}</button>`]));
+  assert.ok(!els.some((e) => e.text?.includes("{{")));
+});
+
+test("changedElements: pure TS diff → []", () => {
+  const els = svc.changedElements(diff("src/svc.ts", ["@@ -1,2 +1,3 @@", " class X {", "+  private n = 0;", " }"]));
+  assert.deepEqual(els, []);
+});
+
+test("changedElements: capped at 200 entries", () => {
+  const lines = Array.from({ length: 250 }, (_, i) => `+<button data-cy="b-${i}">x</button>`);
+  const d = [`diff --git a/h.html b/h.html`, `--- a/h.html`, `+++ b/h.html`, `@@ -1,5 +1,255 @@`, ...lines].join("\n");
+  assert.ok(svc.changedElements(d).length <= 200);
+});
+
+test("changedElementsFromGuidance: QA stopwords are filtered, distinctive nouns kept", () => {
+  const els = svc.changedElementsFromGuidance("test the contact form");
+  const texts = els.map((e) => e.text?.toLowerCase());
+  assert.ok(!texts.includes("test"));
+  assert.ok(!texts.includes("form"));
+  assert.ok(texts.includes("contact"));
+});
+
+test("changedElementsFromGuidance: empty string → []", () => {
+  assert.deepEqual(svc.changedElementsFromGuidance(""), []);
+});
+
+// Parity tests (cross-boundary src/ imports) live in diff-parser-parity.test.ts, which is
+// excluded from qa-engine typecheck (same pattern as test/characterization/scenarios.ts).
