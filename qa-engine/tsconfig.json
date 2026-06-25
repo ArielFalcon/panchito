@@ -24,6 +24,8 @@
   "include": ["src", "test"],
   "exclude": [
     "test/characterization/scenarios.ts",
-    "test/characterization/capture-goldens.ts"
+    "test/characterization/capture-goldens.ts",
+    "src/shared-kernel/contract/index.ts",
+    "test/shared-kernel/run-outcome.test.ts"
   ]
 }
