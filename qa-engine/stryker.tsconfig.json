@@ -1,0 +1,7 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["../src/qa/change-coverage.ts", "../src/qa/change-coverage.test.ts", "../src/types.ts", "../src/qa/source-map.ts"]
+}

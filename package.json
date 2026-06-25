@@ -18,7 +18,8 @@
     "sdk:typecheck": "tsc -p packages/sdk",
     "start": "node boot-guard.mjs && tsx src/index.ts",
     "test": "node --import ./test-setup.mjs --import tsx --test \"src/**/*.test.ts\" \"qa-engine/test/**/*.test.ts\" \"packages/sdk/**/*.test.ts\" \"agents/**/*.test.mjs\"",
-    "typecheck": "tsc --build --force"
+    "typecheck": "tsc --build --force",
+    "mutate:keystone": "stryker run qa-engine/stryker.conf.json"
   },
   "dependencies": {
     "@opencode-ai/sdk": "1.17.7",
@@ -31,6 +32,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@stryker-mutator/typescript-checker": "^9.6.1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
     "c8": "^10.1.3",

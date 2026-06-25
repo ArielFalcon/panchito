@@ -1,0 +1,15 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stryker-mutator/stryker-js/master/packages/api/schema/stryker-core.json",
+  "packageManager": "npm",
+  "reporters": ["clear-text", "progress"],
+  "testRunner": "command",
+  "commandRunner": {
+    "command": "node --import ./test-setup.mjs --import tsx --test src/qa/change-coverage.test.ts"
+  },
+  "checkers": ["typescript"],
+  "tsconfigFile": "qa-engine/stryker.tsconfig.json",
+  "mutate": ["src/qa/change-coverage.ts:173-181"],
+  "timeoutMS": 15000,
+  "thresholds": { "high": 90, "low": 80, "break": 80 },
+  "concurrency": 4
+}
