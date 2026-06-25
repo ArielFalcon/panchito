@@ -28,6 +28,7 @@
     "src/shared-kernel/contract/index.ts",
     "test/shared-kernel/run-outcome.test.ts",
     "test/shared-kernel/diff-parser/diff-parser-parity.test.ts",
-    "test/contexts/change-analysis/domain/commit-classification-parity.test.ts"
+    "test/contexts/change-analysis/domain/commit-classification-parity.test.ts",
+    "src/contexts/change-analysis/infrastructure/extractors/default-extractors.ts"
   ]
 }
