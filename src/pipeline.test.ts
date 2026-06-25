@@ -1184,6 +1184,117 @@ test("code mode compile gate: a broken toolchain (infra) → infra-error, no Iss
   assert.equal(d.issues.length, 0, "infra is inconclusive — no Issue on the watched repo");
 });
 
+// ── C2: static-signal runs in code mode ──────────────────────────────────────
+
+test("C2: aggregateStaticSignal is called in code mode (not skipped by !isCode)", async () => {
+  const calls: string[] = [];
+  let aggregateCalled = false;
+  const d = deps(passing(), calls);
+  // Inject aggregateStaticSignal dep — should be called in code mode.
+  d.aggregateStaticSignal = async () => {
+    aggregateCalled = true;
+    return {
+      builtForSha: "abc123",
+      languages: ["typescript" as const],
+      symbols: [{ name: "Foo.bar", file: "src/foo.ts", kind: "function", signature: "Foo.bar(): void", line: 1 }],
+      relations: [],
+      complexity: [],
+      patterns: [],
+      fileChangeKinds: [],
+      skipped: [],
+    };
+  };
+  await runPipeline(codeApp, "abc123", d, "manual", { mode: "diff", target: "code" });
+  assert.ok(aggregateCalled, "C2: aggregateStaticSignal must be called in code mode (not blocked by !isCode)");
+});
+
+test("C2: staticSignal is threaded into genInput when aggregateStaticSignal returns data in code mode", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls);
+  d.aggregateStaticSignal = async () => ({
+    builtForSha: "abc123",
+    languages: ["typescript" as const],
+    symbols: [{ name: "MyClass.method", file: "src/my.ts", kind: "method", signature: "MyClass.method(): void", line: 10 }],
+    relations: [],
+    complexity: [],
+    patterns: [],
+    fileChangeKinds: [],
+    skipped: [],
+  });
+  await runPipeline(codeApp, "abc123", d, "manual", { mode: "diff", target: "code" });
+  const genInput = d.genInputs[0];
+  assert.ok(genInput, "generate must be called");
+  assert.ok(genInput!.staticSignal, "C2: staticSignal must be threaded into genInput in code mode");
+  assert.ok(genInput!.staticSignal!.includes("MyClass.method"), "staticSignal content must include the symbol signature");
+});
+
+// ── C5: surface extractor failures (skipped[]) ────────────────────────────────
+
+test("C5: static-signal skipped notes are logged when non-empty", async () => {
+  const calls: string[] = [];
+  const logMessages: string[] = [];
+  const d = deps(passing(), calls);
+  d.log = (m: string) => logMessages.push(m);
+  d.aggregateStaticSignal = async () => ({
+    builtForSha: "abc123",
+    languages: ["typescript" as const],
+    symbols: [],
+    relations: [],
+    complexity: [],
+    patterns: [],
+    fileChangeKinds: [],
+    skipped: ["symbols: ast-grep not found", "complexity: lizard not installed"],
+  });
+  await runPipeline(app, "abc123", d, "manual", { mode: "diff", target: "e2e" });
+  assert.ok(
+    logMessages.some((m) => m.includes("static-signal skipped") && m.includes("ast-grep not found")),
+    `C5: log must contain 'static-signal skipped' with the skipped notes; got: ${JSON.stringify(logMessages.filter((m) => m.includes("static-signal")))}`,
+  );
+});
+
+test("C5: static-signal skipped notes NOT logged when skipped is empty", async () => {
+  const calls: string[] = [];
+  const logMessages: string[] = [];
+  const d = deps(passing(), calls);
+  d.log = (m: string) => logMessages.push(m);
+  d.aggregateStaticSignal = async () => ({
+    builtForSha: "abc123",
+    languages: ["typescript" as const],
+    symbols: [{ name: "Foo.bar", file: "src/foo.ts", kind: "function", signature: "Foo.bar(): void", line: 1 }],
+    relations: [],
+    complexity: [],
+    patterns: [],
+    fileChangeKinds: [],
+    skipped: [],
+  });
+  await runPipeline(app, "abc123", d, "manual", { mode: "diff", target: "e2e" });
+  assert.ok(
+    !logMessages.some((m) => m.includes("static-signal skipped")),
+    "C5: 'static-signal skipped' log must NOT appear when skipped is empty",
+  );
+});
+
+test("C2 regression: e2e mode aggregateStaticSignal call is unchanged", async () => {
+  const calls: string[] = [];
+  let aggregateCalled = false;
+  const d = deps(passing(), calls);
+  d.aggregateStaticSignal = async () => {
+    aggregateCalled = true;
+    return {
+      builtForSha: "abc123",
+      languages: ["typescript" as const],
+      symbols: [{ name: "Bar.baz", file: "src/bar.ts", kind: "function", signature: "Bar.baz(): void", line: 5 }],
+      relations: [],
+      complexity: [],
+      patterns: [],
+      fileChangeKinds: [],
+      skipped: [],
+    };
+  };
+  await runPipeline(app, "abc123", d, "manual", { mode: "diff", target: "e2e" });
+  assert.ok(aggregateCalled, "C2 regression: aggregateStaticSignal must still be called in e2e mode");
+});
+
 test("context mode: generates context.json, validates it, publishes, skips validate/execute/review", async () => {
   const calls: string[] = [];
   const d = deps(passing(), calls, {

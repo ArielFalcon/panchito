@@ -112,6 +112,9 @@ export interface GenerateInput {
   // Static signal: deterministic pre-computed analysis (symbols, relations, complexity, patterns)
   // rendered as a prompt section by renderStaticSignal. Empty string or absent = no section added.
   staticSignal?: string;
+  // C1: diff archetypes computed by detectStructuralPatterns for the current diff.
+  // Threaded here so the generator receives a one-line structural hint ("Change shape: auth-flow, …").
+  diffArchetypes?: string[];
   // Seam b: deterministic list of existing spec file paths under e2eRelDir/**/*.spec.ts, enumerated
   // from the filesystem before the session starts. When non-empty and mode is diff or manual,
   // rendered as an "existing-suite-manifest" semi-stable section. Absent or empty = no section.
@@ -328,6 +331,8 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
         explorer: input.explorerBrief ? false : input.explorer,
         contextPack: input.contextPack,
         staticSignal: input.staticSignal,
+        // C1: thread diff archetypes into the prompt builder for the structural hint.
+        diffArchetypes: input.diffArchetypes,
         // Seam b: thread the filesystem-enumerated spec file manifest into the prompt builder.
         existingSpecFiles: input.existingSpecFiles,
         service: input.service,
@@ -1701,6 +1706,14 @@ export async function runPipeline(
   // every generation and re-generation pass receives the computed value (or undefined).
   let staticSignalText: string | undefined;
 
+  // C1: diff archetypes computed once from the commit diff+files (deterministic). Threaded into
+  // every generation call via baseGenInput so the generator receives a one-line structural hint.
+  // Gated to diff mode with intent present — without a commit diff, structural shape has no scope.
+  const diffArchetypeKinds: string[] | undefined =
+    generating && intent && mode === "diff"
+      ? detectStructuralPatterns(diff, intent.changedFiles).map((p) => p.kind).filter((k) => k !== "generic")
+      : undefined;
+
   // Seam b: enumerate existing spec files from the filesystem before the first generate call.
   // Populated once (not rebuilt on regen passes — the suite does not change mid-run).
   // Graceful: if the e2e dir does not exist or the glob fails, stays undefined (no section emitted).
@@ -1757,6 +1770,8 @@ export async function runPipeline(
     contextPack: builtContextPack,
     learnedRules: promptSections,
     staticSignal: staticSignalText,
+    // C1: thread diff archetypes so the generator receives a one-line structural hint.
+    diffArchetypes: diffArchetypeKinds?.length ? diffArchetypeKinds : undefined,
     // Slice 1: thread change-anchor signals to defaultPipelineDeps.generate so the captureRoutesDom
     // closure can pass them to captureDomByRoute for [CHANGED: …] annotation of worker DOM trees.
     changedElements: changedElements.length > 0 ? changedElements : undefined,
@@ -1936,12 +1951,21 @@ export async function runPipeline(
       }
     }
 
-    if (deps.aggregateStaticSignal && !isCode && generating && !triggerService) {
+    // C2 Part A: static-signal runs in BOTH e2e and code mode (pure source analysis — no DEV/DOM
+    // needed). The original !isCode guard was a structural bias against code mode, but static-signal
+    // is exactly where symbol/relation/complexity targeting helps most for code-mode runs.
+    // The cross-service trigger guard is kept: service diffs are foreign-repo changes whose
+    // symbols/relations are not in the primary repo's tree.
+    if (deps.aggregateStaticSignal && generating && !triggerService) {
       const sig = await deps.aggregateStaticSignal({ sha, baseSha: opts.baseSha, repoDir: mirrorDir, changedFiles: [...parseDiffHunks(promptDiff).keys()], diff: promptDiff });
       staticSignalText = renderStaticSignal(sig) || undefined;
       const hasContent = sig.symbols.length > 0 || sig.relations.length > 0 || sig.complexity.length > 0 || sig.patterns.length > 0;
       if (hasContent || sig.skipped.length > 0) {
         log(`[qa] static-signal: ${sig.symbols.length} symbols, ${sig.relations.length} relations, ${sig.complexity.length} hotspots, ${sig.patterns.length} patterns${sig.skipped.length > 0 ? ` (skipped: ${sig.skipped.length})` : ""}`);
+        // C5: log skipped notes when non-empty so tool failures are visible.
+        if (sig.skipped.length > 0) {
+          log(`[qa] static-signal skipped: ${sig.skipped.join("; ")}`);
+        }
       }
     }
 

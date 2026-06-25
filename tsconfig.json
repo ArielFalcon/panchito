@@ -20,5 +20,6 @@
     }
   },
   "include": ["src"],
+  "exclude": ["src/**/__fixtures__"],
   "references": [{ "path": "./qa-engine" }]
 }

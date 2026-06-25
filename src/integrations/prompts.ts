@@ -787,6 +787,14 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
   // SEMI-STABLE: static signal (deterministic pre-computed analysis — stable for this diff).
   const staticSignalContent = input.staticSignal && isGenerationMode ? input.staticSignal : "";
 
+  // C1: diff archetypes — a one-line structural hint for the generator ("Change shape
+  // (deterministic): auth-flow, data-list — prioritise tests that exercise these").
+  // Rendered only when archetypes are present and non-empty; absent = no section.
+  const diffArchetypesContent =
+    input.diffArchetypes?.length && isGenerationMode
+      ? `Change shape (deterministic): ${input.diffArchetypes.join(", ")} — prioritise tests that exercise these`
+      : "";
+
   return assemble([
     // STABLE prefix: working rules (mode-specific but stable for the generator role per session).
     section("working-rules", "stable-prefix", workingRulesContent, { priority: 1, cacheable: true }),
@@ -813,6 +821,9 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
       return [section("existing-suite-manifest", "semi-stable", manifestContent, { priority: 2 })];
     })(),
     ...(staticSignalContent ? [section("static-signal", "semi-stable", staticSignalContent, { priority: 3 })] : []),
+    // C1: diff archetypes one-line hint (tiny semi-stable section, priority 3 alongside static-signal).
+    // Absent when no archetypes or non-generation mode — no empty header emitted.
+    ...(diffArchetypesContent ? [section("diff-archetypes", "semi-stable", diffArchetypesContent, { priority: 3 })] : []),
     // VOLATILE priority 0: Context Pack (blast-radius + DOM + contracts, pushed by orchestrator).
     // Placed FIRST in VOLATILE so the ground-truth is nearest the task and within the
     // compaction-preserved tail. The domSnapshot (failure-point capture) stays at priority 1

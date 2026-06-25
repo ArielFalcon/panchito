@@ -538,6 +538,10 @@ export interface OpencodeRunInput {
   // Static signal: deterministic pre-computed analysis rendered as a prompt section.
   // Empty string or absent = no section added. Signal-only, fail-open.
   staticSignal?: string;
+  // C1: diff archetypes computed by detectStructuralPatterns (deterministic, from the commit diff).
+  // Surfaces the structural shape of the change as a ONE-LINE hint to the generator so it can
+  // prioritise archetype-appropriate tests (e.g. "auth-flow, data-list"). Absent or empty = no hint.
+  diffArchetypes?: string[];
   // Seam b: deterministic list of existing spec file paths under e2eRelDir/**/*.spec.ts, enumerated
   // by the orchestrator from the filesystem before the session starts. When non-empty and mode is
   // diff or manual, rendered as an "existing-suite-manifest" semi-stable section so the generator

@@ -614,3 +614,71 @@ test("A3: selector-priority rule appears no more than twice across the prompt (i
     `selector-priority rule must appear at most twice across the prompt (stable + volatile); found ${matches}`,
   );
 });
+
+// ── C1: diff archetypes surfaced to the generator as a one-line hint ──────────
+
+// C1-1: when diffArchetypes are present in the input, the prompt must contain
+// the one-line "Change shape (deterministic):" hint.
+test("C1: diffArchetypes line appears in the prompt when archetypes are present", () => {
+  const text = buildPrompt(mkInput({ diffArchetypes: ["auth-flow", "data-list"] }));
+  assert.ok(
+    text.includes("Change shape (deterministic)"),
+    "prompt must contain the 'Change shape (deterministic):' hint when diffArchetypes are present",
+  );
+  assert.ok(
+    text.includes("auth-flow"),
+    "prompt must include the archetype kinds",
+  );
+  assert.ok(
+    text.includes("data-list"),
+    "prompt must include all archetype kinds",
+  );
+});
+
+// C1-2: when diffArchetypes are absent, NO empty header must appear.
+test("C1: no diffArchetypes line when archetypes are absent", () => {
+  const text = buildPrompt(mkInput());
+  assert.ok(
+    !text.includes("Change shape (deterministic)"),
+    "prompt must NOT contain the archetypes hint when diffArchetypes is absent",
+  );
+});
+
+// C1-3: when diffArchetypes is an empty array, NO empty header must appear.
+test("C1: no diffArchetypes line when archetypes array is empty", () => {
+  const text = buildPrompt(mkInput({ diffArchetypes: [] }));
+  assert.ok(
+    !text.includes("Change shape (deterministic)"),
+    "prompt must NOT contain the archetypes hint when diffArchetypes is an empty array",
+  );
+});
+
+// ── C2: static-signal rendered in CODE-MODE prompts ──────────────────────────
+
+// C2-1: a code-mode generation input WITH staticSignal renders the static-signal section.
+test("C2: code-mode with staticSignal renders the static-signal section", () => {
+  const text = buildPrompt(mkInput({ target: "code", staticSignal: "## Static signal\n\nsymbol: Foo.bar" }));
+  assert.ok(
+    text.includes("Static signal") && text.includes("Foo.bar"),
+    "code-mode prompt with staticSignal must include the static-signal section",
+  );
+});
+
+// C2-2: a code-mode generation input WITHOUT staticSignal must NOT add an empty section.
+test("C2: code-mode without staticSignal emits no static-signal section", () => {
+  const text = buildPrompt(mkInput({ target: "code" }));
+  assert.ok(
+    !text.includes("Static signal"),
+    "code-mode prompt without staticSignal must NOT include an empty static-signal section",
+  );
+});
+
+// C2-3 (regression): the e2e path must be byte-identical when nothing changes — staticSignal present
+// must still render in e2e mode (non-regression).
+test("C2 regression: e2e-mode with staticSignal still renders static-signal section", () => {
+  const text = buildPrompt(mkInput({ target: "e2e", staticSignal: "## Static signal\n\nsymbol: Foo.bar" }));
+  assert.ok(
+    text.includes("Static signal") && text.includes("Foo.bar"),
+    "e2e-mode prompt with staticSignal must include the static-signal section (regression guard)",
+  );
+});
