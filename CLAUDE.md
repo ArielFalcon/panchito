@@ -194,6 +194,18 @@ Codex consumes the **provider-neutral** mirror of these under `agent/` (`agent/r
 
 ## Invariants — do not break these
 
+- **Root-cause & project-agnostic — never tailor a fix to a configured test
+  app.** Every fix and feature targets the underlying cause and must hold for
+  ANY watched project. The apps in `config/apps/*` (`portfolio`, `petclinic`,
+  `jhipster-store`, `panchito`, …) are *interchangeable test targets, not design
+  inputs* — never shape a code path "so app X passes"; reproduce on one,
+  diagnose the root, generalize the solution. The ONLY legitimate
+  project-shaped constraint is **declared, deliberate scope** (e.g. the
+  static-signal toolchain covers Java + JavaScript/TypeScript by design *for
+  now*, widened later) — and even that lives in `config/` / the language
+  registry, never as an app-specific branch in `src/` (the next invariant). When
+  a detected "bug" might be a deliberate guard from a past fix, confirm your
+  change improves the root cause without regressing that guard before making it.
 - **Security boundary:** the LLM agent is **read-only** on watched repos. Only the
   deterministic orchestrator does git writes (push/PR). Never give the agent (or
   any future chat/operator layer) direct write to a watched repo.
@@ -259,9 +271,15 @@ new "quality" logic should lean on the coverage signal, not add another LLM prox
 
 ## Current state
 
-`main` runs end-to-end against `ArielFalcon/portfolio` (a public Astro static site
-on Vercel) in **shadow mode** with the deploy gate skipped (no `/version`). engram
-is enabled for persistent agent memory across runs.
+Several apps are wired in `config/apps/` across the current **Java +
+JavaScript/TypeScript** scope — all interchangeable test targets, never design
+inputs (see Invariants): `jhipster-store` (Angular 21 gateway + Spring
+microservices, monorepo), `petclinic` (Spring, monorepo) and `portfolio`
+(static Astro) run in **e2e** mode against live DEV in **shadow mode**;
+`panchito` runs in **code** mode (the engine tests its own source, `code:
+true`). The deploy gate is skipped wherever no `versionUrl` is configured
+(already-deployed/static targets). engram is enabled for persistent agent
+memory across runs.
 
 The agent runtime is **provider-agnostic** (`src/agent-runtime/`): OpenCode and Codex,
 in `single` or `dual` mode, behind one facade (the `agents` container's supervisor
