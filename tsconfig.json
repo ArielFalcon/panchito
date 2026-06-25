@@ -11,7 +11,13 @@
     "forceConsistentCasingInFileNames": true,
     "noUncheckedIndexedAccess": true,
     "noEmit": true,
-    "types": ["node"]
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@kernel/*": ["qa-engine/src/shared-kernel/*"],
+      "@contexts/*": ["qa-engine/src/contexts/*"],
+      "@interface/*": ["qa-engine/src/interface/*"]
+    }
   },
   "include": ["src"],
   "references": [{ "path": "./qa-engine" }]
