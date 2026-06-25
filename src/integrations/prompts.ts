@@ -577,9 +577,12 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
     : "";
 
   // SEMI-STABLE: exploration brief (set by the pre-write explorer pass; stable for this turn).
+  // D3 fix: when a Context Pack is also present, the pack already carries FE↔BE links; pass
+  // suppressFeBe:true so the brief's FE↔BE section is omitted and the deduplication budget is
+  // freed for other signal. When only the brief is present, feBe renders normally.
   const contextBriefContent = input.contextBrief
     ? [
-        renderExplorationBrief(input.contextBrief),
+        renderExplorationBrief(input.contextBrief, { suppressFeBe: !!input.contextPack }),
         `(The brief above distilled the blast radius — do NOT re-read that code. Verify selectors against the live DOM.)`,
         ``,
       ].join("\n")

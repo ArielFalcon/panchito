@@ -188,7 +188,11 @@ export function coerceExplorationBrief(raw: unknown): ExplorationBrief | null {
 // is agent-produced from attacker-influenceable repo content — prompt-injection / secret-exfil
 // defense) and is BOUNDED so a huge brief cannot blow the token budget, exactly like
 // renderArchitectureContext. Leads with the selector-fidelity guard (decision D).
-export function renderExplorationBrief(brief: ExplorationBrief): string {
+//
+// D3 fix: when `suppressFeBe` is true the FE↔BE links section is omitted because a Context Pack
+// is already present in the prompt — the pack already carries FE↔BE, so rendering it a second time
+// from the brief wastes budget and forces earlier shedding of other signal.
+export function renderExplorationBrief(brief: ExplorationBrief, opts: { suppressFeBe?: boolean } = {}): string {
   const s = (x: unknown): string => sanitizeText(String(x ?? "")).text;
   const MAX_ITEMS = 200;
   const MAX_LEN = 20_000;
@@ -212,7 +216,7 @@ export function renderExplorationBrief(brief: ExplorationBrief): string {
   }
   lines.push("");
 
-  if (brief.feBe?.length) {
+  if (brief.feBe?.length && !opts.suppressFeBe) {
     lines.push(`### FE↔BE links (${brief.feBe.length})`);
     for (const l of brief.feBe.slice(0, MAX_ITEMS)) {
       lines.push(`- Route \`${s(l.route)}\` → \`${s(l.operationId)}\`${l.via ? ` (via ${s(l.via)})` : ""}`);

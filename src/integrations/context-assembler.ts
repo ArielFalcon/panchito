@@ -217,6 +217,12 @@ export function assemble(sections: Section[], opts: AssembleOpts = {}): Assemble
   // the lowest-priority sections (by descending priority number within each role
   // band, so the highest numeric priority = lowest value = first to go) until the
   // total fits. Shedding follows each section's overflow policy.
+  //
+  // D1+D2: track section ids dropped by the budget pass. After assembly, if any were dropped,
+  // a small always-surviving notice is appended to the output naming them. This tells the agent
+  // exactly which context sections it did NOT receive so it can explore them directly rather
+  // than assuming their content is absent.
+  const droppedIds: string[] = [];
   const budgetBytes = opts.budgetBytes ?? 0;
   if (budgetBytes > 0) {
     // Compute total bytes of the assembled prompt (surviving sections joined by "\n").
@@ -280,6 +286,8 @@ export function assemble(sections: Section[], opts: AssembleOpts = {}): Assemble
           candidate.dropped = true;
           // Clear content so totalBytes() recalculation reflects the shed.
           candidate.content = "";
+          // D1+D2: record this drop so the shed-notice can name the missing section.
+          droppedIds.push(candidate.section.id);
         } else {
           // "summarize" degrades to truncation: truncate to fill the remaining budget.
           // FIX 8d / production note: there is NO real summarizer in this phase, and every prompt
@@ -300,6 +308,8 @@ export function assemble(sections: Section[], opts: AssembleOpts = {}): Assemble
             );
             candidate.dropped = true;
             candidate.content = "";
+            // D1+D2: record this drop so the shed-notice can name the missing section.
+            droppedIds.push(candidate.section.id);
           } else {
             // capToBytes appends a marker of the form `\n…(section '{id}' capped at {N} bytes)`.
             // Estimate the marker byte overhead conservatively (64 bytes covers any realistic id).
@@ -353,6 +363,18 @@ export function assemble(sections: Section[], opts: AssembleOpts = {}): Assemble
     // Record the byte size of the (possibly capped) content.
     sectionSizes[r.section.id] = Buffer.byteLength(r.content, "utf8");
     parts.push(r.content);
+  }
+
+  // D1+D2: if any sections were dropped by the global budget pass, append a small always-surviving
+  // notice naming the omitted ids. The notice is appended AFTER the budget check (it is NOT added
+  // to `resolved` so it cannot itself be shed). It is intentionally tiny so it never meaningfully
+  // impacts the budget. The agent learns which context sections it did NOT receive and can explore
+  // them directly — do not assume they are absent just because they were not in the prompt.
+  if (droppedIds.length > 0) {
+    const notice =
+      `⚠ Budget: these context sections were omitted and are NOT below: ${droppedIds.join(", ")}. ` +
+      `If a flow needs DOM/structure/contracts you did not receive, explore it directly — do not assume it is absent.`;
+    parts.push(notice);
   }
 
   return {

@@ -17,5 +17,19 @@ export function renderStaticSignal(sig: StaticSignal): string {
   if (sig.complexity.length) { lines.push(`### Complexity hotspots (higher ccn = more paths → more cases needed)`); for (const c of sig.complexity.slice(0, MAX_ITEMS)) lines.push(`- ${s(c.function)} (${s(c.file)}:${c.line}) — ccn ${c.ccn}, ${c.nloc} loc`); lines.push(""); }
   if (sig.patterns.length) { lines.push(`### Change patterns`); for (const p of sig.patterns.slice(0, MAX_ITEMS)) lines.push(`- ${s(p.pattern)} (${s(p.file)})`); lines.push(""); }
   const out = lines.join("\n");
-  return out.length > MAX_LEN ? out.slice(0, MAX_LEN) + "\n…(static signal truncated)" : out;
+  // D4: truncate on a byte budget (not char offset) and cut at the last newline boundary so the
+  // section never ends in a dangling half-line. The assembler budgets in bytes, so a char-based
+  // slice can emit more bytes than the limit and can also bisect a multi-byte sequence or a
+  // mid-line entry (e.g. mid-`###` heading). Cutting at the preceding `\n` avoids both problems.
+  const marker = "\n…(static signal truncated)";
+  const markerBytes = Buffer.byteLength(marker, "utf8");
+  const buf = Buffer.from(out, "utf8");
+  if (buf.length <= MAX_LEN) return out;
+  // Walk back from (MAX_LEN - markerBytes) to find the last newline whose position, combined with
+  // the marker, stays within MAX_LEN total bytes.
+  let cut = MAX_LEN - markerBytes;
+  while (cut > 0 && buf[cut] !== 0x0a /* '\n' */) cut--;
+  // Include the newline itself in the surviving body so body ends with '\n'.
+  const body = buf.subarray(0, cut + 1).toString("utf8");
+  return body + marker;
 }

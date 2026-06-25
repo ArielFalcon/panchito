@@ -400,6 +400,61 @@ test("seam-c: full FE↔BE rendered when contextPack is absent (non-regression)"
   );
 });
 
+// ── D3: suppress FE↔BE from exploration brief when contextPack is present ─────
+
+// D3-1: when BOTH contextBrief (with feBe) AND contextPack are present, "FE↔BE links"
+// must appear at most ONCE in the assembled prompt (from the pack, not the brief).
+test("D3: FE↔BE links appear only once when both contextBrief (with feBe) and contextPack are present", () => {
+  const contextBrief = {
+    builtForSha: "abc1234",
+    objective: "test the checkout flow",
+    blastRadius: [{ symbol: "CheckoutService.pay", file: "src/checkout.ts", role: "applies discount" }],
+    feBe: [{ route: "/checkout", operationId: "createOrder", via: "OrderClient.create" }],
+    routes: [{ path: "/checkout", verified: false as const }],
+  };
+  const contextPack = "### FE↔BE links (1 of 1 total)\n- Route `/checkout` → `createOrder`";
+  const text = buildPrompt(mkInput({ contextBrief, contextPack }));
+  const count = (text.match(/FE↔BE links/g) ?? []).length;
+  assert.equal(
+    count,
+    1,
+    `"FE↔BE links" must appear exactly once when contextPack is present (only from the pack, not the brief); found ${count} occurrences`,
+  );
+});
+
+// D3-2 (non-regression): when only contextBrief is present (no contextPack), the brief's
+// FE↔BE section must still render normally — suppression must NOT apply.
+test("D3: FE↔BE links in contextBrief render normally when contextPack is absent", () => {
+  const contextBrief = {
+    builtForSha: "abc1234",
+    objective: "test the checkout flow",
+    blastRadius: [{ symbol: "CheckoutService.pay", file: "src/checkout.ts", role: "applies discount" }],
+    feBe: [{ route: "/checkout", operationId: "createOrder", via: "OrderClient.create" }],
+    routes: [{ path: "/checkout", verified: false as const }],
+  };
+  const text = buildPrompt(mkInput({ contextBrief }));
+  assert.ok(
+    text.includes("FE↔BE links"),
+    "FE↔BE links section in the brief must render when contextPack is absent",
+  );
+});
+
+// D3-3: when contextBrief has NO feBe (absent or empty), behavior is unchanged regardless of contextPack.
+test("D3: no FE↔BE section in brief when brief.feBe is absent — no change with or without contextPack", () => {
+  const contextBrief = {
+    builtForSha: "abc1234",
+    objective: "test the checkout flow",
+    blastRadius: [{ symbol: "CheckoutService.pay", file: "src/checkout.ts", role: "applies discount" }],
+    // No feBe property
+    routes: [{ path: "/checkout", verified: false as const }],
+  };
+  const contextPack = "### FE↔BE links (1 of 1 total)\n- Route `/checkout` → `createOrder`";
+  const text = buildPrompt(mkInput({ contextBrief, contextPack }));
+  // Only the pack's FE↔BE appears (brief has no feBe to suppress)
+  const count = (text.match(/FE↔BE links/g) ?? []).length;
+  assert.equal(count, 1, "when brief has no feBe, only the pack's FE↔BE link must appear");
+});
+
 // ── Seam d — learned-rules shed priority ──────────────────────────────────────
 
 // [seam d] 1.9: learned-rules sheds AFTER reviewer-corrections and coverage-gap.
