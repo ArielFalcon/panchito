@@ -27,6 +27,7 @@ You must evaluate each spec from TWO independent perspectives:
 - Does the test clean up what it creates?
 - Would this test fail for the RIGHT reason (a real bug) vs wrong reason
   (selector ambiguity, timing, data collision)?
+- DOM-assertion check (deterministic, evidence-only): IF an injected DOM snapshot for the route is present in your context, flag any assertion referencing an attribute name, role name, or text value that does NOT appear in it as `[fragile-selector]` advisory. If NO snapshot is present in your context, SKIP this check entirely — never flag on absence of evidence. This uses only data you already hold; do NOT invoke any tool, sub-agent, or browser call.
 
 ## Anti-pattern catalog (reject on sight)
 
@@ -34,7 +35,7 @@ You must evaluate each spec from TWO independent perspectives:
 |---|---|---|
 | Trivial assert | `expect(true).toBe(true)` | Proves nothing |
 | Missing assert | Only clicks, no verification | Would accept broken page |
-| Fragile selector | `page.locator(".btn-primary")` | Breaks on CSS change |
+| CSS/XPath locator | `page.locator(".btn-primary")`, `page.locator("xpath=//div")` | Breaks on CSS/DOM refactor; BLOCKING unless no role/testid/label/text alternative exists (see escape hatch below) |
 | Unscoped text | `page.getByText("Save")` without section | Matches wrong element |
 | Ambiguous regex | `getByText(/save/i)` matches "Saved items" | Strict mode violation |
 | No cleanup | Creates data without `cleanup()` | Pollutes DEV |
@@ -77,15 +78,19 @@ Each correction MUST be a structured object with two fields:
 - A Value Judge finding (the test would NOT catch a real regression) → ALWAYS `blocking`.
 - An unconfirmable UI fact (selector/label not confirmed by the Live DEV DOM or the spec itself)
   → ALWAYS `advisory` (re-verify), NEVER `blocking`.
+- A CSS-class or XPath locator (`page.locator(".class")`, `page.locator("xpath=…")`) → `blocking`
+  UNLESS no `getByRole`, `getByTestId`, `getByLabel`, or `getByText` alternative exists (e.g. an
+  unlabeled third-party widget with no accessible name and no test-id attribute). When the escape
+  hatch applies, flag it `[fragile-selector]` advisory instead and explain why no alternative exists.
 - A `[no-cleanup]` finding is `blocking` ONLY when the app HAS a delete affordance the test ignored.
   If the app exposes NO delete affordance, namespaced data left behind is acceptable (each run is
   isolated by its `namespace`) → `advisory` at most, NEVER `blocking` — do not demand cleanup that
   cannot exist. Conversely, a test that fabricates a direct API/HTTP/curl DELETE to "clean up" IS a
   defect: flag it `[other]` blocking (it breaks the UI-only contract and invents an endpoint that may
   not exist) and tell it to rely on namespaced-and-left instead.
-- A Robustness Judge nit (fragile selector, timing, cleanup gap) on an otherwise-correct test
-  → use judgment: if the fragility makes the test unreliable enough to be misleading, `blocking`;
-  if it is a style improvement with no real false-negative risk, `advisory`.
+- A Robustness Judge nit (timing, cleanup gap) on an otherwise-correct test → use judgment: if the
+  fragility makes the test unreliable enough to be misleading, `blocking`; if it is a style
+  improvement with no real false-negative risk, `advisory`.
 
 **Convergence rule (when "Prior-round corrections" are provided):**
 - APPROVE if the previously-raised BLOCKING issues are now resolved — do NOT re-raise them.

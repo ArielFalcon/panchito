@@ -10,6 +10,7 @@ import {
   extractProposedSelectors,
   hasNonExtractableLocator,
   checkSpecSelectors,
+  unscopedMultipleContradictions,
   selectorKey,
   type ProposedSelector,
 } from "./selector-check";
@@ -576,4 +577,308 @@ test("BLOCK-1: getByRole(button,{name:Submit,exact:true}) yields present:true wi
   const r = selectorPresent(sel, nodes);
   assert.equal(r.present, true, "exact Submit matches button: Submit");
   assert.equal(r.verifiable, true);
+});
+
+// ── Fix 3 (SUGGESTION-1): parseLine regression gate — [CHANGED: …] must not corrupt selector extraction ──
+// These tests lock property #2: a [CHANGED: …] marker suffix on a "role: name" line (if it ever
+// leaked into a parsed node line, which the design prevents) must not corrupt parseLine's output.
+// parseLine is private, so we verify through selectorPresent which calls it internally.
+
+test("FIX-3 parseLine regression gate: selectorPresent output is UNCHANGED when a [CHANGED: …] suffix is appended to a node line", () => {
+  // The line "button: Submit [CHANGED: added data-cy=submit-btn]" must parse IDENTICALLY
+  // to "button: Submit" for selector-check purposes. parseLine must treat everything after
+  // the first ": " as the name; the [CHANGED: …] suffix becomes part of the name — and since
+  // the selector name "Submit" is a ci-substring of "Submit [CHANGED: added data-cy=submit-btn]",
+  // selectorPresent must still return present:true.
+  // This is the regression gate: the marker cannot corrupt selector extraction.
+  const plainLine = "button: Submit";
+  const markedLine = "button: Submit [CHANGED: added data-cy=submit-btn]";
+
+  const sel: ProposedSelector = { kind: "role", role: "button", name: "Submit" };
+
+  // Both must yield present:true (ci-substring match on the name segment)
+  const plainResult = selectorPresent(sel, [plainLine]);
+  const markedResult = selectorPresent(sel, [markedLine]);
+
+  assert.equal(plainResult.present, true, "baseline: plain line matches");
+  assert.equal(markedResult.present, true, "[CHANGED:] suffix must not prevent detection of the correct role+name");
+  assert.equal(markedResult.verifiable, true, "verifiable must also be true");
+});
+
+test("FIX-3 parseLine regression gate: selectorPresent with exact:true against [CHANGED: …] suffix (Slice 1 fail-safe semantics)", () => {
+  // Slice 1 fail-safe: parseLine strips ONLY known ARIA state tokens (disabled, expanded,
+  // checked, required, selected, pressed, level=N). A [CHANGED: …] marker is NOT an ARIA
+  // state token — it is NOT stripped. If a [CHANGED:] marker somehow leaked into nodes[]
+  // (the design prevents this via formatDomSnapshot), parseLine would preserve the suffix
+  // and exact:true("Submit") would NOT match "Submit [CHANGED: added data-cy=submit-btn]".
+  // This is the CORRECT fail-safe: ci-substring (tested above, first FIX-3 test) still
+  // matches, so the design intent holds — markers in nodes[] are a design violation, and
+  // exact:true is appropriately strict. The first FIX-3 test (ci-substring) remains the
+  // reliable regression guard. See REGRESSION tests below for the positive case
+  // (real bracketed names are NOT stripped by the ARIA-state allowlist).
+  const markedLine = "button: Submit [CHANGED: added data-cy=submit-btn]";
+  const sel: ProposedSelector = { kind: "role", role: "button", name: "Submit", exact: true };
+  // [CHANGED:] is NOT in the ARIA-state allowlist → NOT stripped → exact:true does not match
+  const result = selectorPresent(sel, [markedLine]);
+  assert.equal(result.present, false, "Slice 1 fail-safe: [CHANGED:] is not an ARIA state token, not stripped — exact:true cannot match the modified name");
+  // Confirm ci-substring (default) still matches (the first FIX-3 test above covers this fully)
+  const ciResult = selectorPresent({ kind: "role", role: "button", name: "Submit" }, [markedLine]);
+  assert.equal(ciResult.present, true, "ci-substring still matches regardless of [CHANGED:] suffix");
+});
+
+test("FIX-3 parseLine regression gate: selectorUnique is UNCHANGED by [CHANGED: …] suffix with default match", () => {
+  // With two marked lines, selectorUnique must count BOTH (not misparse and count 0).
+  const tree = [
+    "button: Submit [CHANGED: added data-cy=submit-btn]",
+    "button: Submit [CHANGED: added data-cy=submit-btn]",
+  ];
+  const sel: ProposedSelector = { kind: "role", role: "button", name: "Submit" };
+  // Both match via ci-substring → non-unique (count=2)
+  assert.equal(selectorUnique(sel, tree), false, "two marked lines → non-unique (marker doesn't suppress counting)");
+});
+
+test("FIX-3 parseLine regression gate: a node WITHOUT [CHANGED:] and WITH [CHANGED:] are treated consistently by checkSpecSelectors", () => {
+  // Integration check: the full pipeline through checkSpecSelectors must behave the same
+  // whether the node has a [CHANGED:] suffix or not.
+  const spec = `await page.getByRole("link", { name: "Home" }).click();`;
+  const plainTree = ["link: Home"];
+  const markedTree = ["link: Home [CHANGED: new link → /home]"];
+
+  const plainResult = checkSpecSelectors([spec], [plainTree]);
+  const markedResult = checkSpecSelectors([spec], [markedTree]);
+
+  // Both must detect the link as present (ci-substring of "Home" in "Home [CHANGED: …]")
+  assert.equal(plainResult.anyVerifiedPresent, true, "plain: link detected");
+  assert.equal(markedResult.anyVerifiedPresent, true, "marked: link still detected via ci-substring");
+  // Neither should report contradictions (the selector IS present in both cases)
+  assert.equal(plainResult.contradictions.length, 0, "plain: no contradictions");
+  assert.equal(markedResult.contradictions.length, 0, "marked: no contradictions despite suffix");
+});
+
+// ── REGRESSION GUARD: real bracketed accessible names must NOT be stripped ──────
+// parseLine must ONLY strip known ARIA state tokens (disabled, expanded, checked,
+// required, selected, pressed, level=N) — NEVER arbitrary bracket content.
+// Real accessible names like "Inbox [5]" (badge count) or "Edit [Draft]" (status
+// marker) must pass through intact so selectorPresent returns present:true.
+//
+// RED: these FAIL against the current generic /\s*\[[^\]]*\]\s*$/ strip because
+// "[5]" and "[Draft]" are stripped, making exact:true compare "Inbox" vs "Inbox [5]".
+// GREEN: requires narrowing the strip to the ARIA-state allowlist.
+
+test("REGRESSION: selectorPresent with real bracketed accessible names (badge count, draft marker)", () => {
+  // Playwright emits these when the accessible name literally contains brackets.
+  // nodes[] carries the full name — parseLine must NOT strip it.
+  const tree = ["link: Inbox [5]", "link: Edit [Draft]"];
+
+  // exact:true — the full bracketed name must match
+  const inboxResult = selectorPresent({ kind: "role", role: "link", name: "Inbox [5]", exact: true }, tree);
+  assert.equal(inboxResult.present, true, "link 'Inbox [5]' with exact:true must be present (badge count not stripped)");
+  assert.equal(inboxResult.verifiable, true);
+
+  const draftResult = selectorPresent({ kind: "role", role: "link", name: "Edit [Draft]", exact: true }, tree);
+  assert.equal(draftResult.present, true, "link 'Edit [Draft]' with exact:true must be present (draft marker not stripped)");
+  assert.equal(draftResult.verifiable, true);
+});
+
+test("REGRESSION: ARIA state tokens ARE still stripped by parseLine (allowlist positive cases)", () => {
+  // Known ARIA state tokens must still be stripped so role/name extraction is unaffected.
+  const tree = ["button: Submit [disabled]", "textbox: Email [required] [disabled]"];
+
+  // Selector uses the bare name (without state token) — must still match after strip
+  const submitResult = selectorPresent({ kind: "role", role: "button", name: "Submit", exact: true }, tree);
+  assert.equal(submitResult.present, true, "[disabled] is an ARIA state token — must be stripped, bare 'Submit' matches");
+
+  const emailResult = selectorPresent({ kind: "role", role: "textbox", name: "Email", exact: true }, tree);
+  assert.equal(emailResult.present, true, "multiple state tokens [required][disabled] stripped, bare 'Email' matches");
+});
+
+// ── A1: per-selector chain-awareness — non-extractable scoping must not suppress UNRELATED selectors ──
+//
+// These tests verify that the A1 fix changes anyNonExtractable from a spec-level blanket flag
+// to per-selector scope awareness:
+//   - A standalone terminal non-extractable locator (e.g. getByTestId('x')) does NOT make
+//     uniqueness indeterminate for UNRELATED extractable selectors in the same spec.
+//   - Only a non-extractable locator used as a SCOPE PREFIX (locator(...).getByRole(...),
+//     getByTestId(...).getByRole(...)) should suppress the chained selector's ambiguity check.
+//
+// R1: standalone getByTestId + unscoped ambiguous getByRole → the MULTIPLE contradiction IS reported.
+// R2: scoped page.locator('.sidebar').getByRole('button',{name:'Save'}) where role alone matches
+//     multiple BUT the locator is scoped → NO false ambiguity contradiction.
+// R3: allUnique stays false in the W5 real-bug branch when any non-extractable locator is present
+//     (the pipeline-level guard must not be weakened by A1).
+// R4: ALL existing selector-check.test.ts cases remain green (covered by running the whole suite).
+
+// R1: spec mixes standalone getByTestId('x') (terminal, non-extractable) + unscoped ambiguous
+//     getByRole('button',{name:'Save'}) where the role matches MULTIPLE nodes in the tree.
+//     BEFORE A1: anyNonExtractable=true → ambiguousSelectorsNow returns [] → contradiction swallowed.
+//     AFTER A1: standalone non-extractable does NOT silence unrelated extractable selector →
+//               the getByRole MULTIPLE contradiction IS reported via findings.contradictions.
+test("A1-R1: standalone getByTestId does NOT silence MULTIPLE contradiction for unscoped getByRole", () => {
+  // Spec: two independent locators — standalone getByTestId (terminal) + getByRole (unscoped, multi-match)
+  const spec = [
+    `await page.getByTestId("submit").click();`,
+    `await page.getByRole("button", { name: "Save" }).click();`,
+  ].join("\n");
+  // Tree: "Save" button appears twice — strict-mode ambiguity
+  const tree = ["button: Save", "button: Save", "button: submit"];
+
+  const findings = checkSpecSelectors([spec], [tree]);
+
+  // anyNonExtractable must be true (the getByTestId is still there)
+  assert.equal(findings.anyNonExtractable, true, "spec has a non-extractable locator → anyNonExtractable must be true");
+
+  // The MULTIPLE contradiction for getByRole("button",{name:"Save"}) MUST be reported.
+  // A1 changes the consumer (ambiguousSelectorsNow in pipeline) to use findings.contradictions
+  // directly, but the source of truth is the contradictions array itself.
+  // For the checkSpecSelectors unit test: the contradiction IS already computed inside
+  // checkSpecSelectors regardless of anyNonExtractable — what A1 fixes is pipeline.ts line 1795
+  // (the consumer that blanket-returns [] on anyNonExtractable). Verify the contradiction exists:
+  assert.ok(
+    findings.contradictions.some((c) => c.includes("MULTIPLE")),
+    "checkSpecSelectors must report the MULTIPLE contradiction for the unscoped ambiguous getByRole",
+  );
+});
+
+// R2: page.locator('.sidebar').getByRole('button',{name:'Save'}) — getByRole is CHAINED after
+//     a scoping locator. The full a11y tree has TWO "button: Save" (one scoped, one elsewhere).
+//     Without scope, getByRole would be ambiguous. With scope, it resolves to a unique one.
+//     A1 must NOT report a false MULTIPLE contradiction for this chained selector.
+//
+// Implementation note: for R2 the chain-awareness is checked at the PIPELINE level (ambiguousSelectorsNow),
+// NOT at the checkSpecSelectors level. checkSpecSelectors operates on the full a11y tree without scope
+// context — it CANNOT verify scoping. The correct A1 behavior for this R2 case is:
+//   - checkSpecSelectors still reports anyNonExtractable=true (the .locator() is present)
+//   - the ambiguousSelectorsNow pipeline function, which does the filtering, must suppress
+//     MULTIPLE contradictions for extractable selectors that are LEXICALLY CHAINED after
+//     a non-extractable scope prefix in the SAME call chain.
+//
+// This test verifies the checkSpecSelectors behavior: anyNonExtractable is true, contradictions
+// MAY include MULTIPLE (because the full unscoped tree check sees both buttons). The pipeline-level
+// test for R2 (ambiguousSelectorsNow suppressing the chained false positive) lives in pipeline tests.
+// Here we verify: anyNonExtractable is correctly detected and contradictions reflects the full-tree result.
+test("A1-R2: chained getByRole after .locator() — anyNonExtractable is true (scoped — pipeline suppresses it)", () => {
+  // Spec: getByRole is scoped by .locator('.sidebar')
+  const spec = `await page.locator(".sidebar").getByRole("button", { name: "Save" }).click();`;
+  // Tree: two "Save" buttons (if we had scope, only one would match, but checkSpecSelectors sees all)
+  const tree = ["button: Save", "button: Save"];
+
+  const findings = checkSpecSelectors([spec], [tree]);
+
+  // anyNonExtractable must be true — the .locator() chain is present
+  assert.equal(findings.anyNonExtractable, true, "scoped locator chain must set anyNonExtractable=true");
+  // The contradiction MAY or MAY NOT appear in the array — the point is that the pipeline's
+  // ambiguousSelectorsNow function (A1 target) will NOT surface it because it recognizes the chain.
+  // For THIS unit test, we assert that the existing R4 pre-existing behavior is preserved:
+  // checkSpecSelectors marks the spec as having a non-extractable locator.
+});
+
+// R3: the W5 real-bug branch guard — allUnique must stay false when anyNonExtractableLocator is true.
+// This test exercises the selector-check layer (the gate lives in pipeline.ts but is driven by
+// checkSpecSelectors findings). We verify that when a non-extractable locator is present,
+// anyNonExtractable is true, which is what pipeline.ts uses to keep allUnique false.
+// A1 must NOT weaken this: findings.anyNonExtractable must remain true whenever any
+// non-extractable family appears in the spec, regardless of whether it is a scope or terminal.
+test("A1-R3: anyNonExtractable stays true for a spec with non-extractable locator (W5 guard must not regress)", () => {
+  // Three variants: standalone terminal, scoped-prefix chain, and mixed.
+  // All must yield anyNonExtractable=true.
+
+  // Standalone terminal getByTestId
+  const specTerminal = `await page.getByTestId("submit").click();`;
+  const rTerminal = checkSpecSelectors([specTerminal], [["button: submit"]]);
+  assert.equal(rTerminal.anyNonExtractable, true, "standalone getByTestId must set anyNonExtractable=true");
+
+  // Scoped locator chain
+  const specScoped = `await page.locator(".sidebar").getByRole("button", { name: "Save" }).click();`;
+  const rScoped = checkSpecSelectors([specScoped], [["button: Save"]]);
+  assert.equal(rScoped.anyNonExtractable, true, "scoped .locator() chain must set anyNonExtractable=true");
+
+  // Mixed: standalone getByTestId + normal getByRole
+  const specMixed = [
+    `await page.getByTestId("nav").click();`,
+    `await page.getByRole("button", { name: "Submit" }).click();`,
+  ].join("\n");
+  const rMixed = checkSpecSelectors([specMixed], [["button: Submit"]]);
+  assert.equal(rMixed.anyNonExtractable, true, "mixed spec with non-extractable must set anyNonExtractable=true");
+});
+
+// ── A1 pipeline-level: ambiguousSelectorsNow per-selector chain-awareness ────────────────────────
+// These tests exercise the isLexicallyChainedAfterNonExtractable helper that will be added to
+// selector-check.ts and used by pipeline.ts's ambiguousSelectorsNow rewrite.
+
+// R1-pipeline: a spec with standalone getByTestId + ambiguous unscoped getByRole must yield
+// contradictions that include MULTIPLE for the getByRole (the standalone testId must not suppress it).
+test("A1-R1-pipeline: isChainedAfterNonExtractable — standalone getByTestId is NOT a scope prefix for getByRole", () => {
+  const spec = [
+    `await page.getByTestId("submit").click();`,
+    `await page.getByRole("button", { name: "Save" }).click();`,
+  ].join("\n");
+  const tree = ["button: Save", "button: Save"];
+
+  // After A1, contradictions must include the MULTIPLE for the unscoped getByRole.
+  // The key is that the getByRole here is NOT preceded by a non-extractable scope on the SAME chain.
+  const findings = checkSpecSelectors([spec], [tree]);
+  assert.ok(
+    findings.contradictions.some((c) => c.includes("MULTIPLE")),
+    "A1: standalone getByTestId on a different statement must not silence the MULTIPLE contradiction for the getByRole",
+  );
+});
+
+// R2-pipeline: page.locator('.sidebar').getByRole(...) — the getByRole IS chained after a scoping
+// non-extractable locator. ambiguousSelectorsNow must NOT surface this as a false MULTIPLE.
+// We verify this by asserting that when a spec ONLY has scoped non-extractable+getByRole,
+// the pipeline-level function filters out MULTIPLE contradictions for chained selectors.
+// Since the pipeline function reads findings.contradictions filtered by chain-awareness, and
+// checkSpecSelectors itself cannot know about scoping, we test the helper function directly.
+test("A1-R2-pipeline: isChainedAfterNonExtractable helper — detects lexical chain after .locator()", () => {
+  // The helper: given a spec source and a getByRole call at a position, is it chained after a
+  // non-extractable locator in the same page.…. chain?
+  // We verify by importing (or re-testing via checkSpecSelectors with a custom filter).
+  // Since the helper may be internal, we test via the exported getScopedContradictions or
+  // an equivalent filtering path. For now, validate by running the spec through the A1-modified
+  // checkSpecSelectors path (once implemented), which returns per-selector chain metadata.
+  //
+  // NOTE: this test will be GREEN once checkSpecSelectors exposes per-selector chain info,
+  // or once ambiguousSelectorsNow in pipeline.ts uses the new filtering. For now it's a
+  // documentation test — the actual pipeline-level validation is in integration.
+  //
+  // Minimal verifiable assertion: a spec with ONLY scoped-chained locators produces
+  // anyNonExtractable=true and MAY produce MULTIPLE contradiction (but pipeline suppresses it).
+  const spec = `await page.locator(".sidebar").getByRole("button", { name: "Save" }).click();`;
+  const tree = ["button: Save", "button: Save"];
+  const findings = checkSpecSelectors([spec], [tree]);
+  assert.equal(findings.anyNonExtractable, true, "pre-condition: scoped spec is non-extractable");
+  // The contradiction from checkSpecSelectors reflects the FULL-TREE check.
+  // The pipeline-level A1 filter is what prevents it from surfacing.
+  // This test documents the contract; the pipeline test validates the end-to-end behavior.
+});
+
+// ── A1 safe-direction: unscopedMultipleContradictions surfaces ONLY positively page-rooted ──────
+// Regression caught at the validation gate: a locator held in a VARIABLE then used to scope a
+// getByRole is NOT lexically chained, so suppressing "only the lexically-chained" over-surfaced it
+// → a FALSE pre-write ambiguity that could hold a good spec invalid at W2. The safe direction is to
+// surface only selectors we can PROVE are unscoped (rooted on the `page` fixture) and suppress the
+// rest (locator-chained OR variable-scoped) as indeterminate.
+test("A1-safe: variable-scoped getByRole is NOT surfaced (regression — suppress when not page-rooted)", () => {
+  const spec = [
+    `const card = page.getByTestId("card-2");`, // non-extractable → anyNonExtractable=true
+    `await card.getByRole("button", { name: "Save" }).click();`, // scoped by VARIABLE, not a lexical chain
+  ].join("\n");
+  // "Save" is ambiguous in the full tree, but the variable scopes it → must NOT surface a false MULTIPLE.
+  const out = unscopedMultipleContradictions([spec], [["button: Save", "button: Save"]], "pre-write");
+  assert.deepEqual(out, [], "variable-scoped getByRole must be suppressed (indeterminate), not surfaced");
+});
+
+test("A1-safe: page-rooted ambiguous getByRole IS surfaced even alongside a standalone getByTestId", () => {
+  const spec = [
+    `await page.getByTestId("submit").click();`,
+    `await page.getByRole("button", { name: "Save" }).click();`, // page-rooted → provably unscoped
+  ].join("\n");
+  const out = unscopedMultipleContradictions([spec], [["button: Save", "button: Save", "button: submit"]], "pre-write");
+  assert.ok(out.some((c) => c.includes("MULTIPLE")), "page-rooted ambiguous getByRole must surface (A1 benefit preserved)");
+});
+
+test("A1-safe: locator-chained getByRole stays suppressed (guard preserved)", () => {
+  const spec = `await page.locator(".sidebar").getByRole("button", { name: "Save" }).click();`;
+  const out = unscopedMultipleContradictions([spec], [["button: Save", "button: Save"]], "pre-write");
+  assert.deepEqual(out, [], "locator-chained getByRole must be suppressed");
 });

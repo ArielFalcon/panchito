@@ -72,7 +72,8 @@ import { renderExecutionResult } from "./integrations/opencode-client";
 import type { AgentRuntimeConfig } from "./agent-runtime/types";
 import { decideProgress, bestRound, classifyFailure, type RoundResult } from "./qa/progress-gate";
 import { adjudicate, ADJ_CLASS, type AdjudicatorEvidence, type AdjudicatorVerdict } from "./qa/failure-adjudicator";
-import { checkSpecSelectors } from "./qa/selector-check";
+import { checkSpecSelectors, unscopedMultipleContradictions } from "./qa/selector-check";
+import { extractChangedElements, changedElementsFromGuidance, type ChangedElement } from "./qa/changed-elements";
 
 // Tests live in this folder inside the repo (git is the source of truth).
 const E2E_DIR = "e2e";
@@ -111,11 +112,21 @@ export interface GenerateInput {
   // Static signal: deterministic pre-computed analysis (symbols, relations, complexity, patterns)
   // rendered as a prompt section by renderStaticSignal. Empty string or absent = no section added.
   staticSignal?: string;
+  // Seam b: deterministic list of existing spec file paths under e2eRelDir/**/*.spec.ts, enumerated
+  // from the filesystem before the session starts. When non-empty and mode is diff or manual,
+  // rendered as an "existing-suite-manifest" semi-stable section. Absent or empty = no section.
+  existingSpecFiles?: string[];
   // Slice H: the ExplorationBrief produced by the orchestrator-level explorer pass, carried into
   // defaultPipelineDeps.generate so it can be forwarded as contextBrief to runOpencode WITHOUT
   // triggering a second maybeExplore call (explorer flag cleared when this is set). The brief also
   // fed buildContextPack before this GenerateInput is created — same brief, one pass, no double-run.
   explorerBrief?: import("./qa/exploration-brief").ExplorationBrief;
+  // Slice 1 (agent-grounding-change-anchor): the change-anchor signals extracted from the diff (or
+  // guidance in MANUAL mode). Carried to defaultPipelineDeps.generate so the captureRoutesDom closure
+  // can pass them into captureDomByRoute's input object for [CHANGED: …] annotation. Absent → no
+  // annotation (byte-identical to today). opencode-client.ts is NOT modified — the closure arity
+  // stays (routes: string[]) => Promise<Map<string, string>>.
+  changedElements?: import("./qa/changed-elements").ChangedElement[];
   service?: { repo: string; mirrorDir: string; openapi?: string | string[] }; // cross-repo: the triggering microservice (read-only working copy)
   services?: Array<{ repo: string; mirrorDir: string; openapi?: string | string[] }>; // context mode: every declared service, mirrored read-only
 }
@@ -317,6 +328,8 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
         explorer: input.explorerBrief ? false : input.explorer,
         contextPack: input.contextPack,
         staticSignal: input.staticSignal,
+        // Seam b: thread the filesystem-enumerated spec file manifest into the prompt builder.
+        existingSpecFiles: input.existingSpecFiles,
         service: input.service,
         services: input.services,
       };
@@ -352,7 +365,11 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
             // Deterministic DOM grounding for the fan-out workers: capture the planned routes' live
             // a11y tree on the orchestrator (Playwright stays out of the agent boundary). Best-effort.
             ...(input.baseUrl
-              ? { captureRoutesDom: (routes: string[]) => captureDomByRoute(routes, { e2eDir: join(input.mirrorDir, E2E_DIR), baseUrl: input.baseUrl }, defaultCaptureDomDeps) }
+              ? {
+                  // Slice 1: capture changedElements from input (set by runPipeline before this GenerateInput is built).
+                  // Passed inside captureDomByRoute's input object (not as a closure arg — the arity (routes: string[]) is pinned by opencode-client.ts).
+                  captureRoutesDom: (routes: string[]) => captureDomByRoute(routes, { e2eDir: join(input.mirrorDir, E2E_DIR), baseUrl: input.baseUrl, changedElements: input.changedElements }, defaultCaptureDomDeps),
+                }
               : {}),
           })
         : runOpencode(ocInput, oc, { signal, onProgress, onRepair });
@@ -1131,6 +1148,16 @@ export async function runPipeline(
     log(`[qa] diff capped for prompts: ${diff.length} → ${promptDiff.length} chars (full diff stays available in the working copy).`);
   }
 
+  // Slice 1 (agent-grounding-change-anchor): extract stable HTML selector signals from the diff
+  // (or guidance noun-phrases in MANUAL mode) ONCE, then thread to BOTH grounding chains as an
+  // optional parameter. Computed from promptDiff so file/line numbering is consistent with
+  // parseDiffHunks usage below. Cap 200 entries (mirrors change-coverage MAX_ITEMS spirit).
+  // Absent/empty → both chains produce byte-identical output to today (no annotation).
+  const changedElements: ChangedElement[] =
+    mode === "manual"
+      ? changedElementsFromGuidance(opts.guidance ?? "")
+      : (mode === "diff" ? extractChangedElements(promptDiff) : []);
+
   // 4. Set up the project so the agent has what it needs to build on — IN PARALLEL with
   //    the deploy gate started in step 1 (dependency install needs no DEV). e2e: bootstrap
   //    the seed if missing + install the e2e deps. code: install the repo's own deps
@@ -1674,6 +1701,35 @@ export async function runPipeline(
   // every generation and re-generation pass receives the computed value (or undefined).
   let staticSignalText: string | undefined;
 
+  // Seam b: enumerate existing spec files from the filesystem before the first generate call.
+  // Populated once (not rebuilt on regen passes — the suite does not change mid-run).
+  // Graceful: if the e2e dir does not exist or the glob fails, stays undefined (no section emitted).
+  let existingSpecFiles: string[] | undefined;
+  if (!isCode) {
+    try {
+      const { readdirSync, statSync } = await import("node:fs");
+      const globSpecs = (dir: string): string[] => {
+        let results: string[] = [];
+        try {
+          for (const entry of readdirSync(dir)) {
+            const full = `${dir}/${entry}`;
+            if (statSync(full).isDirectory()) {
+              results = results.concat(globSpecs(full));
+            } else if (entry.endsWith(".spec.ts")) {
+              // Return path relative to e2eDir
+              results.push(full.slice(e2eDir.length + 1));
+            }
+          }
+        } catch { /* dir may not exist yet — graceful */ }
+        return results;
+      };
+      const found = globSpecs(e2eDir);
+      if (found.length > 0) existingSpecFiles = found;
+    } catch {
+      // Graceful degradation: filesystem read failed — no manifest section emitted.
+    }
+  }
+
   const baseGenInput = (extra: Partial<GenerateInput>): GenerateInput => ({
     repo: app.repo,
     sha,
@@ -1701,6 +1757,11 @@ export async function runPipeline(
     contextPack: builtContextPack,
     learnedRules: promptSections,
     staticSignal: staticSignalText,
+    // Slice 1: thread change-anchor signals to defaultPipelineDeps.generate so the captureRoutesDom
+    // closure can pass them to captureDomByRoute for [CHANGED: …] annotation of worker DOM trees.
+    changedElements: changedElements.length > 0 ? changedElements : undefined,
+    // Seam b: thread enumerated spec files into every generation call for the manifest section.
+    existingSpecFiles,
     service: triggerService
       ? { repo: triggerService.repo, mirrorDir: serviceMirrorDir!, openapi: triggerService.openapi }
       : undefined,
@@ -1730,9 +1791,19 @@ export async function runPipeline(
     const trees = (await deps.captureRouteTrees({ e2eDir, baseUrl, specContents: specSources }))
       .map((s) => s.nodes ?? [])
       .filter((n) => n.length > 0);
-    const findings = checkSpecSelectors(specSources, trees, "pre-write");
-    if (findings.anyNonExtractable) return []; // a scoped `.locator(...)` makes uniqueness indeterminate
-    return findings.contradictions.filter((c) => c.includes("MULTIPLE"));
+    // A1: per-selector chain-awareness. The old blanket `if (findings.anyNonExtractable) return []`
+    // suppressed ALL ambiguity contradictions whenever any non-extractable locator appeared anywhere
+    // in the spec, even a standalone terminal `getByTestId('x')` that scopes nothing. The new
+    // unscopedMultipleContradictions function returns MULTIPLE contradictions only for extractable
+    // selectors that are NOT lexically chained after a non-extractable scope prefix on the same
+    // expression chain, preserving the false-positive guard for scoped `.locator().getByRole(…)`
+    // calls while surfacing real ambiguities from unrelated standalone extractable selectors.
+    //
+    // NOTE: pre-write DOM cannot catch selectors that become ambiguous POST-write within a single
+    // run (e.g. a form step that duplicates a heading after the agent's last navigation). That
+    // residual case is caught at execution by the post-failure Lever-2 check (checkSpecSelectors
+    // at line ~2452) + per-attempt namespace isolation.
+    return unscopedMultipleContradictions(specSources, trees, "pre-write");
   };
 
   // Load persisted curriculum (survives across runs — archetypes that caught real bugs)
@@ -1848,6 +1919,8 @@ export async function runPipeline(
             // Until that wiring exists, prChangedFiles is undefined and contracts are filtered
             // by the brief's feBe only (or contextMap feBe when no brief is present).
             prChangedFiles: intent?.changedFiles,
+            // Slice 1: thread change-anchor signals into the context-pack DOM section for [CHANGED: …] annotation.
+            changedElements: changedElements.length > 0 ? changedElements : undefined,
           },
           defaultContextPackDeps,
         );

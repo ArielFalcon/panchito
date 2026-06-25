@@ -50,15 +50,31 @@ export function normalizeName(s: string): string {
 
 // A snapshot "role: name" line parsed into its two parts. Returns null if the line
 // does not have the expected shape.
+// Task 3.1 (Slice 3): strip any trailing ARIA state token suffix BEFORE splitting — nodes[] lines
+// may carry known ARIA state suffixes (seam A) when passed through from the capture; role and name
+// extraction must be unaffected. The strip is additive insurance: parseAriaSnapshot keeps nodes[]
+// bare, but this makes parseLine robust if a known-state suffix ever arrives.
+//
+// ALLOWLIST — strips ONLY known ARIA interactive-state tokens:
+//   disabled, expanded, checked, required, selected, pressed, level=<digits>
+// Multiple trailing tokens are supported (e.g. "Email [required] [disabled]").
+// Arbitrary bracket content — badge counts "Inbox [5]", draft markers "Edit [Draft]",
+// status markers "Deploy [Beta]" — is NEVER stripped so real accessible names survive intact.
+// The pattern does NOT match [CHANGED: …] markers (not a state token), restoring Slice 1's
+// fail-safe: a leaked [CHANGED:] suffix is preserved, not silently erased.
+const ARIA_STATE_STRIP_RE = /(?:\s*\[(disabled|expanded|checked|required|selected|pressed|level=\d+)\])+\s*$/;
+
 function parseLine(line: string): { role: string; name: string } | null {
-  const colon = line.indexOf(": ");
+  // Strip trailing ARIA state token suffix (allowlist only) before any other processing
+  const clean = line.replace(ARIA_STATE_STRIP_RE, "").trim();
+  const colon = clean.indexOf(": ");
   if (colon === -1) {
     // A line of exactly "role: (present)" shape — colon exists but with value "(present)".
-    const colon2 = line.indexOf(":");
+    const colon2 = clean.indexOf(":");
     if (colon2 === -1) return null;
-    return { role: line.slice(0, colon2).trim().toLowerCase(), name: line.slice(colon2 + 1).trim() };
+    return { role: clean.slice(0, colon2).trim().toLowerCase(), name: clean.slice(colon2 + 1).trim() };
   }
-  return { role: line.slice(0, colon).trim().toLowerCase(), name: line.slice(colon + 2).trim() };
+  return { role: clean.slice(0, colon).trim().toLowerCase(), name: clean.slice(colon + 2).trim() };
 }
 
 // Maps a `kind` to the set of ARIA roles it may match against. "role" uses the
@@ -260,6 +276,110 @@ const NON_EXTRACTABLE_LOCATOR_RE = /\.(?:getByTestId|locator|getByPlaceholder|ge
 // so a commented-out call — wrapped, inline, or trailing — does not count.
 export function hasNonExtractableLocator(specSrc: string): boolean {
   return NON_EXTRACTABLE_LOCATOR_RE.test(stripCommentsAndJoin(specSrc));
+}
+
+// A non-extractable scope prefix immediately followed (on the same call chain) by an extractable
+// selector: e.g. `.locator('.x').getByRole(...)`, `.getByTestId('x').getByRole(...)`.
+// A1 safe-direction (per-selector). A "MULTIPLE" ambiguity is surfaced pre-execution ONLY for a
+// selector we can PROVE is unscoped — rooted directly on the `page` fixture (`page.getByRole(…)` /
+// `this.page.getByRole(…)`). Any other rooting narrows the tree in a way the full-tree check cannot
+// see — a `.locator(…)` chain OR a locator held in a variable (`const row = page.getByTestId(…);
+// row.getByRole(…)`) — so its uniqueness is INDETERMINATE and a "MULTIPLE" there would be a FALSE
+// positive that could wrongly hold a good spec `invalid` at W2. We SUPPRESS by default and surface
+// only the page-rooted case: the same conservative guarantee the old blanket
+// `if (anyNonExtractable) return []` gave, now applied PER-SELECTOR instead of per-spec (so a
+// standalone terminal `getByTestId('x')` no longer silences an unrelated page-rooted getByRole).
+//
+// `before` is the comment-stripped joined source up to the selector's `.getByXxx(` (the exact index
+// extractProposedSelectorsWithIndex returns), so the check is alignment-safe. stripCommentsAndJoin
+// joins lines with spaces, hence the trailing-whitespace trim and the optional `\s*` around `this.`.
+const PAGE_ROOT_BEFORE_RE = /(?:^|[^.\w$])(?:this\s*\.\s*)?page$/;
+function isPageRootedAt(joined: string, index: number): boolean {
+  return PAGE_ROOT_BEFORE_RE.test(joined.slice(0, index).replace(/\s+$/, ""));
+}
+
+// Returns MULTIPLE-node ambiguity contradictions ONLY for extractable selectors that are PROVABLY
+// unscoped (page-rooted). This is the per-selector replacement for the blanket
+// `if (findings.anyNonExtractable) return []` the consumer (ambiguousSelectorsNow) used to apply.
+//
+// Only returns contradictions that include "MULTIPLE" (pre-execution ambiguity check). Absent and
+// unverifiable contradictions are unchanged — they are not affected here.
+//
+// HOW IT WORKS:
+//   1. Run checkSpecSelectors normally → all MULTIPLE contradictions (computed over the FULL tree,
+//      which cannot see locator/variable scoping).
+//   2. Fast path: no non-extractable locator anywhere → no scoping is possible → return MULTIPLE as-is.
+//   3. Otherwise re-extract extractable selectors WITH their source index and keep a MULTIPLE
+//      contradiction ONLY when that selector is page-rooted (isPageRootedAt). Locator-chained and
+//      variable-scoped selectors are SUPPRESSED as indeterminate (safe direction — never a false block).
+//
+// INVARIANT: anyNonExtractable is still computed and returned unchanged. The W5 real-bug branch
+// (pipeline.ts allUnique) must still hold false when any non-extractable locator is present.
+// This function only changes WHICH contradictions reach the pre-execution corrective regen path.
+export function unscopedMultipleContradictions(
+  specSources: string[],
+  trees: string[][],
+  treeLabel = "pre-write",
+): string[] {
+  const findings = checkSpecSelectors(specSources, trees, treeLabel);
+  // Fast path: no non-extractable locators → no scope suppression possible; return MULTIPLE as-is.
+  if (!findings.anyNonExtractable) {
+    return findings.contradictions.filter((c) => c.includes("MULTIPLE"));
+  }
+  // There IS at least one non-extractable locator somewhere → check each extractable selector's
+  // rooting and surface only the provably-unscoped (page-rooted) ones.
+  const unsuppressed: string[] = [];
+  for (const specSrc of specSources) {
+    const joined = stripCommentsAndJoin(specSrc);
+    // Re-extract with indices so we can map contradictions to their source position.
+    const extractedWithIndex = extractProposedSelectorsWithIndex(joined);
+    for (const { index, sel } of extractedWithIndex) {
+      // Surface a MULTIPLE only for a selector PROVABLY unscoped (page-rooted). A locator chain or a
+      // variable-held locator narrows the tree invisibly → indeterminate → suppress (safe direction).
+      if (!isPageRootedAt(joined, index)) continue;
+      // Page-rooted → check if it produces a MULTIPLE contradiction in findings.
+      // Match by reconstructing the role label and name label used in contradiction messages.
+      const roleLabel = sel.role ?? sel.kind;
+      const nameLabel = sel.name ? ` "${sel.name}"` : "";
+      const contradictionPrefix = `${roleLabel}:${nameLabel} matches MULTIPLE`;
+      if (findings.contradictions.some((c) => c.startsWith(contradictionPrefix))) {
+        unsuppressed.push(findings.contradictions.find((c) => c.startsWith(contradictionPrefix))!);
+      }
+    }
+  }
+  // Deduplicate: the same contradiction may appear from multiple spec sources.
+  return [...new Set(unsuppressed)];
+}
+
+// Variant of extractProposedSelectors that also returns the character index of each selector's
+// `.getByRole(` / `.getByText(` / `.getByLabel(` call in the comment-stripped joined source.
+// Internal — used only by unscopedMultipleContradictions to correlate with scopedExtractableIndices.
+function extractProposedSelectorsWithIndex(joined: string): Array<{ index: number; sel: ProposedSelector }> {
+  const found: Array<{ index: number; sel: ProposedSelector }> = [];
+
+  const roleRe = /\.getByRole\(\s*["'`]([^"'`]+)["'`](?:\s*,\s*\{([\s\S]*?)\})?\s*\)/g;
+  let m: RegExpExecArray | null;
+  while ((m = roleRe.exec(joined)) !== null) {
+    const role = m[1]!.trim();
+    const { name, exact, isRegex } = extractNameOpts(m[2] ?? "");
+    found.push({ index: m.index, sel: { kind: "role", role, ...(name !== undefined ? { name } : {}), ...(exact ? { exact } : {}), ...(isRegex ? { isRegex } : {}) } });
+  }
+
+  const textRe = /\.getByText\(\s*["'`]([^"'`]+)["'`](?:\s*,\s*\{([\s\S]*?)\})?\s*\)/g;
+  while ((m = textRe.exec(joined)) !== null) {
+    const name = m[1]!.trim();
+    const { exact } = extractNameOpts(m[2] ?? "");
+    found.push({ index: m.index, sel: { kind: "text", name, ...(exact ? { exact } : {}) } });
+  }
+
+  const labelRe = /\.getByLabel\(\s*["'`]([^"'`]+)["'`](?:\s*,\s*\{([\s\S]*?)\})?\s*\)/g;
+  while ((m = labelRe.exec(joined)) !== null) {
+    const name = m[1]!.trim();
+    const { exact } = extractNameOpts(m[2] ?? "");
+    found.push({ index: m.index, sel: { kind: "label", name, ...(exact ? { exact } : {}) } });
+  }
+
+  return found.sort((a, b) => a.index - b.index);
 }
 
 // Parses the option string from a locator call (the `{ name: …, exact: … }` part).

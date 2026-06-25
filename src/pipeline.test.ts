@@ -3996,3 +3996,71 @@ test("pipeline threads default testIdAttribute (data-testid) into deps.execute w
     );
   }
 });
+
+// ── A1: per-selector chain-awareness — standalone non-extractable must not silence UNRELATED ambiguities ──
+//
+// BEFORE A1: ambiguousSelectorsNow does `if (findings.anyNonExtractable) return []`, so a spec
+//   containing getByTestId('x') (standalone, terminal) alongside an unscoped ambiguous getByRole
+//   returns NO contradictions, suppressing a real ambiguity check.
+// AFTER A1: ambiguousSelectorsNow uses findings.contradictions directly (no blanket bail on
+//   anyNonExtractable). The scoped-locator false-positive guard is preserved at the selector level
+//   by filtering: only MULTIPLE contradictions from extractable selectors that are NOT lexically
+//   chained after a non-extractable scope prefix are surfaced.
+//
+// R1-pipeline (RED until A1): a spec with standalone getByTestId + unscoped ambiguous getByRole
+//   MUST trigger a corrective regen carrying the MULTIPLE contradiction. Currently it does NOT
+//   because anyNonExtractable=true causes ambiguousSelectorsNow to return [].
+test("A1-W1: standalone getByTestId does NOT suppress the MULTIPLE contradiction for an unscoped ambiguous getByRole", async () => {
+  const calls: string[] = [];
+  // Two agents: the first generates, the second is for the (expected) corrective regen.
+  const d = deps(passing(), calls, { agents: [generated, generated] });
+  // Tree: "heading: Owners" appears twice → strict-mode ambiguity for an unscoped getByRole.
+  d.captureRouteTrees = async () => [{ route: "/owners", nodes: ["heading: Owners", "heading: Owners"] }];
+  // Spec: standalone getByTestId (terminal — does NOT scope the getByRole) + unscoped ambiguous getByRole.
+  // BEFORE A1: anyNonExtractable=true → ambiguousSelectorsNow returns [] → no corrective regen fired.
+  // AFTER A1: the standalone testId is a separate statement; the getByRole's MULTIPLE contradiction IS surfaced.
+  writeFileSync(
+    join(d.mirrorDir, "e2e", "a.spec.ts"),
+    [
+      `import { test } from "./fixtures";`,
+      `test("owners", async ({ page }) => {`,
+      `  await page.goto("/owners");`,
+      `  await page.getByTestId("nav-icon").click();`, // standalone terminal — NOT a scope prefix
+      `  await page.getByRole("heading", { name: "Owners" }).click();`, // unscoped → MULTIPLE in tree
+      `});`,
+    ].join("\n"),
+  );
+  await runPipeline(app, "abc123", d);
+  const corrective = d.genInputs.find((gi) => gi.selectorContradictions?.some((c) => c.includes("MULTIPLE")));
+  assert.ok(
+    corrective,
+    `A1: a standalone getByTestId must NOT suppress the MULTIPLE contradiction for an unrelated unscoped getByRole; ` +
+    `expected a corrective regen carrying "MULTIPLE" but got: genInputs=${d.genInputs.length}, ` +
+    `selectorContradictions=${JSON.stringify(d.genInputs.map((gi) => gi.selectorContradictions))}`,
+  );
+});
+
+// R2-pipeline guard (must stay GREEN before and after A1): a scoped locator chain must NOT produce
+// a false-positive MULTIPLE contradiction. This is the guard from the existing W2 test — A1 must
+// not weaken it. Standalone reference so A1 reviewers can see it alongside the new R1 test.
+test("A1-W1: scoped locator chain (.locator().getByRole()) is still NOT blocked after A1 (guard preserved)", async () => {
+  const calls: string[] = [];
+  // This test is a duplicate-intent guard alongside the existing W2 test at line ~3293.
+  // If A1 accidentally removes the anyNonExtractable guard entirely, this test catches it.
+  const d = deps(passing(), calls, { agents: [generated, generated, generated] });
+  d.captureRouteTrees = async () => [{ route: "/owners", nodes: ["heading: Owners", "heading: Owners"] }];
+  writeFileSync(
+    join(d.mirrorDir, "e2e", "a.spec.ts"),
+    [
+      `import { test } from "./fixtures";`,
+      `test("owners", async ({ page }) => {`,
+      `  await page.goto("/owners");`,
+      `  await page.locator(".container").getByRole("heading", { name: "Owners" }).click();`, // scoped
+      `});`,
+    ].join("\n"),
+  );
+  const result = await runPipeline(app, "abc123", d);
+  // A scoped locator makes uniqueness INDETERMINATE → must NOT be held as invalid.
+  assert.notEqual(result.verdict, "invalid", `A1 guard: a scoped locator chain must still NOT be blocked as invalid; got ${result.verdict}`);
+  assert.ok(calls.includes("execute"), "A1 guard: scoped locator must proceed to execution");
+});

@@ -77,6 +77,7 @@ export function buildWorkerPromptAssembled(w: ParallelWorkerInput): AssembledPro
         `- Selector priority: (1) when a tree line carries a trailing \`-> [attr]\` hint, use \`getByTestId('value')\` — Playwright resolves it against the per-app testIdAttribute config; (2) fall back to \`getByRole\`/\`getByLabel\` when no hint is present; (3) no CSS/XPath.`,
         `- Dynamic-DOM: the injected tree is a STATIC snapshot of initial load. Post-interaction elements (modals, dynamic lists) are NOT in this tree — assert them with auto-waiting (\`await expect(locator).toBeVisible()\`, \`waitForURL\`), never \`waitForTimeout\`.`,
         `- getByRole matches the ACCESSIBILITY TREE, not the HTML tag: a <th> is often NOT a "columnheader", a <table> may lose its "table"/"row"/"cell" roles (Bootstrap/CSS strips them). Use ONLY roles + names you LITERALLY SEE in the injected tree; if the role isn't there, use getByText or a scoped locator. A getByRole that matches 0 elements passes review but TIMES OUT on execution.`,
+        `- Framework authoring attributes are NOT runtime DOM attributes — never assert them. Examples: Angular's \`routerLink\` is transformed to a rendered \`href\` (assert the \`href\`); \`*ngIf\`, \`ng-reflect-*\`, and \`formControlName\` do not appear in the live DOM (use \`getByLabel\`, \`getByTestId\`, or \`getByRole\` targeting the rendered element instead). The same principle applies to Vue directive attrs and React prop-only attrs. Asserting them always fails at runtime.`,
         `- At least ONE real assertion on the observable OUTCOME (not just a click). Clean up created data via cleanup().`,
       ]
     : [
@@ -141,6 +142,7 @@ export function buildWorkerPromptAssembled(w: ParallelWorkerInput): AssembledPro
         `If a role you expected (e.g. \`columnheader\`) is NOT listed, it is NOT in the tree:`,
         `use \`getByText\` or a scoped locator instead. If a name appears MORE THAN ONCE,`,
         `scope it to a unique parent (a bare getByRole/getByText would match multiple → strict-mode error).`,
+        `Lines tagged [CHANGED: …] are what THIS change introduced — your objective targets these.`,
         w.domSnapshot,
       ].join("\n")
     : "";
@@ -293,7 +295,9 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
       // planner reads it instead of re-widening). Absent when no orchestrator-level explorer ran.
       ...(planBriefContent ? [section("plan-brief", "semi-stable", planBriefContent, { priority: 1 })] : []),
       ...(contextMapContent ? [section("plan-arch-map", "semi-stable", contextMapContent, { priority: 2, cacheable: true })] : []),
-      ...(lessonsContent ? [section("plan-lessons", "semi-stable", lessonsContent, { priority: 3 })] : []),
+      // Seam d: plan-lessons priority p3→p2 so it sheds AFTER plan-arch-map (p2 declared first,
+      // stable sort) — aligns planner with the same signal-value hierarchy as the generator path.
+      ...(lessonsContent ? [section("plan-lessons", "semi-stable", lessonsContent, { priority: 2 })] : []),
       section("plan-task", "task", taskContent, { priority: 1 }),
       section("plan-output-format", "critical-recap", outputFormatContent, { priority: 1 }),
     ], { budgetBytes: roleWindowBytes("qa-generator") });
@@ -345,7 +349,9 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
       // FIX 3: same brief-reuse as diff — the explorer pass already mapped the blast radius for manual.
       ...(planBriefContent ? [section("plan-brief", "semi-stable", planBriefContent, { priority: 1 })] : []),
       ...(contextMapContent ? [section("plan-arch-map", "semi-stable", contextMapContent, { priority: 2, cacheable: true })] : []),
-      ...(lessonsContent ? [section("plan-lessons", "semi-stable", lessonsContent, { priority: 3 })] : []),
+      // Seam d: plan-lessons priority p3→p2 so it sheds AFTER plan-arch-map (p2 declared first,
+      // stable sort) — aligns planner with the same signal-value hierarchy as the generator path.
+      ...(lessonsContent ? [section("plan-lessons", "semi-stable", lessonsContent, { priority: 2 })] : []),
       section("plan-task", "task", manualTaskContent, { priority: 1 }),
       section("plan-output-format", "critical-recap", outputFormatContent, { priority: 1 }),
     ], { budgetBytes: roleWindowBytes("qa-generator") });
@@ -384,7 +390,10 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
   return assemble([
     section("plan-procedure", "stable-prefix", wholeProcedure, { priority: 1, cacheable: true }),
     ...(contextMapContent ? [section("plan-arch-map", "semi-stable", contextMapContent, { priority: 2, cacheable: true })] : []),
-    ...(lessonsContent ? [section("plan-lessons", "semi-stable", lessonsContent, { priority: 3 })] : []),
+    // Seam d: plan-lessons priority p3→p2 so it sheds AFTER plan-arch-map (p2 declared first,
+    // stable sort) — aligns complete/exhaustive planner with the same signal-value hierarchy as
+    // the diff and manual planner paths.
+    ...(lessonsContent ? [section("plan-lessons", "semi-stable", lessonsContent, { priority: 2 })] : []),
     section("plan-task", "task", wholeTaskContent, { priority: 1 }),
     section("plan-output-format", "critical-recap", outputFormatContent, { priority: 1 }),
   ], { budgetBytes: roleWindowBytes("qa-generator") });
@@ -535,6 +544,10 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
                 `- OpenAPI contract(s) for this repo: ${openapiHint}. For any backend endpoint the affected flow touches, read the matching operation and assert against its contract (required fields, enums, validation/error responses). Drive the app through the web UI like a user — never call the API directly.`,
               ]
             : []),
+          // A3: selector-priority rule in the STABLE band — fires regardless of whether a DOM snapshot
+          // was captured. When a DOM snapshot IS present, its section already contains a `-> [attr]`
+          // hint for getByTestId; this stable rule is concise (no duplication of the tree guidance).
+          `- Selector priority: (1) getByTestId when the tree line carries a \`-> [attr]\` hint; (2) getByRole / getByLabel when no hint; (3) getByText for text-only elements; (4) scoped CSS/locator only as last resort. No raw CSS classes or XPath — these break on refactor.`,
         ]),
     `- engram memory: scoped per app AND per mode (e2e, code, or context). Use project="${input.appName}" on ALL mem_save, mem_search, mem_context, and mem_session_summary calls. Prefix every topic_key with "${memTarget}/" so each mode's memory lives in its own namespace (e.g. topic_key="context/angular-routes" or "e2e/checkout-flow"). When searching, include "${memTarget}" in the query text to filter results to this mode. Never save or search without the mode prefix.`,
     input.needsReview
@@ -544,11 +557,15 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
   const workingRulesContent = workingRulesLines.join("\n");
 
   // SEMI-STABLE: architecture map (stable for this run, changes between runs).
+  // Seam c: when a Context Pack is present, its blast-radius section already contains FE↔BE links;
+  // pass suppressFeBeLinks:true to renderArchitectureContext so it omits the arch-map FE↔BE block,
+  // keeping "FE↔BE links" rendered at most twice across the assembled prompt (pack + context-brief).
   const archMapContent = input.contextMap
     ? [
         renderArchitectureContext(
           input.contextMap,
           input.mode === "diff" ? input.intent?.changedFiles : undefined,
+          { suppressFeBeLinks: !!input.contextPack },
         ) ?? "",
         ``,
       ].join("\n")
@@ -604,6 +621,8 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
           `- This tree is a STATIC snapshot of initial load. Post-interaction elements (modals, dynamic`,
           `  lists, multi-step form steps) are NOT here. Assert them with auto-waiting`,
           `  (\`await expect(locator).toBeVisible()\`, \`waitForURL\`), never \`waitForTimeout\`.`,
+          ``,
+          `Lines tagged [CHANGED: …] are what THIS change introduced — your objective targets these.`,
           ``,
           input.domSnapshot,
           ``,
@@ -773,6 +792,21 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
     // SEMI-STABLE: architecture map and exploration brief (change between runs, stable within).
     ...(archMapContent ? [section("arch-map", "semi-stable", archMapContent, { priority: 1, cacheable: true })] : []),
     ...(contextBriefContent ? [section("context-brief", "semi-stable", contextBriefContent, { priority: 2 })] : []),
+    // Seam b: existing-suite-manifest — a deterministic filesystem-enumerated list of existing spec
+    // file paths, rendered here so the generator can see what flows are already covered without a
+    // serena delegation. Priority 2 (alongside context-brief, sheds before arch-map). Guarded by
+    // isGenerationMode (diff and manual only; not emitted for complete/exhaustive/context).
+    ...(() => {
+      const specFiles = isGenerationMode && (input.mode === "diff" || input.mode === "manual")
+        ? input.existingSpecFiles
+        : undefined;
+      if (!specFiles?.length) return [];
+      const manifestContent = [
+        `## existing-suite-manifest (${specFiles.length} spec file(s) — do NOT rewrite flows already covered here)`,
+        ...specFiles.map((f) => `- ${f}`),
+      ].join("\n");
+      return [section("existing-suite-manifest", "semi-stable", manifestContent, { priority: 2 })];
+    })(),
     ...(staticSignalContent ? [section("static-signal", "semi-stable", staticSignalContent, { priority: 3 })] : []),
     // VOLATILE priority 0: Context Pack (blast-radius + DOM + contracts, pushed by orchestrator).
     // Placed FIRST in VOLATILE so the ground-truth is nearest the task and within the
@@ -795,10 +829,22 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
     ...(reviewContent ? [section("reviewer-corrections", "volatile", reviewContent, { priority: 4, maxBytes: 20_000, overflow: "drop" })] : []),
     // VOLATILE: coverage gap (priority 5).
     ...(coverageContent ? [section("coverage-gap", "volatile", coverageContent, { priority: 5 })] : []),
-    // VOLATILE: learned rules (priority 6 — lowest, as they're supplementary anti-patterns).
-    ...(learnedRulesContent ? [section("learned-rules", "volatile", learnedRulesContent, { priority: 6 })] : []),
-    // TASK: the concrete mode-specific objective.
+    // VOLATILE: learned rules — raised to priority 2 (from p6) so the cross-run learning signal
+    // outlasts lower-value volatile sections. Shed order: coverage-gap (p5) → reviewer-corrections
+    // (p4) → fix-cases (p3) → learned-rules (p2) → dom-snapshot (p1). Learned-rules sheds LAST
+    // among volatile content, preserving the anti-pattern memory under budget pressure.
+    ...(learnedRulesContent ? [section("learned-rules", "volatile", learnedRulesContent, { priority: 2 })] : []),
+    // TASK: the concrete mode-specific objective (criterion before diff — seam e).
     section("task", "task", taskContent, { priority: 1 }),
+    // Seam a: the commit diff in its own task-band section with shedAs:"semi-stable".
+    // Assembly order: task(p1) renders before diff(p2) → criterion precedes diff in output (seam e ✓).
+    // Shed order: shedAs:"semi-stable" places this in band 2, so it sheds after volatile DOM/pack
+    // (band 1) and before arch-map (semi-stable p1) — the diff is recoverable via `git show`, unlike
+    // the DOM ground-truth, so it correctly sheds before the unrecoverable context-pack (band 4).
+    ...(() => {
+      const diffContent = isGenerationMode ? buildDiffSection(input) : "";
+      return diffContent ? [section("diff", "task", diffContent, { priority: 2, shedAs: "semi-stable" })] : [];
+    })(),
   ], { budgetBytes: roleWindowBytes("qa-generator") });
 }
 
@@ -883,6 +929,9 @@ export function buildFollowupPrompt(input: OpencodeRunInput): string {
 export function renderArchitectureContext(
   ctx: ArchitectureContext,
   changedFiles?: string[],
+  // Seam c: when a Context Pack is present, its blast-radius section already contains FE↔BE links;
+  // suppress the arch-map duplicate to keep FE↔BE rendered ≤2x across the assembled prompt.
+  opts: { suppressFeBeLinks?: boolean } = {},
 ): string | null {
   if (!ctx.routes?.length && !ctx.api?.length) return null;
 
@@ -926,7 +975,9 @@ export function renderArchitectureContext(
     lines.push("");
   }
 
-  if (relevantLinks.length) {
+  if (relevantLinks.length && !opts.suppressFeBeLinks) {
+    // Seam c: when a Context Pack is present, its blast-radius section already contains FE↔BE links;
+    // suppress the arch-map duplicate to keep FE↔BE rendered ≤2x across the assembled prompt.
     lines.push(`### FE↔BE links (${relevantLinks.length} of ${ctx.feBe?.length ?? 0} total)`);
     lines.push("Each link tells you which frontend route calls which backend operation — use this to widen the blast radius:");
     for (const l of relevantLinks) {
@@ -1150,6 +1201,9 @@ function buildTask(input: OpencodeRunInput): string {
         `- Exercise the backend ONLY through the frontend UI at the LIVE DEV URL — never call the service directly.`,
       ]
     : [];
+  // Seam e: acceptance-criterion appears BEFORE the diff block. The diff itself is moved to a
+  // dedicated section in buildPromptAssembled (buildDiffSection) so that it can carry
+  // shedAs:"semi-stable" while the task band retains the objective/criterion/scope content.
   return [
     `Generate/update E2E tests for the flows affected by commit ${input.sha} of ${input.repo}.`,
     ``,
@@ -1163,12 +1217,11 @@ function buildTask(input: OpencodeRunInput): string {
     `Cross-check against the diff: if the code does more than the message claims, cover what`,
     `the code actually changes, not just what the message promises.`,
     ``,
-    `## Commit diff`,
-    "```diff",
-    sanitizeText(input.diff).text,
-    "```",
-    ...serviceBlock,
-    ``,
+    // Seam e: objective/acceptance-criterion now precedes the diff block so the agent reads
+    // the GOAL before the evidence. The diff is rendered as a separate task-band section in
+    // buildPromptAssembled (with shedAs:"semi-stable") so both orderings are satisfied:
+    // assembly order places criterion first (task band, declared before diff section), and
+    // the diff sheds as semi-stable (band 2) under budget pressure.
     `## Objective — commit to this BEFORE writing`,
     ACCEPTANCE_CRITERION_RULE,
     ``,
@@ -1198,6 +1251,26 @@ function buildTask(input: OpencodeRunInput): string {
           `- Explore ONLY the page(s) the change affects — not the whole app.`,
           `A handful of focused specs is the right output for a single-commit diff, not a suite rewrite.`,
         ]),
+    ...serviceBlock,
+  ].join("\n");
+}
+
+// Seam a: the diff content for diff-mode generator prompts. Extracted from buildTask so it can be
+// placed as its own section in the task band with shedAs:"semi-stable" — this way the assembly order
+// (task band) keeps the criterion BEFORE the diff (seam e) while the shed order treats the diff as
+// semi-stable (band 2), making it shed after volatile DOM/pack (band 1) and before arch-map (band 2 p1).
+// Returns empty string for all non-diff modes, code mode, and re-generation passes (where the diff
+// is already distilled in the grounding above and repeating it burns tokens).
+function buildDiffSection(input: OpencodeRunInput): string {
+  if (input.target === "code") return "";
+  if (input.mode !== "diff") return "";
+  const isReGen = Boolean(input.fixCases?.length || input.reviewCorrections?.length || input.coverageGap);
+  if (isReGen) return "";
+  return [
+    `## Commit diff`,
+    "```diff",
+    sanitizeText(input.diff).text,
+    "```",
   ].join("\n");
 }
 
