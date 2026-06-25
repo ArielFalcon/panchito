@@ -538,6 +538,11 @@ export interface OpencodeRunInput {
   // Static signal: deterministic pre-computed analysis rendered as a prompt section.
   // Empty string or absent = no section added. Signal-only, fail-open.
   staticSignal?: string;
+  // Seam b: deterministic list of existing spec file paths under e2eRelDir/**/*.spec.ts, enumerated
+  // by the orchestrator from the filesystem before the session starts. When non-empty and mode is
+  // diff or manual, rendered as an "existing-suite-manifest" semi-stable section so the generator
+  // knows what flows are already covered without a serena delegation. Absent or empty = no section.
+  existingSpecFiles?: string[];
   service?: { repo: string; mirrorDir: string; openapi?: string | string[] }; // cross-repo: the triggering microservice (read-only working copy)
   services?: Array<{ repo: string; mirrorDir: string; openapi?: string | string[] }>; // context mode: every declared service, mirrored read-only
 }
@@ -1048,6 +1053,26 @@ export function parsePlan(text: string): PlanObjective[] {
   });
 }
 
+// B4: structured plan result carrying both the objectives array and an optional reason string.
+// The reason is emitted by the planner when it returns an empty objectives array, so a silent
+// "nothing to cover" no-op is distinguishable from a failure. Non-empty plans may omit it.
+export interface PlanResult {
+  objectives: PlanObjective[];
+  reason?: string; // populated only when the planner explicitly included one (typically on empty plans)
+}
+
+// Parse the planner's output into a structured result: objectives array + optional reason.
+// The reason field is OPTIONAL so non-empty plans and existing tests are completely unaffected.
+export function parsePlanResult(text: string): PlanResult {
+  const objectives = parsePlan(text);
+  const o = lastJsonMatching(text, (x) => Array.isArray((x as Record<string, unknown>).objectives));
+  const reason =
+    o && typeof (o as Record<string, unknown>).reason === "string"
+      ? ((o as Record<string, unknown>).reason as string).trim() || undefined
+      : undefined;
+  return { objectives, reason };
+}
+
 // True when the planner's response INTENDED objectives (its text carries an `objectives` array with
 // at least one object entry) but NONE parsed — i.e. the JSON was malformed/over-nested, not a
 // genuine "nothing uncovered". Distinguishes a PARSE FAILURE (→ repair re-prompt, like the
@@ -1282,11 +1307,17 @@ export async function runOpencodeParallel(
     await planSession.dispose().catch(() => {});
   }
 
-  const objectives = parsePlan(planText);
+  // B4: use parsePlanResult to capture both objectives and the optional reason. The reason is
+  // emitted by the planner when it returns an empty array (prompted to do so) so a silent no-op
+  // is distinguishable from a failure. Non-empty plans are unaffected.
+  const planResult = parsePlanResult(planText);
+  const objectives = planResult.objectives;
   opts?.onProgress?.(`[qa] plan: ${objectives.length} objective(s) to generate`);
   if (objectives.length === 0) {
     // A valid no-op: nothing important is uncovered (honored as `skipped` upstream).
-    return { output: planText, specs: [], reviewed: false, approved: true, note: "planner found no important uncovered flows" };
+    const plannerReason = planResult.reason ?? "(no reason given)";
+    console.log(`[qa] planner returned 0 objectives — reason: ${plannerReason}`);
+    return { output: planText, specs: [], reviewed: false, approved: true, note: `planner found no important uncovered flows — reason: ${plannerReason}` };
   }
 
   // A diff or manual plan with a single objective gains nothing from fan-out and would LOSE

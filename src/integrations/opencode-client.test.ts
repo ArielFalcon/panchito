@@ -14,6 +14,7 @@ import {
   runOpencode,
   withTimeout,
   parsePlan,
+  parsePlanResult,
   planNeedsRepair,
   specFileForFlow,
   upsertManifest,
@@ -919,6 +920,36 @@ test("runOpencodeParallel: empty plan is a clean no-op (approved, no specs, no m
   assert.equal(res.approved, true);
   assert.equal(store.size, 0, "no workers, no manifest write");
   assert.deepEqual(opened, ["qa-generator"]); // only the planner ran
+});
+
+// ── B4: planner empty objectives must carry a reason ────────────────────────
+
+test("B4: parsePlan extracts reason from an empty-objectives plan", () => {
+  const plan = '{"objectives":[],"reason":"the commit only updates a comment — no UI flow is affected"}';
+  const result = parsePlan(plan);
+  assert.deepEqual(result, [], "empty objectives must still return []");
+  // parsePlan is a pure array extractor; reason is exposed via parsePlanResult
+});
+
+test("B4: parsePlanResult exposes reason on an empty-objectives plan", () => {
+  const plan = '{"objectives":[],"reason":"only CSS formatting changed — no testable flow"}';
+  const r = parsePlanResult(plan);
+  assert.deepEqual(r.objectives, []);
+  assert.equal(r.reason, "only CSS formatting changed — no testable flow");
+});
+
+test("B4: parsePlanResult reason is undefined on a non-empty plan (no regression)", () => {
+  const plan = '{"objectives":[{"flow":"login","objective":"valid creds reach the dashboard"}]}';
+  const r = parsePlanResult(plan);
+  assert.equal(r.objectives.length, 1);
+  assert.equal(r.reason, undefined, "non-empty plan must not carry a reason field (optional)");
+});
+
+test("B4: parsePlanResult reason is undefined when absent from an empty plan", () => {
+  const plan = '{"objectives":[]}';
+  const r = parsePlanResult(plan);
+  assert.deepEqual(r.objectives, []);
+  assert.equal(r.reason, undefined, "missing reason must come back as undefined, not throw");
 });
 
 test("buildWorkerPrompt is surgical: exact file, write-early discipline, no manifest writes (Q2: workers do NOT navigate)", () => {
@@ -3063,4 +3094,173 @@ test("T8 R8: buildReviewerPrompt execution-result section is VOLATILE (precedes 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── Slice 1 (Phase 3 Task 3.4): worker closure path — changedElements lexically captured ─────────────────
+//
+// NOTE: opencode-client.ts itself needs ZERO edits — only the closure in pipeline.ts lexically
+// captures changedElements and passes it inside captureDomByRoute's input object. The arity of
+// captureRoutesDom is (routes: string[]) → unchanged. These tests verify that:
+// (a) when captureRoutesDom returns a map whose values contain [CHANGED: …] (because the pipeline
+//     closure annotated them via captureDomByRoute({ changedElements })), the domByRoute map
+//     correctly carries those markers to each worker.
+// (b) when captureRoutesDom returns values with no markers (changedElements absent from the
+//     lexical scope), no [CHANGED: …] appears — byte-identity regression guard.
+
+test("Slice 1 (worker closure): captureRoutesDom result with [CHANGED:] marker reaches domByRoute map", async () => {
+  // The pipeline.ts closure passes changedElements inside captureDomByRoute's input object.
+  // The mock here simulates the closure's output: a Map where matched routes already carry
+  // [CHANGED: …] markers (as captureDomByRoute with changedElements would produce).
+  const domWithMarker = `route /register:\n  button: Register  -> [data-testid=register-btn] [CHANGED: added data-cy=register-btn]`;
+
+  // Build a minimal plan that dispatches a worker whose brief has /register as a route.
+  const agentPrompts: Array<{ agent: string; text: string }> = [];
+
+  const stub: AgentDeps = {
+    open: async (agent, _cwd, _opts) => {
+      return {
+        id: agent,
+        prompt: async (text: string) => {
+          agentPrompts.push({ agent, text });
+          // The planner (qa-generator) returns a plan when it receives the planning prompt.
+          // IMPORTANT: must be >=2 objectives to trigger worker fan-out (1 obj falls back to single-agent).
+          // IMPORTANT: blastRadius must be non-empty or parsePlan drops the brief (and routes become undefined).
+          if (agent === "qa-generator" && text.includes("PLANNING ONLY")) {
+            return JSON.stringify({
+              objectives: [
+                {
+                  flow: "register",
+                  objective: "test register form",
+                  symbols: ["RegisterComponent"],
+                  needsUi: true,
+                  brief: {
+                    builtForSha: "abc123",
+                    objective: "register",
+                    blastRadius: [{ symbol: "RegisterComponent", file: "src/register.ts", role: "handles registration" }],
+                    routes: [{ path: "/register", verified: false }],
+                    feBe: [],
+                    contracts: [],
+                    risks: [],
+                  },
+                },
+                {
+                  flow: "login",
+                  objective: "test login form",
+                  symbols: ["LoginComponent"],
+                  needsUi: true,
+                  brief: {
+                    builtForSha: "abc123",
+                    objective: "login",
+                    blastRadius: [{ symbol: "LoginComponent", file: "src/login.ts", role: "handles login" }],
+                    routes: [{ path: "/login", verified: false }],
+                    feBe: [],
+                    contracts: [],
+                    risks: [],
+                  },
+                },
+              ],
+            });
+          }
+          // Workers respond with a spec file.
+          return text.includes("register") ? '{"spec":"flows/register.spec.ts"}' : '{"spec":"flows/login.spec.ts"}';
+        },
+        dispose: async () => {},
+      };
+    },
+  };
+
+  // captureRoutesDom returns a map WITH [CHANGED: …] markers (simulating pipeline.ts closure behavior).
+  // Provide DOM for both routes so all objectives are grounded → workers are dispatched.
+  const captureRoutesDom = async (_routes: string[]): Promise<Map<string, string>> =>
+    new Map([
+      ["/register", domWithMarker],
+      ["/login", `route /login:\n  button: Login  -> [data-testid=login-btn]`],
+    ]);
+
+  const fakeFs = { read: () => null, write: () => {} };
+  const runInput: OpencodeRunInput = {
+    repo: "org/app",
+    sha: "abc1234",
+    diff: "diff --git a/src/home.html\n+++ b/src/home.html\n@@ -1,1 +1,2 @@\n+<button data-cy=\"register-btn\">Register</button>",
+    mirrorDir: "/mirrors/app",
+    e2eRelDir: "e2e",
+    namespace: "qa-bot-slice1",
+    needsReview: false,
+    target: "e2e",
+    mode: "diff",
+    appName: "app",
+    baseUrl: "http://localhost:3000",
+    intent: undefined,
+  };
+
+  await runOpencodeParallel(runInput, stub, { specExists: () => true, captureRoutesDom }, fakeFs as unknown as ManifestFs);
+
+  // Worker prompts (all except the planner) must contain [CHANGED: …] in at least one of them.
+  const workerPrompts = agentPrompts.filter((p) => p.agent === "qa-worker").map((p) => p.text);
+  assert.ok(workerPrompts.length > 0, "at least one worker must have been dispatched");
+  const anyHasMarker = workerPrompts.some((t) => t.includes("[CHANGED:"));
+  assert.ok(anyHasMarker, "worker prompt must carry [CHANGED:] marker from captureRoutesDom return value");
+});
+
+test("Slice 1 (worker closure): absent changedElements → no [CHANGED:] in domByRoute (byte-identity regression guard)", async () => {
+  // When captureRoutesDom returns plain DOM (no changedElements in the closure scope → no markers),
+  // the worker receives unmodified DOM — byte-identical to today.
+  const plainDom = `route /register:\n  button: Register  -> [data-testid=register-btn]`;
+
+  const workerPrompts: string[] = [];
+
+  const stub2: AgentDeps = {
+    open: async (agent, _cwd, _opts) => {
+      return {
+        id: agent,
+        prompt: async (text: string) => {
+          if (agent === "qa-generator" && text.includes("PLANNING ONLY")) {
+            return JSON.stringify({
+              objectives: [
+                { flow: "register", objective: "register", symbols: ["R"], needsUi: true, brief: { builtForSha: "abc", objective: "r", blastRadius: [{ symbol: "R", file: "r.ts", role: "register" }], routes: [{ path: "/register", verified: false }], feBe: [], contracts: [], risks: [] } },
+                { flow: "login", objective: "login", symbols: ["L"], needsUi: true, brief: { builtForSha: "abc", objective: "l", blastRadius: [{ symbol: "L", file: "l.ts", role: "login" }], routes: [{ path: "/login", verified: false }], feBe: [], contracts: [], risks: [] } },
+              ],
+            });
+          }
+          if (agent === "qa-worker") {
+            workerPrompts.push(text);
+          }
+          return text.includes("register") ? '{"spec":"flows/register.spec.ts"}' : '{"spec":"flows/login.spec.ts"}';
+        },
+        dispose: async () => {},
+      };
+    },
+  };
+
+  // No changedElements captured: captureRoutesDom returns plain DOM without markers.
+  const captureRoutesDom2 = async (_routes: string[]): Promise<Map<string, string>> =>
+    new Map([
+      ["/register", plainDom],
+      ["/login", `route /login:\n  button: Login  -> [data-testid=login-btn]`],
+    ]);
+
+  const fakeFs2 = { read: () => null, write: () => {} };
+  const runInput2: OpencodeRunInput = {
+    repo: "org/app",
+    sha: "abc1234",
+    diff: "diff --git a/src/home.ts\n+++ b/src/home.ts\n@@ -1,1 +1,2 @@\n+const x = 1;",
+    mirrorDir: "/mirrors/app",
+    e2eRelDir: "e2e",
+    namespace: "qa-bot-slice1-plain",
+    needsReview: false,
+    target: "e2e",
+    mode: "diff",
+    appName: "app",
+    baseUrl: "http://localhost:3000",
+    intent: undefined,
+  };
+
+  await runOpencodeParallel(runInput2, stub2, { specExists: () => true, captureRoutesDom: captureRoutesDom2 }, fakeFs2 as unknown as ManifestFs);
+
+  // No actual [CHANGED: …] markers from buildChangedMarker in any worker prompt (plain DOM, no markers).
+  // The static header "Lines tagged [CHANGED: …] are what THIS change introduced" is expected and excluded.
+  const hasActualMarker = workerPrompts.some((p) =>
+    p.includes("[CHANGED: added") || p.includes("[CHANGED: new link"),
+  );
+  assert.ok(!hasActualMarker, "absent changedElements → no [CHANGED:] marker in worker prompts (regression guard)");
 });

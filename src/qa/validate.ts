@@ -10,7 +10,7 @@
 // stubs; the real runners (which spawn) are the uncovered boundary.
 
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { scrubEnv } from "./code-runner";
 import { killTree } from "./execute";
@@ -63,7 +63,61 @@ export async function validateSpecs(
       if (!res.infra) allFailuresAreInfra = false;
     }
   }
+
+  // B2: detect spec files with zero assertions. A generated Playwright spec that never calls
+  // expect() is almost always a trivially-passing false-positive. Flag it as a code quality
+  // failure (not infra) so the run becomes `invalid` and feeds a corrective regeneration.
+  const zeroAssertionErrors = checkZeroAssertionSpecs(specDir);
+  for (const e of zeroAssertionErrors) {
+    errors.push(e);
+    allFailuresAreInfra = false; // these are code quality failures, not tool/infra failures
+  }
+
   return { ok: errors.length === 0, errors, infra: errors.length > 0 && allFailuresAreInfra };
+}
+
+// B2: deterministic check — scan all *.spec.ts files under specDir (recursively) and return one
+// error string per file that has ZERO `expect(` occurrences. Counts `expect(`, `expect.soft(`, and
+// `await expect(` — any of these proves the spec has at least one assertion.
+// Non-spec files (no `.spec.ts` suffix) are ignored so this never flags helpers or fixtures.
+function checkZeroAssertionSpecs(specDir: string): string[] {
+  const errors: string[] = [];
+  const walk = (dir: string): void => {
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return; // unreadable directory: skip silently — the other checks will catch infra issues
+    }
+    for (const name of names) {
+      const full = join(dir, name);
+      let isDir = false;
+      try {
+        isDir = statSync(full).isDirectory();
+      } catch {
+        continue; // unreadable stat: skip
+      }
+      if (isDir) {
+        walk(full);
+      } else if (name.endsWith(".spec.ts")) {
+        let content: string;
+        try {
+          content = readFileSync(full, "utf8");
+        } catch {
+          continue; // unreadable file: skip (infra, not a code quality issue)
+        }
+        // Detect any assertion form: `expect(`, `await expect(`, `expect.soft(`, `expect.poll(`.
+        // A single regex (`expect` followed by `.` or `(`) covers every Playwright assertion entry
+        // point without enumerating them — the safe direction (never false-flag a real assertion).
+        const hasAssertion = /\bexpect\s*[.(]/.test(content);
+        if (!hasAssertion) {
+          errors.push(`[zero-assertions] ${name}: spec has no expect() calls — remove it or add assertions`);
+        }
+      }
+    }
+  };
+  walk(specDir);
+  return errors;
 }
 
 // Default runners: run the tools INSIDE the repo's `e2e/` project (its own

@@ -206,13 +206,15 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
         `## Output — end with ONLY this JSON (no spec files):`,
         `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","needsUi":true,"brief":{"builtForSha":"<the sha above>","objective":"…","blastRadius":[{"symbol":"CheckoutService.pay","file":"src/checkout/checkout.service.ts","role":"applies the bulk discount and creates the order"}],"routes":[{"path":"/#!/checkout"}],"feBe":[{"route":"/checkout","operationId":"createOrder","via":"OrderClient.create"}],"contracts":[{"operationId":"createOrder","method":"POST","path":"/orders","fields":["items","total"]}],"risks":["assert the discounted total AFTER the cart re-queries"]}}]}`,
         input.mode === "diff"
-          ? `If the commit's change is not testable through a user flow, output {"objectives":[]}.`
-          : `If the guidance does not yield any testable flow, output {"objectives":[]}.`,
+          ? `If the commit's change is not testable through a user flow, output {"objectives":[],"reason":"<one-line explanation>"}.`
+          : `If the guidance does not yield any testable flow, output {"objectives":[],"reason":"<one-line explanation>"}.`,
+        `When returning an empty objectives array, ALWAYS include a one-line "reason" explaining why there is nothing to test.`,
       ].join("\n")
     : [
         `## Output — end with ONLY this JSON (no spec files):`,
         `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","needsUi":true,"brief":{"builtForSha":"<the sha above>","objective":"…","blastRadius":[{"symbol":"CheckoutService.pay","file":"src/checkout/checkout.service.ts","role":"applies the bulk discount and creates the order"}],"routes":[{"path":"/#!/checkout"}],"feBe":[{"route":"/checkout","operationId":"createOrder","via":"OrderClient.create"}],"contracts":[{"operationId":"createOrder","method":"POST","path":"/orders","fields":["items","total"]}],"risks":["assert the discounted total AFTER the cart re-queries"]}}]}`,
-        `If every important flow is already well covered, output {"objectives":[]}.`,
+        `If every important flow is already well covered, output {"objectives":[],"reason":"<one-line explanation>"}.`,
+        `When returning an empty objectives array, ALWAYS include a one-line "reason" explaining why there is nothing to test.`,
       ].join("\n");
 
   // FIX 3: when the orchestrator already ran the read-only explorer pass (exploreForPack), its brief
@@ -223,10 +225,13 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
   const planBriefContent = input.contextBrief
     ? [
         ``,
-        `## Exploration brief (the blast radius was ALREADY mapped by the explorer pass — use it; do NOT re-widen)`,
+        `## Exploration brief (the blast radius was pre-mapped by the explorer pass — use it; do NOT redo the explorer's work)`,
         renderExplorationBrief(input.contextBrief),
         `Derive the objectives DIRECTLY from this brief's blast radius and routes. Do NOT re-run`,
-        `find_referencing_symbols to re-discover the blast radius — it is already distilled above.`,
+        `find_referencing_symbols to re-derive the same blast radius — that redoes the explorer's work`,
+        `and burns the planning budget. Exception: if the brief is clearly incomplete for a specific`,
+        `changed symbol (e.g. a key file is absent from the blast radius), you MAY run ONE targeted`,
+        `find_referencing_symbols call for that symbol only, then stop.`,
         ``,
       ].join("\n")
     : "";
@@ -236,7 +241,7 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
     const planProcedure = [
       `## Phase 1 of 2 — PLANNING ONLY. Do NOT write any .spec.ts in this phase.`,
       input.contextBrief
-        ? `1. The blast radius is ALREADY fully mapped in the Exploration brief below — derive the affected user flows by REASONING over it (with the commit intent/diff). The brief is COMPLETE: do NOT activate serena, do NOT re-run find_referencing_symbols, do NOT re-analyze the repo with code tools. Using them re-does the explorer's work and BURNS the planning budget — planning here is pure reasoning over the brief, not a second exploration.`
+        ? `1. The blast radius is pre-mapped in the Exploration brief below — derive the affected user flows by REASONING over it (with the commit intent/diff). Do NOT redo the explorer's work: do NOT activate serena, do NOT re-run find_referencing_symbols wholesale, do NOT re-analyze the repo. Exception: if the brief is clearly incomplete for a specific changed symbol, you MAY run ONE targeted find_referencing_symbols for that symbol only, then stop.`
         : `1. Activate serena (activate_project). Read the commit intent and diff below; derive the\n   affected user flows (use find_referencing_symbols to widen from the changed symbols).`,
       `2. Plan one objective per INDEPENDENT affected flow. Do NOT plan flows the commit does not`,
       `   touch; if everything fits one flow, return a single objective.`,
@@ -314,7 +319,7 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
     const manualPlanProcedure = [
       `## Phase 1 of 2 — PLANNING ONLY. Do NOT write any .spec.ts in this phase.`,
       input.contextBrief
-        ? `1. The blast radius is ALREADY fully mapped in the Exploration brief below — derive the affected flows by REASONING over it (with the guidance). It is COMPLETE: do NOT re-run find_referencing_symbols and do NOT re-analyze the blast radius — that re-does the explorer's work and burns the budget. You MAY read the existing suite in ${input.e2eRelDir}/ ONLY to avoid duplicating already-covered flows; do nothing else with serena.`
+        ? `1. The blast radius is pre-mapped in the Exploration brief below — derive the affected flows by REASONING over it (with the guidance). Do NOT redo the explorer's work: do NOT re-run find_referencing_symbols wholesale and do NOT re-analyze the blast radius. Exception: if the brief is clearly incomplete for a specific symbol the guidance covers, you MAY run ONE targeted find_referencing_symbols for that symbol only, then stop. You MAY also read the existing suite in ${input.e2eRelDir}/ to avoid duplicating already-covered flows.`
         : `1. Activate serena (activate_project). Read the guidance below and the existing suite in\n   ${input.e2eRelDir}/ to understand the scope.`,
       `2. Plan one objective per INDEPENDENT affected flow that the guidance asks to test. Stay`,
       `   strictly within the guidance scope; do NOT plan flows the guidance does not mention.`,

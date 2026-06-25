@@ -105,3 +105,88 @@ test("a timed-out check routes through validateSpecs as pure infra", async () =>
   assert.equal(res.ok, false);
   assert.equal(res.infra, true);
 });
+
+// ── B2: zero-assertion spec detection ───────────────────────────────────────
+
+import { readFileSync as _readFileSync, writeFileSync as _writeFileSync, mkdtempSync as _mkdtempSync, rmSync as _rmSync } from "node:fs";
+import { tmpdir as _tmpdir } from "node:os";
+import { join as _join } from "node:path";
+
+function makeTmpSpecDir(specContent: string): string {
+  const dir = _mkdtempSync(_join(_tmpdir(), "qa-validate-b2-"));
+  _writeFileSync(_join(dir, "login.spec.ts"), specContent);
+  return dir;
+}
+
+test("B2 RED: a spec file with NO expect() call is flagged as a zero-assertion error", async () => {
+  const specDir = makeTmpSpecDir([
+    `import { test } from "@playwright/test";`,
+    `test("login loads", async ({ page }) => {`,
+    `  await page.goto("/login");`,
+    `  await page.click("button[type=submit]");`,
+    `});`,
+  ].join("\n"));
+  try {
+    const deps: ValidateDeps = { typecheck: ok, lint: ok, listTests: ok, checkManifest: ok };
+    const res = await validateSpecs(specDir, deps);
+    assert.equal(res.ok, false, "zero-assertion spec must produce a validation failure");
+    assert.ok(res.errors.some((e) => /zero.assertion|no.*expect|login\.spec\.ts/i.test(e)),
+      `expected a zero-assertion error; got: ${JSON.stringify(res.errors)}`);
+    // Must NOT be classified as infra — this is a code quality issue, not a tool failure.
+    assert.equal(res.infra, false);
+  } finally {
+    _rmSync(specDir, { recursive: true });
+  }
+});
+
+test("B2 GREEN: a spec file with at least one expect() passes the zero-assertion check", async () => {
+  const specDir = makeTmpSpecDir([
+    `import { test, expect } from "@playwright/test";`,
+    `test("login succeeds", async ({ page }) => {`,
+    `  await page.goto("/login");`,
+    `  await expect(page).toHaveURL("/dashboard");`,
+    `});`,
+  ].join("\n"));
+  try {
+    const deps: ValidateDeps = { typecheck: ok, lint: ok, listTests: ok, checkManifest: ok };
+    const res = await validateSpecs(specDir, deps);
+    // The other four checks all pass via stubs, so the overall result is ok.
+    assert.equal(res.ok, true, "spec with expect() must pass the zero-assertion check");
+  } finally {
+    _rmSync(specDir, { recursive: true });
+  }
+});
+
+test("B2: await expect() and expect.soft() both count as assertions", async () => {
+  const specDir = makeTmpSpecDir([
+    `import { test, expect } from "@playwright/test";`,
+    `test("soft assertion", async ({ page }) => {`,
+    `  await page.goto("/");`,
+    `  await expect.soft(page.locator("h1")).toBeVisible();`,
+    `});`,
+  ].join("\n"));
+  try {
+    const deps: ValidateDeps = { typecheck: ok, lint: ok, listTests: ok, checkManifest: ok };
+    const res = await validateSpecs(specDir, deps);
+    assert.equal(res.ok, true, "expect.soft() must count as an assertion");
+  } finally {
+    _rmSync(specDir, { recursive: true });
+  }
+});
+
+test("B2: a spec asserting ONLY via expect.poll() is NOT flagged (regression — poll is a real assertion)", async () => {
+  const specDir = makeTmpSpecDir([
+    `import { test, expect } from "@playwright/test";`,
+    `test("eventually consistent", async ({ page }) => {`,
+    `  await page.goto("/");`,
+    `  await expect.poll(() => page.locator(".count").count()).toBeGreaterThan(0);`,
+    `});`,
+  ].join("\n"));
+  try {
+    const deps: ValidateDeps = { typecheck: ok, lint: ok, listTests: ok, checkManifest: ok };
+    const res = await validateSpecs(specDir, deps);
+    assert.equal(res.ok, true, "expect.poll() must count as an assertion (not a zero-assertion false-flag)");
+  } finally {
+    _rmSync(specDir, { recursive: true });
+  }
+});
