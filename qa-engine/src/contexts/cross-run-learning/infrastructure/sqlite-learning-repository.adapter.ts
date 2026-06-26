@@ -36,7 +36,12 @@ export interface LearningStore {
   // an older build on an unfiltered read path (e.g. listAllLearningRules). On the filtered path it
   // is dead-but-harmless; it is kept because the adapter cannot guarantee what the injected store
   // returns in tests.
-  selectRules(): LearningRow[];                 // UNORDERED — ranking is the service's job
+  // CRL-02: `app` is a TYPED CONTRACT ONLY in v1. The legacy listLearningRules(app, limit) filters by
+  // app before returning any row — without per-app scoping the first real wiring would return every
+  // app's rules to every run (corrupt cross-app retrieval). The adapter threads `app` into the store
+  // call so the Plan-6 wiring closure (`{ selectRules: (app) => listLearningRules(app, 200) }`) cannot
+  // compile without it; the in-test fakes accept it and ignore it. The actual filtering is Plan 6.
+  selectRules(app: string): LearningRow[];      // UNORDERED — ranking is the service's job
   upsert(rule: LearningRule): void;
   recordOutcome(outcome: RunOutcome): void;
 }
@@ -76,8 +81,10 @@ export class SqliteLearningRepository implements LearningRepositoryPort {
     this.store.upsert(rule);
   }
 
-  async topRules(_sha: Sha, limit: number): Promise<LearningRule[]> {
-    const rules = this.store.selectRules().map(rowToRule);
+  async topRules(app: string, _sha: Sha, limit: number): Promise<LearningRule[]> {
+    // CRL-02: `app` is threaded into the store seam so the Plan-6 wiring closure must supply it.
+    // v1 stores ignore the argument (no per-app filtering yet); the typed obligation is the point.
+    const rules = this.store.selectRules(app).map(rowToRule);
     return this.governance.topRules(rules, limit);
   }
 

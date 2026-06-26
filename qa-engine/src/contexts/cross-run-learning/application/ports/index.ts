@@ -29,9 +29,15 @@ export interface LearningRule {
   at: string;              // ISO-8601 timestamp — the 3rd SQL sort key (at DESC tiebreak)
 }
 // [SWAP] inverts the SQLite coupling; ranking truth lives in RuleGovernance, not in SQL ORDER BY.
+// `app` on topRules is a TYPED CONTRACT ONLY in v1: the legacy listLearningRules(app, limit) filters
+// by app before returning any row — app-scoping is structural to multi-app correctness (mixing rules
+// across apps corrupts retrieval). v1 impls accept it but do NOT yet filter (the stub returns []; the
+// SQLite store passes it to the injected selectRules, whose filtering lands in Plan 6). Carrying it on
+// the signature now makes the Plan-6 wiring closure physically unable to compile without supplying the
+// app — converting a silent cross-app-contamination landmine into a compiler error.
 export interface LearningRepositoryPort {
   save(rule: LearningRule): Promise<void>;
-  topRules(sha: Sha, limit: number): Promise<LearningRule[]>;
+  topRules(app: string, sha: Sha, limit: number): Promise<LearningRule[]>;
   applyOutcome(outcome: RunOutcome): Promise<void>;
 }
 // Aligned to legacy src/types.ts StructuredReflection (8 fields). Field pruning, if any, is decided

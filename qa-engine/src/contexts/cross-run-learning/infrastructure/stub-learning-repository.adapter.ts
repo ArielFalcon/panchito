@@ -8,6 +8,7 @@ import type { RunOutcome } from "@kernel/run-outcome.ts";
 
 export class StubLearningRepository implements LearningRepositoryPort {
   async save(_rule: LearningRule): Promise<void> { /* off-path no-op */ }
-  async topRules(_sha: Sha, _limit: number): Promise<LearningRule[]> { return []; }
+  // CRL-02: `app` is on the contract (the stub ignores it; learning is off-path in v1).
+  async topRules(_app: string, _sha: Sha, _limit: number): Promise<LearningRule[]> { return []; }
   async applyOutcome(_outcome: RunOutcome): Promise<void> { /* off-path no-op */ }
 }

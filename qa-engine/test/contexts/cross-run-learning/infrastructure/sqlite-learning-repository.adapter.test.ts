@@ -15,7 +15,7 @@ const rows = [
 
 test("maps a legacy 'pending' row to 'candidate' before typing (§11 back-compat)", async () => {
   const repo = new SqliteLearningRepository({ selectRules: () => rows, upsert: () => {}, recordOutcome: () => {} });
-  const top = await repo.topRules(Sha.of("abcdef1"), 10);
+  const top = await repo.topRules("test-app", Sha.of("abcdef1"), 10);
   const t1 = top.find((r) => r.trigger === "t1");
   assert.ok(t1, "the pending row must survive as a candidate, not be dropped");
   assert.equal(t1!.status, "candidate"); // coerced from 'pending'
@@ -23,8 +23,22 @@ test("maps a legacy 'pending' row to 'candidate' before typing (§11 back-compat
 
 test("topRules ranks via RuleGovernanceService — active before the coerced candidate", async () => {
   const repo = new SqliteLearningRepository({ selectRules: () => rows, upsert: () => {}, recordOutcome: () => {} });
-  const top = await repo.topRules(Sha.of("abcdef1"), 10);
+  const top = await repo.topRules("test-app", Sha.of("abcdef1"), 10);
   assert.deepEqual(top.map((r) => r.trigger), ["t2", "t1"]); // active(0.5) before candidate(0.9)
+});
+
+// CRL-02: the `app` argument is threaded into the injected store's selectRules so the Plan-6 wiring
+// closure cannot compile without supplying it. v1 stores ignore it (no per-app filtering yet); this
+// pins only that the value reaches the seam, never that filtering happens (that is Phase 2).
+test("topRules threads the app argument into the injected store.selectRules", async () => {
+  const seenApps: string[] = [];
+  const repo = new SqliteLearningRepository({
+    selectRules: (app) => { seenApps.push(app); return rows; },
+    upsert: () => {},
+    recordOutcome: () => {},
+  });
+  await repo.topRules("portfolio", Sha.of("abcdef1"), 10);
+  assert.deepEqual(seenApps, ["portfolio"]);
 });
 
 test("rowToRule maps confidence exhaustively: low/medium/high pass through, unknown falls back to medium", async () => {
@@ -33,7 +47,7 @@ test("rowToRule maps confidence exhaustively: low/medium/high pass through, unkn
   const mediumRow = { id: "r4", trigger_text: "t4", action_text: "a4", error_class: "E-W", archetype: null, status: "active", confidence: "medium", usage_count: 0, outcome_count: 0, success_rate: null, last_verified: null, source: "oracle", at: "2026-01-04T00:00:00.000Z" };
   const unknownRow = { id: "r5", trigger_text: "t5", action_text: "a5", error_class: "E-V", archetype: null, status: "active", confidence: "very-high", usage_count: 0, outcome_count: 0, success_rate: null, last_verified: null, source: "oracle", at: "2026-01-05T00:00:00.000Z" };
   const repo = new SqliteLearningRepository({ selectRules: () => [mediumRow, unknownRow], upsert: () => {}, recordOutcome: () => {} });
-  const top = await repo.topRules(Sha.of("abcdef1"), 10);
+  const top = await repo.topRules("test-app", Sha.of("abcdef1"), 10);
   const t4 = top.find((r) => r.trigger === "t4");
   const t5 = top.find((r) => r.trigger === "t5");
   assert.equal(t4?.confidence, "medium", "'medium' row confidence must be 'medium' (first-class match)");

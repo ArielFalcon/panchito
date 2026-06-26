@@ -6,7 +6,7 @@ import { Sha } from "@kernel/sha.ts";
 
 test("topRules always returns [] (no rules ever influence the prompt in v1)", async () => {
   const repo = new StubLearningRepository();
-  assert.deepEqual(await repo.topRules(Sha.of("abcdef1"), 10), []);
+  assert.deepEqual(await repo.topRules("test-app", Sha.of("abcdef1"), 10), []);
 });
 
 test("save and applyOutcome are no-ops that never throw (off-path, fail-open)", async () => {
