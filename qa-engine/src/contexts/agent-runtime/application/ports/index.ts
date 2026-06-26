@@ -45,3 +45,20 @@ export interface StallWatchdogPort {
 export interface RoleAssignmentResolver {
   resolve(role: AgentRole): RoleAssignment;
 }
+
+// Wraps configFromEnv / validateAgentRuntimeConfig / publicAgentConfig. publicAgentConfig is the
+// redacted view safe to expose over the API; validation reports per-provider key presence. The config
+// shapes are structural (no src/ import) — the adapter maps the legacy AgentRuntimeConfig onto them.
+export interface AgentRuntimeConfigView {
+  mode: "single" | "dual";
+  assignments: { role: string; provider: AgentProvider; model: string }[];
+}
+export interface AgentConfigValidationView {
+  valid: boolean;
+  errors: string[];
+}
+export interface ConfigPort {
+  fromEnv(env?: Record<string, string | undefined>): AgentRuntimeConfigView;
+  validate(cfg: AgentRuntimeConfigView, keys: Record<string, boolean>): AgentConfigValidationView;
+  publicView(cfg: AgentRuntimeConfigView): AgentRuntimeConfigView; // redacted (no secrets)
+}
