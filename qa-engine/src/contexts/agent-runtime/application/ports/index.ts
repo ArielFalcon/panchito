@@ -9,7 +9,7 @@
 // The kernel-facing session-management types now live in the kernel (design §5.2) so generation depends
 // on AgentRuntimePort FROM the kernel, decoupled from this context. The barrel re-exports them and extends
 // AgentRuntimePort with provider-strategy concerns (AgentRuntimeStrategy below).
-export type { UsageSnapshot, AgentTurnEvent, AgentSession, OpenSessionOpts, AgentRuntimePort }
+export type { UsageSnapshot, AgentTurnEvent, AgentSession, OpenSessionOpts, AgentRuntimePort, AgentOpenDescriptor }
   from "@kernel/ports/agent-runtime.port.ts";
 import type { AgentRuntimePort, AgentSession, AgentTurnEvent } from "@kernel/ports/agent-runtime.port.ts";
 import type { AgentRole, RoleAssignment, AgentProvider } from "@kernel/agent-role.ts";
