@@ -41,7 +41,7 @@
     "test/contexts/objective-signal/infrastructure/jacoco-coverage-parity.test.ts",
     "test/contexts/objective-signal/infrastructure/v8-browser-coverage-parity.test.ts",
     "test/contexts/workspace-and-publication/domain/write-confinement-parity.test.ts",
-    "test/contexts/agent-runtime/domain/codex-error-to-infra-parity.test.ts",
+    "test/contexts/agent-runtime/infrastructure/codex-error-to-infra-parity.test.ts",
     "test/contexts/agent-runtime/infrastructure/config.adapter-parity.test.ts",
     "test/contexts/generation/application/ports/generation-ports-parity.test.ts",
     "test/contexts/generation/infrastructure/context-assembler.adapter-parity.test.ts",
