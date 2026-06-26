@@ -33,6 +33,7 @@
     "test/contexts/test-execution/domain/adjudicate-parity.test.ts",
     "test/contexts/test-execution/domain/selector-check-parity.test.ts",
     "test/contexts/test-execution/domain/progress-gate-parity.test.ts",
-    "test/contexts/test-execution/domain/nav-gate-parity.test.ts"
+    "test/contexts/test-execution/domain/nav-gate-parity.test.ts",
+    "test/contexts/objective-signal/domain/decide-coverage-parity.test.ts"
   ]
 }
