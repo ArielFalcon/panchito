@@ -6,7 +6,15 @@ import { ConfigAdapter } from "@contexts/agent-runtime/infrastructure/config.ada
 test("fromEnv delegates to the injected configFromEnv and maps the view", () => {
   let seenEnv: Record<string, string | undefined> | undefined;
   const adapter = new ConfigAdapter({
-    configFromEnv: (env) => { seenEnv = env; return { mode: "dual", assignments: { primary: { provider: "opencode", model: "m1" } } } as never; },
+    // Legacy shape: assignments is a KEYED OBJECT ({primary,reviewer,chat}: {provider,model}).
+    configFromEnv: (env) => { seenEnv = env; return {
+      mode: "dual",
+      assignments: {
+        primary: { provider: "opencode", model: "m1" },
+        reviewer: { provider: "codex", model: "m2" },
+        chat: { provider: "opencode", model: "m3" },
+      },
+    } as never; },
     validateAgentRuntimeConfig: () => ({ valid: true, errors: [] }) as never,
     publicAgentConfig: (c) => c as never,
   });
@@ -14,6 +22,14 @@ test("fromEnv delegates to the injected configFromEnv and maps the view", () => 
   // DELEGATION assertion: the injected fn received the env (a gutted impl that returns a literal FAILS).
   assert.deepEqual(seenEnv, { AGENT_MODE: "dual" });
   assert.equal(view.mode, "dual");
+  // SHAPE assertion: the view exposes assignments as an ARRAY of {role,provider,model} — a blind cast
+  // (return legacy as View) leaks the keyed object through and FAILS here (QA-01).
+  assert.ok(Array.isArray(view.assignments), "assignments must be an array on the view");
+  assert.deepEqual(view.assignments, [
+    { role: "primary", provider: "opencode", model: "m1" },
+    { role: "reviewer", provider: "codex", model: "m2" },
+    { role: "chat", provider: "opencode", model: "m3" },
+  ]);
 });
 
 test("validate delegates to the injected validator and surfaces errors", () => {
