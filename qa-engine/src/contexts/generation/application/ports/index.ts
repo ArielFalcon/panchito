@@ -56,3 +56,6 @@ export interface PromptBudgetPort {
 }
 
 export interface ContextPackResult { objective: Objective; sections: PromptSection[]; failureCases?: QaCase[]; }
+
+export interface PlanObjectiveView { flow: string; objective: string; reason?: string; }
+export interface PlanParserPort { parse(text: string): PlanObjectiveView[]; }
