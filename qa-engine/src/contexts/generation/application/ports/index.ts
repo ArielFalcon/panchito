@@ -69,9 +69,12 @@ export interface DomGroundingPort {
 }
 
 // capDiff/capText prompt-budget capping — a generation concern, NOT redaction (§5.3(8)).
+// budgetForRole resolves the per-role byte budget (model → window → bytes) from the catalog;
+// the adapter FORWARDS roleWindowBytes(role) — the port carries no threshold, the catalog owns it.
 export interface PromptBudgetPort {
   capDiff(diff: string): string;
   capText(text: string): string;
+  budgetForRole(role: string): number;
 }
 
 export interface ContextPackResult { objective: Objective; sections: PromptSection[]; failureCases?: QaCase[]; }
