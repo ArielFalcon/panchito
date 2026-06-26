@@ -9,15 +9,18 @@ const sha = Sha.of("abcdef1");
 const br = BlastRadius.of(sha, ["src/svc.ts"]);
 
 test("delegates to runMutationOracle with repoDir (not specDir) + changedFiles from BlastRadius", async () => {
-  let seen: { repoDir: string; namespace: string; changedFiles?: string[] } | null = null;
+  let seen: { repoDir: string; namespace: string; changedFiles?: string[]; target?: string } | null = null;
   const adapter = new StrykerMutationOracleAdapter(async (input) => {
-    seen = { repoDir: input.repoDir, namespace: input.namespace, changedFiles: input.changedFiles };
+    seen = { repoDir: input.repoDir, namespace: input.namespace, changedFiles: input.changedFiles, target: input.target };
     return { valueScore: 0.8, mutantCount: 10, killedCount: 8, details: "8/10 killed" };
   });
   const r = await adapter.measure(br, "/m/repo", `qa-bot-${sha.value}`);
   assert.equal(seen!.repoDir, "/m/repo");
   assert.equal(seen!.namespace, `qa-bot-${sha.value}`);
   assert.deepEqual(seen!.changedFiles, ["src/svc.ts"]);
+  // OS-05: assert target:'code' is threaded — wrong target (e.g. 'e2e') would produce a null
+  // valueScore and 'ecosystem unknown' details at wiring time with no test catching the routing error.
+  assert.equal(seen!.target, "code", "adapter must always set target:'code' — wrong target silently no-ops the mutation runner");
   assert.equal(r.valueScore, 0.8);
   assert.equal(r.killedCount, 8);
   assert.equal(typeof r.details, "string", "details field must be present — ValueOracleResult has 4 fields");

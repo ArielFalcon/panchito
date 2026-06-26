@@ -25,6 +25,25 @@ test("resolveByRepo finds the owning app + role across all configs", async () =>
   assert.deepEqual(await adapter.resolveByRepo("org/nope"), []);
 });
 
+// AC-03: pin the code-mode path and the baseBranch ?? 'main' default introduced by the adapter
+// (the legacy schema leaves baseBranch optional; the default is applied at toSnapshot). A future
+// edit that removes or misplaces the default would pass CI silently without these tests.
+test("a code-mode app (no dev, no baseBranch) maps to code:true and defaults baseBranch to 'main'", async () => {
+  const codeCfg = { name: "lib", repo: "org/lib", code: true };
+  const adapter = new YamlAppConfigAdapter({ load: () => codeCfg, list: () => [codeCfg] });
+  const snap = await adapter.load("lib");
+  assert.equal(snap.code, true, "code must be true for a code-mode app");
+  assert.equal(snap.baseBranch, "main", "baseBranch must default to 'main' when absent from config");
+  assert.deepEqual(snap.services, [], "services must be empty when absent from config");
+});
+
+test("an app with baseBranch absent from config gets baseBranch defaulted to 'main' by the adapter", async () => {
+  const noBranchCfg = { name: "portfolio", repo: "org/portfolio", code: false, dev: { versionUrl: "https://dev" } };
+  const adapter = new YamlAppConfigAdapter({ load: () => noBranchCfg, list: () => [noBranchCfg] });
+  const snap = await adapter.load("portfolio");
+  assert.equal(snap.baseBranch, "main", "adapter must apply ?? 'main' when baseBranch is absent");
+});
+
 test("resolveByRepo fans out a repo that is primary of one app AND service of another", async () => {
   // Pins the legacy loadAppConfigsByRepo fan-out (config-loader.test.ts): a repo can be the
   // primary of its own code-mode app AND a service of another app's e2e suite — BOTH webhook runs

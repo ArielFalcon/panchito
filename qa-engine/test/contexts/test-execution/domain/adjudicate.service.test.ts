@@ -27,3 +27,12 @@ test("a pass is passed through unchanged", () => {
   assert.equal(r.verdict, "pass");
   assert.equal(r.appDefect.isDefect, false);
 });
+
+// TE-03: pin the flaky verdict pass-through — the else-branch returning { verdict, appDefect: none() }
+// is correct but unpinned; a refactor that accidentally routes 'flaky' through infra reclassification
+// would produce 'infra-error' with no failing test.
+test("a flaky verdict is passed through unchanged (never reclassified as infra-error)", () => {
+  const r = svc.adjudicate("flaky", [c("flaky")]);
+  assert.equal(r.verdict, "flaky");
+  assert.equal(r.appDefect.isDefect, false);
+});

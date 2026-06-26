@@ -37,3 +37,33 @@ test("throws when baseUrl is absent (e2e requires a live DEV URL)", async () => 
   const strategy = new E2eExecutionStrategy(async () => ({ sha: "abc", verdict: "pass", passed: true, cases: [], logs: "" }));
   await assert.rejects(() => strategy.run({ specDir: "/m/e2e", namespace: "qa-abc" }), /baseUrl/);
 });
+
+// TE-01: pin optional-field threading — a silently-dropped onCase/onRunning/onDiscovered/project/faultInject
+// breaks the live bar and history callbacks at Plan-6 cutover with no other failing test.
+test("threads all optional ExecutionRequest fields (project, onCase, onRunning, onDiscovered, faultInject) to the injected runE2E fn", async () => {
+  type Opts = { baseUrl: string; namespace: string; project?: string; onCase?: unknown; onRunning?: unknown; onDiscovered?: unknown; faultInject?: boolean };
+  let capturedOpts: Opts | null = null;
+  const strategy = new E2eExecutionStrategy(async (_dir, opts) => {
+    capturedOpts = opts as Opts;
+    return { sha: "abc", verdict: "pass", passed: true, cases: [], logs: "" };
+  });
+  const onCase = (c: { name: string; status: string }) => { void c; };
+  const onRunning = (title: string) => { void title; };
+  const onDiscovered = (title: string, file?: string) => { void title; void file; };
+  await strategy.run({
+    specDir: "/m/e2e",
+    baseUrl: "https://dev",
+    namespace: "qa-abc",
+    project: "chromium",
+    onCase,
+    onRunning,
+    onDiscovered,
+    faultInject: true,
+  });
+  assert.ok(capturedOpts !== null, "runE2E fn must be called");
+  assert.equal((capturedOpts as Opts).project, "chromium", "project must be threaded");
+  assert.equal((capturedOpts as Opts).onCase, onCase, "onCase callback must be threaded");
+  assert.equal((capturedOpts as Opts).onRunning, onRunning, "onRunning callback must be threaded");
+  assert.equal((capturedOpts as Opts).onDiscovered, onDiscovered, "onDiscovered callback must be threaded");
+  assert.equal((capturedOpts as Opts).faultInject, true, "faultInject must be threaded");
+});

@@ -47,3 +47,24 @@ test("save delegates to the injected upsert (no SQLite in the test)", async () =
   await repo.save({ id: "r3", trigger: "new", action: "a", errorClass: "E-Z", archetype: null, status: "candidate", confidence: "medium", usageCount: 0, outcomeCount: 0, successRate: null, lastVerified: null, source: "oracle", at: new Date().toISOString() });
   assert.deepEqual(calls, ["new"]);
 });
+
+// CRL-04: pin applyOutcome → store.recordOutcome delegation. A regression breaking this
+// (e.g. accidentally calling upsert or adding an early return) would not be caught by any
+// of the other tests, since they all use recordOutcome: () => {} as a silent no-op.
+test("applyOutcome delegates to store.recordOutcome exactly once with the outcome", async () => {
+  const recordedOutcomes: import("@kernel/run-outcome.ts").RunOutcome[] = [];
+  const repo = new SqliteLearningRepository({
+    selectRules: () => [],
+    upsert: () => {},
+    recordOutcome: (o) => recordedOutcomes.push(o),
+  });
+  const fakeOutcome: import("@kernel/run-outcome.ts").RunOutcome = {
+    runId: "run-001", app: "test-app", sha: "abcdef1", mode: "diff", target: "e2e",
+    verdict: "pass", errorClass: null,
+    gateSignals: { static: true, coverageRatio: null, valueScore: null, reviewerCorrections: [], flaky: false, retries: 0 },
+    rulesRetrieved: [], at: new Date().toISOString(),
+  };
+  await repo.applyOutcome(fakeOutcome);
+  assert.equal(recordedOutcomes.length, 1, "store.recordOutcome must be called exactly once");
+  assert.strictEqual(recordedOutcomes[0], fakeOutcome, "store.recordOutcome must receive the exact outcome object");
+});

@@ -45,10 +45,15 @@ test("no supported-language file → records a skip and returns the empty signal
   assert.equal(sig.skipped.some((s) => s.extractor === "languages"), true);
 });
 
-test("an absent extractor (undefined in the set) is simply not run (no skip noise)", async () => {
+test("absent extractors emit 'extractor not configured' skips, not error skips", async () => {
+  // CA-04: the old test name said 'no skip noise' but the assertion checks that 5 skip entries ARE
+  // emitted (one per missing extractor). The rename clarifies intent: these are typed 'not configured'
+  // skips (not thrown-error skips), so callers can distinguish misconfiguration from runtime failure.
   const sig = await analyzeChange(ctx, {}); // languages supported, but no extractors configured
   assert.deepEqual(sig.symbols, []);
-  // only the 'no extractor configured' skips, one per missing extractor
+  // one skip per missing extractor (symbols, complexity, relations, patterns, semanticDiff)
+  assert.equal(sig.skipped.length, 5, "must emit one skip per unconfigured extractor, not zero");
+  // every skip must use the canonical 'not configured' reason, never a thrown-error reason
   assert.equal(sig.skipped.every((s) => s.reason === "extractor not configured"), true);
 });
 
