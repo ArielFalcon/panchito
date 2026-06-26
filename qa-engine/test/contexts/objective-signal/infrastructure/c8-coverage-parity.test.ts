@@ -27,9 +27,28 @@ const ISTANBUL_FIXTURE = {
   },
 };
 
+// Absolute-path else-if fixture: the Istanbul entry uses a double-slash absolute path so the simple
+// startsWith(root + "/") check fails ("//workspace/..." does not start with "/workspace/..."). Only
+// the else-if (isAbsolute) fallback — path.relative(repoDir, p) → "src/bar.ts" — produces the
+// correct repo-relative key. Without it, the adapter strips only the leading slashes via
+// replace(/^\/+/, ""), producing "workspace/myapp/src/bar.ts" instead of "src/bar.ts".
+const ISTANBUL_DOUBLESLASH_FIXTURE = {
+  [`//${REPO_DIR.slice(1)}/src/bar.ts`]: {
+    path: `//${REPO_DIR.slice(1)}/src/bar.ts`,
+    statementMap: {
+      "0": { start: { line: 3 }, end: { line: 3 } },
+    },
+    s: { "0": 2 },
+  },
+};
+
 const fixtures: Array<{ json: unknown; repoDir?: string }> = [
   { json: ISTANBUL_FIXTURE, repoDir: REPO_DIR },
   { json: ISTANBUL_FIXTURE },   // no repoDir
+  // Pins the else-if (isAbsolute) fallback branch restored in WF-04 + B2-C8-PARITY-FIXTURE-WEAK.
+  // A double-slash absolute path fails startsWith(root+"/") but path.relative() resolves it to
+  // "src/bar.ts". Without the else-if, the adapter produces "workspace/myapp/src/bar.ts" instead.
+  { json: ISTANBUL_DOUBLESLASH_FIXTURE, repoDir: REPO_DIR },
   { json: null },
   { json: {} },
   { json: "not an object" },

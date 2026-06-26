@@ -20,18 +20,30 @@ const TWO_BLOCK_LCOV = [
 
 const SINGLE_BLOCK_LCOV = ["SF:src/svc.ts", "DA:1,3", "DA:2,0", "DA:3,5", "end_of_record"].join("\n");
 
-// Absolute-path fixture: exercises the normalizeRepoPath stripping — the divergence between the old
-// defaultParseLcov (which did NOT strip absolute paths) and parseLcov (which does). Without the fix,
-// this fixture would produce "/workspace/myapp/src/svc.ts" as the map key instead of "src/svc.ts",
-// and the diff intersection (which uses repo-relative keys) would yield zero covered lines.
+// Absolute-path fixture: exercises the normalizeRepoPath first branch (isAbsolute &&
+// startsWith(root + "/")) — path IS under repoDir and the simple prefix matches.
 const ABSOLUTE_PATH_LCOV = [
   `SF:${REPO_DIR}/src/svc.ts`, "DA:1,3", "DA:2,0", "DA:3,5", "end_of_record",
+].join("\n");
+
+// Absolute-path else-if fixture: exercises the normalizeRepoPath else-if (isAbsolute) fallback
+// branch — path is absolute but the simple startsWith(root + "/") check does NOT match because
+// the path has a double-slash prefix ("//workspace/..."). path.relative() normalizes and returns
+// "src/foo.ts" (no ".." prefix), so the adapter MUST apply that relative result. Without the
+// else-if fallback the adapter skips the relative() call and strip only the leading slashes via
+// replace(/^\/+/, ""), producing "workspace/myapp/src/foo.ts" instead of "src/foo.ts".
+const DOUBLE_SLASH_LCOV = [
+  `SF://${REPO_DIR.slice(1)}/src/foo.ts`, "DA:7,1", "DA:8,2", "end_of_record",
 ].join("\n");
 
 const fixtures: Array<{ lcov: string; repoDir?: string }> = [
   { lcov: TWO_BLOCK_LCOV, repoDir: REPO_DIR },
   { lcov: SINGLE_BLOCK_LCOV, repoDir: REPO_DIR },
-  { lcov: ABSOLUTE_PATH_LCOV, repoDir: REPO_DIR }, // parity on absolute SF: path normalization
+  { lcov: ABSOLUTE_PATH_LCOV, repoDir: REPO_DIR },
+  // Pins the else-if (isAbsolute) fallback branch restored in WF-04 + B2-C8-PARITY-FIXTURE-WEAK.
+  // A double-slash absolute path fails startsWith(root+"/") but path.relative() resolves it to
+  // "src/foo.ts". Without the else-if, the adapter produces "workspace/myapp/src/foo.ts" instead.
+  { lcov: DOUBLE_SLASH_LCOV, repoDir: REPO_DIR },
   { lcov: "" },
 ];
 

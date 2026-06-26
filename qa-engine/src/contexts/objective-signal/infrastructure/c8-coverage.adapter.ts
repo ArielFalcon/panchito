@@ -4,6 +4,7 @@
 // by contract (no files → empty report, never a throw). The Istanbul→CoveredLines parse is injected
 // too (defaults to the verified src/qa/change-coverage.ts parseIstanbulJson via Plan-6 composition)
 // — this adapter does not rewrite the parser; it adapts Map<string,Set<number>> to CoveredLines[].
+import { isAbsolute, relative } from "node:path";
 import type { CoverageCollectorPort, CoverageReport } from "../application/ports/index.ts";
 
 export interface IstanbulFile { path: string; json: unknown; }
@@ -38,7 +39,11 @@ function normalizeRepoPath(p: string, repoDir?: string): string {
   let out = p.replace(/\\/g, "/").trim();
   if (repoDir) {
     const root = repoDir.replace(/\\/g, "/").replace(/\/+$/, "");
-    if (out.startsWith(root + "/")) out = out.slice(root.length + 1);
+    if (isAbsolute(out) && out.startsWith(root + "/")) out = out.slice(root.length + 1);
+    else if (isAbsolute(out)) {
+      const rel = relative(repoDir, p).replace(/\\/g, "/");
+      if (rel && !rel.startsWith("..")) out = rel;
+    }
   }
   return out.replace(/^\.\//, "").replace(/^\/+/, "");
 }
