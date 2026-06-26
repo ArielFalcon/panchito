@@ -59,16 +59,26 @@ export function singleProviderConfig(provider: AgentProvider, env: Record<string
   };
 }
 
+// The "other" provider, for dual-mode role separation. Binary today; the provider-registry refactor
+// (provider-agnosticism backlog) generalizes this to "first registered provider != p".
+function complementProvider(p: AgentProvider): AgentProvider {
+  return p === "opencode" ? "codex" : "opencode";
+}
+
 export function configFromEnv(env: Record<string, string | undefined> = process.env): AgentRuntimeConfig {
   const mode = env.AGENT_RUNTIME_MODE === "dual" ? "dual" : "single";
   const singleProvider = env.AGENT_SINGLE_PROVIDER === "codex" ? "codex" : env.AGENT_SINGLE_PROVIDER === "opencode" ? "opencode" : defaultAgentRuntimeConfig(env).singleProvider;
   if (mode === "single") return singleProviderConfig(singleProvider, env);
+  const primaryProvider = providerFromEnv(env.AGENT_PRIMARY_PROVIDER, singleProvider);
   return {
     mode,
     singleProvider,
     assignments: {
-      primary: assignment(providerFromEnv(env.AGENT_PRIMARY_PROVIDER, singleProvider), "primary", env),
-      reviewer: assignment(providerFromEnv(env.AGENT_REVIEWER_PROVIDER, "codex"), "reviewer", env),
+      primary: assignment(primaryProvider, "primary", env),
+      // Dual mode exists for INDEPENDENT judgment, so the reviewer defaults to a DIFFERENT provider
+      // than the primary — not a hardcoded "codex" (which silently collapsed onto the primary when the
+      // primary was already codex, defeating dual mode). Falls back to the primary's complement.
+      reviewer: assignment(providerFromEnv(env.AGENT_REVIEWER_PROVIDER, complementProvider(primaryProvider)), "reviewer", env),
       chat: assignment(providerFromEnv(env.AGENT_CHAT_PROVIDER, singleProvider), "chat", env),
     },
   };

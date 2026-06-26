@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   defaultAgentRuntimeConfig,
+  configFromEnv,
   validateAgentRuntimeConfig,
   publicAgentConfig,
 } from "./config";
@@ -38,6 +39,21 @@ test("dual mode requires both provider keys and at least two visible providers",
   };
   assert.equal(validateAgentRuntimeConfig(cfg, { opencode: true, codex: true }).ok, true);
   assert.match(validateAgentRuntimeConfig(cfg, { opencode: true, codex: false }).errors.join("\n"), /CODEX_API_KEY/);
+});
+
+test("dual mode: reviewer defaults to the primary's COMPLEMENT, not a hardcoded codex (CFG-04)", () => {
+  const keys = { OPENCODE_API_KEY: "ok", CODEX_API_KEY: "ck" };
+  // primary=codex with no explicit reviewer provider → reviewer must be opencode (independent
+  // judgment), NOT codex again (the old hardcoded fallback collapsed both roles onto codex).
+  const codexPrimary = configFromEnv({ ...keys, AGENT_RUNTIME_MODE: "dual", AGENT_SINGLE_PROVIDER: "codex" });
+  assert.equal(codexPrimary.assignments.primary.provider, "codex");
+  assert.equal(codexPrimary.assignments.reviewer.provider, "opencode");
+  // symmetric case still holds: primary=opencode → reviewer defaults to codex
+  const opencodePrimary = configFromEnv({ ...keys, AGENT_RUNTIME_MODE: "dual", AGENT_SINGLE_PROVIDER: "opencode" });
+  assert.equal(opencodePrimary.assignments.reviewer.provider, "codex");
+  // an explicit reviewer provider always wins over the complement default
+  const explicit = configFromEnv({ ...keys, AGENT_RUNTIME_MODE: "dual", AGENT_SINGLE_PROVIDER: "codex", AGENT_REVIEWER_PROVIDER: "codex" });
+  assert.equal(explicit.assignments.reviewer.provider, "codex");
 });
 
 test("dual mode with one provider asks for single-mode downgrade confirmation", () => {
