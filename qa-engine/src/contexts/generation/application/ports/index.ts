@@ -4,7 +4,7 @@
 // DomGroundingPort [SWAP] is e2e-only and degraded to a NullDomGroundingAdapter for code-mode (the
 // use-case ALWAYS receives a port, never undefined — absence handled at the adapter, not in branching).
 // PromptBudgetPort is the GENERATION-side capDiff/capText concern (separate from kernel RedactionPort).
-// Seam-2 (OpencodeRunInput/ReviewInput/ParallelWorkerInput cycle break) is DEFERRED to Plan 5.
+// Seam-2 canonical input types live in generation-ports.ts (OpencodeRunInput/ReviewInput/ParallelWorkerInput).
 
 import type { Objective } from "@kernel/objective.ts";
 import type { QaCase } from "@kernel/qa-case.ts";
@@ -17,7 +17,22 @@ export interface ManifestRepositoryPort {
 
 // Free-form LLM text → structured deliverable/judgment. Fail-closed on an unparseable verdict.
 export interface GeneratorDeliverable { specs: string[]; note?: string; }
-export interface ReviewJudgment { approved: boolean; corrections: string[]; rationale?: string; }
+// ReviewJudgment is the authoritative publish gate. blockingCount distinguishes blocking corrections
+// (must regenerate) from advisory ones (may approve); parsed is FALSE only on a parse miss (no verdict
+// JSON), NOT a real rejection — the caller uses it to re-prompt once instead of burning a fix round.
+// valid + issues are the BOUNDED-REPAIR signal: valid is FALSE when the reviewer JSON failed the typed
+// contract (schema miss, not a real rejection) and issues carries the schema problems — the use-case
+// (B.3) fires ONE repairInstruction("reviewer", issues) re-prompt before giving up (opencode-client.ts:979-983).
+// All four are carried from the legacy ReviewerVerdict so the wrap drops no behavior.
+export interface ReviewJudgment {
+  approved: boolean;
+  corrections: string[];
+  rationale?: string;
+  blockingCount?: number;
+  parsed?: boolean;
+  valid?: boolean;     // reviewer JSON satisfied the typed contract (FALSE => one bounded repair, not rejection)
+  issues?: string[];   // schema problems, fed verbatim to repairInstruction("reviewer", issues)
+}
 export interface VerdictParserPort {
   parseGenerator(text: string): GeneratorDeliverable;
   parseReview(text: string): ReviewJudgment;
