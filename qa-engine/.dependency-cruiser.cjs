@@ -1,16 +1,17 @@
 // qa-engine/.dependency-cruiser.cjs
-// Structural security invariant (§8 R4): generation/* and agent-runtime/* are the agent-facing
-// contexts; the agent is READ-ONLY on watched repos, so neither may reach the write seam. This rule
-// forbids any module under those two contexts from importing ANYTHING from workspace-and-publication
-// (barrel, port, or adapter) — catching VcsWritePort regardless of how it is re-exported.
+// Structural security invariant (§8 R4): the agent is READ-ONLY on watched repos; only the
+// workspace-and-publication context may import the VCS write seam. The rule is inverted: deny the
+// VcsWritePort import from EVERY context path that is NOT workspace-and-publication. This is broader
+// than the prior generation|agent-runtime allowlist — it covers any new context added in future plans
+// without requiring a whitelist update.
 // Known limitation: dependency-cruiser may miss dynamic import() — flagged for manual audit.
 module.exports = {
   forbidden: [
     {
       name: "no-vcs-write-in-agent-contexts",
       severity: "error",
-      comment: "generation/* and agent-runtime/* must never import from workspace-and-publication (agent-is-read-only). Matches barrel, ports, and any future adapter — not just the specific write adapter filename.",
-      from: { path: "qa-engine/src/contexts/(generation|agent-runtime)/" },
+      comment: "Only workspace-and-publication may import the VCS write seam. All other contexts/* paths are denied — this rule is inverted so new contexts are secure by default without a whitelist update.",
+      from: { path: "qa-engine/src/contexts/(?!workspace-and-publication)" },
       to: { path: "contexts/workspace-and-publication" },
     },
   ],

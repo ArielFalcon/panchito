@@ -18,7 +18,7 @@ export interface LearningRule {
   trigger: string;
   action: string;
   errorClass: ErrorClass;
-  archetype: string | null;
+  archetype?: string | null; // optional to align with legacy src/qa/learning/learning-rule.ts (archetype?: string | null)
   status: RuleStatus;
   confidence: "low" | "medium" | "high";
   usageCount: number;

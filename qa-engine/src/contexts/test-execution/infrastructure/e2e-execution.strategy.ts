@@ -4,6 +4,13 @@
 // then runs it through AdjudicateService so the runner-infra reclassification is centralized.
 // The runE2E fn is injected so this adapter is testable without Playwright.
 //
+// Defense-in-depth note: AdjudicateService is applied here on top of runE2E, which already
+// performs the same reclassification internally (allFailuresAreRunnerInfra in execute.ts).
+// The double-pass is intentional and idempotent — adjudicate(adjudicate(verdict)) == adjudicate(verdict)
+// because infra-error is a terminal verdict that the service returns unchanged. This ensures the
+// typed boundary always carries a correctly-classified verdict regardless of whether the injected
+// runE2E stub (in tests) or the real runner performed the internal reclassification.
+//
 // Plan-6 composition wiring: pass (specDir, opts) => runE2E(specDir, opts, defaultExecuteDeps).
 import type {
   ExecutionStrategyPort,
