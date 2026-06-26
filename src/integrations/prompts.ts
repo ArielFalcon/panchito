@@ -16,7 +16,10 @@ import { join } from "node:path";
 import { sanitizeText, capText } from "../orchestrator/sanitizer";
 import type { ArchitectureContext } from "../qa/context";
 import type { CommitIntent } from "../qa/commit-classify";
-import type { OpencodeRunInput, ParallelWorkerInput, ReviewInput } from "./opencode-client";
+// Seam-2 break: these input contracts are canonical in the qa-engine generation context. Re-rooting
+// this type-only import off ./opencode-client dissolves the opencode-client ⇄ prompts cycle (the
+// generation-ports parity test keeps the legacy opencode-client copies structurally in sync).
+import type { OpencodeRunInput, ParallelWorkerInput, ReviewInput } from "@contexts/generation/application/ports/generation-ports.ts";
 import { renderExplorationBrief } from "../qa/exploration-brief";
 import { assemble, section, type AssembledPrompt } from "./context-assembler";
 import { roleWindowBytes } from "./model-window-catalog";
