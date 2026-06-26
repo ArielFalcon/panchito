@@ -13,6 +13,14 @@ import type { QaCase } from "@kernel/qa-case.ts";
 export type { DeployGatePort } from "@kernel/ports/deploy-gate.port.ts";
 
 export interface CheckResult { ok: boolean; output: string; infra?: boolean; } // infra optional: mirrors src/qa/validate.ts CheckResult (infra?: boolean)
+
+// ValidationResult mirrors src/qa/validate.ts ValidationResult. Re-exported here so that
+// consumers of the port (Plan-6 orchestration layer) import from the port, not from src/.
+export interface ValidationResult {
+  ok: boolean;
+  errors: string[]; // one error per failed check, with its output (for the agent)
+  infra: boolean;   // ALL failures are infrastructure (missing tools, OOM) — not code quality
+}
 export interface ExecutionRequest {
   specDir: string;
   baseUrl?: string;        // absent for code target
@@ -36,9 +44,13 @@ export interface ExecutionStrategyPort {
   run(req: ExecutionRequest): Promise<ExecutionResult>;
 }
 // Static gate (tsc/eslint-playwright/playwright --list/manifest) — lifted from ValidateDeps.
+// validateAll runs the FULL gate (all 4 checks + the zero-assertion guard) in one call, matching
+// the behavior of the legacy validateSpecs. Consumers that call validateAll cannot silently skip
+// the zero-assertion guard (WF-02). The 4 granular methods remain for fine-grained injection.
 export interface StaticGatePort {
   typecheck(specDir: string): Promise<CheckResult>;
   lint(specDir: string): Promise<CheckResult>;
   listTests(specDir: string): Promise<CheckResult>;
   checkManifest(specDir: string): Promise<CheckResult>;
+  validateAll(specDir: string): Promise<ValidationResult>;
 }
