@@ -38,6 +38,7 @@
     "test/contexts/objective-signal/infrastructure/lcov-coverage-parity.test.ts",
     "test/contexts/objective-signal/infrastructure/c8-coverage-parity.test.ts",
     "test/contexts/objective-signal/infrastructure/jacoco-coverage-parity.test.ts",
-    "test/contexts/objective-signal/infrastructure/v8-browser-coverage-parity.test.ts"
+    "test/contexts/objective-signal/infrastructure/v8-browser-coverage-parity.test.ts",
+    "test/contexts/workspace-and-publication/domain/write-confinement-parity.test.ts"
   ]
 }
