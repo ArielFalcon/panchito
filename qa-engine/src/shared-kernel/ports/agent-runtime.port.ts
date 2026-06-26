@@ -15,10 +15,26 @@ export interface AgentOpenDescriptor {
   objective?: string;
 }
 
-// AgentTurnEvent telemetry fields are ADDED by Task A.2 (it edits THIS file).
-export interface AgentTurnEvent { runId: string; role: AgentRole; objective?: string; }
+// AgentTurnEvent gains the per-turn telemetry fields the legacy funnel records (round/isRepair distinguish
+// generation rounds from contract-repair re-prompts; sectionSizes is the ContextAssembler byte map, null
+// for non-assembled prompts). runId is nullable (mirrors the legacy funnel: null for runs without a run
+// context). The TurnTelemetrySink (already defined) records these — no new port needed.
+export interface AgentTurnEvent {
+  runId: string | null;
+  role: AgentRole;
+  objective?: string;
+  round: number;
+  isRepair: boolean;
+  sectionSizes: Record<string, number> | null;
+}
+
 export interface AgentSession {
-  prompt(text: string): Promise<{ output: string }>;
+  // Widened to carry the per-call telemetry/repair opts the legacy session exposes. The opts are
+  // forwarded verbatim to the wrapped session so no capability is dropped at the port boundary.
+  prompt(
+    text: string,
+    opts?: { textOnly?: boolean; round?: number; isRepair?: boolean; sectionSizes?: Record<string, number> | null },
+  ): Promise<{ output: string }>;
   dispose(): Promise<void> | void;
 }
 export interface OpenSessionOpts {
