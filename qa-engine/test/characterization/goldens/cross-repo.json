@@ -12,14 +12,6 @@
     "reviewerCorrections": [],
     "flaky": false,
     "retries": 0,
-    "phaseTimings": {
-      "pack": 1,
-      "generator": 0,
-      "validate": 0,
-      "feedback-execute": 0,
-      "execute": 0,
-      "oracle": 0
-    },
     "preExecAmbiguityCatches": 0,
     "deterministicSelectorBlocks": 0
   },

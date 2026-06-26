@@ -26,9 +26,16 @@ const KEYS: ScenarioKey[] = [
   "context",
 ];
 
+// Strip per-invocation, non-behavioral fields so the committed golden is deterministic and
+// re-capture is idempotent. `runId`/`at` are unique per run; `gateSignals.phaseTimings` are
+// wall-clock durations (ms) and `gateSignals.usage` are token/cost counters — both vary by
+// run and machine. The equivalence comparator already excludes all of these from its behavioral
+// projection; dropping them here keeps the golden free of spurious diffs that masquerade as
+// behavior changes (a 1ms→0ms timing jitter once looked like a real change).
 function sanitize(o: RunOutcome): Record<string, unknown> {
   const { runId: _r, at: _a, ...rest } = o;
-  return rest;
+  const { phaseTimings: _pt, usage: _u, ...stableSignals } = rest.gateSignals;
+  return { ...rest, gateSignals: stableSignals };
 }
 
 // context mode does NOT call persistOutcome (it returns early as a maintenance task). Synthesize the

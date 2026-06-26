@@ -13,11 +13,6 @@
     "reviewerApproved": true,
     "flaky": false,
     "retries": 0,
-    "phaseTimings": {
-      "pack": 0,
-      "generator": 0,
-      "validate": 0
-    },
     "preExecAmbiguityCatches": 0,
     "deterministicSelectorBlocks": 0
   },

@@ -13,11 +13,6 @@
     "reviewerApproved": true,
     "flaky": false,
     "retries": 0,
-    "phaseTimings": {
-      "generator": 0,
-      "execute": 0,
-      "oracle": 0
-    },
     "preExecAmbiguityCatches": 0,
     "deterministicSelectorBlocks": 0
   },
