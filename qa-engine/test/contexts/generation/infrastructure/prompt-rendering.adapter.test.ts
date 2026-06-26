@@ -10,6 +10,7 @@ import type { ParallelWorkerInput, ReviewInput, OpencodeRunInput } from "@contex
 // below can assert the real output rather than an invented "e2e/" string.
 function makeBuilders(overrides: Partial<PromptBuilders>): PromptBuilders {
   return {
+    buildPromptAssembled: (_i: OpencodeRunInput) => ({ text: "", sectionSizes: {} }),
     buildWorkerPromptAssembled: (_w: ParallelWorkerInput) => ({ text: "", sectionSizes: {} }),
     buildReviewerPromptAssembled: (_i: ReviewInput) => ({ text: "", sectionSizes: {} }),
     buildExplorerPrompt: (_i: OpencodeRunInput) => "",

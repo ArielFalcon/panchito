@@ -50,12 +50,16 @@ export interface VerdictParserPort {
 
 export interface PromptSection { heading: string; body: string; }
 // PromptRenderingPort exposes both the section-based generic seam (render) AND the concrete builder
-// forwards the adapter implements (renderWorker/renderReviewer/renderExplorer/specFileForFlow).
-// Phase B codes against this port, not the concrete PromptRenderingAdapter, so all four methods
+// forwards the adapter implements (renderMain/renderWorker/renderReviewer/renderExplorer/specFileForFlow).
+// Phase B codes against this port, not the concrete PromptRenderingAdapter, so all methods
 // must appear here to avoid forcing Phase B onto the concrete type.
 // OpencodeRunInput/ReviewInput/ParallelWorkerInput imported at the top of this file (Seam-2).
 export interface PromptRenderingPort {
   render(sections: readonly PromptSection[]): string;
+  // Main single-agent generation prompt (wraps buildPromptAssembled). Used by GenerateTestsUseCase
+  // for the primary generator session (runOpencode path). The assembled result carries sectionSizes
+  // for per-turn telemetry, mirroring the legacy buildPromptAssembled call in runOpencode:724.
+  renderMain(input: OpencodeRunInput): { text: string; sectionSizes: Record<string, number> };
   renderWorker(w: ParallelWorkerInput): { text: string; sectionSizes: Record<string, number> };
   renderReviewer(input: ReviewInput): { text: string; sectionSizes: Record<string, number> };
   renderExplorer(input: OpencodeRunInput): string;
