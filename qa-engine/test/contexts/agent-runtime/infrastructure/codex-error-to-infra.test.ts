@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { codexErrorToInfra } from "@contexts/agent-runtime/domain/codex-error-to-infra.ts";
+import { codexErrorToInfra } from "@contexts/agent-runtime/infrastructure/codex-error-to-infra.ts";
 
 test("classifies a timeout error as infra (AgentUnavailableError)", () => {
   const r = codexErrorToInfra(new Error("Codex prompt timed out after 30000ms"));

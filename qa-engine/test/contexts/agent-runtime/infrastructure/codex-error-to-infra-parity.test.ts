@@ -2,7 +2,7 @@
 // legacy original. Imports from src/ — excluded from qa-engine typecheck; runs via tsx.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { codexErrorToInfra } from "@contexts/agent-runtime/domain/codex-error-to-infra.ts";
+import { codexErrorToInfra } from "@contexts/agent-runtime/infrastructure/codex-error-to-infra.ts";
 import { codexErrorToInfra as legacy } from "../../../../../src/agent-runtime/codex-strategy.ts";
 
 test("PARITY: classification matches legacy across a sample error table", () => {
