@@ -62,3 +62,13 @@ export interface ConfigPort {
   validate(cfg: AgentRuntimeConfigView, keys: Record<string, boolean>): AgentConfigValidationView;
   publicView(cfg: AgentRuntimeConfigView): AgentRuntimeConfigView; // redacted (no secrets)
 }
+
+// The mode-aware (single/dual) facade seam. Wraps SingleAgentFacade/DualAgentFacade — getStatus reports
+// one provider (single) or both (dual); startEventStream multiplexes the dual streams. The adapter
+// delegates to whichever legacy facade it was constructed with; it never collapses dual into single.
+export interface AgentFacadePort {
+  getStatus(): Promise<{ mode: "single" | "dual"; providers: AgentProviderHealth[] }>;
+  listModels(provider?: AgentProvider): Promise<AgentModelInfo[]>;
+  startEventStream?(onActivity: (a: unknown) => void, signal?: AbortSignal,
+    onRunEvent?: (runId: string, body: unknown) => void): Promise<void>;
+}
