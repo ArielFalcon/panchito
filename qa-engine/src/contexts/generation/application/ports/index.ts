@@ -7,7 +7,7 @@
 // Seam-2 canonical input types live in generation-ports.ts (OpencodeRunInput/ReviewInput/ParallelWorkerInput).
 
 import type { Objective } from "@kernel/objective.ts";
-import type { QaCase } from "@kernel/qa-case.ts";
+import type { QaCase, SpecMeta } from "@kernel/qa-case.ts";
 
 export interface ManifestEntry { id: string; file: string; flow: string; objective: string; }
 export interface ManifestRepositoryPort {
@@ -16,7 +16,12 @@ export interface ManifestRepositoryPort {
 }
 
 // Free-form LLM text → structured deliverable/judgment. Fail-closed on an unparseable verdict.
-export interface GeneratorDeliverable { specs: string[]; note?: string; }
+// parsed is FALSE only on a parse miss (no verdict JSON emitted), NOT a deliberate no-op — the Phase-B
+// use-case branches on !parsed (opencode-client.ts:748) to distinguish a parse miss from a real rejection
+// (the #1 fail-closed invariant). specMetas carries the agent's per-spec metadata that drives the
+// deterministic, disk-reconciled manifest upsert ("disk over the agent's word", opencode-client.ts:764).
+// Both are carried from the legacy parseVerdict so the wrap drops no behavior.
+export interface GeneratorDeliverable { specs: string[]; note?: string; parsed?: boolean; specMetas?: SpecMeta[]; }
 // ReviewJudgment is the authoritative publish gate. blockingCount distinguishes blocking corrections
 // (must regenerate) from advisory ones (may approve); parsed is FALSE only on a parse miss (no verdict
 // JSON), NOT a real rejection — the caller uses it to re-prompt once instead of burning a fix round.
