@@ -6,14 +6,14 @@
 // independent circuit-breaker (an OpenCode outage must never trip this one). Do not add shared global state.
 import type { AgentRuntimeStrategy, AgentSession, OpenSessionOpts, RoleAssignmentResolver,
   AgentProviderHealth, AgentModelInfo, UsageSnapshot, AgentTurnEvent, AgentOpenDescriptor } from "../application/ports/index.ts";
-import type { AgentRole } from "@kernel/agent-role.ts";
+import type { AgentRole, AgentProvider } from "@kernel/agent-role.ts";
 
 // Structural shape of the legacy strategy (no src/ import at runtime — only the optional parity test may).
 // The open() callback param types match the REAL src/agent-runtime/types.ts AgentRuntimeStrategy.openSession
 // signature (onUsage: UsageSnapshot, onTurn: AgentTurnEvent): the port forwards those richer callbacks here,
 // so the seam must accept them (an `unknown` param would be contravariant-incompatible under strict mode).
 interface LegacyStrategy {
-  provider: "opencode" | "codex";
+  provider: AgentProvider;
   open(agent: string, cwd: string, opts?: { signal?: AbortSignal; timeoutMs?: number; model?: string;
     onUsage?: (u: UsageSnapshot) => void; onTurn?: (t: AgentTurnEvent) => void; descriptor?: AgentOpenDescriptor }): Promise<LegacySession>;
   health(): Promise<AgentProviderHealth>;
