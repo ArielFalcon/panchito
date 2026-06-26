@@ -31,7 +31,7 @@ export async function analyzeChange(ctx: ExtractionContext, extractors: Extracto
 
   const run = async <T>(
     name: string,
-    port: { extract(c: ExtractionContext): Promise<Result<T, { extractor: string; reason: string }>> } | undefined,
+    port: { extract(c: ExtractionContext): Promise<Result<T, ExtractorSkipped>> } | undefined,
     extractCtx: ExtractionContext,
     assign: (v: T) => void,
   ): Promise<void> => {
@@ -39,7 +39,7 @@ export async function analyzeChange(ctx: ExtractionContext, extractors: Extracto
     try {
       const r = await port.extract(extractCtx);
       if (isOk(r)) assign(r.value);
-      else sig.skipped.push(r.error as ExtractorSkipped);
+      else sig.skipped.push(r.error);
     } catch (e) {
       sig.skipped.push({ extractor: name, reason: e instanceof Error ? e.message : String(e) });
     }

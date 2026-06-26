@@ -6,13 +6,20 @@
 // code). The scope is NOT read from parentheses: it is derived from the changed
 // files (the message gives intent, the files give the "where").
 //
-// Ported verbatim in behavior from src/qa/commit-classify.ts. The ONLY change:
-// the inlined parseChangedFiles(diff) is replaced by the shared DiffParserService
-// so the context consumes ONE canonical diff parser instead of a private duplicate.
-// The genuinelyAddedLogic/genuinelyAddedConfig walkers stay private: they parse
-// +++/---/+/- with content-relocation subtraction — that is classify-specific logic,
-// NOT generic diff parsing, so it does NOT move to DiffParserService.
+// Ported verbatim in behavior from src/qa/commit-classify.ts. The ONLY change from
+// the original: the inlined parseChangedFiles(diff) is now a module-scope pure function
+// that delegates to the shared DiffParserService logic (no class instantiation at module
+// load — the domain stays DI-clean). The genuinelyAddedLogic/genuinelyAddedConfig walkers
+// stay private: they parse +++/---/+/- with content-relocation subtraction — that is
+// classify-specific logic, NOT generic diff parsing, so it does NOT move to DiffParserService.
 import { DiffParserService } from "@kernel/diff-parser/diff-parser.service.ts";
+
+// Pure module-scope helper — creates a DiffParserService per-call (stateless, zero cost).
+// Restores the legacy self-contained shape: no module-level class instance couples domain
+// load to the kernel at import time.
+function changedFilesFromDiff(diff: string): string[] {
+  return new DiffParserService().changedFiles(diff);
+}
 
 export type CommitType =
   | "feat" | "fix" | "perf" | "refactor" | "chore"
@@ -52,15 +59,13 @@ const DEFAULT_ACTION: Record<CommitType, CommitAction> = {
   unknown: "generate", // no recognizable convention: when in doubt, test
 };
 
-const diffParser = new DiffParserService();
-
 export function classifyCommit(message: string, diff: string): CommitClassification {
   const { type, breaking } = parseHeader(message);
   const firstLine = (message.split("\n")[0] ?? "").trim();
   // The body (paragraphs after the subject) is the richest human statement of intent — what changed
   // and WHY. The subject alone is often too terse to derive a concrete test objective from.
   const body = message.split("\n").slice(1).join("\n").trim();
-  const changedFiles = diffParser.changedFiles(diff); // was the inlined parseChangedFiles
+  const changedFiles = changedFilesFromDiff(diff); // was the inlined parseChangedFiles
   // Behavior can change in code (logic keywords) OR in config-as-code that the source-extension
   // logic check is blind to — a Spring application.yml/.properties setting under a chore/build
   // message changes runtime behavior yet would otherwise be classified skip and go untested.

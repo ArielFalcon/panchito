@@ -58,7 +58,7 @@ function rowToRule(row: LearningRow): LearningRule {
     errorClass: row.error_class as ErrorClass,
     archetype: row.archetype ?? null,
     status: coerceStatus(row.status),
-    confidence: (row.confidence === "low" || row.confidence === "high") ? row.confidence : "medium",
+    confidence: row.confidence === "low" ? "low" : row.confidence === "high" ? "high" : "medium",
     usageCount: row.usage_count,
     outcomeCount: row.outcome_count ?? 0,
     successRate: row.success_rate,

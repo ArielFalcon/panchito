@@ -10,8 +10,10 @@ import type { CoverageCollectorPort, CoverageReport } from "../application/ports
 // consistent with the keystone invariant: coverage unknown never blocks publish.
 const COLLECTOR_TIMEOUT_MS = 30_000;
 
-// Wraps a single collector call with a bounded AbortSignal timeout so a stuck collector degrades
+// Wraps a single collector call with a bounded setTimeout race so a stuck collector degrades
 // gracefully to an empty report rather than hanging Promise.all (which would freeze the queue).
+// Note: a future improvement could thread an AbortSignal into collector.collect() for cooperative
+// cancellation; the current implementation is a one-shot race with no cooperative cleanup.
 async function collectWithTimeout(
   collector: CoverageCollectorPort,
   specDir: string,

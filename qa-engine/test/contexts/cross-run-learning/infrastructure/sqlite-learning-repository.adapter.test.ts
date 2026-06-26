@@ -27,6 +27,19 @@ test("topRules ranks via RuleGovernanceService — active before the coerced can
   assert.deepEqual(top.map((r) => r.trigger), ["t2", "t1"]); // active(0.5) before candidate(0.9)
 });
 
+test("rowToRule maps confidence exhaustively: low/medium/high pass through, unknown falls back to medium", async () => {
+  // CRL-05: the exhaustive ternary must treat 'medium' as a first-class match (not a catch-all).
+  // A 'medium' row passes through as-is; an unknown value also maps to 'medium' (safe fallback).
+  const mediumRow = { id: "r4", trigger_text: "t4", action_text: "a4", error_class: "E-W", archetype: null, status: "active", confidence: "medium", usage_count: 0, outcome_count: 0, success_rate: null, last_verified: null, source: "oracle", at: "2026-01-04T00:00:00.000Z" };
+  const unknownRow = { id: "r5", trigger_text: "t5", action_text: "a5", error_class: "E-V", archetype: null, status: "active", confidence: "very-high", usage_count: 0, outcome_count: 0, success_rate: null, last_verified: null, source: "oracle", at: "2026-01-05T00:00:00.000Z" };
+  const repo = new SqliteLearningRepository({ selectRules: () => [mediumRow, unknownRow], upsert: () => {}, recordOutcome: () => {} });
+  const top = await repo.topRules(Sha.of("abcdef1"), 10);
+  const t4 = top.find((r) => r.trigger === "t4");
+  const t5 = top.find((r) => r.trigger === "t5");
+  assert.equal(t4?.confidence, "medium", "'medium' row confidence must be 'medium' (first-class match)");
+  assert.equal(t5?.confidence, "medium", "unknown confidence value must fall back to 'medium'");
+});
+
 test("save delegates to the injected upsert (no SQLite in the test)", async () => {
   const calls: string[] = [];
   const repo = new SqliteLearningRepository({ selectRules: () => [], upsert: (r) => calls.push(r.trigger), recordOutcome: () => {} });
