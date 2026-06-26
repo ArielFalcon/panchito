@@ -414,9 +414,13 @@ Lift the three remaining pure decision cores. `SelectorCheckService` wraps the u
 **currently-edited** `src/qa/selector-check.ts` — re-read its HEAD shape (Task 0) before copying.
 `ProgressGateService` and `NavGateService` are small pure gates referenced by the fix-loop.
 
-> If `src/qa/selector-check.ts` exports a single pure `checkSelectors`-style function, the service
-> is a thin class around a copied body + a parity test vs the legacy export. If its shape changed
-> under the user's WIP, copy the CURRENT shape — the parity test is the guard.
+> RE-VERIFIED vs HEAD (2026-06-26): the user's "selector-fragility hardening" audit added a SECOND
+> public export, `unscopedMultipleContradictions(specSources, trees, treeLabel?) → string[]` — the
+> per-selector page-rooted MULTIPLE filter that `pipeline.ts:1821` calls via `ambiguousSelectorsNow`
+> — plus the helpers `PAGE_ROOT_BEFORE_RE`, `isPageRootedAt`, `extractProposedSelectorsWithIndex`, and
+> an `ARIA_STATE_STRIP_RE` allowlist now applied inside `parseLine`. A copy of only `checkSpecSelectors`
+> would DROP these and REGRESS the hardening. The service MUST expose BOTH public functions, the copy
+> MUST be of the CURRENT HEAD body, and the parity test (binding to both exports) is the guard.
 
 **Files:** `src/contexts/test-execution/domain/selector-check.service.ts`,
 `src/contexts/test-execution/domain/progress-gate.service.ts`,
@@ -494,14 +498,26 @@ Lift the three remaining pure decision cores. `SelectorCheckService` wraps the u
     ): SpecSelectorFindings {
       return checkSpecSelectors(specSources, trees, treeLabel);
     }
+
+    // Pre-execution MULTIPLE-ambiguity filter, page-rooted selectors only (the per-selector scope
+    // suppression the user's audit added). pipeline.ts (ambiguousSelectorsNow) calls this with the
+    // "pre-write" tree label; Plan 6 wiring needs the same seam, so the service exposes it too.
+    unscopedMultiple(
+      specSources: string[],
+      trees: string[][],
+      treeLabel = "pre-write",
+    ): string[] {
+      return unscopedMultipleContradictions(specSources, trees, treeLabel);
+    }
   }
   ```
-  > The `checkSpecSelectors` body is copied verbatim (including all helpers: `parseLine`,
-  > `roleMatches`, `nameMatches`, `extractProposedSelectors`, `hasNonExtractableLocator`,
-  > `selectorPresent`, `selectorUnique`, `selectorKey`, `extractNameOpts`,
-  > `STRUCTURAL_PRESENT_MARKER`, `ARIA_STATE_STRIP_RE`, `TEXT_KIND_ROLES`, `LABEL_KIND_ROLES`,
-  > `NON_EXTRACTABLE_LOCATOR_RE`, `stripCommentsAndJoin`, `normalizeName`). The parity test pins
-  > the copy to the legacy export.
+  > Both public functions (`checkSpecSelectors` AND `unscopedMultipleContradictions`) are copied
+  > verbatim from the CURRENT HEAD, including every helper: `parseLine` (with its `ARIA_STATE_STRIP_RE`
+  > strip), `roleMatches`, `nameMatches`, `extractProposedSelectors`, `extractProposedSelectorsWithIndex`,
+  > `hasNonExtractableLocator`, `selectorPresent`, `selectorUnique`, `selectorKey`, `extractNameOpts`,
+  > `isPageRootedAt`, and the constants `STRUCTURAL_PRESENT_MARKER`, `ARIA_STATE_STRIP_RE`,
+  > `TEXT_KIND_ROLES`, `LABEL_KIND_ROLES`, `NON_EXTRACTABLE_LOCATOR_RE`, `PAGE_ROOT_BEFORE_RE`,
+  > `stripCommentsAndJoin`, `normalizeName`. The parity test (both exports) pins the copy to HEAD.
 - [ ] Run it, see it pass.
 - [ ] Write the parity test — call BOTH the service and the legacy `checkSpecSelectors` on a shared
   fixture table and `deepEqual` the results:
@@ -511,7 +527,7 @@ Lift the three remaining pure decision cores. `SelectorCheckService` wraps the u
   import { test } from "node:test";
   import assert from "node:assert/strict";
   import { SelectorCheckService } from "@contexts/test-execution/domain/selector-check.service.ts";
-  import { checkSpecSelectors } from "../../../../../src/qa/selector-check.ts";
+  import { checkSpecSelectors, unscopedMultipleContradictions } from "../../../../../src/qa/selector-check.ts";
 
   const svc = new SelectorCheckService();
   const DOM_TREE = ["button: Submit", "button: Buy now", "textbox: Email"];
@@ -521,6 +537,12 @@ Lift the three remaining pure decision cores. `SelectorCheckService` wraps the u
     { srcs: [`page.getByTestId("id")`], trees: [DOM_TREE] },
     { srcs: [], trees: [DOM_TREE] },
     { srcs: [`page.getByRole("button").click()`], trees: [["button: A", "button: B"]] },
+    // ARIA-state-suffix: parseLine must strip the [disabled] token so role/name still match — pins the
+    // user's ARIA_STATE_STRIP_RE behavior (a stale copy would treat the suffix as part of the name).
+    { srcs: [`page.getByRole("button", { name: "Submit" }).click()`], trees: [["button: Submit [disabled]"]] },
+    // page-rooted MULTIPLE next to a non-extractable locator: exercises unscopedMultipleContradictions'
+    // suppression path (anyNonExtractable=true ⇒ only the page-rooted MULTIPLE survives).
+    { srcs: [`page.getByRole("button").click(); page.getByTestId("x").click()`], trees: [["button: A", "button: B"]] },
   ];
 
   test("PARITY: SelectorCheckService.check matches checkSpecSelectors across the fixture table", () => {
@@ -531,6 +553,16 @@ Lift the three remaining pure decision cores. `SelectorCheckService` wraps the u
       assert.deepEqual(
         { ...svcResult, absentKeys: [...svcResult.absentKeys].sort() },
         { ...legacy, absentKeys: [...legacy.absentKeys].sort() },
+        JSON.stringify({ srcs, treeLen: trees[0]?.length }),
+      );
+    }
+  });
+
+  test("PARITY: SelectorCheckService.unscopedMultiple matches unscopedMultipleContradictions", () => {
+    for (const { srcs, trees } of fixtures) {
+      assert.deepEqual(
+        svc.unscopedMultiple(srcs, trees, "pre-write"),
+        unscopedMultipleContradictions(srcs, trees, "pre-write"),
         JSON.stringify({ srcs, treeLen: trees[0]?.length }),
       );
     }
@@ -798,6 +830,13 @@ Implements `ExecutionStrategyPort` for the code target by delegating to `runCode
 Implements the four-method static gate (typecheck/lint/listTests/checkManifest) by delegating to
 the legacy validate functions. Inject each as a fn so no `tsc`/eslint/playwright spawn happens in
 the test.
+
+> RE-VERIFIED vs HEAD (2026-06-26): the user's audit added a FIFTH check inside `validateSpecs` —
+> `checkZeroAssertionSpecs` (the zero-assertion gate scoped to `flows/`). It is NOT one of the four
+> injected `ValidateDeps` methods; it is a hardcoded internal call. The WRAP inherits it for free
+> (Plan-6 composition wires the real `defaultValidateDeps`/`validateSpecs`), so NO adapter code
+> changes — but the gate is now five checks (four injected + one hardcoded), not four. The adapter
+> test below stays as written: it exercises only the four delegating methods, which never touch the FS.
 
 **Files:** `src/contexts/test-execution/infrastructure/static-gate.adapter.ts`,
 `test/contexts/test-execution/infrastructure/static-gate.adapter.test.ts`
