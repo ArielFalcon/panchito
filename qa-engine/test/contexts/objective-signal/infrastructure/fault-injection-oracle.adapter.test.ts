@@ -24,6 +24,26 @@ test("delegates to runFaultInjectionOracle with e2eDir + baseUrl + namespace fro
   assert.equal(typeof r.details, "string", "details field must be present — ValueOracleResult has 4 fields");
 });
 
+test("threads baselineCases (4th measure arg) into the runner input when present", async () => {
+  let seenBaseline: string[] | undefined = ["sentinel"]; // sentinel ≠ what we expect
+  const adapter = new FaultInjectionOracleAdapter(async (input) => {
+    seenBaseline = input.baselineCases;
+    return { valueScore: 0.5, mutantCount: 2, killedCount: 1, details: "1/2" };
+  }, BASE_URL);
+  await adapter.measure(br, "/m/repo", "qa-bot-abc", ["login.spec.ts", "checkout.spec.ts"]);
+  assert.deepEqual(seenBaseline, ["login.spec.ts", "checkout.spec.ts"]);
+});
+
+test("omits baselineCases from the runner input when measure is called without it (3-arg call)", async () => {
+  let hadBaselineKey = true;
+  const adapter = new FaultInjectionOracleAdapter(async (input) => {
+    hadBaselineKey = "baselineCases" in input;
+    return { valueScore: null, mutantCount: 0, killedCount: 0, details: "no baseline" };
+  }, BASE_URL);
+  await adapter.measure(br, "/m/repo", "qa-bot-abc");
+  assert.equal(hadBaselineKey, false, "no baselineCases key when measure is called without baseline specs");
+});
+
 test("when the runner returns null (no JSON intercepted), returns valueScore:null with a details string (never gates)", async () => {
   const adapter = new FaultInjectionOracleAdapter(async () => null, BASE_URL);
   const r = await adapter.measure(br, "/m/repo", "qa-bot-abc");

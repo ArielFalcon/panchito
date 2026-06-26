@@ -22,7 +22,9 @@ type RunMutation = (input: OracleInputLike) => Promise<ValueOracleResult>;
 export class StrykerMutationOracleAdapter implements ValueOraclePort {
   constructor(private readonly runMutation: RunMutation) {}
 
-  async measure(br: BlastRadius, repoDir: string, namespace: string): Promise<ValueOracleResult> {
+  // The 4th param (baselineCases) is part of the ValueOraclePort contract for the e2e oracle only;
+  // mutation testing scopes by changedFiles, not by green-run spec names, so this adapter ignores it.
+  async measure(br: BlastRadius, repoDir: string, namespace: string, _baselineCases?: string[]): Promise<ValueOracleResult> {
     return this.runMutation({
       target: "code",
       repoDir,
