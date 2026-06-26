@@ -8,6 +8,9 @@
 
 import type { Objective } from "@kernel/objective.ts";
 import type { QaCase, SpecMeta } from "@kernel/qa-case.ts";
+// Seam-2 canonical input types and supporting authoring-context types from generation-ports.ts.
+// Imported here for use in PromptRenderingPort (GEN-06) and PlanObjectiveView (WRAP-3).
+import type { OpencodeRunInput, ReviewInput, ParallelWorkerInput, ExplorationBrief } from "./generation-ports.ts";
 
 export interface ManifestEntry { id: string; file: string; flow: string; objective: string; }
 export interface ManifestRepositoryPort {
@@ -29,14 +32,16 @@ export interface GeneratorDeliverable { specs: string[]; note?: string; parsed?:
 // contract (schema miss, not a real rejection) and issues carries the schema problems — the use-case
 // (B.3) fires ONE repairInstruction("reviewer", issues) re-prompt before giving up (opencode-client.ts:979-983).
 // All four are carried from the legacy ReviewerVerdict so the wrap drops no behavior.
+// valid + issues are REQUIRED (not optional) to match the legacy ReviewerVerdict (verdict-validate.ts:73-75)
+// which always populates both — the adapter's LegacyReviewer shape declares them required for the same reason.
 export interface ReviewJudgment {
   approved: boolean;
   corrections: string[];
   rationale?: string;
   blockingCount?: number;
   parsed?: boolean;
-  valid?: boolean;     // reviewer JSON satisfied the typed contract (FALSE => one bounded repair, not rejection)
-  issues?: string[];   // schema problems, fed verbatim to repairInstruction("reviewer", issues)
+  valid: boolean;      // reviewer JSON satisfied the typed contract (FALSE => one bounded repair, not rejection)
+  issues: string[];    // schema problems, fed verbatim to repairInstruction("reviewer", issues); empty when valid
 }
 export interface VerdictParserPort {
   parseGenerator(text: string): GeneratorDeliverable;
@@ -44,8 +49,17 @@ export interface VerdictParserPort {
 }
 
 export interface PromptSection { heading: string; body: string; }
+// PromptRenderingPort exposes both the section-based generic seam (render) AND the concrete builder
+// forwards the adapter implements (renderWorker/renderReviewer/renderExplorer/specFileForFlow).
+// Phase B codes against this port, not the concrete PromptRenderingAdapter, so all four methods
+// must appear here to avoid forcing Phase B onto the concrete type.
+// OpencodeRunInput/ReviewInput/ParallelWorkerInput imported at the top of this file (Seam-2).
 export interface PromptRenderingPort {
   render(sections: readonly PromptSection[]): string;
+  renderWorker(w: ParallelWorkerInput): { text: string; sectionSizes: Record<string, number> };
+  renderReviewer(input: ReviewInput): { text: string; sectionSizes: Record<string, number> };
+  renderExplorer(input: OpencodeRunInput): string;
+  specFileForFlow(flow: string): string;
 }
 
 // e2e: real grounding; code-mode: NullDomGroundingAdapter returns an empty context (§3 hard limit).
@@ -62,5 +76,16 @@ export interface PromptBudgetPort {
 
 export interface ContextPackResult { objective: Objective; sections: PromptSection[]; failureCases?: QaCase[]; }
 
-export interface PlanObjectiveView { flow: string; objective: string; reason?: string; }
+// PlanObjectiveView carries the fields the legacy PlanObjective (opencode-client.ts:1022-1027) exposes
+// AND that ParallelWorkerInput construction (opencode-client.ts:1438-1443) consumes at fan-out.
+// symbols/needsUi/brief were absent from the original view, forcing Phase B to narrow-cast back to
+// the legacy type. They are added here so the port is self-sufficient for fan-out.
+export interface PlanObjectiveView {
+  flow: string;
+  objective: string;
+  reason?: string;
+  symbols: string[];     // code symbols the spec should exercise (serena blast radius)
+  needsUi: boolean;      // selects qa-worker (UI) vs qa-worker-code (code-only) at fan-out
+  brief?: ExplorationBrief; // distilled blast radius so the worker need not re-explore (optional → back-compat)
+}
 export interface PlanParserPort { parse(text: string): PlanObjectiveView[]; }

@@ -59,8 +59,9 @@ export class VerdictParserAdapter implements VerdictParserPort {
       ...(r.blockingCount !== undefined ? { blockingCount: r.blockingCount } : {}),
       ...(r.parsed !== undefined ? { parsed: r.parsed } : {}),
       // valid + issues forwarded verbatim — the use-case (B.3) reads them to fire the bounded reviewer repair.
-      ...(r.valid !== undefined ? { valid: r.valid } : {}),
-      ...(r.issues !== undefined ? { issues: r.issues } : {}),
+      // Both are REQUIRED on ReviewJudgment (matching the legacy ReviewerVerdict which always sets them).
+      valid: r.valid,
+      issues: r.issues,
     };
   }
 }
