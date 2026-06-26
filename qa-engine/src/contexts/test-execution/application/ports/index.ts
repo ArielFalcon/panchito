@@ -21,6 +21,13 @@ export interface ExecutionRequest {
   specFiles?: string[];
   signal?: AbortSignal;
   timeoutMs?: number;
+  // e2e live-progress callbacks (ExecuteOptions capability set — no regression vs legacy):
+  project?: string;                                          // Playwright --project filter
+  onCase?: (c: { name: string; status: string; detail?: string }) => void;
+  onRunning?: (title: string) => void;
+  onDiscovered?: (title: string, file?: string) => void;
+  // code target: diff-driven module scoping (CodeExecuteOptions.changedFiles):
+  changedFiles?: string[];
 }
 export interface ExecutionResult { verdict: RunVerdict; cases: QaCase[]; logs: string; }
 

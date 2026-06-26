@@ -1,0 +1,59 @@
+// src/contexts/test-execution/infrastructure/e2e-execution.strategy.ts
+// WRAP of src/qa/execute.ts runE2E (strangler: delegate, do not rewrite the runner). Maps the
+// typed ExecutionRequest onto the legacy opts and the legacy QaRunResult onto ExecutionResult,
+// then runs it through AdjudicateService so the runner-infra reclassification is centralized.
+// The runE2E fn is injected so this adapter is testable without Playwright.
+//
+// Plan-6 composition wiring: pass (specDir, opts) => runE2E(specDir, opts, defaultExecuteDeps).
+import type {
+  ExecutionStrategyPort,
+  ExecutionRequest,
+  ExecutionResult,
+} from "../application/ports/index.ts";
+import { AdjudicateService } from "../domain/adjudicate.service.ts";
+
+// Structural shape of the legacy runE2E return (src/types.ts QaRunResult) — declared locally so
+// this file does not import from src/ (only the parity test may). Widened: optional fields ignored.
+interface LegacyRunResult { verdict: string; cases: { name: string; status: string; detail?: string }[]; logs: string; }
+type QaCase = { name: string; status: string; detail?: string };
+type RunE2eFn = (
+  specDir: string,
+  opts: {
+    baseUrl: string;
+    namespace: string;
+    faultInject?: boolean;
+    specFiles?: string[];
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    // Carries the full ExecuteOptions capability set — no regression vs the legacy seam:
+    project?: string;                          // Playwright --project (PW_PROJECT_RE validated by runE2E)
+    onCase?: (c: QaCase) => void;              // per-test completion (live bar / history)
+    onRunning?: (title: string) => void;       // test started (focus card)
+    onDiscovered?: (title: string, file?: string) => void; // full test list up-front
+  },
+) => Promise<LegacyRunResult>;
+
+export class E2eExecutionStrategy implements ExecutionStrategyPort {
+  private readonly adjudicator = new AdjudicateService();
+  constructor(private readonly runE2E: RunE2eFn) {}
+
+  async run(req: ExecutionRequest): Promise<ExecutionResult> {
+    if (!req.baseUrl) throw new Error("E2eExecutionStrategy requires a baseUrl (live DEV URL)");
+    const result = await this.runE2E(req.specDir, {
+      baseUrl: req.baseUrl,
+      namespace: req.namespace,
+      ...(req.faultInject !== undefined ? { faultInject: req.faultInject } : {}),
+      ...(req.specFiles ? { specFiles: req.specFiles } : {}),
+      ...(req.signal ? { signal: req.signal } : {}),
+      ...(req.timeoutMs !== undefined ? { timeoutMs: req.timeoutMs } : {}),
+      // Thread the full ExecuteOptions capability set — no capability regression vs legacy seam:
+      ...(req.project !== undefined ? { project: req.project } : {}),
+      ...(req.onCase ? { onCase: req.onCase } : {}),
+      ...(req.onRunning ? { onRunning: req.onRunning } : {}),
+      ...(req.onDiscovered ? { onDiscovered: req.onDiscovered } : {}),
+    });
+    const cases = result.cases.map((c) => ({ name: c.name, status: c.status as "pass" | "fail" | "flaky", ...(c.detail ? { detail: c.detail } : {}) }));
+    const adjudged = this.adjudicator.adjudicate(result.verdict as ExecutionResult["verdict"], cases);
+    return { verdict: adjudged.verdict, cases, logs: result.logs };
+  }
+}
