@@ -1,9 +1,9 @@
 // qa-engine/src/contexts/cross-run-learning/application/ports/index.ts
 // Off-path flywheel ports (stubbed in v1; never gates publish). LearningRepositoryPort [SWAP] inverts
 // the two-way SQLite coupling (history.ts imports applyOutcome; distiller/retrieval import history)
-// into one port, making RuleGovernance the single source of ranking truth. ReflectorPort uses
-// AgentRuntimePort (consumed from the kernel via generation/agent-runtime, not redefined here).
+// into one port, making RuleGovernance the single source of ranking truth.
 // ErrorClass stays in THIS context (no kernel leak) — modeled as a local string-literal union.
+// ReflectorPort and ProcessAuditPort are re-added co-located with their impls in Plan 6.
 
 import type { Sha } from "@kernel/sha.ts";
 import type { RunOutcome } from "@kernel/run-outcome.ts";
@@ -45,11 +45,4 @@ export interface StructuredReflection {
   evidence: string;
   rootCause: string;
   preventiveRule: { trigger: string; action: string };
-}
-export interface ReflectorPort {
-  reflect(outcome: RunOutcome): Promise<StructuredReflection | null>;
-}
-export interface ProcessFinding { kind: string; detail: string; }
-export interface ProcessAuditPort {
-  audit(outcome: RunOutcome): Promise<ProcessFinding[]>;
 }
