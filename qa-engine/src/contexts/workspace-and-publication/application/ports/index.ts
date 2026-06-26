@@ -32,5 +32,16 @@ export interface GitHubIssuePort {
 export interface MirrorGcPort {
   prune(repo: string): Promise<void>;
 }
+// The shadow-mode swap boundary. ShadowLogAdapter implements this port; at composition
+// time (Plan 6) the DI container selects ShadowLogAdapter when qa.shadow=true and the
+// real adapters otherwise. This named interface makes the arch-lint capable of forbidding
+// shadow-mode from leaking into the generation context.
+export interface ShadowPublicationPort {
+  openPr(repo: string, branch: string, title: string, body: string): Promise<void>;
+  openIssue(repo: string, title: string, body: string): Promise<void>;
+  commit(dir: string, message: string, files: readonly string[]): Promise<void>;
+  push(dir: string, branch: string): Promise<void>;
+  prune(mirrorDir: string): Promise<void>;
+}
 export interface PublishDecision { verdict: RunVerdict; outcome: string; }
 export interface ConfinementResult { strays: number; dangerous: number; reverted: string[]; }
