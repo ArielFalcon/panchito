@@ -10,9 +10,23 @@ import type { RunOutcome } from "@kernel/run-outcome.ts";
 
 export type ErrorClass = string; // the real owner; the kernel RunOutcome.errorClass widens to this.
 export type RuleStatus = "candidate" | "active" | "deprecated" | "superseded";
+// Extended to the full legacy LearningRule shape (src/qa/learning/learning-rule.ts).
+// The Plan-2 stub had only 6 fields; rowToRule and the ranking service both need the
+// remaining 7 (id, archetype, usageCount, outcomeCount, lastVerified, source, at).
 export interface LearningRule {
-  trigger: string; action: string; errorClass: ErrorClass; status: RuleStatus;
-  confidence: "low" | "medium" | "high"; successRate: number | null;
+  id: string;
+  trigger: string;
+  action: string;
+  errorClass: ErrorClass;
+  archetype: string | null;
+  status: RuleStatus;
+  confidence: "low" | "medium" | "high";
+  usageCount: number;
+  outcomeCount: number;
+  successRate: number | null;
+  lastVerified: string | null;
+  source: string;
+  at: string;              // ISO-8601 timestamp — the 3rd SQL sort key (at DESC tiebreak)
 }
 // [SWAP] inverts the SQLite coupling; ranking truth lives in RuleGovernance, not in SQL ORDER BY.
 export interface LearningRepositoryPort {
