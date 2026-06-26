@@ -6,27 +6,13 @@
 // distinct from the breaker's retry loop and must not be coupled to it. ProcessKillPort is consumed
 // FROM the kernel. RunUsage stays here (no kernel leak) — modeled as a local UsageSnapshot type.
 
+// The kernel-facing session-management types now live in the kernel (design §5.2) so generation depends
+// on AgentRuntimePort FROM the kernel, decoupled from this context. The barrel re-exports them and extends
+// AgentRuntimePort with provider-strategy concerns (AgentRuntimeStrategy below).
+export type { UsageSnapshot, AgentTurnEvent, AgentSession, OpenSessionOpts, AgentRuntimePort }
+  from "@kernel/ports/agent-runtime.port.ts";
+import type { AgentRuntimePort, AgentSession, AgentTurnEvent } from "@kernel/ports/agent-runtime.port.ts";
 import type { AgentRole, RoleAssignment, AgentProvider } from "@kernel/agent-role.ts";
-
-export interface UsageSnapshot { inputTokens: number; outputTokens: number; provider: AgentProvider; }
-export interface AgentTurnEvent { runId: string; role: AgentRole; objective?: string; }
-export interface AgentSession {
-  prompt(text: string): Promise<{ output: string }>;
-  dispose(): Promise<void> | void;
-}
-
-export interface OpenSessionOpts {
-  signal?: AbortSignal;
-  timeoutMs?: number;
-  model?: string;
-  onUsage?: (u: UsageSnapshot) => void;
-  onTurn?: (t: AgentTurnEvent) => void;
-}
-
-// The kernel-facing port generation depends on.
-export interface AgentRuntimePort {
-  openSession(role: AgentRole, cwd: string, opts?: OpenSessionOpts): Promise<AgentSession>;
-}
 
 export interface AgentProviderHealth { provider: AgentProvider; status: string; configured: boolean; error?: string; }
 export interface AgentModelInfo { id: string; label?: string; provider?: AgentProvider; }
