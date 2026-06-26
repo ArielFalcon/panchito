@@ -6,12 +6,14 @@ import type { ParallelWorkerInput, ReviewInput, OpencodeRunInput } from "@contex
 
 // Minimal fake builders — typed against the real PromptBuilders interface so a field mismatch
 // is caught at compile time; the "as never" casts on the input shapes keep the stubs concise.
+// NOTE: the specFileForFlow default here uses "flows/" (the real path) so the delegation test
+// below can assert the real output rather than an invented "e2e/" string.
 function makeBuilders(overrides: Partial<PromptBuilders>): PromptBuilders {
   return {
     buildWorkerPromptAssembled: (_w: ParallelWorkerInput) => ({ text: "", sectionSizes: {} }),
     buildReviewerPromptAssembled: (_i: ReviewInput) => ({ text: "", sectionSizes: {} }),
     buildExplorerPrompt: (_i: OpencodeRunInput) => "",
-    specFileForFlow: (flow: string) => `e2e/${flow}.spec.ts`,
+    specFileForFlow: (flow: string) => `flows/${flow}.spec.ts`,
     ...overrides,
   };
 }
@@ -48,7 +50,17 @@ test("renderExplorer delegates to buildExplorerPrompt and returns its string", (
   assert.equal(out, "EXPLORER");
 });
 
-test("specFileForFlow delegates (path mapping preserved)", () => {
-  const adapter = new PromptRenderingAdapter(makeBuilders({}));
-  assert.equal(adapter.specFileForFlow("checkout"), "e2e/checkout.spec.ts");
+test("specFileForFlow delegates to the injected builder — delegation captured and path forwarded", () => {
+  // The real specFileForFlow (src/integrations/prompts.ts:specFileForFlow) returns "flows/<safe>.spec.ts",
+  // NOT "e2e/". A gutted impl that hardcodes "e2e/checkout.spec.ts" FAILS both assertions below:
+  // (1) the seen flag is false if the builder was never called, and
+  // (2) the output must match what the injected builder returns, not an invented path.
+  let seen = false;
+  const adapter = new PromptRenderingAdapter(makeBuilders({
+    specFileForFlow: (flow: string) => { seen = true; return `flows/${flow}.spec.ts`; },
+  }));
+  const result = adapter.specFileForFlow("checkout");
+  assert.ok(seen, "the injected specFileForFlow builder must be called — a gutted impl FAILS this");
+  assert.equal(result, "flows/checkout.spec.ts",
+    "output must match the builder's 'flows/' prefix — a hardcoded 'e2e/' impl FAILS this");
 });
