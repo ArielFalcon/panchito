@@ -16,6 +16,22 @@ test("getStatus delegates to the wrapped DUAL facade and forwards BOTH providers
   assert.equal(s.providers.length, 2);             // dual is NOT collapsed to one provider
 });
 
+test("getStatus forwards SINGLE-mode facade verbatim (mode===single, providers.length===1)", async () => {
+  let called = false;
+  const adapter = new AgentFacadeAdapter({
+    getStatus: async () => {
+      called = true;
+      return { mode: "single", providers: [
+        { provider: "opencode", status: "ok", configured: true }] };
+    },
+    listModels: async () => [],
+  } as never);
+  const s = await adapter.getStatus();
+  assert.equal(called, true);
+  assert.equal(s.mode, "single");        // a gutted impl returning {mode:'dual'} would FAIL here
+  assert.equal(s.providers.length, 1);  // single-mode is NOT promoted to two providers
+});
+
 test("startEventStream delegates to the wrapped facade (the dual SSE multiplex survives)", async () => {
   const calls: string[] = [];
   const adapter = new AgentFacadeAdapter({
