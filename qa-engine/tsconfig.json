@@ -30,6 +30,9 @@
     "test/shared-kernel/diff-parser/diff-parser-parity.test.ts",
     "test/contexts/change-analysis/domain/commit-classification-parity.test.ts",
     "src/contexts/change-analysis/infrastructure/extractors/default-extractors.ts",
-    "test/contexts/test-execution/domain/adjudicate-parity.test.ts"
+    "test/contexts/test-execution/domain/adjudicate-parity.test.ts",
+    "test/contexts/test-execution/domain/selector-check-parity.test.ts",
+    "test/contexts/test-execution/domain/progress-gate-parity.test.ts",
+    "test/contexts/test-execution/domain/nav-gate-parity.test.ts"
   ]
 }
