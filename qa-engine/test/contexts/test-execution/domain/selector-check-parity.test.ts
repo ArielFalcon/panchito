@@ -14,7 +14,11 @@ const fixtures: Array<{ srcs: string[]; trees: string[][] }> = [
   { srcs: [`page.getByRole("button").click()`], trees: [["button: A", "button: B"]] },
   // ARIA-state-suffix: parseLine must strip the [disabled] token so role/name still match — pins the
   // user's ARIA_STATE_STRIP_RE behavior (a stale copy would treat the suffix as part of the name).
-  { srcs: [`page.getByRole("button", { name: "Submit" }).click()`], trees: [["button: Submit [disabled]"]] },
+  // exact:true is REQUIRED here. With substring matching, "Submit [disabled]".includes("Submit") is
+  // true WITH OR WITHOUT ARIA_STATE_STRIP_RE, so the strip would be invisible to the test. With
+  // exact:true, nameMatches does normActual === normExpected: parseLine MUST strip [disabled] to
+  // produce "Submit", otherwise the service diverges from the legacy and deepEqual fails.
+  { srcs: [`page.getByRole("button", { name: "Submit", exact: true }).click()`], trees: [["button: Submit [disabled]"]] },
   // page-rooted MULTIPLE next to a non-extractable locator: exercises unscopedMultipleContradictions'
   // suppression path (anyNonExtractable=true ⇒ only the page-rooted MULTIPLE survives).
   { srcs: [`page.getByRole("button").click(); page.getByTestId("x").click()`], trees: [["button: A", "button: B"]] },
