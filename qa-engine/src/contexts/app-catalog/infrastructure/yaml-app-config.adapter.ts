@@ -43,7 +43,7 @@ export class YamlAppConfigAdapter implements AppRepositoryPort {
     return this.loaders.list().map(toSnapshot);
   }
 
-  async resolveByRepo(repoSlug: string): Promise<{ app: AppConfigSnapshot; role: RepoRole } | null> {
+  async resolveByRepo(repoSlug: string): Promise<{ app: AppConfigSnapshot; role: RepoRole }[]> {
     // Call list() ONCE into a local const to avoid the double FS scan and the non-null-assertion
     // race where the second list() call could return a different set (e.g. a file was added between
     // the two calls, or the loader is a test double that mutates state).
@@ -52,10 +52,12 @@ export class YamlAppConfigAdapter implements AppRepositoryPort {
       name: c.name, repo: c.repo, baseBranch: c.baseBranch ?? "main",
       code: c.code ?? false, shadow: c.qa?.shadow ?? false, services: c.services ?? [], dev: c.dev,
     }));
-    const resolution = new RepoResolutionService(apps).resolve(repoSlug);
-    if (!resolution) return null;
-    // Find from the same local const — no second FS scan, no race.
-    const cfg = configs.find((c) => c.name === resolution.app.name)!;
-    return { app: toSnapshot(cfg), role: resolution.role };
+    // EVERY match — a repo that is primary of one app AND service of another fans out to BOTH
+    // (mirrors legacy loadAppConfigsByRepo). Find each cfg from the same local const — no second
+    // FS scan, no race.
+    return new RepoResolutionService(apps).resolve(repoSlug).map((resolution) => {
+      const cfg = configs.find((c) => c.name === resolution.app.name)!;
+      return { app: toSnapshot(cfg), role: resolution.role };
+    });
   }
 }

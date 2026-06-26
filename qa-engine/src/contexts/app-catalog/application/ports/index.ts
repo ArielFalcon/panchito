@@ -13,7 +13,9 @@ export interface AppConfigSnapshot {
 export interface AppRepositoryPort {
   load(name: string): Promise<AppConfigSnapshot>;
   list(): Promise<AppConfigSnapshot[]>;
-  resolveByRepo(repoSlug: string): Promise<{ app: AppConfigSnapshot; role: RepoRole } | null>;
+  // EVERY app the repo participates in — a repo can be primary of one app AND service of another,
+  // so the result is an array (the webhook enqueues one run per match). Empty when unwatched.
+  resolveByRepo(repoSlug: string): Promise<{ app: AppConfigSnapshot; role: RepoRole }[]>;
 }
 export interface RepoInfoPort {
   defaultBranch(repoSlug: string): Promise<string>;
