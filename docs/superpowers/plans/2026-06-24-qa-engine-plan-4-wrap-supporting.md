@@ -537,9 +537,11 @@ Lift the three remaining pure decision cores. `SelectorCheckService` wraps the u
     { srcs: [`page.getByTestId("id")`], trees: [DOM_TREE] },
     { srcs: [], trees: [DOM_TREE] },
     { srcs: [`page.getByRole("button").click()`], trees: [["button: A", "button: B"]] },
-    // ARIA-state-suffix: parseLine must strip the [disabled] token so role/name still match — pins the
-    // user's ARIA_STATE_STRIP_RE behavior (a stale copy would treat the suffix as part of the name).
-    { srcs: [`page.getByRole("button", { name: "Submit" }).click()`], trees: [["button: Submit [disabled]"]] },
+    // ARIA-state-suffix: parseLine must strip the [disabled] token. exact:true is REQUIRED — with
+    // substring matching "Submit [disabled]".includes("Submit") is true with OR without the strip, so
+    // the strip would be invisible to the test; with exact:true the strip is what makes svc match the
+    // legacy (a stale copy that drops ARIA_STATE_STRIP_RE diverges → deepEqual fails).
+    { srcs: [`page.getByRole("button", { name: "Submit", exact: true }).click()`], trees: [["button: Submit [disabled]"]] },
     // page-rooted MULTIPLE next to a non-extractable locator: exercises unscopedMultipleContradictions'
     // suppression path (anyNonExtractable=true ⇒ only the page-rooted MULTIPLE survives).
     { srcs: [`page.getByRole("button").click(); page.getByTestId("x").click()`], trees: [["button: A", "button: B"]] },
@@ -831,12 +833,16 @@ Implements the four-method static gate (typecheck/lint/listTests/checkManifest) 
 the legacy validate functions. Inject each as a fn so no `tsc`/eslint/playwright spawn happens in
 the test.
 
-> RE-VERIFIED vs HEAD (2026-06-26): the user's audit added a FIFTH check inside `validateSpecs` —
-> `checkZeroAssertionSpecs` (the zero-assertion gate scoped to `flows/`). It is NOT one of the four
-> injected `ValidateDeps` methods; it is a hardcoded internal call. The WRAP inherits it for free
-> (Plan-6 composition wires the real `defaultValidateDeps`/`validateSpecs`), so NO adapter code
-> changes — but the gate is now five checks (four injected + one hardcoded), not four. The adapter
-> test below stays as written: it exercises only the four delegating methods, which never touch the FS.
+> RE-VERIFIED vs HEAD (2026-06-26), CORRECTED after the Plan-4 review (WF-02): the user's audit added
+> a FIFTH check inside `validateSpecs` — `checkZeroAssertionSpecs` (the zero-assertion gate scoped to
+> `flows/`). It is NOT one of the four injected `ValidateDeps` methods; it is a hardcoded internal
+> call. The four granular port methods (typecheck/lint/listTests/checkManifest) do NOT carry it, so a
+> Plan-6 consumer calling them individually would SILENTLY skip the zero-assertion guard. Therefore
+> the port ALSO exposes `validateAll(specDir): Promise<ValidationResult>`, delegating to an injected
+> `validateAll` fn (bound to the legacy `validateSpecs` at wiring time) so the FULL five-check gate
+> crosses the boundary in one call. The four granular methods remain for fine-grained injection; add
+> a `validateAll` delegation + a parity-style adapter test that a gutted impl (ignoring the injected
+> fn) would fail.
 
 **Files:** `src/contexts/test-execution/infrastructure/static-gate.adapter.ts`,
 `test/contexts/test-execution/infrastructure/static-gate.adapter.test.ts`
