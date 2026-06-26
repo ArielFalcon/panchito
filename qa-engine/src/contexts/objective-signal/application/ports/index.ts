@@ -14,10 +14,20 @@ export interface CoverageReport { covered: CoveredLines[]; }
 export interface CoverageCollectorPort {
   collect(specDir: string, namespace: string): Promise<CoverageReport>;
 }
-export interface ValueOracleResult { mutantCount: number; killedCount: number; score: number | null; }
+// Aligned to legacy oracle-types.ts ValueOracleResult (4 fields): renaming score→valueScore +
+// adding details prevents a silent field drop when the adapters wrap runMutationOracle /
+// runFaultInjectionOracle (base-fix B.3).
+export interface ValueOracleResult {
+  valueScore: number | null;
+  mutantCount: number;
+  killedCount: number;
+  details: string;
+}
 // [SWAP — one port, two adapters] mutation (code) vs fault-injection (e2e).
+// measure(br, repoDir, namespace): namespace is per-run (sha-scoped like "qa-bot-<sha>") — it comes
+// from the measure call args, NOT from the constructor; repoDir maps to OracleInput.repoDir.
 export interface ValueOraclePort {
-  measure(br: BlastRadius, specDir: string): Promise<ValueOracleResult>;
+  measure(br: BlastRadius, repoDir: string, namespace: string): Promise<ValueOracleResult>;
 }
 export interface SourceMapPort {
   toOriginalLine(file: string, byteOffset: number): Promise<{ file: string; line: number } | null>;
