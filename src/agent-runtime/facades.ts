@@ -1,4 +1,4 @@
-import type { AgentDeps } from "../integrations/opencode-client";
+import type { AgentDeps, AgentSession } from "../integrations/opencode-client";
 import type { LiveActivity } from "../integrations/opencode-client";
 import type { RunEventBody } from "../contract/events";
 import {
@@ -21,10 +21,14 @@ export class SingleAgentFacade implements AgentFacade {
 
   deps(): AgentDeps {
     const deps: AgentDeps = {
-      open: (agent, cwd, opts) => {
+      open: async (agent, cwd, opts) => {
         const role = roleForLegacyAgent(agent);
         const model = assignmentForRole(this.config, role).model;
-        return this.strategy.openSession(role, cwd, { ...opts, model });
+        const session: AgentSession = await this.strategy.openSession(role, cwd, { ...opts, model });
+        // Codex is exec-per-prompt (self-timed, no SSE) → mark so the stall watchdog skips it.
+        // (Provider-keyed today; the provider-registry refactor moves this to a strategy capability.)
+        if (this.strategy.provider === "codex") session.selfTimed = true;
+        return session;
       },
     };
     if (this.strategy.cleanupOrphans) deps.cleanupOrphans = (maxAgeMs) => this.strategy.cleanupOrphans!(maxAgeMs);
@@ -57,10 +61,14 @@ export class DualAgentFacade implements AgentFacade {
 
   deps(): AgentDeps {
     return {
-      open: (agent, cwd, opts) => {
+      open: async (agent, cwd, opts) => {
         const role = roleForLegacyAgent(agent);
         const assignment = assignmentForRole(this.config, role);
-        return this.strategies[assignment.provider].openSession(role, cwd, { ...opts, model: assignment.model });
+        const session: AgentSession = await this.strategies[assignment.provider].openSession(role, cwd, { ...opts, model: assignment.model });
+        // Codex is exec-per-prompt (self-timed, no SSE) → mark so the stall watchdog skips it.
+        // (Provider-keyed today; the provider-registry refactor moves this to a strategy capability.)
+        if (assignment.provider === "codex") session.selfTimed = true;
+        return session;
       },
       cleanupOrphans: async (maxAgeMs) => {
         const counts = await Promise.all(

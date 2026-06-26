@@ -596,6 +596,10 @@ export interface AgentSession {
   // through the funnel into AgentTurnEvent so telemetry records it per turn.
   prompt(text: string, opts?: { textOnly?: boolean; round?: number; isRepair?: boolean; sectionSizes?: Record<string, number> | null }): Promise<string>;
   dispose(): Promise<void>;
+  // selfTimed marks a session whose transport manages its own per-prompt timeout (e.g. Codex
+  // exec-per-prompt, which never emits SSE activity). The stall watchdog SKIPS such sessions —
+  // wrapping them would false-positive-kill any prompt slower than the stall threshold.
+  selfTimed?: boolean;
 }
 
 // Session-scoped descriptor forwarded by every open() call-site that has a run context.
@@ -1613,6 +1617,14 @@ export function withStallWatchdog(
   return {
     ...baseDeps,
     open: async (agent, cwd, openOpts) => {
+      const inner = await baseDeps.open(agent, cwd, openOpts);
+
+      // Self-timed sessions (Codex exec-per-prompt) manage their own timeout in the transport and
+      // never emit SSE activity, so the stall watchdog — which only resets on notifySessionActivity
+      // from the OpenCode SSE loop — would false-positive-kill every prompt slower than the
+      // threshold. Skip wrapping; the transport's own timeout is the real deadline.
+      if (inner.selfTimed) return inner;
+
       // Track the in-flight prompt's reject handle so the stall callback can surface
       // StalledAgentError from inside the watchdog (which runs on the timer thread).
       let rejectInFlight: ((err: unknown) => void) | undefined;
@@ -1630,8 +1642,6 @@ export function withStallWatchdog(
         // Best-effort dispose — do not await (we are inside a timer callback).
         inner.dispose().catch(() => {});
       });
-
-      const inner = await baseDeps.open(agent, cwd, openOpts);
 
       // Register this session's watchdog notify with the SSE event loop so that
       // every incoming activity event for this session resets the stall timer.

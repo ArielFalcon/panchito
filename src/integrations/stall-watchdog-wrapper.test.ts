@@ -200,3 +200,40 @@ test("withStallWatchdog: dispose() stops the watchdog (no leak after session end
 
   assert.equal(stopCalled, true, "dispose() must stop the watchdog to prevent leaks");
 });
+
+test("withStallWatchdog: a self-timed session (Codex exec) skips the watchdog entirely (CP-01)", async () => {
+  // Codex exec-per-prompt sessions manage their own timeout and never emit SSE activity, so the
+  // watchdog must skip them — otherwise any prompt slower than stallMs is false-positive-killed.
+  let watchdogCreated = false;
+  const base: AgentDeps = {
+    open: async () => ({
+      id: "codex-session",
+      prompt: async () => "codex result",
+      dispose: async () => {},
+      selfTimed: true,
+    }),
+  };
+  const wrapped = withStallWatchdog(base, {
+    stallMs: 99999,
+    watchdogFactory: () => { watchdogCreated = true; return { notify: () => {}, stop: () => {} }; },
+  });
+
+  const session = await wrapped.open("qa-generator", "/tmp");
+  assert.equal(watchdogCreated, false, "the watchdog must NOT be created for a self-timed session");
+  assert.equal(session.selfTimed, true, "the self-timed marker is preserved on the returned session");
+  assert.equal(await session.prompt("hello"), "codex result");
+  await session.dispose();
+});
+
+test("withStallWatchdog: a normal (non-self-timed) session IS still wrapped (CP-01 complement)", async () => {
+  let watchdogCreated = false;
+  const base: AgentDeps = {
+    open: async () => ({ id: "opencode-session", prompt: async () => "ok", dispose: async () => {} }),
+  };
+  const wrapped = withStallWatchdog(base, {
+    stallMs: 99999,
+    watchdogFactory: () => { watchdogCreated = true; return { notify: () => {}, stop: () => {} }; },
+  });
+  await wrapped.open("qa-generator", "/tmp");
+  assert.equal(watchdogCreated, true, "a normal session must still be wrapped by the watchdog");
+});
