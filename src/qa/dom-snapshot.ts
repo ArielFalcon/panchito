@@ -24,11 +24,14 @@ import { killTree } from "./execute";
 // stable attributes is not emitted. selector-check.ts NEVER reads attrs[]; only
 // formatDomSnapshot does, for the PROMPT text only.
 export interface NodeAttr {
-  key: string; // "role: name" join key (e.g. "button: Submit")
+  key: string; // "role: name" join key (e.g. "button: Submit") — bare, no state suffix
   testId?: string; // value of the configured testIdAttribute (e.g. data-testid or data-cy)
   id?: string; // HTML id attribute
   name?: string; // HTML name attribute (inputs, forms)
   href?: string; // relative href (links) — a same-origin path hint, not the full URL
+  // Seam C (Slice 3): optional input metadata — advisory to the agent; absence = today's behavior
+  inputType?: string; // e.g. "password", "date", "email", "file", "tel", "number", "search"
+  nameFallback?: string; // placeholder/aria-label/aria-labelledby when computedName is blank
 }
 
 // Raw attribute entry from the in-page walk before merging.
@@ -38,13 +41,20 @@ export interface RawAttr {
   id?: string;
   name?: string;
   href?: string;
+  // Seam C (Slice 3): optional input metadata captured by the in-page walk
+  inputType?: string; // type attribute of <input>/<textarea>
+  nameFallback?: string; // placeholder > aria-label > aria-labelledby when computedName is blank
 }
 
 // One captured route: the accessible roles+names the reviewer judges UI facts against.
 export interface RouteSnapshot {
   route: string;
-  nodes?: string[]; // "role: name" lines (interactive/labelled elements only) — BYTE-IDENTICAL to parseAriaSnapshot output
+  nodes?: string[]; // "role: name" lines (interactive/labelled elements only) — BYTE-IDENTICAL to parseAriaSnapshot output; NO state suffixes
   attrs?: NodeAttr[]; // parallel stable-attribute map, keyed by the same "role: name" join key; NEVER modifies nodes[]
+  // Seam A (Slice 3): parallel state map — key = bare "role: name" (same join key as nodes[]/attrs[]);
+  // value = array of state tokens (e.g. ["disabled"]). DISPLAY-ONLY — rendered by formatDomSnapshot
+  // as a suffix after the attr hint and before [CHANGED:]. NEVER written into nodes[].
+  states?: Map<string, string[]>;
   testIdAttrName?: string; // the configured testIdAttribute name used during capture (e.g. "data-cy"); defaults to "data-testid" in formatDomSnapshot
   error?: string; // capture failed for this route (degrade — never blocks review)
 }
@@ -115,29 +125,67 @@ export function extractTargetRoutes(specContents: string[], max = MAX_ROUTES): s
 const PRIORITY_ROLES = ["columnheader", "rowheader", "cell", "gridcell", "row", "table", "grid", "list", "listitem", "text"];
 export const isPriorityNode = (line: string): boolean => PRIORITY_ROLES.some((r) => line.startsWith(`${r}:`));
 
-// Caps a "role: name" line set to `max`, keeping EVERY priority (table/list) node and filling the
-// remaining budget with the rest in document order — so a data table that sorts after the nav is
-// never truncated away (the exact failure that made the author "see nothing about the table").
+// Trailing ARIA-state tokens that Playwright appends AFTER the accessible name (e.g.
+// `button "Submit" [disabled]`). An ALLOWLIST, never a generic `[...]` strip: a generic strip
+// truncates real accessible names that legitimately end in brackets (badge counts "Inbox [5]",
+// draft markers "Edit [Draft]"), which collides distinct siblings in the join and misses the
+// state lookup. Token set mirrors the capture side (STATE_RE) plus pressed/level for safety.
+const ARIA_STATE_STRIP_RE = /(?:\s*\[(disabled|expanded|checked|required|selected|pressed|level=\d+)\])+\s*$/;
+
+// Seam D (Slice 3): Normalize a "role: name [state]" join key to its bare canonical form.
+// FIRST strip a trailing ARIA-state suffix (allowlist only — never a real bracketed name), THEN
+// trim and collapse internal whitespace to a single space. Order matters: strip state before
+// collapsing so " [disabled]" doesn't leave a trailing space that survives the collapse.
+// Exported for unit testing and mergeAttrs.
+export function normalizeKey(s: string): string {
+  return s.replace(ARIA_STATE_STRIP_RE, "").replace(/\s+/g, " ").trim();
+}
+
+// Gate Delta 1 (Slice 3): interactive roles that must be preserved BEFORE landmarks/other
+// non-priority nodes. button/link/textbox/combobox are the critical selector-authoring roles —
+// evicting them in favor of landmark banners is the "author sees empty form" failure mode.
+const INTERACTIVE_ROLES = ["button", "link", "textbox", "combobox", "checkbox", "radio"];
+const isInteractiveNode = (line: string): boolean => INTERACTIVE_ROLES.some((r) => line.startsWith(`${r}:`));
+
+// Caps a "role: name" line set to `max`, keeping EVERY priority (table/list) node, then
+// EVERY interactive node (button/link/textbox/combobox/checkbox/radio), then filling the
+// remaining budget with the rest (landmarks and other non-priority) in document order.
+// Three-tier: priority → interactive → other. Interactive tier is the Gate Delta 1 fix:
+// without it, landmark roles (navigation/banner/main) filled the remaining budget in
+// document order before interactive elements, evicting buttons on landmark-heavy pages.
 // Returns the kept lines plus how many were dropped, so a caller can note the omission. Exported
 // for the fix-loop prompt (buildFailureDom), which caps the readable block, NOT the stored tree.
 export function capDomLines(lines: string[], max: number): { kept: string[]; dropped: number } {
   if (lines.length <= max) return { kept: lines, dropped: 0 };
   const priorityCount = lines.filter(isPriorityNode).length;
-  const otherBudget = Math.max(0, max - priorityCount);
+  const afterPriority = Math.max(0, max - priorityCount);
+  const interactiveNonPriority = lines.filter((n) => !isPriorityNode(n) && isInteractiveNode(n));
+  const interactiveCount = Math.min(interactiveNonPriority.length, afterPriority);
+  const otherBudget = Math.max(0, afterPriority - interactiveCount);
+  let interactiveKept = 0;
   let othersKept = 0;
-  const kept = lines.filter((n) => isPriorityNode(n) || othersKept++ < otherBudget);
+  const kept = lines.filter((n) => {
+    if (isPriorityNode(n)) return true; // tier 1: always kept
+    if (isInteractiveNode(n)) return interactiveKept++ < interactiveCount; // tier 2: interactive
+    return othersKept++ < otherBudget; // tier 3: landmarks and other
+  });
   return { kept, dropped: lines.length - kept.length };
 }
 
 // Build a compact attribute hint bracket for a node's NodeAttr, e.g. "[data-cy=submit id=btn]".
-// Rules: testId first, then id, then name, then href (relative only). Budget ~40 chars.
-// Returns empty string when no stable value is present (caller must suppress the hint).
+// Rules: testId first, then id, then name, then href (relative only), then type= (inputType),
+// then nameFallback. Budget ~40 chars total inside the brackets; seam C fields are appended
+// after stable attrs within the same budget (truncated as today). Absent fields → no token.
+// Returns empty string when no value is present (caller must suppress the hint).
 function buildAttrHint(attr: NodeAttr, testIdAttrName: string): string {
   const parts: string[] = [];
   if (attr.testId !== undefined) parts.push(`${testIdAttrName}=${attr.testId}`);
   else if (attr.id !== undefined) parts.push(`id=${attr.id}`);
   else if (attr.name !== undefined) parts.push(`name=${attr.name}`);
   else if (attr.href !== undefined) parts.push(attr.href);
+  // Seam C (Slice 3): advisory type= and name fallback — appended after stable attrs
+  if (attr.inputType !== undefined) parts.push(`type=${attr.inputType}`);
+  if (attr.nameFallback !== undefined) parts.push(attr.nameFallback);
   if (parts.length === 0) return "";
   const raw = parts.join(" ");
   // Bracket budget: keep it compact (≤40 chars inside the brackets).
@@ -151,13 +199,75 @@ function isMarkerLine(line: string): boolean {
   return line.includes(": (present)") || line.startsWith("text: ");
 }
 
+// Pure function that appends a [CHANGED: …] marker suffix when a captured node matches
+// a ChangedElement from the diff. Match priority: testId → id → name → href → text fallback.
+// Returns " [CHANGED: <why>]" on match, "" on no-match (the caller appends the return value).
+// The marker lives ONLY in the formatted string — NEVER in nodes[] or attrs[].
+export function buildChangedMarker(
+  line: string,
+  attr: NodeAttr | undefined,
+  changed: import("./changed-elements").ChangedElement[],
+): string {
+  if (!changed.length) return "";
+
+  for (const c of changed) {
+    // Primary: stable-attr matches (most precise; same discipline as mergeAttrs)
+    if (c.testId !== undefined && attr?.testId === c.testId) {
+      return ` [CHANGED: added data-cy=${c.testId}]`;
+    }
+    if (c.id !== undefined && attr?.id === c.id) {
+      return ` [CHANGED: added id=${c.id}]`;
+    }
+    if (c.name !== undefined && attr?.name === c.name) {
+      return ` [CHANGED: added name=${c.name}]`;
+    }
+    if (c.href !== undefined && attr?.href === c.href) {
+      return ` [CHANGED: new link → ${c.href}]`;
+    }
+    // Secondary: text fallback — match only on whitespace-word boundaries, not arbitrary substring.
+    // The line is "role: name" — extract the name part after ": ".
+    // A guidance phrase like "test" must NOT match "test-submission" (hyphenated compound),
+    // because that actively misleads the agent: prefer UNDER-marking over spurious markers.
+    // Word-boundary rule: the node name is split on WHITESPACE only (not hyphens/underscores),
+    // so "test-submission" is one token and "test" alone does NOT match it.
+    // "form" DOES match "Contact form submit" because they are whitespace-separated words.
+    if (c.text !== undefined) {
+      const colonIdx = line.indexOf(": ");
+      const rawNodeName = colonIdx !== -1 ? line.slice(colonIdx + 2).trim() : line.trim();
+      // Task 2.2 (Slice 3): strip trailing ARIA state token suffix from the name portion —
+      // defensive insurance so a line like "Submit [disabled]" doesn't make "[disabled]"
+      // a spurious word-token in the whitespace-split match below.
+      // ALLOWLIST — strips ONLY known ARIA interactive-state tokens (same set as selector-check.ts
+      // parseLine): disabled, expanded, checked, required, selected, pressed, level=<digits>.
+      // Real accessible names ending in brackets ("Inbox [5]", "Edit [Draft]") are preserved
+      // so the exact/word match below fires correctly when c.text carries the full bracketed name.
+      const nodeName = rawNodeName.replace(ARIA_STATE_STRIP_RE, "").trim();
+      if (nodeName) {
+        const textLower = c.text.toLowerCase();
+        const nodeNameLower = nodeName.toLowerCase();
+        // Exact equality (case-insensitive) always matches.
+        const exactMatch = nodeNameLower === textLower;
+        // Whole-word match: split on whitespace only. Hyphenated compounds (e.g. "test-submission")
+        // remain one token and will not match a sub-string like "test".
+        const nodeWords = nodeNameLower.split(/\s+/).filter(Boolean);
+        const wordMatch = nodeWords.includes(textLower);
+        if (exactMatch || wordMatch) {
+          return ` [CHANGED: added text "${c.text}"]`;
+        }
+      }
+    }
+  }
+  return "";
+}
+
 // Format the captured snapshots into the compact text block inlined in the prompt.
 // When a RouteSnapshot carries attrs[], a compact " -> [attr]" hint is appended AFTER
 // each kept line whose join key matches a NodeAttr with at least one stable value.
 // Structural markers ("(present)") and text: lines NEVER receive a hint.
-// The nodes[] array is NEVER modified — the hint is PROMPT TEXT ONLY.
+// The optional `changed` param appends a [CHANGED: …] marker on matched lines (AFTER the -> hint).
+// The nodes[] array is NEVER modified — the hint and marker are PROMPT TEXT ONLY.
 // selector-check.ts consumes only raw nodes[], not the formatted prompt text.
-export function formatDomSnapshot(snaps: RouteSnapshot[]): string {
+export function formatDomSnapshot(snaps: RouteSnapshot[], changed?: import("./changed-elements").ChangedElement[]): string {
   const lines: string[] = [];
   for (const s of snaps) {
     if (s.error) {
@@ -173,19 +283,35 @@ export function formatDomSnapshot(snaps: RouteSnapshot[]): string {
       ? new Map(s.attrs.map((a) => [a.key, a]))
       : null;
     const testIdAttrName = s.testIdAttrName ?? "data-testid";
+    // When changed is provided and non-empty, we append [CHANGED: …] markers to matched lines.
+    // When absent/empty, the loop is byte-identical to today's output.
+    const useChanged = changed && changed.length > 0;
+    // Seam A (Slice 3): states map for this snapshot — keyed by bare "role: name" join key.
+    // State tokens are rendered DISPLAY-ONLY as a suffix after the attr hint and before [CHANGED:].
+    // They NEVER appear on structural "(present)" marker lines.
+    const stateMap = s.states && s.states.size > 0 ? s.states : null;
     lines.push(`route ${s.route}:`);
     for (const n of nodes) {
+      // State suffix: rendered only for non-marker lines. The attrMap lookup uses the bare key
+      // (normalizeKey strips state if nodes[] ever carries a suffix — defensive); the state is looked
+      // up by the bare node string (nodes[] is always bare per the Option A invariant).
+      const stateSuffix = (!isMarkerLine(n) && stateMap?.get(normalizeKey(n)))
+        ? ` [${stateMap.get(normalizeKey(n))!.join("] [")}]`
+        : "";
       if (attrMap && !isMarkerLine(n)) {
-        const attr = attrMap.get(n);
+        const attr = attrMap.get(normalizeKey(n)) ?? attrMap.get(n);
         if (attr) {
           const hint = buildAttrHint(attr, testIdAttrName);
           if (hint) {
-            lines.push(`  ${n}  -> ${hint}`);
+            const changedMarker = useChanged ? buildChangedMarker(n, attr, changed!) : "";
+            lines.push(`  ${n}  -> ${hint}${stateSuffix}${changedMarker}`);
             continue;
           }
         }
       }
-      lines.push(`  ${n}`);
+      // No hint path: state suffix + changed marker (text fallback, or attr match without hint)
+      const changedMarker = useChanged && !isMarkerLine(n) ? buildChangedMarker(n, attrMap?.get(normalizeKey(n)) ?? attrMap?.get(n), changed!) : "";
+      lines.push(`  ${n}${stateSuffix}${changedMarker}`);
     }
     if (all.length > nodes.length) lines.push(`  … (${all.length - nodes.length} more non-table elements omitted)`);
   }
@@ -218,15 +344,18 @@ export async function captureDom(input: CaptureDomInput, deps: CaptureDomDeps): 
 // render it once and inject the tree so the worker transcribes real selectors instead of guessing.
 // Best-effort and degradation-safe: no routes / no baseUrl / a failed render all return undefined,
 // and the caller falls back to the worker exploring with its own Playwright MCP (today's behavior).
+// The optional `changed` arg (Slice 1) is forwarded to formatDomSnapshot for [CHANGED: …] annotation.
+// Absent → byte-identical to today.
 export async function captureDomForRoutes(
   routes: string[],
   input: { e2eDir: string; baseUrl?: string },
   deps: CaptureDomDeps,
+  changed?: import("./changed-elements").ChangedElement[],
 ): Promise<string | undefined> {
   const clean = normalizeRoutes(routes).slice(0, MAX_ROUTES);
   if (clean.length === 0 || !input.baseUrl) return undefined;
   try {
-    const text = formatDomSnapshot(await deps.render(input.e2eDir, input.baseUrl, clean));
+    const text = formatDomSnapshot(await deps.render(input.e2eDir, input.baseUrl, clean), changed);
     return text.trim() ? text : undefined;
   } catch {
     return undefined; // degrade to the worker's own exploration; never break the run
@@ -250,7 +379,7 @@ export async function captureDomForRoutes(
 // pair is not a majority of a >=4-route set), and a single unique route is never dropped (count 1).
 export async function captureDomByRoute(
   routes: string[],
-  input: { e2eDir: string; baseUrl?: string },
+  input: { e2eDir: string; baseUrl?: string; changedElements?: import("./changed-elements").ChangedElement[] },
   deps: CaptureDomDeps,
 ): Promise<Map<string, string>> {
   const out = new Map<string, string>();
@@ -279,7 +408,7 @@ export async function captureDomByRoute(
   };
   for (const s of rendered) {
     if (isSharedShell(s)) continue; // shared shell across most routes → not route-specific
-    const text = formatDomSnapshot([s]);
+    const text = formatDomSnapshot([s], input.changedElements);
     if (text.trim()) out.set(s.route, text);
   }
   return out;
@@ -335,6 +464,11 @@ export function parseAriaSnapshot(yaml: string): string[] {
     // and inline textual content — keeping it surfaces the "collapsed table" case (Bootstrap) so the
     // author can see there is no columnheader and write accordingly.
     "text",
+    // Seam B (Slice 3): expanded keep-set for landmarks, modals, forms, live-regions, and toggle widgets.
+    // These were absent from grounding, making the reviewer blind to modal presence, form context, and
+    // navigation structure. alert/status/progressbar are live-regions (name = the message); switch is a
+    // valued toggle widget (name = its label). All kept; structural designation is per-role below.
+    "dialog", "alertdialog", "alert", "status", "form", "navigation", "banner", "main", "switch", "progressbar",
   ]);
   // Roles whose mere PRESENCE is informative even WITHOUT an accessible name, so we emit a bare
   // "(present)" marker instead of dropping them:
@@ -344,7 +478,12 @@ export function parseAriaSnapshot(yaml: string): string[] {
   //    for/id, common in apps like PetClinic) leaves the input UNNAMED; without this it is DROPPED and
   //    the whole form goes INVISIBLE to grounding, so the reviewer can't confirm the author's selectors
   //    and falsely REJECTS them. The marker says the field EXISTS → target it by attribute/position.
-  const structural = new Set(["table", "grid", "list", "row", "textbox", "combobox", "checkbox", "radio"]);
+  //  • Seam B structural additions (Slice 3): dialog/alertdialog/form/navigation/banner/main — containers
+  //    whose presence is informative even when unnamed. switch is structural too (Gate Delta 4: toggle
+  //    symmetry with checkbox/radio). alert/status/progressbar are NOT structural — their name IS the
+  //    live message; an unnamed live-region carries no information worth surfacing as a presence marker.
+  const structural = new Set(["table", "grid", "list", "row", "textbox", "combobox", "checkbox", "radio",
+    "dialog", "alertdialog", "form", "navigation", "banner", "main", "switch"]);
 
   for (const rawLine of yaml.split("\n")) {
     const trimmed = rawLine.trimStart();
@@ -407,31 +546,94 @@ export function parseAriaSnapshot(yaml: string): string[] {
   return out;
 }
 
+// Seam A (Slice 3): parallel state capture — returns nodes[] (bare, byte-identical to
+// parseAriaSnapshot output) PLUS a parallel Map<bare-key, state-tokens[]>. The state tokens
+// ([disabled]/[expanded]/[checked]/[required]/[selected]) are captured at each of the 3 parse
+// paths without modifying the nodes[] join keys. The Map is keyed by the same bare "role: name"
+// string so downstream consumers (mergeAttrs, buildChangedMarker, selector-check parseLine)
+// remain unaffected. `nodes` field delegates to parseAriaSnapshot; state is collected in a second
+// pass over the same YAML using the same grammar. Pure and exported for unit testing.
+export function parseAriaSnapshotWithState(yaml: string): { nodes: string[]; states: Map<string, string[]> } {
+  const nodes = parseAriaSnapshot(yaml);
+  const states = new Map<string, string[]>();
+  // Regex for the interactive state tokens we capture (not level= — not interactive state)
+  const STATE_RE = /\[(disabled|expanded|checked|required|selected)\]/g;
+  for (const rawLine of yaml.split("\n")) {
+    const trimmed = rawLine.trimStart();
+    if (!trimmed.startsWith("- ")) continue;
+    const rest = trimmed.slice(2).trim();
+    if (rest.startsWith("/")) continue;
+    const roleMatch = /^([a-z][a-z0-9-]*)/.exec(rest);
+    if (!roleMatch) continue;
+    const role = roleMatch[1]!;
+    const afterRole = rest.slice(role.length);
+    // Determine bare key using the same logic as parseAriaSnapshot
+    let bareName: string | null = null;
+    const quotedMatch = /"((?:\\.|[^"\\])*)"/.exec(afterRole);
+    if (quotedMatch) {
+      const name = quotedMatch[1]!.replace(/\\(["\\])/g, "$1").trim();
+      if (name) bareName = name;
+      // unnamed quoted → structural (present) or dropped — state not captured for (present) lines
+    } else {
+      const colonIdx = afterRole.indexOf(":");
+      if (colonIdx !== -1) {
+        const afterColon = afterRole.slice(colonIdx + 1).trim();
+        if (afterColon) {
+          const name = afterColon.replace(/\s*\[[^\]]*\]\s*$/g, "").trim();
+          if (name) bareName = name;
+        }
+        // bare colon or empty → (present) marker — no state captured on structural markers
+      }
+      // no colon → (present) or dropped — no state captured
+    }
+    if (!bareName) continue; // unnamed / structural present marker → skip state capture
+    const bareKey = `${role}: ${bareName}`;
+    // Only capture state if this key is actually in nodes[] (i.e. the role was in keep)
+    if (!nodes.includes(bareKey)) continue;
+    STATE_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    const tokens: string[] = [];
+    while ((m = STATE_RE.exec(afterRole)) !== null) {
+      tokens.push(m[1]!);
+    }
+    if (tokens.length > 0) states.set(bareKey, tokens);
+  }
+  return { nodes, states };
+}
+
 // Merges a RawAttr[] (from the in-page walk) into NodeAttr[] keyed by the same "role: name"
 // join key that parseAriaSnapshot produces. Unmatched RawAttrs (keys not in nodes[]) are
 // dropped. On collision (two entries with the same key) the first wins. Pure and exported
 // for unit testing.
 export function mergeAttrs(nodes: string[], rawAttrs: RawAttr[]): NodeAttr[] {
   if (rawAttrs.length === 0) return [];
-  // Index raw attrs by key for O(1) lookup. First occurrence wins on collision.
+  // Task 2.1 (Slice 3): index by NORMALIZED key so whitespace divergence and trailing state
+  // suffixes don't cause silent drops. First occurrence wins on collision.
   const byKey = new Map<string, RawAttr>();
   for (const r of rawAttrs) {
-    if (!byKey.has(r.key)) byKey.set(r.key, r);
+    const nk = normalizeKey(r.key);
+    if (!byKey.has(nk)) byKey.set(nk, r);
   }
   const out: NodeAttr[] = [];
   const seen = new Set<string>(); // only one NodeAttr per key (first node wins)
   for (const node of nodes) {
-    if (seen.has(node)) continue;
-    const raw = byKey.get(node);
+    const bareKey = normalizeKey(node); // strip state suffix + whitespace-normalize
+    if (seen.has(bareKey)) continue;
+    const raw = byKey.get(bareKey);
     if (!raw) continue;
-    // Only emit when at least one stable attribute is present
-    if (raw.testId === undefined && raw.id === undefined && raw.name === undefined && raw.href === undefined) continue;
-    seen.add(node);
-    const attr: NodeAttr = { key: node };
+    // Only emit when at least one stable or advisory attribute is present
+    if (raw.testId === undefined && raw.id === undefined && raw.name === undefined && raw.href === undefined
+      && raw.inputType === undefined && raw.nameFallback === undefined) continue;
+    seen.add(bareKey);
+    // NodeAttr.key is the NORMALIZED bare key (no state suffix, whitespace-collapsed) — stable join key
+    const attr: NodeAttr = { key: bareKey };
     if (raw.testId !== undefined) attr.testId = raw.testId;
     if (raw.id !== undefined) attr.id = raw.id;
     if (raw.name !== undefined) attr.name = raw.name;
     if (raw.href !== undefined) attr.href = raw.href;
+    // Seam C: propagate optional input metadata
+    if (raw.inputType !== undefined) attr.inputType = raw.inputType;
+    if (raw.nameFallback !== undefined) attr.nameFallback = raw.nameFallback;
     out.push(attr);
   }
   return out;
@@ -479,6 +681,8 @@ const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
         // Attribute walk: after ariaSnapshot(), query interactive/labelled nodes to extract stable
         // HTML attributes. Chromium-only cast for computedRole/computedName (best-effort; wrapped in
         // try/catch — if it throws, attrs is empty and the run degrades to a11y-only grounding).
+        // Seam C (Slice 3): SAME evaluate call — extended to also capture inputType and nameFallback
+        // for <input>/<textarea> elements. Zero extra Playwright calls.
         let rawAttrs = [];
         try {
           rawAttrs = await page.evaluate(function(testIdAttrName) {
@@ -501,8 +705,26 @@ const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
               if (nameVal) result.name = nameVal;
               var href = el.getAttribute('href');
               if (href && href.startsWith('/')) result.href = href;
-              // Only emit if at least one stable attribute is present
-              if (!result.testId && !result.id && !result.name && !result.href) return null;
+              // Seam C: capture input type and name fallback for <input>/<textarea>
+              var tagName = el.tagName.toLowerCase();
+              if (tagName === 'input' || tagName === 'textarea') {
+                var typeVal = el.getAttribute('type');
+                if (typeVal && typeVal !== 'text') result.inputType = typeVal;
+                // name fallback only when computedName is blank (i18n-unnamed inputs)
+                if (!computedName) {
+                  var placeholder = el.getAttribute('placeholder');
+                  var ariaLabel = el.getAttribute('aria-label');
+                  var ariaLabelledby = el.getAttribute('aria-labelledby');
+                  var fallback = placeholder || ariaLabel || '';
+                  if (!fallback && ariaLabelledby) {
+                    var labelEl = document.getElementById(ariaLabelledby);
+                    if (labelEl) fallback = (labelEl.textContent || '').trim();
+                  }
+                  if (fallback) result.nameFallback = fallback;
+                }
+              }
+              // Only emit if at least one stable or advisory attribute is present
+              if (!result.testId && !result.id && !result.name && !result.href && !result.inputType && !result.nameFallback) return null;
               return result;
             }).filter(Boolean);
           }, testIdAttr);
@@ -532,10 +754,13 @@ const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
           const raw = JSON.parse(stdout) as Array<{ route: string; yaml?: string; rawAttrs?: RawAttr[]; testIdAttr?: string; error?: string }>;
           done(raw.map((r) => {
             if (r.error) return { route: r.route, error: r.error };
-            const nodes = parseAriaSnapshot(r.yaml ?? "");
+            // Seam A (Slice 3): use parseAriaSnapshotWithState to populate both nodes[] and the
+            // parallel states map. nodes[] is byte-identical to parseAriaSnapshot output (same join keys).
+            const { nodes, states } = parseAriaSnapshotWithState(r.yaml ?? "");
             const attrs = r.rawAttrs && r.rawAttrs.length > 0 ? mergeAttrs(nodes, r.rawAttrs) : undefined;
             const snap: RouteSnapshot = { route: r.route, nodes };
             if (attrs && attrs.length > 0) snap.attrs = attrs;
+            if (states.size > 0) snap.states = states;
             if (r.testIdAttr) snap.testIdAttrName = r.testIdAttr;
             return snap;
           }));

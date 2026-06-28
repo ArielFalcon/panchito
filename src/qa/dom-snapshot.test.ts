@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { extractTargetRoutes, formatDomSnapshot, parseAriaSnapshot, captureDom, captureDomByRoute, captureRouteTrees, normalizeRoutes, capDomLines, isPriorityNode, mergeAttrs, type CaptureDomDeps, type NodeAttr, type RouteSnapshot } from "./dom-snapshot";
+import { extractTargetRoutes, formatDomSnapshot, parseAriaSnapshot, captureDom, captureDomByRoute, captureRouteTrees, normalizeRoutes, capDomLines, isPriorityNode, mergeAttrs, normalizeKey, parseAriaSnapshotWithState, type CaptureDomDeps, type NodeAttr, type RouteSnapshot } from "./dom-snapshot";
 
 // ── Phase 1: NodeAttr / RouteSnapshot.attrs types ───────────────────────────
 
@@ -549,4 +549,568 @@ test("captureRouteTrees is best-effort: no routes / no baseUrl / render throws /
   assert.deepEqual(await captureRouteTrees({ e2eDir: "/m", baseUrl: "http://dev", specContents: [`page.goto("/a")`] }, throwing), [], "render throws → []");
   const errored: CaptureDomDeps = { render: async () => [{ route: "/a", error: "nav failed" }, { route: "/b", nodes: [] }] };
   assert.deepEqual(await captureRouteTrees({ e2eDir: "/m", baseUrl: "http://dev", specContents: [`page.goto("/a"); page.goto("/b")`] }, errored), [], "errored + empty-nodes excluded");
+});
+
+// ── Phase 2 (Slice 1): buildChangedMarker + formatDomSnapshot(snaps, changed?) ─────────────────
+
+// Import the new exports. These will fail until Task 2.2 is implemented.
+import type { ChangedElement } from "./changed-elements";
+import { buildChangedMarker } from "./dom-snapshot";
+
+// (a) node with testId matching a ChangedElement.testId → line ends with [CHANGED: …]
+test("buildChangedMarker: matches on testId → returns [CHANGED: added data-cy=…]", () => {
+  const attr: NodeAttr = { key: "button: Submit", testId: "submit-btn" };
+  const changed: ChangedElement[] = [{ file: "f.html", line: 1, testId: "submit-btn", raw: "raw" }];
+  const marker = buildChangedMarker("button: Submit", attr, changed);
+  assert.ok(marker.startsWith(" [CHANGED:"), "marker starts with [CHANGED:");
+  assert.ok(marker.includes("submit-btn"), "marker includes the testId value");
+});
+
+// (b) match by id
+test("buildChangedMarker: matches on id → returns [CHANGED: added id=…]", () => {
+  const attr: NodeAttr = { key: "button: Save", id: "save-entity" };
+  const changed: ChangedElement[] = [{ file: "f.html", line: 1, id: "save-entity", raw: "raw" }];
+  const marker = buildChangedMarker("button: Save", attr, changed);
+  assert.ok(marker.startsWith(" [CHANGED:"), "marker for id match");
+  assert.ok(marker.includes("save-entity"), "marker includes id value");
+});
+
+// (c) match by name
+test("buildChangedMarker: matches on name → returns [CHANGED: added name=…]", () => {
+  const attr: NodeAttr = { key: "textbox: Username", name: "username" };
+  const changed: ChangedElement[] = [{ file: "f.html", line: 1, name: "username", raw: "raw" }];
+  const marker = buildChangedMarker("textbox: Username", attr, changed);
+  assert.ok(marker.startsWith(" [CHANGED:"), "marker for name match");
+  assert.ok(marker.includes("username"), "marker includes name value");
+});
+
+// (d) match by href
+test("buildChangedMarker: matches on href → returns [CHANGED: new link → /path]", () => {
+  const attr: NodeAttr = { key: "link: Products", href: "/products" };
+  const changed: ChangedElement[] = [{ file: "f.html", line: 1, href: "/products", raw: "raw" }];
+  const marker = buildChangedMarker("link: Products", attr, changed);
+  assert.ok(marker.startsWith(" [CHANGED:"), "marker for href match");
+  assert.ok(marker.includes("/products"), "marker includes href value");
+});
+
+// (e) text-fallback match (role:name segment equals changed.text)
+test("buildChangedMarker: text fallback — node name contains changed.text → [CHANGED: added text …]", () => {
+  const attr: NodeAttr | undefined = undefined; // no stable attrs
+  const changed: ChangedElement[] = [{ file: "f.html", line: 1, text: "Submit", raw: "raw" }];
+  const marker = buildChangedMarker("button: Submit", attr, changed);
+  assert.ok(marker.startsWith(" [CHANGED:"), "text fallback match produces marker");
+  assert.ok(marker.includes("Submit"), "marker includes the text");
+});
+
+// (f) no match → empty string (line byte-identical to today's formatDomSnapshot output)
+test("buildChangedMarker: no match → returns empty string", () => {
+  const attr: NodeAttr = { key: "button: Cancel", id: "cancel-btn" };
+  const changed: ChangedElement[] = [{ file: "f.html", line: 1, testId: "submit-btn", raw: "raw" }]; // different testId
+  const marker = buildChangedMarker("button: Cancel", attr, changed);
+  assert.equal(marker, "", "no match → empty string");
+});
+
+// (g) changed=undefined → entire output byte-identical to formatDomSnapshot(snaps) (regression guard)
+test("formatDomSnapshot: changed=undefined → output byte-identical to one-arg call (regression guard)", () => {
+  const snaps: RouteSnapshot[] = [{
+    route: "/form",
+    nodes: ["button: Submit", "link: Home"],
+    attrs: [{ key: "button: Submit", testId: "submit" }],
+  }];
+  const withoutArg = formatDomSnapshot(snaps);
+  const withUndefined = formatDomSnapshot(snaps, undefined);
+  assert.equal(withUndefined, withoutArg, "passing undefined is byte-identical to omitting the arg");
+});
+
+// (h) changed=[] → byte-identical (regression guard)
+test("formatDomSnapshot: changed=[] → output byte-identical to one-arg call (regression guard)", () => {
+  const snaps: RouteSnapshot[] = [{
+    route: "/form",
+    nodes: ["button: Submit", "link: Home"],
+    attrs: [{ key: "button: Submit", testId: "submit" }],
+  }];
+  const withoutArg = formatDomSnapshot(snaps);
+  const withEmpty = formatDomSnapshot(snaps, []);
+  assert.equal(withEmpty, withoutArg, "empty changed array is byte-identical to omitting the arg");
+});
+
+// (i) marker NEVER appears in nodes[] — call parseAriaSnapshot on the same fixture
+test("formatDomSnapshot with changed: marker appears in formatted string but NEVER in nodes[]", () => {
+  const yaml = "- button \"Submit\"";
+  const nodes = parseAriaSnapshot(yaml);
+  const changed: ChangedElement[] = [{ file: "f.html", line: 1, text: "Submit", raw: "raw" }];
+  const snap: RouteSnapshot[] = [{ route: "/form", nodes }];
+  const formatted = formatDomSnapshot(snap, changed);
+  // Formatted output contains the marker
+  assert.ok(formatted.includes("[CHANGED:"), "marker appears in formatted string");
+  // nodes[] are UNCHANGED — no marker in the raw nodes array
+  for (const n of nodes) {
+    assert.ok(!n.includes("[CHANGED:"), `nodes[] must be unchanged: "${n}"`);
+  }
+  // And the snap.nodes[] is the SAME object — not modified
+  assert.ok(!snap[0]!.nodes!.some((n) => n.includes("[CHANGED:")), "snap.nodes[] not mutated");
+});
+
+// Full integration: formatDomSnapshot with changed entries produces [CHANGED] on matched lines
+test("formatDomSnapshot with matched changed entry: marker appended after -> [attr] hint", () => {
+  const snaps: RouteSnapshot[] = [{
+    route: "/form",
+    nodes: ["button: Submit"],
+    attrs: [{ key: "button: Submit", testId: "submit-btn" }],
+  }];
+  const changed: ChangedElement[] = [{ file: "f.html", line: 1, testId: "submit-btn", raw: "raw" }];
+  const out = formatDomSnapshot(snaps, changed);
+  // Must contain the attr hint
+  assert.ok(out.includes("->"), "attr hint present");
+  // Must contain the CHANGED marker
+  assert.ok(out.includes("[CHANGED:"), "CHANGED marker present");
+  // Marker appears on the same line as the node
+  const lines = out.split("\n");
+  const nodeLine = lines.find((l) => l.includes("button: Submit"));
+  assert.ok(nodeLine, "node line found");
+  assert.ok(nodeLine!.includes("[CHANGED:"), "marker on the same line as the node");
+});
+
+// Unmatched node lines are byte-identical when changed is provided
+test("formatDomSnapshot: unmatched node → line unchanged even when changed is non-empty", () => {
+  const snaps: RouteSnapshot[] = [{
+    route: "/form",
+    nodes: ["button: Submit", "link: About"],
+    attrs: [{ key: "button: Submit", testId: "submit-btn" }],
+  }];
+  const changed: ChangedElement[] = [{ file: "f.html", line: 1, testId: "submit-btn", raw: "raw" }];
+  const withChanged = formatDomSnapshot(snaps, changed);
+  const withoutChanged = formatDomSnapshot(snaps);
+  // The "link: About" line must be identical in both
+  const withChangedLines = withChanged.split("\n");
+  const withoutLines = withoutChanged.split("\n");
+  const aboutWith = withChangedLines.find((l) => l.includes("link: About"));
+  const aboutWithout = withoutLines.find((l) => l.includes("link: About"));
+  assert.equal(aboutWith, aboutWithout, "unmatched node line is byte-identical");
+});
+
+// ── Fix 1b: word-boundary in buildChangedMarker text-FALLBACK only ────────────
+// RED tests: the text fallback MUST NOT fire on substring-of-word matches.
+// These fail against the current impl ("test" matches "test-submission" via .includes).
+// The stable-attr path (testId/id/name/href) is UNCHANGED and must still work as before.
+
+test("buildChangedMarker FIX-1b: text fallback must NOT fire when changed.text is a substring-of-word in nodeName", () => {
+  // "test" appears as the PREFIX of "test-submission", not as a whole word.
+  // The marker must NOT fire — substring match would mislead the agent.
+  const changed: ChangedElement[] = [{ file: "", line: 0, text: "test", raw: "test" }];
+  const marker = buildChangedMarker("button: test-submission", undefined, changed);
+  assert.equal(marker, "", "'test' must not match 'test-submission' via substring — word boundary required");
+});
+
+test("buildChangedMarker FIX-1b: text fallback must NOT fire when changed.text is 'form' matching 'Contact form submit'", () => {
+  // The manual-mode guidance "test the contact form" emits c.text="form".
+  // Node name "Contact form submit" DOES contain "form" as a whole word.
+  // After the fix this SHOULD match (it's a whole word in the name).
+  // But the false-positive was "test" matching "test-submission"; this is separate.
+  // Here we test that a partial-word that is NOT a word boundary does not fire.
+  const changed: ChangedElement[] = [{ file: "", line: 0, text: "sub", raw: "sub" }];
+  const marker = buildChangedMarker("button: test-submission", undefined, changed);
+  assert.equal(marker, "", "'sub' must not match 'test-submission' as a non-word-boundary token");
+});
+
+test("buildChangedMarker FIX-1b: text fallback DOES fire when changed.text is an EXACT whole-word match in nodeName", () => {
+  // "form" as a whole word inside "Contact form submit" — should produce a marker
+  const changed: ChangedElement[] = [{ file: "", line: 0, text: "form", raw: "form" }];
+  const marker = buildChangedMarker("button: Contact form submit", undefined, changed);
+  assert.ok(marker.startsWith(" [CHANGED:"), "whole-word 'form' in 'Contact form submit' must match");
+});
+
+test("buildChangedMarker FIX-1b: text fallback DOES fire when node name equals changed.text exactly", () => {
+  // Node name IS the phrase — always a match
+  const changed: ChangedElement[] = [{ file: "", line: 0, text: "Submit", raw: "Submit" }];
+  const marker = buildChangedMarker("button: Submit", undefined, changed);
+  assert.ok(marker.startsWith(" [CHANGED:"), "exact-equality match must still produce a marker");
+});
+
+test("buildChangedMarker FIX-1b: DIFF-mode stable-attr path (testId/id/name/href) is UNAFFECTED by word-boundary fix", () => {
+  // Stable-attr matches never used the text fallback — they must be byte-identical after the fix
+  const attrTestId: NodeAttr = { key: "button: Submit", testId: "submit-btn" };
+  const changedById: ChangedElement[] = [{ file: "f.html", line: 1, testId: "submit-btn", raw: "raw" }];
+  assert.ok(buildChangedMarker("button: Submit", attrTestId, changedById).includes("submit-btn"), "testId match unchanged");
+
+  const attrId: NodeAttr = { key: "button: Save", id: "save-entity" };
+  const changedByIdAttr: ChangedElement[] = [{ file: "f.html", line: 1, id: "save-entity", raw: "raw" }];
+  assert.ok(buildChangedMarker("button: Save", attrId, changedByIdAttr).includes("save-entity"), "id match unchanged");
+
+  const attrHref: NodeAttr = { key: "link: Products", href: "/products" };
+  const changedByHref: ChangedElement[] = [{ file: "f.html", line: 1, href: "/products", raw: "raw" }];
+  assert.ok(buildChangedMarker("link: Products", attrHref, changedByHref).includes("/products"), "href match unchanged");
+});
+
+// Full scenario from verify report WARNING-2: guidance "test the contact form" emitting
+// text entries MUST NOT produce markers on unrelated nodes when stopwords are filtered
+// and the text fallback uses word boundaries.
+test("FIX-1 end-to-end: guidance 'test the contact form' must NOT mark test-submission or form-details nodes", async () => {
+  const { changedElementsFromGuidance } = await import("./changed-elements");
+  const changed = changedElementsFromGuidance("test the contact form");
+  const nodes = ["button: test-submission", "button: Contact form submit", "link: form-details"];
+  for (const node of nodes) {
+    const marker = buildChangedMarker(node, undefined, changed);
+    // "button: test-submission" — 'test' is a stopword OR fails word-boundary; must NOT match
+    // "link: form-details" — 'form' appears as prefix of "form-details"; must NOT match
+    // "button: Contact form submit" — 'contact' or 'form' as whole words; this one MAY match
+    // (the test just ensures NO spurious markers on the clearly wrong nodes)
+    if (node === "button: test-submission" || node === "link: form-details") {
+      assert.equal(marker, "", `guidance must NOT spuriously mark "${node}": got "${marker}"`);
+    }
+  }
+});
+
+// ── REGRESSION GUARD: buildChangedMarker text-fallback with real bracketed accessible names ──
+// The text-fallback strip on rawNodeName must NOT use a generic /\s*\[[^\]]*\]\s*$/ pattern.
+// Real accessible names ending in brackets (badge counts "Inbox [5]", draft markers "Edit [Draft]")
+// must be preserved so the word/exact match in the text fallback fires correctly.
+//
+// RED: these FAIL against the current generic strip because rawNodeName "Inbox [5]" becomes
+// "Inbox", then c.text "Inbox [5]" does NOT equal "inbox" and "inbox [5]" not in ["inbox"].
+// GREEN: requires narrowing to the ARIA-state allowlist (same pattern as selector-check.ts).
+
+test("REGRESSION: buildChangedMarker text-fallback correctly matches node whose name ends in brackets (badge count)", () => {
+  // Node "link: Inbox [5]" — accessible name is literally "Inbox [5]" (badge count).
+  // changed.text is also "Inbox [5]". The text fallback must fire: exact equality match.
+  const changed: ChangedElement[] = [{ file: "f.html", line: 1, text: "Inbox [5]", raw: "raw" }];
+  const marker = buildChangedMarker("link: Inbox [5]", undefined, changed);
+  assert.ok(marker.startsWith(" [CHANGED:"), "text fallback must fire: 'Inbox [5]' should match changed.text 'Inbox [5]'");
+});
+
+test("REGRESSION: buildChangedMarker text-fallback correctly matches node whose name ends in draft marker", () => {
+  // Node "link: Edit [Draft]" — accessible name is literally "Edit [Draft]".
+  // changed.text is "Edit [Draft]". The text fallback must fire.
+  const changed: ChangedElement[] = [{ file: "f.html", line: 1, text: "Edit [Draft]", raw: "raw" }];
+  const marker = buildChangedMarker("link: Edit [Draft]", undefined, changed);
+  assert.ok(marker.startsWith(" [CHANGED:"), "text fallback must fire: 'Edit [Draft]' should match changed.text 'Edit [Draft]'");
+});
+
+test("REGRESSION: buildChangedMarker text-fallback still strips ARIA state tokens (allowlist positive case)", () => {
+  // Node "button: Submit [disabled]" — [disabled] IS an ARIA state token → strip it → name is "Submit".
+  // changed.text is "Submit". Exact equality match must still fire.
+  const changed: ChangedElement[] = [{ file: "f.html", line: 1, text: "Submit", raw: "raw" }];
+  const marker = buildChangedMarker("button: Submit [disabled]", undefined, changed);
+  assert.ok(marker.startsWith(" [CHANGED:"), "[disabled] is an ARIA state token — must be stripped so 'Submit' exact-matches changed.text");
+});
+
+// ── Slice 3: dom-capture-completeness ─────────────────────────────────────────
+// RED tests written BEFORE implementation per strict TDD mode.
+// Task 4.1 — GATE DELTA 1: interactive-priority budget protection
+
+// Task 4.1 RED: capDomLines must NOT evict interactive nodes in favor of landmarks.
+// 5 landmark + 55 interactive = 60 nodes, MAX=60 → every interactive node kept.
+// Today FAILS because landmarks fill otherBudget in document order before buttons.
+test("4.1 [RED→GREEN] capDomLines: interactive nodes are NOT evicted for landmarks when budget is tight", () => {
+  const landmarks = Array.from({ length: 5 }, (_, i) => `navigation: nav-${i}`);
+  const interactive = Array.from({ length: 55 }, (_, i) => `button: btn-${i}`);
+  // Document order: landmarks first, then interactive (worst case for current impl)
+  const lines = [...landmarks, ...interactive];
+  const { kept, dropped } = capDomLines(lines, 60);
+  // ALL 55 interactive nodes must survive — none evicted for landmarks
+  for (let i = 0; i < 55; i++) {
+    assert.ok(kept.includes(`button: btn-${i}`), `button btn-${i} must NOT be evicted`);
+  }
+  // Some landmarks may be dropped (budget is tight) but interactive nodes are safe
+  assert.equal(dropped, 0, "total nodes = cap, nothing should be dropped");
+});
+
+test("4.1b [RED→GREEN] capDomLines: interactive nodes survive when landmarks would fill otherBudget", () => {
+  // 10 landmarks + 60 interactive nodes, cap=60; priority (table/list) = 0
+  // Old impl: otherBudget=60, landmarks fill first 10, interactive fills 50 → 10 interactive evicted
+  // New impl: interactive tier fills before landmarks → all 60 interactive kept, landmarks dropped
+  const landmarks = Array.from({ length: 10 }, (_, i) => `navigation: nav-${i}`);
+  const interactive = Array.from({ length: 60 }, (_, i) => `button: btn-${i}`);
+  const lines = [...landmarks, ...interactive];
+  const { kept } = capDomLines(lines, 60);
+  for (let i = 0; i < 60; i++) {
+    assert.ok(kept.includes(`button: btn-${i}`), `interactive button btn-${i} must not be evicted`);
+  }
+  // Landmarks may be dropped since budget is full after interactive
+  const keptLandmarks = kept.filter((l) => l.startsWith("navigation:"));
+  assert.equal(keptLandmarks.length, 0, "landmarks should be evicted to make room for interactive nodes");
+});
+
+// Task 4.2 RED: bare nodes[] invariant — parseAriaSnapshot must NOT include state suffix.
+// The invariant already holds today, but we write an EXPLICIT assertion to lock it.
+test("4.2 [RED→GREEN] parseAriaSnapshot: state suffix [disabled] NEVER appears in nodes[] output", () => {
+  const result = parseAriaSnapshot('- button "Submit" [disabled]');
+  assert.deepEqual(result, ["button: Submit"], `nodes[] must be bare; got ${JSON.stringify(result)}`);
+  assert.ok(!result.some((l) => l.includes("[disabled]")), "no state suffix in nodes[]");
+  assert.ok(!result.some((l) => l.includes("[checked]")), "no [checked] in nodes[]");
+});
+
+// Task 4.3 RED: parseAriaSnapshotWithState state capture (parallel structure)
+test("4.3 [RED→GREEN] parseAriaSnapshotWithState: nodes stay bare, states captured in parallel map", () => {
+  const { nodes, states } = parseAriaSnapshotWithState(
+    '- button "Submit" [disabled]\n- checkbox "Remember me" [checked]'
+  );
+  assert.deepEqual(nodes, ["button: Submit", "checkbox: Remember me"], "nodes[] must be bare");
+  assert.deepEqual(states.get("button: Submit"), ["disabled"], "disabled state captured");
+  assert.deepEqual(states.get("checkbox: Remember me"), ["checked"], "checked state captured");
+});
+
+test("4.3b parseAriaSnapshotWithState: multiple states on same node all captured", () => {
+  const { nodes, states } = parseAriaSnapshotWithState('- textbox "Email" [required] [disabled]');
+  assert.deepEqual(nodes, ["textbox: Email"], "bare node");
+  const s = states.get("textbox: Email");
+  assert.ok(s?.includes("required"), "required captured");
+  assert.ok(s?.includes("disabled"), "disabled captured");
+});
+
+test("4.3c parseAriaSnapshotWithState: no state → key absent from map (not empty array)", () => {
+  const { nodes, states } = parseAriaSnapshotWithState('- button "Save"');
+  assert.deepEqual(nodes, ["button: Save"]);
+  assert.equal(states.get("button: Save"), undefined, "no state → absent from map");
+});
+
+// Task 4.4 RED: formatDomSnapshot renders state suffix DISPLAY-ONLY (not in nodes[])
+test("4.4 [RED→GREEN] formatDomSnapshot: state suffix appears in formatted output when states map provided", () => {
+  const statesMap = new Map([["button: Submit", ["disabled"]]]);
+  const snap: RouteSnapshot[] = [{ route: "/form", nodes: ["button: Submit"], states: statesMap }];
+  const out = formatDomSnapshot(snap);
+  assert.ok(out.includes("button: Submit [disabled]"), `state suffix should appear in formatted output; got: ${out}`);
+  // Crucially: nodes[] is still bare
+  assert.deepEqual(snap[0]!.nodes, ["button: Submit"], "nodes[] must remain bare");
+});
+
+test("4.4b formatDomSnapshot: state NEVER appears on (present) marker lines", () => {
+  const statesMap = new Map([["form: (present)", ["disabled"]]]);
+  const snap: RouteSnapshot[] = [{ route: "/form", nodes: ["form: (present)"], states: statesMap }];
+  const out = formatDomSnapshot(snap);
+  // State should NOT appear on marker lines
+  const formLine = out.split("\n").find((l) => l.includes("form:"));
+  assert.ok(formLine, "form line exists");
+  assert.ok(!formLine!.includes("[disabled]"), "state not on (present) marker line");
+});
+
+test("4.4c formatDomSnapshot: state suffix appears BEFORE [CHANGED:] marker in output", () => {
+  const statesMap = new Map([["button: Submit", ["disabled"]]]);
+  const snaps: RouteSnapshot[] = [{
+    route: "/form",
+    nodes: ["button: Submit"],
+    attrs: [{ key: "button: Submit", testId: "submit-btn" }],
+    states: statesMap,
+  }];
+  const changed: ChangedElement[] = [{ file: "f.html", line: 1, testId: "submit-btn", raw: "raw" }];
+  const out = formatDomSnapshot(snaps, changed);
+  const nodeLine = out.split("\n").find((l) => l.includes("button: Submit"));
+  assert.ok(nodeLine, "node line found");
+  // state suffix BEFORE CHANGED marker
+  const stateIdx = nodeLine!.indexOf("[disabled]");
+  const changedIdx = nodeLine!.indexOf("[CHANGED:");
+  assert.ok(stateIdx !== -1, "state suffix present");
+  assert.ok(changedIdx !== -1, "CHANGED marker present");
+  assert.ok(stateIdx < changedIdx, "state suffix appears before CHANGED marker");
+});
+
+// Task 4.5 RED: seam B keep-set expansion
+test("4.5 [RED→GREEN] parseAriaSnapshot: expanded keep-set — dialog, form, navigation, switch", () => {
+  assert.ok(parseAriaSnapshot('- dialog "Confirm Delete"').includes("dialog: Confirm Delete"), "dialog with name");
+  assert.ok(parseAriaSnapshot("- form:").includes("form: (present)"), "unnamed form → (present)");
+  assert.ok(parseAriaSnapshot('- navigation "Main"').includes("navigation: Main"), "navigation with name");
+  assert.ok(parseAriaSnapshot('- switch "Dark mode"').includes("switch: Dark mode"), "switch kept");
+});
+
+test("4.5b parseAriaSnapshot: alertdialog, alert, status, banner, main, progressbar all kept", () => {
+  assert.ok(parseAriaSnapshot('- alertdialog "Danger!"').includes("alertdialog: Danger!"), "alertdialog");
+  assert.ok(parseAriaSnapshot('- alert "Error occurred"').includes("alert: Error occurred"), "alert");
+  assert.ok(parseAriaSnapshot('- status "Loading"').includes("status: Loading"), "status");
+  assert.ok(parseAriaSnapshot('- banner "Site header"').includes("banner: Site header"), "banner");
+  assert.ok(parseAriaSnapshot('- main "Content"').includes("main: Content"), "main");
+  assert.ok(parseAriaSnapshot('- progressbar "Upload progress"').includes("progressbar: Upload progress"), "progressbar");
+});
+
+test("4.5c parseAriaSnapshot: dialog/alertdialog/form/navigation/banner/main/switch are STRUCTURAL (unnamed → (present))", () => {
+  assert.deepEqual(parseAriaSnapshot("- dialog:"), ["dialog: (present)"], "unnamed dialog → (present)");
+  assert.deepEqual(parseAriaSnapshot("- alertdialog:"), ["alertdialog: (present)"], "unnamed alertdialog → (present)");
+  assert.deepEqual(parseAriaSnapshot("- form:"), ["form: (present)"], "unnamed form → (present)");
+  assert.deepEqual(parseAriaSnapshot("- navigation:"), ["navigation: (present)"], "unnamed navigation → (present)");
+  assert.deepEqual(parseAriaSnapshot("- banner:"), ["banner: (present)"], "unnamed banner → (present)");
+  assert.deepEqual(parseAriaSnapshot("- main:"), ["main: (present)"], "unnamed main → (present)");
+  assert.deepEqual(parseAriaSnapshot("- switch:"), ["switch: (present)"], "unnamed switch → (present) (Delta 4)");
+});
+
+test("4.5d parseAriaSnapshot: alert/status/progressbar NOT structural — unnamed instances dropped", () => {
+  // alert, status, progressbar are NOT structural → unnamed instance is dropped (not kept as (present))
+  assert.deepEqual(parseAriaSnapshot("- alert:"), [], "unnamed alert dropped (not structural)");
+  assert.deepEqual(parseAriaSnapshot("- status:"), [], "unnamed status dropped (not structural)");
+  assert.deepEqual(parseAriaSnapshot("- progressbar:"), [], "unnamed progressbar dropped (not structural)");
+});
+
+// Task 4.6 RED: seam C inputType + nameFallback propagation
+test("4.6 [RED→GREEN] mergeAttrs: inputType propagated from RawAttr to NodeAttr", () => {
+  const nodes = ["textbox: (present)"];
+  const rawAttrs = [{ key: "textbox: (present)", inputType: "password", id: "pwd" }];
+  const result = mergeAttrs(nodes, rawAttrs);
+  assert.equal(result.length, 1, "entry emitted");
+  assert.equal(result[0]?.inputType, "password", "inputType propagated");
+  assert.equal(result[0]?.id, "pwd", "id still present");
+});
+
+test("4.6b mergeAttrs: nameFallback propagated from RawAttr to NodeAttr", () => {
+  const nodes = ["textbox: (present)"];
+  const rawAttrs = [{ key: "textbox: (present)", nameFallback: "Search…", id: "search" }];
+  const result = mergeAttrs(nodes, rawAttrs);
+  assert.equal(result[0]?.nameFallback, "Search…", "nameFallback propagated");
+});
+
+test("4.6c buildAttrHint: inputType appears in hint after stable attrs on a NAMED node", () => {
+  // We test via formatDomSnapshot since buildAttrHint is not exported.
+  // A NAMED input node with id + inputType → hint contains both.
+  // Note: (present) structural markers correctly receive NO hint per the existing invariant.
+  const snap: RouteSnapshot[] = [{
+    route: "/form",
+    nodes: ["textbox: Password"],
+    attrs: [{ key: "textbox: Password", id: "pwd", inputType: "password" }],
+    states: new Map(),
+  }];
+  const out = formatDomSnapshot(snap);
+  assert.match(out, /id=pwd/, "id in hint");
+  assert.match(out, /type=password/, "inputType in hint as type=");
+});
+
+test("4.6d buildAttrHint: nameFallback appears in hint on a named node", () => {
+  // nameFallback is captured by the in-page walk for unnamed inputs. Here we test that
+  // if a named node also has a fallback, it appears in the hint. The (present) marker
+  // invariant remains: (present) lines never get a hint. This tests the buildAttrHint logic
+  // via a node that mergeAttrs produces with a key that is NOT a (present) marker.
+  const snap: RouteSnapshot[] = [{
+    route: "/search",
+    nodes: ["textbox: Search"],
+    attrs: [{ key: "textbox: Search", nameFallback: "Search…" }],
+    states: new Map(),
+  }];
+  const out = formatDomSnapshot(snap);
+  assert.match(out, /Search…/, "nameFallback appears in hint");
+});
+
+test("4.6e buildAttrHint: absent inputType and nameFallback produce no extra tokens (byte-identical hint)", () => {
+  // A node with only id → hint is exactly [id=save-entity], no extra tokens
+  const snap1: RouteSnapshot[] = [{
+    route: "/form",
+    nodes: ["button: Save"],
+    attrs: [{ key: "button: Save", id: "save-entity" }],
+  }];
+  const snap2: RouteSnapshot[] = [{
+    route: "/form",
+    nodes: ["button: Save"],
+    attrs: [{ key: "button: Save", id: "save-entity" }],
+    states: new Map(),
+  }];
+  const out1 = formatDomSnapshot(snap1);
+  const out2 = formatDomSnapshot(snap2);
+  // Both should have [id=save-entity] and no extra tokens
+  assert.match(out1, /\[id=save-entity\]/);
+  assert.match(out2, /\[id=save-entity\]/);
+  assert.ok(!out1.includes("type="), "no type= token when inputType absent");
+  assert.ok(!out2.includes("type="), "no type= token when inputType absent (with empty states)");
+});
+
+// Task 4.7 RED: seam D normalizeKey and mergeAttrs hardening
+test("4.7 [RED→GREEN] normalizeKey: strips trailing [...] then collapses whitespace", () => {
+  assert.equal(normalizeKey("button: Submit [disabled]"), "button: Submit", "trailing state stripped");
+  assert.equal(normalizeKey("button:  Submit"), "button: Submit", "double space collapsed");
+  assert.equal(normalizeKey("  button: Submit  "), "button: Submit", "leading/trailing trimmed");
+  assert.equal(normalizeKey("button: Submit"), "button: Submit", "already normalized → unchanged");
+});
+
+test("4.7b mergeAttrs: whitespace divergence does NOT drop attrs (double space after colon)", () => {
+  // nodes[] has double-space, RawAttr has single-space key
+  const nodes = ["button:  Submit"];
+  const rawAttrs = [{ key: "button: Submit", id: "btn" }];
+  const result = mergeAttrs(nodes, rawAttrs);
+  assert.equal(result.length, 1, "NodeAttr emitted despite whitespace divergence");
+  assert.equal(result[0]?.id, "btn");
+});
+
+test("4.7c mergeAttrs: state suffix on node key does NOT prevent attr merge", () => {
+  // nodes[] has state suffix (from seam A), RawAttr has bare key
+  const nodes = ["button: Submit [disabled]"];
+  const rawAttrs = [{ key: "button: Submit", id: "btn" }];
+  const result = mergeAttrs(nodes, rawAttrs);
+  assert.equal(result.length, 1, "NodeAttr emitted despite state suffix on node key");
+  assert.equal(result[0]?.key, "button: Submit", "NodeAttr.key is the bare normalized key");
+  assert.equal(result[0]?.id, "btn");
+});
+
+// REGRESSION (corrective): normalizeKey must NOT strip a real accessible name that ends in
+// brackets (badge counts "Inbox [5]", draft markers "Edit [Draft]") — only ARIA state tokens.
+// A generic trailing-[...] strip truncates the real name, colliding distinct siblings in mergeAttrs
+// (first-wins drops the second's attrs) and missing the stateMap lookup for bracketed-name nodes.
+test("REGRESSION: normalizeKey preserves real bracketed names, strips only ARIA state tokens", () => {
+  assert.equal(normalizeKey("link: Inbox [5]"), "link: Inbox [5]", "badge-count name preserved");
+  assert.equal(normalizeKey("link: Edit [Draft]"), "link: Edit [Draft]", "draft-marker name preserved");
+  assert.equal(normalizeKey("button: Submit [disabled]"), "button: Submit", "ARIA state still stripped");
+  assert.equal(normalizeKey("textbox: Email [required] [disabled]"), "textbox: Email", "multiple state tokens stripped");
+});
+
+test("REGRESSION: mergeAttrs does NOT collide two siblings differing only in a real bracket suffix", () => {
+  const nodes = ["link: Inbox [5]", "link: Inbox [3]"];
+  const rawAttrs = [
+    { key: "link: Inbox [5]", id: "inbox-unread" },
+    { key: "link: Inbox [3]", id: "inbox-flagged" },
+  ];
+  const result = mergeAttrs(nodes, rawAttrs);
+  assert.equal(result.length, 2, "both bracketed-name siblings kept (no first-wins collision)");
+  assert.equal(result.find((a) => a.key === "link: Inbox [5]")?.id, "inbox-unread");
+  assert.equal(result.find((a) => a.key === "link: Inbox [3]")?.id, "inbox-flagged");
+});
+
+// Task 4.8 RED: selector-check.ts parseLine state-strip
+// parseLine is private in selector-check.ts — we test via selectorPresent (the public API)
+// which calls parseLine internally. If parseLine strips the suffix, selectorPresent
+// will correctly match "button: Submit" even when the line has "[disabled]" suffix.
+test("4.8 [RED→GREEN] selectorPresent: correctly matches node line with state suffix", async () => {
+  // If parseLine strips "[disabled]", role=button name=Submit matches "button: Submit [disabled]"
+  const { selectorPresent: sp } = await import("./selector-check");
+  const tree = ["button: Submit [disabled]"];
+  const sel = { kind: "role" as const, role: "button", name: "Submit" };
+  const result = sp(sel, tree);
+  assert.equal(result.present, true, "selectorPresent must match even with state suffix on node line");
+  assert.equal(result.verifiable, true);
+});
+
+// Task 4.9 UPDATE: existing state-stripping tests — add companion assertions on parseAriaSnapshotWithState
+test("4.9 parseAriaSnapshotWithState companion: state IS captured in parallel map (not lost)", () => {
+  // The existing tests assert state is NOT in nodes[] — we now also verify it IS in states map
+  const yaml = `
+- checkbox "Subscribe" [checked]
+- checkbox "Newsletter" [disabled]
+- option "Dog" [selected]
+`.trim();
+  const { nodes, states } = parseAriaSnapshotWithState(yaml);
+  // nodes[] still bare (existing invariant)
+  assert.ok(!nodes.some((l) => l.includes("[checked]")), "no state bracket in nodes[]");
+  assert.ok(!nodes.some((l) => l.includes("[disabled]")), "no state bracket in nodes[]");
+  assert.ok(!nodes.some((l) => l.includes("[selected]")), "no state bracket in nodes[]");
+  // states map captures what was stripped
+  assert.deepEqual(states.get("checkbox: Subscribe"), ["checked"], "checked captured");
+  assert.deepEqual(states.get("checkbox: Newsletter"), ["disabled"], "disabled captured");
+  assert.deepEqual(states.get("option: Dog"), ["selected"], "selected captured");
+});
+
+// Phase 5: Non-regression sweep tests (5.1, 5.2)
+test("5.1 Slice 1 marker-absent-when-no-change: node with no state/inputType/nameFallback formats byte-identically", () => {
+  // A node from the original keep-set with no new data must format identically
+  const nodes = ["button: Submit", "link: Home", "table: (present)"];
+  const snap1: RouteSnapshot[] = [{ route: "/form", nodes }];
+  const snap2: RouteSnapshot[] = [{ route: "/form", nodes, states: new Map() }];
+  const out1 = formatDomSnapshot(snap1);
+  const out2 = formatDomSnapshot(snap2);
+  assert.equal(out1, out2, "empty states map → byte-identical to no states at all");
+  // No marker present when changed is undefined
+  assert.ok(!out1.includes("[CHANGED:"), "no CHANGED marker when changed is not provided");
+});
+
+test("5.2 Byte-identical no-op: original-keep-set role with no new data formats identically before/after Slice 3", () => {
+  // heading is in the original keep-set and gets no new fields
+  const nodes = ["heading: Owners", "listitem: Item one"];
+  const snap: RouteSnapshot[] = [{ route: "/", nodes }];
+  const out = formatDomSnapshot(snap);
+  // Lines should be indented with 2 spaces and no extra suffixes
+  assert.ok(out.includes("  heading: Owners"), "heading formatted as-is");
+  assert.ok(out.includes("  listitem: Item one"), "listitem formatted as-is");
+  assert.ok(!out.includes("[disabled]"), "no stray state suffix");
+  assert.ok(!out.includes("type="), "no stray inputType token");
 });

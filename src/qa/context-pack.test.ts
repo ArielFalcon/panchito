@@ -575,3 +575,48 @@ test("Slice H (fix — regression gate): complete/exhaustive runs unaffected by 
   assert.ok(!planAssembled.text.includes("TRANSCRIBE"), "complete/exhaustive must not have transcribe framing");
   assert.ok(!planAssembled.text.includes("Live DOM"), "complete/exhaustive plan prompt must not include DOM content");
 });
+
+// ── Phase 3 (Slice 1): changedElements threading to the DOM section ─────────────────────────────
+
+import type { ChangedElement } from "./changed-elements";
+
+// (a) pass changedElements with a matching entry on ContextPackInput; assert DOM section contains [CHANGED: …]
+test("Slice 1 (Phase 3): changedElements on ContextPackInput reaches DOM section via captureDomForRoutes (4th arg)", async () => {
+  const changed: ChangedElement[] = [{ file: "f.html", line: 1, testId: "register-btn", raw: "raw" }];
+
+  // Track whether the 4th argument was forwarded to captureDomForRoutes
+  let receivedChanged: ChangedElement[] | undefined = undefined;
+  const trackingDeps: ContextPackDeps = {
+    captureDomForRoutes: async (_routes, _input, _domDeps, changedArg) => {
+      receivedChanged = changedArg;
+      // Return a fake DOM that would match the changed testId if formatted with changed markers
+      return "button: Register  -> [data-testid=register-btn] [CHANGED: added data-cy=register-btn]";
+    },
+    domDeps: stubDomDeps(undefined),
+    log: () => {},
+  };
+
+  const result = await buildContextPack(
+    { brief: MINIMAL_BRIEF, baseUrl: "http://localhost:3000", e2eDir: "/fake/e2e", changedElements: changed },
+    trackingDeps,
+  );
+
+  // changedElements must have been forwarded to captureDomForRoutes
+  assert.deepEqual(receivedChanged, changed, "changedElements forwarded as 4th arg to captureDomForRoutes");
+  // The DOM section must contain [CHANGED:
+  assert.ok(result.text?.includes("[CHANGED:"), "DOM section must contain [CHANGED: marker");
+});
+
+// Regression guard: changedElements=undefined → output byte-identical to pack without changedElements
+test("Slice 1 (Phase 3): changedElements=undefined on ContextPackInput → output byte-identical (regression guard)", async () => {
+  const withUndefined = await buildContextPack(
+    { brief: MINIMAL_BRIEF, baseUrl: "http://localhost:3000", e2eDir: "/fake/e2e" },
+    stubContextPackDeps("button: Submit"),
+  );
+  // Re-build explicitly passing changedElements: undefined
+  const withExplicitUndefined = await buildContextPack(
+    { brief: MINIMAL_BRIEF, baseUrl: "http://localhost:3000", e2eDir: "/fake/e2e", changedElements: undefined },
+    stubContextPackDeps("button: Submit"),
+  );
+  assert.equal(withExplicitUndefined.text, withUndefined.text, "undefined changedElements is byte-identical to omitting it");
+});
