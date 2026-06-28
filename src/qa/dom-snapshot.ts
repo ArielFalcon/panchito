@@ -63,6 +63,8 @@ export interface CaptureDomInput {
   e2eDir: string; // the seeded e2e project (its node_modules has the pinned Playwright)
   baseUrl: string; // live DEV
   specContents: string[]; // the spec sources, to extract the routes they navigate
+  testIdAttribute?: string; // config-declared convention (e.g. "data-cy"); threaded to render so the
+                            // in-page attribute walk queries the right attribute. Absent → render defaults to "data-testid".
 }
 
 export interface CaptureDomDeps {
@@ -207,13 +209,14 @@ export function buildChangedMarker(
   line: string,
   attr: NodeAttr | undefined,
   changed: import("./changed-elements").ChangedElement[],
+  testIdAttrName: string = "data-testid",
 ): string {
   if (!changed.length) return "";
 
   for (const c of changed) {
     // Primary: stable-attr matches (most precise; same discipline as mergeAttrs)
     if (c.testId !== undefined && attr?.testId === c.testId) {
-      return ` [CHANGED: added data-cy=${c.testId}]`;
+      return ` [CHANGED: added ${testIdAttrName}=${c.testId}]`;
     }
     if (c.id !== undefined && attr?.id === c.id) {
       return ` [CHANGED: added id=${c.id}]`;
@@ -303,14 +306,14 @@ export function formatDomSnapshot(snaps: RouteSnapshot[], changed?: import("./ch
         if (attr) {
           const hint = buildAttrHint(attr, testIdAttrName);
           if (hint) {
-            const changedMarker = useChanged ? buildChangedMarker(n, attr, changed!) : "";
+            const changedMarker = useChanged ? buildChangedMarker(n, attr, changed!, testIdAttrName) : "";
             lines.push(`  ${n}  -> ${hint}${stateSuffix}${changedMarker}`);
             continue;
           }
         }
       }
       // No hint path: state suffix + changed marker (text fallback, or attr match without hint)
-      const changedMarker = useChanged && !isMarkerLine(n) ? buildChangedMarker(n, attrMap?.get(normalizeKey(n)) ?? attrMap?.get(n), changed!) : "";
+      const changedMarker = useChanged && !isMarkerLine(n) ? buildChangedMarker(n, attrMap?.get(normalizeKey(n)) ?? attrMap?.get(n), changed!, testIdAttrName) : "";
       lines.push(`  ${n}${stateSuffix}${changedMarker}`);
     }
     if (all.length > nodes.length) lines.push(`  … (${all.length - nodes.length} more non-table elements omitted)`);
@@ -325,7 +328,7 @@ export async function captureDom(input: CaptureDomInput, deps: CaptureDomDeps): 
   const routes = extractTargetRoutes(input.specContents);
   if (routes.length === 0 || !input.baseUrl) return undefined; // benign: nothing to ground against
   try {
-    const snaps = await deps.render(input.e2eDir, input.baseUrl, routes);
+    const snaps = await deps.render(input.e2eDir, input.baseUrl, routes, input.testIdAttribute);
     const text = formatDomSnapshot(snaps);
     if (text.trim()) return text;
     // Routes WERE extractable and a baseUrl WAS present, yet the render produced nothing. That is a
@@ -348,14 +351,14 @@ export async function captureDom(input: CaptureDomInput, deps: CaptureDomDeps): 
 // Absent → byte-identical to today.
 export async function captureDomForRoutes(
   routes: string[],
-  input: { e2eDir: string; baseUrl?: string },
+  input: { e2eDir: string; baseUrl?: string; testIdAttribute?: string },
   deps: CaptureDomDeps,
   changed?: import("./changed-elements").ChangedElement[],
 ): Promise<string | undefined> {
   const clean = normalizeRoutes(routes).slice(0, MAX_ROUTES);
   if (clean.length === 0 || !input.baseUrl) return undefined;
   try {
-    const text = formatDomSnapshot(await deps.render(input.e2eDir, input.baseUrl, clean), changed);
+    const text = formatDomSnapshot(await deps.render(input.e2eDir, input.baseUrl, clean, input.testIdAttribute), changed);
     return text.trim() ? text : undefined;
   } catch {
     return undefined; // degrade to the worker's own exploration; never break the run
@@ -379,7 +382,7 @@ export async function captureDomForRoutes(
 // pair is not a majority of a >=4-route set), and a single unique route is never dropped (count 1).
 export async function captureDomByRoute(
   routes: string[],
-  input: { e2eDir: string; baseUrl?: string; changedElements?: import("./changed-elements").ChangedElement[] },
+  input: { e2eDir: string; baseUrl?: string; changedElements?: import("./changed-elements").ChangedElement[]; testIdAttribute?: string },
   deps: CaptureDomDeps,
 ): Promise<Map<string, string>> {
   const out = new Map<string, string>();
@@ -393,7 +396,7 @@ export async function captureDomByRoute(
   }
   let snaps: RouteSnapshot[];
   try {
-    snaps = await deps.render(input.e2eDir, input.baseUrl, clean);
+    snaps = await deps.render(input.e2eDir, input.baseUrl, clean, input.testIdAttribute);
   } catch {
     return out; // degrade: every objective falls back independently
   }
@@ -425,7 +428,7 @@ export async function captureRouteTrees(input: CaptureDomInput, deps: CaptureDom
   const routes = extractTargetRoutes(input.specContents);
   if (routes.length === 0 || !input.baseUrl) return [];
   try {
-    const snaps = await deps.render(input.e2eDir, input.baseUrl, routes);
+    const snaps = await deps.render(input.e2eDir, input.baseUrl, routes, input.testIdAttribute);
     return snaps.filter((s) => !s.error && (s.nodes?.length ?? 0) > 0);
   } catch {
     return []; // degrade: no pre-execution signal, never break the run

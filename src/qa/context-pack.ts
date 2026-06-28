@@ -72,6 +72,11 @@ export interface ContextPackInput {
   // optional 4th arg, which forwards it to formatDomSnapshot for [CHANGED: …] annotation.
   // Absent/empty → no annotation; output is byte-identical to today.
   changedElements?: ChangedElement[];
+
+  // Pillar 1 (selector grounding): the config-declared test-id convention (e.g. "data-cy"), forwarded
+  // to captureDomForRoutes so the DOM capture queries the right attribute and the agent transcribes
+  // real test-ids instead of guessing. Absent → capture defaults to "data-testid".
+  testIdAttribute?: string;
 }
 
 export interface ContextPackResult {
@@ -88,7 +93,7 @@ export interface ContextPackResult {
 export interface ContextPackDeps {
   captureDomForRoutes(
     routes: string[],
-    input: { e2eDir: string; baseUrl?: string },
+    input: { e2eDir: string; baseUrl?: string; testIdAttribute?: string },
     domDeps: CaptureDomDeps,
     changed?: ChangedElement[],
   ): Promise<string | undefined>;
@@ -249,7 +254,7 @@ export async function buildContextPack(
   const briefRoutes = candidateRoutes.slice(0, DOM_ROUTE_CAP);
   if (briefRoutes.length > 0 && input.e2eDir && input.baseUrl) {
     try {
-      const raw = await deps.captureDomForRoutes(briefRoutes, { e2eDir: input.e2eDir, baseUrl: input.baseUrl }, deps.domDeps, input.changedElements);
+      const raw = await deps.captureDomForRoutes(briefRoutes, { e2eDir: input.e2eDir, baseUrl: input.baseUrl, testIdAttribute: input.testIdAttribute }, deps.domDeps, input.changedElements);
       if (raw) {
         // Budget the DOM: split into lines, apply capDomLines (table/list priority), then
         // reconstruct. This replaces the fixed 4×60 cap with a byte-budget-aware slice.

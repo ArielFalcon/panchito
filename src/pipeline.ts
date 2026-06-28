@@ -130,6 +130,9 @@ export interface GenerateInput {
   // annotation (byte-identical to today). opencode-client.ts is NOT modified — the closure arity
   // stays (routes: string[]) => Promise<Map<string, string>>.
   changedElements?: import("./qa/changed-elements").ChangedElement[];
+  // Pillar 1 (selector grounding): config-declared test-id convention, forwarded by the captureRoutesDom
+  // closure to captureDomByRoute so worker DOM capture queries the right attribute. Absent → "data-testid".
+  testIdAttribute?: string;
   service?: { repo: string; mirrorDir: string; openapi?: string | string[] }; // cross-repo: the triggering microservice (read-only working copy)
   services?: Array<{ repo: string; mirrorDir: string; openapi?: string | string[] }>; // context mode: every declared service, mirrored read-only
 }
@@ -210,7 +213,7 @@ export interface PipelineDeps {
   // Grounds the independent reviewer in the LIVE DEV DOM: renders the routes the spec targets and
   // returns "role: name" lines so the reviewer judges UI facts against reality, not its training
   // memory. Best-effort (undefined on any failure) — the review degrades to defer-on-unverifiable.
-  captureDom?(input: { e2eDir: string; baseUrl: string; specContents: string[] }): Promise<string | undefined>;
+  captureDom?(input: { e2eDir: string; baseUrl: string; specContents: string[]; testIdAttribute?: string }): Promise<string | undefined>;
   // Pre-execution per-route RAW a11y trees for the deterministic selector check (W1). Distinct from
   // captureDom (which formats a fused string for the reviewer) — this returns raw `.nodes` per route for
   // checkSpecSelectors. Best-effort and tech-agnostic; absent ⇒ the pre-execution check is skipped (no
@@ -373,7 +376,7 @@ export function defaultPipelineDeps(options: DefaultPipelineDepsOptions = {}): P
               ? {
                   // Slice 1: capture changedElements from input (set by runPipeline before this GenerateInput is built).
                   // Passed inside captureDomByRoute's input object (not as a closure arg — the arity (routes: string[]) is pinned by opencode-client.ts).
-                  captureRoutesDom: (routes: string[]) => captureDomByRoute(routes, { e2eDir: join(input.mirrorDir, E2E_DIR), baseUrl: input.baseUrl, changedElements: input.changedElements }, defaultCaptureDomDeps),
+                  captureRoutesDom: (routes: string[]) => captureDomByRoute(routes, { e2eDir: join(input.mirrorDir, E2E_DIR), baseUrl: input.baseUrl, changedElements: input.changedElements, testIdAttribute: input.testIdAttribute }, defaultCaptureDomDeps),
                 }
               : {}),
           })
@@ -1518,7 +1521,7 @@ export async function runPipeline(
           const specContents = r.specs.map((s) => {
             try { return readFileSync(join(mirrorDir, E2E_DIR, s), "utf8"); } catch { return ""; }
           });
-          domSnapshot = await deps.captureDom({ e2eDir, baseUrl: app.dev.baseUrl, specContents }).catch(() => undefined);
+          domSnapshot = await deps.captureDom({ e2eDir, baseUrl: app.dev.baseUrl, specContents, testIdAttribute }).catch(() => undefined);
           lastSpecsKey = specsKey;
         }
       }
@@ -1775,6 +1778,7 @@ export async function runPipeline(
     // Slice 1: thread change-anchor signals to defaultPipelineDeps.generate so the captureRoutesDom
     // closure can pass them to captureDomByRoute for [CHANGED: …] annotation of worker DOM trees.
     changedElements: changedElements.length > 0 ? changedElements : undefined,
+    testIdAttribute,
     // Seam b: thread enumerated spec files into every generation call for the manifest section.
     existingSpecFiles,
     service: triggerService
@@ -1803,7 +1807,7 @@ export async function runPipeline(
       .map((f) => join(e2eDir, f))
       .filter((p) => existsSync(p))
       .map((p) => readFileSync(p, "utf8"));
-    const trees = (await deps.captureRouteTrees({ e2eDir, baseUrl, specContents: specSources }))
+    const trees = (await deps.captureRouteTrees({ e2eDir, baseUrl, specContents: specSources, testIdAttribute }))
       .map((s) => s.nodes ?? [])
       .filter((n) => n.length > 0);
     // A1: per-selector chain-awareness. The old blanket `if (findings.anyNonExtractable) return []`
@@ -1936,6 +1940,7 @@ export async function runPipeline(
             prChangedFiles: intent?.changedFiles,
             // Slice 1: thread change-anchor signals into the context-pack DOM section for [CHANGED: …] annotation.
             changedElements: changedElements.length > 0 ? changedElements : undefined,
+            testIdAttribute,
           },
           defaultContextPackDeps,
         );
