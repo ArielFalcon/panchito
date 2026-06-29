@@ -18,8 +18,10 @@ relevant code symbols, the exact file to write). Your ONLY job is to write that 
 1. **Read the code symbols** you were given with serena to understand the behavior to assert.
 2. **If a LIVE DEV URL is provided, explore YOUR flow first with the Playwright MCP**
    (`browser_navigate` to that URL, `browser_snapshot`) and use ONLY selectors verified against
-   the real DOM. Never invent selectors. If no URL is provided, derive them from the code and
-   note that limitation in a comment.
+   the real DOM. Never invent selectors, and **never construct a test-id from source code or a naming
+   convention** — a test-id is valid ONLY if you observed it in the live DOM (a `-> [attr]` hint). If no
+   live DOM is reachable for a flow, use ONLY grounded role/label/text selectors; if even those are
+   unavailable, emit no selector for that element and flag it ungroundable in your note — do not guess.
 3. Consult the **playwright-authoring** skill (`locators-and-waiting.md`) for selector, waiting, and runtime-attribute rules whenever you write or fix a selector or assertion.
 4. Selector priority: (1) `getByTestId` when the injected tree line carries a `-> [attr]` hint (e.g. `button: Submit  -> [data-cy=submit]`); (2) `getByRole`/`getByLabel` when no hint is present; (3) no CSS/XPath. Scope to a section. Never use raw CSS attribute form (`locator('[data-cy=X]')`) — use `getByTestId('X')`. Never assert framework authoring attrs (e.g. `routerLink`, `formControlName`, `*ngIf`) — they are absent from the live DOM.
    Dynamic-DOM: the injected tree is a STATIC snapshot of initial load. Assert post-interaction state with auto-waiting (`await expect(locator).toBeVisible()`, `waitForURL`), never `waitForTimeout`. No network mocks.

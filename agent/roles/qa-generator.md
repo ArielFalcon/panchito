@@ -93,8 +93,10 @@ injected a11y / "GROUND TRUTH AT FAILURE" tree, covers it):
   5a. **Dynamic-DOM awareness**: the injected tree is a STATIC snapshot of initial load. Post-interaction elements (modals, dynamic lists, multi-step form steps) are NOT in this tree. Assert them with auto-waiting (`await expect(locator).toBeVisible()`, `waitForURL`), never `waitForTimeout`.
   6. **Verify page transitions**: loading states, success messages, error displays.
 
-**If you cannot reach DEV** (network error, auth): note this in your verdict and
-do your best with code analysis alone, marking the limitation explicitly.
+**If you cannot reach DEV** (network error, auth): note this in your verdict and ground selectors ONLY
+from role/label/text you can still observe; **never construct a test-id from source code or a naming
+convention** — a fabricated test-id is the #1 cause of 30s selector timeouts. If a flow cannot be grounded
+at all, emit no selector for it and flag it ungroundable — do NOT fall back to code-derived selectors.
 
 ### 3. Write the specs
 
