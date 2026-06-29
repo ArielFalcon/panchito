@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scrubEnv } from "./code-runner";
 import { killTree } from "./execute";
+import { buildTestIdIndex } from "./route-catalog";
 
 // Stable HTML attributes for one interactive or labelled node. `key` equals the
 // "role: name" line that parseAriaSnapshot produced for this node — it is the join key
@@ -56,6 +57,7 @@ export interface RouteSnapshot {
   // as a suffix after the attr hint and before [CHANGED:]. NEVER written into nodes[].
   states?: Map<string, string[]>;
   testIdAttrName?: string; // the configured testIdAttribute name used during capture (e.g. "data-cy"); defaults to "data-testid" in formatDomSnapshot
+  testIds?: Map<string, number>; // Pillar 2 catalog: role-independent test-id value→count index (presence + uniqueness) — feeds the pre-execution selector gate
   error?: string; // capture failed for this route (degrade — never blocks review)
 }
 
@@ -732,7 +734,13 @@ const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
             }).filter(Boolean);
           }, testIdAttr);
         } catch(_attrErr) { rawAttrs = []; }
-        out.push({ route, yaml, rawAttrs, testIdAttr });
+        var testIdRawList = [];
+        try {
+          testIdRawList = await page.evaluate(function(a) {
+            return Array.from(document.querySelectorAll('[' + a + ']')).map(function(el) { return el.getAttribute(a); }).filter(function(v) { return v; });
+          }, testIdAttr);
+        } catch(_e) { testIdRawList = []; }
+        out.push({ route, yaml, rawAttrs, testIdRawList, testIdAttr });
       } catch (e) { out.push({ route, error: String(e && e.message || e).slice(0, 200) }); }
     }
   } catch (e) { process.stderr.write(String(e)); } finally { if (browser) await browser.close().catch(() => {}); }
@@ -754,7 +762,7 @@ const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
       child.on("error", () => done([]));
       child.on("close", () => {
         try {
-          const raw = JSON.parse(stdout) as Array<{ route: string; yaml?: string; rawAttrs?: RawAttr[]; testIdAttr?: string; error?: string }>;
+          const raw = JSON.parse(stdout) as Array<{ route: string; yaml?: string; rawAttrs?: RawAttr[]; testIdRawList?: string[]; testIdAttr?: string; error?: string }>;
           done(raw.map((r) => {
             if (r.error) return { route: r.route, error: r.error };
             // Seam A (Slice 3): use parseAriaSnapshotWithState to populate both nodes[] and the
@@ -765,6 +773,8 @@ const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
             if (attrs && attrs.length > 0) snap.attrs = attrs;
             if (states.size > 0) snap.states = states;
             if (r.testIdAttr) snap.testIdAttrName = r.testIdAttr;
+            const testIds = buildTestIdIndex(r.testIdRawList ?? []);
+            if (testIds.size > 0) snap.testIds = testIds;
             return snap;
           }));
         } catch {
