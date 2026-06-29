@@ -27,6 +27,7 @@ function strategy(
     : [
         { id: "gpt-5.4" },
         { id: "gpt-5.4-mini" },
+        { id: "gpt-5.5" },
       ];
   return {
     provider,

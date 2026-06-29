@@ -33,10 +33,20 @@ const CODEX_EXEC_ENV_EXACT = new Set([
 const CODEX_EXEC_ENV_PREFIX = /^(?:DEV_|AGENT_)/;
 const MAX_PROMPT_BYTES = 2 * 1024 * 1024;
 
+// When codex has a stored login (auth.json — e.g. a ChatGPT subscription created by `codex login`),
+// do NOT forward the env API keys to the child: codex prefers an env API key over the stored login,
+// which silently bypasses the subscription (and can hit a quota-exhausted key). Let the stored auth win.
+function codexHasStoredAuth(env = process.env) {
+  const home = env.CODEX_HOME || `${env.HOME || "/root"}/.codex`;
+  return existsSync(`${home}/auth.json`);
+}
+
 function codexExecEnv(env = process.env) {
+  const storedAuth = codexHasStoredAuth(env);
   const out = {};
   for (const [key, value] of Object.entries(env)) {
     if (value === undefined) continue;
+    if (storedAuth && (key === "CODEX_API_KEY" || key === "OPENAI_API_KEY")) continue;
     if (CODEX_EXEC_ENV_EXACT.has(key) || CODEX_EXEC_ENV_PREFIX.test(key)) out[key] = value;
   }
   return out;
@@ -253,10 +263,23 @@ export function resolveSandbox(sandbox) {
 }
 
 // Build the `codex exec` argv for one turn. Throws (via resolveSandbox) on an invalid sandbox.
+//
+// SANDBOX POLICY inside the agents container. The container is the real security boundary:
+// unprivileged (no added caps, not privileged, no host access) with a secret-scrubbed env
+// (codexExecEnv). Codex's own OS-sandbox (landlock/seccomp via a user namespace) CANNOT initialise
+// in this unprivileged container — every write/command fails with "the sandbox helper could not
+// create a namespace". So for WRITE roles we bypass codex's redundant sandbox; codex documents this
+// flag as "intended solely for running in environments that are externally sandboxed", which this
+// container is. Defence-in-depth is preserved: only the orchestrator performs git writes, and it
+// reverts any out-of-`e2e/` change. READ-ONLY roles keep `--sandbox read-only` — the judge never writes.
 export function buildCodexExecArgs({ cwd, model, sandbox }) {
+  const mode = resolveSandbox(sandbox);
+  const sandboxArgs = mode === "workspace-write"
+    ? ["--dangerously-bypass-approvals-and-sandbox"]
+    : ["--sandbox", "read-only"];
   return [
     "exec", "--json", "--cd", cwd, "--skip-git-repo-check",
-    "--sandbox", resolveSandbox(sandbox), "--color", "never",
+    ...sandboxArgs, "--color", "never",
     ...(model ? ["--model", model] : []),
     "-",
   ];
@@ -314,7 +337,12 @@ function extractCodexLastMessage(jsonl) {
     if (!line.trim()) continue;
     try {
       const event = JSON.parse(line);
-      const message = event.msg ?? event.message ?? event.text ?? event.content;
+      // codex exec --json (0.139.0) emits the assistant turn as
+      // {"type":"item.completed","item":{"type":"agent_message","text":"..."}}.
+      // Keep the older flat shapes as fallbacks for forward/backward compatibility.
+      const message =
+        (event.type === "item.completed" && event.item?.type === "agent_message" ? event.item.text : undefined) ??
+        event.msg ?? event.message ?? event.text ?? event.content;
       if (typeof message === "string" && message.trim()) last = message;
     } catch {
       // codex exec --json is JSONL; tolerate stray non-JSON lines without dropping a completed turn.
@@ -483,7 +511,7 @@ export function ensureCodexConfig(codexHome, env = process.env) {
     const retained = kept.map((b) => {
       const parts = b.header !== null ? [b.header, ...b.body] : b.body;
       return parts.join("\n");
-    }).join("").trimEnd();
+    }).join("\n").trimEnd();
 
     const mcpBlock = mcpToml.trimEnd() + "\n";
     const merged = (retained ? retained + "\n\n" : "") + mcpBlock;

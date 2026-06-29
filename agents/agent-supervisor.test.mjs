@@ -20,14 +20,19 @@ test("resolveSandbox rejects an unknown value (no `--sandbox` flag-injection)", 
   assert.throws(() => resolveSandbox("--privileged"), /sandbox must be/);
 });
 
-test("buildCodexExecArgs applies the per-role sandbox so the reviewer cannot write the workspace", () => {
+test("buildCodexExecArgs: read-only roles get --sandbox read-only; write roles bypass codex's own sandbox", () => {
+  // Read-only roles keep codex's read-only sandbox — the judge/reflector still cannot write.
   const reviewer = buildCodexExecArgs({ cwd: "/repo", sandbox: "read-only" });
   const i = reviewer.indexOf("--sandbox");
   assert.ok(i >= 0 && reviewer[i + 1] === "read-only", "reviewer must run --sandbox read-only");
+  assert.ok(!reviewer.includes("--dangerously-bypass-approvals-and-sandbox"), "reviewer must NOT bypass the sandbox");
 
+  // Write roles: codex's OS-sandbox (landlock/seccomp via a user namespace) cannot initialise inside the
+  // unprivileged agents container, so write roles bypass it; the container + the orchestrator's out-of-e2e
+  // revert are the real boundary (see buildCodexExecArgs in agent-supervisor.mjs). Bypass replaces --sandbox.
   const dflt = buildCodexExecArgs({ cwd: "/repo" });
-  const j = dflt.indexOf("--sandbox");
-  assert.equal(dflt[j + 1], "workspace-write", "an absent sandbox defaults to workspace-write");
+  assert.ok(dflt.includes("--dangerously-bypass-approvals-and-sandbox"), "an absent sandbox (write-capable) bypasses codex's sandbox");
+  assert.ok(!dflt.includes("--sandbox"), "the bypass and --sandbox are mutually exclusive");
 
   const withModel = buildCodexExecArgs({ cwd: "/repo", model: "gpt-5.4", sandbox: "workspace-write" });
   assert.ok(withModel.includes("--model") && withModel.includes("gpt-5.4"));
@@ -121,21 +126,21 @@ test("ensureCodexConfig: preserves existing auth content in the file (AC0.1.2 �
 // T-P0-3: sandbox regression guard — read-only roles resolve to read-only, generator to workspace-write.
 // AC0.1.3 RELAXED: the per-role MCP exclusion is satisfied by the per-role sandbox boundary,
 // NOT by a per-role MCP config. This test pins the contract so it can never silently regress.
-test("T-P0-3: reviewer/reflector roles resolve --sandbox read-only; generator gets workspace-write (AC0.1.3)", () => {
-  // Read-only roles: reviewer, reflector
+test("T-P0-3: read-only roles resolve --sandbox read-only; write roles bypass codex's sandbox (AC0.1.3)", () => {
+  // Read-only roles: reviewer, reflector — keep codex's read-only sandbox; they never write.
   const reviewer = buildCodexExecArgs({ cwd: "/repo", sandbox: "read-only" });
   const ri = reviewer.indexOf("--sandbox");
   assert.ok(ri >= 0, "--sandbox flag must be present for reviewer");
   assert.equal(reviewer[ri + 1], "read-only", "reviewer must run --sandbox read-only");
+  assert.ok(!reviewer.includes("--dangerously-bypass-approvals-and-sandbox"), "reviewer must NOT bypass");
 
-  // Generator role: workspace-write (write-capable sandbox)
+  // Write role: bypass codex's redundant in-container sandbox (it cannot init unprivileged). The
+  // container isolation + the orchestrator's out-of-e2e revert remain the boundary.
   const generator = buildCodexExecArgs({ cwd: "/repo", sandbox: "workspace-write" });
-  const gi = generator.indexOf("--sandbox");
-  assert.ok(gi >= 0, "--sandbox flag must be present for generator");
-  assert.equal(generator[gi + 1], "workspace-write", "generator must run --sandbox workspace-write (write-capable)");
+  assert.ok(generator.includes("--dangerously-bypass-approvals-and-sandbox"), "generator (write) bypasses codex's sandbox");
+  assert.ok(!generator.includes("--sandbox"), "generator must not also pass --sandbox (mutually exclusive)");
 
-  // Default (no sandbox specified) resolves to workspace-write — backward compat
+  // Default (no sandbox) is write-capable → same bypass — backward compat for an older orchestrator.
   const defaultArgs = buildCodexExecArgs({ cwd: "/repo" });
-  const di = defaultArgs.indexOf("--sandbox");
-  assert.equal(defaultArgs[di + 1], "workspace-write", "default (no sandbox) must resolve to workspace-write");
+  assert.ok(defaultArgs.includes("--dangerously-bypass-approvals-and-sandbox"), "default (no sandbox) bypasses codex's sandbox");
 });

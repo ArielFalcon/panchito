@@ -6,7 +6,6 @@ import { capabilitiesForRole } from "./types";
 import { AgentUnavailableError } from "../errors";
 import { sanitizeText } from "../orchestrator/sanitizer";
 import { saveAgentTurn } from "../server/history";
-import { mapCodexExecEvent } from "../integrations/activity-mapper";
 import {
   checkCodexCircuit,
   recordCodexCircuitFailure,
@@ -67,7 +66,7 @@ export function codexErrorToInfra(error: unknown): AgentUnavailableError | null 
   // Auth / credits / billing signals in stderr surfaced through the exit-code path.
   if (
     /\b(401|403|unauthorized|authentication failed|forbidden)\b/.test(msg) ||
-    /\b(402|out of credits|payment required|billing)\b/.test(msg) ||
+    /\b(402|out of credits|payment required|billing|quota|insufficient_quota)\b/.test(msg) ||
     /\b(429|too many requests|rate.?limit)\b/.test(msg)
   ) {
     return new AgentUnavailableError(
@@ -130,6 +129,7 @@ export function defaultCodexTransport(env: Record<string, string | undefined> = 
 export const CODEX_MODELS: AgentModelInfo[] = [
   { id: "gpt-5.4", label: "GPT-5.4" },
   { id: "gpt-5.4-mini", label: "GPT-5.4 Mini" },
+  { id: "gpt-5.5", label: "GPT-5.5" },
 ];
 
 const CODEX_EXEC_ENV_EXACT = new Set([
@@ -139,6 +139,10 @@ const CODEX_EXEC_ENV_EXACT = new Set([
 ]);
 const CODEX_EXEC_ENV_PREFIX = /^(?:DEV_|AGENT_)/;
 
+// Subscription-vs-API-key precedence (prefer a ChatGPT login over a stale/quota'd env key) is handled
+// on the Docker/supervisor path (agents/agent-supervisor.mjs codexHasStoredAuth) — the path the engine
+// actually runs. It is intentionally NOT replicated here: this orchestrator-side builder must stay a
+// pure, filesystem-independent env projection so it is deterministic under test.
 export function codexExecEnv(env: Record<string, string | undefined> = process.env): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
@@ -514,7 +518,13 @@ export function extractCodexLastMessage(jsonl: string): string {
     if (!line.trim()) continue;
     try {
       const event = JSON.parse(line) as Record<string, unknown>;
-      const message = event.msg ?? event.message ?? event.text ?? event.content;
+      // codex exec --json (0.139.0) emits the assistant turn as
+      // {"type":"item.completed","item":{"type":"agent_message","text":"..."}}.
+      // Keep the older flat shapes as fallbacks for forward/backward compatibility.
+      const item = event.item as { type?: string; text?: string } | undefined;
+      const message =
+        (event.type === "item.completed" && item?.type === "agent_message" ? item.text : undefined) ??
+        event.msg ?? event.message ?? event.text ?? event.content;
       if (typeof message === "string" && message.trim()) last = message;
     } catch {
       // Keep scanning: `codex exec --json` should be JSONL, but stderr-like lines

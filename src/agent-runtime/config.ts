@@ -37,7 +37,7 @@ const DEFAULT_MODELS: Record<AgentProvider, Record<keyof AgentRuntimeConfig["ass
     // MUST differ from primary — two different models guarantee independent judgment.
     // A guard test (model-config.test.ts) asserts reviewer!=primary for BOTH providers
     // so this can never silently collapse back to the same model.
-    reviewer: "gpt-5.4-mini",
+    reviewer: "gpt-5.5",
     chat: "gpt-5.4-mini",
   },
 };

@@ -18,7 +18,7 @@
     "qa-generator": {
       "description": "Generates Playwright E2E tests for a commit's blast radius and writes them in e2e/.",
       "mode": "primary",
-      "model": "opencode-go/kimi-k2.7-code",
+      "model": "opencode-go/deepseek-v4-pro",
       "prompt": "{file:./agent/qa-generator.md}",
       "tools": { "write": true, "edit": true, "read": true, "bash": true, "webfetch": false },
       "mcp": ["serena", "engram", "playwright"],
