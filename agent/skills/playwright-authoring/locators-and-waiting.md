@@ -4,11 +4,25 @@ Adapted from [TestDino playwright-skill](https://github.com/testdino-hq/playwrig
 
 ## Locators (best to worst)
 
-1. `getByTestId("...")` — **when a `-> [attr]` hint appears on the injected tree line**. The hint signals a stable test-id attribute (e.g. `data-testid=submit` or `data-cy=submit`). Use `getByTestId('submit')` — Playwright resolves it via the per-app `testIdAttribute` config. This is the most stable selector and MUST be preferred when available.
+1. `getByTestId("...")` — **when a `-> [attr]` hint appears on the injected tree line**. The hint signals a stable test-id attribute (e.g. `data-testid=submit` or `data-cy=submit`). Use `getByTestId('submit')` — Playwright resolves it via the per-app `testIdAttribute` config. This is the most stable selector and MUST be preferred when available. NEVER use `locator('[data-cy=X]')` or `locator('[data-testid=X]')` as a substitute — `getByTestId` resolves the attribute name via the per-app `testIdAttribute` Playwright config; raw CSS form hardcodes the attribute name and breaks when the app configures a non-default attribute.
 2. `getByRole("button", { name: /publish/i })` — semantic, accessible. Preferred when no test-id hint is present.
 3. `getByLabel`, `getByPlaceholder`, `getByText` — for forms/content when role+name is unavailable.
 4. Scoped locator (`section.locator("th")`) — when neither test-id nor role is present.
 5. ❌ Raw CSS/XPath, auto-generated classes, `nth-child` — fragile, forbidden.
+
+## Authoring-only attributes — never assert at runtime
+
+Some attributes exist **only in the component source template** and are stripped or transformed before the browser parses the DOM. Asserting them always fails at runtime because they are absent from the live accessibility tree.
+
+**The authoring-only class:** these are framework binding attributes written by a developer in a template to wire up routing, conditional rendering, or form control — they are compiler/framework inputs, not rendered HTML attributes.
+
+Examples by framework (illustrative — the principle applies to any component framework):
+
+- **Angular:** `routerLink="/home"` is transformed by the router into a rendered `href` attribute — assert `href`, not `routerlink`. Directives `*ngIf`, `ng-reflect-*`, and `formControlName` do not appear in the live DOM; use `getByLabel`, `getByTestId`, or `getByRole` targeting the rendered element instead. Explicitly forbidden: `toHaveAttribute("routerlink", ...)` and `locator("[formControlName=X]")`.
+- **Vue:** `v-bind` and `v-model` directive attributes are not exposed as DOM attributes — assert the rendered value or element instead.
+- **React:** JSX props are not automatically forwarded as DOM attributes unless the component explicitly spreads them; `className` renders as `class` but most custom props are prop-only and invisible to Playwright.
+
+**Values oracle:** The browser (or injected DOM snapshot) is the ONLY oracle for rendered values — formatted dates, computed totals, status labels, translated strings. Reimplementing app formatting logic in the test produces a value that drifts on a CORRECT app. Always take the expected string from what you observed in the DOM, not from the source code or test data.
 
 ## Dynamic-DOM awareness (CRITICAL)
 
@@ -38,6 +52,8 @@ If the role you want is absent there, do NOT use `getByRole` for it — fall bac
 elements is the single most common cause of a spec that looks green in review but TIMES OUT on
 execution (observed: `getByRole("columnheader", { name: /name/i })` matched 0 on a Bootstrap table
 whose `<th>Name</th>` was real but not exposed as a columnheader).
+
+`getByRole({ name })` and `getByText` assertions are i18n-fragile — the accessible name or visible text changes when locale or translation bundle changes, silently breaking the test on a CORRECT app. Prefer selectors stable across locales: `getByTestId` (when a test-id attribute exists), `getByLabel` (when the label is a stable key), or a scoped locator anchored to a stable landmark/heading. If a name-based selector is unavoidable, add a code comment acknowledging i18n fragility (e.g. `// i18n-fragile: breaks if locale changes`).
 
 ## Hard rules for selectors (MANDATORY)
 

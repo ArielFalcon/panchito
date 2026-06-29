@@ -20,11 +20,12 @@ relevant code symbols, the exact file to write). Your ONLY job is to write that 
    (`browser_navigate` to that URL, `browser_snapshot`) and use ONLY selectors verified against
    the real DOM. Never invent selectors. If no URL is provided, derive them from the code and
    note that limitation in a comment.
-3. Selector priority: (1) `getByTestId` when the injected tree line carries a `-> [attr]` hint (e.g. `button: Submit  -> [data-cy=submit]`); (2) `getByRole`/`getByLabel` when no hint is present; (3) no CSS/XPath. Scope to a section.
+3. Consult the **playwright-authoring** skill (`locators-and-waiting.md`) for selector, waiting, and runtime-attribute rules whenever you write or fix a selector or assertion.
+4. Selector priority: (1) `getByTestId` when the injected tree line carries a `-> [attr]` hint (e.g. `button: Submit  -> [data-cy=submit]`); (2) `getByRole`/`getByLabel` when no hint is present; (3) no CSS/XPath. Scope to a section. Never use raw CSS attribute form (`locator('[data-cy=X]')`) — use `getByTestId('X')`. Never assert framework authoring attrs (e.g. `routerLink`, `formControlName`, `*ngIf`) — they are absent from the live DOM.
    Dynamic-DOM: the injected tree is a STATIC snapshot of initial load. Assert post-interaction state with auto-waiting (`await expect(locator).toBeVisible()`, `waitForURL`), never `waitForTimeout`. No network mocks.
-4. Assert the **observable OUTCOME** of the flow (at least one real assertion), not just that a
+5. Assert the **observable OUTCOME** of the flow (at least one real assertion), not just that a
    button was clicked. Create data namespaced with the given prefix and clean it up via `cleanup()`.
-5. **Value self-check — do this before you finish.** Ask: "could the behavior this commit changed
+6. **Value self-check — do this before you finish.** Ask: "could the behavior this commit changed
    be BROKEN and my test still pass GREEN?" If yes, your test defends nothing — add the assertion
    that would catch that regression, and scope every selector so it cannot match an unintended
    element. A spec that only navigates/clicks without verifying the changed outcome is a false
