@@ -5,9 +5,12 @@
 // construction; the live-DOM capture (dom-snapshot.ts) feeds it the raw per-family material. Building
 // it here keeps it deterministic and unit-testable without a browser.
 //
-// Slice 1 (this file): the test-id index — the family that was NON_EXTRACTABLE and so only caught by a
-// 30s runtime timeout. Later slices add roles/labels/placeholders/texts/idsNames, the status+settled
-// confidence fields, and the dual gate that consumes the catalog.
+// Slice 1: the test-id index — the family that was NON_EXTRACTABLE and so only caught by a 30s runtime
+// timeout. Slice 2 (this file): buildRouteCatalog (the pure DTO→catalog adapter) + the status/settled
+// confidence fields + degradedRouteWarning (loud, never-silent capture failure). Later slices add
+// roles/labels/placeholders/texts/idsNames and the dual gate that consumes the catalog.
+
+import type { RouteSnapshot } from "./dom-snapshot";
 
 /** Per-route catalog of the selectors that provably exist in the captured live DOM, one index per
  *  selector family so every family the agent may emit is checkable. `status`/`settled` gate whether
@@ -32,4 +35,29 @@ export function buildTestIdIndex(capturedValues: readonly string[]): Map<string,
     index.set(value, (index.get(value) ?? 0) + 1);
   }
   return index;
+}
+
+/** Pure adapter from the capture DTO (RouteSnapshot) to the gate-facing RouteCatalog. Owns the
+ *  confidence policy: a capture `error` ⇒ `degraded` (never trusted); an unconfirmed settle ⇒
+ *  `settled:false` (conservative — the fail-closed path may trust ONLY a captured && settled route, so
+ *  an unknown must default to advisory, never to a false block). No browser, no I/O — fully testable. */
+export function buildRouteCatalog(snapshot: RouteSnapshot): RouteCatalog {
+  const degraded = snapshot.error !== undefined;
+  return {
+    route: snapshot.route,
+    status: degraded ? "degraded" : "captured",
+    settled: !degraded && snapshot.settled === true,
+    testIds: degraded ? new Map() : (snapshot.testIds ?? new Map()),
+  };
+}
+
+/** Loud, single-line warning naming every route whose capture DEGRADED (errored / timed out /
+ *  auth-blocked), or undefined when every route captured. This replaces the silent `catch{return []}`
+ *  reopen (CLAUDE.md: never swallow a capture failure into an empty result) so a run that grounds
+ *  against a partial tree is visible and attributed. Unsettled routes are NOT named here — present-but-
+ *  unsettled is expected on SPAs and stays advisory in the catalog, not a per-route console alarm. */
+export function degradedRouteWarning(catalogs: readonly RouteCatalog[]): string | undefined {
+  const degraded = catalogs.filter((c) => c.status === "degraded").map((c) => c.route);
+  if (degraded.length === 0) return undefined;
+  return `[qa] WARNING: DOM capture DEGRADED for ${degraded.length} route(s) [${degraded.join(", ")}] — these routes are NOT grounded; the selector gate treats them as advisory (no fail-closed).`;
 }

@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scrubEnv } from "./code-runner";
 import { killTree } from "./execute";
-import { buildTestIdIndex } from "./route-catalog";
+import { buildRouteCatalog, buildTestIdIndex, degradedRouteWarning } from "./route-catalog";
 
 // Stable HTML attributes for one interactive or labelled node. `key` equals the
 // "role: name" line that parseAriaSnapshot produced for this node — it is the join key
@@ -58,6 +58,7 @@ export interface RouteSnapshot {
   states?: Map<string, string[]>;
   testIdAttrName?: string; // the configured testIdAttribute name used during capture (e.g. "data-cy"); defaults to "data-testid" in formatDomSnapshot
   testIds?: Map<string, number>; // Pillar 2 catalog: role-independent test-id value→count index (presence + uniqueness) — feeds the pre-execution selector gate
+  settled?: boolean; // Pillar 2 (Slice 2): a SECONDARY waitForLoadState("networkidle") AFTER goto resolved within budget → the catalog is post-hydration and the gate may fail-closed. Absent/false ⇒ possibly pre-hydration ⇒ advisory only.
   error?: string; // capture failed for this route (degrade — never blocks review)
 }
 
@@ -362,7 +363,8 @@ export async function captureDomForRoutes(
   try {
     const text = formatDomSnapshot(await deps.render(input.e2eDir, input.baseUrl, clean, input.testIdAttribute), changed);
     return text.trim() ? text : undefined;
-  } catch {
+  } catch (err) {
+    console.warn(`[qa] WARNING: DOM capture FAILED for ${clean.length} route(s) [${clean.join(", ")}] (${err instanceof Error ? err.message : String(err)}) — the worker grounds via its own exploration this run.`);
     return undefined; // degrade to the worker's own exploration; never break the run
   }
 }
@@ -399,7 +401,8 @@ export async function captureDomByRoute(
   let snaps: RouteSnapshot[];
   try {
     snaps = await deps.render(input.e2eDir, input.baseUrl, clean, input.testIdAttribute);
-  } catch {
+  } catch (err) {
+    console.warn(`[qa] WARNING: DOM capture FAILED for ${clean.length} route(s) [${clean.join(", ")}] (${err instanceof Error ? err.message : String(err)}) — each objective falls back to its own exploration this run.`);
     return out; // degrade: every objective falls back independently
   }
   // Count how many routes produced each distinct node-set signature, to detect a shared-shell soft-404.
@@ -429,12 +432,20 @@ export async function captureDomByRoute(
 export async function captureRouteTrees(input: CaptureDomInput, deps: CaptureDomDeps): Promise<RouteSnapshot[]> {
   const routes = extractTargetRoutes(input.specContents);
   if (routes.length === 0 || !input.baseUrl) return [];
+  let snaps: RouteSnapshot[];
   try {
-    const snaps = await deps.render(input.e2eDir, input.baseUrl, routes, input.testIdAttribute);
-    return snaps.filter((s) => !s.error && (s.nodes?.length ?? 0) > 0);
-  } catch {
-    return []; // degrade: no pre-execution signal, never break the run
+    snaps = await deps.render(input.e2eDir, input.baseUrl, routes, input.testIdAttribute);
+  } catch (err) {
+    // Loud, attributed degrade (CLAUDE.md: never swallow a capture failure into []). The whole render
+    // threw → no pre-execution selector grounding this run; the gate has nothing and stays advisory.
+    console.warn(`[qa] WARNING: DOM capture FAILED for ${routes.length} route(s) [${routes.join(", ")}] (${err instanceof Error ? err.message : String(err)}) — no pre-execution selector grounding this run.`);
+    return [];
   }
+  // Per-route degrade (render succeeded but some routes errored): name them loudly before filtering, so
+  // a partially-grounded run is visible and attributed rather than a silent reopen.
+  const warning = degradedRouteWarning(snaps.map(buildRouteCatalog));
+  if (warning) console.warn(warning);
+  return snaps.filter((s) => !s.error && (s.nodes?.length ?? 0) > 0);
 }
 
 // Parses the YAML string returned by `locator('body').ariaSnapshot()` (Playwright >=1.57) into
@@ -680,7 +691,16 @@ const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
     const page = await (await browser.newContext()).newPage();
     for (const route of routes) {
       try {
-        await page.goto(new URL(route, baseUrl).toString(), { waitUntil: "networkidle", timeout: 15000 });
+        // Primary navigation resolves at domcontentloaded (always yields a DOM, even for a SPA that
+        // never reaches network-idle). Settledness is probed SEPARATELY below so a non-settling route
+        // still produces an (advisory) catalog instead of throwing and losing the route entirely.
+        await page.goto(new URL(route, baseUrl).toString(), { waitUntil: "domcontentloaded", timeout: 15000 });
+        // Secondary settle probe (Pillar 2 / Slice 2): networkidle in its OWN budget, kept SHORTER than
+        // the per-route render budget (15s) so a never-settling route cannot blow renderTimeoutFor and
+        // kill the whole capture. Resolves ⇒ post-hydration (settled=true); times out ⇒ capture anyway,
+        // settled=false ⇒ the gate treats this route advisory (never fail-closed).
+        var settled = false;
+        try { await page.waitForLoadState("networkidle", { timeout: 10000 }); settled = true; } catch (_settle) {}
         // ariaSnapshot() (PW >=1.57) returns a YAML string; page.accessibility.snapshot() was removed.
         const yaml = await page.locator('body').ariaSnapshot();
         // Attribute walk: after ariaSnapshot(), query interactive/labelled nodes to extract stable
@@ -740,7 +760,7 @@ const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
             return Array.from(document.querySelectorAll('[' + a + ']')).map(function(el) { return el.getAttribute(a); }).filter(function(v) { return v; });
           }, testIdAttr);
         } catch(_e) { testIdRawList = []; }
-        out.push({ route, yaml, rawAttrs, testIdRawList, testIdAttr });
+        out.push({ route, yaml, rawAttrs, testIdRawList, testIdAttr, settled });
       } catch (e) { out.push({ route, error: String(e && e.message || e).slice(0, 200) }); }
     }
   } catch (e) { process.stderr.write(String(e)); } finally { if (browser) await browser.close().catch(() => {}); }
@@ -762,7 +782,7 @@ const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
       child.on("error", () => done([]));
       child.on("close", () => {
         try {
-          const raw = JSON.parse(stdout) as Array<{ route: string; yaml?: string; rawAttrs?: RawAttr[]; testIdRawList?: string[]; testIdAttr?: string; error?: string }>;
+          const raw = JSON.parse(stdout) as Array<{ route: string; yaml?: string; rawAttrs?: RawAttr[]; testIdRawList?: string[]; testIdAttr?: string; settled?: boolean; error?: string }>;
           done(raw.map((r) => {
             if (r.error) return { route: r.route, error: r.error };
             // Seam A (Slice 3): use parseAriaSnapshotWithState to populate both nodes[] and the
@@ -775,6 +795,7 @@ const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
             if (r.testIdAttr) snap.testIdAttrName = r.testIdAttr;
             const testIds = buildTestIdIndex(r.testIdRawList ?? []);
             if (testIds.size > 0) snap.testIds = testIds;
+            if (r.settled === true) snap.settled = true; // absent ⇒ buildRouteCatalog defaults to advisory
             return snap;
           }));
         } catch {
