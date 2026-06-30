@@ -320,6 +320,22 @@ export function formatDomSnapshot(snaps: RouteSnapshot[], changed?: import("./ch
       lines.push(`  ${n}${stateSuffix}${changedMarker}`);
     }
     if (all.length > nodes.length) lines.push(`  … (${all.length - nodes.length} more non-table elements omitted)`);
+    // FIX B (Pillar 2 / Slice 2): role-less hint-parity block. A <div data-cy=x> with no ARIA role
+    // is captured into testIds (role-independent pass) but is invisible in the ARIA nodes[] above.
+    // Render a separate block so the agent can DISCOVER every test-id the gate will accept, preventing
+    // catalog/hint divergence and eliminating the fabrication trigger for role-less test-ids.
+    // count===1 → bare value; count>1 → value (×N) ambiguity marker. Bounded to MAX_NODES_PER_ROUTE
+    // values; excess is summarized as "(+k more)" so the prompt is never unbounded. Comma-joined: test-id
+    // conventions (kebab/camel/snake) never contain ", ", so values need no escaping.
+    if (s.testIds && s.testIds.size > 0) {
+      const entries = [...s.testIds.entries()];
+      const cap = MAX_NODES_PER_ROUTE;
+      const shown = entries.slice(0, cap);
+      const overflow = entries.length - shown.length;
+      const parts = shown.map(([v, count]) => count > 1 ? `${v} (×${count})` : v);
+      if (overflow > 0) parts.push(`(+${overflow} more)`);
+      lines.push(`  test-ids on this route: ${parts.join(", ")}`);
+    }
   }
   return lines.join("\n");
 }
@@ -361,7 +377,12 @@ export async function captureDomForRoutes(
   const clean = normalizeRoutes(routes).slice(0, MAX_ROUTES);
   if (clean.length === 0 || !input.baseUrl) return undefined;
   try {
-    const text = formatDomSnapshot(await deps.render(input.e2eDir, input.baseUrl, clean, input.testIdAttribute), changed);
+    const snaps = await deps.render(input.e2eDir, input.baseUrl, clean, input.testIdAttribute);
+    // Per-route degrade: surface errored routes loudly (same as captureRouteTrees/captureDomByRoute —
+    // CLAUDE.md: never swallow a capture failure) before formatting for the worker.
+    const w = degradedRouteWarning(snaps.map(buildRouteCatalog));
+    if (w) console.warn(w);
+    const text = formatDomSnapshot(snaps, changed);
     return text.trim() ? text : undefined;
   } catch (err) {
     console.warn(`[qa] WARNING: DOM capture FAILED for ${clean.length} route(s) [${clean.join(", ")}] (${err instanceof Error ? err.message : String(err)}) — the worker grounds via its own exploration this run.`);
@@ -405,6 +426,10 @@ export async function captureDomByRoute(
     console.warn(`[qa] WARNING: DOM capture FAILED for ${clean.length} route(s) [${clean.join(", ")}] (${err instanceof Error ? err.message : String(err)}) — each objective falls back to its own exploration this run.`);
     return out; // degrade: every objective falls back independently
   }
+  // Per-route degrade: surface errored routes loudly (same pattern as captureRouteTrees — CLAUDE.md:
+  // never swallow a capture failure) before filtering them out for grounding.
+  const w = degradedRouteWarning(snaps.map(buildRouteCatalog));
+  if (w) console.warn(w);
   // Count how many routes produced each distinct node-set signature, to detect a shared-shell soft-404.
   const sig = (s: RouteSnapshot): string => (s.nodes ?? []).join("\n");
   const rendered = snaps.filter((s) => !s.error && s.nodes?.length);
@@ -655,9 +680,10 @@ export function mergeAttrs(nodes: string[], rawAttrs: RawAttr[]): NodeAttr[] {
   return out;
 }
 
-// The render child loops routes SEQUENTIALLY (each goto bounded at 15s) and writes its result ONCE at
-// the end, so a kill mid-flight loses EVERY route, not just the slow one. Scale the kill deadline with
-// the route count (each route's 15s goto must fit) so the union render actually completes; cap it so a
+// The render child loops routes SEQUENTIALLY (each route bounded at ~15s: goto ≤10s + a ≤5s networkidle
+// settle probe — see the in-page script) and writes its result ONCE at the end, so a kill mid-flight
+// loses EVERY route, not just the slow one. Scale the kill deadline with the route count (each route's
+// ~15s capture must fit RENDER_PER_ROUTE_TIMEOUT_MS) so the union render actually completes; cap it so a
 // pathological plan can't hold the orchestrator indefinitely. (For a single route this is still 35s.)
 const RENDER_BASE_TIMEOUT_MS = 20_000;
 const RENDER_PER_ROUTE_TIMEOUT_MS = 15_000;
@@ -694,13 +720,13 @@ const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
         // Primary navigation resolves at domcontentloaded (always yields a DOM, even for a SPA that
         // never reaches network-idle). Settledness is probed SEPARATELY below so a non-settling route
         // still produces an (advisory) catalog instead of throwing and losing the route entirely.
-        await page.goto(new URL(route, baseUrl).toString(), { waitUntil: "domcontentloaded", timeout: 15000 });
-        // Secondary settle probe (Pillar 2 / Slice 2): networkidle in its OWN budget, kept SHORTER than
-        // the per-route render budget (15s) so a never-settling route cannot blow renderTimeoutFor and
-        // kill the whole capture. Resolves ⇒ post-hydration (settled=true); times out ⇒ capture anyway,
-        // settled=false ⇒ the gate treats this route advisory (never fail-closed).
-        var settled = false;
-        try { await page.waitForLoadState("networkidle", { timeout: 10000 }); settled = true; } catch (_settle) {}
+        await page.goto(new URL(route, baseUrl).toString(), { waitUntil: "domcontentloaded", timeout: 10000 });
+        // Secondary settle probe (Pillar 2 / Slice 2): goto(≤10s) + settle(≤5s) = ≤15s per route =
+        // RENDER_PER_ROUTE_TIMEOUT_MS, so renderTimeoutFor always covers the worst case. A route that
+        // does not reach networkidle within 5s is marked settled=false (advisory, safe direction) and
+        // the capture proceeds rather than losing the route entirely.
+        let settled = false;
+        try { await page.waitForLoadState("networkidle", { timeout: 5000 }); settled = true; } catch (_settle) {}
         // ariaSnapshot() (PW >=1.57) returns a YAML string; page.accessibility.snapshot() was removed.
         const yaml = await page.locator('body').ariaSnapshot();
         // Attribute walk: after ariaSnapshot(), query interactive/labelled nodes to extract stable
@@ -754,7 +780,7 @@ const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
             }).filter(Boolean);
           }, testIdAttr);
         } catch(_attrErr) { rawAttrs = []; }
-        var testIdRawList = [];
+        let testIdRawList = [];
         try {
           testIdRawList = await page.evaluate(function(a) {
             return Array.from(document.querySelectorAll('[' + a + ']')).map(function(el) { return el.getAttribute(a); }).filter(function(v) { return v; });
@@ -779,7 +805,7 @@ const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
       const timer = setTimeout(() => killTree(child), renderTimeoutFor(routes.length));
       child.stdout.on("data", (d) => (stdout += d.toString()));
       const done = (snaps: RouteSnapshot[]): void => { clearTimeout(timer); try { rmSync(work, { recursive: true, force: true }); } catch { /* best-effort */ } resolve(snaps); };
-      child.on("error", () => done([]));
+      child.on("error", (err) => { console.warn(`[qa] WARNING: DOM capture script failed to spawn (${err instanceof Error ? err.message : String(err)}) — no grounding this run.`); done([]); });
       child.on("close", () => {
         try {
           const raw = JSON.parse(stdout) as Array<{ route: string; yaml?: string; rawAttrs?: RawAttr[]; testIdRawList?: string[]; testIdAttr?: string; settled?: boolean; error?: string }>;
@@ -799,6 +825,7 @@ const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
             return snap;
           }));
         } catch {
+          console.warn(`[qa] WARNING: DOM capture script produced unparseable output — no grounding this run.`);
           done([]);
         }
       });

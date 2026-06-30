@@ -12,12 +12,23 @@
 
 import type { RouteSnapshot } from "./dom-snapshot";
 
+/** Single source of truth for the route capture status values. Using a const object ensures runtime
+ *  values exist alongside the type, enables autocomplete, and prevents the string-literal / type
+ *  divergence hazard of a bare union (TypeScript skill: const-object pattern over direct union). */
+export const ROUTE_STATUS = {
+  CAPTURED: "captured",
+  DEGRADED: "degraded",
+} as const;
+
+/** Route capture status: "captured" = render succeeded; "degraded" = errored / timed-out / auth-blocked. */
+export type RouteStatus = (typeof ROUTE_STATUS)[keyof typeof ROUTE_STATUS];
+
 /** Per-route catalog of the selectors that provably exist in the captured live DOM, one index per
  *  selector family so every family the agent may emit is checkable. `status`/`settled` gate whether
  *  the fail-closed path may trust it (see the design's "confidence window"). */
 export interface RouteCatalog {
   route: string;
-  status: "captured" | "degraded"; // degraded = capture errored / timed out / auth-blocked
+  status: RouteStatus; // degraded = capture errored / timed out / auth-blocked
   settled: boolean; // a secondary networkidle settle resolved within budget → catalog is post-hydration
   /** test-id value → occurrence count. Presence answers "does this getByTestId exist?"; count > 1
    *  flags a strict-mode ambiguity that would otherwise surface only at runtime. */
@@ -45,7 +56,7 @@ export function buildRouteCatalog(snapshot: RouteSnapshot): RouteCatalog {
   const degraded = snapshot.error !== undefined;
   return {
     route: snapshot.route,
-    status: degraded ? "degraded" : "captured",
+    status: degraded ? ROUTE_STATUS.DEGRADED : ROUTE_STATUS.CAPTURED,
     settled: !degraded && snapshot.settled === true,
     testIds: degraded ? new Map() : (snapshot.testIds ?? new Map()),
   };
@@ -57,7 +68,7 @@ export function buildRouteCatalog(snapshot: RouteSnapshot): RouteCatalog {
  *  against a partial tree is visible and attributed. Unsettled routes are NOT named here — present-but-
  *  unsettled is expected on SPAs and stays advisory in the catalog, not a per-route console alarm. */
 export function degradedRouteWarning(catalogs: readonly RouteCatalog[]): string | undefined {
-  const degraded = catalogs.filter((c) => c.status === "degraded").map((c) => c.route);
+  const degraded = catalogs.filter((c) => c.status === ROUTE_STATUS.DEGRADED).map((c) => c.route);
   if (degraded.length === 0) return undefined;
   return `[qa] WARNING: DOM capture DEGRADED for ${degraded.length} route(s) [${degraded.join(", ")}] — these routes are NOT grounded; the selector gate treats them as advisory (no fail-closed).`;
 }

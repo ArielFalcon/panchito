@@ -1807,6 +1807,8 @@ export async function runPipeline(
       .map((f) => join(e2eDir, f))
       .filter((p) => existsSync(p))
       .map((p) => readFileSync(p, "utf8"));
+    // RouteSnapshot.settled and the full RouteCatalog (testIds/status) are produced by captureRouteTrees
+    // but only nodes[] is consumed here today — the slice-4 selector gate must wire settled+catalog.
     const trees = (await deps.captureRouteTrees({ e2eDir, baseUrl, specContents: specSources, testIdAttribute }))
       .map((s) => s.nodes ?? [])
       .filter((n) => n.length > 0);

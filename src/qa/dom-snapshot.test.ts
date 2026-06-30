@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { extractTargetRoutes, formatDomSnapshot, parseAriaSnapshot, captureDom, captureDomByRoute, captureRouteTrees, normalizeRoutes, capDomLines, isPriorityNode, mergeAttrs, normalizeKey, parseAriaSnapshotWithState, type CaptureDomDeps, type NodeAttr, type RouteSnapshot } from "./dom-snapshot";
+import { extractTargetRoutes, formatDomSnapshot, parseAriaSnapshot, captureDom, captureDomByRoute, captureDomForRoutes, captureRouteTrees, normalizeRoutes, capDomLines, isPriorityNode, mergeAttrs, normalizeKey, parseAriaSnapshotWithState, type CaptureDomDeps, type NodeAttr, type RouteSnapshot } from "./dom-snapshot";
 
 // ── Phase 1: NodeAttr / RouteSnapshot.attrs types ───────────────────────────
 
@@ -1113,4 +1113,87 @@ test("5.2 Byte-identical no-op: original-keep-set role with no new data formats 
   assert.ok(out.includes("  listitem: Item one"), "listitem formatted as-is");
   assert.ok(!out.includes("[disabled]"), "no stray state suffix");
   assert.ok(!out.includes("type="), "no stray inputType token");
+});
+
+// ── FIX B (TDD RED→GREEN): role-less hint-parity block in formatDomSnapshot ─────────────────────
+// A <div data-cy=x> with no ARIA role is captured into RouteSnapshot.testIds but was INVISIBLE in
+// the formatted prompt — the agent fabricated it. formatDomSnapshot must render a separate
+// "test-ids on this route:" block so the agent can DISCOVER every value the gate will accept.
+
+test("FIX-B-1: formatDomSnapshot appends 'test-ids on this route:' line when testIds is non-empty", () => {
+  const snap: RouteSnapshot[] = [{
+    route: "/form",
+    nodes: ["button: Submit"],
+    testIds: new Map([["submit-btn", 1], ["header-logo", 1]]),
+  }];
+  const out = formatDomSnapshot(snap);
+  assert.ok(out.includes("  test-ids on this route:"), "test-ids block present");
+  assert.ok(out.includes("submit-btn"), "first test-id listed");
+  assert.ok(out.includes("header-logo"), "second test-id listed");
+});
+
+test("FIX-B-2: formatDomSnapshot renders count>1 with ambiguity marker (×N)", () => {
+  const snap: RouteSnapshot[] = [{
+    route: "/form",
+    nodes: ["button: Submit"],
+    testIds: new Map([["submit-btn", 2], ["unique-id", 1]]),
+  }];
+  const out = formatDomSnapshot(snap);
+  assert.ok(out.includes("submit-btn (×2)"), "duplicate test-id gets ambiguity marker");
+  // count===1 renders bare (no marker)
+  assert.ok(out.includes("unique-id") && !out.includes("unique-id (×"), "count=1 renders bare");
+});
+
+test("FIX-B-3 byte-identical guarantee: testIds absent/empty → output unchanged (existing no-op tests still pass)", () => {
+  const nodes = ["button: Submit", "link: Home", "table: (present)"];
+  const withAbsent = formatDomSnapshot([{ route: "/x", nodes }]);
+  const withEmptyMap = formatDomSnapshot([{ route: "/x", nodes, testIds: new Map() }]);
+  assert.equal(withAbsent, withEmptyMap, "empty testIds Map → byte-identical to testIds absent");
+  // Confirm the test-ids block is NOT present
+  assert.ok(!withAbsent.includes("test-ids on this route:"), "no test-ids block when testIds absent");
+  assert.ok(!withEmptyMap.includes("test-ids on this route:"), "no test-ids block when testIds empty");
+});
+
+// ── FIX D (TDD): captureRouteTrees loud degraded warning integration ─────────────────────────────
+// Pins that the degraded-route warning actually REACHES console.warn (today only the return value of
+// degradedRouteWarning is tested, not the wiring into the real console).
+
+test("FIX-D: captureRouteTrees calls console.warn when a render returns an errored route", async () => {
+  const spec = `await page.goto("/owners");`;
+  const deps: CaptureDomDeps = {
+    render: async () => [{ route: "/owners", error: "Timeout 15000ms exceeded" }],
+  };
+  const warned: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
+  try {
+    await captureRouteTrees({ e2eDir: "/m", baseUrl: "http://dev", specContents: [spec] }, deps);
+  } finally {
+    console.warn = origWarn;
+  }
+  assert.ok(warned.length > 0, "console.warn must be called when a route is degraded");
+  const msg = warned.join(" ");
+  assert.ok(msg.includes("/owners"), "warning names the degraded route");
+  assert.ok(msg.includes("DEGRADED") || msg.includes("WARNING"), "warning is attributable as a degraded-capture event");
+});
+
+// ── Round 3 (re-judge): captureDomForRoutes is the FOURTH capture path; per-route degrade must be loud
+// there too (a render that returns WITHOUT throwing but with errored routes was silently swallowed —
+// formatDomSnapshot renders the error as text so text.trim() is truthy and no warning fired). ──────
+test("captureDomForRoutes warns when a render returns an errored route (4th path, loud degrade)", async () => {
+  const deps: CaptureDomDeps = {
+    render: async () => [{ route: "/owners", error: "Timeout 15000ms exceeded" }],
+  };
+  const warned: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
+  try {
+    await captureDomForRoutes(["/owners"], { e2eDir: "/m", baseUrl: "http://dev" }, deps);
+  } finally {
+    console.warn = origWarn;
+  }
+  assert.ok(warned.length > 0, "console.warn must fire on a degraded route in captureDomForRoutes");
+  const msg = warned.join(" ");
+  assert.ok(msg.includes("/owners"), "warning names the degraded route");
+  assert.ok(msg.includes("DEGRADED") || msg.includes("WARNING"), "attributed as a degraded-capture event");
 });
