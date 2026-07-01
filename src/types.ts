@@ -253,6 +253,12 @@ export interface RunOutcome {
     // static gate). Absent on runs where the check did not run (code mode, no-`dev` app, no grounding).
     preExecAmbiguityCatches?: number;
     deterministicSelectorBlocks?: number;
+    // Pillar 2 catalog gate honest-coverage (observation-only): test-id selectors gated in the confident
+    // window vs left advisory, and how many fabricated test-ids the gate caught pre-execution. The
+    // window/advisory fractions make the design's advisory→enforce flip decision falsifiable across runs.
+    catalogGateInWindow?: number;
+    catalogGateAdvisory?: number;
+    catalogGateFailClosed?: number;
   };
   rulesRetrieved: string[];
   reflection?: StructuredReflection;

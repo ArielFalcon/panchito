@@ -15,6 +15,7 @@ import {
   extractCatalogSelectors,
   confidentWindowEnd,
   extractTestIdSelectorsWithIndex,
+  firstGotoRoute,
   type ProposedSelector,
 } from "./selector-check";
 
@@ -993,4 +994,50 @@ test("extractTestIdSelectorsWithIndex: values + positions, interpolated dropped,
   const out = extractTestIdSelectorsWithIndex(spec);
   assert.deepEqual(out.map((s) => s.value), ["real"], "ghost (comment) and dyn (interpolated) excluded");
   assert.ok(out[0]!.index >= 0);
+});
+
+// Regression (JD): the old stripCommentsAndJoin joined lines to ONE string BEFORE stripping trailing
+// `//` comments, so `[^\n]*` ate from the first `//` (e.g. inside an `https://` literal) to the very
+// END — silently dropping every selector after it, across the WHOLE module (aria-path included). A URL
+// literal must only ever affect its own line, never swallow later selectors.
+test("stripCommentsAndJoin: an https:// URL literal does NOT truncate later selectors (regression)", () => {
+  const spec = [
+    `await page.goto("https://accounts.example.com/login");`,
+    `await page.getByTestId("real-after-url").click();`,
+    `await page.getByRole("button", { name: "Continue" }).click();`,
+  ].join("\n");
+  assert.deepEqual(extractTestIdSelectorsWithIndex(spec).map((s) => s.value), ["real-after-url"], "getByTestId after an https:// literal is still extracted");
+  assert.deepEqual(extractCatalogSelectors(spec).testIds, ["real-after-url"]);
+  // the aria-path extractor (extractProposedSelectors) shares stripCommentsAndJoin — it must also survive
+  assert.ok(extractProposedSelectors(spec).some((s) => s.kind === "role" && s.name === "Continue"), "aria-path selector after the URL survives too");
+});
+
+test("stripCommentsAndJoin: a REAL trailing // comment is still stripped (W5 preserved), URL on same line kept", () => {
+  const spec = `await page.getByTestId("keep").click(); // getByTestId("ghost-comment")`;
+  assert.deepEqual(extractTestIdSelectorsWithIndex(spec).map((s) => s.value), ["keep"], "trailing // comment still removed");
+});
+
+test("confidentWindowEnd: a dblclick also closes the window (a click variant that can navigate)", () => {
+  const spec = [`await page.goto("/x");`, `await page.getByTestId("a").dblclick();`, `await page.getByTestId("b-post");`].join("\n");
+  const end = confidentWindowEnd(spec);
+  const ids = extractTestIdSelectorsWithIndex(spec);
+  assert.ok(ids.find((s) => s.value === "a")!.index < end, "the dblclick target is in-window");
+  assert.ok(ids.find((s) => s.value === "b-post")!.index > end, "a selector after the dblclick is out of window");
+});
+
+test("extractCatalogSelectors: idsNames strips the [name=x i] case-insensitive attribute modifier", () => {
+  assert.deepEqual(extractCatalogSelectors(`await page.locator("[name=firstName i]").fill("x");`).idsNames, ["firstName"], "the ` i` modifier is not part of the name value");
+  assert.deepEqual(extractCatalogSelectors(`await page.locator("#plain-id").click();`).idsNames, ["plain-id"]);
+});
+
+// JD CRITICAL fix: the confident-window ROUTE must be the spec's FIRST LITERAL goto — consistent with
+// confidentWindowEnd, which counts the raw first goto. Deriving it from the first NAVIGABLE goto (which
+// drops ${…}/absolute) shifts it to a LATER route and checks first-route selectors against the wrong
+// catalog → false correction. When the first goto is un-navigable there is no window route → advisory.
+test("firstGotoRoute: the FIRST literal goto's route; undefined when un-navigable (→ advisory)", () => {
+  assert.equal(firstGotoRoute(`await page.goto("/owners"); await page.goto("/x");`), "/owners");
+  assert.equal(firstGotoRoute(`await page.goto("owners");`), "/owners", "leading slash normalized");
+  assert.equal(firstGotoRoute('await page.goto(`/dynamic/${id}`); await page.goto("/owners");'), undefined, "interpolated first goto → advisory (NOT /owners)");
+  assert.equal(firstGotoRoute(`await page.goto("https://accounts.example.com/login");`), undefined, "absolute first goto → advisory");
+  assert.equal(firstGotoRoute(`await expect(page.getByRole("heading")).toBeVisible();`), undefined, "no goto → undefined");
 });

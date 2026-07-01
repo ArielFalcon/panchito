@@ -548,7 +548,17 @@ test("captureRouteTrees is best-effort: no routes / no baseUrl / render throws /
   const throwing: CaptureDomDeps = { render: async () => { throw new Error("launch failed"); } };
   assert.deepEqual(await captureRouteTrees({ e2eDir: "/m", baseUrl: "http://dev", specContents: [`page.goto("/a")`] }, throwing), [], "render throws → []");
   const errored: CaptureDomDeps = { render: async () => [{ route: "/a", error: "nav failed" }, { route: "/b", nodes: [] }] };
-  assert.deepEqual(await captureRouteTrees({ e2eDir: "/m", baseUrl: "http://dev", specContents: [`page.goto("/a"); page.goto("/b")`] }, errored), [], "errored + empty-nodes excluded");
+  assert.deepEqual(await captureRouteTrees({ e2eDir: "/m", baseUrl: "http://dev", specContents: [`page.goto("/a"); page.goto("/b")`] }, errored), [], "errored + empty-nodes(-and-no-testIds) excluded");
+});
+
+// JD fix: a page built entirely from role-less test-id elements (<div data-cy=x> with no ARIA role) has
+// EMPTY nodes[] but a populated testIds index — exactly what the role-independent capture exists to add
+// value on. It must NOT be dropped by the nodes-only filter, or the catalog gate goes blind to it.
+test("captureRouteTrees keeps a route with testIds even when its ARIA nodes are empty (role-less test-id page)", async () => {
+  const deps: CaptureDomDeps = { render: async () => [{ route: "/a", nodes: [], testIds: new Map([["x", 1]]) }] };
+  const trees = await captureRouteTrees({ e2eDir: "/m", baseUrl: "http://dev", specContents: [`page.goto("/a")`] }, deps);
+  assert.equal(trees.length, 1, "a testId-only route is not dropped");
+  assert.equal(trees[0]!.testIds?.get("x"), 1);
 });
 
 // ── Phase 2 (Slice 1): buildChangedMarker + formatDomSnapshot(snaps, changed?) ─────────────────

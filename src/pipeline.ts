@@ -59,7 +59,7 @@ import { github } from "./integrations/github";
 import { capDiff } from "./orchestrator/sanitizer";
 import { renderIssue, type IssueContext, type TestedItem, type AdjudicationLabel } from "./report/reporter";
 import { renderValueTag } from "./qa/value-report";
-import { captureDom, captureDomByRoute, captureRouteTrees, defaultCaptureDomDeps, capDomLines, extractTargetRoutes, type CaptureDomInput, type RouteSnapshot } from "./qa/dom-snapshot";
+import { captureDom, captureDomByRoute, captureRouteTrees, defaultCaptureDomDeps, capDomLines, type CaptureDomInput, type RouteSnapshot } from "./qa/dom-snapshot";
 import { buildContextPack, defaultContextPackDeps } from "./qa/context-pack";
 import { aggregateStaticSignal, type StaticSignalInput } from "./qa/static-signal/aggregate";
 import { defaultStaticSignalDeps } from "./qa/static-signal/aggregate.defaults";
@@ -72,7 +72,7 @@ import { renderExecutionResult } from "./integrations/opencode-client";
 import type { AgentRuntimeConfig } from "./agent-runtime/types";
 import { decideProgress, bestRound, classifyFailure, type RoundResult } from "./qa/progress-gate";
 import { adjudicate, ADJ_CLASS, type AdjudicatorEvidence, type AdjudicatorVerdict } from "./qa/failure-adjudicator";
-import { checkSpecSelectors, unscopedMultipleContradictions } from "./qa/selector-check";
+import { checkSpecSelectors, unscopedMultipleContradictions, firstGotoRoute, extractTestIdSelectorsWithIndex } from "./qa/selector-check";
 import { buildRouteCatalog } from "./qa/route-catalog";
 import { catalogGate } from "./qa/catalog-gate";
 import { extractChangedElements, changedElementsFromGuidance, type ChangedElement } from "./qa/changed-elements";
@@ -1015,6 +1015,9 @@ export async function runPipeline(
     // affect the verdict). Recorded on every outcome so the §9 catch/block rate is queryable.
     outcome.gateSignals.preExecAmbiguityCatches = preExecAmbiguityCatches;
     outcome.gateSignals.deterministicSelectorBlocks = deterministicSelectorBlocks;
+    outcome.gateSignals.catalogGateInWindow = catalogGateInWindow;
+    outcome.gateSignals.catalogGateAdvisory = catalogGateAdvisory;
+    outcome.gateSignals.catalogGateFailClosed = catalogGateFailClosed;
     deps.saveOutcome(outcome).catch((err) => {
       log(`[qa] WARNING: failed to persist RunOutcome (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
     });
@@ -1793,8 +1796,18 @@ export async function runPipeline(
   let result: AgentResult | null = null;
   // Observation-only counts for §9 (gateSignals): ambiguities caught pre-execution, and how many
   // persisted after the corrective regen to trigger the deterministic block.
+  // preExecAmbiguityCatches drives the W2 block re-check (line ~2240) — it must count ONLY strict-mode
+  // ambiguities, NEVER catalog-gate corrections (the catalog gate feeds only the W1 one-shot repair and
+  // must never reach the deterministic block; conflating them here would let a fabricated-test-id
+  // correction hard-block a valid spec — the exact safe-direction violation the design forbids).
   let preExecAmbiguityCatches = 0;
   let deterministicSelectorBlocks = 0;
+  // Pillar 2 catalog gate honest-coverage telemetry (observation-only; the design's advisory→enforce flip
+  // needs aggregable data, not just log lines): selectors gated in the confident window vs left advisory,
+  // and how many fabricated test-ids the gate caught pre-execution.
+  let catalogGateInWindow = 0;
+  let catalogGateAdvisory = 0;
+  let catalogGateFailClosed = 0;
   // W1/W2 — deterministic pre-execution selector ambiguity check, reusable at the detect point (W1) AND
   // the block point (W2). Re-checked FRESH at the static gate so a static-fix rewrite cannot leave a stale
   // block and a no-op corrective regen is still caught (the on-disk specs are authoritative). Reads the
@@ -1802,60 +1815,59 @@ export async function runPipeline(
   // contradictions (present + non-unique). Agnostic to the app's stack; best-effort (variable grounding
   // coverage degrades to []). A scoped `.locator(...)` locator (non-extractable → uniqueness INDETERMINATE)
   // and absent/unverifiable selectors NEVER count, so the block fires only on a confirmed, unscoped fact.
-  const ambiguousSelectorsNow = async (): Promise<string[]> => {
+  // Shared pre-execution capture: render the CURRENT specs' routes ONCE, so the ambiguity check and the
+  // catalog gate derive from the SAME snapshots — one browser launch, and the nodes[] and testIds catalogs
+  // reflect the same page state (two independent live renders could diverge on SPA timing). Called fresh
+  // each invocation (the W2 re-check needs a fresh render of the possibly-rewritten on-disk specs); the W1
+  // pass calls it once and shares the result across both derivations.
+  const capturePreExecSnaps = async (): Promise<{ specSources: string[]; snaps: RouteSnapshot[] } | null> => {
     const baseUrl = app.dev?.baseUrl;
-    if (isCode || !baseUrl || !deps.captureRouteTrees || result == null || result.specs.length === 0) return [];
+    if (isCode || !baseUrl || !deps.captureRouteTrees || result == null || result.specs.length === 0) return null;
     const specSources = result.specs
       .map((f) => join(e2eDir, f))
       .filter((p) => existsSync(p))
       .map((p) => readFileSync(p, "utf8"));
-    // RouteSnapshot.settled and the full RouteCatalog (testIds/status) are produced by captureRouteTrees
-    // but only nodes[] is consumed here today — the slice-4 selector gate must wire settled+catalog.
-    const trees = (await deps.captureRouteTrees({ e2eDir, baseUrl, specContents: specSources, testIdAttribute }))
-      .map((s) => s.nodes ?? [])
-      .filter((n) => n.length > 0);
-    // A1: per-selector chain-awareness. The old blanket `if (findings.anyNonExtractable) return []`
-    // suppressed ALL ambiguity contradictions whenever any non-extractable locator appeared anywhere
-    // in the spec, even a standalone terminal `getByTestId('x')` that scopes nothing. The new
-    // unscopedMultipleContradictions function returns MULTIPLE contradictions only for extractable
-    // selectors that are NOT lexically chained after a non-extractable scope prefix on the same
-    // expression chain, preserving the false-positive guard for scoped `.locator().getByRole(…)`
-    // calls while surfacing real ambiguities from unrelated standalone extractable selectors.
-    //
-    // NOTE: pre-write DOM cannot catch selectors that become ambiguous POST-write within a single
-    // run (e.g. a form step that duplicates a heading after the agent's last navigation). That
-    // residual case is caught at execution by the post-failure Lever-2 check (checkSpecSelectors
-    // at line ~2452) + per-attempt namespace isolation.
+    const snaps = await deps.captureRouteTrees({ e2eDir, baseUrl, specContents: specSources, testIdAttribute });
+    return { specSources, snaps };
+  };
+
+  // Strict-mode AMBIGUITY contradictions (present + non-unique) derived from a captured snapshot set. Pure.
+  // A1: unscopedMultipleContradictions returns MULTIPLE contradictions ONLY for extractable selectors that
+  // are NOT lexically chained after a non-extractable scope prefix, preserving the false-positive guard for
+  // scoped `.locator().getByRole(…)` while still surfacing real ambiguities from standalone extractable
+  // selectors. NOTE: pre-write DOM cannot catch selectors that become ambiguous POST-write within a run;
+  // that residual is caught at execution by the post-failure Lever-2 check + per-attempt namespace isolation.
+  const ambiguityContradictionsFrom = (specSources: string[], snaps: RouteSnapshot[]): string[] => {
+    const trees = snaps.map((s) => s.nodes ?? []).filter((n) => n.length > 0);
     return unscopedMultipleContradictions(specSources, trees, "pre-write");
   };
 
-  // Pillar 2 — the confidence-aware catalog gate, wired as a one-shot PRE-EXECUTION repair (design
-  // slice 4/5). For each spec, gate its test-id selectors against the captured RouteCatalog of its FIRST
-  // route: a test-id ABSENT from the DOM inside the confident window (captured && settled, before the
+  // W2 deterministic-block re-check: captures FRESH (the on-disk specs may have been rewritten by the
+  // corrective regen) and returns ambiguity contradictions ONLY. The catalog gate NEVER participates in
+  // the W2 block — it feeds only the W1 one-shot repair (see catalogCorrectionsFrom).
+  const ambiguousSelectorsNow = async (): Promise<string[]> => {
+    const cap = await capturePreExecSnaps();
+    return cap ? ambiguityContradictionsFrom(cap.specSources, cap.snaps) : [];
+  };
+
+  // Pillar 2 — the confidence-aware catalog gate, wired as a one-shot PRE-EXECUTION repair (design slice
+  // 4/5). For each spec, gate its test-id selectors against the captured RouteCatalog of its FIRST LITERAL
+  // goto route: a test-id ABSENT from the DOM inside the confident window (captured && settled, before the
   // first navigation/click) is FABRICATED → emit a GROUND TRUTH correction so the single corrective regen
   // replaces it BEFORE a 30s runtime timeout. Everything else (post-navigation, unsettled, degraded,
-  // un-groundable) is advisory — never a correction. Feeds the SAME selectorContradictions channel as the
-  // ambiguity check and, like it, triggers only ONE regen; the run then proceeds regardless (a still-absent
-  // selector is left to the runtime backstop). It never touches the W2 deterministic BLOCK, so a
-  // dynamically-revealed element can never false-block. Best-effort: any capture gap → no corrections.
-  const catalogSelectorCorrections = async (): Promise<string[]> => {
-    const baseUrl = app.dev?.baseUrl;
-    if (isCode || !baseUrl || !deps.captureRouteTrees || result == null || result.specs.length === 0) return [];
-    const specSources = result.specs
-      .map((f) => join(e2eDir, f))
-      .filter((p) => existsSync(p))
-      .map((p) => readFileSync(p, "utf8"));
-    // Cost guard: only the test-id family is gated this slice — skip the render entirely when no spec
-    // emits a getByTestId (the gate would have nothing to check).
-    if (!specSources.some((s) => s.includes("getByTestId("))) return [];
-    const snaps = await deps.captureRouteTrees({ e2eDir, baseUrl, specContents: specSources, testIdAttribute });
+  // un-groundable, or an un-navigable first goto) is advisory — never a correction, and NEVER the W2 block,
+  // so a still-absent (e.g. dynamically-revealed) selector can never false-block. Pure; consumes the SAME
+  // snapshots as the ambiguity check.
+  const catalogCorrectionsFrom = (specSources: string[], snaps: RouteSnapshot[]): string[] => {
+    // Skip the per-spec work when no spec emits a real (non-comment) getByTestId.
+    if (!specSources.some((s) => extractTestIdSelectorsWithIndex(s).length > 0)) return [];
     const catalogByRoute = new Map(snaps.map((s) => [s.route, buildRouteCatalog(s)]));
     const corrections: string[] = [];
     let inWindow = 0;
     let advisory = 0;
     for (const specSrc of specSources) {
-      const firstRoute = extractTargetRoutes([specSrc])[0]; // the confident-window route is the initial goto
-      if (firstRoute === undefined) continue; // no navigable route → no window catalog → all advisory
+      const firstRoute = firstGotoRoute(specSrc); // the FIRST LITERAL goto — consistent with confidentWindowEnd
+      if (firstRoute === undefined) continue; // un-navigable / no first goto → no window route → advisory
       const windowRoute = catalogByRoute.get(firstRoute);
       if (windowRoute === undefined) continue; // route not captured → advisory
       const gate = catalogGate(specSrc, windowRoute);
@@ -1865,6 +1877,9 @@ export async function runPipeline(
         corrections.push(`getByTestId('${value}') is NOT in the captured DOM of route '${firstRoute}' — this test-id does not exist on the page. Use only a test-id present in the grounded DOM snapshot, or a role/label selector; never invent a test-id.`);
       }
     }
+    catalogGateInWindow += inWindow;
+    catalogGateAdvisory += advisory;
+    catalogGateFailClosed += corrections.length;
     if (inWindow + advisory > 0) {
       log(`[qa] catalog gate: ${corrections.length} fabricated test-id(s) caught pre-execution; ${inWindow}/${inWindow + advisory} test-id selector(s) in the confident window (rest advisory → runtime backstop)`);
     }
@@ -2032,13 +2047,15 @@ export async function runPipeline(
     // feed it through the EXISTING selectorContradictions regen channel + generateOnce (cycle-ceiling
     // bounded) so the agent scopes the locator BEFORE the first execution. The deterministic BLOCK is
     // re-checked FRESH at the static gate below (W2), so even a no-op corrective regen is still caught.
-    const preExecAmbiguities = await ambiguousSelectorsNow();
+    // Capture the specs' live DOM ONCE and derive BOTH the strict-mode ambiguity contradictions AND the
+    // catalog gate's fabricated-test-id corrections from the SAME snapshots (one browser launch, no
+    // divergence), then feed both through the SAME one-shot selectorContradictions regen channel.
+    const preExecCap = await capturePreExecSnaps();
+    const preExecAmbiguities = preExecCap ? ambiguityContradictionsFrom(preExecCap.specSources, preExecCap.snaps) : [];
     preExecAmbiguityCatches = preExecAmbiguities.length;
-    // Merge the confidence-aware catalog gate's fabricated-test-id corrections into the SAME one-shot
-    // repair. Like the ambiguity check it only ever triggers ONE regen, and it never participates in the
-    // W2 deterministic BLOCK below — so a still-absent (e.g. dynamically-revealed) test-id can never
-    // false-block; it is left to the runtime backstop.
-    const preExecCatalogCorrections = await catalogSelectorCorrections();
+    // The catalog gate's corrections join the SAME one-shot repair but NEVER the W2 block below — so a
+    // still-absent (e.g. dynamically-revealed) test-id can never false-block; it is left to the runtime backstop.
+    const preExecCatalogCorrections = preExecCap ? catalogCorrectionsFrom(preExecCap.specSources, preExecCap.snaps) : [];
     const preExecCorrections = [...preExecAmbiguities, ...preExecCatalogCorrections];
     if (preExecCorrections.length > 0) {
       log(`[qa] pre-exec selector check: ${preExecCorrections.length} correction(s) BEFORE execution — regenerating once: ${preExecCorrections.join("; ")}`);

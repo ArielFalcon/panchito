@@ -3394,9 +3394,12 @@ test("W1 catalog gate: a fabricated test-id in the confident window (captured&&s
     join(d.mirrorDir, "e2e", "a.spec.ts"),
     `import { test } from "./fixtures";\ntest("owners", async ({ page }) => {\n  await page.goto("/owners");\n  await page.getByTestId("ghost-btn").click();\n});\n`,
   );
-  await runPipeline(app, "abc123", d);
+  const run = await runPipeline(app, "abc123", d);
   const corrective = d.genInputs.find((gi) => gi.selectorContradictions?.some((c) => c.includes("ghost-btn") && c.includes("NOT in the captured")));
   assert.ok(corrective, `expected a corrective regen carrying the fabricated test-id; gen inputs: ${d.genInputs.length}`);
+  // The stub regen returns the SAME still-fabricated spec; the catalog gate must NOT hard-block — it
+  // feeds only the W1 one-shot repair, so the run PROCEEDS to execution (the runtime is the backstop).
+  assert.notEqual(run.verdict, "invalid", "a still-absent test-id after one regen must PROCEED, never hard-block");
 });
 
 test("W1 catalog gate: a PRESENT test-id is grounded → no corrective regen", async () => {

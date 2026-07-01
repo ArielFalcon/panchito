@@ -200,15 +200,21 @@ export function selectorUnique(sel: ProposedSelector, treeLines: string[]): bool
 // (e.g. `/* see http://… */`) is not mistaken for a line comment. The result is the COMMENT-STRIPPED
 // source on one line — a call wrapped across lines is matched as a whole, tokens stay space-separated.
 function stripCommentsAndJoin(specSrc: string): string {
-  const lines = specSrc
+  // Block comments FIRST, on the RAW multi-line source (dotall — a /* … */ may span lines, and a `//`
+  // inside it must not be mistaken for a line comment). Each block collapses to a single space.
+  const noBlocks = specSrc.replace(/\/\*[\s\S]*?\*\//g, " ");
+  return noBlocks
     .split("\n")
     .filter((rawLine) => {
       const trimmed = rawLine.trimStart();
-      return !(trimmed.startsWith("//") || trimmed.startsWith("*"));
+      return !(trimmed.startsWith("//") || trimmed.startsWith("*")); // full-line // or block-body *
     })
+    // Strip a trailing `//` comment PER LINE, BEFORE joining, so a `//` can only blank the rest of its
+    // OWN line — never swallow the selectors on every following line once newlines are collapsed (the old
+    // join-then-strip ate from the first `//` to end-of-string, e.g. inside an https:// literal). The
+    // `(?<!:)` guard protects `://` so a URL literal is not mistaken for a comment.
+    .map((line) => line.replace(/(?<!:)\/\/.*$/, " "))
     .join(" ");
-  // Remove /* … */ block comments first (non-greedy, dotall), then trailing // … line comments.
-  return lines.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
 }
 
 // Extracts all proposed selectors from a spec source file using regex over the call
@@ -298,7 +304,7 @@ export function extractCatalogSelectors(specSrc: string): CatalogSelectors {
     titles: collect(/\.getByTitle\(\s*["'`]([^"'`]+)["'`]/g),
     idsNames: [
       ...collect(/\.locator\(\s*["'`]#([\w-]+)["'`]\s*\)/g),
-      ...collect(/\.locator\(\s*["'`]\[name=["']?([^"'\]]+)["']?\]["'`]\s*\)/g),
+      ...collect(/\.locator\(\s*["'`]\[name=["']?([^"'\]\s]+)["']?(?:\s+[isIS])?\]["'`]\s*\)/g), // exclude ws + drop a trailing ` i`/` s` case modifier
     ],
   };
 }
@@ -313,7 +319,7 @@ export function extractCatalogSelectors(specSrc: string): CatalogSelectors {
 // direction. Returns Infinity when nothing closes it (the whole spec is the confident window).
 export function confidentWindowEnd(specSrc: string): number {
   const joined = stripCommentsAndJoin(specSrc);
-  const firstClick = joined.search(/\.(?:click|tap)\s*\(/);
+  const firstClick = joined.search(/\.(?:dblclick|click|tap)\s*\(/); // dblclick is a click variant that can navigate too
   const gotoRe = /\.goto\s*\(/g;
   let count = 0;
   let secondGoto = -1;
@@ -337,6 +343,20 @@ export function extractTestIdSelectorsWithIndex(specSrc: string): Array<{ value:
     if (value && !value.includes("${")) out.push({ value, index: m.index });
   }
   return out;
+}
+
+// The route of the spec's FIRST literal page.goto(...) — the catalog gate's confident-window route — or
+// undefined when that first goto is un-navigable (interpolated ${…} or an absolute URL), in which case
+// the window route cannot be pinned and the gate must leave the whole spec advisory. Kept CONSISTENT
+// with confidentWindowEnd (which counts the raw first goto), so a first-route selector is never checked
+// against a LATER route's catalog. Normalizes the leading slash exactly like extractTargetRoutes, so it
+// matches the RouteSnapshot.route keys. Comment-stripped (W5 parity).
+export function firstGotoRoute(specSrc: string): string | undefined {
+  const m = /\.goto\(\s*["'`]([^"'`]+)["'`]/.exec(stripCommentsAndJoin(specSrc));
+  if (!m) return undefined;
+  const raw = m[1]!.trim();
+  if (!raw || raw.includes("${") || /^https?:\/\//i.test(raw)) return undefined; // un-navigable → advisory
+  return raw.startsWith("/") ? raw : `/${raw}`;
 }
 
 // Locator families Lever-2 CANNOT extract/verify against an aria snapshot: getByTestId (test ids

@@ -470,7 +470,10 @@ export async function captureRouteTrees(input: CaptureDomInput, deps: CaptureDom
   // a partially-grounded run is visible and attributed rather than a silent reopen.
   const warning = degradedRouteWarning(snaps.map(buildRouteCatalog));
   if (warning) console.warn(warning);
-  return snaps.filter((s) => !s.error && (s.nodes?.length ?? 0) > 0);
+  // Keep a route with a populated test-id index even when its ARIA nodes[] is empty — a page of
+  // role-less <div data-cy=x> elements is exactly what the role-independent capture (Pillar 2) exists
+  // to ground, and the catalog gate must see it. Errored routes are still dropped.
+  return snaps.filter((s) => !s.error && ((s.nodes?.length ?? 0) > 0 || (s.testIds?.size ?? 0) > 0));
 }
 
 // Parses the YAML string returned by `locator('body').ariaSnapshot()` (Playwright >=1.57) into
