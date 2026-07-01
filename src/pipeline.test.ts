@@ -3427,6 +3427,22 @@ test("W1 catalog gate: an UNSETTLED route is advisory — a fabricated test-id d
   assert.equal(corrective, undefined, "an unsettled catalog is advisory → no fail-closed regen");
 });
 
+test("W1 catalog gate: an un-navigable FIRST goto (interpolated) → advisory, no false correction (CRITICAL regression guard)", async () => {
+  const d = deps(passing(), [], { agents: [generated, generated] });
+  // Captured && settled /owners; but the spec's FIRST goto is interpolated → firstGotoRoute is undefined,
+  // so the whole spec is advisory. dyn-el lives on the dynamic route, NOT /owners — it must NOT be checked
+  // against /owners' catalog (the round-2 CRITICAL: deriving the window route from the first NAVIGABLE goto
+  // shifted it to /owners and fail-closed a valid selector).
+  d.captureRouteTrees = async () => [{ route: "/owners", nodes: ["button: Add"], testIds: new Map([["real-btn", 1]]), settled: true }];
+  writeFileSync(
+    join(d.mirrorDir, "e2e", "a.spec.ts"),
+    'import { test } from "./fixtures";\ntest("dyn", async ({ page }) => {\n  await page.goto(`/dynamic/${id}`);\n  await page.getByTestId("dyn-el").click();\n  await page.goto("/owners");\n});\n',
+  );
+  await runPipeline(app, "abc123", d);
+  const corrective = d.genInputs.find((gi) => gi.selectorContradictions?.some((c) => c.includes("dyn-el")));
+  assert.equal(corrective, undefined, "an un-navigable first goto must NOT fail-close a selector against a LATER route's catalog");
+});
+
 // ── W2: deterministic block when the ambiguity persists after the corrective regen (increment 4) ──
 
 test("W2 pre-exec: a strict-mode ambiguity that PERSISTS after the corrective regen blocks as invalid (no execute, no publish)", async () => {

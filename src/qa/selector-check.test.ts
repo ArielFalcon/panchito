@@ -18,6 +18,7 @@ import {
   firstGotoRoute,
   type ProposedSelector,
 } from "./selector-check";
+import { extractTargetRoutes } from "./dom-snapshot";
 
 // ── normalizeName ─────────────────────────────────────────────────────────────
 
@@ -1015,6 +1016,29 @@ test("stripCommentsAndJoin: an https:// URL literal does NOT truncate later sele
 test("stripCommentsAndJoin: a REAL trailing // comment is still stripped (W5 preserved), URL on same line kept", () => {
   const spec = `await page.getByTestId("keep").click(); // getByTestId("ghost-comment")`;
   assert.deepEqual(extractTestIdSelectorsWithIndex(spec).map((s) => s.value), ["keep"], "trailing // comment still removed");
+});
+
+test("stripCommentsAndJoin: a // INSIDE a string literal is content, not a comment (breadcrumb/path/ratio)", () => {
+  // same-line: a getByText whose text contains // must not swallow a following selector on that line
+  const sameLine = `await page.getByText("Home // Settings").click(); await page.getByRole("button", { name: "Go" }).click();`;
+  assert.ok(extractProposedSelectors(sameLine).some((s) => s.kind === "role" && s.name === "Go"), "same-line getByRole after a //-in-string survives");
+  // and the test-id extractor sees a getByTestId after a //-in-string on the same line
+  const idSame = `await page.getByText("a//b").click(); await page.getByTestId("keep-testid").click();`;
+  assert.deepEqual(extractTestIdSelectorsWithIndex(idSame).map((s) => s.value), ["keep-testid"]);
+  // a REAL trailing comment on a line that ALSO has a //-in-string is still stripped from the comment on
+  const mixed = `await page.getByTestId("real").click(); // note: see path//x`;
+  assert.deepEqual(extractTestIdSelectorsWithIndex(mixed).map((s) => s.value), ["real"], "the real trailing comment is still removed");
+});
+
+test("extractCatalogSelectors: idsNames matches [name=x] with a bare trailing space (no modifier)", () => {
+  assert.deepEqual(extractCatalogSelectors(`await page.locator("[name=lastName ]").fill("x");`).idsNames, ["lastName"], "a trailing space with no i/s modifier still closes the match");
+});
+
+test("firstGotoRoute normalizes routes IDENTICALLY to extractTargetRoutes (cross-file drift guard)", () => {
+  for (const raw of ["/owners", "owners", "/a/b", "products"]) {
+    const spec = `await page.goto("${raw}");`;
+    assert.equal(firstGotoRoute(spec), extractTargetRoutes([spec])[0], `normalization must agree for ${raw}`);
+  }
 });
 
 test("confidentWindowEnd: a dblclick also closes the window (a click variant that can navigate)", () => {
