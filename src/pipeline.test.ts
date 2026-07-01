@@ -3383,6 +3383,47 @@ test("W1 pre-exec: a UNIQUE selector in the pre-write grounding does NOT trigger
   assert.equal(corrective, undefined, "a unique selector must NOT trigger a corrective regen");
 });
 
+// ── W1 catalog gate (Pillar 2 slice 4): fabricated test-id → ONE corrective regen, never a hard block ──
+
+test("W1 catalog gate: a fabricated test-id in the confident window (captured&&settled) triggers a corrective regen", async () => {
+  const calls: string[] = [];
+  const d = deps(passing(), calls, { agents: [generated, generated] });
+  // Captured && settled route whose real test-id is 'real-btn'; the spec fabricates 'ghost-btn'.
+  d.captureRouteTrees = async () => [{ route: "/owners", nodes: ["button: Add"], testIds: new Map([["real-btn", 1]]), settled: true }];
+  writeFileSync(
+    join(d.mirrorDir, "e2e", "a.spec.ts"),
+    `import { test } from "./fixtures";\ntest("owners", async ({ page }) => {\n  await page.goto("/owners");\n  await page.getByTestId("ghost-btn").click();\n});\n`,
+  );
+  await runPipeline(app, "abc123", d);
+  const corrective = d.genInputs.find((gi) => gi.selectorContradictions?.some((c) => c.includes("ghost-btn") && c.includes("NOT in the captured")));
+  assert.ok(corrective, `expected a corrective regen carrying the fabricated test-id; gen inputs: ${d.genInputs.length}`);
+});
+
+test("W1 catalog gate: a PRESENT test-id is grounded → no corrective regen", async () => {
+  const d = deps(passing(), [], { agents: [generated, generated] });
+  d.captureRouteTrees = async () => [{ route: "/owners", nodes: ["button: Add"], testIds: new Map([["real-btn", 1]]), settled: true }];
+  writeFileSync(
+    join(d.mirrorDir, "e2e", "a.spec.ts"),
+    `import { test } from "./fixtures";\ntest("owners", async ({ page }) => {\n  await page.goto("/owners");\n  await page.getByTestId("real-btn").click();\n});\n`,
+  );
+  await runPipeline(app, "abc123", d);
+  const corrective = d.genInputs.find((gi) => gi.selectorContradictions?.some((c) => c.includes("real-btn")));
+  assert.equal(corrective, undefined, "a present test-id must NOT trigger a corrective regen");
+});
+
+test("W1 catalog gate: an UNSETTLED route is advisory — a fabricated test-id does NOT fail-closed (safe direction)", async () => {
+  const d = deps(passing(), [], { agents: [generated, generated] });
+  // settled:false ⇒ the catalog is untrusted ⇒ advisory, never a fail-closed regen (no false block).
+  d.captureRouteTrees = async () => [{ route: "/owners", nodes: ["button: Add"], testIds: new Map(), settled: false }];
+  writeFileSync(
+    join(d.mirrorDir, "e2e", "a.spec.ts"),
+    `import { test } from "./fixtures";\ntest("owners", async ({ page }) => {\n  await page.goto("/owners");\n  await page.getByTestId("ghost-btn").click();\n});\n`,
+  );
+  await runPipeline(app, "abc123", d);
+  const corrective = d.genInputs.find((gi) => gi.selectorContradictions?.some((c) => c.includes("ghost-btn")));
+  assert.equal(corrective, undefined, "an unsettled catalog is advisory → no fail-closed regen");
+});
+
 // ── W2: deterministic block when the ambiguity persists after the corrective regen (increment 4) ──
 
 test("W2 pre-exec: a strict-mode ambiguity that PERSISTS after the corrective regen blocks as invalid (no execute, no publish)", async () => {

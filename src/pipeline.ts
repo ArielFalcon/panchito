@@ -59,7 +59,7 @@ import { github } from "./integrations/github";
 import { capDiff } from "./orchestrator/sanitizer";
 import { renderIssue, type IssueContext, type TestedItem, type AdjudicationLabel } from "./report/reporter";
 import { renderValueTag } from "./qa/value-report";
-import { captureDom, captureDomByRoute, captureRouteTrees, defaultCaptureDomDeps, capDomLines, type CaptureDomInput, type RouteSnapshot } from "./qa/dom-snapshot";
+import { captureDom, captureDomByRoute, captureRouteTrees, defaultCaptureDomDeps, capDomLines, extractTargetRoutes, type CaptureDomInput, type RouteSnapshot } from "./qa/dom-snapshot";
 import { buildContextPack, defaultContextPackDeps } from "./qa/context-pack";
 import { aggregateStaticSignal, type StaticSignalInput } from "./qa/static-signal/aggregate";
 import { defaultStaticSignalDeps } from "./qa/static-signal/aggregate.defaults";
@@ -73,6 +73,8 @@ import type { AgentRuntimeConfig } from "./agent-runtime/types";
 import { decideProgress, bestRound, classifyFailure, type RoundResult } from "./qa/progress-gate";
 import { adjudicate, ADJ_CLASS, type AdjudicatorEvidence, type AdjudicatorVerdict } from "./qa/failure-adjudicator";
 import { checkSpecSelectors, unscopedMultipleContradictions } from "./qa/selector-check";
+import { buildRouteCatalog } from "./qa/route-catalog";
+import { catalogGate } from "./qa/catalog-gate";
 import { extractChangedElements, changedElementsFromGuidance, type ChangedElement } from "./qa/changed-elements";
 
 // Tests live in this folder inside the repo (git is the source of truth).
@@ -1827,6 +1829,48 @@ export async function runPipeline(
     return unscopedMultipleContradictions(specSources, trees, "pre-write");
   };
 
+  // Pillar 2 — the confidence-aware catalog gate, wired as a one-shot PRE-EXECUTION repair (design
+  // slice 4/5). For each spec, gate its test-id selectors against the captured RouteCatalog of its FIRST
+  // route: a test-id ABSENT from the DOM inside the confident window (captured && settled, before the
+  // first navigation/click) is FABRICATED → emit a GROUND TRUTH correction so the single corrective regen
+  // replaces it BEFORE a 30s runtime timeout. Everything else (post-navigation, unsettled, degraded,
+  // un-groundable) is advisory — never a correction. Feeds the SAME selectorContradictions channel as the
+  // ambiguity check and, like it, triggers only ONE regen; the run then proceeds regardless (a still-absent
+  // selector is left to the runtime backstop). It never touches the W2 deterministic BLOCK, so a
+  // dynamically-revealed element can never false-block. Best-effort: any capture gap → no corrections.
+  const catalogSelectorCorrections = async (): Promise<string[]> => {
+    const baseUrl = app.dev?.baseUrl;
+    if (isCode || !baseUrl || !deps.captureRouteTrees || result == null || result.specs.length === 0) return [];
+    const specSources = result.specs
+      .map((f) => join(e2eDir, f))
+      .filter((p) => existsSync(p))
+      .map((p) => readFileSync(p, "utf8"));
+    // Cost guard: only the test-id family is gated this slice — skip the render entirely when no spec
+    // emits a getByTestId (the gate would have nothing to check).
+    if (!specSources.some((s) => s.includes("getByTestId("))) return [];
+    const snaps = await deps.captureRouteTrees({ e2eDir, baseUrl, specContents: specSources, testIdAttribute });
+    const catalogByRoute = new Map(snaps.map((s) => [s.route, buildRouteCatalog(s)]));
+    const corrections: string[] = [];
+    let inWindow = 0;
+    let advisory = 0;
+    for (const specSrc of specSources) {
+      const firstRoute = extractTargetRoutes([specSrc])[0]; // the confident-window route is the initial goto
+      if (firstRoute === undefined) continue; // no navigable route → no window catalog → all advisory
+      const windowRoute = catalogByRoute.get(firstRoute);
+      if (windowRoute === undefined) continue; // route not captured → advisory
+      const gate = catalogGate(specSrc, windowRoute);
+      inWindow += gate.inWindow;
+      advisory += gate.advisory;
+      for (const value of gate.failClosed) {
+        corrections.push(`getByTestId('${value}') is NOT in the captured DOM of route '${firstRoute}' — this test-id does not exist on the page. Use only a test-id present in the grounded DOM snapshot, or a role/label selector; never invent a test-id.`);
+      }
+    }
+    if (inWindow + advisory > 0) {
+      log(`[qa] catalog gate: ${corrections.length} fabricated test-id(s) caught pre-execution; ${inWindow}/${inWindow + advisory} test-id selector(s) in the confident window (rest advisory → runtime backstop)`);
+    }
+    return corrections;
+  };
+
   // Load persisted curriculum (survives across runs — archetypes that caught real bugs)
   if (!curriculum) {
     const { loadCurriculum } = await import("./server/history");
@@ -1990,13 +2034,19 @@ export async function runPipeline(
     // re-checked FRESH at the static gate below (W2), so even a no-op corrective regen is still caught.
     const preExecAmbiguities = await ambiguousSelectorsNow();
     preExecAmbiguityCatches = preExecAmbiguities.length;
-    if (preExecAmbiguities.length > 0) {
-      log(`[qa] pre-exec selector check: ${preExecAmbiguities.length} strict-mode ambiguity contradiction(s) BEFORE execution — regenerating once to scope them: ${preExecAmbiguities.join("; ")}`);
-      const corrected = await generateOnce(baseGenInput({ selectorContradictions: preExecAmbiguities }));
+    // Merge the confidence-aware catalog gate's fabricated-test-id corrections into the SAME one-shot
+    // repair. Like the ambiguity check it only ever triggers ONE regen, and it never participates in the
+    // W2 deterministic BLOCK below — so a still-absent (e.g. dynamically-revealed) test-id can never
+    // false-block; it is left to the runtime backstop.
+    const preExecCatalogCorrections = await catalogSelectorCorrections();
+    const preExecCorrections = [...preExecAmbiguities, ...preExecCatalogCorrections];
+    if (preExecCorrections.length > 0) {
+      log(`[qa] pre-exec selector check: ${preExecCorrections.length} correction(s) BEFORE execution — regenerating once: ${preExecCorrections.join("; ")}`);
+      const corrected = await generateOnce(baseGenInput({ selectorContradictions: preExecCorrections }));
       // ONLY adopt the corrective regen if it produced specs. An EMPTY result (cycle-ceiling hit, or an
-      // agent no-op) must NOT discard the original ambiguous specs — they remain on disk and WILL execute,
-      // so `result` must keep pointing at them for the W2 re-check (and the no-op-skip guard) to catch the
-      // on-op ambiguity. This closes the empty-corrective-regen bypass.
+      // agent no-op) must NOT discard the original specs — they remain on disk and WILL execute, so
+      // `result` must keep pointing at them for the W2 re-check (and the no-op-skip guard) to catch a
+      // residual ambiguity. This closes the empty-corrective-regen bypass.
       if (corrected != null && corrected.specs.length > 0) result = corrected;
     }
 
