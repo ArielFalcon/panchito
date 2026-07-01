@@ -303,6 +303,42 @@ export function extractCatalogSelectors(specSrc: string): CatalogSelectors {
   };
 }
 
+// The lexical end of the catalog gate's "confident window": the index (in the comment-stripped joined
+// source) of the first action that makes the INITIAL-route catalog stale — the first `.click()`/`.tap()`
+// or the SECOND `.goto()`. A selector after this point may live on a page reached post-navigation, which
+// the initial catalog cannot see, so the gate must NOT fail-close there (it would false-block).
+// `fill`/`type`/`press`/`hover`/`check`/`selectOption` do NOT close the window (they don't navigate).
+// The 2nd-goto rule is conservative: the design keeps the window open across `goto(<same route>)`, but
+// closing on ANY second goto only NARROWS the window (fewer fail-closes, never a false block) — the safe
+// direction. Returns Infinity when nothing closes it (the whole spec is the confident window).
+export function confidentWindowEnd(specSrc: string): number {
+  const joined = stripCommentsAndJoin(specSrc);
+  const firstClick = joined.search(/\.(?:click|tap)\s*\(/);
+  const gotoRe = /\.goto\s*\(/g;
+  let count = 0;
+  let secondGoto = -1;
+  for (let m: RegExpExecArray | null; (m = gotoRe.exec(joined)) !== null; ) {
+    if (++count === 2) { secondGoto = m.index; break; }
+  }
+  const ends = [firstClick, secondGoto].filter((i) => i >= 0);
+  return ends.length > 0 ? Math.min(...ends) : Infinity;
+}
+
+// getByTestId selectors WITH their position in the comment-stripped joined source, so the gate can tell
+// which fall inside the confident window (index < confidentWindowEnd). Same comment-stripping as the
+// aria extractor (W5 parity). Interpolated `${…}` values are dropped (computed → un-groundable). The
+// index is in the SAME coordinate space as confidentWindowEnd (both strip the identical source).
+export function extractTestIdSelectorsWithIndex(specSrc: string): Array<{ value: string; index: number }> {
+  const joined = stripCommentsAndJoin(specSrc);
+  const re = /\.getByTestId\(\s*["'`]([^"'`]+)["'`]/g;
+  const out: Array<{ value: string; index: number }> = [];
+  for (let m: RegExpExecArray | null; (m = re.exec(joined)) !== null; ) {
+    const value = m[1]!.trim();
+    if (value && !value.includes("${")) out.push({ value, index: m.index });
+  }
+  return out;
+}
+
 // Locator families Lever-2 CANNOT extract/verify against an aria snapshot: getByTestId (test ids
 // are not in the a11y tree), raw CSS/XPath `.locator(…)`, getByPlaceholder/getByAltText/getByTitle
 // (names parseAriaSnapshot does not surface), AND the REGEX-first-arg forms `getByText(/…/)` /

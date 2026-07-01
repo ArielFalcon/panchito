@@ -13,6 +13,8 @@ import {
   unscopedMultipleContradictions,
   selectorKey,
   extractCatalogSelectors,
+  confidentWindowEnd,
+  extractTestIdSelectorsWithIndex,
   type ProposedSelector,
 } from "./selector-check";
 
@@ -941,4 +943,54 @@ test("extractCatalogSelectors: un-groundable forms are NOT extracted (escape-hat
 test("extractCatalogSelectors: empty spec → all families empty (never throws)", () => {
   const out = extractCatalogSelectors(`await page.getByRole("button", { name: "Save" }).click();`);
   assert.deepEqual(out, { testIds: [], placeholders: [], altTexts: [], titles: [], idsNames: [] });
+});
+
+// ── confidentWindowEnd + extractTestIdSelectorsWithIndex (Pillar 2, slice 4 — gate core) ──────────
+// The catalog gate may fail-close ONLY on selectors in the "confident window": lexically before the
+// first click/tap or the second goto (post-navigation the initial-route catalog is stale → advisory).
+// These two pure helpers give the gate the positions it compares; both operate on the SAME
+// comment-stripped joined source so their indices share one coordinate space.
+
+test("confidentWindowEnd: first click/tap closes the window", () => {
+  const spec = [
+    `await page.goto("/login");`,
+    `await page.getByTestId("user").fill("franz");`,
+    `await page.getByTestId("submit").click();`,
+    `await page.getByTestId("dashboard-post-nav").click();`,
+  ].join("\n");
+  const end = confidentWindowEnd(spec);
+  const ids = extractTestIdSelectorsWithIndex(spec);
+  const before = ids.filter((s) => s.index < end).map((s) => s.value);
+  // fill does NOT close; the submit selector is BEFORE its own .click() token → in window.
+  assert.deepEqual(before, ["user", "submit"], "fill keeps window open; submit is pre-.click()");
+  assert.ok(ids.find((s) => s.value === "dashboard-post-nav")!.index > end, "post-click selector is out of window");
+});
+
+test("confidentWindowEnd: the SECOND goto closes the window (later routes are a different catalog)", () => {
+  const spec = [
+    `await page.goto("/a");`,
+    `await page.getByTestId("x-on-a");`,
+    `await page.goto("/b");`,
+    `await page.getByTestId("y-on-b");`,
+  ].join("\n");
+  const end = confidentWindowEnd(spec);
+  const ids = extractTestIdSelectorsWithIndex(spec);
+  assert.ok(ids.find((s) => s.value === "x-on-a")!.index < end, "selector on the initial route is in window");
+  assert.ok(ids.find((s) => s.value === "y-on-b")!.index > end, "selector after the 2nd goto is out of window");
+});
+
+test("confidentWindowEnd: nothing closes the window → Infinity (whole spec is the window)", () => {
+  const spec = `await page.goto("/x"); await page.getByTestId("a").fill("v"); await expect(page.getByTestId("b")).toBeVisible();`;
+  assert.equal(confidentWindowEnd(spec), Infinity);
+});
+
+test("extractTestIdSelectorsWithIndex: values + positions, interpolated dropped, comment-stripped", () => {
+  const spec = [
+    `await page.getByTestId("real").click();`,
+    `// await page.getByTestId("ghost").click();`,
+    `await page.getByTestId(\`dyn-\${id}\`).click();`,
+  ].join("\n");
+  const out = extractTestIdSelectorsWithIndex(spec);
+  assert.deepEqual(out.map((s) => s.value), ["real"], "ghost (comment) and dyn (interpolated) excluded");
+  assert.ok(out[0]!.index >= 0);
 });
