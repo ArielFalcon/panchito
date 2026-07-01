@@ -259,6 +259,50 @@ export function extractProposedSelectors(specSrc: string): ProposedSelector[] {
   return found.sort((a, b) => a.index - b.index).map((f) => f.sel);
 }
 
+// The selector families the ARIA-path checker is BLIND to (test-ids live in the attribute side-channel,
+// not the a11y tree). The Pillar 2 catalog gate (slice 4) matches each against its per-route index in
+// the RouteCatalog. Empty arrays when a family is unused. `idsNames` unifies id and name locators.
+export interface CatalogSelectors {
+  testIds: string[];
+  placeholders: string[];
+  altTexts: string[];
+  titles: string[];
+  idsNames: string[]; // from locator('#id') and locator('[name=x]') — simple, groundable forms only
+}
+
+// Extracts the catalog families a spec emits (getByTestId/getByPlaceholder/getByAltText/getByTitle and
+// SIMPLE id/name locators) so the slice-4 gate can verify each against the captured RouteCatalog. This
+// is PARALLEL to extractProposedSelectors (role/text/label) and ADDITIVE — it does NOT touch
+// NON_EXTRACTABLE_LOCATOR_RE or the W5 real-bug guard; the aria-path semantics are unchanged. Matched
+// over the COMMENT-STRIPPED source (stripCommentsAndJoin) so a commented-out getByTestId cannot leak
+// (W5 parity). Only STRING-LITERAL first args and simple locator forms are groundable; complex CSS/XPath,
+// computed `${…}` values, and attribute locators other than `[name=…]` (e.g. `[data-cy=…]`, the
+// escape-hatch Pillar 3 forbids) are intentionally NOT extracted → the gate treats them as un-groundable
+// → advisory, never a false block.
+export function extractCatalogSelectors(specSrc: string): CatalogSelectors {
+  const joined = stripCommentsAndJoin(specSrc);
+  const collect = (re: RegExp): string[] => {
+    const out: string[] = [];
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(joined)) !== null) {
+      const v = m[1]!.trim();
+      if (v && !v.includes("${")) out.push(v); // drop interpolated/computed → un-groundable
+    }
+    return out;
+  };
+  return {
+    testIds: collect(/\.getByTestId\(\s*["'`]([^"'`]+)["'`]/g),
+    placeholders: collect(/\.getByPlaceholder\(\s*["'`]([^"'`]+)["'`]/g),
+    altTexts: collect(/\.getByAltText\(\s*["'`]([^"'`]+)["'`]/g),
+    titles: collect(/\.getByTitle\(\s*["'`]([^"'`]+)["'`]/g),
+    idsNames: [
+      ...collect(/\.locator\(\s*["'`]#([\w-]+)["'`]\s*\)/g),
+      ...collect(/\.locator\(\s*["'`]\[name=["']?([^"'\]]+)["']?\]["'`]\s*\)/g),
+    ],
+  };
+}
+
 // Locator families Lever-2 CANNOT extract/verify against an aria snapshot: getByTestId (test ids
 // are not in the a11y tree), raw CSS/XPath `.locator(…)`, getByPlaceholder/getByAltText/getByTitle
 // (names parseAriaSnapshot does not surface), AND the REGEX-first-arg forms `getByText(/…/)` /

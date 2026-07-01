@@ -12,6 +12,7 @@ import {
   checkSpecSelectors,
   unscopedMultipleContradictions,
   selectorKey,
+  extractCatalogSelectors,
   type ProposedSelector,
 } from "./selector-check";
 
@@ -881,4 +882,63 @@ test("A1-safe: locator-chained getByRole stays suppressed (guard preserved)", ()
   const spec = `await page.locator(".sidebar").getByRole("button", { name: "Save" }).click();`;
   const out = unscopedMultipleContradictions([spec], [["button: Save", "button: Save"]], "pre-write");
   assert.deepEqual(out, [], "locator-chained getByRole must be suppressed");
+});
+
+// ── extractCatalogSelectors (Pillar 2, slice 3a) ──────────────────────────────
+// Extracts the selector families the ARIA-path checker is BLIND to (test-id, placeholder, alt, title,
+// simple id/name locators) so the slice-4 catalog gate can match each against its per-route index. This
+// is PARALLEL to extractProposedSelectors — it must NOT change NON_EXTRACTABLE_LOCATOR_RE / the W5 guard.
+// Comment-stripped like the aria extractor (a commented-out getByTestId must not leak — W5 parity).
+
+test("extractCatalogSelectors: pulls the four getBy* families the aria-path cannot verify", () => {
+  const spec = [
+    `await page.getByTestId("submit-btn").click();`,
+    `await page.getByPlaceholder("Search owners").fill("Franz");`,
+    `await expect(page.getByAltText("Company logo")).toBeVisible();`,
+    `await page.getByTitle("Close dialog").click();`,
+  ].join("\n");
+  const out = extractCatalogSelectors(spec);
+  assert.deepEqual(out.testIds, ["submit-btn"]);
+  assert.deepEqual(out.placeholders, ["Search owners"]);
+  assert.deepEqual(out.altTexts, ["Company logo"]);
+  assert.deepEqual(out.titles, ["Close dialog"]);
+});
+
+test("extractCatalogSelectors: idsNames from SIMPLE locator('#id') and locator('[name=x]') only", () => {
+  const spec = [
+    `await page.locator("#owner-name").fill("Franz");`,
+    `await page.locator('[name="lastName"]').fill("Kafka");`,
+    `await page.locator("[name=email]").fill("k@x.com");`,
+  ].join("\n");
+  const out = extractCatalogSelectors(spec);
+  assert.deepEqual(out.idsNames.sort(), ["email", "lastName", "owner-name"].sort());
+});
+
+test("extractCatalogSelectors: comment-stripped — a commented-out selector never leaks (W5 parity)", () => {
+  const spec = [
+    `await page.getByTestId("real-id").click();`,
+    `// await page.getByTestId("ghost-line").click();`,
+    `await page.getByPlaceholder("Real"); /* getByPlaceholder("ghost-block") */`,
+    `await page.getByTitle("Real2"); // getByTitle("ghost-trailing")`,
+  ].join("\n");
+  const out = extractCatalogSelectors(spec);
+  assert.deepEqual(out.testIds, ["real-id"], "no ghost test-id from a full-line comment");
+  assert.ok(!out.placeholders.includes("ghost-block"), "no ghost from an inline block comment");
+  assert.ok(!out.titles.includes("ghost-trailing"), "no ghost from a trailing comment");
+});
+
+test("extractCatalogSelectors: un-groundable forms are NOT extracted (escape-hatch → advisory)", () => {
+  const spec = [
+    `await page.locator(".card .title").click();`,           // complex CSS → un-groundable
+    `await page.locator('[data-cy="wrapped-id"]').click();`, // test-id wrapped in locon → escape hatch
+    `await page.getByTestId(\`dyn-\${id}\`).click();`,        // computed/interpolated → un-groundable
+  ].join("\n");
+  const out = extractCatalogSelectors(spec);
+  assert.deepEqual(out.idsNames, [], "complex CSS and [data-cy=…] are not idsNames");
+  assert.deepEqual(out.testIds, [], "an interpolated ${…} test-id is not groundable");
+});
+
+test("extractCatalogSelectors: empty spec → all families empty (never throws)", () => {
+  const out = extractCatalogSelectors(`await page.getByRole("button", { name: "Save" }).click();`);
+  assert.deepEqual(out, { testIds: [], placeholders: [], altTexts: [], titles: [], idsNames: [] });
 });
