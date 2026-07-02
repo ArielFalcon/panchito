@@ -46,3 +46,17 @@ test("PARITY: SelectorCheckService.unscopedMultiple matches unscopedMultipleCont
     );
   }
 });
+
+test("PARITY: a URL inside a string is not mistaken for a comment", () => {
+  const spec = [
+    `import { test, expect } from "@playwright/test";`,
+    `test("nav", async ({ page }) => {`,
+    `  await page.goto("https://dev.example.com/account/register");`,
+    `  await page.getByRole("button", { name: "Save" }).click();`,
+    `});`,
+  ].join("\n");
+  const tree = ['- button "Save"'];
+  const svc = new SelectorCheckService();
+  assert.deepEqual(svc.check([spec], [tree]), checkSpecSelectors([spec], [tree]));
+  assert.deepEqual(svc.unscopedMultiple([spec], [tree]), unscopedMultipleContradictions([spec], [tree]));
+});

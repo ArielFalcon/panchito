@@ -193,16 +193,41 @@ export function selectorUnique(sel: ProposedSelector, treeLines: string[]): bool
 // Order matters: block comments are removed BEFORE the trailing-`//` strip so a `//` INSIDE a `/* … */`
 // (e.g. `/* see http://… */`) is not mistaken for a line comment. The result is the COMMENT-STRIPPED
 // source on one line — a call wrapped across lines is matched as a whole, tokens stay space-separated.
+// Cut a line at its first `//` that is OUTSIDE a string literal — a real trailing line comment. A `//`
+// inside a '…', "…" or `…` string (a URL `https://`, a breadcrumb "a // b", a path "x//y") is NOT a
+// comment and is preserved. Backslash escapes inside strings are honored. A char-scanner, because a
+// regex cannot tell a comment `//` from a `//` inside a string.
+function stripTrailingLineComment(line: string): string {
+  let quote: string | null = null; // the open quote char, or null when outside any string
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) {
+      if (c === "\\") { i++; continue; } // skip the escaped char inside a string
+      if (c === quote) quote = null;
+    } else if (c === "'" || c === '"' || c === "`") {
+      quote = c;
+    } else if (c === "/" && line[i + 1] === "/") {
+      return `${line.slice(0, i)} `; // real comment start (outside any string) → cut here
+    }
+  }
+  return line;
+}
+
 function stripCommentsAndJoin(specSrc: string): string {
-  const lines = specSrc
+  // Block comments FIRST, on the RAW multi-line source (dotall — a /* … */ may span lines, and a `//`
+  // inside it must not be mistaken for a line comment). Each block collapses to a single space.
+  const noBlocks = specSrc.replace(/\/\*[\s\S]*?\*\//g, " ");
+  return noBlocks
     .split("\n")
     .filter((rawLine) => {
       const trimmed = rawLine.trimStart();
-      return !(trimmed.startsWith("//") || trimmed.startsWith("*"));
+      return !(trimmed.startsWith("//") || trimmed.startsWith("*")); // full-line // or block-body *
     })
+    // Strip a trailing `//` comment PER LINE (bounded to its own line so it can never swallow later
+    // lines once joined) and ONLY when the `//` is outside a string literal (so a URL / breadcrumb /
+    // path `//` inside a string is preserved, not mistaken for a comment).
+    .map(stripTrailingLineComment)
     .join(" ");
-  // Remove /* … */ block comments first (non-greedy, dotall), then trailing // … line comments.
-  return lines.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
 }
 
 // Extracts all proposed selectors from a spec source file using regex over the call
