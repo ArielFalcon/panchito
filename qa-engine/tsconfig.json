@@ -30,7 +30,6 @@
     "test/shared-kernel/run-outcome.test.ts",
     "test/shared-kernel/diff-parser/diff-parser-parity.test.ts",
     "test/contexts/change-analysis/domain/commit-classification-parity.test.ts",
-    "src/contexts/change-analysis/infrastructure/extractors/default-extractors.ts",
     "test/contexts/test-execution/domain/adjudicate-parity.test.ts",
     "test/contexts/test-execution/domain/selector-check-parity.test.ts",
     "test/contexts/test-execution/domain/progress-gate-parity.test.ts",
@@ -62,6 +61,11 @@
     "test/contexts/qa-run-orchestration/domain/helpers/progress-gate-parity.test.ts",
     "test/contexts/qa-run-orchestration/domain/helpers/selector-check-parity.test.ts",
     "test/contexts/qa-run-orchestration/domain/helpers/error-class-parity.test.ts",
-    "test/characterization/shadow-run.operator.ts"
+    "test/characterization/shadow-run.operator.ts",
+    "test/contexts/change-analysis/infrastructure/extractors/symbols-parity.test.ts",
+    "test/contexts/change-analysis/infrastructure/extractors/relations-parity.test.ts",
+    "test/contexts/change-analysis/infrastructure/extractors/complexity-parity.test.ts",
+    "test/contexts/change-analysis/infrastructure/extractors/semantic-diff-parity.test.ts",
+    "test/contexts/change-analysis/infrastructure/extractors/patterns-parity.test.ts"
   ]
 }

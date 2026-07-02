@@ -21,6 +21,11 @@
   },
   "include": [
     "test/contexts/generation/application/ports/generation-ports-parity.test.ts",
-    "test/characterization/shadow-run.operator.ts"
+    "test/characterization/shadow-run.operator.ts",
+    "test/contexts/change-analysis/infrastructure/extractors/symbols-parity.test.ts",
+    "test/contexts/change-analysis/infrastructure/extractors/relations-parity.test.ts",
+    "test/contexts/change-analysis/infrastructure/extractors/complexity-parity.test.ts",
+    "test/contexts/change-analysis/infrastructure/extractors/semantic-diff-parity.test.ts",
+    "test/contexts/change-analysis/infrastructure/extractors/patterns-parity.test.ts"
   ]
 }
