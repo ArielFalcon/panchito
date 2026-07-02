@@ -18,7 +18,7 @@
     "sdk:typecheck": "tsc -p packages/sdk",
     "start": "node boot-guard.mjs && tsx src/index.ts",
     "test": "node --import ./test-setup.mjs --import tsx --test \"src/**/*.test.ts\" \"qa-engine/test/**/*.test.ts\" \"packages/sdk/**/*.test.ts\" \"agents/**/*.test.mjs\"",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p qa-engine/tsconfig.json && tsc --noEmit -p qa-engine/tsconfig.parity.json",
+    "typecheck": "tsc -b qa-engine/tsconfig.json && tsc --noEmit -p tsconfig.json && tsc --noEmit -p qa-engine/tsconfig.json && tsc --noEmit -p qa-engine/tsconfig.parity.json",
     "mutate:keystone": "stryker run qa-engine/stryker.conf.json"
   },
   "dependencies": {
