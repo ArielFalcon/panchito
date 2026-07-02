@@ -2286,9 +2286,9 @@ export async function runPipeline(
     onStep?.("execute");
     log("[qa] running the repo's own test suite (code mode)...");
     run = await (async () => { const t0 = Date.now(); const r = await deps.executeCode!(mirrorDir, { namespace: ns, onCase, signal, changedFiles: intent?.changedFiles ?? [], log }); addTiming("execute", Date.now() - t0); return r; })();
-  } else if (!app.dev) {
+  } else if (!app.dev?.baseUrl) {
     // Defensive: an e2e run on an app with no dev environment is inconclusive.
-    run = resultOf(ns, "infra-error", "e2e run requested but no dev environment is configured");
+    run = resultOf(ns, "infra-error", "e2e run requested but no DEV baseUrl is configured");
     // Post-generation exit: revert any strays the agent wrote, and record the tokens already spent.
     const confinement = await runConfine();
     persistOutcome(run, { confinement, usage: usage.result(usageComplete, usageAttribution), phaseTimings });
@@ -2619,7 +2619,12 @@ export async function runPipeline(
         log(`[qa] retry filtered: scoping re-run to ${failedSpecFiles.length} spec file(s): ${failedSpecFiles.join(", ")}`);
       }
 
-      const retryRun = await (async () => { const t0 = Date.now(); const r = await deps.execute!(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: retryNs, onCase, onRunning: onRunningTest, signal, ...(canFilter ? { specFiles: failedSpecFiles } : {}) }); addTiming("execute", Date.now() - t0); return r; })();
+      const retryBaseUrl = app.dev?.baseUrl;
+      if (!retryBaseUrl) {
+        run = resultOf(ns, "infra-error", "cannot retry E2E: DEV baseUrl is missing");
+        break;
+      }
+      const retryRun = await (async () => { const t0 = Date.now(); const r = await deps.execute!(e2eDir, { baseUrl: retryBaseUrl, namespace: retryNs, onCase, onRunning: onRunningTest, signal, ...(canFilter ? { specFiles: failedSpecFiles } : {}) }); addTiming("execute", Date.now() - t0); return r; })();
       if (retryRun.verdict === "fail" && !(await devHealthy())) {
         run = resultOf(ns, "infra-error", "failures with an unhealthy DEV: treated as infrastructure");
         break;
@@ -2737,9 +2742,12 @@ export async function runPipeline(
           if (okStatic.ok && (isCode || (await devHealthy()))) {
             if (!isCode) deps.clearCoverage?.(e2eDir, ns); // re-measure only the improved suite's dumps
             coverageNs = ns; // the enforce re-execute below runs under `ns`; align the re-collection
+            const reRunBaseUrl = app.dev?.baseUrl;
             const reRun = isCode
               ? await (async () => { const t0 = Date.now(); const r = await deps.executeCode!(mirrorDir, { namespace: ns, onCase, signal, changedFiles: intent?.changedFiles ?? [], log }); addTiming("execute", Date.now() - t0); return r; })()
-              : await (async () => { const t0 = Date.now(); const r = await deps.execute!(e2eDir, { baseUrl: app.dev?.baseUrl ?? "", namespace: ns, onCase, onRunning: onRunningTest, signal }); addTiming("execute", Date.now() - t0); return r; })();
+              : !reRunBaseUrl
+                ? resultOf(ns, "infra-error", "cannot re-run E2E for coverage enforcement: DEV baseUrl is missing")
+                : await (async () => { const t0 = Date.now(); const r = await deps.execute!(e2eDir, { baseUrl: reRunBaseUrl, namespace: ns, onCase, onRunning: onRunningTest, signal }); addTiming("execute", Date.now() - t0); return r; })();
             if (reRun.verdict === "pass") {
               run = reRun;
               result = improved;

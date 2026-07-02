@@ -3901,6 +3901,22 @@ test("T12 A1: no-dev app → feedback gate skipped, evidence absent, reviewer ru
   );
 });
 
+test("T12 A1b: malformed e2e app without dev.baseUrl fails closed before execute", async () => {
+  const calls: string[] = [];
+  const missingBaseUrlApp: AppConfig = { ...app, dev: {} as AppConfig["dev"] };
+  const d = deps(passing(), calls);
+  let executeCalls = 0;
+  d.execute = async () => {
+    executeCalls++;
+    return passing();
+  };
+
+  const result = await runPipeline(missingBaseUrlApp, "abc1234nobase", d, "manual", { mode: "diff" });
+
+  assert.equal(executeCalls, 0, "execute must not be called when dev.baseUrl is missing");
+  assert.equal(result.verdict, "infra-error");
+});
+
 test("T12 A2: complete mode → feedback gate skipped (mode-gated), evidence absent, decisions unchanged", async () => {
   // Feedback execute is gated to diff|manual only. complete/exhaustive modes skip it entirely.
   // executedRed is absent → reviewer's verdict is the sole gate, same as before this change.
