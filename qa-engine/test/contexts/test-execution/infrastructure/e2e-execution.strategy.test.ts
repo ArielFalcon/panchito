@@ -67,3 +67,20 @@ test("threads all optional ExecutionRequest fields (project, onCase, onRunning, 
   assert.equal((capturedOpts as Opts).onDiscovered, onDiscovered, "onDiscovered callback must be threaded");
   assert.equal((capturedOpts as Opts).faultInject, true, "faultInject must be threaded");
 });
+
+// G1 kernel widening: the legacy re-projection used to keep only {name, status, detail?}, silently
+// dropping failureDom/httpStatus/finalUrl/runtimeErrors/file/durationMs/flow/objective/reason before
+// they ever reached the FixLoop aggregate (adjudicator Rules 2.5/2.6, Lever-2). This pins that the
+// full evidence set now survives the strategy boundary unchanged.
+test("evidence fields survive the strategy boundary (G1 kernel widening)", async () => {
+  const evidenceCase = {
+    name: "checkout shows total", status: "fail" as const, detail: "expect(received).toBe",
+    flow: "checkout", objective: "verify totals", reason: "assertion",
+    durationMs: 812, failureDom: '- button "Pay"', file: "e2e/checkout.spec.ts",
+    httpStatus: 500, finalUrl: "https://dev.example.com/cart",
+    runtimeErrors: [{ type: "pageerror", text: "NG0303: unregistered icon" }],
+  };
+  const strategy = new E2eExecutionStrategy(async () => ({ verdict: "fail", cases: [evidenceCase], logs: "" }));
+  const res = await strategy.run({ specDir: "/tmp/x", baseUrl: "http://dev", namespace: "ns" });
+  assert.deepEqual(res.cases[0], evidenceCase);
+});

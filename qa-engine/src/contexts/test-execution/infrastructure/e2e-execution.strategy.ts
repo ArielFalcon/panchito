@@ -20,9 +20,26 @@ import type {
 import { AdjudicateService } from "../domain/adjudicate.service.ts";
 
 // Structural shape of the legacy runE2E return (src/types.ts QaRunResult) — declared locally so
-// this file does not import from src/ (only the parity test may). Widened: optional fields ignored.
-interface LegacyRunResult { verdict: string; cases: { name: string; status: string; detail?: string }[]; logs: string; }
-type QaCase = { name: string; status: string; detail?: string };
+// this file does not import from src/ (only the parity test may). Mirrors kernel QaCase (@kernel/
+// qa-case.ts) field-for-field: G1 widened the kernel type precisely so this evidence — failureDom/
+// httpStatus/finalUrl/runtimeErrors/file/durationMs/flow/objective/reason — survives the port
+// boundary instead of being re-projected away. The FixLoop aggregate reads these fields off QaCase
+// for adjudicator Rules 2.5/2.6 and Lever-2; dropping them here silently starved that logic.
+interface LegacyRunResult { verdict: string; cases: QaCase[]; logs: string; }
+type QaCase = {
+  name: string;
+  status: string;
+  detail?: string;
+  flow?: string;
+  objective?: string;
+  reason?: string;
+  durationMs?: number;
+  failureDom?: string;
+  file?: string;
+  httpStatus?: number;
+  finalUrl?: string;
+  runtimeErrors?: { type: string; text: string }[];
+};
 type RunE2eFn = (
   specDir: string,
   opts: {
@@ -59,7 +76,9 @@ export class E2eExecutionStrategy implements ExecutionStrategyPort {
       ...(req.onRunning ? { onRunning: req.onRunning } : {}),
       ...(req.onDiscovered ? { onDiscovered: req.onDiscovered } : {}),
     });
-    const cases = result.cases.map((c) => ({ name: c.name, status: c.status as "pass" | "fail" | "flaky", ...(c.detail ? { detail: c.detail } : {}) }));
+    // Status-narrowing pass-through: keep every evidence field the runner emitted (no re-projection)
+    // and only narrow `status` to the port's literal union.
+    const cases = result.cases.map((c) => ({ ...c, status: c.status as "pass" | "fail" | "flaky" }));
     const adjudged = this.adjudicator.adjudicate(result.verdict as ExecutionResult["verdict"], cases);
     return { verdict: adjudged.verdict, cases, logs: result.logs };
   }
