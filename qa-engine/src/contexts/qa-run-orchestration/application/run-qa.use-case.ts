@@ -235,6 +235,13 @@ export class RunQaUseCase {
     let lastGenerated = generated;
     let staticFixRounds = 0;
     while (!validation.ok && !validation.infra && generating && lastGenerated.specs.length > 0 && staticFixRounds < MAX_STATIC_FIX_ROUNDS) {
+      // Plan 7.2 (closes the INFO gap in engram #916): a cancel requested mid-repair must stop the
+      // loop BEFORE burning another generate()+validate() round-trip — without this check the loop
+      // would still consume its full remaining repair budget before the next phase-boundary check
+      // (post-validate, below) could ever observe the abort.
+      if (signal?.aborted) {
+        return this.abortedResult();
+      }
       staticFixRounds++;
       retries++;
       lastGenerated = await this.deps.generation.generate([], workspace.specDir, signal);

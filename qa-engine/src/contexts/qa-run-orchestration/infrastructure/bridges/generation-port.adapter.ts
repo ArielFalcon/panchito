@@ -3,11 +3,17 @@
 // generate/review/reconcile shell (fail-closed reviewer gate, bounded repair, blockingCount) is
 // GenerateTestsUseCase's OWN logic, reused verbatim.
 //
-// Shape translation: GenerationPort.generate(objectives, specDir) -> GenerationResult
+// Shape translation: GenerationPort.generate(objectives, specDir, signal?) -> GenerationResult
 // {specs, reviewed, approved, note}. This bridge holds the STATIC per-run context
 // (repo/appName/mirrorDir/e2eRelDir/namespace/needsReview/target/mode/diff) as constructor config —
-// the composition root (Task E.1/E.2) supplies these once per run; only specDir/objectives vary
-// per generate() call, matching the barrel's narrower GenerationPort signature.
+// the composition root (Task E.1/E.2) supplies these once per run; only specDir/objectives/signal
+// vary per generate() call, matching the barrel's narrower GenerationPort signature.
+//
+// Plan 7.2 (closes engram #916): signal is forwarded verbatim into
+// GenerateTestsUseCase.generate(input, {signal}) — the use-case already forwards opts?.signal into
+// BOTH the generator and reviewer runtime.openSession() calls (Plan 7.1 territory, untouched here);
+// this bridge was the ONLY missing link, silently dropping a cancelled run's signal before it ever
+// reached the wall-clock-dominant in-flight agent turn.
 //
 // specSources (consumed by the FixLoop's Lever-2 selector check, per fix-loop.aggregate.ts's own
 // FixLoopGenerateResult.specSources contract): re-reads the JUST-GENERATED spec files' source text
@@ -59,7 +65,7 @@ export class GenerationPortAdapter implements GenerationPort {
     private readonly collaborators: GenerationPortCollaborators = {},
   ) {}
 
-  async generate(_objectives: readonly Objective[], specDir: string): Promise<GenerationPortResult> {
+  async generate(_objectives: readonly Objective[], specDir: string, signal?: AbortSignal): Promise<GenerationPortResult> {
     const input: OpencodeRunInput = {
       repo: this.ctx.repo,
       sha: "", // provenance only; the use-case never branches on it — the caller's Sha VO owns identity
@@ -74,7 +80,7 @@ export class GenerationPortAdapter implements GenerationPort {
       ...(this.ctx.guidance ? { guidance: this.ctx.guidance } : {}),
     };
 
-    const generated = await this.useCase.generate(input);
+    const generated = await this.useCase.generate(input, { ...(signal ? { signal } : {}) });
 
     const result: GenerationPortResult = {
       specs: generated.specs,

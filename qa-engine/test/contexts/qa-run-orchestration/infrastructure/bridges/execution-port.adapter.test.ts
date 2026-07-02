@@ -43,3 +43,54 @@ test("execute() dispatches to CodeExecutionStrategy for target 'code' (no baseUr
   assert.equal(result.verdict, "fail");
   assert.equal(result.cases.length, 1);
 });
+
+// ── Plan 7.2 — leaf-signal forwarding (closes engram #916): the ExecutionPort barrel already
+// declares execute(specDir, signal?) (Plan 7.1), and E2eExecutionStrategy/CodeExecutionStrategy
+// already forward ExecutionRequest.signal into runE2E/runCodeTests's own opts.signal — this
+// adapter is the ONLY missing link. It must declare + forward the signal, or the queue's
+// AbortSignal is silently dropped before it ever reaches Playwright/the code runner.
+
+test("execute() forwards an AbortSignal into the e2e strategy's ExecutionRequest", async () => {
+  const controller = new AbortController();
+  let capturedSignal: AbortSignal | undefined;
+  const e2e = new E2eExecutionStrategy(async (_specDir, opts) => {
+    capturedSignal = opts.signal;
+    return { verdict: "pass", cases: [], logs: "" };
+  });
+  const code = new CodeExecutionStrategy(async () => ({ verdict: "pass", cases: [], logs: "" }));
+  const adapter = new ExecutionPortAdapter({ e2e, code }, { target: "e2e", baseUrl: "https://dev.example.com", namespace: "qa-bot-abc1234" });
+
+  await adapter.execute("/mirrors/org/app/e2e", controller.signal);
+
+  assert.equal(capturedSignal, controller.signal, "the SAME AbortSignal instance passed to execute() must reach the e2e strategy's ExecutionRequest.signal, not be dropped at the bridge");
+});
+
+test("execute() forwards an AbortSignal into the code strategy's ExecutionRequest", async () => {
+  const controller = new AbortController();
+  let capturedSignal: AbortSignal | undefined;
+  const e2e = new E2eExecutionStrategy(async () => ({ verdict: "pass", cases: [], logs: "" }));
+  const code = new CodeExecutionStrategy(async (_repoDir, opts) => {
+    capturedSignal = opts.signal;
+    return { verdict: "pass", cases: [], logs: "" };
+  });
+  const adapter = new ExecutionPortAdapter({ e2e, code }, { target: "code", namespace: "qa-bot-def5678" });
+
+  await adapter.execute("/mirrors/org/app", controller.signal);
+
+  assert.equal(capturedSignal, controller.signal, "the SAME AbortSignal instance passed to execute() must reach the code strategy's ExecutionRequest.signal, not be dropped at the bridge");
+});
+
+test("execute() with no signal at all behaves exactly as before (no second-arg regression)", async () => {
+  let capturedOpts: unknown;
+  const e2e = new E2eExecutionStrategy(async (_specDir, opts) => {
+    capturedOpts = opts;
+    return { verdict: "pass", cases: [], logs: "" };
+  });
+  const code = new CodeExecutionStrategy(async () => ({ verdict: "pass", cases: [], logs: "" }));
+  const adapter = new ExecutionPortAdapter({ e2e, code }, { target: "e2e", baseUrl: "https://dev.example.com", namespace: "qa-bot-abc1234" });
+
+  const result = await adapter.execute("/mirrors/org/app/e2e");
+
+  assert.equal(result.verdict, "pass");
+  assert.equal((capturedOpts as { signal?: AbortSignal }).signal, undefined, "an absent signal must remain absent downstream — no fabricated AbortSignal");
+});

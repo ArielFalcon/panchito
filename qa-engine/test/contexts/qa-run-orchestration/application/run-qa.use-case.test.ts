@@ -972,6 +972,38 @@ test("run() with no signal at all behaves exactly as before (no second-arg regre
   assert.equal(out.decision.sideEffect, "pr");
 });
 
+// Plan 7.2 (closes the INFO gap in engram #916): the static-fix while loop (~line 237,
+// MAX_STATIC_FIX_ROUNDS) had NO signal?.aborted check inside its own loop body — a cancel
+// requested mid-repair would still burn out the full repair budget (up to MAX_STATIC_FIX_ROUNDS
+// generate()+validate() round-trips) before the NEXT phase-boundary check (post-validate,
+// pre-health) could ever catch it. This closes that residual unbounded-wall-clock-inside-the-loop
+// gap, matching the same phase-boundary discipline the other 5 checks already established.
+test("run() aborted mid-repair inside the static-fix loop stops before consuming the full repair budget", async () => {
+  const controller = new AbortController();
+  let validateCallCount = 0;
+  let generateCallCount = 0;
+  const { ports } = stubPorts({
+    validate: async () => {
+      validateCallCount++;
+      if (validateCallCount === 1) {
+        // Abort right after the FIRST validate() fails — the loop's own next generate() call
+        // (the repair round) must observe the abort and stop, never reaching a 2nd repair round.
+        controller.abort();
+      }
+      return { ok: false, errors: ["permanently broken lint error"] };
+    },
+    generate: async () => { generateCallCount++; return { specs: ["a.spec.ts"], approved: true }; },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "plan7-2-abort-inside-static-fix-loop" }, controller.signal);
+
+  assert.equal(out.decision.verdict, "infra-error", "an abort observed mid-repair must map to the SAME aborted-terminal shape every other phase-boundary check uses");
+  assert.equal(out.decision.sideEffect, "none");
+  assert.ok(generateCallCount <= 2, `the static-fix loop must stop repairing once the signal aborts — expected at most 2 generate() calls (1 initial + at most 1 repair attempt), got ${generateCallCount}`);
+  assert.ok(validateCallCount <= 2, `the static-fix loop must stop re-validating once the signal aborts — expected at most 2 validate() calls, got ${validateCallCount}`);
+});
+
 test("FIX E: infra-error calls runHistory.save() but NOT learning.fold()", async () => {
   let saveCallCount = 0;
   let foldCallCount = 0;

@@ -109,3 +109,48 @@ test("generate() omits specSources when no readSpecSource collaborator is inject
 
   assert.equal(result.specSources, undefined);
 });
+
+// ── Plan 7.2 — leaf-signal forwarding (closes engram #916): GenerateTestsUseCase.generate()
+// already forwards opts?.signal into runtime.openSession(role, mirrorDir, { signal }) for BOTH the
+// generator and reviewer sessions (Plan 7.1 territory, untouched here) — this adapter is the ONLY
+// missing link. It must declare + forward the signal into GenerateTestsUseCase.generate(input,
+// opts), or the queue's AbortSignal is silently dropped before it ever reaches the agent session.
+
+test("generate() forwards an AbortSignal into GenerateTestsUseCase.generate()'s GenerateOpts", async () => {
+  const controller = new AbortController();
+  const capturedSignals: (AbortSignal | undefined)[] = [];
+  const ports = fakeGenerationPorts();
+  ports.runtime.openSession = async (_role, _mirrorDir, opts) => {
+    capturedSignals.push(opts?.signal);
+    return {
+      prompt: async () => ({ output: "generator-json" }),
+      dispose: async () => {},
+    };
+  };
+  const useCase = new GenerateTestsUseCase(ports);
+  const adapter = new GenerationPortAdapter(useCase, {
+    repo: "org/app", appName: "app", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e",
+    namespace: "qa-bot-abc1234", needsReview: false, target: "e2e", mode: "diff", diff: "",
+  });
+
+  await adapter.generate([], "/mirrors/org/app/e2e", controller.signal);
+
+  assert.ok(capturedSignals.length > 0, "openSession must have been called at least once");
+  for (const captured of capturedSignals) {
+    assert.equal(captured, controller.signal, "the SAME AbortSignal instance passed to generate() must reach GenerateTestsUseCase's own opts.signal, not be dropped at the bridge");
+  }
+});
+
+test("generate() with no signal at all behaves exactly as before (no third-arg regression)", async () => {
+  const ports = fakeGenerationPorts();
+  const useCase = new GenerateTestsUseCase(ports);
+  const adapter = new GenerationPortAdapter(useCase, {
+    repo: "org/app", appName: "app", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e",
+    namespace: "qa-bot-abc1234", needsReview: false, target: "e2e", mode: "diff", diff: "",
+  });
+
+  const result = await adapter.generate([], "/mirrors/org/app/e2e");
+
+  assert.deepEqual(result.specs, ["flows/checkout.spec.ts"]);
+  assert.equal(result.approved, true);
+});
