@@ -9,7 +9,7 @@
 // Only hotspots (ccn >= 5) are returned. Files with no hotspots emit nothing.
 // Degrades cleanly to [] when lizard is missing (code===null from runBinary).
 
-import { normalizeRepoPath } from "../change-coverage";
+import { normalizeRepoPath } from "../diff-hunks";
 import { runBinary } from "./exec";
 import type { ComplexityHotspot } from "./types";
 

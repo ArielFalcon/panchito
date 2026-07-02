@@ -5,8 +5,6 @@ import { AppConfig } from "../orchestrator/config-loader";
 import { JobQueue } from "./queue";
 import { enqueueTrackedRun } from "./runner";
 import { getRecord } from "./history";
-import { PipelineDeps } from "../pipeline";
-import { QaCase } from "../types";
 import type { AgentDeps } from "../integrations/opencode-client";
 import { SqliteRunHistoryAdapter } from "./run-history-sqlite-adapter";
 import { SqliteLearningRepository } from "@contexts/cross-run-learning/infrastructure/sqlite-learning-repository.adapter";
@@ -27,32 +25,6 @@ function stubAgentDeps(): AgentDeps {
     open: async () => {
       throw new Error("stubAgentDeps.open must never be called during factory construction");
     },
-  };
-}
-
-function stubPipelineDeps(): PipelineDeps {
-  return {
-    waitForDeploy: async () => {},
-    prepare: async () => ({ mirrorDir: "/tmp/x", diff: "", message: "feat: x" }),
-    prepareAtBranch: async () => ({ mirrorDir: "/tmp/x" }),
-    generate: async () => ({ output: "", specs: ["a.spec.ts"], reviewed: false, approved: true }),
-    setupE2e: async () => {},
-    validate: async () => ({ ok: true, errors: [], infra: false }),
-    execute: async (_dir, opts) => {
-      const cases: QaCase[] = [{ name: "legacy-t1", status: "pass" }];
-      cases.forEach((c) => opts.onCase?.(c));
-      return { sha: opts.namespace ?? "ns", verdict: "pass", passed: true, cases, logs: "" };
-    },
-    isHealthy: async () => true,
-    isReachable: async () => true,
-    publish: async () => null,
-    publishContext: async () => null,
-    setupCode: async () => {},
-    executeCode: async (_dir, opts) => ({ sha: opts.namespace ?? "ns", verdict: "pass", passed: true, cases: [], logs: "" }),
-    publishCode: async () => null,
-    cleanup: async () => {},
-    openIssue: async () => ({ url: "" }),
-    log: () => {},
   };
 }
 
@@ -334,9 +306,9 @@ test("createRewrittenEngineFactory never calls getAgentDeps during construction 
   }
 });
 
-test("createRewrittenEngineFactory's port throws a clear error if ever invoked while PIPELINE_ENGINE is legacy (defense-in-depth — the runner's own dispatch guard is the real protection)", () => {
-  const factory = createRewrittenEngineFactory({ getAgentDeps: stubAgentDeps });
-  assert.throws(() => factory(cfg("factory-legacy-guard"), "qa-bot-abc1234-runA", { mode: "diff" }), /PIPELINE_ENGINE is 'legacy'/);
+test("createRewrittenEngineFactory's returned closure never throws when PIPELINE_ENGINE is 'legacy' (Plan 7.6 — accepted-but-ignored, no legacy branch remains to reject it)", () => {
+  const factory = createRewrittenEngineFactory({ getAgentDeps: stubAgentDeps, env: { PIPELINE_ENGINE: "legacy" } });
+  assert.doesNotThrow(() => factory(cfg("factory-legacy-guard"), "qa-bot-abc1234-runA", { mode: "diff" }));
 });
 
 test("createRewrittenEngineFactory's returned closure threads the namespace argument into branch for two consecutive calls with different namespaces", () => {
@@ -360,20 +332,19 @@ test("createRewrittenEngineFactory's returned closure threads the namespace argu
   }
 });
 
-// ── PIPELINE_ENGINE dispatch integration — with a REAL engineFactory this time (not a fake port) ──
-// Proves the same fail-safe contract runner.test.ts already pins for a fake port ALSO holds for the
-// real production factory: absent PIPELINE_ENGINE never reaches engineFactory (the factory is
-// constructed but never invoked), so the legacy runPipeline path stays byte-identical.
+// ── PIPELINE_ENGINE dispatch integration — with a REAL engineFactory (not a fake port) ────────────
+// Plan 7.6: the legacy engine is deleted — a supplied engineFactory is ALWAYS invoked, regardless
+// of PIPELINE_ENGINE, using the REAL production factory (not just a fake port, as runner.test.ts
+// already pins for the dispatch seam itself).
 
-test("PIPELINE_ENGINE unset — the runner takes legacy, the REAL rewritten engineFactory is never invoked", async () => {
+test("engineFactory (real production factory) is invoked and drives the run to completion", async () => {
   const queue = new JobQueue();
   let factoryInvoked = false;
   const realFactory = createRewrittenEngineFactory({ getAgentDeps: stubAgentDeps });
   const id = enqueueTrackedRun(
     queue,
-    { app: "factory-dispatch-absent", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
+    { app: "factory-dispatch-real", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
     {
-      pipeline: stubPipelineDeps(),
       loadApp: cfg,
       engineFactory: (appConfig, namespace, run) => {
         factoryInvoked = true;
@@ -384,8 +355,7 @@ test("PIPELINE_ENGINE unset — the runner takes legacy, the REAL rewritten engi
   await queue.drain();
   const r = getRecord(id)!;
   assert.equal(r.status, "done");
-  assert.equal(r.verdict, "pass", "the legacy stub pipeline ran — proves the legacy branch, not the rewritten port");
-  assert.equal(factoryInvoked, false, "with PIPELINE_ENGINE absent, the REAL rewritten engineFactory must never be consulted");
+  assert.equal(factoryInvoked, true, "the real rewritten engineFactory must be invoked — it is the only engine");
 });
 
 // ── THE VALUE KEYSTONE — assembleChangeCoverage wiring + code-mode coverage trigger ──────────────
@@ -428,7 +398,7 @@ test("buildRewrittenCompositionConfig's coverage collector for a code:true app r
   await assert.doesNotReject(() => config.objectiveSignal.collector.collect("/tmp/does-not-exist/e2e", "qa-bot-def5678-run2"));
 });
 
-test("PIPELINE_ENGINE=legacy (explicit) — same fail-safe holds for the real factory", async () => {
+test("PIPELINE_ENGINE=legacy (stale operator setting) — the real factory is still invoked (accepted-but-ignored, no fallback to a different code path)", async () => {
   const prev = process.env.PIPELINE_ENGINE;
   process.env.PIPELINE_ENGINE = "legacy";
   try {
@@ -439,7 +409,6 @@ test("PIPELINE_ENGINE=legacy (explicit) — same fail-safe holds for the real fa
       queue,
       { app: "factory-dispatch-legacy", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
       {
-        pipeline: stubPipelineDeps(),
         loadApp: cfg,
         engineFactory: (appConfig, namespace, run) => {
           factoryInvoked = true;
@@ -449,8 +418,11 @@ test("PIPELINE_ENGINE=legacy (explicit) — same fail-safe holds for the real fa
     );
     await queue.drain();
     const r = getRecord(id)!;
-    assert.equal(r.verdict, "pass");
-    assert.equal(factoryInvoked, false);
+    // stubAgentDeps.open() always throws, so a REAL run through the real factory genuinely fails —
+    // the assertion of interest is that the factory was reached at all (never bypassed), not the
+    // verdict shape of a deliberately-broken agent stub.
+    assert.equal(r.status, "done");
+    assert.equal(factoryInvoked, true, "PIPELINE_ENGINE=legacy no longer selects a different code path");
   } finally {
     if (prev === undefined) delete process.env.PIPELINE_ENGINE;
     else process.env.PIPELINE_ENGINE = prev;

@@ -1,15 +1,14 @@
 // test/contexts/qa-run-orchestration/composition/composition-root.test.ts
-// RED-first (Task E.2): buildProduction(env, cfg) selects LegacyPipelineAdapter (PIPELINE_ENGINE
-// absent/"legacy") or RewrittenOrchestratorAdapter (PIPELINE_ENGINE="rewritten") per the E.1 flag
-// (selectEngine) — the shadow seam, NOT the cutover (Plan 6 never ships rewritten as the default).
-// buildShadow(cfg) always wires the rewritten engine with the SHADOW publication path (no PR/Issue
-// side effect) and a read-only history snapshot (no persistence to a real store).
+// Plan 7.6 (cutover finale): the legacy engine is DELETED — buildProduction(env, cfg) UNCONDITIONALLY
+// wires a RewrittenOrchestratorAdapter now, regardless of PIPELINE_ENGINE. buildShadow(cfg) always
+// wires the rewritten engine with the SHADOW publication path (no PR/Issue side effect) and a
+// read-only history snapshot (no persistence to a real store) — unchanged by the cutover.
 //
 // Per the plan's own scope note for this task ("unit test uses lightweight FAKES for the heavy
 // adapters — the real end-to-end wiring is exercised in Slice F, not here"), this test supplies
 // fake collaborators (repo/mirror/coverage/etc.) rather than booting real git/Playwright/Stryker —
 // the composition root's OWN job under test is "does it wire the 11 ports to the RIGHT bridge
-// classes and dispatch by flag", not "does a real QA run pass end-to-end".
+// classes", not "does a real QA run pass end-to-end".
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -17,12 +16,10 @@ import {
   buildShadow,
   type CompositionConfig,
 } from "@contexts/qa-run-orchestration/composition/composition-root.ts";
-import { LegacyPipelineAdapter, type LegacyRunner } from "@contexts/qa-run-orchestration/infrastructure/legacy-pipeline.adapter.ts";
 import { RewrittenOrchestratorAdapter } from "@contexts/qa-run-orchestration/infrastructure/rewritten-orchestrator.adapter.ts";
 import { PIPELINE_ENGINE } from "@contexts/qa-run-orchestration/composition/pipeline-engine-flag.ts";
 import { Sha } from "@kernel/sha.ts";
 import { BlastRadius } from "@kernel/blast-radius.ts";
-import type { RunOutcome } from "@kernel/run-outcome.ts";
 
 // ── A minimal fake CompositionConfig — every collaborator is a lightweight stub, matching the
 // SAME stub shapes rewritten-orchestrator.adapter.test.ts already uses for the 10-scenario parity
@@ -83,24 +80,16 @@ function fakeConfig(overrides: Partial<CompositionConfig> = {}): CompositionConf
   return { ...base, ...overrides };
 }
 
-// ── buildProduction: engine selection by PIPELINE_ENGINE ──────────────────────────────────────
+// ── buildProduction: always wires the rewritten engine ─────────────────────────────────────────
 
-function fakeLegacyRunner(): LegacyRunner {
-  return {
-    app: { name: "app" },
-    deps: { savedOutcomes: [] as RunOutcome[] },
-    runPipeline: async () => ({ verdict: "pass" }),
-  };
-}
-
-test("buildProduction returns a LegacyPipelineAdapter when PIPELINE_ENGINE is absent (fail-safe default)", () => {
-  const port = buildProduction({}, fakeConfig(), { legacyRunner: fakeLegacyRunner() });
-  assert.ok(port instanceof LegacyPipelineAdapter);
+test("buildProduction returns a RewrittenOrchestratorAdapter when PIPELINE_ENGINE is absent", () => {
+  const port = buildProduction({}, fakeConfig());
+  assert.ok(port instanceof RewrittenOrchestratorAdapter);
 });
 
-test("buildProduction returns a LegacyPipelineAdapter when PIPELINE_ENGINE='legacy'", () => {
-  const port = buildProduction({ [PIPELINE_ENGINE]: "legacy" }, fakeConfig(), { legacyRunner: fakeLegacyRunner() });
-  assert.ok(port instanceof LegacyPipelineAdapter);
+test("buildProduction returns a RewrittenOrchestratorAdapter even when PIPELINE_ENGINE='legacy' (accepted-but-ignored)", () => {
+  const port = buildProduction({ [PIPELINE_ENGINE]: "legacy" }, fakeConfig());
+  assert.ok(port instanceof RewrittenOrchestratorAdapter);
 });
 
 test("buildProduction returns a RewrittenOrchestratorAdapter when PIPELINE_ENGINE='rewritten'", () => {

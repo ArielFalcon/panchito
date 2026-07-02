@@ -72,9 +72,13 @@ one HTTP boundary (`src/integrations/opencode-client.ts` ↔ `opencode serve`).
 
 ### The run flow — start here
 
-`src/pipeline.ts` is the whole orchestration; read it first. One `runPipeline`
-serves both triggers (webhook `src/index.ts`, manual `src/cli.ts`), default
-`diff` mode shown:
+`qa-engine/src/contexts/qa-run-orchestration/application/run-qa.use-case.ts`
+(`RunQaUseCase`) is the whole orchestration; read it first. It is the **only**
+engine — one `RunQaUseCase.run()` serves both triggers (webhook `src/index.ts`,
+manual `src/cli.ts`) via `src/server/runner.ts`'s single funnel
+(`enqueueTrackedRun`), which drives it through the injected `RunnerDeps.engineFactory`
+(the real one is `src/server/rewritten-engine-factory.ts`, mapping `AppConfig` into
+a qa-engine `CompositionConfig`). Default `diff` mode shown:
 
 1. **Gate** — wait until DEV serves this SHA and is healthy (`/version`).
    Skipped entirely when `dev.versionUrl` is absent (already-deployed/static sites).
@@ -93,7 +97,8 @@ serves both triggers (webhook `src/index.ts`, manual `src/cli.ts`), default
 7. **Execute (Filter C)** — run with Playwright against DEV; classify
    `pass`/`fail`/`flaky` (a pass only after retry = flaky → quarantine).
 8. **Change-coverage (the value keystone)** — measure whether the green run actually
-   exercised the diff's changed lines (`src/qa/change-coverage.ts`). `signal` records
+   exercised the diff's changed lines (`qa-engine/src/contexts/objective-signal/domain/
+   {assemble-change-coverage,decide-coverage.service}.ts`). `signal` records
    only; `enforce` regenerates once at the uncovered lines and, if still short of
    `minRatio`, holds the PR. `unknown` (no usable coverage / cross-repo) never blocks.
 9. **Decide** — green + reviewer-approved (+ coverage not blocking) → PR w/ auto-merge.
@@ -142,9 +147,11 @@ anywhere in the repo (`publishCode`), not just `e2e/`.
 
 ### Dependency injection is the testing strategy
 
-Every side-effecting step in `runPipeline` is injected via `PipelineDeps`
-(`defaultPipelineDeps()` wires the real ones). The orchestration logic — ordering,
-branches, verdict decisions — is unit-tested with stubs. The **real integrations
+`RunQaUseCase` is driven entirely through hexagonal ports (`qa-engine/src/contexts/
+qa-run-orchestration/application/ports/index.ts`); `CompositionConfig`
+(`qa-engine/.../composition/composition-root.ts`) wires each port to a real bridge
+adapter. The orchestration logic — ordering, branches, verdict decisions — is
+unit-tested with fakes built directly against the ports. The **real integrations
 are the deliberately-uncovered boundaries**: the agent-runtime call (OpenCode SDK /
 Codex exec), the Playwright runner, git operations. Each integration module exports its own `*Deps` and a
 `default*Deps` in the same pattern (`opencode-client`, `repo-mirror`, `validate`,

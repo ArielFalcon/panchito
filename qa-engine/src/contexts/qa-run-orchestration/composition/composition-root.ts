@@ -3,13 +3,13 @@
 // adapters from sibling contexts — it sits outside generation/* and agent-runtime/*, so the
 // arch-lint VCS-write gate (no-vcs-write-in-agent-contexts) stays green. Wires ALL 11
 // qa-run-orchestration ports to the REAL bridge adapters built in Task E.0 so the rewritten engine
-// is COMPLETE (not stubbed) and can drive a full QA run. Replaces defaultPipelineDeps().
+// is COMPLETE (not stubbed) and can drive a full QA run.
 //
-// buildProduction(env, cfg): reads the PIPELINE_ENGINE flag via selectEngine (Task E.1) — "legacy"
-// (the fail-safe default) wraps the given LegacyRunner in a LegacyPipelineAdapter; "rewritten"
-// wires a COMPLETE RewrittenOrchestratorAdapter over all 11 real bridges. Plan 6 never ships
-// rewritten as the default (that flip is Plan 7, justified by the Slice F shadow evidence) — this
-// factory is the shadow SEAM, not the cutover.
+// Plan 7.6 (cutover finale): the legacy engine is DELETED. buildProduction(env, cfg) now
+// UNCONDITIONALLY wires a COMPLETE RewrittenOrchestratorAdapter over all 11 real bridges — the
+// PIPELINE_ENGINE flag (selectEngine) is still consulted only so an operator's stale
+// PIPELINE_ENGINE=legacy gets a deprecation warning (see pipeline-engine-flag.ts), never a
+// different code path.
 //
 // buildShadow(cfg): ALWAYS the rewritten engine (bypasses the flag entirely — shadow runs exist to
 // observe the rewritten engine, never the legacy one), with the publication bridge's shadow-log
@@ -30,7 +30,6 @@ import type { Sha } from "@kernel/sha.ts";
 import type { RunMode, TestTarget } from "@kernel/run-mode.ts";
 import type { RunPipelinePort, ObserverPort, RunHistoryPort } from "../application/ports/index.ts";
 import { RewrittenOrchestratorAdapter, type RewrittenOrchestratorAdapterDeps } from "../infrastructure/rewritten-orchestrator.adapter.ts";
-import { LegacyPipelineAdapter, type LegacyRunner } from "../infrastructure/legacy-pipeline.adapter.ts";
 import { selectEngine } from "./pipeline-engine-flag.ts";
 
 import { ChangeAnalysisPortAdapter } from "../infrastructure/bridges/change-analysis-port.adapter.ts";
@@ -451,30 +450,20 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
   };
 }
 
-// Options accepted only by the "legacy" branch — never required for "rewritten" (kept optional so
-// callers that KNOW they are forcing PIPELINE_ENGINE=rewritten need not supply a LegacyRunner).
-export interface BuildProductionOptions {
-  legacyRunner?: LegacyRunner;
-}
+// Retained as an empty options bag for call-site source compatibility (callers that still pass
+// `{}` or omit the argument keep working). No legacy-only options remain post-cutover.
+export interface BuildProductionOptions {}
 
-// buildProduction(env, cfg): the flag-driven factory (design's "Step 2" shadow seam). Reads
-// PIPELINE_ENGINE via selectEngine (Task E.1) — "legacy" (the fail-safe default) requires a
-// LegacyRunner (options.legacyRunner); "rewritten" wires the COMPLETE RewrittenOrchestratorAdapter
-// over all 11 real bridges from cfg.
+// buildProduction(env, cfg): UNCONDITIONALLY wires the COMPLETE RewrittenOrchestratorAdapter over
+// all 11 real bridges from cfg. selectEngine(env) is still called so a stale PIPELINE_ENGINE=legacy
+// setting surfaces its deprecation warning (see pipeline-engine-flag.ts) — its return value no
+// longer branches this factory (there is only one engine left to build).
 export function buildProduction(
   env: Record<string, string | undefined>,
   cfg: CompositionConfig,
-  options: BuildProductionOptions = {},
+  _options: BuildProductionOptions = {},
 ): RunPipelinePort {
-  const engine = selectEngine(env);
-  if (engine === "legacy") {
-    if (!options.legacyRunner) {
-      throw new Error(
-        "buildProduction: PIPELINE_ENGINE is 'legacy' (the fail-safe default) but no legacyRunner was supplied — pass options.legacyRunner to wrap the existing runPipeline.",
-      );
-    }
-    return new LegacyPipelineAdapter(options.legacyRunner);
-  }
+  selectEngine(env);
   return new RewrittenOrchestratorAdapter(wireBridges(cfg));
 }
 

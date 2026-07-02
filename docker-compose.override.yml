@@ -18,9 +18,11 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      # Strangler dispatch toggle (src/server/runner.ts selectEngine). Absent/"legacy" keeps the
-      # byte-identical legacy runPipeline path; "rewritten" routes through the qa-engine
-      # RunPipelinePort factory. Controlled from the host env so a plain `up` stays on legacy.
+      # Legacy strangler-dispatch toggle (qa-engine's selectEngine, pipeline-engine-flag.ts).
+      # Plan 7.6 cutover: the legacy engine is deleted — the qa-engine RunPipelinePort factory is
+      # now the ONLY engine regardless of this value. Kept as a passthrough only so a stale
+      # PIPELINE_ENGINE=legacy in an operator's env surfaces a one-time deprecation warning instead
+      # of an undefined-var error; it no longer selects a different code path.
       PIPELINE_ENGINE: ${PIPELINE_ENGINE:-}
       # Agent provider override for the ORCHESTRATOR process (src/agent-runtime/config.ts honors
       # it; provider selection happens host-side, not in the agents supervisor). This environment

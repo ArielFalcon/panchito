@@ -6,16 +6,13 @@
 // invisible to the TUI/continue/chat). See docs/interactive-layer.md §3.1.
 
 import { JobQueue } from "./queue";
-import { runPipeline, defaultPipelineDeps, PipelineDeps } from "../pipeline";
 import { loadAppConfig, AppConfig } from "../orchestrator/config-loader";
-import { createRecord, updateRecord, addCase, getRecord, appendLog, appendActivity, listRecords } from "./history";
+import { createRecord, updateRecord, addCase, getRecord, appendActivity, listRecords } from "./history";
 import { recordIncident } from "./maintainer";
 import { testDataNamespace } from "../qa/test-data";
 import { RunMode, TestTarget, TriggerSource, QaCase, QaRunResult, engineStatus } from "../types";
-import { activityRouter } from "../integrations/opencode-client";
 import { redactError } from "../util/redact";
 import { isInfraError } from "../errors";
-import { logJson } from "../integrations/logger";
 import type { RunEventStore } from "./run-events";
 import type { RunEventBody } from "../contract/events";
 import { Sha } from "@kernel/sha";
@@ -24,22 +21,6 @@ import type { RunPipelinePort, RunInput, ObserverPort } from "@contexts/qa-run-o
 
 type RunStepEvent = Extract<RunEventBody, { type: "step.changed" }>;
 type RunStep = RunStepEvent["step"];
-
-const RUN_EVENT_STEPS = new Set<RunStep>([
-  "gate", "classify", "setup", "generate", "validate", "health", "execute", "coverage", "retry", "decide", "done",
-]);
-
-function isRunStep(value: string): value is RunStep {
-  return RUN_EVENT_STEPS.has(value as RunStep);
-}
-
-// Classify a pipeline log line for the TUI's log tail. Heuristic on content — the
-// pipeline logs plain strings, so there is no structured level to read.
-function logLevelFor(text: string): "info" | "warn" | "error" {
-  if (/✗|\berror\b|\bfailed\b|crash/i.test(text)) return "error";
-  if (/⚠|\bwarn(?:ing)?\b|flaky|quarantin/i.test(text)) return "warn";
-  return "info";
-}
 
 export interface RunRequest {
   app: string;
@@ -59,24 +40,22 @@ export interface RunRequest {
 
 // Side-effecting collaborators, injected so the funnel is unit-testable with stubs.
 export interface RunnerDeps {
-  pipeline?: PipelineDeps; // defaults to the real deps, built per run
   loadApp?: (name: string) => AppConfig; // defaults to the real config loader
   runEvents?: RunEventStore;
-  // PIPELINE_ENGINE dispatch seam (Task E.3, Plan 6). ABSENT by default — this keeps the legacy
-  // runPipeline path byte-identical to today (the flag is consulted, but with no factory supplied
-  // the runner fails safe to legacy even if PIPELINE_ENGINE=rewritten; see the queue callback
-  // below). When present, it is invoked ONLY after selectEngine(process.env) resolves to
-  // "rewritten" — building the full RewrittenOrchestratorAdapter wiring (a real
-  // qa-engine CompositionConfig: SandboxedBinaryRunner, Stryker/coverage collectors, the real
-  // GitHub client, the agent runtime, …) is deliberately NOT this file's job — that heavy
-  // assembly belongs to the caller (an operator script per Slice F.2), keeping this hot-path
-  // dispatch free of qa-engine's leaf-IO imports.
+  // The rewritten engine's composition factory (Plan 7.6: the ONLY engine — the legacy runPipeline
+  // path was deleted). REQUIRED: with no factory supplied, enqueueTrackedRun's queue callback
+  // throws loudly at run time (a missing factory is a boot-time wiring error, never a silent
+  // fallback) — see the queue callback below. Building the full RewrittenOrchestratorAdapter wiring
+  // (a real qa-engine CompositionConfig: SandboxedBinaryRunner, Stryker/coverage collectors, the
+  // real GitHub client, the agent runtime, …) is deliberately NOT this file's job — that heavy
+  // assembly belongs to the caller (src/server/rewritten-engine-factory.ts in production; a test
+  // double in tests), keeping this hot-path dispatch free of qa-engine's leaf-IO imports.
   //
   // `namespace` (2nd param, judgment-day CRITICAL fix): the runner computes this PER RUN — see
   // enqueueTrackedRun's queue callback below — via testDataNamespace(app.qa.testDataPrefix, sha,
-  // runId), the SAME formula legacy runPipeline uses at src/pipeline.ts:1222. Without this the
-  // rewritten engine's own namespace/branch would be static, colliding every run of every app on
-  // the same live-DEV test-data namespace the moment the flag flips.
+  // runId), the SAME formula the legacy engine used to. Without this the rewritten engine's own
+  // namespace/branch would be static, colliding every run of every app on the same live-DEV
+  // test-data namespace.
   //
   // `run` (3rd param, audit-remediation fix): mode/guidance are PER-RUN values (req.mode/
   // req.guidance below) — the composition root's own CompositionConfig.mode/guidance feed straight
@@ -98,6 +77,11 @@ export interface RunnerDeps {
   // the 5th argument keeps behaving exactly as before this fix (no orphan-data cleanup on the
   // rewritten engine) — matches every other trailing-optional-arg precedent in this signature
   // (namespace/run/observer above all followed the same additive pattern).
+  //
+  // REQUIRED (Plan 7.6): every real caller (src/index.ts, src/cli.ts) always supplies this via
+  // rewritten-engine-factory.ts. Left optional at the type level ONLY so a caller that truly wants
+  // the loud boot-time error (see enqueueTrackedRun below) can still omit it in a test; production
+  // code paths must never omit it.
   engineFactory?: (
     appConfig: AppConfig,
     namespace: string,
@@ -357,130 +341,49 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
       if (req.shadow !== undefined) {
         appConfig.qa.shadow = req.shadow;
       }
-      const pipeline = deps.pipeline ?? defaultPipelineDeps();
-      // Pipe every pipeline log line into THREE sinks: the console, the RunRecord (the
-      // chat assistant's context) and — the missing link — a `log.line` event per line so
-      // the TUI surfaces real-time progress instead of the user having to ask the chat.
-      // Multi-line blobs (e.g. test-runner stdout) are split so each renders as its own row.
-      const emitLog = (msg: string) => {
-        console.log(msg); // human-readable plain line for local/stdout visibility
-        // Structured, runId-correlated copy into the SHIPPED JSON stream (OBS-03): the per-run
-        // verdict reasoning was previously console-only / SQLite-blob-only and absent from the
-        // log stream an operator scrapes. file-only (mirrorToConsole=false) so console isn't doubled.
-        logJson(logLevelFor(msg), msg, { runId: record.id, app: req.app, sha: req.sha }, false);
-        appendLog(record.id, msg);
-        for (const raw of String(msg).split("\n")) {
-          const text = raw.replace(/\s+$/, "");
-          if (text) deps.runEvents?.publish(record.id, { type: "log.line", level: logLevelFor(text), text });
-        }
-      };
-      // PIPELINE_ENGINE dispatch (Task E.3): the ONLY place src/ consults the flag. Absent/"legacy"
-      // (or "rewritten" with no engineFactory supplied — fail-safe) takes the EXACT legacy branch
-      // below, byte-identical to before this task. "rewritten" WITH a supplied engineFactory routes
-      // through RunPipelinePort instead — runPipeline is NEVER called on that branch.
-      const engine = selectEngine(process.env);
-      // CRITICAL fix (judgment-day): compute the PER-RUN namespace exactly like legacy runPipeline
-      // does at src/pipeline.ts:1222 — testDataNamespace(prefix, sha, runId) — and pass it into the
-      // rewritten engineFactory. `appConfig` is already loaded above (no double-load); `record.id`
-      // is this run's id, matching legacy's `opts.runId`. Without this, the rewritten engine's own
+      // Plan 7.6 (cutover finale): the legacy runPipeline path is DELETED — the rewritten engine is
+      // the ONLY engine. selectEngine(process.env) is still consulted so a stale
+      // PIPELINE_ENGINE=legacy setting surfaces its deprecation warning (pipeline-engine-flag.ts);
+      // its return value no longer branches this dispatch. engineFactory is now REQUIRED — a
+      // missing factory is a boot-time wiring defect, surfaced loudly rather than silently falling
+      // back to a deleted code path.
+      selectEngine(process.env);
+      if (!deps.engineFactory) {
+        throw new Error(
+          "enqueueTrackedRun: RunnerDeps.engineFactory is required (Plan 7.6 — the legacy pipeline was removed). " +
+            "Wire src/server/rewritten-engine-factory.ts's createRewrittenEngineFactory(...) at the caller.",
+        );
+      }
+      // CRITICAL fix (judgment-day): compute the PER-RUN namespace — testDataNamespace(prefix, sha,
+      // runId) — and pass it into the rewritten engineFactory. `appConfig` is already loaded above
+      // (no double-load); `record.id` is this run's id. Without this, the rewritten engine's own
       // branch/namespace collided across every run of every app (a static literal).
       const runNamespace = testDataNamespace(appConfig.qa.testDataPrefix, req.sha, record.id);
       // Bug fix: built PER RUN (needs record.id + deps.runEvents) and threaded into engineFactory's
       // 4th argument, so the rewritten engine's RunQaUseCase.onStep() calls reach the SAME
-      // updateRecord + RunEvents.publish machinery the legacy branch's own onStep callback (below)
-      // already uses — this is what makes the TUI/API render the rewritten path's progress live
-      // instead of staying frozen until the final verdict.
+      // updateRecord + RunEvents.publish machinery — this is what makes the TUI/API render the
+      // rewritten path's progress live instead of staying frozen until the final verdict.
       // liveAnnounced: shared between the observer (live test.* announcements from the use-case's
       // ExecutionOpts.onCase streaming) and runViaRewrittenEngine's post-hoc recordCase loop, so a
       // case's terminal event publishes exactly once in the common case — and the correcting event
       // still publishes on divergence (see buildRewrittenObserver's own dedup + convergence note).
       const liveAnnounced = new Map<string, LiveAnnouncedStatus>();
       const observer = buildRewrittenObserver(record.id, deps.runEvents, liveAnnounced);
-      const run: QaRunResult =
-        engine === "rewritten" && deps.engineFactory
-          ? await runViaRewrittenEngine(
-              // Audit fix (judgment-day): thread the REQUESTED mode/guidance into the rewritten
-              // engineFactory — mirrors the namespace precedent immediately above. Previously the
-              // factory hardcoded mode:"diff" internally, silently mis-prompting every non-diff run.
-              deps.engineFactory(appConfig, runNamespace, { mode: req.mode, ...(req.guidance ? { guidance: req.guidance } : {}) }, observer, previousNamespace),
-              req,
-              record.id,
-              signal,
-              appConfig,
-              deps.runEvents,
-              liveAnnounced,
-              // Audit CRITICAL (task #33): the SAME resolved previousNamespace the legacy branch's
-              // own RunOptions.previousNamespace receives below — threads the CleanupPort gate.
-              previousNamespace,
-            )
-          : await runPipeline(
-              appConfig,
-              req.sha,
-              {
-                ...pipeline,
-                log: emitLog,
-                // During generation, emit a heartbeat every 15s so the TUI and chat
-                // have live feedback while the agent is working (blocking prompt call).
-                // FORWARD onUsage (4th arg): the runner keeps its OWN progress callback for live
-                // heartbeats, but must pass the usage sink through or the generator's token spend is
-                // never captured in the webhook path (only the reviewer's would be).
-                generate: async (input, signal, _onProgress, onUsage) => {
-                  const onProgress = emitLog;
-                  return pipeline.generate({ ...input, runId: record.id }, signal, (msg) => {
-                    // Enrich heartbeat messages with live agent context.
-                    const m = msg.match(/agent is working... \((\d+)s elapsed\)/);
-                    if (m) {
-                      const ctx = activityRouter.contextForRun(record.id);
-                      const parts = [`agent active (${m[1]}s)`];
-                      if (ctx) parts.push(`— ${ctx}`);
-                      onProgress(`[qa] ${parts.join(" ")}`);
-                      return;
-                    }
-                    onProgress(msg);
-                  }, onUsage);
-                },
-              },
-              req.source ?? "webhook",
-              { mode: req.mode, target: req.target, guidance: req.guidance, fixCases: req.fixCases, parentRunId: req.parentRunId, triggerRepo: req.triggerRepo, previousNamespace, runId: record.id, commits: req.commits, baseSha: req.baseSha },
-              (step, detail) => {
-                updateRecord(record.id, { step, stepDetail: detail, retrying: step === "retry" });
-                const normalized = step === "publish" ? "decide" : step;
-                if (isRunStep(normalized)) {
-                  deps.runEvents?.publish(record.id, { type: "step.changed", step: normalized, detail });
-                }
-              },
-              // A test finished → persist the case (live bar/history) AND mark its activity
-              // todo completed so it stops being the "running" focus.
-              (c) => {
-                addCase(record.id, c);
-                appendActivity(record.id, { kind: "todo", text: c.name, status: "completed" });
-                deps.runEvents?.publish(record.id, c.status === "pass"
-                  ? { type: "test.passed", name: c.name, durationMs: c.durationMs ?? 0 }
-                  : c.status === "fail"
-                    ? { type: "test.failed", name: c.name, detail: c.detail, ...(c.durationMs !== undefined ? { durationMs: c.durationMs } : {}) }
-                    : { type: "test.flaky", name: c.name, attempts: 2 });
-              },
-              (specs) => updateRecord(record.id, { specs }),
-              signal,
-              // A test started → it becomes the in-progress focus card during execute.
-              (title) => {
-                appendActivity(record.id, { kind: "todo", text: title, status: "in_progress" });
-                deps.runEvents?.publish(record.id, { type: "test.started", name: title });
-              },
-              // The independent reviewer's verdict → the live ReviewerCard (reasons are the
-              // actionable corrections on a rejection).
-              (approved, reasons) => {
-                deps.runEvents?.publish(record.id, { type: "reviewer.verdict", approved, reasons });
-              },
-              // Change-coverage result → the live coverage component (the value keystone).
-              (changedLines, coveredLines) => {
-                deps.runEvents?.publish(record.id, { type: "coverage.computed", changedLines, coveredLines });
-              },
-              // Each test the runner discovered up front → the live "next" preview.
-              (name, file) => {
-                deps.runEvents?.publish(record.id, { type: "test.discovered", name, ...(file ? { file } : {}) });
-              },
-            );
+      const run: QaRunResult = await runViaRewrittenEngine(
+        // Audit fix (judgment-day): thread the REQUESTED mode/guidance into the rewritten
+        // engineFactory. Previously the factory hardcoded mode:"diff" internally, silently
+        // mis-prompting every non-diff run.
+        deps.engineFactory(appConfig, runNamespace, { mode: req.mode, ...(req.guidance ? { guidance: req.guidance } : {}) }, observer, previousNamespace),
+        req,
+        record.id,
+        signal,
+        appConfig,
+        deps.runEvents,
+        liveAnnounced,
+        // Audit CRITICAL (task #33): the SAME resolved previousNamespace — threads the CleanupPort
+        // gate.
+        previousNamespace,
+      );
       // Plan 7.1 (engram #913): guard the happy-path finalize against a race with cancelTrackedRun.
       // A cancelled record is ALREADY "done" (cancelTrackedRun finalizes synchronously the moment it
       // aborts the queue's signal — see cancelTrackedRun below). If run.run()'s own promise resolves

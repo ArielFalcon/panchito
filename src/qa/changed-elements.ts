@@ -2,7 +2,7 @@
 //
 // `extractChangedElements` scans `+` lines (additions only) for stable HTML selector
 // signals — data-cy/testid/id/name/href/routerLink/visible text — and returns a typed
-// array of `ChangedElement`. Reuses `parseDiffHunks` from change-coverage.ts for
+// array of `ChangedElement`. Reuses `parseDiffHunks` from diff-hunks.ts for
 // file/line truth (no re-implementation of diff parsing); signals are extracted in a
 // second pass over the same lines.
 //
@@ -12,7 +12,7 @@
 // Both functions are PURE (no I/O, no LLM call). Cap: 200 entries per `extractChangedElements`.
 // A miss degrades to no-marker (never blocks, never alters nodes[]/attrs[]).
 
-import { parseDiffHunks } from "./change-coverage";
+import { parseDiffHunks } from "./diff-hunks";
 
 // ── Public interface ─────────────────────────────────────────────────────────
 

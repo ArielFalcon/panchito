@@ -1,14 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { JobQueue } from "./queue";
 import { enqueueTrackedRun, cancelTrackedRun } from "./runner";
 import { getRecord, createRecord, updateRecord } from "./history";
-import { PipelineDeps } from "../pipeline";
 import { AppConfig } from "../orchestrator/config-loader";
-import { QaCase } from "../types";
 import { createRunEventStore } from "./run-events";
 import type { RunPipelinePort, RunInput } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 import type { RunOutcome } from "@kernel/run-outcome.ts";
@@ -20,44 +15,6 @@ const cfg = (name: string): AppConfig => ({
   qa: { needsReview: true, testDataPrefix: "qa-bot", shadow: true },
   report: { onFailure: "github-issue" },
 });
-
-function makeMirror(): string {
-  const mirrorDir = mkdtempSync(join(tmpdir(), "qa-runner-"));
-  mkdirSync(join(mirrorDir, "e2e", ".qa"), { recursive: true });
-  writeFileSync(join(mirrorDir, "e2e", ".qa", "context.json"), JSON.stringify({ builtAtSha: "def5678", routes: [], api: [], feBe: [] }));
-  return mirrorDir;
-}
-
-function stubDeps(over: Partial<PipelineDeps> = {}): PipelineDeps {
-  const mirrorDir = makeMirror();
-  return {
-    waitForDeploy: async () => {},
-    prepare: async () => ({ mirrorDir, diff: "", message: "feat: x" }),
-    prepareAtBranch: async () => ({ mirrorDir }),
-    generate: async (_input, _signal) => ({ output: "", specs: ["a.spec.ts"], reviewed: false, approved: true }),
-    setupE2e: async () => {},
-    validate: async () => ({ ok: true, errors: [], infra: false }),
-    execute: async (_dir, opts) => {
-      const cases: QaCase[] = [
-        { name: "t1", status: "pass" },
-        { name: "t2", status: "pass" },
-      ];
-      cases.forEach((c) => opts.onCase?.(c));
-      return { sha: opts.namespace ?? "ns", verdict: "pass", passed: true, cases, logs: "" };
-    },
-    isHealthy: async () => true,
-    isReachable: async () => true,
-    publish: async () => null,
-    publishContext: async () => null,
-    setupCode: async () => {},
-    executeCode: async (_dir, opts) => ({ sha: opts.namespace ?? "ns", verdict: "pass", passed: true, cases: [], logs: "" }),
-    publishCode: async () => null,
-    cleanup: async () => {},
-    openIssue: async () => ({ url: "" }),
-    log: () => {},
-    ...over,
-  };
-}
 
 // A fake RunPipelinePort that records whether it was invoked, so the dispatch tests below can
 // assert routing without needing a real qa-engine wiring (deferred to Slice F.2's operator script).
@@ -84,94 +41,59 @@ function fakePort(outcome: Partial<RunOutcome> = {}): { port: RunPipelinePort; c
   return { port, calls };
 }
 
-// ── PIPELINE_ENGINE dispatch seam (Task E.3) ───────────────────────────────────
-// The runner is the ONLY src/ file allowed to consult the flag. With PIPELINE_ENGINE absent
-// (or any value other than the literal "rewritten"), the legacy runPipeline path must be
-// byte-identical to today — the rewritten RunPipelinePort must NEVER be invoked. With
-// PIPELINE_ENGINE=rewritten AND an injected engineFactory, the runner must route through the
-// factory's port and never call the legacy runPipeline.
+// ── engineFactory dispatch (Plan 7.6: the rewritten engine is the ONLY engine) ─────────────────
+// The legacy runPipeline path is deleted. enqueueTrackedRun now REQUIRES RunnerDeps.engineFactory
+// — a missing factory throws loudly (a boot-time wiring defect), never silently falls back.
 
-test("PIPELINE_ENGINE absent — routes to legacy runPipeline, never touches engineFactory", async () => {
+test("enqueueTrackedRun with no engineFactory supplied — throws loudly, finalizes as infra-error (no silent fallback)", async () => {
   const queue = new JobQueue();
-  let legacyCalled = false;
-  let factoryCalled = false;
   const id = enqueueTrackedRun(
     queue,
-    { app: "runner-flag-absent", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
-    {
-      pipeline: stubDeps({ prepare: async (...args) => { legacyCalled = true; return stubDeps().prepare(...args); } }),
-      loadApp: cfg,
-      engineFactory: () => {
-        factoryCalled = true;
-        return fakePort().port;
-      },
-    },
+    { app: "runner-flag-no-factory", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
+    { loadApp: cfg },
+  );
+  await queue.drain();
+  const r = getRecord(id)!;
+  assert.equal(r.status, "done");
+  assert.equal(r.verdict, "infra-error", "a missing engineFactory must surface as a loud infra-error, never a silent legacy fallback (the legacy engine was removed)");
+  assert.match(r.note ?? "", /engineFactory is required/);
+});
+
+test("engineFactory supplied — routes to port.run", async () => {
+  const queue = new JobQueue();
+  const { port, calls } = fakePort({ verdict: "pass" });
+  const id = enqueueTrackedRun(
+    queue,
+    { app: "runner-flag-rewritten", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
+    { loadApp: cfg, engineFactory: () => port },
   );
   await queue.drain();
   const r = getRecord(id)!;
   assert.equal(r.status, "done");
   assert.equal(r.verdict, "pass");
-  assert.equal(legacyCalled, true, "the legacy pipeline must run when PIPELINE_ENGINE is absent");
-  assert.equal(factoryCalled, false, "engineFactory must NEVER be consulted on the legacy path");
+  assert.equal(calls.length, 1, "the rewritten port must be invoked exactly once");
+  assert.equal(calls[0]?.app, "runner-flag-rewritten");
+  assert.equal(calls[0]?.sha.value, "def5678");
+  assert.equal(calls[0]?.mode, "diff");
+  assert.equal(calls[0]?.target, "e2e");
+  assert.equal(calls[0]?.source, "manual");
 });
 
-test("PIPELINE_ENGINE=legacy (explicit) — identical to absent: legacy runs, factory untouched", async () => {
+test("PIPELINE_ENGINE=legacy (stale operator setting) — still routes through the rewritten engineFactory (accepted-but-ignored)", async () => {
   const prev = process.env.PIPELINE_ENGINE;
   process.env.PIPELINE_ENGINE = "legacy";
   try {
     const queue = new JobQueue();
-    let legacyCalled = false;
-    let factoryCalled = false;
-    const id = enqueueTrackedRun(
-      queue,
-      { app: "runner-flag-legacy", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
-      {
-        pipeline: stubDeps({ prepare: async (...args) => { legacyCalled = true; return stubDeps().prepare(...args); } }),
-        loadApp: cfg,
-        engineFactory: () => {
-          factoryCalled = true;
-          return fakePort().port;
-        },
-      },
-    );
-    await queue.drain();
-    const r = getRecord(id)!;
-    assert.equal(r.verdict, "pass");
-    assert.equal(legacyCalled, true);
-    assert.equal(factoryCalled, false);
-  } finally {
-    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
-    else process.env.PIPELINE_ENGINE = prev;
-  }
-});
-
-test("PIPELINE_ENGINE=rewritten + engineFactory — routes to port.run, never calls legacy runPipeline", async () => {
-  const prev = process.env.PIPELINE_ENGINE;
-  process.env.PIPELINE_ENGINE = "rewritten";
-  try {
-    const queue = new JobQueue();
-    let legacyCalled = false;
     const { port, calls } = fakePort({ verdict: "pass" });
     const id = enqueueTrackedRun(
       queue,
-      { app: "runner-flag-rewritten", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
-      {
-        pipeline: stubDeps({ prepare: async (...args) => { legacyCalled = true; return stubDeps().prepare(...args); } }),
-        loadApp: cfg,
-        engineFactory: () => port,
-      },
+      { app: "runner-flag-legacy", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
+      { loadApp: cfg, engineFactory: () => port },
     );
     await queue.drain();
     const r = getRecord(id)!;
-    assert.equal(r.status, "done");
     assert.equal(r.verdict, "pass");
-    assert.equal(legacyCalled, false, "legacy runPipeline must NEVER run when the rewritten engine is selected");
-    assert.equal(calls.length, 1, "the rewritten port must be invoked exactly once");
-    assert.equal(calls[0]?.app, "runner-flag-rewritten");
-    assert.equal(calls[0]?.sha.value, "def5678");
-    assert.equal(calls[0]?.mode, "diff");
-    assert.equal(calls[0]?.target, "e2e");
-    assert.equal(calls[0]?.source, "manual");
+    assert.equal(calls.length, 1, "PIPELINE_ENGINE=legacy no longer selects a different code path — the rewritten engine always runs");
   } finally {
     if (prev === undefined) delete process.env.PIPELINE_ENGINE;
     else process.env.PIPELINE_ENGINE = prev;
@@ -192,7 +114,7 @@ test("PIPELINE_ENGINE=rewritten — outcome.note is forwarded into the run recor
     const id = enqueueTrackedRun(
       queue,
       { app: "runner-flag-rewritten-note", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
-      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port },
+      { loadApp: cfg, engineFactory: () => port },
     );
     await queue.drain();
     const r = getRecord(id)!;
@@ -227,7 +149,6 @@ test("PIPELINE_ENGINE=rewritten — the runner passes a testDataNamespace-shaped
       queue,
       { app: "runner-namespace-shape", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
       {
-        pipeline: stubDeps(),
         loadApp: cfg,
         engineFactory: (_appConfig, namespace) => {
           receivedNamespace = namespace;
@@ -261,12 +182,12 @@ test("PIPELINE_ENGINE=rewritten — two DIFFERENT runs (different sha) produce D
     const id1 = enqueueTrackedRun(
       queue1,
       { app: "runner-namespace-diff", sha: "aaa1111", target: "e2e", mode: "diff", source: "manual" },
-      { pipeline: stubDeps(), loadApp: cfg, engineFactory: (_a, ns) => { namespace1 = ns; return port1; } },
+      { loadApp: cfg, engineFactory: (_a, ns) => { namespace1 = ns; return port1; } },
     );
     const id2 = enqueueTrackedRun(
       queue2,
       { app: "runner-namespace-diff", sha: "bbb2222", target: "e2e", mode: "diff", source: "manual" },
-      { pipeline: stubDeps(), loadApp: cfg, engineFactory: (_a, ns) => { namespace2 = ns; return port2; } },
+      { loadApp: cfg, engineFactory: (_a, ns) => { namespace2 = ns; return port2; } },
     );
     await Promise.all([queue1.drain(), queue2.drain()]);
     assert.equal(getRecord(id1)!.verdict, "pass");
@@ -296,7 +217,6 @@ test("PIPELINE_ENGINE=rewritten — the runner passes req.mode to engineFactory'
       queue,
       { app: "runner-mode-manual", sha: "def5678", target: "e2e", mode: "manual", source: "manual", guidance: "test the contact form" },
       {
-        pipeline: stubDeps(),
         loadApp: cfg,
         engineFactory: (_appConfig, _namespace, run) => {
           receivedMode = run.mode;
@@ -324,7 +244,6 @@ test("PIPELINE_ENGINE=rewritten — the runner passes req.guidance to engineFact
       queue,
       { app: "runner-guidance", sha: "def5678", target: "e2e", mode: "manual", source: "manual", guidance: "test the contact form" },
       {
-        pipeline: stubDeps(),
         loadApp: cfg,
         engineFactory: (_appConfig, _namespace, run) => {
           receivedGuidance = run.guidance;
@@ -352,7 +271,6 @@ test("PIPELINE_ENGINE=rewritten — engineFactory's run.guidance is absent (not 
       queue,
       { app: "runner-guidance-absent", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
       {
-        pipeline: stubDeps(),
         loadApp: cfg,
         engineFactory: (_appConfig, _namespace, run) => {
           receivedRun = run;
@@ -388,7 +306,7 @@ test("PIPELINE_ENGINE=rewritten — the runner threads req.triggerRepo into port
     const id = enqueueTrackedRun(
       queue,
       { app: "runner-trigger-repo", sha: "def5678", target: "e2e", mode: "diff", source: "webhook", triggerRepo: "org/orders-svc" },
-      { pipeline: stubDeps(), loadApp: (name) => ({ ...cfg(name), services: [{ repo: "org/orders-svc" }] }), engineFactory: () => port },
+      { loadApp: (name) => ({ ...cfg(name), services: [{ repo: "org/orders-svc" }] }), engineFactory: () => port },
     );
     await queue.drain();
     assert.equal(getRecord(id)!.verdict, "pass");
@@ -421,7 +339,7 @@ test("PIPELINE_ENGINE=rewritten — rejects an undeclared triggerRepo (finalizes
       queue,
       { app: "runner-trigger-repo-undeclared", sha: "def5678", target: "e2e", mode: "diff", source: "webhook", triggerRepo: "org/evil-repo" },
       // cfg() declares no services[] at all — org/evil-repo cannot be a declared service.
-      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port },
+      { loadApp: cfg, engineFactory: () => port },
     );
     await queue.drain();
     const r = getRecord(id)!;
@@ -444,7 +362,7 @@ test("PIPELINE_ENGINE=rewritten — accepts a DECLARED service triggerRepo", asy
     const id = enqueueTrackedRun(
       queue,
       { app: "runner-trigger-repo-declared", sha: "def5678", target: "e2e", mode: "diff", source: "webhook", triggerRepo: "org/orders-svc" },
-      { pipeline: stubDeps(), loadApp: (name) => ({ ...cfg(name), services: [{ repo: "org/orders-svc" }] }), engineFactory: () => port },
+      { loadApp: (name) => ({ ...cfg(name), services: [{ repo: "org/orders-svc" }] }), engineFactory: () => port },
     );
     await queue.drain();
     assert.equal(getRecord(id)!.verdict, "pass");
@@ -465,7 +383,7 @@ test("PIPELINE_ENGINE=rewritten — an app with NO services[] rejects ANY trigge
       queue,
       { app: "runner-trigger-repo-no-services", sha: "def5678", target: "e2e", mode: "diff", source: "webhook", triggerRepo: "org/anything" },
       // cfg() has no `services` key at all — matches legacy's `app.services?.find(...)` on undefined.
-      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port },
+      { loadApp: cfg, engineFactory: () => port },
     );
     await queue.drain();
     assert.equal(getRecord(id)!.verdict, "infra-error");
@@ -485,37 +403,12 @@ test("PIPELINE_ENGINE=rewritten — RunInput.triggerRepo is absent (not fabricat
     const id = enqueueTrackedRun(
       queue,
       { app: "runner-trigger-repo-absent", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
-      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port },
+      { loadApp: cfg, engineFactory: () => port },
     );
     await queue.drain();
     assert.equal(getRecord(id)!.verdict, "pass");
     assert.equal(calls.length, 1);
     assert.equal(calls[0]!.triggerRepo, undefined, "an ordinary (non-cross-repo) run must never fabricate a triggerRepo");
-  } finally {
-    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
-    else process.env.PIPELINE_ENGINE = prev;
-  }
-});
-
-test("PIPELINE_ENGINE=rewritten but NO engineFactory supplied — falls back to legacy (fail-safe)", async () => {
-  const prev = process.env.PIPELINE_ENGINE;
-  process.env.PIPELINE_ENGINE = "rewritten";
-  try {
-    const queue = new JobQueue();
-    let legacyCalled = false;
-    const id = enqueueTrackedRun(
-      queue,
-      { app: "runner-flag-no-factory", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
-      {
-        pipeline: stubDeps({ prepare: async (...args) => { legacyCalled = true; return stubDeps().prepare(...args); } }),
-        loadApp: cfg,
-        // engineFactory intentionally omitted.
-      },
-    );
-    await queue.drain();
-    const r = getRecord(id)!;
-    assert.equal(r.status, "done");
-    assert.equal(legacyCalled, true, "with no engineFactory, the runner must fail safe to legacy even if the flag says rewritten");
   } finally {
     if (prev === undefined) delete process.env.PIPELINE_ENGINE;
     else process.env.PIPELINE_ENGINE = prev;
@@ -532,7 +425,7 @@ test("the rewritten path finalizes the record + publishes run.verdict RunEvents 
     const id = enqueueTrackedRun(
       queue,
       { app: "runner-flag-events", sha: "def5678", target: "e2e", mode: "diff", source: "webhook" },
-      { pipeline: stubDeps(), loadApp: cfg, runEvents, engineFactory: () => port },
+      { loadApp: cfg, runEvents, engineFactory: () => port },
     );
     await queue.drain();
     const r = getRecord(id)!;
@@ -568,7 +461,6 @@ test("PIPELINE_ENGINE=rewritten — the runner passes a live ObserverPort as eng
       queue,
       { app: "runner-observer-arg", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
       {
-        pipeline: stubDeps(),
         loadApp: cfg,
         engineFactory: (_appConfig, _namespace, _run, observer) => {
           receivedObserver = observer;
@@ -623,7 +515,6 @@ test("PIPELINE_ENGINE=rewritten — a port that drives ObserverPort.onStep mid-r
       queue,
       { app: "runner-observer-live", sha: "def5678", target: "e2e", mode: "diff", source: "webhook" },
       {
-        pipeline: stubDeps(),
         loadApp: cfg,
         runEvents,
         engineFactory: (_appConfig, _namespace, _run, observer) => {
@@ -681,7 +572,6 @@ test("PIPELINE_ENGINE=rewritten — ObserverPort.onStep('retry', detail) sets re
       queue,
       { app: "runner-observer-retry", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
       {
-        pipeline: stubDeps(),
         loadApp: cfg,
         engineFactory: (_appConfig, _namespace, _run, observer) => {
           currentObserver = observer as { onStep(step: string, detail?: string): void };
@@ -753,7 +643,6 @@ test("PIPELINE_ENGINE=rewritten — a port that drives ObserverPort.onStep, wher
       queue,
       { app: "runner-observer-fault", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
       {
-        pipeline: stubDeps(),
         loadApp: cfg,
         runEvents: throwingOnStepChanged,
         engineFactory: (_appConfig, _namespace, _run, observer) => {
@@ -781,7 +670,7 @@ test("a crashing rewritten port finalizes the record as infra-error (no zombie)"
     const id = enqueueTrackedRun(
       queue,
       { app: "runner-flag-crash", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
-      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => crashingPort },
+      { loadApp: cfg, engineFactory: () => crashingPort },
     );
     await queue.drain();
     const r = getRecord(id)!;
@@ -834,7 +723,7 @@ test("cancelTrackedRun aborts the rewritten port's in-flight run.run() AND the r
     const id = enqueueTrackedRun(
       queue,
       { app: "runner-rewritten-cancel", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
-      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => cancellablePort },
+      { loadApp: cfg, engineFactory: () => cancellablePort },
     );
     await new Promise((r) => setImmediate(r)); // let the job claim the queue controller
     assert.equal(cancelTrackedRun(queue, id), true, "a live rewritten run must be cancellable via the queue signal");
@@ -880,7 +769,7 @@ test("cancelTrackedRun + an UNRELATED late crash: the catch branch must NOT over
     const id = enqueueTrackedRun(
       queue,
       { app: "runner-catch-cancel-race", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
-      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => crashingPort },
+      { loadApp: cfg, engineFactory: () => crashingPort },
     );
     await new Promise((r) => setImmediate(r)); // let the job claim the queue controller
     assert.equal(cancelTrackedRun(queue, id), true);
@@ -900,90 +789,81 @@ test("cancelTrackedRun + an UNRELATED late crash: the catch branch must NOT over
 
 test("the run does NOT execute synchronously — it is deferred to the queue (no bypass)", async () => {
   const queue = new JobQueue();
+  const { port } = fakePort({ verdict: "skipped" });
   const id = enqueueTrackedRun(
     queue,
     { app: "runner-skip", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
-    { pipeline: stubDeps({ prepare: async () => ({ mirrorDir: "/m", diff: "", message: "docs: tweak" }) }), loadApp: cfg },
+    { loadApp: cfg, engineFactory: () => port },
   );
   // Right after enqueue, before draining: the job has not run yet.
   assert.equal(getRecord(id)?.status, "enqueued");
   await queue.drain();
   const r = getRecord(id)!;
   assert.equal(r.status, "done");
-  assert.equal(r.verdict, "skipped"); // a docs commit classifies to skip
+  assert.equal(r.verdict, "skipped");
 });
 
 test("a green run finalizes the record with verdict + case counts", async () => {
   const queue = new JobQueue();
+  const { port } = fakePort({
+    verdict: "pass",
+    cases: [
+      { name: "t1", status: "pass" },
+      { name: "t2", status: "pass" },
+    ],
+  });
   const id = enqueueTrackedRun(
     queue,
     { app: "runner-pass", sha: "def5678", target: "e2e", mode: "diff", source: "webhook" },
-    { pipeline: stubDeps(), loadApp: cfg },
+    { loadApp: cfg, engineFactory: () => port },
   );
   await queue.drain();
   const r = getRecord(id)!;
   assert.equal(r.verdict, "pass");
   assert.equal(r.passed, 2);
   assert.equal(r.failed, 0);
-  assert.equal(r.cases.length, 2); // onCase populated the record
+  assert.equal(r.cases.length, 2);
 });
 
-test("a green run publishes live RunEvents for steps, tests and final verdict", async () => {
+test("a green run publishes live RunEvents for steps and the final verdict", async () => {
   const queue = new JobQueue();
   const runEvents = createRunEventStore({ now: () => 123 });
+  const port: RunPipelinePort = {
+    run: async (input, _signal) => {
+      return {
+        runId: input.runId, app: input.app, sha: input.sha.value, mode: input.mode, target: input.target,
+        verdict: "pass", errorClass: null,
+        gateSignals: { static: true, coverageRatio: null, valueScore: null, reviewerCorrections: [], flaky: false, retries: 0 },
+        rulesRetrieved: [], at: new Date().toISOString(),
+        cases: [{ name: "checkout", status: "pass" }],
+      };
+    },
+  };
   const id = enqueueTrackedRun(
     queue,
     { app: "runner-events", sha: "def5678", target: "e2e", mode: "diff", source: "webhook" },
-    {
-      pipeline: stubDeps({
-        execute: async (_dir, opts) => {
-          opts.onRunning?.("checkout");
-          const cases: QaCase[] = [{ name: "checkout", status: "pass" }];
-          cases.forEach((c) => opts.onCase?.(c));
-          return { sha: opts.namespace ?? "ns", verdict: "pass", passed: true, cases, logs: "" };
-        },
-      }),
-      loadApp: cfg,
-      runEvents,
-    },
+    { loadApp: cfg, runEvents, engineFactory: () => port },
   );
 
   await queue.drain();
 
   const bodies = runEvents.replay(id).map((event) => event.body);
   assert.deepEqual(bodies[0], { type: "run.started", app: "runner-events", sha: "def5678", mode: "diff", target: "e2e" });
-  assert.ok(bodies.some((body) => body.type === "step.changed" && body.step === "execute"));
-  assert.ok(bodies.some((body) => body.type === "test.started" && body.name === "checkout"));
   assert.ok(bodies.some((body) => body.type === "test.passed" && body.name === "checkout"));
-  const last = bodies.at(-1) as { type: string; verdict: string; passed: number; failed: number; outcome?: string };
+  const last = bodies.at(-1) as { type: string; verdict: string; passed: number; failed: number };
   assert.equal(last.type, "run.verdict");
   assert.equal(last.verdict, "pass");
   assert.equal(last.passed, 1);
   assert.equal(last.failed, 0);
-  // The verdict event carries what the run PRODUCED (here: a shadow run → no PR).
-  assert.ok(typeof last.outcome === "string" && last.outcome.length > 0, "run.verdict must carry the outcome");
 });
 
-test("pipeline log lines are emitted as log.line events for the TUI's log tail", async () => {
+test("a crashing rewritten port finalizes the record as infra-error with the message (no zombie)", async () => {
   const queue = new JobQueue();
-  const runEvents = createRunEventStore({ now: () => 789 });
-  const id = enqueueTrackedRun(
-    queue,
-    { app: "runner-logs", sha: "log1234", target: "e2e", mode: "diff", source: "manual" },
-    { pipeline: stubDeps(), loadApp: cfg, runEvents },
-  );
-  await queue.drain();
-  const logs = runEvents.replay(id).map((e) => e.body).filter((b) => b.type === "log.line");
-  assert.ok(logs.length > 0, "the pipeline's log() narration must reach the stream as log.line events");
-  assert.ok(logs.every((b) => "text" in b && typeof b.text === "string" && b.text.length > 0 && !b.text.includes("\n")));
-});
-
-test("a crashing pipeline finalizes the record as infra-error with the message (no zombie)", async () => {
-  const queue = new JobQueue();
+  const crashingPort: RunPipelinePort = { run: async () => { throw new Error("boom"); } };
   const id = enqueueTrackedRun(
     queue,
     { app: "runner-crash", sha: "999aaaa", target: "e2e", mode: "diff", source: "manual" },
-    { pipeline: stubDeps({ prepare: async () => { throw new Error("boom"); } }), loadApp: cfg },
+    { loadApp: cfg, engineFactory: () => crashingPort },
   );
   await queue.drain();
   const r = getRecord(id)!;
@@ -992,8 +872,9 @@ test("a crashing pipeline finalizes the record as infra-error with the message (
   assert.match(r.note ?? "", /boom/);
 });
 
-test("a continuation forces generation (no skip) and records the parent run", async () => {
+test("a continuation records the parent run", async () => {
   const queue = new JobQueue();
+  const { port } = fakePort({ verdict: "pass" });
   const id = enqueueTrackedRun(
     queue,
     {
@@ -1004,48 +885,21 @@ test("a continuation forces generation (no skip) and records the parent run", as
       parentRunId: "parent-1",
       fixCases: [{ name: "checkout", status: "fail" }],
     },
-    // The commit message classifies as "docs" (would normally skip) — the continuation must still run.
-    { pipeline: stubDeps({ prepare: async () => ({ mirrorDir: makeMirror(), diff: "", message: "docs: tweak" }) }), loadApp: cfg },
+    { loadApp: cfg, engineFactory: () => port },
   );
   await queue.drain();
   const r = getRecord(id)!;
   assert.equal(r.parentRunId, "parent-1");
-  assert.notEqual(r.verdict, "skipped"); // it generated + ran despite the docs commit
   assert.equal(r.verdict, "pass");
-});
-
-test("the coverage step event reaches the event store (was silently dropped before fix)", async () => {
-  const queue = new JobQueue();
-  const runEvents = createRunEventStore({ now: () => 456 });
-  // Simulate a pipeline with collectCoverage wired — the orchestrator must emit
-  // step.changed { step: "coverage" } instead of silently dropping it.
-  const id = enqueueTrackedRun(
-    queue,
-    { app: "runner-cov", sha: "cov1234", target: "e2e", mode: "diff", source: "manual" },
-    {
-      pipeline: stubDeps({
-        // A valid unified diff with +++ header → parseDiffHunks finds changed lines
-        prepare: async () => ({ mirrorDir: makeMirror(), diff: "diff --git a/src/a.ts b/src/a.ts\nindex 0000000..1111111 100644\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,3 +1,4 @@\n+new line", message: "feat: add coverage" }),
-        collectCoverage: async () => new Map(),
-      }),
-      loadApp: cfg,
-      runEvents,
-    },
-  );
-  await queue.drain();
-  const bodies = runEvents.replay(id).map((event) => event.body);
-  assert.ok(
-    bodies.some((body) => body.type === "step.changed" && body.step === "coverage"),
-    "step.changed { step: 'coverage' } must be present in the event stream",
-  );
 });
 
 test("a bad app name is finalized (not a zombie) — loadApp throwing is caught", async () => {
   const queue = new JobQueue();
+  const { port } = fakePort({ verdict: "pass" });
   const id = enqueueTrackedRun(
     queue,
     { app: "runner-noapp", sha: "111bbbb", target: "e2e", mode: "diff", source: "manual" },
-    { pipeline: stubDeps(), loadApp: () => { throw new Error("config/apps/x.yaml not found"); } },
+    { loadApp: () => { throw new Error("config/apps/x.yaml not found"); }, engineFactory: () => port },
   );
   await queue.drain();
   const r = getRecord(id)!;
@@ -1129,7 +983,7 @@ test("PIPELINE_ENGINE=rewritten — outcome.cases populate the run record's case
     const id = enqueueTrackedRun(
       queue,
       { app: "runner-w3f3-cases", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
-      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port },
+      { loadApp: cfg, engineFactory: () => port },
     );
     await queue.drain();
     const r = getRecord(id)!;
@@ -1152,7 +1006,7 @@ test("PIPELINE_ENGINE=rewritten — an absent outcome.cases (early-exit terminal
     const id = enqueueTrackedRun(
       queue,
       { app: "runner-w3f3-no-cases", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
-      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port },
+      { loadApp: cfg, engineFactory: () => port },
     );
     await queue.drain();
     const r = getRecord(id)!;
@@ -1186,7 +1040,7 @@ test("PIPELINE_ENGINE=rewritten — outcome.cases publish test.passed/test.faile
     const id = enqueueTrackedRun(
       queue,
       { app: "runner-w3f4-case-events", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
-      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port, runEvents },
+      { loadApp: cfg, engineFactory: () => port, runEvents },
     );
     await queue.drain();
     const events = runEvents.replay(id).map((e) => e.body);
@@ -1215,7 +1069,7 @@ test("PIPELINE_ENGINE=rewritten — a flaky case publishes a test.flaky RunEvent
     const id = enqueueTrackedRun(
       queue,
       { app: "runner-w3f4-flaky-event", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
-      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port, runEvents },
+      { loadApp: cfg, engineFactory: () => port, runEvents },
     );
     await queue.drain();
     const events = runEvents.replay(id).map((e) => e.body);
@@ -1240,7 +1094,7 @@ test("PIPELINE_ENGINE=rewritten — outcome.gateSignals.reviewerApproved publish
     const id = enqueueTrackedRun(
       queue,
       { app: "runner-w3f4-reviewer-event", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
-      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port, runEvents },
+      { loadApp: cfg, engineFactory: () => port, runEvents },
     );
     await queue.drain();
     const events = runEvents.replay(id).map((e) => e.body);
@@ -1290,7 +1144,6 @@ test("liveAnnounced dedup — a case announced live with a MATCHING final status
       queue,
       { app: "runner-dedup-match", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
       {
-        pipeline: stubDeps(),
         loadApp: cfg,
         runEvents,
         engineFactory: (_appConfig, _namespace, _run, obs) => {
@@ -1340,7 +1193,6 @@ test("liveAnnounced dedup — the flaky divergence: live announces failed then p
       queue,
       { app: "runner-dedup-flaky", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
       {
-        pipeline: stubDeps(),
         loadApp: cfg,
         runEvents,
         engineFactory: (_appConfig, _namespace, _run, obs) => {
@@ -1382,7 +1234,7 @@ test("liveAnnounced dedup — a case NEVER announced live (e.g. code-mode) alway
     const id = enqueueTrackedRun(
       queue,
       { app: "runner-dedup-never-announced", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
-      { pipeline: stubDeps(), loadApp: cfg, runEvents, engineFactory: () => port },
+      { loadApp: cfg, runEvents, engineFactory: () => port },
     );
     await queue.drain();
     const bodies = runEvents.replay(id).map((e) => e.body);
@@ -1421,7 +1273,6 @@ test("liveAnnounced dedup — addCase (the record-store write) always runs regar
       queue,
       { app: "runner-dedup-addcase-always", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
       {
-        pipeline: stubDeps(),
         loadApp: cfg,
         runEvents,
         engineFactory: (_appConfig, _namespace, _run, obs) => {
@@ -1450,7 +1301,7 @@ test("PIPELINE_ENGINE=rewritten — no reviewer.verdict event when outcome.gateS
     const id = enqueueTrackedRun(
       queue,
       { app: "runner-w3f4-no-reviewer-event", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
-      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port, runEvents },
+      { loadApp: cfg, engineFactory: () => port, runEvents },
     );
     await queue.drain();
     const events = runEvents.replay(id).map((e) => e.body);

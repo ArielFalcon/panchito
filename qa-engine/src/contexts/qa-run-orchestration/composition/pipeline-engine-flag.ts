@@ -1,12 +1,22 @@
 // src/contexts/qa-run-orchestration/composition/pipeline-engine-flag.ts
-// PIPELINE_ENGINE selects LegacyPipelineAdapter (default) vs RewrittenOrchestratorAdapter behind
-// RunPipelinePort (design §7.3 Step 2). DEFAULT legacy — the shadow seam, NOT the cutover. Plan 6 never
-// ships rewritten as the default; the cutover (flip default) is Plan 7, justified by the Slice F evidence.
+// Plan 7.6 (cutover finale): the legacy engine has been DELETED — there is no LegacyPipelineAdapter
+// to select anymore. selectEngine now ALWAYS resolves to "rewritten"; the PIPELINE_ENGINE env var is
+// accepted-but-ignored for backward compatibility with any operator tooling that still sets it. A
+// deprecation warning is emitted once when PIPELINE_ENGINE=legacy is explicitly set, since that value
+// can no longer be honored (there is nothing left to select).
 export const PIPELINE_ENGINE = "PIPELINE_ENGINE" as const;
-export type EngineChoice = "legacy" | "rewritten";
+export type EngineChoice = "rewritten";
 
-// Fail-safe: any value other than the EXACT string "rewritten" (absent, "legacy", casing, whitespace,
-// garbage) selects the legacy engine. The rewritten engine is opt-in only, never a fallback.
+let warnedLegacyRequested = false;
+
+// Always returns "rewritten" — the sole engine post-cutover. PIPELINE_ENGINE is read only to warn
+// an operator who still explicitly requests "legacy" (a value that no longer has an implementation).
 export function selectEngine(env: Record<string, string | undefined>): EngineChoice {
-  return env[PIPELINE_ENGINE] === "rewritten" ? "rewritten" : "legacy";
+  if (env[PIPELINE_ENGINE] === "legacy" && !warnedLegacyRequested) {
+    warnedLegacyRequested = true;
+    console.warn(
+      "[qa] PIPELINE_ENGINE=legacy was requested but the legacy engine was removed in Plan 7.6 — running the rewritten engine instead.",
+    );
+  }
+  return "rewritten";
 }

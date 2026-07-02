@@ -22,9 +22,18 @@ import {
   type FailureDump,
 } from "./execute";
 import { QaCase } from "../types";
-import { buildFailureDomLines } from "../pipeline";
 import { selectorPresent } from "./selector-check";
 import { parseAriaSnapshot } from "./dom-snapshot";
+
+// Plan 7.6 (cutover finale): src/pipeline.ts is deleted. This is a verbatim, test-local copy of its
+// buildFailureDomLines — splits a case's captured failure-point a11y tree into non-empty lines. Pure,
+// dependency-free. The production copy now lives in qa-engine's
+// contexts/qa-run-orchestration/domain/fix-loop.aggregate.ts (ported there in Plan 6/7); this test
+// only needs the same shape to assert execute.ts's DOM-harvest output is consumable by it.
+function buildFailureDomLines(failureDom: string | undefined): string[] {
+  if (!failureDom) return [];
+  return failureDom.split("\n").filter((l) => l.trim());
+}
 
 test("allFailuresAreRunnerInfra: a browser-launch failure is infra (runner fault), not a test failure", () => {
   const launchFail: QaCase[] = [

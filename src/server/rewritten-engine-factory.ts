@@ -1,24 +1,21 @@
 // src/server/rewritten-engine-factory.ts
 //
-// Plan 7.6 (Part 2) — "arm the cutover": the REAL production engineFactory. Maps an AppConfig to a
-// qa-engine CompositionConfig and returns `buildProduction(process.env, cfg)`, wiring the SAME
-// production collaborators the host process already builds (the real agent runtime at :4097, the
-// real GitHub PR/Issue client, the real deploy gate, the real Playwright/code runners) — not a
-// second, parallel set of integrations.
+// The REAL production engineFactory (Plan 7.6 cutover finale: the ONLY engine — the legacy
+// runPipeline path was deleted). Maps an AppConfig to a qa-engine CompositionConfig and returns
+// `buildProduction(process.env, cfg)`, wiring the SAME production collaborators the host process
+// already builds (the real agent runtime at :4097, the real GitHub PR/Issue client, the real deploy
+// gate, the real Playwright/code runners) — not a second, parallel set of integrations.
 //
-// This is ADDITIVE + OPT-IN. RunnerDeps.engineFactory (src/server/runner.ts) is only ever consulted
-// when selectEngine(process.env) resolves to "rewritten" — which requires PIPELINE_ENGINE=rewritten
-// to be set explicitly (src/contexts/qa-run-orchestration/composition/pipeline-engine-flag.ts's
-// fail-safe default is "legacy"). With PIPELINE_ENGINE absent, this module is loaded and its
-// factory function is constructed, but `createRewrittenEngineFactory(...)` is NEVER INVOKED — the
-// runner's dispatch takes the legacy `runPipeline` branch exactly as before this file existed.
+// RunnerDeps.engineFactory (src/server/runner.ts) is now REQUIRED — every real caller
+// (src/index.ts, src/cli.ts) supplies this factory, and enqueueTrackedRun throws loudly if it is
+// ever omitted (a boot-time wiring defect, not a silent fallback).
 //
 // This is the REAL production path (buildProduction → real GitHub publish, real durable run
-// history), NOT buildShadow (test/characterization/shadow-run.operator.ts's Task F.2 harness,
-// which always forces the shadow-log route + in-memory history for its own operator-invoked
-// comparison runs). An app's own `qa.shadow: true` config still routes PublishDecisionService to
-// the ShadowLogAdapter here too — see composition-root.ts's wireBridges() "Production publication"
-// comment — so onboarding a new app in shadow mode behaves identically whichever engine ran it.
+// history), NOT buildShadow (used by tests/operator scripts, which always force the shadow-log
+// route + in-memory history). An app's own `qa.shadow: true` config still routes
+// PublishDecisionService to the ShadowLogAdapter here too — see composition-root.ts's
+// wireBridges() "Production publication" comment — so onboarding a new app in shadow mode behaves
+// identically.
 //
 // Faithful port of qa-engine/test/characterization/shadow-run.operator.ts's buildCompositionConfig
 // (the FIRST and, until this file, ONLY place the AppConfig→CompositionConfig mapping was written —

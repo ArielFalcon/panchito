@@ -20,13 +20,12 @@ import { handleMaintainerApi, recordIncident, getMaintainerStatus, getIncidents 
 import { getRecord, listRecords, currentRun, updateRecord, interruptedRecords, continuationDepth, MAX_CONTINUATION_DEPTH, listLearningRules, loadScorecard, loadCurriculum, listRunOutcomes, getRunOutcome, getAgentTurns, computeTelemetryAnalysis } from "./server/history";
 import { enqueueTrackedRun, cancelTrackedRun } from "./server/runner";
 import { createRewrittenEngineFactory } from "./server/rewritten-engine-factory";
-import { defaultPipelineDeps } from "./pipeline";
 import { pruneMirrors, defaultMirrorPruneDeps, getDirectorySize } from "./server/mirror-prune";
 import { buildArtifactBytesMetrics, type ArtifactSizeCache } from "./server/metrics";
 import { createMaintainerRuntime } from "./server/maintainer-runtime";
 import { installHttpDispatcher } from "./util/net";
 import { resolveRef, defaultMirrorDeps } from "./integrations/repo-mirror";
-import { askAssistant, AgentDeps, getOpenSessionCount, withUsageSink, withStallWatchdog } from "./integrations/opencode-client";
+import { askAssistant, AgentDeps, getOpenSessionCount } from "./integrations/opencode-client";
 import { createAgentRuntimeManager } from "./server/agent-runtime";
 import { CodexRuntimeStrategy, OpenCodeRuntimeStrategy } from "./agent-runtime";
 import { appendLog, appendActivity, deleteAppHistory, runVerdictCounts } from "./server/history";
@@ -127,25 +126,11 @@ function currentAgentDeps(): AgentDeps {
   return agentRuntime.facade().deps();
 }
 
-function currentPipelineDeps() {
-  return defaultPipelineDeps({
-    // Forward the per-run usage sink to the facade's AgentDeps so every open() call emits
-    // a UsageSnapshot. The facade forwards opts (including onUsage) via {...opts} spreads
-    // to the underlying runtime strategy, which eventually reaches defaultAgentDeps.open()
-    // where the snapshot is emitted after recordCircuitSuccess(). withUsageSink is the shared
-    // wrapper (also used in defaultPipelineDeps) so the opts.onUsage precedence cannot drift; it
-    // injects onUsage into every open() — including internal callers (explorer, reviewer, etc.).
-    agentDepsFactory: async (onUsage) => withStallWatchdog(withUsageSink(currentAgentDeps(), onUsage)),
-    hasOpenSessions: () => agentRuntime.hasOpenSessions(),
-    agentRuntimeConfig: agentRuntime.facade().config,
-  });
-}
-
-// Plan 7.6 (Part 2) — the rewritten-engine seam (RunnerDeps.engineFactory, src/server/runner.ts).
-// ADDITIVE + OPT-IN: with PIPELINE_ENGINE unset (the default), the runner's dispatch never invokes
-// this factory — it is only reached on the "rewritten" branch. Reuses THIS process's real
-// agentRuntime (currentAgentDeps) instead of building a second AgentRuntimeManager, matching every
-// other collaborator this file already owns (github, deploy-gate, repo-mirror, execute/code-runner).
+// Plan 7.6 (cutover finale) — the rewritten engine is the ONLY engine; RunnerDeps.engineFactory
+// (src/server/runner.ts) is now REQUIRED on every enqueueTrackedRun call below. Reuses THIS
+// process's real agentRuntime (currentAgentDeps) instead of building a second
+// AgentRuntimeManager, matching every other collaborator this file already owns (github,
+// deploy-gate, repo-mirror, execute/code-runner).
 const engineFactory = createRewrittenEngineFactory({ getAgentDeps: currentAgentDeps });
 
 // Auto-maintenance runtime (ARCH-01): the self-deploy path lives in maintainer-runtime.ts; the
@@ -215,7 +200,7 @@ function enqueueApiRun(app: string, sha: string, target: string, mode: RunMode, 
   }
   // Orphan-data cleanup is reconstructed inside enqueueTrackedRun (the single funnel), so
   // every trigger gets it — not just this webhook path.
-  return enqueueTrackedRun(queue, { app, sha, target: target as TestTarget, mode, guidance, shadow, commits, source: "webhook", triggerRepo, baseSha }, { runEvents, pipeline: currentPipelineDeps(), engineFactory });
+  return enqueueTrackedRun(queue, { app, sha, target: target as TestTarget, mode, guidance, shadow, commits, source: "webhook", triggerRepo, baseSha }, { runEvents, engineFactory });
 }
 
 // Orphan-session sweep threshold. Must always exceed the longest possible agent
@@ -494,8 +479,8 @@ const apiDeps: ApiDeps = {
       parentRunId: parentId,
       source: "manual",
       // Honor the active agent runtime (Codex/dual) on continuations, exactly like the
-      // webhook path above — otherwise the runner falls back to static OpenCode deps.
-    }, { runEvents, pipeline: currentPipelineDeps(), engineFactory });
+      // webhook path above.
+    }, { runEvents, engineFactory });
   },
 };
 
