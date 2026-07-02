@@ -470,6 +470,157 @@ test("the rewritten path finalizes the record + publishes run.verdict RunEvents 
   }
 });
 
+// ── Bug fix: rewritten-engine runs left their RunRecord/RunEvents frozen — record.step never
+// advanced past its initial value and /api/runs/:id/events stayed empty, because nothing wired
+// RunQaUseCaseDeps.observer. The runner's own fix is buildRewrittenObserver (this file) +
+// engineFactory's widened 4th (observer) argument. These tests pin: (1) engineFactory receives a
+// live ObserverPort as its 4th argument, and (2) a port that drives that observer mid-run produces
+// the SAME updateRecord + step.changed RunEvent shape the legacy engine's own onStep callback
+// produces — so the TUI/API render identically regardless of which engine is running. ────────────
+
+test("PIPELINE_ENGINE=rewritten — the runner passes a live ObserverPort as engineFactory's 4th argument", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const { port } = fakePort();
+    let receivedObserver: unknown;
+    enqueueTrackedRun(
+      queue,
+      { app: "runner-observer-arg", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
+      {
+        pipeline: stubDeps(),
+        loadApp: cfg,
+        engineFactory: (_appConfig, _namespace, _run, observer) => {
+          receivedObserver = observer;
+          return port;
+        },
+      },
+    );
+    await queue.drain();
+    assert.ok(receivedObserver, "engineFactory must receive a 4th (observer) argument");
+    assert.equal(typeof (receivedObserver as { onStep?: unknown }).onStep, "function");
+    assert.equal(typeof (receivedObserver as { onEvent?: unknown }).onEvent, "function");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("PIPELINE_ENGINE=rewritten — a port that drives ObserverPort.onStep mid-run updates the record's step + publishes step.changed RunEvents live (not just at the final verdict)", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const runEvents = createRunEventStore({ now: () => 1234 });
+    // A port standing in for RewrittenOrchestratorAdapter -> RunQaUseCase: it drives the SAME
+    // observer the runner handed it through a representative phase sequence BEFORE resolving,
+    // exactly as RunQaUseCase.run() now does at each phase boundary.
+    const observingPort: RunPipelinePort = {
+      run: async (input) => {
+        const stepsSeenMidRun = ["gate", "classify", "generate", "validate", "health", "execute"] as const;
+        for (const step of stepsSeenMidRun) {
+          currentObserver?.onStep(step);
+          // Assert the record already reflects this step BEFORE the run finishes — proving the
+          // update is live, not batched until the final verdict.
+          assert.equal(getRecord(id)?.step, step, `record.step must advance to '${step}' while the run is still in flight`);
+        }
+        return {
+          runId: input.runId,
+          app: input.app,
+          sha: input.sha.value,
+          mode: input.mode,
+          target: input.target,
+          verdict: "pass",
+          errorClass: null,
+          gateSignals: { static: true, coverageRatio: null, valueScore: null, reviewerCorrections: [], flaky: false, retries: 0 },
+          rulesRetrieved: [],
+          at: new Date().toISOString(),
+        };
+      },
+    };
+    let currentObserver: { onStep(step: string, detail?: string): void } | undefined;
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-observer-live", sha: "def5678", target: "e2e", mode: "diff", source: "webhook" },
+      {
+        pipeline: stubDeps(),
+        loadApp: cfg,
+        runEvents,
+        engineFactory: (_appConfig, _namespace, _run, observer) => {
+          currentObserver = observer as { onStep(step: string, detail?: string): void };
+          return observingPort;
+        },
+      },
+    );
+    await queue.drain();
+
+    const r = getRecord(id)!;
+    assert.equal(r.status, "done");
+    assert.equal(r.verdict, "pass");
+    assert.equal(r.step, "done", "the record's final step is 'done' (set by the queue callback's own finalize, after the port resolved)");
+
+    const bodies = runEvents.replay(id).map((e) => e.body);
+    const stepEvents = bodies.filter((b): b is Extract<typeof b, { type: "step.changed" }> => b.type === "step.changed");
+    assert.deepEqual(
+      stepEvents.map((e) => e.step),
+      ["gate", "classify", "generate", "validate", "health", "execute"],
+      "every onStep() call the port made mid-run must publish its own step.changed RunEvent, in order — this is the SAME machinery the legacy engine's own onStep callback drives",
+    );
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("PIPELINE_ENGINE=rewritten — ObserverPort.onStep('retry', detail) sets record.stepDetail and record.retrying:true, mirroring the legacy callback's own retrying:step==='retry' convention", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    let currentObserver: { onStep(step: string, detail?: string): void } | undefined;
+    const retryingPort: RunPipelinePort = {
+      run: async (input) => {
+        currentObserver?.onStep("retry", "static-fix round 1/2");
+        assert.equal(getRecord(id)?.retrying, true);
+        assert.equal(getRecord(id)?.stepDetail, "static-fix round 1/2");
+        return {
+          runId: input.runId,
+          app: input.app,
+          sha: input.sha.value,
+          mode: input.mode,
+          target: input.target,
+          verdict: "pass",
+          errorClass: null,
+          gateSignals: { static: true, coverageRatio: null, valueScore: null, reviewerCorrections: [], flaky: false, retries: 1 },
+          rulesRetrieved: [],
+          at: new Date().toISOString(),
+        };
+      },
+    };
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-observer-retry", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
+      {
+        pipeline: stubDeps(),
+        loadApp: cfg,
+        engineFactory: (_appConfig, _namespace, _run, observer) => {
+          currentObserver = observer as { onStep(step: string, detail?: string): void };
+          return retryingPort;
+        },
+      },
+    );
+    await queue.drain();
+    // The queue callback's own happy-path finalize always writes retrying:false — this proves the
+    // mid-run retrying:true was genuinely observed above (asserted synchronously inside run()),
+    // not that it survives to the terminal record.
+    assert.equal(getRecord(id)?.retrying, false);
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
 test("a crashing rewritten port finalizes the record as infra-error (no zombie)", async () => {
   const prev = process.env.PIPELINE_ENGINE;
   process.env.PIPELINE_ENGINE = "rewritten";

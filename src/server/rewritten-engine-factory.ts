@@ -57,7 +57,7 @@
 import { join } from "node:path";
 import type { AppConfig } from "../orchestrator/config-loader";
 import type { AgentDeps } from "../integrations/opencode-client";
-import type { RunPipelinePort } from "@contexts/qa-run-orchestration/application/ports/index.ts";
+import type { RunPipelinePort, ObserverPort } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 import { buildProduction, type CompositionConfig } from "@contexts/qa-run-orchestration/composition/composition-root";
 import { Sha } from "@kernel/sha";
 import type { AgentRole } from "@kernel/agent-role";
@@ -188,6 +188,11 @@ export function buildRewrittenCompositionConfig(
   deps: RewrittenEngineFactoryDeps,
   namespace: string,
   run: { mode: RunMode; guidance?: string },
+  // Bug fix: the PER-RUN ObserverPort (src/server/runner.ts's buildRewrittenObserver) — threaded
+  // straight into CompositionConfig.observer so wireBridges() wires it into RunQaUseCaseDeps.
+  // Optional: a caller that omits it (e.g. a unit test building a config directly) keeps every
+  // onStep() call in RunQaUseCase a no-op, exactly the pre-fix behavior.
+  observer?: ObserverPort,
 ): CompositionConfig {
   const isCode = app.code === true;
   const target: "e2e" | "code" = isCode ? "code" : "e2e";
@@ -387,6 +392,7 @@ export function buildRewrittenCompositionConfig(
     deployGateTimeoutMs: app.dev?.deployTimeoutMs ?? 60000,
 
     ...(deps.historyFilePath ? { historyFilePath: deps.historyFilePath } : {}),
+    ...(observer ? { observer } : {}),
   };
 }
 
@@ -407,12 +413,20 @@ export function buildRewrittenCompositionConfig(
 // The `run` parameter (audit fix, judgment-day) carries the PER-RUN mode/guidance — see
 // buildRewrittenCompositionConfig's own header. Same statelessness contract: nothing here is
 // cached, so two calls with two different `run` values compose two independent configs.
+//
+// The `observer` parameter (bug fix): the runner's PER-RUN ObserverPort (src/server/runner.ts's
+// buildRewrittenObserver) — forwarded straight into buildRewrittenCompositionConfig so the
+// resulting RunPipelinePort's RunQaUseCase actually reports progress back to the RunRecord/
+// RunEvents. Without this 4th argument (or a caller that omits it), record.step never advances
+// past its initial value and /api/runs/:id/events stays empty for the ENTIRE run — this was the
+// root cause: RunnerDeps.engineFactory's signature had no seam for an observer at all, so even
+// though ObserverPort/RunQaUseCaseDeps.observer existed, nothing ever constructed one.
 export function createRewrittenEngineFactory(
   deps: RewrittenEngineFactoryDeps,
-): (appConfig: AppConfig, namespace: string, run: { mode: RunMode; guidance?: string }) => RunPipelinePort {
+): (appConfig: AppConfig, namespace: string, run: { mode: RunMode; guidance?: string }, observer?: ObserverPort) => RunPipelinePort {
   const env = deps.env ?? process.env;
-  return (appConfig: AppConfig, namespace: string, run: { mode: RunMode; guidance?: string }): RunPipelinePort => {
-    const cfg = buildRewrittenCompositionConfig(appConfig, deps, namespace, run);
+  return (appConfig: AppConfig, namespace: string, run: { mode: RunMode; guidance?: string }, observer?: ObserverPort): RunPipelinePort => {
+    const cfg = buildRewrittenCompositionConfig(appConfig, deps, namespace, run, observer);
     return buildProduction(env, cfg);
   };
 }

@@ -20,7 +20,7 @@ import type { RunEventStore } from "./run-events";
 import type { RunEventBody } from "../contract/events";
 import { Sha } from "@kernel/sha";
 import { selectEngine } from "@contexts/qa-run-orchestration/composition/pipeline-engine-flag";
-import type { RunPipelinePort, RunInput } from "@contexts/qa-run-orchestration/application/ports/index.ts";
+import type { RunPipelinePort, RunInput, ObserverPort } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 
 type RunStepEvent = Extract<RunEventBody, { type: "step.changed" }>;
 type RunStep = RunStepEvent["step"];
@@ -82,7 +82,44 @@ export interface RunnerDeps {
   // req.guidance below) — the composition root's own CompositionConfig.mode/guidance feed straight
   // into Generation/Review prompt assembly, so these must reflect the actual requested run mode
   // (diff/complete/exhaustive/manual/context), never a hardcoded literal.
-  engineFactory?: (appConfig: AppConfig, namespace: string, run: { mode: RunMode; guidance?: string }) => RunPipelinePort;
+  //
+  // `observer` (4th param, bug fix): a PER-RUN ObserverPort — see runViaRewrittenEngine's own
+  // buildObserver() below for the exact mapping. The runner builds this once per run (it needs
+  // record.id + deps.runEvents, neither known to the factory closure itself) and threads it
+  // through to whatever CompositionConfig.observer the factory wires into RunQaUseCaseDeps.
+  // OPTIONAL: a factory that ignores the 4th argument keeps behaving exactly as before this fix
+  // (record.step never advances) — this is what made the bug possible in the first place, so every
+  // REAL factory (src/server/rewritten-engine-factory.ts) MUST thread it through.
+  engineFactory?: (
+    appConfig: AppConfig,
+    namespace: string,
+    run: { mode: RunMode; guidance?: string },
+    observer?: ObserverPort,
+  ) => RunPipelinePort;
+}
+
+// Bug fix: rewritten-engine runs left their RunRecord/RunEvents frozen — record.step never
+// advanced past its initial value and /api/runs/:id/events stayed empty, because nothing ever
+// wired RunQaUseCaseDeps.observer (the ObserverPort seam existed but was never consumed on this
+// path). This is the runner's own mapping of ObserverPort.onStep -> updateRecord + runEvents.publish,
+// built PER RUN (needs record.id + deps.runEvents, neither available to the qa-engine composition
+// root) and threaded into engineFactory's 4th argument. Mirrors the legacy runPipeline callback's
+// exact semantics (src/pipeline.ts's onStep param, consumed at the queue callback below):
+//   - updateRecord(record.id, { step, stepDetail: detail, retrying: step === "retry" })
+//   - a "step.changed" RunEvent, EXCEPT this use-case never emits a step outside RunStep's own
+//     vocabulary (RunQaUseCase.onStep calls are already RunStep-typed at the port boundary, so no
+//     "publish" -> "decide" normalization is needed here — that normalization existed only because
+//     the legacy pipeline's own step strings included "publish", which RunStep does not).
+function buildRewrittenObserver(runId: string, runEvents: RunEventStore | undefined): ObserverPort {
+  return {
+    onStep(step: RunStep, detail?: string): void {
+      updateRecord(runId, { step, stepDetail: detail, retrying: step === "retry" });
+      runEvents?.publish(runId, { type: "step.changed", step, detail });
+    },
+    onEvent(body: RunEventBody): void {
+      runEvents?.publish(runId, body);
+    },
+  };
 }
 
 // Maps a RunRequest + record id into the strangler seam's RunInput and drives the injected
@@ -195,13 +232,19 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
       // is this run's id, matching legacy's `opts.runId`. Without this, the rewritten engine's own
       // branch/namespace collided across every run of every app (a static literal).
       const runNamespace = testDataNamespace(appConfig.qa.testDataPrefix, req.sha, record.id);
+      // Bug fix: built PER RUN (needs record.id + deps.runEvents) and threaded into engineFactory's
+      // 4th argument, so the rewritten engine's RunQaUseCase.onStep() calls reach the SAME
+      // updateRecord + RunEvents.publish machinery the legacy branch's own onStep callback (below)
+      // already uses — this is what makes the TUI/API render the rewritten path's progress live
+      // instead of staying frozen until the final verdict.
+      const observer = buildRewrittenObserver(record.id, deps.runEvents);
       const run: QaRunResult =
         engine === "rewritten" && deps.engineFactory
           ? await runViaRewrittenEngine(
               // Audit fix (judgment-day): thread the REQUESTED mode/guidance into the rewritten
               // engineFactory — mirrors the namespace precedent immediately above. Previously the
               // factory hardcoded mode:"diff" internally, silently mis-prompting every non-diff run.
-              deps.engineFactory(appConfig, runNamespace, { mode: req.mode, ...(req.guidance ? { guidance: req.guidance } : {}) }),
+              deps.engineFactory(appConfig, runNamespace, { mode: req.mode, ...(req.guidance ? { guidance: req.guidance } : {}) }, observer),
               req,
               record.id,
               signal,

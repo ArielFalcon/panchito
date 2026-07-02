@@ -18,7 +18,7 @@ import type {
   SetupPort,
 } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 import { BlastRadius } from "@kernel/blast-radius.ts";
-import { ok } from "@kernel/result.ts";
+import { ok, err } from "@kernel/result.ts";
 import type { RunOutcome } from "@kernel/run-outcome.ts";
 
 // RunQaUseCase (Task D.5 — design §5.3(1)): composes Run, RunDecisionService, FixLoop, and the 11
@@ -1415,4 +1415,139 @@ test("KEYSTONE: the SAME diff-mode PASS run WITHOUT input.triggerRepo still thre
   await useCase.run({ ...baseInput, mode: "diff", runId: "keystone-monorepo-control" });
 
   assert.equal(seenDiff, "diff --git a/src/x.ts b/src/x.ts", "a monorepo (non-cross-repo) run must be unaffected by the triggerRepo guard — control case for the test above");
+});
+
+// ── ObserverPort wiring (bug fix): the rewritten engine's RunRecord/RunEvents stayed frozen
+// because RunQaUseCase never called an observer at any phase boundary — ObserverPort existed at
+// the port barrel but nothing in this use-case ever reached for `this.deps.observer`. These tests
+// pin (1) the phase-boundary emission order on a representative happy path, and (2) that an
+// absent observer remains a pure no-op (backward compatible with every pre-existing test/
+// composition above, none of which supply one). ──────────────────────────────────────────────────
+
+function fakeObserver(): { observer: import("@contexts/qa-run-orchestration/application/ports/index.ts").ObserverPort; steps: Array<{ step: string; detail?: string }> } {
+  const steps: Array<{ step: string; detail?: string }> = [];
+  return {
+    observer: {
+      onStep(step, detail) {
+        steps.push({ step, ...(detail !== undefined ? { detail } : {}) });
+      },
+      onEvent() {
+        /* not exercised by these tests — RunQaUseCase never calls onEvent today */
+      },
+    },
+    steps,
+  };
+}
+
+test("ObserverPort: a diff-mode green-pr run emits gate -> classify -> setup -> generate -> validate -> health -> execute -> coverage -> decide -> done, in order", async () => {
+  // stubPorts() wires a default SetupPort (see this file's own stubPorts() above), matching the
+  // scenario this suite's other green-pr pin already exercises — the "setup" step is therefore
+  // expected here too, not a gap.
+  const { ports } = stubPorts();
+  const { observer, steps } = fakeObserver();
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig, observer });
+
+  const out = await useCase.run({ ...baseInput, mode: "diff" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.deepEqual(
+    steps.map((s) => s.step),
+    ["gate", "classify", "setup", "generate", "validate", "health", "execute", "coverage", "decide", "done"],
+  );
+});
+
+test("ObserverPort: the setup phase is SKIPPED (no 'setup' step) when RunQaUseCaseDeps.setup is absent", async () => {
+  const { ports } = stubPorts();
+  const { setup: _unusedSetup, ...portsWithoutSetup } = ports;
+  const { observer, steps } = fakeObserver();
+  const useCase = new RunQaUseCase({ ...portsWithoutSetup, config: baseConfig, observer });
+
+  await useCase.run({ ...baseInput, mode: "diff" });
+
+  assert.deepEqual(
+    steps.map((s) => s.step),
+    ["gate", "classify", "generate", "validate", "health", "execute", "coverage", "decide", "done"],
+  );
+});
+
+test("ObserverPort: a classify-skip emits gate -> classify -> done, matching the legacy's bare-return (no generate/validate/execute)", async () => {
+  const { ports } = stubPorts({ classify: async () => ({ action: "skip", reason: "docs-only change", diff: "" }) });
+  const { observer, steps } = fakeObserver();
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig, observer });
+
+  const out = await useCase.run({ ...baseInput, mode: "diff" });
+
+  assert.equal(out.decision.verdict, "skipped");
+  assert.deepEqual(steps.map((s) => s.step), ["gate", "classify", "done"]);
+});
+
+test("ObserverPort: a failing execute() emits a 'retry' step (fix-loop engaged) before the eventual done", async () => {
+  const { ports } = stubPorts({ execute: async () => ({ verdict: "fail", cases: [], logs: "" }) });
+  const { observer, steps } = fakeObserver();
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig, observer });
+
+  const out = await useCase.run({ ...baseInput, mode: "diff" });
+
+  assert.equal(out.decision.verdict, "fail");
+  assert.ok(steps.some((s) => s.step === "retry"), "a failing execute() must engage the FixLoop, observed as a 'retry' step");
+  assert.equal(steps.at(-1)?.step, "done", "every exit path terminates with a 'done' step");
+  // A fail verdict never reaches "coverage" (ObjectiveSignalPort.measure() only runs on a pass).
+  assert.ok(!steps.some((s) => s.step === "coverage"), "coverage is never measured for a non-pass verdict");
+});
+
+test("ObserverPort: a static-gate repair round emits its own 'retry' step with a round-number detail", async () => {
+  let validateCalls = 0;
+  const { ports } = stubPorts({
+    validate: async () => {
+      validateCalls++;
+      // Fails once, then passes — exercises exactly ONE static-fix repair round.
+      return validateCalls === 1 ? { ok: false, errors: ["unused var"] } : { ok: true, errors: [] };
+    },
+  });
+  const { observer, steps } = fakeObserver();
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig, observer });
+
+  await useCase.run({ ...baseInput, mode: "diff" });
+
+  const retrySteps = steps.filter((s) => s.step === "retry");
+  assert.equal(retrySteps.length, 1);
+  assert.match(retrySteps[0]?.detail ?? "", /static-fix round 1\/2/);
+});
+
+test("ObserverPort: an infra-error entry-gate terminal emits gate -> done only (no classify/generate reached)", async () => {
+  const { ports } = stubPorts({
+    waitUntilServing: async () => err(new Error("DEV did not serve sha within 60000ms")),
+  });
+  const { observer, steps } = fakeObserver();
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig, observer });
+
+  const out = await useCase.run({ ...baseInput, mode: "diff" });
+
+  assert.equal(out.decision.verdict, "infra-error");
+  assert.deepEqual(steps.map((s) => s.step), ["gate", "done"]);
+});
+
+test("ObserverPort: an already-aborted signal short-circuits straight to a single 'done' step (no gate/classify/generate reached)", async () => {
+  const { ports } = stubPorts();
+  const { observer, steps } = fakeObserver();
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig, observer });
+  const controller = new AbortController();
+  controller.abort();
+
+  const out = await useCase.run({ ...baseInput, mode: "diff" }, controller.signal);
+
+  assert.equal(out.decision.verdict, "infra-error");
+  // abortedResult() reuses infraErrorResult()'s shared terminal, which now uniformly emits "done"
+  // on every exit path (mainline, skip, invalid/infra-error) — so a cancelled-before-start run
+  // still reports itself as terminal to any observer, even though it never reached "gate".
+  assert.deepEqual(steps.map((s) => s.step), ["done"]);
+});
+
+test("ObserverPort: an ABSENT observer is a pure no-op — every RunQaUseCaseDeps consumer that predates this fix keeps compiling and behaving identically", async () => {
+  const { ports } = stubPorts();
+  // Deliberately NOT passing `observer` — this is every pre-existing test/composition in this
+  // file and across the codebase today.
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await assert.doesNotReject(useCase.run({ ...baseInput, mode: "diff" }));
 });

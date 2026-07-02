@@ -43,6 +43,7 @@ import type {
   DeployGatePort,
   RunHistoryPort,
   SetupPort,
+  ObserverPort,
 } from "./ports/index.ts";
 import { decide, type RunEvidence } from "../domain/run-decision.service.ts";
 import { RunDecision } from "../domain/run-decision.ts";
@@ -99,6 +100,18 @@ export interface RunQaUseCaseDeps {
   // agent has the fixtures/config" — a throw from setup() propagates to infraErrorResult(), never a
   // code verdict (src/qa/setup.ts's own doc).
   setup?: SetupPort;
+  // [SWAP] absent -> every onStep() call below is a no-op (backward compatible with every
+  // pre-existing composition/test that has not wired an ObserverPort yet — this is exactly why
+  // ObserverPort.onStep/onEvent were never called anywhere before this fix: nothing in this
+  // use-case ever reached for `this.deps.observer`). When present, onStep(step, detail) fires at
+  // each phase boundary this use-case actually crosses, using the SAME step vocabulary the legacy
+  // runPipeline's own onStep callback emits (src/server/runner.ts's RUN_EVENT_STEPS: "gate" |
+  // "classify" | "setup" | "generate" | "validate" | "health" | "execute" | "coverage" | "retry" |
+  // "decide" | "done") so a caller mapping onStep -> RunRecord.step/RunEvents renders identically
+  // regardless of which engine produced it. Only phases this use-case genuinely executes emit a
+  // step — a step the use-case never reaches (e.g. "coverage" on a non-"pass" verdict) is never
+  // fabricated.
+  observer?: ObserverPort;
   config?: Partial<RunQaConfig>;
 }
 
@@ -170,6 +183,7 @@ export class RunQaUseCase {
     }
 
     // Phase: gate (DeployGatePort). Absent -> always serving (static sites / code target [SWAP]).
+    this.deps.observer?.onStep("gate");
     if (this.deps.deployGate) {
       const gateResult = await this.deps.deployGate.waitUntilServing(input.sha);
       if (!isOk(gateResult)) {
@@ -202,6 +216,7 @@ export class RunQaUseCase {
     // behavior this fix introduces; classifyCommit's own action/reason table is untouched.
     let classificationDiff: string | undefined;
     if (input.mode === "diff") {
+      this.deps.observer?.onStep("classify");
       const classification = await this.deps.changeAnalysis.classify(input.sha);
       classificationDiff = classification.diff;
       if (classification.action === "skip") {
@@ -226,6 +241,7 @@ export class RunQaUseCase {
     // verdict — never persisted (matches infraErrorResult()'s own no-persist convention for every
     // other entry-gate-shaped failure).
     if (this.deps.setup) {
+      this.deps.observer?.onStep("setup");
       try {
         await this.deps.setup.setup(workspace.specDir, signal);
       } catch (err) {
@@ -241,6 +257,7 @@ export class RunQaUseCase {
     }
 
     // Phase: generate (GenerationPort).
+    this.deps.observer?.onStep("generate");
     const generated = await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff);
 
     // Agent no-op: approved + zero specs -> skipped (CLAUDE.md invariant: a VALID skipped, never invalid).
@@ -289,6 +306,7 @@ export class RunQaUseCase {
     // pipeline.ts:2269's `result = await generateOnce(...)`) — the LATEST generation attempt's own
     // `approved` flag is what FIX 1's reviewerApprovedFromGeneration (below) must read, not the
     // stale pre-repair `generated` value.
+    this.deps.observer?.onStep("validate");
     let validation = await this.deps.validation.validate(workspace.specDir);
     let lastGenerated = generated;
     let staticFixRounds = 0;
@@ -302,6 +320,9 @@ export class RunQaUseCase {
       }
       staticFixRounds++;
       retries++;
+      // Mirrors the legacy runner's own `retrying: step === "retry"` signal (src/server/
+      // runner.ts) — a static-fix repair round IS a retry from the observer's point of view.
+      this.deps.observer?.onStep("retry", `static-fix round ${staticFixRounds}/${MAX_STATIC_FIX_ROUNDS}`);
       // "Dynamic diff" fix: the repair regeneration reuses the SAME classificationDiff, not a
       // dropped/empty value — a repair round must see the same real change context the initial
       // generate() call did.
@@ -361,6 +382,7 @@ export class RunQaUseCase {
     // as a side effect into this closure variable rather than widening the return type — the LAST
     // health-check failure's message is what the mid-run terminal below (and any FixLoop-internal
     // health check) can report.
+    this.deps.observer?.onStep("health");
     let lastHealthCheckError: string | undefined;
     const devHealthy = async (): Promise<boolean> => {
       if (!this.deps.deployGate) return true;
@@ -417,6 +439,9 @@ export class RunQaUseCase {
     // which stubs validate() to `ok:true` uniformly) and treats a context build's successful
     // generation as an immediate "pass" with zero cases (nothing was executed, so there is nothing
     // to report per-case) — never fabricating a Playwright run.
+    if (input.mode !== "context") {
+      this.deps.observer?.onStep("execute");
+    }
     let run = input.mode === "context"
       ? { verdict: "pass" as const, cases: [] as QaCase[], logs: generated.note ?? "" }
       : await this.deps.execution.execute(workspace.specDir, signal);
@@ -431,6 +456,7 @@ export class RunQaUseCase {
     // SAME shared counter the FixLoop below adds to — matching the legacy's single module-scope
     // `retries` variable, incremented by both loops.
     if (run.verdict === "fail") {
+      this.deps.observer?.onStep("retry", "fix-loop engaged after a failing execute()");
       const fixLoopExecution: FixLoopExecutionPort = {
         execute: async () => {
           const r = await this.deps.execution.execute(workspace.specDir, signal);
@@ -503,6 +529,7 @@ export class RunQaUseCase {
     // fabricated 0.
     let valueScore: number | null = null;
     if (run.verdict === "pass") {
+      this.deps.observer?.onStep("coverage");
       // "Dynamic diff" precedent (classificationDiff, above): change-coverage is measured ONLY for a
       // per-commit DIFF run (src/pipeline.ts:2912's own gate: `mode === "diff" && ... && !triggerService`)
       // — classificationDiff is undefined outside diff mode (classify() is only called in diff mode,
@@ -578,7 +605,11 @@ export class RunQaUseCase {
       reviewerApprovedForOutcome = reviewerApproved;
     }
 
-    // Phase: decide (RunDecisionService).
+    // Phase: decide (RunDecisionService). Mirrors the legacy runner's own normalization
+    // (src/server/runner.ts: `step === "publish" ? "decide" : step`) — this use-case's publish
+    // phase (below) never emits its OWN step; "decide" covers both, matching the legacy's single
+    // observable step for the decide+publish pair.
+    this.deps.observer?.onStep("decide");
     const evidence: RunEvidence = {
       verdict: run.verdict,
       generating,
@@ -646,6 +677,7 @@ export class RunQaUseCase {
       await this.deps.learning.fold(mainlineOutcome);
     }
 
+    this.deps.observer?.onStep("done");
     return {
       decision,
       errorClass,
@@ -742,6 +774,7 @@ export class RunQaUseCase {
     // it never reaches persistOutcome at all, so it never computes a reviewerApproved value either).
     reviewerApprovedForOutcome?: boolean,
   ): RunQaResult {
+    this.deps.observer?.onStep("done");
     return {
       decision: RunDecision.of("skipped", "none"),
       // FIX 4 (judgment-day D.7): "skipped" always resolves errorClass:null via the taxonomy
@@ -768,6 +801,7 @@ export class RunQaUseCase {
     if (note !== undefined) {
       console.error("[qa] infra-error terminal:", note);
     }
+    this.deps.observer?.onStep("done");
     return {
       decision: RunDecision.of("infra-error", "none"),
       // FIX 4 (judgment-day D.7): the entry-gate infra-error never persists (matches the legacy,
@@ -856,6 +890,7 @@ export class RunQaUseCase {
         await this.deps.learning.fold(outcome);
       }
     }
+    this.deps.observer?.onStep("done");
     return {
       decision,
       // FIX 2 (judgment-day D.7 batch 2): when skipPersist is true (the context-mode invalid path),

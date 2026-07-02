@@ -129,6 +129,40 @@ test("buildRewrittenCompositionConfig leaves guidance absent when the run param 
   assert.equal(config.guidance, undefined);
 });
 
+// ── Bug fix: rewritten-engine runs left their RunRecord/RunEvents frozen because nothing wired
+// RunQaUseCaseDeps.observer through this factory. buildRewrittenCompositionConfig's 5th (observer)
+// argument and createRewrittenEngineFactory's own 4th (observer) argument close that gap — these
+// tests pin the threading, not the observer's own behavior (covered in runner.test.ts). ───────────
+
+test("buildRewrittenCompositionConfig threads the passed observer into CompositionConfig.observer", () => {
+  const app = cfg("factory-observer-present");
+  const observer = { onStep: () => {}, onEvent: () => {} };
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" }, observer);
+  assert.equal(config.observer, observer, "the SAME observer instance must reach CompositionConfig, not a copy or a wrapper");
+});
+
+test("buildRewrittenCompositionConfig leaves observer absent when the caller omits it (backward compatible with every pre-existing call site)", () => {
+  const app = cfg("factory-observer-absent");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.equal(config.observer, undefined);
+});
+
+test("createRewrittenEngineFactory forwards its 4th (observer) argument to buildRewrittenCompositionConfig on every call", () => {
+  const app = cfg("factory-observer-e2e");
+  // createRewrittenEngineFactory reads PIPELINE_ENGINE via buildProduction internally (env
+  // defaults to process.env) — mirrors this file's own established pattern (e.g. the
+  // "createRewrittenEngineFactory's port throws..." test below) of passing env explicitly so the
+  // ambient process.env never leaks into the assertion.
+  const factory = createRewrittenEngineFactory({ getAgentDeps: stubAgentDeps, env: { PIPELINE_ENGINE: "rewritten" } });
+  const observer = { onStep: () => {}, onEvent: () => {} };
+  // buildProduction(env, cfg) constructs a RewrittenOrchestratorAdapter wrapping RunQaUseCase —
+  // the adapter has no public read-back of its own deps, so this test asserts the OBSERVABLE
+  // consequence: the factory call itself never throws when an observer is supplied (proving the
+  // 4th argument's type threads correctly end-to-end), matching this suite's own "construction
+  // must not throw" style used by the other factory tests in this file.
+  assert.doesNotThrow(() => factory(app, "qa-bot-abc1234-run1", { mode: "diff" }, observer));
+});
+
 test("buildRewrittenCompositionConfig selects the code target + Stryker oracle for a code:true app", () => {
   const app: AppConfig = { ...cfg("factory-code"), code: true, dev: undefined };
   const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-def5678-run2", { mode: "diff" });

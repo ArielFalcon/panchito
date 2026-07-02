@@ -27,7 +27,7 @@
 // adapters" — not "constructs every leaf IO integration from scratch".
 import type { Sha } from "@kernel/sha.ts";
 import type { RunMode, TestTarget } from "@kernel/run-mode.ts";
-import type { RunPipelinePort } from "../application/ports/index.ts";
+import type { RunPipelinePort, ObserverPort } from "../application/ports/index.ts";
 import { RewrittenOrchestratorAdapter, type RewrittenOrchestratorAdapterDeps } from "../infrastructure/rewritten-orchestrator.adapter.ts";
 import { LegacyPipelineAdapter, type LegacyRunner } from "../infrastructure/legacy-pipeline.adapter.ts";
 import { selectEngine } from "./pipeline-engine-flag.ts";
@@ -163,6 +163,17 @@ export interface CompositionConfig {
   // path is given (falls back to in-memory otherwise); buildShadow ALWAYS forces in-memory
   // regardless of this field (no side effect on the real history store during a shadow run).
   historyFilePath?: string;
+
+  // ObserverPort collaborator (bug fix: rewritten-engine runs left their RunRecord/RunEvents
+  // frozen — record.step never advanced and /api/runs/:id/events stayed empty, because nothing
+  // ever wired RunQaUseCaseDeps.observer). OPTIONAL: absent -> RunQaUseCase's onStep() calls are
+  // all no-ops (backward compatible with every composition built before this field existed,
+  // including every existing test that constructs a CompositionConfig without an observer). The
+  // PER-RUN observer (which needs the live RunRecord id + RunEventStore) is built by the caller
+  // (src/server/runner.ts's runViaRewrittenEngine) and threaded in here — this composition root
+  // has no RunRecord/RunEventStore concept of its own (that is root src/'s concern, per CLAUDE.md
+  // "App-specificity lives only in config/; nothing app-specific in src/... [qa-engine]").
+  observer?: ObserverPort;
 }
 
 const DEFAULT_DEPLOY_GATE_INTERVAL_MS = 2000;
@@ -284,6 +295,7 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
     deployGate,
     runHistory,
     ...(setup ? { setup } : {}),
+    ...(cfg.observer ? { observer: cfg.observer } : {}),
     config: {
       needsReview: cfg.needsReview,
       shadow: cfg.shadow,
