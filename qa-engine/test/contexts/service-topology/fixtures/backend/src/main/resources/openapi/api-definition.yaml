@@ -1,0 +1,25 @@
+openapi: "3.0.3"
+info:
+  title: Orders API
+  version: "1.0"
+paths:
+  /orders:
+    get:
+      operationId: listOrders
+      summary: List all orders
+      responses:
+        "200":
+          description: OK
+  /orders/{id}:
+    get:
+      operationId: getOrderById
+      summary: Get a single order
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK

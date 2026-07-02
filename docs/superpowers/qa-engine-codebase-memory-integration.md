@@ -347,7 +347,71 @@ Each connection technology is a **strategy/adapter** behind that port:
     back-contract completeness, not resolver capability** (restaurants, 11 ops → 7 clean links; users,
     1 op → mostly drift).
 - `GrpcResolver`, `EventTopicResolver` (NATS/Kafka) — **future**: a new adapter, **zero domain
-  change**.
+  change**. (Discovery 2026-06-30: `nname`'s microservices talk ONLY via NATS domain events — no
+  Feign/RestTemplate/HTTP between them — so the real BE↔BE dependencies of `nname` are **async**; the
+  `EventTopicResolver` is where they surface, and it too must be config-driven per the profile below.)
+
+  > **Design note — retired coupled spike (2026-07-01).** An `EventTopicResolver` was spiked to
+  > completion (adapter + 9 tests + fixtures) and then **removed from the tree**, because it (a)
+  > hardcoded `nname`'s messaging plumbing in the engine core (`ListenerMessageDelegate`,
+  > `DomainEventSubscriber<T>`, `publishGenericMessage` — names invented by `nname`, *not* NATS
+  > primitives), breaching invariant #1 harder than the HTTP resolver does; (b) was out of sequence —
+  > the HTTP/OpenAPI path must be made config-driven first, to establish the profile-driven mould; and
+  > (c) carried a real bug (enclosing-class attribution grabbed the *first* class in the file, not the
+  > publishing one — the exact problem the HTTP resolver already solves with a tree-sitter method walk).
+  > The `UnmatchedEvent` VO and the `unmatchedEvents?` result bucket were removed with it (no producer
+  > left); `ServiceLink.transport` keeps `"event"` in its union, so the domain seam stays open.
+  > **Distilled design, preserved for the config-driven rebuild:** scan for *publishers* (a class that
+  > emits a named contract event) and *listeners* (a class that consumes a named contract event); join
+  > by event name — exact match `1.0`, domain/model name-stem fallback `0.7`; report publishers/listeners
+  > with no counterpart as drift-like signal. The concrete detection patterns (listener base class,
+  > publish call-site shape, file extension) MUST come from the `transport: event` `BoundaryProfile`, never
+  > the core. Rebuild it by following the HTTP resolver's config-driven mould (sequence step 1), not before.
+
+#### ⚠️ Agnosticism (invariant #1) — the resolver must NOT hardcode any project's patterns
+
+**The current `OpenApiHttpResolver` violates this.** It hardcodes `nname`'s patterns in the engine core:
+`SERVICE_PREFIX_RE = /name-([a-z0-9-]+)-api/`, `OPENAPI_RELATIVE_PATH = "src/main/resources/openapi/api-definition.yaml"`,
+`CALL_RE = /this\.rest\.(get|post|…)/`, and the `ms-name-{service}` repo→service derivation. That makes
+it a `NnameOpenApiResolver`, not a generic one — a breach of *"nothing app-specific in the engine core;
+app-specificity lives only in `config/`."* **Fix: parameterize the resolver by a `BoundaryProfile` from
+`app-catalog` config. `nname` becomes one config, not code.**
+
+```yaml
+# config/apps/<app>.yaml — the app declares its pattern; the core holds zero app literals
+boundaries:
+  - transport: http
+    frontFiles: "**/*.api.ts"                    # which front files to scan for egress
+    frontCallSite: angular-rest-client           # NAMED call-site pattern from the core catalog
+    servicePrefixTemplate: "name-{service}-api"  # how the target service is encoded in the URL
+    openApiPath: "src/main/resources/openapi/api-definition.yaml"  # ingress spec location, per repo
+    serviceRepoTemplate: "ms-name-{service}"     # how a repo slug maps to a service name
+```
+
+```ts
+// service-topology — domain
+export interface BoundaryProfile {
+  transport: "http" | "event" | "rpc";
+  frontFiles: string;             // glob
+  frontCallSite: string;          // key into the in-core CallSiteCatalog
+  servicePrefixTemplate: string;  // "name-{service}-api" → compiled to extract {service} + resource
+  openApiPath: string;            // ingress contract location, per backend repo
+  serviceRepoTemplate: string;    // "ms-name-{service}" → repo slug → service name
+}
+```
+
+Two requirements, satisfied:
+
+1. **Any project with THIS pattern (OpenAPI + service-prefix) works with no code change** — it just
+   declares its profile. Templates use `{service}` (not raw regex in YAML — the resolver compiles the
+   template to a matcher). The **`frontCallSite` is a NAMED entry** in a small in-core `CallSiteCatalog`
+   (`angular-rest-client` = `this.rest.{verb}(...)`, `angular-httpclient` = `http.{verb}(...)`, `axios`,
+   `fetch`, …). A new front convention = one catalog entry (code), referenced by name from config; the
+   catalog is the *only* place a call-site shape lives, so the resolver core stays literal-free.
+2. **Future different patterns extend cleanly** — gRPC, events (the `nname` NATS case), direct
+   HttpClient are new strategies/catalog entries behind the same `ServiceBoundaryResolverPort`, each
+   config-driven by its own `BoundaryProfile`. The composition root builds one strategy per `boundaries[]`
+   entry and wires them into the composite.
 
 Selection is by config, via a composite that mirrors `CoverageCollectorAdapter`'s fail-open pattern
 (per-collector timeout + error isolation, verified against the real adapter in
@@ -721,6 +785,15 @@ PR-blocking decision until it has earned it through measured calibration.
 ---
 
 ## 11. Open risks / PoC-gated
+
+- **Agnosticism gap — the resolver hardcodes `nname`'s patterns (the #1 thing to fix next).** The
+  implemented `OpenApiHttpResolver` embeds `nname`-specific literals in the engine core
+  (`SERVICE_PREFIX_RE = /name-…-api/`, `OPENAPI_RELATIVE_PATH`, `CALL_RE = this.rest.{verb}`,
+  `ms-name-{service}` repo→service), violating invariant #1 ("nothing app-specific in the core").
+  **Next step, BEFORE wiring / transitivity / async: refactor to the config-driven `BoundaryProfile`
+  (§6.2)** — all app-specific patterns move to `app-catalog` config; `nname` becomes one profile, not
+  code; the `frontCallSite` catalog is the extension seam. Acceptance: the E2E still resolves the 11
+  `nname` links with the profile loaded from config (proving the core carries no `nname` literal).
 
 - **Resolver yield — VALIDATED (was the #1 open risk).** The spike (2026-06-27) resolved **10
   deterministic `ServiceLink`s** over the real `nname` system vs the tool's **0**, plus 11 FE↔BE

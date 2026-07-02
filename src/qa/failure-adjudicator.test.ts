@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 // They drive the implementation of failure-adjudicator.ts.
 import {
   adjudicate,
+  classifyRuntimeErrors,
   ADJ_CLASS,
   ADJ_ACTION,
   ADJ_CONFIDENCE,
@@ -29,6 +30,7 @@ function base(): AdjudicatorEvidence {
     objectiveSource: [],
     failingFiles: [],
     httpStatuses: [], // D3: per-failed-case attributed 5xx statuses (undefined = absent for that case)
+    runtimeErrorsByCase: [], // Feature B: per-failed-case captured console/pageerror events (empty = none captured)
   };
 }
 
@@ -473,4 +475,228 @@ test("T6/D3-mixed-b: genuine correlated-5xx + co-failing locator-defect → app_
   assert.equal(v.confidence, ADJ_CONFIDENCE.HIGH);
   assert.equal(v.action, ADJ_ACTION.BREAK_ISSUE);
   assert.match(v.reason, /500/, "the reason must include the 5xx status for the human triager");
+});
+
+// ── Feature B: classifyRuntimeErrors — pure classifier ────────────────────────
+// Project-agnostic: only strong framework/uncaught signals set appDefect=true. Conservative —
+// benign resource-load noise (401/403/404, warnings, favicon) must NEVER set appDefect.
+
+test("classifyRuntimeErrors: a pageerror (uncaught JS exception) → appDefect=true", () => {
+  const result = classifyRuntimeErrors([{ type: "pageerror", text: "TypeError: Cannot read properties of undefined (reading 'foo')" }]);
+  assert.equal(result.appDefect, true, "any pageerror is an uncaught exception → appDefect");
+  assert.ok(result.reasons.length > 0, "reasons must explain why appDefect fired");
+});
+
+test("classifyRuntimeErrors: Angular NG0100-style error code in console.error → appDefect=true", () => {
+  const result = classifyRuntimeErrors([{ type: "error", text: "ERROR Error: NG0100: ExpressionChangedAfterItHasBeenCheckedError" }]);
+  assert.equal(result.appDefect, true, "an NG#### Angular error code is a framework-error signature");
+});
+
+test("classifyRuntimeErrors: Angular zone 'ERROR Error:' prefix → appDefect=true", () => {
+  const result = classifyRuntimeErrors([{ type: "error", text: "ERROR Error: Uncaught (in promise): Icon shopping-cart could not be found" }]);
+  assert.equal(result.appDefect, true, "the Angular zone 'ERROR Error:' prefix is a framework-error signature");
+});
+
+test("classifyRuntimeErrors: 'Unhandled Promise rejection' → appDefect=true", () => {
+  const result = classifyRuntimeErrors([{ type: "error", text: "Unhandled Promise rejection: NetworkError" }]);
+  assert.equal(result.appDefect, true);
+});
+
+test("classifyRuntimeErrors: a lone 401 'Failed to load resource' → appDefect=false (benign noise)", () => {
+  const result = classifyRuntimeErrors([{ type: "error", text: "Failed to load resource: the server responded with a status of 401 ()" }]);
+  assert.equal(result.appDefect, false, "a resource-load failure is benign noise, not a framework error");
+  assert.equal(result.reasons.length, 0);
+});
+
+test("classifyRuntimeErrors: a lone 403/404 'Failed to load resource' → appDefect=false (benign noise)", () => {
+  const r403 = classifyRuntimeErrors([{ type: "error", text: "Failed to load resource: the server responded with a status of 403 (Forbidden)" }]);
+  const r404 = classifyRuntimeErrors([{ type: "error", text: "Failed to load resource: the server responded with a status of 404 (Not Found)" }]);
+  assert.equal(r403.appDefect, false);
+  assert.equal(r404.appDefect, false);
+});
+
+test("classifyRuntimeErrors: favicon 404 + generic network failure → appDefect=false", () => {
+  const result = classifyRuntimeErrors([
+    { type: "error", text: "GET http://localhost/favicon.ico 404 (Not Found)" },
+    { type: "error", text: "Failed to load resource: net::ERR_CONNECTION_REFUSED" },
+  ]);
+  assert.equal(result.appDefect, false, "favicon/network-load noise must never set appDefect");
+});
+
+test("classifyRuntimeErrors: a warning-level console entry → appDefect=false", () => {
+  const result = classifyRuntimeErrors([{ type: "warning", text: "Deprecation warning: some API is deprecated" }]);
+  assert.equal(result.appDefect, false, "warnings are not framework errors");
+});
+
+test("classifyRuntimeErrors: empty input → appDefect=false, reasons=[]", () => {
+  const result = classifyRuntimeErrors([]);
+  assert.equal(result.appDefect, false);
+  assert.deepEqual(result.reasons, []);
+});
+
+test("classifyRuntimeErrors: a mix of benign noise + ONE framework error → appDefect=true", () => {
+  const result = classifyRuntimeErrors([
+    { type: "error", text: "Failed to load resource: the server responded with a status of 404 (Not Found)" },
+    { type: "error", text: "GET http://localhost/favicon.ico 404 (Not Found)" },
+    { type: "error", text: "ERROR Error: NG0303: Can't bind to 'ngModel'" },
+  ]);
+  assert.equal(result.appDefect, true, "one genuine framework error among benign noise must still set appDefect");
+});
+
+test("classifyRuntimeErrors: a bare 'Error:' console string (no uncaught/framework signature) → appDefect=false", () => {
+  // Safe-direction (cardinal): a bare `console.error("Error: ...")` string is NOT a reliable app-defect
+  // signal — apps routinely log HANDLED errors this way. Matching it would let benign logging mask a
+  // real generated-test defect (Rule 2.6 routes ANY appDefect case straight to app_defect→Issue). A
+  // GENUINELY uncaught error (React or otherwise) arrives as a `pageerror` and IS caught (see the
+  // pageerror test above); a boundary-caught / merely-logged "Error:" is a deliberate false-negative.
+  const result = classifyRuntimeErrors([{ type: "error", text: "Error: Objects are not valid as a React child (found: object with keys {a, b})" }]);
+  assert.equal(result.appDefect, false, "a bare logged 'Error:' string is benign logging, not a framework/uncaught signal");
+});
+
+test("classifyRuntimeErrors: a handled app 'Error:' log on a failing run → appDefect=false (no masking)", () => {
+  // The masking guard: a failing test (a real generated-test defect) whose page merely logged a
+  // handled error must NOT be misclassified as an app defect and steal the Issue from the real cause.
+  const result = classifyRuntimeErrors([{ type: "error", text: "Error: could not initialize the recommendations widget (using cached data)" }]);
+  assert.equal(result.appDefect, false);
+  assert.equal(result.reasons.length, 0);
+});
+
+test("classifyRuntimeErrors: 'Uncaught' console text (non-pageerror) → appDefect=true", () => {
+  const result = classifyRuntimeErrors([{ type: "error", text: "Uncaught TypeError: x is not a function" }]);
+  assert.equal(result.appDefect, true);
+});
+
+// ── Feature B: adjudicator Rule 2.6 — runtime errors → app_defect ─────────────
+// Sits BELOW runner_infra/dev_infra/the 5xx rule (Rule 2.5) and ABOVE isLikelyRealBug (Rule 3):
+// a framework-level runtime error is high-confidence app evidence even without a value-mismatch
+// failure detail — this is the whole point of Feature B (jhipster's FontAwesome NG error broke
+// the app silently; the E2E failure detail was a plain selector-count timeout, no value mismatch).
+
+test("Rule 2.6: a pageerror on a failing case → app_defect/high/break-issue", () => {
+  const ev: AdjudicatorEvidence = {
+    ...base(),
+    allUnique: false,
+    failureDetails: ["Error: expect(fields).toHaveCount(4) failed\nReceived: 0"],
+    failureClasses: ["value-mismatch"],
+    httpStatuses: [],
+    runtimeErrorsByCase: [[{ type: "pageerror", text: "TypeError: Cannot read properties of undefined" }]],
+  };
+  const v = adjudicate(ev);
+  assert.equal(v.class, ADJ_CLASS.APP_DEFECT, "a pageerror must route the failure to app_defect");
+  assert.equal(v.confidence, ADJ_CONFIDENCE.HIGH);
+  assert.equal(v.action, ADJ_ACTION.BREAK_ISSUE);
+});
+
+test("Rule 2.6: an Angular framework console.error on a failing case → app_defect", () => {
+  const ev: AdjudicatorEvidence = {
+    ...base(),
+    failureDetails: ["Error: expect(locator).toBeVisible() failed — timed out"],
+    failureClasses: ["locator"],
+    httpStatuses: [],
+    runtimeErrorsByCase: [[{ type: "error", text: "ERROR Error: Icon shopping-cart could not be found" }]],
+  };
+  const v = adjudicate(ev);
+  assert.equal(v.class, ADJ_CLASS.APP_DEFECT);
+  assert.equal(v.action, ADJ_ACTION.BREAK_ISSUE);
+  assert.match(v.reason, /runtime error/i, "the reason must mention the runtime-error evidence");
+});
+
+test("Rule 2.6: benign console noise only (no framework signature) → does NOT force app_defect", () => {
+  const ev: AdjudicatorEvidence = {
+    ...base(),
+    allUnique: false,
+    failureDetails: ["Error: expect(locator).toBeVisible() failed"],
+    failureClasses: ["locator"],
+    absentKeysCount: 1,
+    gateSpend: true,
+    httpStatuses: [],
+    runtimeErrorsByCase: [[{ type: "error", text: "Failed to load resource: the server responded with a status of 401 ()" }]],
+  };
+  const v = adjudicate(ev);
+  assert.notEqual(v.class, ADJ_CLASS.APP_DEFECT, "benign resource-load noise must never force app_defect");
+  assert.equal(v.class, ADJ_CLASS.GENERATED_TEST_DEFECT);
+  assert.equal(v.action, ADJ_ACTION.CONTINUE);
+});
+
+test("Rule 2.6: empty runtimeErrorsByCase (capture disabled/missed) → verdict unchanged from today", () => {
+  const ev: AdjudicatorEvidence = {
+    ...base(),
+    allUnique: true,
+    failureDetails: ["Error: expect(received).toBe(expected)\nExpected: 'Alice'\nReceived: 'Bob'"],
+    failureClasses: ["value-mismatch"],
+    httpStatuses: [],
+    runtimeErrorsByCase: [],
+  };
+  const v = adjudicate(ev);
+  // isLikelyRealBug (Rule 3) still fires on its own merits — Rule 2.6 must be a strict no-op here.
+  assert.equal(v.class, ADJ_CLASS.APP_DEFECT);
+  assert.doesNotMatch(v.reason, /runtime error/i, "must take the isLikelyRealBug path, not the runtime-error path");
+});
+
+test("Rule 2.6: runner_infra still wins over a co-present runtime error (Rule 1 beats Rule 2.6)", () => {
+  const infraDetail = "browserType.launch: Executable doesn't exist at path";
+  const ev: AdjudicatorEvidence = {
+    ...base(),
+    failureDetails: [infraDetail],
+    failureClasses: ["other"],
+    httpStatuses: [],
+    runtimeErrorsByCase: [[{ type: "pageerror", text: "TypeError: boom" }]],
+  };
+  const v = adjudicate(ev);
+  assert.equal(v.class, ADJ_CLASS.RUNNER_INFRA, "Rule 1 (runner_infra) must win over Rule 2.6");
+});
+
+test("Rule 2.6: dev_infra still wins over a co-present runtime error (Rule 2 beats Rule 2.6)", () => {
+  const ev: AdjudicatorEvidence = {
+    ...base(),
+    devHealthy: false,
+    failureDetails: ["some error"],
+    failureClasses: ["other"],
+    httpStatuses: [],
+    runtimeErrorsByCase: [[{ type: "pageerror", text: "TypeError: boom" }]],
+  };
+  const v = adjudicate(ev);
+  assert.equal(v.class, ADJ_CLASS.DEV_INFRA, "Rule 2 (dev_infra) must win over Rule 2.6");
+});
+
+test("Rule 2.6: the 5xx rule (2.5) still wins/co-fires over a runtime error — reason mentions the 5xx path", () => {
+  const ev: AdjudicatorEvidence = {
+    ...base(),
+    failureDetails: ["Error: expect(locator).toBeVisible() failed"],
+    failureClasses: ["locator"],
+    httpStatuses: [500],
+    runtimeErrorsByCase: [[{ type: "pageerror", text: "TypeError: boom" }]],
+  };
+  const v = adjudicate(ev);
+  assert.equal(v.class, ADJ_CLASS.APP_DEFECT);
+  assert.match(v.reason, /5xx|backend returned/i, "Rule 2.5 (5xx) precedes Rule 2.6 — reason must reflect the 5xx path");
+});
+
+test("Rule 2.6: mixed cases — one clean case + one runtime-error case → app_defect (deliberate .some choice, mirrors Rule 2.5)", () => {
+  const ev: AdjudicatorEvidence = {
+    ...base(),
+    failureDetails: [
+      "Error: expect(locator).toHaveText() failed — Expected: 'Welcome', Received: ''",
+      "Error: expect(fields).toHaveCount(4) failed\nReceived: 0",
+    ],
+    failureClasses: ["locator", "value-mismatch"],
+    httpStatuses: [],
+    runtimeErrorsByCase: [[], [{ type: "pageerror", text: "TypeError: boom" }]],
+  };
+  const v = adjudicate(ev);
+  assert.equal(v.class, ADJ_CLASS.APP_DEFECT, "ONE case with a genuine runtime error routes the whole run to app_defect");
+  assert.equal(v.action, ADJ_ACTION.BREAK_ISSUE);
+});
+
+test("Rule 2.6: never fires in code mode (isCode=true skips runtime-error evidence entirely)", () => {
+  const ev: AdjudicatorEvidence = {
+    ...base(),
+    isCode: true,
+    failureDetails: ["some test failure"],
+    failureClasses: ["other"],
+    httpStatuses: [],
+    runtimeErrorsByCase: [[{ type: "pageerror", text: "TypeError: boom" }]],
+  };
+  const v = adjudicate(ev);
+  assert.notEqual(v.class, ADJ_CLASS.APP_DEFECT, "code mode has no browser — runtime errors must never apply");
 });

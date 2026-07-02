@@ -23,6 +23,23 @@ export const DEFAULT_E2E_INSTALL_TIMEOUT_MS = 600_000; // 10 min
 // existing repo's fixtures.ts means the block was already injected.
 export const FAILURE_CAPTURE_MARKER = ">>> qa-failure-capture (system-owned: do not edit) >>>";
 
+// Ownership marker used by ensurePlaywrightEnvKeys to recognize an already-onboarded
+// repo's e2e/playwright.config.ts as a (possibly older) unmodified copy of the seed —
+// see config/e2e/playwright.config.ts's header comment for the full rationale. Unlike
+// fixtures.ts (whose repairs are append-only), playwright.config.ts is a single inline
+// `export default defineConfig({...})` call: there is no block to append that would
+// retroactively mutate the exported object, so the repair here is whole-file replacement,
+// gated on this marker so a customized config is never overwritten.
+export const PLAYWRIGHT_CONFIG_SEED_MARKER = "qa-playwright-config-seed";
+
+// The managed env-passthrough keys the seed's playwright.config.ts carries. Repos
+// onboarded before a key was added to the seed never receive it (bootstrap only runs
+// once, on first onboard) — ensurePlaywrightEnvKeys checks for BOTH literal key names
+// to decide whether a repair is needed. Kept as a simple substring check (not AST
+// parsing — too fragile for a config file the repo may reformat) against the managed
+// keys' exact source text in the current seed.
+const PLAYWRIGHT_CONFIG_MANAGED_KEYS = ["actionTimeout", "testIdAttribute"] as const;
+
 // The afterEach block injected into existing repos' e2e/fixtures.ts. Not injected
 // into new onboards (the seed already carries it). Append-only: prepended newline
 // so there is always a blank separator from any agent-written lines above.
@@ -42,12 +59,32 @@ export const FAILURE_CAPTURE_BLOCK = `
 // a CommonJS-style synchronous load is not defined in this native-ESM module
 // ("type":"module") and would throw a ReferenceError that the catch would swallow.
 let errorResponses = [];
+// Feature B (app-defect detection): browser console \`error\`-level entries and uncaught \`pageerror\`
+// exceptions observed during the current test. Reset per-test (mirrors errorResponses) so a reused
+// page never cross-attributes a PRIOR test's runtime errors to the current one. Best-effort: the
+// orchestrator's classifyRuntimeErrors (src/qa/failure-adjudicator.ts) turns this into a diagnostic
+// signal ONLY — it never blocks or masks a real generated-test defect (see that module's doc).
+let runtimeErrors = [];
 test.beforeEach(async ({ page }) => {
   if (!process.env.QA_FAILURE_CAPTURE_DIR) return; // no-op when capture is disabled (zero overhead)
   errorResponses = [];                               // reset unconditionally so reused pages never cross-attribute
+  runtimeErrors = [];                                 // Feature B: same per-test reset discipline
   try {
     page.on('response', (r) => {
       try { const s = r.status(); if (s >= 400) errorResponses.push({ url: r.url(), status: s, resourceType: r.request().resourceType() }); } catch {}
+    });
+  } catch {}
+  try {
+    page.on('console', (msg) => {
+      try {
+        if (msg.type() !== 'error') return; // only error-level; warnings/logs are not runtime evidence
+        runtimeErrors.push({ type: 'error', text: msg.text() });
+      } catch {}
+    });
+  } catch {}
+  try {
+    page.on('pageerror', (err) => {
+      try { runtimeErrors.push({ type: 'pageerror', text: err.message ?? String(err) }); } catch {}
     });
   } catch {}
 });
@@ -99,9 +136,29 @@ test.afterEach(async ({ page }, testInfo) => {
       });
       if (survivors.length > 0) httpStatus = survivors[survivors.length - 1].status; // last survivor
     } catch {}
+    // Feature B: dedupe (same type+text pair collapses to one entry — a repeated framework error
+    // firing on every change-detection cycle would otherwise flood the dump), cap at ~15 entries
+    // (the orchestrator only needs enough to classify, not an exhaustive log), and truncate each
+    // entry's text to ~200 chars (the classifier only needs the first line/signature, not a full
+    // stack). Best-effort: any failure here still lets the rest of the dump (yaml/finalUrl/httpStatus)
+    // write normally.
+    let dedupedRuntimeErrors = [];
+    try {
+      const RUNTIME_ERRORS_CAP = 15;
+      const RUNTIME_ERROR_TEXT_CAP = 200;
+      const seen = new Set();
+      for (const e of runtimeErrors) {
+        const text = e.text.length > RUNTIME_ERROR_TEXT_CAP ? e.text.slice(0, RUNTIME_ERROR_TEXT_CAP) : e.text;
+        const key = \`\${e.type} \${text}\`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        dedupedRuntimeErrors.push({ type: e.type, text });
+        if (dedupedRuntimeErrors.length >= RUNTIME_ERRORS_CAP) break;
+      }
+    } catch { dedupedRuntimeErrors = []; }
     writeFileSync(
       join(dir, \`\${safeProject}__\${hash}__\${testInfo.retry}.json\`),
-      JSON.stringify({ project, file, title, retry: testInfo.retry, yaml, finalUrl, httpStatus }),
+      JSON.stringify({ project, file, title, retry: testInfo.retry, yaml, finalUrl, httpStatus, runtimeErrors: dedupedRuntimeErrors }),
     );
   } catch { /* page may be closed on a nav-crash — best-effort, never fail the run */ }
 });
@@ -126,6 +183,12 @@ export interface SetupDeps {
   // from the seed copy already; this only runs for repos that predate this change.
   // Optional: absent stubs skip it; defaultSetupDeps always provides it for production.
   ensureFailureCapture?(e2eDir: string): void;
+  // Backfill the managed env-passthrough keys (actionTimeout, testIdAttribute) into an
+  // already-onboarded repo's e2e/playwright.config.ts (Task D5). Marker-guarded whole-file
+  // replacement (see PLAYWRIGHT_CONFIG_SEED_MARKER doc) — idempotent, never touches a
+  // customized config. Optional: absent stubs skip it; defaultSetupDeps always provides it
+  // for production.
+  ensurePlaywrightEnvKeys?(e2eDir: string): void;
 }
 
 export async function setupE2eProject(e2eDir: string, deps: SetupDeps, opts?: SetupOptions): Promise<void> {
@@ -138,6 +201,7 @@ export async function setupE2eProject(e2eDir: string, deps: SetupDeps, opts?: Se
   // dir — the worker cannot. Idempotent; runs on every setup, including the install-cached early return.
   deps.ensureSpecDir?.(e2eDir);
   deps.ensureFailureCapture?.(e2eDir);
+  deps.ensurePlaywrightEnvKeys?.(e2eDir);
   if (isInstallCurrent(e2eDir)) {
     console.log("[qa] e2e dependencies up to date; skipping npm ci");
     return;
@@ -209,6 +273,37 @@ export const defaultSetupDeps: SetupDeps = {
     const src = readFileSync(path, "utf8");
     if (src.includes(FAILURE_CAPTURE_MARKER)) return; // already present — idempotent no-op
     appendFileSync(path, FAILURE_CAPTURE_BLOCK); // never rewrites existing lines (append-only)
+  },
+  // Backfills the managed env-passthrough keys into an already-onboarded repo's
+  // e2e/playwright.config.ts (Task D5). Repos onboarded before a key was added to the
+  // seed only ever get it via bootstrap (which runs once, on first onboard) — this
+  // closes that gap for repos that predate the key.
+  //
+  // Whole-file replacement, not append: playwright.config.ts is a single inline
+  // `export default defineConfig({...})` call, so there is no block that can be appended
+  // to retroactively mutate the exported object (unlike fixtures.ts). The replacement is
+  // gated on PLAYWRIGHT_CONFIG_SEED_MARKER so a customized config is never overwritten —
+  // the repo owns its e2e/ after first PR. A missing file is a no-op (a fresh onboard
+  // gets the current seed from the bootstrap cpSync already).
+  ensurePlaywrightEnvKeys: (e2eDir) => {
+    const path = join(e2eDir, "playwright.config.ts");
+    if (!existsSync(path)) return; // a fresh onboard gets it from the seed copy already
+    const src = readFileSync(path, "utf8");
+    const hasAllManagedKeys = PLAYWRIGHT_CONFIG_MANAGED_KEYS.every((key) => src.includes(key));
+    if (hasAllManagedKeys) return; // already has every managed key — idempotent no-op
+    if (!src.includes(PLAYWRIGHT_CONFIG_SEED_MARKER)) {
+      const missing = PLAYWRIGHT_CONFIG_MANAGED_KEYS.filter((key) => !src.includes(key));
+      console.warn(
+        `[qa] ${path} is missing managed env-passthrough key(s) [${missing.join(", ")}] but carries no ` +
+          `seed ownership marker — the config has been customized (or predates the marker), so it will ` +
+          `NOT be overwritten. Add the missing key(s) manually if this repo wants them.`,
+      );
+      return;
+    }
+    // Recognized as an unmodified (possibly older) copy of the seed: safe to replace wholesale.
+    // env-passthrough only — the seed file itself reads process.env at runtime, so this never
+    // bakes a concrete value into the repo's config.
+    cpSync(join(seedDir(), "playwright.config.ts"), path);
   },
   bootstrap: (e2eDir) =>
     cpSync(seedDir(), e2eDir, {

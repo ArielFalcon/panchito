@@ -25,6 +25,34 @@ import assert from "node:assert/strict";
 // Resolve repo root relative to this test file (src/agent-runtime/ → two levels up)
 const REPO_ROOT = join(import.meta.dirname ?? __dirname, "..", "..");
 
+// Skill file pairs that must be byte-identical (modulo trailing whitespace) across both trees.
+// Full-file parity is stricter than section-level parity: any one-tree edit fails CI immediately.
+// The whole playwright-authoring skill directory is locked (SKILL.md excepted — it carries a known,
+// out-of-scope canonical/Codex divergence) so drift cannot reappear in a sibling file we did not edit.
+const SKILL_FILE_PAIRS: Array<[string, string]> = [
+  [
+    "agents/skill/playwright-authoring/locators-and-waiting.md",
+    "agent/skills/playwright-authoring/locators-and-waiting.md",
+  ],
+  [
+    "agents/skill/playwright-authoring/auth.md",
+    "agent/skills/playwright-authoring/auth.md",
+  ],
+  [
+    "agents/skill/playwright-authoring/browser-conditions.md",
+    "agent/skills/playwright-authoring/browser-conditions.md",
+  ],
+  [
+    "agents/skill/playwright-authoring/storage-and-uploads.md",
+    "agent/skills/playwright-authoring/storage-and-uploads.md",
+  ],
+];
+
+// Must-match sections for the worker role (by canonical H2 header text).
+// The guard compares H2 bodies between the OpenCode mirror (agents/agent/qa-worker.md)
+// and the Codex mirror (agent/roles/qa-worker.md). H1 may differ (Flash suffix).
+const WORKER_MUST_MATCH_SECTIONS = ["How to write a valuable spec"];
+
 function readFile(rel: string): string {
   const p = join(REPO_ROOT, rel);
   assert.ok(existsSync(p), `Prompt file not found: ${rel} (resolved: ${p})`);
@@ -70,7 +98,17 @@ const GENERATOR_WAIVED_SECTIONS = new Set([
 
 // Must-match sections for the shared AGENTS.md.
 // "Global rules" contains safety-critical constraints shared by both runtimes and must not diverge.
-const AGENTS_MUST_MATCH_SECTIONS = ["Global rules"];
+// "Execution context" carries the TRANSCRIBE-from-injected-grounding contract (do not re-navigate
+// routes already covered by the Context Pack / re-judge a11y tree) — a stale mirror here silently
+// reverts Codex-run generation to always-re-explore, sabotaging grounding reuse.
+// "Protocols (to keep quality from degrading over time)" carries Protocol 4 (cleanup via the UI, or
+// namespaced-and-left; NEVER a fabricated API call) — a stale mirror here lets Codex hallucinate a
+// DELETE endpoint that was never verified to exist.
+const AGENTS_MUST_MATCH_SECTIONS = [
+  "Global rules",
+  "Execution context",
+  "Protocols (to keep quality from degrading over time)",
+];
 
 describe("prompt-sync drift guard", () => {
   it("agent/roles/qa-reviewer.md contains the {text,severity} structured corrections contract (AC1.1.1)", () => {
@@ -288,6 +326,102 @@ describe("prompt-sync drift guard", () => {
       },
       (err: unknown) => err instanceof assert.AssertionError,
       "The generator Final output drift guard must throw an AssertionError when the codex mirror diverges.",
+    );
+  });
+});
+
+describe("agent-guidance-runtime-semantics drift guard", () => {
+  const normalize = (s: string) => s.replace(/\r\n/g, "\n").replace(/[ \t]+$/gm, "").trim();
+
+  // ---------------------------------------------------------------------------
+  // Task 1.1: Full-file parity for playwright-authoring skill files.
+  // The two trees must be byte-identical (modulo trailing whitespace).
+  // This assertion PASSES on the current byte-identical files and FAILS on any one-tree edit.
+  // ---------------------------------------------------------------------------
+  it("playwright-authoring skill file parity: locators-and-waiting.md matches across both trees (Task 1.1)", () => {
+    for (const [opencodeRel, codexRel] of SKILL_FILE_PAIRS) {
+      const opencodeContent = readFile(opencodeRel);
+      const codexContent = readFile(codexRel);
+      assert.equal(
+        normalize(codexContent),
+        normalize(opencodeContent),
+        `prompt-sync DIVERGENCE: skill file "${opencodeRel}" and "${codexRel}" differ. ` +
+          `Both trees must be byte-identical. Edit both mirrors in the same step.`,
+      );
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Task 1.2: Section-level parity for the worker role's "How to write a valuable spec" section.
+  // Worker H1 may differ (Flash suffix) — the guard compares H2 bodies only.
+  // ---------------------------------------------------------------------------
+  it("qa-worker.md 'How to write a valuable spec' section matches across both mirrors (Task 1.2)", () => {
+    const opencodeWorker = parseSections(readFile("agents/agent/qa-worker.md"));
+    const codexWorker = parseSections(readFile("agent/roles/qa-worker.md"));
+
+    for (const sectionHeader of WORKER_MUST_MATCH_SECTIONS) {
+      const opencodeBody = opencodeWorker.get(sectionHeader);
+      const codexBody = codexWorker.get(sectionHeader);
+
+      if (opencodeBody === undefined) continue; // section only in codex mirror is allowed
+
+      assert.ok(
+        codexBody !== undefined,
+        `prompt-sync DIVERGENCE: section "## ${sectionHeader}" is present in agents/agent/qa-worker.md ` +
+          `but missing from agent/roles/qa-worker.md. Port it.`,
+      );
+
+      assert.equal(
+        normalize(codexBody),
+        normalize(opencodeBody),
+        `prompt-sync DIVERGENCE in worker section "## ${sectionHeader}": ` +
+          `agent/roles/qa-worker.md and agents/agent/qa-worker.md differ. ` +
+          `The codex mirror must match the canonical OpenCode version.`,
+      );
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Task 1.3: Inverse proofs — confirm the guard actually catches divergence.
+  // (a) Skill-file parity: appending a comment to the in-memory content must trigger AssertionError.
+  // (b) Worker section parity: appending a comment to the in-memory section body must trigger AssertionError.
+  // ---------------------------------------------------------------------------
+  it("inverse: skill-file parity guard catches one-tree drift (Task 1.3 — skill file)", () => {
+    const [opencodeRel] = SKILL_FILE_PAIRS[0]!;
+    const opencodeContent = readFile(opencodeRel);
+    const divergedContent = opencodeContent + "\n\n<!-- drift -->";
+
+    assert.throws(
+      () => {
+        assert.equal(
+          normalize(divergedContent),
+          normalize(opencodeContent),
+          `prompt-sync DIVERGENCE in skill file "${opencodeRel}"`,
+        );
+      },
+      (err: unknown) => err instanceof assert.AssertionError,
+      "The skill-file parity guard must throw an AssertionError when the codex mirror diverges.",
+    );
+  });
+
+  it("inverse: worker section parity guard catches one-tree drift (Task 1.3 — worker section)", () => {
+    const opencodeWorker = parseSections(readFile("agents/agent/qa-worker.md"));
+    const sectionHeader = WORKER_MUST_MATCH_SECTIONS[0]!;
+    const opencodeBody = opencodeWorker.get(sectionHeader);
+    if (!opencodeBody) return; // section unexpectedly absent — skip inverse check
+
+    const divergedBody = opencodeBody + "\n\n<!-- drift -->";
+
+    assert.throws(
+      () => {
+        assert.equal(
+          normalize(divergedBody),
+          normalize(opencodeBody),
+          `prompt-sync DIVERGENCE in worker section "## ${sectionHeader}"`,
+        );
+      },
+      (err: unknown) => err instanceof assert.AssertionError,
+      "The worker section-parity guard must throw an AssertionError when the codex mirror diverges.",
     );
   });
 });

@@ -79,6 +79,12 @@ export interface AdjudicatorEvidence {
   /** Per-failed-case attributed HTTP status (D1/D2 capture): `failed.map(c => c.httpStatus)`.
    *  Entries are undefined when capture missed for that case. Mirrors the failingFiles pattern. */
   httpStatuses: (number | undefined)[];
+  /** Feature B — per-failed-case captured browser console/pageerror entries:
+   *  `failed.map(c => c.runtimeErrors ?? [])`. Mirrors the httpStatuses pattern (one entry per
+   *  failed case, in order); an empty inner array means no runtime errors were captured for that
+   *  case (capture disabled, missed, or the app genuinely emitted none) — never undefined at the
+   *  outer level, so callers can iterate without an extra guard. */
+  runtimeErrorsByCase: { type: string; text: string }[][];
 }
 
 export interface AdjudicatorVerdict {
@@ -87,6 +93,64 @@ export interface AdjudicatorVerdict {
   action: AdjudicatorAction;
   /** Human-legible explanation threaded into Issue labels/body for observability. */
   reason: string;
+}
+
+// ── Feature B: classifyRuntimeErrors — pure, project-agnostic runtime-error classifier ──────────
+
+export interface RuntimeErrorVerdict {
+  /** True only on a STRONG framework/uncaught signal — conservative by design (see module doc). */
+  appDefect: boolean;
+  /** Human-legible reasons, one per matched entry, threaded into the adjudicator verdict reason. */
+  reasons: string[];
+}
+
+// Framework/uncaught-exception signatures. PROJECT-AGNOSTIC (no jhipster/angular/react-app literal
+// branches — see CLAUDE.md invariant): these are generic patterns any Angular or React app can emit,
+// not per-app strings. Kept narrow and conservative — the safe direction (per the design) is a false
+// NEGATIVE (missing an app defect), never a false POSITIVE that could mask a real generated-test defect.
+//   - `NG\d+` — Angular's numbered runtime error codes (NG0100, NG0303, …).
+//   - `ERROR Error:` — the Angular zone/`ErrorHandler` console.error prefix for an uncaught exception.
+//   - `Uncaught` — the browser's own prefix for an uncaught exception/rejection (any framework).
+//   - `Unhandled Promise rejection` — an unhandled async rejection (any framework).
+// A bare `Error:` console string is DELIBERATELY excluded: apps routinely `console.error("Error: …")`
+// for HANDLED failures, so matching it would false-POSITIVE and mask a real generated-test defect
+// (Rule 2.6 routes any appDefect case straight to app_defect→Issue). A GENUINELY uncaught error —
+// React error boundaries included — surfaces as a `pageerror`, which classifyRuntimeErrors already
+// treats as a strong signal; so dropping the bare pattern costs only merely-LOGGED errors — the
+// acceptable false-NEGATIVE side of the cardinal safe direction.
+const FRAMEWORK_ERROR_RE = /\bNG\d+\b|ERROR Error:|Uncaught|Unhandled Promise rejection/;
+
+// Benign noise that must NEVER set appDefect, even though it can share surface words with the
+// patterns above (e.g. a "Failed to load resource" line has no "Error:" but is excluded defensively
+// here too, in case the format changes). Resource load failures (4xx and generic network errors,
+// including favicon) are expected background chatter, not app breakage.
+const BENIGN_NOISE_RE = /Failed to load resource|favicon|net::ERR_/i;
+
+/**
+ * Classifies a run's captured browser console/pageerror entries (Feature B) into an appDefect
+ * signal. Pure, sync, never throws. Conservative: only a `pageerror` (any uncaught JS exception)
+ * or a console entry matching a generic framework-error signature sets `appDefect=true`; benign
+ * resource-load noise, warnings, and anything else leave it `false`. A single genuine entry among
+ * benign noise is enough (mirrors the adjudicator's own "one genuine signal is enough" precedent —
+ * see Rule 2.5's 5xx `.some`-style handling below).
+ */
+export function classifyRuntimeErrors(errors: { type: string; text: string }[]): RuntimeErrorVerdict {
+  const reasons: string[] = [];
+  for (const e of errors) {
+    // Any pageerror is, by definition, an uncaught JS exception — always a strong signal regardless
+    // of its text (a Playwright `pageerror` event only fires for genuinely uncaught exceptions).
+    if (e.type === "pageerror") {
+      reasons.push(`uncaught page error: ${e.text}`);
+      continue;
+    }
+    // Console entries: exclude benign noise FIRST (defense in depth), then match the generic
+    // framework-error signature set.
+    if (BENIGN_NOISE_RE.test(e.text)) continue;
+    if (FRAMEWORK_ERROR_RE.test(e.text)) {
+      reasons.push(`framework runtime error: ${e.text}`);
+    }
+  }
+  return { appDefect: reasons.length > 0, reasons };
 }
 
 // ── Pure decision function ─────────────────────────────────────────────────────
@@ -109,6 +173,7 @@ export function adjudicate(evidence: AdjudicatorEvidence): AdjudicatorVerdict {
     objectiveSource,
     failingFiles,
     httpStatuses,
+    runtimeErrorsByCase,
   } = evidence;
 
   // Rule 1: runner_infra — every failure matches the Playwright launcher infra pattern.
@@ -155,6 +220,37 @@ export function adjudicate(evidence: AdjudicatorEvidence): AdjudicatorVerdict {
       action: ADJ_ACTION.BREAK_ISSUE,
       reason: `App defect detected: backend returned a 5xx server error (status ${reported}). ${gateReason}`,
     };
+  }
+
+  // Rule 2.6 (Feature B — app-defect detection via browser console/page-error capture): a captured
+  // framework/uncaught runtime error on a failing case is high-confidence app evidence even when the
+  // failure detail itself is NOT a value-mismatch (the whole point — jhipster's unregistered
+  // FontAwesome icon threw during Angular change-detection, breaking client-side interactivity
+  // app-wide; the E2E failures were plain selector-count timeouts, not value mismatches, so neither
+  // Rule 2.5 nor Rule 3 could see it). Sits BELOW runner_infra/dev_infra/the 5xx rule (a runtime
+  // error during DEV downtime or a launcher crash is still infra, caught above) and ABOVE
+  // isLikelyRealBug (a runtime error is stronger, more specific evidence than a bare value-mismatch
+  // heuristic). Same MIXED-RUN choice as Rule 2.5 (.some, not .every): ONE case with a genuine
+  // classified runtime error is enough to route the whole run to app_defect — the co-failing case
+  // (if any) still appears in the failed-case list, so it is never lost.
+  // SAFE DIRECTION (cardinal, per the design): this rule only ADDS a diagnostic — it must never
+  // hard-block, auto-pass, or mask a real generated-test defect. `classifyRuntimeErrors` is
+  // deliberately conservative (benign resource-load noise never sets appDefect), so an empty or
+  // all-benign runtimeErrorsByCase is a strict no-op here and control falls through to Rule 3/4/5
+  // exactly as before this feature existed.
+  // Not applicable in code mode (no browser, no console/pageerror events to capture).
+  if (!isCode) {
+    for (const errs of runtimeErrorsByCase) {
+      const verdict = classifyRuntimeErrors(errs);
+      if (verdict.appDefect) {
+        return {
+          class: ADJ_CLASS.APP_DEFECT,
+          confidence: ADJ_CONFIDENCE.HIGH,
+          action: ADJ_ACTION.BREAK_ISSUE,
+          reason: `App defect detected: browser runtime error captured during the failing test (${verdict.reasons[0]}). ${gateReason}`,
+        };
+      }
+    }
   }
 
   // Rule 3: app_defect — exact parity with isLikelyRealBug (calls the proven predicate,

@@ -413,6 +413,22 @@ test("runE2E passes project, signal and timeoutMs through to the runner deps", a
   assert.equal(seen.timeoutMs, 5_000);
 });
 
+// A3: testIdAttribute must reach deps.runSuite — apps declare their test-id convention in config
+// (e.g. data-cy for jhipster) and the DOM capture / selector catalog / authoring contract all
+// validate against it, but the VERDICTUAL Playwright run never received it, so PW_TEST_ID_ATTRIBUTE
+// was never set and getByTestId silently resolved the default data-testid on non-default apps.
+test("runE2E passes testIdAttribute through to the runner deps", async () => {
+  let seen: { testIdAttribute?: string } = {};
+  const deps: ExecuteDeps = {
+    runSuite: async (args) => {
+      seen = { testIdAttribute: args.testIdAttribute };
+      return { report: { stats: { expected: 1 } }, logs: "ok", ran: true };
+    },
+  };
+  await runE2E("/dir", { baseUrl: "https://dev", namespace: "ns", testIdAttribute: "data-cy" }, deps);
+  assert.equal(seen.testIdAttribute, "data-cy");
+});
+
 test("runE2E rejects a project name outside the allowlist (arg-injection surface)", async () => {
   let started = false;
   const deps: ExecuteDeps = {
@@ -819,4 +835,105 @@ test("T5: harvest leaves httpStatus/finalUrl absent when dump has neither (absen
   // No new WARNING for absent httpStatus/finalUrl (only failureDom has the loud warning path).
   const newWarnings = warnings.filter((w) => /httpStatus|finalUrl/i.test(w));
   assert.equal(newWarnings.length, 0, `must NOT emit new warnings for absent httpStatus/finalUrl: ${JSON.stringify(newWarnings)}`);
+});
+
+// ── Feature B: Harvest fold — runtimeErrors onto QaCase ───────────────────────
+// RED test: the harvest must fold dump.runtimeErrors onto the SAME QaCase object that today
+// receives failureDom/httpStatus/finalUrl (D1/D2 precedent). Mirrors T5 exactly.
+
+test("Feature B: harvest folds dump.runtimeErrors onto the failed QaCase", async () => {
+  const title = "owner registration › create owner";
+  const file = "owners.spec.ts";
+  const hash = createHash("sha1").update(`${file}/${title}`).digest("hex").slice(0, 12);
+
+  const deps: ExecuteDeps = {
+    runSuite: async (args) => {
+      if (args.failureCaptureDir) {
+        writeFileSync(
+          join(args.failureCaptureDir, `desktop__${hash}__0.json`),
+          JSON.stringify({
+            project: "desktop",
+            file,
+            title,
+            retry: 0,
+            yaml: "- button \"Submit\"",
+            runtimeErrors: [{ type: "pageerror", text: "TypeError: Cannot read properties of undefined" }],
+          }),
+        );
+      }
+      return {
+        report: {
+          suites: [{
+            title: "owners.spec.ts",
+            specs: [{
+              title: "owner registration › create owner",
+              ok: false,
+              tests: [{ results: [{ status: "failed", error: { message: "timeout" } }] }],
+            }],
+          }],
+        },
+        logs: "failed",
+        ran: true,
+      };
+    },
+  };
+  const run = await runE2E("/e2e", { baseUrl: "https://dev", namespace: "desktop" }, deps);
+  const failed = run.cases.find((c) => c.status === "fail");
+  assert.ok(failed, "the failing case must be present");
+  assert.deepEqual(
+    (failed as QaCase).runtimeErrors,
+    [{ type: "pageerror", text: "TypeError: Cannot read properties of undefined" }],
+    "harvest must fold dump.runtimeErrors onto the QaCase",
+  );
+});
+
+test("Feature B: harvest leaves runtimeErrors absent when dump has none (best-effort, no new warning)", async () => {
+  const title = "form › submit";
+  const file = "form.spec.ts";
+  const hash = createHash("sha1").update(`${file}/${title}`).digest("hex").slice(0, 12);
+
+  const deps: ExecuteDeps = {
+    runSuite: async (args) => {
+      if (args.failureCaptureDir) {
+        writeFileSync(
+          join(args.failureCaptureDir, `desktop__${hash}__0.json`),
+          JSON.stringify({ project: "desktop", file, title, retry: 0, yaml: "- button \"Submit\"" }), // no runtimeErrors
+        );
+      }
+      return {
+        report: {
+          suites: [{ title: "form.spec.ts", specs: [{ title: "form › submit", ok: false, tests: [{ results: [{ status: "failed", error: { message: "timeout" } }] }] }] }],
+        },
+        logs: "failed",
+        ran: true,
+      };
+    },
+  };
+  const warnings: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...a: unknown[]) => { warnings.push(a.map(String).join(" ")); realWarn(...a); };
+  let run;
+  try { run = await runE2E("/e2e", { baseUrl: "https://dev", namespace: "desktop" }, deps); }
+  finally { console.warn = realWarn; }
+
+  const failed = run.cases.find((c) => c.status === "fail");
+  assert.ok(failed);
+  assert.equal((failed as QaCase).runtimeErrors, undefined, "runtimeErrors must be absent when dump has none");
+  const newWarnings = warnings.filter((w) => /runtimeErrors/i.test(w));
+  assert.equal(newWarnings.length, 0, `must NOT emit new warnings for absent runtimeErrors: ${JSON.stringify(newWarnings)}`);
+});
+
+test("Feature B: readFailureDumps parses runtimeErrors defensively (garbage/malformed entries dropped, never throws)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "qa-fail-dump-"));
+  try {
+    writeFileSync(
+      join(dir, "desktop__abc123__0.json"),
+      JSON.stringify({ project: "desktop", file: "x.spec.ts", title: "a › b", retry: 0, runtimeErrors: [{ type: "pageerror", text: "boom" }, "garbage", { type: 42, text: "no" }] }),
+    );
+    const dumps = readFailureDumps(dir);
+    assert.equal(dumps.length, 1);
+    assert.deepEqual(dumps[0]!.runtimeErrors, [{ type: "pageerror", text: "boom" }], "malformed entries in the array must be dropped, valid ones kept");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

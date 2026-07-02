@@ -209,6 +209,7 @@ export function buildPerFileEvidence(
       objectiveSource,
       failingFiles: failed.map((c) => c.file),
       httpStatuses: failed.map((c) => c.httpStatus),
+      runtimeErrorsByCase: failed.map((c) => c.runtimeErrors ?? []),
     };
     result.set(file, evidence);
   }

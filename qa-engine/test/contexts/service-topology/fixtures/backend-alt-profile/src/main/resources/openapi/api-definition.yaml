@@ -1,0 +1,25 @@
+openapi: "3.0.3"
+info:
+  title: Menu API
+  version: "1.0"
+paths:
+  /menu:
+    get:
+      operationId: listMenuItems
+      summary: List all menu items
+      responses:
+        "200":
+          description: OK
+  /menu/{id}:
+    get:
+      operationId: getMenuItemById
+      summary: Get a single menu item
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK

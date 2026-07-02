@@ -33,6 +33,34 @@ baseBranch: "main"             # target branch for the QA pull requests
 #     versionUrl: "https://dev-api.example.internal/orders/version"
 #   - repo: "org/payments-svc"
 
+# Optional (e2e apps only): the qa-engine cross-repo boundary conventions — how THIS repo's
+# frontend calls its backends, and where each backend's OpenAPI contract lives. Complements
+# `services:` above (which lists the participating repos); `boundaries:` declares the CALL
+# CONVENTION between them so the qa-engine resolver can stitch frontend call-sites to backend
+# operationIds with zero app-specific literal in the engine itself. Consumed only by the
+# qa-engine resolver (service-topology context) — the legacy loader (src/orchestrator) strips
+# unknown keys and ignores this block entirely.
+# boundaries:
+#   - transport: http
+#     frontFiles: "**/*.api.ts"                       # filename-suffix glob of front egress files
+#     frontCallSite: { kind: receiver-verb-call, receiver: "this.rest" }
+#     servicePrefixTemplate: "name-{service}-api"      # e.g. name-orders-api/orders
+#     serviceRepoTemplate: "ms-name-{service}"         # e.g. ms-name-orders
+#     openApiPath: "src/main/resources/openapi/api-definition.yaml"
+#   # EVENT transport: for repos whose backends talk to each other ONLY via events (NATS,
+#   # RabbitMQ, or any broker sharing the same class-based publish/listen convention below —
+#   # the transport itself is opaque, only the class/method SHAPE matters). Scans every repo in
+#   # `services:` (plus the primary repo) for listener/publisher classes matching this shape and
+#   # joins them by event name (exact) or domain/model name-stem (fallback).
+#   - transport: event
+#     files: "**/*.java"                               # glob of backend source files to scan
+#     eventPattern:
+#       kind: class-based-domain-events                 # catalog key — the in-core SHAPE to match
+#       listenerBaseType: "ListenerMessageDelegate"      # base class/interface a listener extends/implements
+#       listenerEventCall: "convertMsgToSpecificType"    # method that reads the consumed event, e.g. call(msg, FooEvent.class)
+#       subscriberBaseType: "DomainEventSubscriber"      # generic interface a broker interface extends, e.g. extends DomainEventSubscriber<FooModel>
+#       publishCall: "publishGenericMessage"             # method that publishes with a `.class` argument, e.g. call(subject, event, FooEvent.class)
+
 # `dev` is REQUIRED for e2e apps (the default) and OMITTED for code-mode apps.
 dev:
   baseUrl: "https://dev.example.internal"
@@ -42,6 +70,12 @@ dev:
   versionUrl: "https://dev.example.internal/version"
   pollIntervalMs: 10000        # how often the gate polls
   deployTimeoutMs: 600000      # 10 min for DEV to stabilize on the new SHA
+
+# e2e:
+#   # The app's test-id convention. Drives Playwright getByTestId, the DOM capture
+#   # test-id hints, and the selector catalog. Defaults to "data-testid".
+#   # jhipster-style apps typically use "data-cy".
+#   testIdAttribute: "data-cy"
 
 qa:
   needsReview: true            # the strict reviewer validates the generated E2E tests

@@ -214,12 +214,32 @@ export { expect };
 // a CommonJS-style synchronous load is not defined in this native-ESM module
 // ("type":"module") and would throw a ReferenceError that the catch would swallow.
 let errorResponses: { url: string; status: number; resourceType: string }[] = [];
+// Feature B (app-defect detection): browser console `error`-level entries and uncaught `pageerror`
+// exceptions observed during the current test. Reset per-test (mirrors errorResponses) so a reused
+// page never cross-attributes a PRIOR test's runtime errors to the current one. Best-effort: the
+// orchestrator's classifyRuntimeErrors (src/qa/failure-adjudicator.ts) turns this into a diagnostic
+// signal ONLY — it never blocks or masks a real generated-test defect (see that module's doc).
+let runtimeErrors: { type: string; text: string }[] = [];
 test.beforeEach(async ({ page }) => {
   if (!process.env.QA_FAILURE_CAPTURE_DIR) return; // no-op when capture is disabled (zero overhead)
   errorResponses = [];                               // reset unconditionally so reused pages never cross-attribute
+  runtimeErrors = [];                                 // Feature B: same per-test reset discipline
   try {
     page.on('response', (r) => {
       try { const s = r.status(); if (s >= 400) errorResponses.push({ url: r.url(), status: s, resourceType: r.request().resourceType() }); } catch {}
+    });
+  } catch {}
+  try {
+    page.on('console', (msg) => {
+      try {
+        if (msg.type() !== 'error') return; // only error-level; warnings/logs are not runtime evidence
+        runtimeErrors.push({ type: 'error', text: msg.text() });
+      } catch {}
+    });
+  } catch {}
+  try {
+    page.on('pageerror', (err) => {
+      try { runtimeErrors.push({ type: 'pageerror', text: err.message ?? String(err) }); } catch {}
     });
   } catch {}
 });
@@ -271,9 +291,29 @@ test.afterEach(async ({ page }, testInfo) => {
       });
       if (survivors.length > 0) httpStatus = survivors[survivors.length - 1]!.status; // last survivor
     } catch {}
+    // Feature B: dedupe (same type+text pair collapses to one entry — a repeated framework error
+    // firing on every change-detection cycle would otherwise flood the dump), cap at ~15 entries
+    // (the orchestrator only needs enough to classify, not an exhaustive log), and truncate each
+    // entry's text to ~200 chars (the classifier only needs the first line/signature, not a full
+    // stack). Best-effort: any failure here still lets the rest of the dump (yaml/finalUrl/httpStatus)
+    // write normally.
+    let dedupedRuntimeErrors: { type: string; text: string }[] = [];
+    try {
+      const RUNTIME_ERRORS_CAP = 15;
+      const RUNTIME_ERROR_TEXT_CAP = 200;
+      const seen = new Set<string>();
+      for (const e of runtimeErrors) {
+        const text = e.text.length > RUNTIME_ERROR_TEXT_CAP ? e.text.slice(0, RUNTIME_ERROR_TEXT_CAP) : e.text;
+        const key = `${e.type} ${text}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        dedupedRuntimeErrors.push({ type: e.type, text });
+        if (dedupedRuntimeErrors.length >= RUNTIME_ERRORS_CAP) break;
+      }
+    } catch { dedupedRuntimeErrors = []; }
     writeFileSync(
       join(dir, `${safeProject}__${hash}__${testInfo.retry}.json`),
-      JSON.stringify({ project, file, title, retry: testInfo.retry, yaml, finalUrl, httpStatus }),
+      JSON.stringify({ project, file, title, retry: testInfo.retry, yaml, finalUrl, httpStatus, runtimeErrors: dedupedRuntimeErrors }),
     );
   } catch { /* page may be closed on a nav-crash — best-effort, never fail the run */ }
 });

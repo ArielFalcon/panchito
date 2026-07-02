@@ -1,0 +1,26 @@
+openapi: "3.0.3"
+info:
+  title: Restaurants API
+  version: "1.0"
+paths:
+  /restaurants:
+    get:
+      operationId: getAllRestaurants
+      summary: List all restaurants
+      responses:
+        "200":
+          description: OK
+  /menus:
+    post:
+      operationId: createNewDailyMenu
+      summary: Create a daily menu
+      responses:
+        "201":
+          description: Created
+  /places:
+    get:
+      operationId: findNearbyPlaces
+      summary: Find nearby places
+      responses:
+        "200":
+          description: OK

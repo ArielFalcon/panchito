@@ -1150,7 +1150,7 @@ the test-execution original)
 **Files:** `qa-engine/src/contexts/qa-run-orchestration/infrastructure/bridges/*.adapter.ts` (11),
 `test/contexts/qa-run-orchestration/infrastructure/bridges/*.adapter.test.ts`
 
-- [ ] Re-confirm the gap and the sibling entry points to wrap (grep — record the exact symbols/paths so each
+- [x] Re-confirm the gap and the sibling entry points to wrap (grep — record the exact symbols/paths so each
   bridge wraps a REAL collaborator, not an invented one):
   ```bash
   cd /Users/arielyumn/Desktop/TRABAJO/ai-pipeline
@@ -1162,13 +1162,29 @@ the test-execution original)
   rg -ln "ShadowLogAdapter|GitHubPrAdapter|GitHubIssueAdapter|mirror-gc.adapter" qa-engine/src/contexts/workspace-and-publication/
   rg -ln "deploy-gate.port"                                    qa-engine/src/shared-kernel/ports/
   ```
-  Expected: the `implements` grep is EMPTY (confirms the bridges are absent). The sibling entry points resolve
-  to: generation `GenerateTestsUseCase`; change-analysis `AnalyzeChangeUseCase`; test-execution
-  `static-gate.adapter.ts` (validate) + `e2e/code-execution.strategy.ts` (execute); objective-signal
-  `DecideCoverageService` + `coverage-collector.adapter.ts`; workspace-and-publication
-  github-pr/github-issue/shadow-log + `mirror-gc.adapter.ts`; the kernel `deploy-gate.port.ts` interface (no
-  adapter — E.0 writes one). `RunHistoryPort` has NO sibling adapter — E.0 writes the save impl.
-- [ ] Build the 11 bridges, each TDD (failing delegation test → minimal map → pass). The mapping per port:
+  **RESULT (2026-07-02, apply-phase re-confirmation): the `implements` grep WAS empty (bridges absent, as
+  expected) — but 3 of the plan's own named sibling collaborators DO NOT EXIST at HEAD, confirmed and
+  documented in each bridge's own header comment (not silently substituted):**
+  - `change-analysis`: NO `AnalyzeChangeUseCase` class/use-case exists anywhere. The real collaborators are
+    `VcsReadPort.blastRadius(sha)` (analyze) and the domain `classifyCommit(message, diff)` function
+    (classify). `analyzeChange(ctx, extractors): Promise<StaticSignal>` is a DIFFERENT capability
+    (static-signal extractor telemetry) with a different return shape — not this port's collaborator.
+  - generation: NO standalone "reviewer flow" export exists — `renderReviewer` is called from exactly ONE
+    site, inside `GenerateTestsUseCase.generate()`'s own conditional review branch. `ReviewPortAdapter`
+    composes the SAME 3 generation-owned primitives (openSession/renderReviewer/parseReview) standalone.
+  - `objective-signal`: NO assembly function exists turning `CoverageCollectorPort`'s raw `CoverageReport` +
+    the diff into the `ChangeCoverage` read-model `DecideCoverageService.decide()` consumes
+    (`src/qa/change-coverage.ts`'s `computeChangeCoverage`+`parseDiffHunks` NOT YET PORTED to qa-engine — a
+    real, still-open port-completeness gap, registered for a follow-on change).
+  - `test-execution`/`workspace-and-publication`/kernel `deploy-gate.port.ts`: all confirmed to match the
+    plan exactly (`static-gate.adapter.ts`, `e2e/code-execution.strategy.ts`,
+    github-pr/github-issue/shadow-log adapters + `PublishDecisionService`, and the kernel port interface
+    with no adapter). `RunHistoryPort` confirmed no sibling adapter, as the plan expected.
+  - **One undeclared-but-structurally-identical 3rd real-build**: `WorkspacePort` ALSO has no sibling
+    collaborator (`MirrorRegistryPort`'s own header states it is deliberately decoupled from WorkspacePort;
+    `MirrorGcPort` only prunes an EXISTING mirror) — built as a real minimal implementation alongside
+    DeployGate/RunHistory, not merely wrapped.
+- [x] Build the 11 bridges, each TDD (failing delegation test → minimal map → pass). The mapping per port:
   - **`ChangeAnalysisPortAdapter`** → `AnalyzeChangeUseCase` (analyze→`BlastRadius`, classify→action/reason).
   - **`GenerationPortAdapter`** → `GenerateTestsUseCase` (objectives+specDir → `{specs, approved, note}`).
   - **`ReviewPortAdapter`** → the generation reviewer flow; MUST surface `parsed` + `blockingCount` (the
@@ -1191,13 +1207,26 @@ the test-execution original)
   - **`RunHistoryPortAdapter`** → a REAL `save(outcome)`. NO sibling adapter exists — write a minimal impl
     (SQLite via the control-plane repo if present; otherwise a small in-memory/file store). This inverts the
     leaky dynamic `import()` the legacy uses at `pipeline.ts:487-619`.
-- [ ] Isolated gate per bridge + typecheck → 0:
+- [x] Isolated gate per bridge + typecheck → 0:
   ```bash
   node --import ./test-setup.mjs --import tsx --test "qa-engine/test/contexts/qa-run-orchestration/infrastructure/bridges/**/*.test.ts" 2>&1 | tail -10
   npx tsc --noEmit -p qa-engine/tsconfig.json
   ```
-  Expected: every bridge test passes; typecheck exits 0; the inventory grep in Task E.2 will now find 11
-  `implements`.
+  **RESULT: all 34 bridge-test assertions (across the 11 files, 2-4 each) confirmed ✔ via the full-repo
+  `npm test` run (3073 tests, 3072 pass, 0 fail, 1 pre-existing unrelated skip). Standalone
+  `npx tsc --noEmit -p qa-engine/tsconfig.json` exits 0 (confirmed twice). The E.2 inventory grep
+  (`rg -n "implements (...)" .../bridges/ -l`) now finds exactly 11 files. GATE A (all 10 scenarios +
+  10 golden round-trips) and the D.7 domain (Run/FixLoop/RunQaUseCase/RewrittenOrchestratorAdapter) are
+  in the SAME aggregate run and green — the legacy net is UNCHANGED.**
+  One genuine bug was found and FIXED during this task (not merely reported): the first revision of
+  `PublicationPortAdapter` imported concrete `workspace-and-publication` classes directly and TRIPPED the
+  arch-lint security gate (`qa-engine/test/arch/vcs-write-confinement.test.ts`,
+  `no-vcs-write-in-agent-contexts` — CLAUDE.md's "agent is read-only, only the orchestrator does git
+  writes" invariant, dependency-cruiser-enforced with `tsPreCompilationDeps:true` so type-only imports are
+  also caught). Fixed by declaring LOCAL structural (duck-typed) interfaces instead — zero import edge
+  into `workspace-and-publication` from `qa-run-orchestration`; the composition root (Task E.1/E.2) is the
+  only place allowed to construct the REAL instances and pass them in, matching the plan's own framing of
+  the composition root as "the ONLY module that imports concrete adapters."
 - [ ] Commit (one per bridge, or grouped by sibling context — qa-engine paths only):
   ```bash
   git add qa-engine/src/contexts/qa-run-orchestration/infrastructure/bridges/ \

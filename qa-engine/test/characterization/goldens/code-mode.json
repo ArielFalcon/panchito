@@ -14,7 +14,10 @@
     "flaky": false,
     "retries": 0,
     "preExecAmbiguityCatches": 0,
-    "deterministicSelectorBlocks": 0
+    "deterministicSelectorBlocks": 0,
+    "catalogGateInWindow": 0,
+    "catalogGateAdvisory": 0,
+    "catalogGateFailClosed": 0
   },
   "rulesRetrieved": []
 }

@@ -33,7 +33,7 @@ import { bestEffort, bestEffortAsync } from "./qa/learning/best-effort";
 import { distillReflection, distillReviewerCorrections } from "./qa/learning/distiller";
 import { detectStructuralPatterns } from "./qa/learning/structural-pattern";
 import { matchExemplars, renderExemplarsForPrompt } from "./qa/learning/skill-exemplar";
-import { initCurriculum, selectActiveArchetypesCached, renderArchetypesForPrompt, recordArchetypeHit, clearActiveArchetypesCache } from "./qa/learning/curriculum";
+import { initCurriculum, selectActiveArchetypesCached, renderArchetypesForPrompt, recordArchetypeHit, clearActiveArchetypesCache, type Curriculum } from "./qa/learning/curriculum";
 import type { StructuredReflection } from "./types";
 import { validateContext, isContextStale } from "./qa/context";
 import type { ArchitectureContext } from "./qa/context";
@@ -850,6 +850,126 @@ export function deriveCycleBackstop(maxRetries: number, numObjectives = 1): numb
   // worker sessions are bounded and do not go through the 4-loop generate→review→fix→coverage path).
   const extraObjectives = Math.max(0, numObjectives - 1);
   return singleObjectiveBase + extraObjectives * (CYCLES_PER_GENERATE + REPAIR_HEADROOM_PER_GENERATE);
+}
+
+// Learning fold shared by the static-gate early return and the end of the pipeline: distill
+// reviewer corrections, label the run, fold the prevention signal into the retrieved rules
+// (no-oracle governance), reflect on the failure, and persist the curriculum. Without this on
+// the `invalid` path the engine would never learn anything from static-gate failures — the most
+// common failure mode of generated tests. Off-path: every step is non-blocking and a failure is
+// only a warning.
+//
+// Extracted from a runPipeline-local closure to a top-level function with explicit params
+// (behavior-identical — every free variable the closure captured is now an explicit argument;
+// see the 3 call sites in runPipeline). Ported verbatim: no logic changed, only the call boundary.
+export async function foldRunLearning(
+  v: QaRunResult,
+  o: { staticOk: boolean; coverageRatio?: number | null; valueScore?: number | null },
+  ctx: {
+    app: AppConfig;
+    deps: PipelineDeps;
+    opts: RunOptions;
+    sha: string;
+    mode: RunMode;
+    isCode: boolean;
+    diff: string;
+    intent: CommitIntent | undefined;
+    reviewerCorrections: string[];
+    reviewerRationale: string | undefined;
+    retries: number;
+    retrievedRules: LearningRule[];
+    retrievedRuleIds: string[];
+    curriculum: Curriculum | null;
+    signal: AbortSignal | undefined;
+  },
+): Promise<void> {
+  const {
+    app, deps, opts, sha, mode, isCode, diff, intent, reviewerCorrections, reviewerRationale,
+    retries, retrievedRules, retrievedRuleIds, curriculum, signal,
+  } = ctx;
+  // Identical derivation to runPipeline's own `const log = deps.log ?? (() => {})` (line ~994) —
+  // recomputed here rather than threaded as a 16th param, since it is a pure function of `deps`.
+  const log = deps.log ?? (() => {});
+  // Compute diff pattern kinds ONCE and reuse for both archetype tagging and prevention filtering.
+  const diffPatternKinds = detectStructuralPatterns(diff, intent?.changedFiles ?? []).map((p) => p.kind);
+  // Tag rules distilled from this run with the diff's dominant structural shape, so they recall
+  // on the same kind of change later. Only a SPECIFIC shape is useful as a tag — a purely
+  // "generic" diff yields null (untagged), since "generic" matches everything and biases nothing.
+  const runArchetype = diffPatternKinds.find((k) => k !== "generic") ?? null;
+  if (reviewerCorrections.length > 0 && opts.runId && deps.distillCorrections && shouldDistillLearning(isCode, v.verdict)) {
+    try {
+      const distilled = deps.distillCorrections({ app: app.name, runId: opts.runId, corrections: reviewerCorrections, archetype: runArchetype });
+      if (distilled.inserted.length > 0) {
+        log(`[qa] learning: distilled ${distilled.inserted.length} candidate rule(s) from reviewer corrections (retrievable, rendered as experimental until measured outcomes promote them)`);
+      }
+    } catch (err) {
+      log(`[qa] WARNING: reviewer-corrections distillation failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  const labeled = labelRunOutcome({
+    runId: opts.runId ?? sha, app: app.name, sha, mode, target: opts.target ?? "e2e",
+    verdict: v.verdict, staticOk: o.staticOk,
+    coverageRatio: o.coverageRatio ?? null,
+    minCoverageRatio: app.qa.changeCoverage?.minRatio ?? DEFAULT_COVERAGE_POLICY.minRatio,
+    reviewerCorrections, reviewerRationale, flaky: v.verdict === "flaky", retries,
+    valueScore: o.valueScore ?? null,
+  });
+  // Governance WITHOUT an oracle: when the oracle produced no valueScore (off, or not
+  // applicable), fold a CONSERVATIVE prevention signal — derived from this run's own
+  // errorClass — into the RELEVANT retrieved rules. Prevention is conditioned on structural
+  // relevance: a rule only earns or loses prevention trust on a change whose archetype matches
+  // the rule's tagged archetype. Untagged rules (no archetype field) stay eligible — attributableRules
+  // is fail-open per rule, so the large body of legacy untagged rules remains in the flywheel.
+  // This lets candidate rules earn or lose trust for EVERY app, not just oracle-enabled ones.
+  // Capped at "medium" confidence (only the oracle lifts a rule to "high"). See preventionOutcome.
+  //
+  // Phase 7 coverage anchor: derive a coverage-credit signal to gate candidate → active promotion.
+  // coverageCreditConfirmed is true when coverage was measured AND the test covered changed lines
+  // (coverageRatio > 0), false when measured but found no coverage, null when not measured at all
+  // (cross-repo, policy=off, or unknown). This is the non-circular anchor: promotion requires that
+  // the tests the rule influenced actually exercised the diff's changed lines, not just green-lit by
+  // the reviewer. Coverage stays non-blocking where unmeasurable (null → promotion allowed).
+  const coverageRatio = o.coverageRatio ?? null;
+  const coverageMeasured = coverageRatio !== null; // true when the coverage step ran and produced a ratio
+  const coverageCreditConfirmed = coverageMeasured ? coverageRatio > 0 : null;
+  if ((o.valueScore ?? null) === null && retrievedRules.length > 0 && opts.runId) {
+    const { recordRuleOutcome } = await import("./server/history");
+    bestEffort("governance", log, () => {
+      let folded = 0;
+      for (const rule of attributableRules(retrievedRules, { diffArchetypes: diffPatternKinds })) {
+        const score = preventionOutcome(rule.errorClass, labeled.errorClass);
+        if (score === null) continue; // no evidence about this rule from this run
+        // Pass the coverage-credit signal so the DB's promotion gate can apply it.
+        recordRuleOutcome(rule.id, score, coverageCreditConfirmed);
+        folded++;
+      }
+      if (folded > 0) {
+        log(`[qa] governance: folded prevention signal into ${folded} rule(s) (no oracle; runErrorClass=${labeled.errorClass ?? "none"}; coverageCredit=${coverageCreditConfirmed ?? "unmeasured"})`);
+      }
+    }, undefined);
+  }
+  if (deps.reflectAndDistill && opts.runId && !signal?.aborted && shouldDistillLearning(isCode, v.verdict)) {
+    if (labeled.errorClass && labeled.errorClass !== "E-INFRA" && labeled.errorClass !== "E-FLAKY") {
+      const outcome: RunOutcome = { ...labeled, gateSignals: { ...labeled.gateSignals, valueScore: o.valueScore ?? null }, rulesRetrieved: retrievedRuleIds, at: labeled.at };
+      void bestEffortAsync("reflect-distill", log, () => deps.reflectAndDistill!({ app: app.name, runId: opts.runId!, outcome, archetype: runArchetype }), null);
+    }
+  }
+  // Persist curriculum (archetypes that caught real bugs survive across runs)
+  if (curriculum) {
+    const { saveCurriculum } = await import("./server/history");
+    bestEffort("curriculum-save", log, () => saveCurriculum(curriculum!), undefined);
+  }
+  // Post-run PROCESS audit — the engine reflecting on its OWN run quality (recurring defects,
+  // ledger noise, review churn) and routing each finding to the right remediation: deprecate
+  // noise rules autonomously (DATA), record an incident for the maintainer on an engine defect
+  // (CODE → human-gated PR). Server-side, off-path, independent of any client/TUI session.
+  if (deps.auditProcess && opts.runId) {
+    // AWAITED (not fire-and-forget): a manual/CLI run does `process.exit` right after the pipeline
+    // returns, which would kill an un-awaited audit mid-flight (its incident/deprecation never
+    // lands). The deterministic detection is cheap and the LLM diagnosis is already
+    // hasOpenSessions-gated, so awaiting adds no meaningful latency. Best-effort — never throws.
+    await bestEffortAsync("process-audit", log, () => deps.auditProcess!({ app: app.name, runId: opts.runId! }), undefined);
+  }
 }
 
 export async function runPipeline(
@@ -2117,95 +2237,6 @@ export async function runPipeline(
     log("[qa] regression: not generating tests; validating and running the existing suite.");
   }
 
-  // Learning fold shared by the static-gate early return and the end of the pipeline:
-  // distill reviewer corrections, label the run, fold the prevention signal into the
-  // retrieved rules (no-oracle governance), reflect on the failure, and persist the
-  // curriculum. Without this on the `invalid` path the engine would never learn anything
-  // from static-gate failures — the most common failure mode of generated tests.
-  // Off-path: every step is non-blocking and a failure is only a warning.
-  const foldRunLearning = async (v: QaRunResult, o: { staticOk: boolean; coverageRatio?: number | null; valueScore?: number | null }) => {
-    // Compute diff pattern kinds ONCE and reuse for both archetype tagging and prevention filtering.
-    const diffPatternKinds = detectStructuralPatterns(diff, intent?.changedFiles ?? []).map((p) => p.kind);
-    // Tag rules distilled from this run with the diff's dominant structural shape, so they recall
-    // on the same kind of change later. Only a SPECIFIC shape is useful as a tag — a purely
-    // "generic" diff yields null (untagged), since "generic" matches everything and biases nothing.
-    const runArchetype = diffPatternKinds.find((k) => k !== "generic") ?? null;
-    if (reviewerCorrections.length > 0 && opts.runId && deps.distillCorrections && shouldDistillLearning(isCode, v.verdict)) {
-      try {
-        const distilled = deps.distillCorrections({ app: app.name, runId: opts.runId, corrections: reviewerCorrections, archetype: runArchetype });
-        if (distilled.inserted.length > 0) {
-          log(`[qa] learning: distilled ${distilled.inserted.length} candidate rule(s) from reviewer corrections (retrievable, rendered as experimental until measured outcomes promote them)`);
-        }
-      } catch (err) {
-        log(`[qa] WARNING: reviewer-corrections distillation failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-    const labeled = labelRunOutcome({
-      runId: opts.runId ?? sha, app: app.name, sha, mode, target: opts.target ?? "e2e",
-      verdict: v.verdict, staticOk: o.staticOk,
-      coverageRatio: o.coverageRatio ?? null,
-      minCoverageRatio: app.qa.changeCoverage?.minRatio ?? DEFAULT_COVERAGE_POLICY.minRatio,
-      reviewerCorrections, reviewerRationale, flaky: v.verdict === "flaky", retries,
-      valueScore: o.valueScore ?? null,
-    });
-    // Governance WITHOUT an oracle: when the oracle produced no valueScore (off, or not
-    // applicable), fold a CONSERVATIVE prevention signal — derived from this run's own
-    // errorClass — into the RELEVANT retrieved rules. Prevention is conditioned on structural
-    // relevance: a rule only earns or loses prevention trust on a change whose archetype matches
-    // the rule's tagged archetype. Untagged rules (no archetype field) stay eligible — attributableRules
-    // is fail-open per rule, so the large body of legacy untagged rules remains in the flywheel.
-    // This lets candidate rules earn or lose trust for EVERY app, not just oracle-enabled ones.
-    // Capped at "medium" confidence (only the oracle lifts a rule to "high"). See preventionOutcome.
-    //
-    // Phase 7 coverage anchor: derive a coverage-credit signal to gate candidate → active promotion.
-    // coverageCreditConfirmed is true when coverage was measured AND the test covered changed lines
-    // (coverageRatio > 0), false when measured but found no coverage, null when not measured at all
-    // (cross-repo, policy=off, or unknown). This is the non-circular anchor: promotion requires that
-    // the tests the rule influenced actually exercised the diff's changed lines, not just green-lit by
-    // the reviewer. Coverage stays non-blocking where unmeasurable (null → promotion allowed).
-    const coverageRatio = o.coverageRatio ?? null;
-    const coverageMeasured = coverageRatio !== null; // true when the coverage step ran and produced a ratio
-    const coverageCreditConfirmed = coverageMeasured ? coverageRatio > 0 : null;
-    if ((o.valueScore ?? null) === null && retrievedRules.length > 0 && opts.runId) {
-      const { recordRuleOutcome } = await import("./server/history");
-      bestEffort("governance", log, () => {
-        let folded = 0;
-        for (const rule of attributableRules(retrievedRules, { diffArchetypes: diffPatternKinds })) {
-          const score = preventionOutcome(rule.errorClass, labeled.errorClass);
-          if (score === null) continue; // no evidence about this rule from this run
-          // Pass the coverage-credit signal so the DB's promotion gate can apply it.
-          recordRuleOutcome(rule.id, score, coverageCreditConfirmed);
-          folded++;
-        }
-        if (folded > 0) {
-          log(`[qa] governance: folded prevention signal into ${folded} rule(s) (no oracle; runErrorClass=${labeled.errorClass ?? "none"}; coverageCredit=${coverageCreditConfirmed ?? "unmeasured"})`);
-        }
-      }, undefined);
-    }
-    if (deps.reflectAndDistill && opts.runId && !signal?.aborted && shouldDistillLearning(isCode, v.verdict)) {
-      if (labeled.errorClass && labeled.errorClass !== "E-INFRA" && labeled.errorClass !== "E-FLAKY") {
-        const outcome: RunOutcome = { ...labeled, gateSignals: { ...labeled.gateSignals, valueScore: o.valueScore ?? null }, rulesRetrieved: retrievedRuleIds, at: labeled.at };
-        void bestEffortAsync("reflect-distill", log, () => deps.reflectAndDistill!({ app: app.name, runId: opts.runId!, outcome, archetype: runArchetype }), null);
-      }
-    }
-    // Persist curriculum (archetypes that caught real bugs survive across runs)
-    if (curriculum) {
-      const { saveCurriculum } = await import("./server/history");
-      bestEffort("curriculum-save", log, () => saveCurriculum(curriculum!), undefined);
-    }
-    // Post-run PROCESS audit — the engine reflecting on its OWN run quality (recurring defects,
-    // ledger noise, review churn) and routing each finding to the right remediation: deprecate
-    // noise rules autonomously (DATA), record an incident for the maintainer on an engine defect
-    // (CODE → human-gated PR). Server-side, off-path, independent of any client/TUI session.
-    if (deps.auditProcess && opts.runId) {
-      // AWAITED (not fire-and-forget): a manual/CLI run does `process.exit` right after the pipeline
-      // returns, which would kill an un-awaited audit mid-flight (its incident/deprecation never
-      // lands). The deterministic detection is cheap and the LLM diagnosis is already
-      // hasOpenSessions-gated, so awaiting adds no meaningful latency. Best-effort — never throws.
-      await bestEffortAsync("process-audit", log, () => deps.auditProcess!({ app: app.name, runId: opts.runId! }), undefined);
-    }
-  };
-
   // Tracks whether the code-mode compile gate passed (for the learning record's staticOk). Optimistic
   // default so an absent/not-applicable gate is not recorded as a misleading false; a FAILED gate
   // returns early, so reaching the green-path persist below means the gate passed.
@@ -2287,7 +2318,10 @@ export async function runPipeline(
         tested: testedFrom(result),
         intent,
       });
-      await foldRunLearning(invalid, { staticOk: false }); // E-STATIC must feed the flywheel too
+      await foldRunLearning(invalid, { staticOk: false }, { // E-STATIC must feed the flywheel too
+        app, deps, opts, sha, mode, isCode, diff, intent, reviewerCorrections, reviewerRationale,
+        retries, retrievedRules, retrievedRuleIds, curriculum, signal,
+      });
       return invalid;
     }
 
@@ -2448,7 +2482,10 @@ export async function runPipeline(
         tested: testedFrom(result),
         intent,
       });
-      await foldRunLearning(invalid, { staticOk: false });
+      await foldRunLearning(invalid, { staticOk: false }, {
+        app, deps, opts, sha, mode, isCode, diff, intent, reviewerCorrections, reviewerRationale,
+        retries, retrievedRules, retrievedRuleIds, curriculum, signal,
+      });
       return invalid;
     }
   }
@@ -2640,6 +2677,7 @@ export async function runPipeline(
           : (opts.guidance ? [opts.guidance] : []),
       failingFiles: failed.map((c) => c.file),
       httpStatuses: failed.map((c) => c.httpStatus),
+      runtimeErrorsByCase: failed.map((c) => c.runtimeErrors ?? []),
     };
     const verdict = adjudicate(evidence);
     adjVerdict = verdict;
@@ -3230,7 +3268,10 @@ export async function runPipeline(
 
   // Reviewer-corrections distillation, labeling, prevention governance, reflection and
   // curriculum persistence — shared with the static-gate (`invalid`) early return above.
-  await foldRunLearning(run, { staticOk: generating && (isCode ? codeValidated : true), coverageRatio: ratio, valueScore });
+  await foldRunLearning(run, { staticOk: generating && (isCode ? codeValidated : true), coverageRatio: ratio, valueScore }, {
+    app, deps, opts, sha, mode, isCode, diff, intent, reviewerCorrections, reviewerRationale,
+    retries, retrievedRules, retrievedRuleIds, curriculum, signal,
+  });
 
   return run;
 }

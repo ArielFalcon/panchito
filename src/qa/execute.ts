@@ -80,6 +80,7 @@ export interface ExecuteOptions {
   signal?: AbortSignal;                // operator cancel: kills the runner's process tree → infra-error
   timeoutMs?: number;                  // wall-clock budget; defaults to e2eTimeoutMs()
   project?: string;                    // restrict to one Playwright --project (must match PW_PROJECT_RE)
+  testIdAttribute?: string;            // the configured testIdAttribute; injected as PW_TEST_ID_ATTRIBUTE so playwright.config.ts resolves getByTestId correctly
   // Filtered-retry optimization: when present and non-empty, only these spec file basenames
   // are passed as positional args to Playwright (e.g. ["login.spec.ts"]).
   // Each value is validated against SPEC_FILE_RE before it reaches the child-process argv.
@@ -232,6 +233,7 @@ export async function runE2E(
     namespace: opts.namespace,
     faultInject: opts.faultInject,
     project: opts.project,
+    testIdAttribute: opts.testIdAttribute,
     specFiles: opts.specFiles,
     signal: opts.signal,
     timeoutMs: opts.timeoutMs,
@@ -364,6 +366,9 @@ export async function runE2E(
       // best-effort — absent on older dumps or when capture missed (no new warning beyond failureDom's).
       if (dump?.httpStatus !== undefined) qa.httpStatus = dump.httpStatus;
       if (dump?.finalUrl !== undefined) qa.finalUrl = dump.finalUrl;
+      // Feature B runtime evidence: fold the captured console/pageerror entries onto the same QaCase
+      // object — same best-effort, absent-warned contract (no new warning beyond failureDom's).
+      if (dump?.runtimeErrors !== undefined) qa.runtimeErrors = dump.runtimeErrors;
       // Fallback: try errorContext from the JSON report (PW 1.60 expect() failures).
       // errorContext is the SAME raw ariaSnapshot YAML the fixture writes (Playwright's
       // `- role "name"` form), so it MUST be flattened through parseAriaSnapshot to the
@@ -439,6 +444,9 @@ export interface FailureDump {
   // D1/D2 runtime evidence (optional, best-effort, absent on older dumps and when capture missed).
   httpStatus?: number; // the attributed 5xx status (integer in [500,599]), or absent
   finalUrl?: string;   // page.url() at the failure point, or absent
+  // Feature B runtime evidence: deduped, capped browser console `error`/`pageerror` entries observed
+  // during the failing test (optional, best-effort, absent on older dumps and when capture missed).
+  runtimeErrors?: { type: string; text: string }[];
 }
 
 // Reads every qa-failure-capture dump from the capture dir into a parsed list. Best-effort: an
@@ -454,7 +462,8 @@ export function readFailureDumps(dir: string): FailureDump[] {
     const m = RETRY_RE.exec(f);
     if (!m) continue;
     try {
-      const body = JSON.parse(readFileSync(join(dir, f), "utf8")) as { project?: unknown; file?: unknown; title?: unknown; retry?: unknown; yaml?: unknown; httpStatus?: unknown; finalUrl?: unknown };
+      const body = JSON.parse(readFileSync(join(dir, f), "utf8")) as { project?: unknown; file?: unknown; title?: unknown; retry?: unknown; yaml?: unknown; httpStatus?: unknown; finalUrl?: unknown; runtimeErrors?: unknown };
+      const runtimeErrors = parseRuntimeErrors(body.runtimeErrors);
       out.push({
         project: typeof body.project === "string" ? body.project : "",
         ...(typeof body.file === "string" ? { file: body.file } : {}),
@@ -464,9 +473,31 @@ export function readFailureDumps(dir: string): FailureDump[] {
         // D1/D2 runtime evidence — parsed defensively: absent/garbage → undefined, never throw.
         ...(typeof body.httpStatus === "number" && Number.isInteger(body.httpStatus) ? { httpStatus: body.httpStatus } : {}),
         ...(typeof body.finalUrl === "string" ? { finalUrl: body.finalUrl } : {}),
+        // Feature B runtime evidence — same defensive contract.
+        ...(runtimeErrors.length > 0 ? { runtimeErrors } : {}),
       });
     } catch (err) {
       console.warn(`[qa] WARNING: failed to read failure capture dump ${f}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return out;
+}
+
+// Defensively parses the `runtimeErrors` field of a capture dump: a malformed entry (wrong shape,
+// non-string `text`/`type`) is DROPPED rather than throwing or poisoning the whole array — the fixture
+// that writes these dumps is best-effort and self-contained (see qa-failure-capture in
+// config/e2e/fixtures.ts), so the harvest side must tolerate a partially-garbage array. Never throws.
+function parseRuntimeErrors(v: unknown): { type: string; text: string }[] {
+  if (!Array.isArray(v)) return [];
+  const out: { type: string; text: string }[] = [];
+  for (const entry of v) {
+    if (
+      entry &&
+      typeof entry === "object" &&
+      typeof (entry as { type?: unknown }).type === "string" &&
+      typeof (entry as { text?: unknown }).text === "string"
+    ) {
+      out.push({ type: (entry as { type: string }).type, text: (entry as { text: string }).text });
     }
   }
   return out;
@@ -612,7 +643,9 @@ export const defaultExecuteDeps: ExecuteDeps = {
         // QaCase.failureDom for the fix-loop grounding prompt.
         // PW_TEST_ID_ATTRIBUTE: threads the configured testIdAttribute into the runner so
         // playwright.config.ts resolves getByTestId correctly for the app's convention.
-        env: { ...scrubEnv(/^DEV_/), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonPath, ...(testIdAttribute ? { PW_TEST_ID_ATTRIBUTE: testIdAttribute } : {}), ...(faultInject ? { QA_FAULT_INJECT: "1" } : {}), ...(failureCaptureDir ? { QA_FAILURE_CAPTURE_DIR: failureCaptureDir } : {}) },
+        // PW_ACTION_TIMEOUT_MS: optional per-target override of the seed's action auto-wait
+        // bound (default 8000) so a slower DEV can widen it without editing the seed config.
+        env: { ...scrubEnv(/^DEV_/), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonPath, ...(testIdAttribute ? { PW_TEST_ID_ATTRIBUTE: testIdAttribute } : {}), ...(process.env.PW_ACTION_TIMEOUT_MS ? { PW_ACTION_TIMEOUT_MS: process.env.PW_ACTION_TIMEOUT_MS } : {}), ...(faultInject ? { QA_FAULT_INJECT: "1" } : {}), ...(failureCaptureDir ? { QA_FAILURE_CAPTURE_DIR: failureCaptureDir } : {}) },
         detached: true, // own process group → killTree reaps npx/playwright/browser grandchildren
       });
 

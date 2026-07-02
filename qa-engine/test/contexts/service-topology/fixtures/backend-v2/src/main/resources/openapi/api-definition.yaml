@@ -1,0 +1,12 @@
+openapi: "3.0.3"
+info:
+  title: Auth v2 API (SERVICE_PREFIX_RE digits fixture)
+  version: "2.0"
+paths:
+  /login:
+    post:
+      operationId: login
+      summary: Authenticate user
+      responses:
+        "200":
+          description: OK

@@ -134,6 +134,14 @@ export interface QaCase {
   // finalUrl: the page URL at the failure point (page.url() synchronously in afterEach). Absent when
   // capture missed. Never written to Issue bodies in this slice — only threaded into the reviewer prompt.
   finalUrl?: string;
+  // Feature B — app-defect detection via browser console/page-error capture. Deduped, capped (~15)
+  // browser-console `error`-level entries and uncaught `pageerror` exceptions observed during the
+  // failing test, each with `text` truncated (~200 chars). Optional and best-effort, same absent-
+  // warned contract as httpStatus/finalUrl: absent when capture missed (env unset, page closed on a
+  // nav-crash, or nothing was emitted). Feeds `classifyRuntimeErrors` (failure-adjudicator.ts) as a
+  // diagnostic signal ONLY — it steers the adjudicator/report toward "probable app-side defect" but
+  // never blocks, auto-passes, or masks a real generated-test defect.
+  runtimeErrors?: { type: string; text: string }[];
 }
 
 export interface QaRunResult {
