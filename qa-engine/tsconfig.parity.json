@@ -69,6 +69,7 @@
     "test/contexts/qa-run-orchestration/domain/adjudicate-parity.test.ts",
     "test/contexts/qa-run-orchestration/domain/helpers/progress-gate-parity.test.ts",
     "test/contexts/qa-run-orchestration/domain/helpers/selector-check-parity.test.ts",
-    "test/contexts/qa-run-orchestration/domain/helpers/error-class-parity.test.ts"
+    "test/contexts/qa-run-orchestration/domain/helpers/error-class-parity.test.ts",
+    "test/contract/seam-parity.contract.test.ts"
   ]
 }
