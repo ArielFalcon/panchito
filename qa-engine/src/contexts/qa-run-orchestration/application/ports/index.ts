@@ -24,6 +24,13 @@ export interface RunInput {
   target: TestTarget;
   guidance?: string;
   runId: string;
+  // Cross-repo deploy-event semantics: set when this run was triggered by a webhook from a SERVICE
+  // repo (a microservice whose commit deployed, not the primary app repo itself) — mirrors legacy
+  // RunRequest.triggerRepo (src/server/runner.ts) / pipeline.ts's own `triggerService`. When set,
+  // browser V8 coverage cannot map the service repo's changed lines, so change-coverage MUST stay
+  // "unknown" (src/pipeline.ts:2912's `!triggerService` conjunct; CLAUDE.md: "Change-coverage is
+  // unknown for these [cross-repo] runs"). Absent (the common case) -> ordinary monorepo run.
+  triggerRepo?: string;
 }
 export interface RunPipelinePort {
   // signal is a SEPARATE transport arg (mirrors legacy runPipeline's own trailing signal
@@ -87,7 +94,14 @@ export interface ObjectiveSignalPort {
   // src/qa/learning/labeler.ts's LabelerInput.valueScore). Optional/nullable so a stub or a
   // composition root that has not yet wired the mutation-testing oracle (Task E.0) can omit it —
   // absent is read as "not measured", never a fabricated 0.
-  measure(br: BlastRadius, specDir: string): Promise<{ status: "pass" | "fail" | "unknown"; ratio: number | null; valueScore?: number | null }>;
+  //
+  // diff: the "dynamic diff" precedent (GenerationPort.generate's own optional trailing `diff` arg,
+  // above) — the run's REAL per-run commit diff (sourced from ChangeAnalysisPort.classify() in diff
+  // mode, the only mode that ever measures change-coverage: CLAUDE.md "Run modes" + src/pipeline.ts's
+  // own `mode === "diff"` coverage gate). Absent (every non-diff mode, or a caller that predates this
+  // param) -> the adapter's assembler is never invoked -> decide() receives null -> "unknown" -> NEVER
+  // blocks (the keystone's own architecturally-safe default, unchanged).
+  measure(br: BlastRadius, specDir: string, diff?: string): Promise<{ status: "pass" | "fail" | "unknown"; ratio: number | null; valueScore?: number | null }>;
 }
 export interface PublicationPort {
   // reviewerApproved/coverageBlocks/e2eChanged (audit fix, judgment-day): the REAL per-run values

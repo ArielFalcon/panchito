@@ -94,6 +94,13 @@ export interface RunnerDeps {
 // boundary — those stay `[]`/`""`/undefined here rather than invented. Full per-case + outcome
 // fidelity is the shadow-comparison harness's job (Slice F.1), not this dispatch seam.
 //
+// CLAUDE.md invariant ("surface integration errors loudly — never swallow errors into an empty
+// result"): outcome.note IS forwarded — previously dropped here entirely, which is exactly why a
+// live infra-error terminal from the rewritten engine surfaced with NO note, NO log, NO cases
+// (undiagnosable without live-container instrumentation). RunQaUseCase's infra-error-shaped
+// terminals now carry a diagnostic note end-to-end; this is the seam that used to discard it
+// before it ever reached updateRecord's `note: run.note || undefined` below.
+//
 // Cancellation (Plan 7.1, engram #913): the queue callback's AbortSignal IS threaded into
 // port.run(input, signal) — RunPipelinePort.run now accepts an optional signal (widened at the
 // port), and RunQaUseCase checks signal?.aborted at every phase boundary, so a cancelled rewritten
@@ -108,6 +115,7 @@ async function runViaRewrittenEngine(port: RunPipelinePort, req: RunRequest, run
     target: req.target,
     runId,
     ...(req.guidance ? { guidance: req.guidance } : {}),
+    ...(req.triggerRepo ? { triggerRepo: req.triggerRepo } : {}),
   };
   const outcome = await port.run(input, signal);
   return {
@@ -116,6 +124,7 @@ async function runViaRewrittenEngine(port: RunPipelinePort, req: RunRequest, run
     passed: outcome.verdict === "pass",
     cases: [],
     logs: "",
+    ...(outcome.note !== undefined ? { note: outcome.note } : {}),
   };
 }
 

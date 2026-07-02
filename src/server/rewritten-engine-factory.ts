@@ -80,6 +80,7 @@ import { FaultInjectionOracleAdapter } from "@contexts/objective-signal/infrastr
 import { GitHubPrAdapter } from "@contexts/workspace-and-publication/infrastructure/github-pr.adapter";
 import { GitHubIssueAdapter } from "@contexts/workspace-and-publication/infrastructure/github-issue.adapter";
 import { makeTargetCoverageCollector } from "@contexts/objective-signal/infrastructure/target-coverage-collector";
+import { assembleChangeCoverage } from "@contexts/objective-signal/domain/assemble-change-coverage";
 
 // SandboxedBinaryRunner + ProcessKillAdapter: real, src/-free process-sandbox primitives
 // (Sub-Plan 7.2 item 1) — no root src/ import needed for these, unlike the collaborators below.
@@ -106,7 +107,7 @@ import { parseReviewerVerdict } from "../integrations/verdict-validate";
 import { roleWindowBytes } from "../integrations/model-window-catalog";
 import { validateSpecs, defaultValidateDeps } from "../qa/validate";
 import { runE2E, defaultExecuteDeps } from "../qa/execute";
-import { runCodeTests, defaultCodeExecuteDeps } from "../qa/code-runner";
+import { runCodeTests, defaultCodeExecuteDeps, runCodeCoverage } from "../qa/code-runner";
 import { setupE2eProject, defaultSetupDeps } from "../qa/setup";
 import { setupCodeProject, defaultCodeSetupDeps } from "../qa/code-runner";
 import { github } from "../integrations/github";
@@ -254,7 +255,28 @@ export function buildRewrittenCompositionConfig(
   const e2e = new E2eExecutionStrategy((specDir, opts) => runE2E(specDir, opts, defaultExecuteDeps));
   const code = new CodeExecutionStrategy((repoDir, opts) => runCodeTests(repoDir, opts, defaultCodeExecuteDeps));
 
-  const collector = makeTargetCoverageCollector({ target, repoDir: mirrorDir, e2eDir, changedFiles: [] });
+  // changedFiles: static `[]` placeholder — the SAME documented limitation as `diff: ""` above (no
+  // per-run diff exists yet at composition time). ObjectiveSignalPortAdapter.measure() derives the
+  // REAL per-run changedFiles from the dynamic diff and threads them into collect()'s optional
+  // trailing arg (the "dynamic diff" precedent), so this placeholder only matters for a caller that
+  // never supplies a diff (i.e. never a real production diff-mode run).
+  const rawCollector = makeTargetCoverageCollector({ target, repoDir: mirrorDir, e2eDir, changedFiles: [] });
+  // Code-mode coverage trigger (legacy parity: src/pipeline.ts:487 `if (input.target === "code")
+  // await runCodeCoverage(input.repoDir).catch(() => {})`, BEFORE the lcov/Istanbul readers run —
+  // src/qa/code-runner.ts:786's own doc: "best-effort... never throws... caller falls back to
+  // unmeasured"). The rewritten collector composite (LcovCoverageAdapter/C8CoverageAdapter) reads
+  // conventional report paths passively; nothing in the rewritten path ever RUNS the repo's own
+  // instrumented test command to PRODUCE those reports — this wrapper closes that gap the same
+  // best-effort way legacy does (catch -> ignore, degrading to the collector's own fail-open "no
+  // report found" -> "unknown", never a crash).
+  const collector: typeof rawCollector = isCode
+    ? {
+        collect: async (specDir, namespace, changedFiles) => {
+          await runCodeCoverage(mirrorDir).catch(() => {});
+          return rawCollector.collect(specDir, namespace, changedFiles);
+        },
+      }
+    : rawCollector;
   const oracle = isCode
     ? new StrykerMutationOracleAdapter((input) => runMutationOracle(input, realMutationDeps))
     : new FaultInjectionOracleAdapter(
@@ -328,6 +350,13 @@ export function buildRewrittenCompositionConfig(
     ...(app.e2e?.testIdAttribute !== undefined ? { testIdAttribute: app.e2e.testIdAttribute } : {}),
     objectiveSignal: { collector, oracle },
     coveragePolicy: { mode: app.qa.changeCoverage?.mode ?? "signal", minRatio: app.qa.changeCoverage?.minRatio ?? 0.7 },
+    // THE VALUE KEYSTONE (CLAUDE.md "The value/trust risk"): turns the collector's raw CoverageReport
+    // + the run's real per-run diff (threaded dynamically by ObjectiveSignalPortAdapter.measure(), the
+    // SAME "dynamic diff" precedent as generationUseCase/reviewRuntime above) into the ChangeCoverage
+    // read-model DecideCoverageService.decide() consumes. A pure port of legacy parseDiffHunks +
+    // computeChangeCoverage (qa-engine/src/contexts/objective-signal/domain/assemble-change-coverage.ts)
+    // — supplying it here is what turns the previously-always-"unknown" measurement into a REAL one.
+    assembleChangeCoverage,
     baselineCases: [],
 
     // Real GitHub PR/Issue collaborators — the actual production publish path (buildProduction, not

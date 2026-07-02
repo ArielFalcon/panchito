@@ -110,6 +110,13 @@ export interface RunQaInput {
   target: TestTarget;
   guidance?: string;
   runId: string;
+  // Cross-repo deploy-event semantics (dual-judge finding, closes the gap the FIX D comment at the
+  // FixLoop wiring below used to flag as "RunQaInput has no such field"): mirrors RunInput.triggerRepo
+  // (../ports/index.ts) and legacy's triggerService (src/pipeline.ts). Set -> the measure phase must
+  // starve ObjectiveSignalPort.measure()'s diff arg so change-coverage degrades to "unknown" (browser
+  // coverage cannot map a service repo's changed lines) — the keystone invariant "unknown" NEVER
+  // blocks, unchanged. Absent -> ordinary monorepo run, unaffected.
+  triggerRepo?: string;
 }
 
 export interface RunQaResult {
@@ -131,6 +138,12 @@ export interface RunQaResult {
     deterministicSelectorBlocks: number;
   };
   cases: QaCase[];
+  // Diagnostic note for an infra-error-shaped terminal (CLAUDE.md "surface integration errors loudly
+  // — never swallow errors into an empty result"): the InfraError/thrown-error message that caused
+  // the terminal exit, so a run that dead-ends here is diagnosable from the run record alone instead
+  // of requiring live-container instrumentation. Optional — absent on every OTHER terminal (skipped/
+  // invalid/pass/fail/flaky) unless a caller explicitly threads one; never fabricated.
+  note?: string;
 }
 
 const DEFAULT_CONFIG: RunQaConfig = {
@@ -160,7 +173,10 @@ export class RunQaUseCase {
     if (this.deps.deployGate) {
       const gateResult = await this.deps.deployGate.waitUntilServing(input.sha);
       if (!isOk(gateResult)) {
-        return this.infraErrorResult();
+        // CLAUDE.md invariant: thread the deploy-gate's own InfraError message (e.g. "DEV did not
+        // serve sha ... within ...ms") as the diagnostic note — the raw gateResult.error is already
+        // descriptive (deploy-gate-port.adapter.ts), previously dropped entirely here.
+        return this.infraErrorResult(gateResult.error.message);
       }
     }
     if (signal?.aborted) {
@@ -212,8 +228,12 @@ export class RunQaUseCase {
     if (this.deps.setup) {
       try {
         await this.deps.setup.setup(workspace.specDir, signal);
-      } catch {
-        return this.infraErrorResult();
+      } catch (err) {
+        // CLAUDE.md invariant: never swallow an integration error into an empty result — this WAS a
+        // bare catch (verdict + nothing else, undiagnosable without live-container instrumentation).
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("[qa] setup phase failed:", err);
+        return this.infraErrorResult(`setup failed: ${msg}`);
       }
     }
     if (signal?.aborted) {
@@ -305,6 +325,18 @@ export class RunQaUseCase {
       // buildContextMap's own invalid branch (src/pipeline.ts:1377-1404), which files an Issue but
       // never reaches persistOutcome. Every OTHER mode's static-gate invalid still persists exactly
       // as before.
+      //
+      // NOTE on validation.infra (CLAUDE.md invariant scope): this branch is deliberately NOT split
+      // on validation.infra here — that verdict-mapping divergence from the legacy (infra:true should
+      // map to "infra-error", not "invalid"; src/pipeline.ts:2305) is a KNOWN, DECLARED divergence
+      // tracked in parity-allowlist.json ("scenarios.ts:codemode-infra-toolchain" in
+      // golden-outcome.test.ts) with its own explicit "not reproducible/fixed at this layer per this
+      // task's scope" note — changing the verdict here would silently close that allowlisted gap and
+      // break golden-outcome.test.ts's own assertion that the divergence still exists. This fix's
+      // scope is strictly the diagnostic note (CLAUDE.md "surface integration errors loudly"), not
+      // the verdict-mapping gap — so validation.errors now reaches the note on the SAME "invalid"
+      // verdict this branch already returns, leaving the Task E.0/Slice E consumption gap untouched.
+      console.error("[qa] static gate failed:", validation.errors);
       return await this.terminalResult(
         "invalid",
         cfg,
@@ -317,15 +349,27 @@ export class RunQaUseCase {
         // the real legacy runPipeline (retries:2 for an always-failing validate(), matching
         // MAX_STATIC_FIX_ROUNDS's own bound exactly).
         retries,
+        validation.errors.slice(0, 2).join("\n\n") || undefined,
       );
     }
 
     // Phase: health (mid-run DEV pre-flight, distinct from the entry gate). Derived from
     // DeployGatePort — absent (static sites / code target) defaults to always-healthy.
+    //
+    // CLAUDE.md invariant: devHealthy() is reused verbatim by the FixLoop below (its own
+    // boolean-returning contract must not change), so the gate's InfraError message is captured
+    // as a side effect into this closure variable rather than widening the return type — the LAST
+    // health-check failure's message is what the mid-run terminal below (and any FixLoop-internal
+    // health check) can report.
+    let lastHealthCheckError: string | undefined;
     const devHealthy = async (): Promise<boolean> => {
       if (!this.deps.deployGate) return true;
       const result = await this.deps.deployGate.waitUntilServing(input.sha);
-      return isOk(result);
+      if (!isOk(result)) {
+        lastHealthCheckError = result.error.message;
+        return false;
+      }
+      return true;
     };
     if (!(await devHealthy())) {
       // FIX 1 (judgment-day D.7 batch 2 — newly unmasked by threading reviewerApproved through this
@@ -343,7 +387,12 @@ export class RunQaUseCase {
       // empirically against the real legacy runPipeline (a preceding repair round's retries++
       // survives into this exact persisted exit, since `retries` is one shared accumulator across
       // the whole legacy function body, src/pipeline.ts:1027).
-      return await this.terminalResult("infra-error", cfg, input, { generating, static: false }, reviewerApprovedFromGeneration, false, retries);
+      // CLAUDE.md invariant: thread a diagnostic note so this terminal is no longer silent — the
+      // captured gate error message when available, else a generic fallback (the gate can also be
+      // absent per its own [SWAP] contract, though that path can never reach `!devHealthy()`).
+      const healthNote = lastHealthCheckError ?? "DEV health pre-flight failed before execute";
+      console.error("[qa] health pre-flight failed before execute:", healthNote);
+      return await this.terminalResult("infra-error", cfg, input, { generating, static: false }, reviewerApprovedFromGeneration, false, retries, healthNote);
     }
     if (signal?.aborted) {
       return this.abortedResult();
@@ -409,12 +458,15 @@ export class RunQaUseCase {
       const wallClockBudget = WallClockBudget.derive({ cycleBudget, agentTimeoutMs: 0 });
       // FIX D (judgment-day): mirrors src/pipeline.ts:2563-2564's keystone guard verbatim —
       // `generating && mode === "diff" && covPolicy.mode !== "off" && !triggerService`. This
-      // barrel's ports carry no triggerService/cross-repo concept at this layer (RunQaInput has no
-      // such field), so that conjunct is vacuously true here; Task E.0's composition root is where
-      // a real cross-repo trigger would need to fold back into this computation. Threading true
-      // PREVENTS the FixLoop's filtered-retry optimization from scoping a retry to a subset of spec
-      // files when change-coverage WILL be measured this run — filtering would silently undercount
-      // the keystone's own denominator (the passing, non-retried specs' lines would look uncovered).
+      // conjunct deliberately omits `!input.triggerRepo` (unlike the measure-phase guard below,
+      // which DOES respect it): the field now exists on RunQaInput (dual-judge cross-repo fix), but
+      // this flag only ever WIDENS the FixLoop's safety net (disabling the filtered-retry
+      // optimization) — a false positive here (treating a cross-repo run as if coverage will be
+      // measured) is harmless, since coverage never actually gets undercounted for a run that never
+      // measures it in the first place. Threading true PREVENTS the FixLoop's filtered-retry
+      // optimization from scoping a retry to a subset of spec files when change-coverage WILL be
+      // measured this run — filtering would silently undercount the keystone's own denominator (the
+      // passing, non-retried specs' lines would look uncovered).
       const coverageWillMeasure = generating && input.mode === "diff" && cfg.coveragePolicyMode !== "off";
       const fixLoopResult = await fixLoop.run({
         initialRun: { verdict: run.verdict, cases: run.cases },
@@ -451,9 +503,32 @@ export class RunQaUseCase {
     // fabricated 0.
     let valueScore: number | null = null;
     if (run.verdict === "pass") {
+      // "Dynamic diff" precedent (classificationDiff, above): change-coverage is measured ONLY for a
+      // per-commit DIFF run (src/pipeline.ts:2912's own gate: `mode === "diff" && ... && !triggerService`)
+      // — classificationDiff is undefined outside diff mode (classify() is only called in diff mode,
+      // see the classify() call site above), so passing it here already restricts measurement to diff
+      // mode: every other mode calls measure() with `diff` absent, the adapter's assembler is never
+      // invoked, and the keystone's own safe default (null -> "unknown" -> never blocks) applies —
+      // exactly the legacy's mode gate, without duplicating a second `input.mode === "diff"` check.
+      //
+      // Cross-repo guard (dual-judge finding): legacy's coverage-collect gate is
+      // `mode === "diff" && ... && !triggerService` (src/pipeline.ts:2912) — a webhook-triggered
+      // cross-repo run's changed lines live in the SERVICE repo, which browser V8 coverage cannot
+      // map (CLAUDE.md: "Change-coverage is unknown for these [cross-repo] runs"). Note legacy does
+      // NOT gate the value-oracle (mutation testing, src/pipeline.ts's runOracle call, line ~722) on
+      // triggerService — only the change-coverage ASSEMBLER is skipped. Reusing the same "starve the
+      // diff arg" mechanism the mode gate above already relies on: passing `diff: undefined` here
+      // means the assembler is never invoked (-> "unknown", never blocks) while the oracle inside the
+      // adapter's own measure() implementation is untouched and still runs.
+      if (input.triggerRepo) {
+        // Mirror the legacy's explicit skip log (src/pipeline.ts:2909-2911) so a cross-repo run's
+        // "unknown" coverage is diagnosable, never a silent null.
+        console.log(`[qa] change-coverage: skipped — the changed lines live in ${input.triggerRepo}; browser coverage maps only the frontend (status=unknown).`);
+      }
       const signal = await this.deps.objectiveSignal.measure(
         BlastRadius.of(input.sha, []),
         workspace.specDir,
+        input.triggerRepo ? undefined : classificationDiff,
       );
       coverageRatio = signal.ratio;
       valueScore = signal.valueScore ?? null;
@@ -630,7 +705,7 @@ export class RunQaUseCase {
     // sources, which never thread a reviewerApproved/valueScore either — see src/pipeline.ts:1114's
     // `app.qa.needsReview && result ? result.approved : null`, where `result` stays unset before
     // review runs). Only the mainline persist call (after review/measure) supplies real values.
-    extra?: { reviewerApproved?: boolean; valueScore?: number | null },
+    extra?: { reviewerApproved?: boolean; valueScore?: number | null; note?: string },
   ) {
     const gateCoverageRatio = coverageRatio;
     const gateValueScore = extra?.valueScore ?? null;
@@ -654,6 +729,7 @@ export class RunQaUseCase {
         deterministicSelectorBlocks: 0,
       },
       rulesRetrieved: [],
+      ...(extra?.note !== undefined ? { note: extra.note } : {}),
       at: new Date().toISOString(),
     };
   }
@@ -684,7 +760,14 @@ export class RunQaUseCase {
     };
   }
 
-  private infraErrorResult(): RunQaResult {
+  // CLAUDE.md invariant ("surface integration errors loudly — never swallow errors into an empty
+  // result"): every infra-error-shaped terminal routes through here with a diagnostic `note` — a
+  // silent infra-error (verdict + nothing else) is undiagnosable from the run record alone. Logs
+  // loudly via console.error so the failure is visible even when the caller never inspects `note`.
+  private infraErrorResult(note?: string): RunQaResult {
+    if (note !== undefined) {
+      console.error("[qa] infra-error terminal:", note);
+    }
     return {
       decision: RunDecision.of("infra-error", "none"),
       // FIX 4 (judgment-day D.7): the entry-gate infra-error never persists (matches the legacy,
@@ -693,6 +776,7 @@ export class RunQaUseCase {
       errorClass: this.deriveErrorClass("infra-error", null, null),
       gateSignals: { static: false, coverageRatio: null, valueScore: null, retries: 0, preExecAmbiguityCatches: 0, deterministicSelectorBlocks: 0 },
       cases: [],
+      ...(note !== undefined ? { note } : {}),
     };
   }
 
@@ -702,6 +786,11 @@ export class RunQaUseCase {
   // cancelTrackedRun (src/server/runner.ts) already writes when it finalizes a cancelled record
   // (verdict:"infra-error", note:"cancelled by operator") — reusing the existing terminal shape
   // keeps both engines' cancellation outcome byte-identical rather than inventing a new verdict.
+  // Deliberately calls infraErrorResult() with NO note: the runner (src/server/runner.ts's
+  // cancelTrackedRun) writes its OWN "cancelled by operator" note onto the run record when it
+  // finalizes a cancellation — threading a note here would clash with (or be silently overwritten
+  // by) that operator-facing note. Absent note on THIS specific terminal is intentional, not an
+  // oversight of the loud-diagnostics fix applied to every other infra-error-shaped terminal.
   private abortedResult(): RunQaResult {
     return this.infraErrorResult();
   }
@@ -737,6 +826,12 @@ export class RunQaUseCase {
     // method's own returned RunQaResult), invisible before the static-fix loop existed (retries was
     // ALWAYS 0 for these two call sites until FIX 3 ported the loop). Now genuinely threaded.
     retries = 0,
+    // CLAUDE.md invariant ("surface integration errors loudly"): a diagnostic note for THIS terminal
+    // exit — e.g. the validation-infra route's joined error messages, or the health pre-flight's
+    // captured InfraError message. Optional; omitted entirely when the caller has nothing more
+    // specific than the verdict itself (the generic static-gate "invalid" callers, whose own errors
+    // already reach the caller via ValidationPort's separate `errors` array elsewhere).
+    note?: string,
   ): Promise<RunQaResult> {
     const decision = decide({
       verdict,
@@ -754,6 +849,7 @@ export class RunQaUseCase {
     if (!skipPersist) {
       const outcome = this.toRunOutcome(input, decision, [], retries, null, errorClass, {
         reviewerApproved: reviewerApprovedForOutcome,
+        note,
       });
       await this.deps.runHistory.save(outcome);
       if (verdict === "invalid") {
@@ -783,6 +879,7 @@ export class RunQaUseCase {
         deterministicSelectorBlocks: 0,
       },
       cases: [],
+      ...(!skipPersist && note !== undefined ? { note } : {}),
     };
   }
 }

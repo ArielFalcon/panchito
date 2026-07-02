@@ -10,8 +10,17 @@ import type { BlastRadius } from "@kernel/blast-radius.ts";
 export interface CoveredLines { file: string; lines: number[]; }
 export interface CoverageReport { covered: CoveredLines[]; }
 // [SWAP — NEW] per-ecosystem coverage collection (v8/c8/JaCoCo/lcov), injected (never FS-hardcoded).
+//
+// changedFiles: the "dynamic diff" precedent (GenerationPort.generate's / ObjectiveSignalPort.measure's
+// own optional trailing arg) — an OPTIONAL per-call override for the RUN's real changed files, needed
+// by the two collectors whose URL/package->repo-file resolution depends on it (V8BrowserCoverageAdapter,
+// JacocoCoverageAdapter). Those adapters currently receive changedFiles ONLY via their constructor
+// (baked in at composition time, when no per-run diff is known yet — see rewritten-engine-factory.ts's
+// own documented `changedFiles: []` placeholder). Absent -> an adapter falls back to its own
+// constructor-supplied changedFiles (backward compatible; every pre-existing caller/stub/test that
+// only ever called collect(specDir, namespace) keeps compiling and behaving identically).
 export interface CoverageCollectorPort {
-  collect(specDir: string, namespace: string): Promise<CoverageReport>;
+  collect(specDir: string, namespace: string, changedFiles?: string[]): Promise<CoverageReport>;
 }
 // Aligned to legacy oracle-types.ts ValueOracleResult (4 fields): renaming score→valueScore +
 // adding details prevents a silent field drop when the adapters wrap runMutationOracle /

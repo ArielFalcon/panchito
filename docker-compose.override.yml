@@ -18,10 +18,29 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
+      # Strangler dispatch toggle (src/server/runner.ts selectEngine). Absent/"legacy" keeps the
+      # byte-identical legacy runPipeline path; "rewritten" routes through the qa-engine
+      # RunPipelinePort factory. Controlled from the host env so a plain `up` stays on legacy.
+      PIPELINE_ENGINE: ${PIPELINE_ENGINE:-}
+      # Agent provider override for the ORCHESTRATOR process (src/agent-runtime/config.ts honors
+      # it; provider selection happens host-side, not in the agents supervisor). This environment
+      # entry beats the env_file (.env) value, so the host env controls the provider per boot;
+      # empty/unset falls back to the key-based default (OPENCODE_API_KEY present -> opencode).
+      AGENT_SINGLE_PROVIDER: ${AGENT_SINGLE_PROVIDER:-}
       # Opt-in clone base for the local jhipster-store target. Defaults to github.com, so other
       # apps clone normally UNLESS you boot with GIT_REMOTE_BASE=/app/local-repos set in the host
       # env — then the orchestrator clones the bind-mounted jhipster-store for this probe session.
       GIT_REMOTE_BASE: ${GIT_REMOTE_BASE:-https://github.com}
+      # Test-login credentials forwarded to the e2e Playwright run (scrubEnv keeps /^DEV_/). An app
+      # that requires auth (jhipster-store) needs these, or the authenticate() fixture skips login
+      # and every entity-page test times out. Set per-probe in the host env, e.g.
+      # DEV_TEST_USER=admin DEV_TEST_PASS=admin (the JHipster default admin user).
+      DEV_TEST_USER: ${DEV_TEST_USER:-}
+      DEV_TEST_PASS: ${DEV_TEST_PASS:-}
+      # Planner (agent repo/live-app exploration) deadline. Default 240s (4min) is tight for a large
+      # SPA monorepo like jhipster-store where the agent explores the live app via Playwright-MCP;
+      # raised to 600s (10min) here so a slow-but-progressing exploration is not killed mid-flight.
+      OPENCODE_PLANNER_TIMEOUT_MS: ${OPENCODE_PLANNER_TIMEOUT_MS:-600000}
     volumes:
       - ./src:/app/src
       - ./package.json:/app/package.json
@@ -41,3 +60,11 @@ services:
   agents:
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Live-mount the supervisor so edits to agents/agent-supervisor.mjs take effect on a plain
+    # `docker compose restart agents` — WITHOUT a rebuild — the same live-code trade the orchestrator
+    # already gets for src/. The Dockerfile COPYs this file to /usr/local/bin at build time, so the
+    # baked image can otherwise go stale relative to the source (a fix in the source never reaches the
+    # running container until `docker compose build agents`). It is a single self-contained file (only
+    # node builtins), so mounting just it is sufficient.
+    volumes:
+      - ./agents/agent-supervisor.mjs:/usr/local/bin/agent-supervisor.mjs

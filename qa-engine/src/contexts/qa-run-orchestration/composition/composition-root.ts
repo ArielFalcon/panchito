@@ -26,7 +26,6 @@
 // composition root's job exactly what the plan names it: "wires ALL 11 ports to the REAL bridge
 // adapters" — not "constructs every leaf IO integration from scratch".
 import type { Sha } from "@kernel/sha.ts";
-import type { BlastRadius } from "@kernel/blast-radius.ts";
 import type { RunMode, TestTarget } from "@kernel/run-mode.ts";
 import type { RunPipelinePort } from "../application/ports/index.ts";
 import { RewrittenOrchestratorAdapter, type RewrittenOrchestratorAdapterDeps } from "../infrastructure/rewritten-orchestrator.adapter.ts";
@@ -121,18 +120,21 @@ export interface CompositionConfig {
   // field existed.
   setupCollaborators?: SetupPortCollaborators;
 
-  // ObjectiveSignalPort collaborators — the keystone. assembleChangeCoverage is OPTIONAL (absent
-  // -> decide() receives null -> "unknown" -> NEVER blocks, the documented safe default while the
-  // change-coverage port-completeness gap stays open — see the bridge's own header).
+  // ObjectiveSignalPort collaborators — the keystone. assembleChangeCoverage is OPTIONAL (absent, or
+  // no per-run diff at measure() call time -> decide() receives null -> "unknown" -> NEVER blocks,
+  // the keystone's own architecturally-safe default).
   objectiveSignal: {
     collector: Pick<CoverageCollectorPort, "collect">;
     oracle: Pick<ValueOraclePort, "measure">;
   };
   coveragePolicy: CoveragePolicy;
-  assembleChangeCoverage?: (
-    report: Awaited<ReturnType<CoverageCollectorPort["collect"]>>,
-    br: BlastRadius,
-  ) => ChangeCoverage;
+  // (diff, report) -> ChangeCoverage — matches assemble-change-coverage.ts's exported
+  // `assembleChangeCoverage` shape (a pure port of legacy parseDiffHunks + computeChangeCoverage).
+  // Widened from the earlier `(report, br)` shape: br carries no diff (BlastRadius.changedFiles is
+  // frequently empty at the RunQaUseCase call site), while the run's REAL diff — sourced from
+  // ChangeAnalysisPort.classify() in diff mode, the ONLY mode that measures change-coverage — is
+  // exactly what parseDiffHunks needs.
+  assembleChangeCoverage?: (diff: string, report: Awaited<ReturnType<CoverageCollectorPort["collect"]>>) => ChangeCoverage;
   baselineCases?: string[];
 
   // PublicationPort collaborators (production path only — buildShadow always overrides these with
@@ -227,6 +229,10 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
     {
       policy: cfg.coveragePolicy,
       repoDir: cfg.mirrorDir,
+      // NAMESPACE FIX: the SAME per-run namespace ExecutionPortAdapter uses below (`cfg.branch`) —
+      // see objective-signal-port.adapter.ts's own measure() comment for why `br.sha.toString()`
+      // (the pre-existing fallback) mismatches the directory execution actually wrote dumps to.
+      namespace: cfg.branch,
       ...(cfg.assembleChangeCoverage ? { assembleChangeCoverage: cfg.assembleChangeCoverage } : {}),
       ...(cfg.baselineCases ? { baselineCases: cfg.baselineCases } : {}),
     },

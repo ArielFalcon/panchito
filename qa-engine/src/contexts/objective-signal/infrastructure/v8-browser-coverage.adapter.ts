@@ -37,11 +37,16 @@ export class V8BrowserCoverageAdapter implements CoverageCollectorPort {
     private readonly parse: ParseV8 = defaultParseV8Coverage,
   ) {}
 
-  async collect(specDir: string, namespace: string): Promise<CoverageReport> {
+  // changedFiles (per-call, optional): the "dynamic diff" precedent — PREFERS the run's real changed
+  // files (derived from the diff at measure()-call time, when the composition-time constructor value
+  // is often a placeholder `[]` — see CoverageCollectorPort's own header) over the constructor value.
+  // Falls back to this.changedFiles when the caller omits it (backward compatible).
+  async collect(specDir: string, namespace: string, changedFiles?: string[]): Promise<CoverageReport> {
     const dumps = await this.readDumps(specDir, namespace);
+    const files = changedFiles ?? this.changedFiles;
     const merged = new Map<string, Set<number>>();
     for (const d of dumps) {
-      for (const [file, lines] of this.parse(d.entries, this.changedFiles)) {
+      for (const [file, lines] of this.parse(d.entries, files)) {
         const set = merged.get(file) ?? new Set<number>();
         for (const ln of lines) set.add(ln);
         merged.set(file, set);

@@ -263,6 +263,46 @@ test("PIPELINE_ENGINE unset — the runner takes legacy, the REAL rewritten engi
   assert.equal(factoryInvoked, false, "with PIPELINE_ENGINE absent, the REAL rewritten engineFactory must never be consulted");
 });
 
+// ── THE VALUE KEYSTONE — assembleChangeCoverage wiring + code-mode coverage trigger ──────────────
+// CLAUDE.md "The value/trust risk": change-coverage measurement was always "unknown" because no
+// assembler turned the collector's raw CoverageReport + the run's diff into the ChangeCoverage
+// read-model. This factory is the production seam that supplies the REAL assembler + (for code mode)
+// triggers the repo's own instrumented test run so a report exists to read in the first place.
+
+test("buildRewrittenCompositionConfig supplies a REAL assembleChangeCoverage (the value keystone, previously always absent)", () => {
+  const app = cfg("factory-assembler");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.equal(typeof config.assembleChangeCoverage, "function", "assembleChangeCoverage must be wired — its absence is exactly what kept measure() at status:'unknown' forever");
+
+  // Prove it is the REAL pure port (parseDiffHunks + computeChangeCoverage), not a stub that always
+  // returns a fixed shape: a diff with 2 added lines, 1 covered by the report, must intersect to a
+  // real, non-trivial ChangeCoverage.
+  const diff = ["diff --git a/src/x.ts b/src/x.ts", "+++ b/src/x.ts", "@@ -1,0 +1,2 @@", "+a", "+b"].join("\n");
+  const cc = config.assembleChangeCoverage!(diff, { covered: [{ file: "src/x.ts", lines: [1] }] });
+  assert.equal(cc.measured, true);
+  assert.equal(cc.overall.changedLines, 2);
+  assert.equal(cc.overall.coveredChanged, 1);
+  assert.deepEqual(cc.uncovered, [{ file: "src/x.ts", lines: [2] }]);
+});
+
+test("buildRewrittenCompositionConfig's coverage collector for an e2e app does NOT trigger runCodeCoverage (code-only trigger)", async () => {
+  const app = cfg("factory-e2e-no-codecov");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  // Must resolve without throwing — an e2e app's collector is the plain V8-dump collector, untouched
+  // by the code-mode wrapper; a nonexistent namespace dir degrades to an empty report (fail-open).
+  const report = await config.objectiveSignal.collector.collect("/tmp/does-not-exist/e2e", "qa-bot-abc1234-run1");
+  assert.deepEqual(report, { covered: [] });
+});
+
+test("buildRewrittenCompositionConfig's coverage collector for a code:true app runs best-effort (never throws even with no c8/no test command)", async () => {
+  const app: AppConfig = { ...cfg("factory-code-coverage-trigger"), code: true, dev: undefined };
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-def5678-run2", { mode: "diff" });
+  // Legacy parity (src/pipeline.ts:487): `if (input.target === "code") await runCodeCoverage(input.repoDir).catch(() => {})`
+  // — best-effort, BEFORE the lcov/Istanbul readers run. A bogus mirrorDir (no repo, no c8, no test
+  // command) must degrade the whole collect() call to an empty report, never throw.
+  await assert.doesNotReject(() => config.objectiveSignal.collector.collect("/tmp/does-not-exist/e2e", "qa-bot-def5678-run2"));
+});
+
 test("PIPELINE_ENGINE=legacy (explicit) — same fail-safe holds for the real factory", async () => {
   const prev = process.env.PIPELINE_ENGINE;
   process.env.PIPELINE_ENGINE = "legacy";

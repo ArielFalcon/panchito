@@ -178,6 +178,37 @@ test("PIPELINE_ENGINE=rewritten + engineFactory — routes to port.run, never ca
   }
 });
 
+// CLAUDE.md invariant ("surface integration errors loudly — never swallow errors into an empty
+// result"): a live portfolio run once produced verdict:infra-error with NO note/log/cases on the
+// rewritten engine path — undiagnosable without instrumenting a live container. Root cause:
+// runViaRewrittenEngine (this file) mapped RunOutcome -> QaRunResult but dropped `note` entirely.
+// This test pins that the note now survives all the way out to the run record.
+test("PIPELINE_ENGINE=rewritten — outcome.note is forwarded into the run record's note field", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const { port } = fakePort({ verdict: "infra-error", note: "DEV did not serve sha def5678 within 5000ms" });
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-flag-rewritten-note", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
+      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port },
+    );
+    await queue.drain();
+    const r = getRecord(id)!;
+    assert.equal(r.status, "done");
+    assert.equal(r.verdict, "infra-error");
+    assert.equal(
+      r.note,
+      "DEV did not serve sha def5678 within 5000ms",
+      "the rewritten engine's diagnostic note must reach the run record — previously silently dropped by runViaRewrittenEngine's RunOutcome -> QaRunResult mapping",
+    );
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
 // ── CRITICAL fix (judgment-day) — the runner MUST compute a PER-RUN namespace and pass it into
 // engineFactory, mirroring the exact formula legacy uses (testDataNamespace(prefix, sha, runId) at
 // src/pipeline.ts:1222). Without this, every run of every app collided on the SAME static branch
@@ -332,6 +363,55 @@ test("PIPELINE_ENGINE=rewritten — engineFactory's run.guidance is absent (not 
     await queue.drain();
     assert.equal(getRecord(id)!.verdict, "pass");
     assert.equal(receivedRun?.guidance, undefined, "guidance must be absent, not fabricated, when the request never supplied one");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+// ── Cross-repo coverage guard (dual-judge finding) ─────────────────────────────
+// Legacy's coverage-collect gate is `mode === "diff" && ... && !triggerService`
+// (src/pipeline.ts:2912) — browser V8 coverage cannot map a service repo's changed lines, so a
+// cross-repo (deploy-event) run must degrade change-coverage to "unknown", never a real ratio.
+// runViaRewrittenEngine must thread req.triggerRepo into the RunInput it hands to port.run() so
+// RunQaUseCase can starve the ObjectiveSignalPort.measure() diff arg for these runs.
+
+test("PIPELINE_ENGINE=rewritten — the runner threads req.triggerRepo into port.run's RunInput when present", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const { port, calls } = fakePort({ verdict: "pass" });
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-trigger-repo", sha: "def5678", target: "e2e", mode: "diff", source: "webhook", triggerRepo: "org/orders-svc" },
+      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port },
+    );
+    await queue.drain();
+    assert.equal(getRecord(id)!.verdict, "pass");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.triggerRepo, "org/orders-svc", "RunInput.triggerRepo must carry req.triggerRepo through to port.run, mirroring legacy's triggerService cross-repo gate");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("PIPELINE_ENGINE=rewritten — RunInput.triggerRepo is absent (not fabricated) when req.triggerRepo is omitted", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const { port, calls } = fakePort({ verdict: "pass" });
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-trigger-repo-absent", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
+      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port },
+    );
+    await queue.drain();
+    assert.equal(getRecord(id)!.verdict, "pass");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.triggerRepo, undefined, "an ordinary (non-cross-repo) run must never fabricate a triggerRepo");
   } finally {
     if (prev === undefined) delete process.env.PIPELINE_ENGINE;
     else process.env.PIPELINE_ENGINE = prev;

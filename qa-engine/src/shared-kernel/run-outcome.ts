@@ -43,5 +43,12 @@ export interface RunOutcome {
   rulesRetrieved: string[];
   // Wide: the real type is cross-run-learning's StructuredReflection; `unknown` for the same reason.
   reflection?: unknown;
+  // Diagnostic note for a terminal exit (mirrors legacy src/types.ts's `note?: string` on RunOutcome /
+  // AgentResult / QaRunResult): a human-readable reason surfaced to the run record — e.g. the InfraError
+  // message from a deploy-gate/health failure, or "setup failed: <cause>". Optional; absent means no
+  // diagnostic was captured for this outcome (never a fabricated empty string). src/server/runner.ts
+  // maps `run.note || undefined` into the run record — this field is what makes that mapping non-empty
+  // on the rewritten path.
+  note?: string;
   at: string;
 }

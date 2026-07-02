@@ -340,3 +340,32 @@ test("FIX 4 (adapter): errorClass is forwarded into the returned RunOutcome, not
   assert.equal(outcome.verdict, "fail");
   assert.equal(outcome.errorClass, "E-EXEC-FAIL", "errorClass must be forwarded from the use-case's RunQaResult into the adapter's RunOutcome");
 });
+
+// ── CLAUDE.md invariant note-chain (a live infra-error once surfaced with NO note/log/cases —
+// undiagnosable without instrumenting a live container): RunQaResult.note must reach RunOutcome.note
+// through this adapter's toOutcome() mapping — previously dropped entirely, silently breaking the
+// note chain between RunQaUseCase and src/server/runner.ts's runViaRewrittenEngine (which reads
+// outcome.note off exactly the RunOutcome this adapter returns). ──────────────────────────────────
+
+test("NOTE CHAIN (adapter): RunQaResult.note is forwarded into the returned RunOutcome.note", async () => {
+  const { ports } = stubPorts({ waitUntilServing: async () => ({ ok: false, error: new Error("DEV did not serve sha abc1234 within 5000ms") }) });
+  const adapter = new RewrittenOrchestratorAdapter({ ...ports, config: baseConfig });
+
+  const outcome = await adapter.run({ ...baseInput, runId: "note-chain-adapter-mapping" });
+
+  assert.equal(outcome.verdict, "infra-error");
+  assert.ok(
+    outcome.note?.includes("DEV did not serve sha abc1234"),
+    `the entry deploy-gate's InfraError message must survive RunQaResult -> RunOutcome mapping — got: ${outcome.note}`,
+  );
+});
+
+test("NOTE CHAIN (adapter): a clean pass never fabricates a note (absent by default)", async () => {
+  const { ports } = stubPorts();
+  const adapter = new RewrittenOrchestratorAdapter({ ...ports, config: baseConfig });
+
+  const outcome = await adapter.run({ ...baseInput, runId: "note-chain-adapter-no-note" });
+
+  assert.equal(outcome.verdict, "pass");
+  assert.equal(outcome.note, undefined, "a clean pass must never carry a fabricated note — optional field, absent by default, exactly like legacy");
+});

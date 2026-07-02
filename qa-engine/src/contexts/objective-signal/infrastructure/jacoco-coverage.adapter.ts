@@ -18,11 +18,14 @@ export class JacocoCoverageAdapter implements CoverageCollectorPort {
     private readonly parse: ParseJacoco = defaultParseJacocoXml,
   ) {}
 
-  async collect(specDir: string, namespace: string): Promise<CoverageReport> {
+  // changedFiles (per-call, optional): same "dynamic diff" precedent as V8BrowserCoverageAdapter —
+  // prefers the run's real changed files over the composition-time constructor value when supplied.
+  async collect(specDir: string, namespace: string, changedFiles?: string[]): Promise<CoverageReport> {
     const files = await this.readFiles(specDir, namespace);
+    const changed = changedFiles ?? this.changedFiles;
     const merged = new Map<string, Set<number>>();
     for (const f of files) {
-      for (const [file, lines] of this.parse(f.text, this.changedFiles)) {
+      for (const [file, lines] of this.parse(f.text, changed)) {
         const set = merged.get(file) ?? new Set<number>();
         for (const ln of lines) set.add(ln);
         merged.set(file, set);

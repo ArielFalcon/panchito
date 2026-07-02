@@ -1035,6 +1035,10 @@ for (const c of allDualCases) {
       target: c.input.target as never,
       guidance: undefined,
       runId: `${c.legacyScenario.runId}-dual-rewritten`,
+      // Cross-repo faithfulness (judgment-day): thread the scenario's triggerRepo exactly like the
+      // legacy side's legacyOpts above — without it, the cross-repo golden case never exercises the
+      // rewritten path's own !triggerRepo coverage guard (false sense of parity coverage).
+      ...("triggerRepo" in rebuilt.opts && rebuilt.opts.triggerRepo ? { triggerRepo: rebuilt.opts.triggerRepo } : {}),
     });
     void savedRewritten; // captured for potential future inspection; the adapter's own return is asserted
 

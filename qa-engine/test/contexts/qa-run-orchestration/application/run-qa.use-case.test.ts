@@ -239,7 +239,9 @@ const tenScenarios: TenScenarioCase[] = [
   },
   {
     // crossApp (needsReview:false, shadow:false explicit), makeDeps({ isCrossRepo: true }). Source:
-    // scenarios.ts:302-322.
+    // scenarios.ts:302-322. NOTE (judgment-day): this row deliberately does NOT set
+    // input.triggerRepo — it pins the needsReview-skip semantics of the cross-repo shape only; the
+    // triggerRepo coverage guard has its own dedicated KEYSTONE tests further down this file.
     scenario: "cross-repo",
     overrides: {},
     config: { ...baseConfig, needsReview: false },
@@ -353,6 +355,59 @@ test("RunQaUseCase — infra-error: execute() is NEVER called (DEV unhealthy bef
 
   assert.equal(out.decision.verdict, "infra-error");
   assert.equal(executeCallCount, 0, "DEV-unhealthy must block BEFORE execution, never call it");
+});
+
+// ── CLAUDE.md invariant ("surface integration errors loudly — never swallow errors into an empty
+// result"): every infra-error-shaped terminal must carry a diagnostic note. A live portfolio run
+// once produced verdict:infra-error with NO note/log/cases — undiagnosable without instrumenting a
+// live container. These tests pin the note end-to-end for each silent terminal that fix closed. ──
+
+test("NOTE CHAIN: entry deploy-gate failure surfaces the InfraError message as the note", async () => {
+  const { ports } = stubPorts({
+    waitUntilServing: async () => ({ ok: false, error: new Error("DEV did not serve sha abc1234 within 5000ms (versionUrl=https://example.com/version)") }),
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "note-chain-entry-gate" });
+
+  assert.equal(out.decision.verdict, "infra-error");
+  assert.ok(
+    out.note?.includes("DEV did not serve sha abc1234"),
+    `the entry deploy-gate's own InfraError message must reach the note, not be dropped — got: ${out.note}`,
+  );
+});
+
+test("NOTE CHAIN: mid-run health pre-flight failure surfaces a note (and is persisted)", async () => {
+  let waitUntilServingCall = 0;
+  let saved: import("@kernel/run-outcome.ts").RunOutcome | undefined;
+  const { ports } = stubPorts({
+    waitUntilServing: async () => {
+      waitUntilServingCall++;
+      // First call (entry gate) succeeds; second call (mid-run pre-flight, after validate) fails —
+      // mirrors FIX E's own two-call precedent for isolating the mid-run branch.
+      return waitUntilServingCall === 1 ? ok(true) : { ok: false, error: new Error("DEV went down mid-run") };
+    },
+  });
+  ports.runHistory.save = async (outcome) => { saved = outcome; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "note-chain-health-preflight" });
+
+  assert.equal(out.decision.verdict, "infra-error");
+  assert.ok(out.note?.includes("DEV went down mid-run"), `the mid-run health pre-flight's captured gate error must reach the note — got: ${out.note}`);
+  assert.equal(saved?.note, out.note, "the persisted RunOutcome must carry the SAME note as the returned RunQaResult — the note must survive the mapping chain out to the run record");
+});
+
+test("NOTE CHAIN: static-gate 'invalid' terminal surfaces the validation errors as the note", async () => {
+  const { ports } = stubPorts({
+    validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout", "[tsc] Type 'string' is not assignable to type 'number'."] }),
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "note-chain-validation-invalid" });
+
+  assert.equal(out.decision.verdict, "invalid");
+  assert.ok(out.note?.includes("no-wait-for-timeout"), `a static-gate 'invalid' terminal must surface validation.errors in the note — got: ${out.note}`);
 });
 
 // ── "Dynamic diff" fix: the Plan 7.5 shadow proof (engram #936) found that GenerationPortAdapter
@@ -532,8 +587,10 @@ test("FIX D: a diff-mode fail retry computes coverageWillMeasure per the legacy 
   // fix-loop.aggregate.ts's own header). So the only port-observable proof available at THIS
   // layer is instrumenting FixLoop.run itself and asserting the use-case invokes it with
   // coverageWillMeasure computed per the legacy formula (src/pipeline.ts:2563-2564):
-  // `generating && mode === "diff" && covPolicy.mode !== "off"` (this port layer carries no
-  // triggerService/cross-repo concept, so that legacy conjunct is vacuously true here). We patch
+  // `generating && mode === "diff" && covPolicy.mode !== "off"` (RunQaInput.triggerRepo exists now,
+  // but this formula deliberately omits the !triggerRepo conjunct — over-firing true for cross-repo
+  // only disables the FixLoop's filtered-retry optimization, a documented harmless trade-off; the
+  // REAL coverage guard lives at the measure() call site, which starves the diff). We patch
   // FixLoop.prototype.run for the duration of this test to capture the actual input the use-case
   // constructs, restoring it immediately after — this is the narrowest possible seam that proves
   // the WIRING, without inventing a new port.
@@ -697,6 +754,7 @@ test("SETUP: a setup() throw maps to infra-error, never a code verdict — and d
   assert.equal(out.decision.sideEffect, "none");
   assert.equal(generateCalled, false, "generate() must never run once setup has thrown");
   assert.equal(saveCallCount, 0, "a setup failure must NOT persist a RunOutcome — matches the entry-gate infra-error's own no-persist convention (infraErrorResult never saves)");
+  assert.ok(out.note?.includes("npm ci in e2e failed (code 1)"), `a setup throw must surface a diagnostic note carrying the thrown message (CLAUDE.md "never swallow errors into an empty result") — got: ${out.note}`);
 });
 
 test("SETUP: an absent SetupPort (deps.setup undefined) is a no-op — generation still runs (backward compatible)", async () => {
@@ -1279,4 +1337,82 @@ test("FIX E: infra-error calls runHistory.save() but NOT learning.fold()", async
   assert.equal(out.decision.verdict, "infra-error");
   assert.equal(saveCallCount, 1, "infra-error must call runHistory.save() exactly once (matches persistOutcome at pipeline.ts:2328-2337)");
   assert.equal(foldCallCount, 0, "infra-error must NEVER call learning.fold() (the legacy never calls foldRunLearning for this source)");
+});
+
+// ── Change-coverage keystone: classificationDiff threading into ObjectiveSignalPort.measure() ───
+// The "dynamic diff" precedent (already proven for generation/review in this file's other tests):
+// classify() (diff mode only) returns the run's real commit diff, hoisted to `classificationDiff`,
+// and reused across generation/review/repair. This closes the LAST missing thread — measure() must
+// see the SAME real diff, so the ChangeCoverage assembler (when wired) can actually run, instead of
+// silently staying "unknown" forever regardless of policy mode.
+
+test("KEYSTONE: a diff-mode PASS run threads classificationDiff into ObjectiveSignalPort.measure()'s 3rd arg", async () => {
+  let seenDiff: string | undefined = "UNSET";
+  const { ports } = stubPorts({
+    classify: async () => ({ action: "generate", reason: "diff touches src/x.ts", diff: "diff --git a/src/x.ts b/src/x.ts" }),
+    measure: async (_br, _specDir, diff) => {
+      seenDiff = diff;
+      return { status: "unknown", ratio: null };
+    },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, mode: "diff", runId: "keystone-diff-mode" });
+
+  assert.equal(seenDiff, "diff --git a/src/x.ts b/src/x.ts", "measure() must receive the SAME real diff classify() returned, not a static/absent value");
+});
+
+test("KEYSTONE: a non-diff mode run never has a classificationDiff — measure() sees diff:undefined", async () => {
+  let seenDiff: string | undefined = "UNSET";
+  const { ports } = stubPorts({
+    measure: async (_br, _specDir, diff) => {
+      seenDiff = diff;
+      return { status: "unknown", ratio: null };
+    },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, mode: "complete", runId: "keystone-non-diff-mode" });
+
+  assert.equal(seenDiff, undefined, "classify() is only ever called in diff mode (CLAUDE.md 'Run modes'), so complete/exhaustive/manual/context must never fabricate a diff for measure()");
+});
+
+// ── Cross-repo coverage guard (dual-judge finding) ─────────────────────────────
+// Legacy's coverage-collect gate is `mode === "diff" && ... && !triggerService` (src/pipeline.ts:2912)
+// — a cross-repo (deploy-event) run's changed lines live in the SERVICE repo, which browser V8
+// coverage cannot map (CLAUDE.md: "Change-coverage is unknown for these [cross-repo] runs"). The
+// keystone invariant is "unknown" NEVER blocks, so a cross-repo diff run must starve the assembler
+// (measure() sees diff:undefined) exactly like a non-diff-mode run, even though classify() DID run
+// and DID produce a real classificationDiff.
+
+test("KEYSTONE: a diff-mode PASS run WITH input.triggerRepo set — measure() sees diff:undefined despite classify() producing a real diff", async () => {
+  let seenDiff: string | undefined = "UNSET";
+  const { ports } = stubPorts({
+    classify: async () => ({ action: "generate", reason: "diff touches src/x.ts", diff: "diff --git a/src/x.ts b/src/x.ts" }),
+    measure: async (_br, _specDir, diff) => {
+      seenDiff = diff;
+      return { status: "unknown", ratio: null };
+    },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, mode: "diff", runId: "keystone-cross-repo", triggerRepo: "org/orders-svc" });
+
+  assert.equal(seenDiff, undefined, "a cross-repo run must starve ObjectiveSignalPort.measure()'s diff arg — the assembler must never be invoked (browser coverage cannot map service-repo lines), mirroring legacy's !triggerService gate");
+});
+
+test("KEYSTONE: the SAME diff-mode PASS run WITHOUT input.triggerRepo still threads the real classificationDiff", async () => {
+  let seenDiff: string | undefined = "UNSET";
+  const { ports } = stubPorts({
+    classify: async () => ({ action: "generate", reason: "diff touches src/x.ts", diff: "diff --git a/src/x.ts b/src/x.ts" }),
+    measure: async (_br, _specDir, diff) => {
+      seenDiff = diff;
+      return { status: "unknown", ratio: null };
+    },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, mode: "diff", runId: "keystone-monorepo-control" });
+
+  assert.equal(seenDiff, "diff --git a/src/x.ts b/src/x.ts", "a monorepo (non-cross-repo) run must be unaffected by the triggerRepo guard — control case for the test above");
 });

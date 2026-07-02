@@ -81,6 +81,11 @@ function toOutcome(input: RunInput, result: RunQaResult): RunOutcome {
       deterministicSelectorBlocks: result.gateSignals.deterministicSelectorBlocks,
     },
     rulesRetrieved: [],
+    // CLAUDE.md invariant ("surface integration errors loudly"): forward the SAME diagnostic note
+    // the use-case's infra-error-shaped terminals now carry — previously dropped entirely here,
+    // which is exactly the gap that let a live infra-error surface with NO note downstream (src/
+    // server/runner.ts's runViaRewrittenEngine only reads outcome.note off THIS returned RunOutcome).
+    ...(result.note !== undefined ? { note: result.note } : {}),
     at: new Date().toISOString(),
   };
 }

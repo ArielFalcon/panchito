@@ -19,10 +19,11 @@ async function collectWithTimeout(
   specDir: string,
   namespace: string,
   timeoutMs = COLLECTOR_TIMEOUT_MS,
+  changedFiles?: string[],
 ): Promise<CoverageReport> {
   return new Promise((resolve) => {
     const timer = setTimeout(() => resolve({ covered: [] }), timeoutMs);
-    collector.collect(specDir, namespace).then(
+    collector.collect(specDir, namespace, changedFiles).then(
       (r) => { clearTimeout(timer); resolve(r); },
       () => { clearTimeout(timer); resolve({ covered: [] }); }, // error → empty (fail-open)
     );
@@ -35,11 +36,13 @@ export class CoverageCollectorAdapter implements CoverageCollectorPort {
     private readonly timeoutMs = COLLECTOR_TIMEOUT_MS,
   ) {}
 
-  async collect(specDir: string, namespace: string): Promise<CoverageReport> {
+  // changedFiles (per-call, optional): forwarded verbatim to every leaf collector — see
+  // CoverageCollectorPort's own header for the "dynamic diff" precedent this follows.
+  async collect(specDir: string, namespace: string, changedFiles?: string[]): Promise<CoverageReport> {
     // Each collector runs with a bounded timeout. A slow/hanging collector degrades to an empty
     // report (→ DecideCoverageService returns "unknown" → NEVER blocks — the keystone invariant).
     const all = await Promise.all(
-      this.collectors.map((c) => collectWithTimeout(c, specDir, namespace, this.timeoutMs)),
+      this.collectors.map((c) => collectWithTimeout(c, specDir, namespace, this.timeoutMs, changedFiles)),
     );
     const merged = new Map<string, Set<number>>();
     for (const r of all) for (const c of r.covered) {
