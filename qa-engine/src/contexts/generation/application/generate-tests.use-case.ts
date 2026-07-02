@@ -127,9 +127,12 @@ export class GenerateTestsUseCase {
     // entry 0.changeRef" all missing).
     //
     // On-disk phantom verification (legacy's sha256File check: a specMeta naming a file NOT on disk
-    // is dropped before it reaches the manifest) is NOT yet ported into qa-engine's
-    // ManifestRepositoryPort — reconcile() here still only prunes/merges by id, it does not verify
-    // the file exists on disk first. Tracked as a follow-up gap, not silently claimed as covered.
+    // is dropped before it reaches the manifest) plus schema-shape validation (legacy's
+    // ManifestEntrySchema.safeParse) are ported into manifest.reconcile()'s implementation
+    // (manifest-fs.ts's safetyFilter, run BEFORE the upsert-merge — same ordering as legacy's
+    // drop-before-write). A phantom entry (file absent on disk) or a malformed entry (empty
+    // objective/targets/changeRef) is dropped with a console.warn there, never silently, and never
+    // reaches this use-case's `reconciledEntries` return value.
     const specDir = `${input.mirrorDir}/${input.e2eRelDir}`;
     const changeType = input.intent?.type ?? "unknown";
     const rawEntries: ManifestEntry[] = (deliverable.specMetas ?? []).map((m) => ({

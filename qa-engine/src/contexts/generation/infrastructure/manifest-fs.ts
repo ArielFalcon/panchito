@@ -15,11 +15,39 @@
 // unrelated entries; a re-upserted id is replaced, not merged field-by-field with its old value —
 // same as the real upsertManifest's `{ ...byId.get(e.id), ...e }` spread) is carried over exactly.
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { ManifestEntry } from "../application/ports/index.ts";
 
 function manifestPath(specDir: string): string {
   return join(specDir, ".qa", "manifest.json");
+}
+
+// Ported verbatim from src/integrations/opencode-client.ts's sha256File: content checksum of a spec
+// file, computed for integrity verification AND (per reconcileManifest below) doubling as the
+// on-disk existence probe — a file that cannot be read (absent, unreadable, any fs error) yields
+// undefined rather than throwing, matching the legacy fail-open contract.
+function sha256File(path: string): string | undefined {
+  try {
+    const data = readFileSync(path);
+    return createHash("sha256").update(data).digest("hex");
+  } catch {
+    return undefined;
+  }
+}
+
+// Minimal structural validation mirroring src/orchestrator/schemas.ts's ManifestEntrySchema (the
+// fields the real static gate actually enforces: non-empty id/objective/flow, non-empty targets,
+// non-empty changeRef.sha/type). Replicated locally rather than importing the legacy zod schema —
+// qa-engine/src must stay src/-free (CLAUDE.md invariant). Returns the first violation message, or
+// undefined when the entry is well-formed.
+function manifestEntryViolation(e: ManifestEntry): string | undefined {
+  if (!e.id || e.id.length === 0) return "missing 'id'";
+  if (!e.objective || e.objective.length === 0) return "missing 'objective'";
+  if (!e.flow || e.flow.length === 0) return "missing 'flow'";
+  if (!e.targets || e.targets.length === 0) return "empty 'targets'";
+  if (!e.changeRef || !e.changeRef.sha || !e.changeRef.type) return "missing or incomplete 'changeRef'";
+  return undefined;
 }
 
 // Fail-open by construction, ported from realManifestFs.read: a missing file, an unreadable file,
@@ -43,16 +71,50 @@ export async function readManifest(specDir: string): Promise<ManifestEntry[]> {
   }
 }
 
+// Ported verbatim from opencode-client.ts:764-810's two safety passes, run BEFORE the upsert-merge
+// (legacy drops before writing — same ordering here): (1) the sha256 presence filter — a specMeta
+// naming a `file` that is NOT readable on disk is a PHANTOM (the agent claimed a spec it never
+// wrote); dropped with a console.warn, never silently. A present file always yields a sha256, so
+// this pass doubles as the "disk over the agent's word" existence check AND stamps the entry with
+// its integrity checksum (mirrors legacy's `sha256: sha256!` — persisted on the surviving entry).
+// (2) structural validation against the same shape the real read-path schema enforces — an entry
+// that passes the disk check but is malformed (empty objective/targets/etc.) is dropped with a
+// console.warn too, never corrupting the manifest. Both passes are loud (CLAUDE.md: never swallow
+// silently), matching legacy's console.warn-per-drop behavior exactly.
+function safetyFilter(specDir: string, entries: readonly ManifestEntry[]): ManifestEntry[] {
+  const withSha = entries.map((e) => ({ e, sha256: e.file ? sha256File(join(specDir, e.file)) : undefined }));
+  const onDisk = withSha.filter(({ e, sha256 }) => {
+    if (!sha256) {
+      console.warn(`[qa] WARNING: agent reported spec '${e.file}' in its manifest metadata but it is not on disk — dropping the phantom manifest entry.`);
+      return false;
+    }
+    return true;
+  }).map(({ e, sha256 }) => ({ ...e, sha256 }));
+
+  return onDisk.filter((e) => {
+    const violation = manifestEntryViolation(e);
+    if (violation) {
+      console.warn(`[qa] WARNING: dropping manifest entry '${e.id}' — it fails the manifest schema: ${violation}.`);
+      return false;
+    }
+    return true;
+  });
+}
+
 // Ported verbatim from upsertManifest's merge mechanic: read the existing array (rebuilding from []
 // on a corrupt/missing file — "disk over the agent's word" only applies to WHICH entries win, not to
 // crashing on a bad read), upsert the given entries by id (an existing id is REPLACED by the new
 // entry, spread over any prior fields of the same id — matching `{ ...byId.get(e.id), ...e }`),
 // preserve every unrelated existing entry, then write. entries.length === 0 short-circuits with NO
 // write (matching upsertManifest's own early return) — a no-op reconcile never touches the manifest
-// file, so it is never created just to hold an empty array.
+// file, so it is never created just to hold an empty array. Entries are run through safetyFilter
+// (phantom-drop + structural validation) BEFORE the merge, matching legacy's drop-before-write order.
 export async function reconcileManifest(specDir: string, entries: readonly ManifestEntry[]): Promise<ManifestEntry[]> {
   const path = manifestPath(specDir);
   if (entries.length === 0) return [];
+
+  const safeEntries = safetyFilter(specDir, entries);
+  if (safeEntries.length === 0) return [];
 
   let existing: ManifestEntry[] = [];
   try {
@@ -67,7 +129,7 @@ export async function reconcileManifest(specDir: string, entries: readonly Manif
 
   const byId = new Map<string, ManifestEntry>();
   for (const e of existing) if (e && typeof e.id === "string") byId.set(e.id, e);
-  for (const e of entries) byId.set(e.id, { ...byId.get(e.id), ...e });
+  for (const e of safeEntries) byId.set(e.id, { ...byId.get(e.id), ...e });
 
   const merged = [...byId.values()];
   mkdirSync(dirname(path), { recursive: true });

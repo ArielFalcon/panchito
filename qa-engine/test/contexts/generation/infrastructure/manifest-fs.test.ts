@@ -7,7 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { readManifest, reconcileManifest } from "@contexts/generation/infrastructure/manifest-fs.ts";
 
 function makeSpecDir(): string {
@@ -16,6 +16,14 @@ function makeSpecDir(): string {
 
 function manifestPath(specDir: string): string {
   return join(specDir, ".qa", "manifest.json");
+}
+
+// Writes a real (dummy-content) spec file under specDir so a ManifestEntry naming it survives the
+// on-disk phantom-drop safety filter reconcileManifest now runs before every merge.
+function writeSpecFile(specDir: string, relPath: string): void {
+  const full = join(specDir, relPath);
+  mkdirSync(dirname(full), { recursive: true });
+  writeFileSync(full, "// dummy spec content\n");
 }
 
 test("readManifest returns [] when the manifest file does not exist", async () => {
@@ -68,12 +76,15 @@ test("readManifest reads back real entries written to disk", async () => {
 test("reconcileManifest creates the manifest file (with .qa/ dir) when none exists", async () => {
   const specDir = makeSpecDir();
   try {
-    const entries = [{ id: "checkout", file: "e2e/checkout.spec.ts", flow: "checkout", objective: "o" }];
+    writeSpecFile(specDir, "e2e/checkout.spec.ts");
+    const entries = [{ id: "checkout", file: "e2e/checkout.spec.ts", flow: "checkout", objective: "o", targets: ["t"], changeRef: { sha: "s", type: "feat" } }];
     const out = await reconcileManifest(specDir, entries);
-    assert.deepEqual(out, entries);
+    assert.equal(out.length, 1);
+    assert.equal(out[0]?.id, "checkout");
+    assert.ok(out[0]?.sha256, "surviving entry is stamped with a sha256 checksum");
     assert.equal(existsSync(manifestPath(specDir)), true);
     const onDisk = JSON.parse(readFileSync(manifestPath(specDir), "utf8"));
-    assert.deepEqual(onDisk, entries);
+    assert.deepEqual(onDisk, out);
   } finally {
     rmSync(specDir, { recursive: true, force: true });
   }
@@ -83,6 +94,8 @@ test("reconcileManifest upserts by id — an existing id is overwritten, a new i
   const specDir = makeSpecDir();
   try {
     mkdirSync(join(specDir, ".qa"), { recursive: true });
+    writeSpecFile(specDir, "e2e/login.spec.ts");
+    writeSpecFile(specDir, "e2e/checkout.spec.ts");
     const seeded = [
       { id: "login", file: "e2e/login.spec.ts", flow: "login", objective: "old objective" },
       { id: "logout", file: "e2e/logout.spec.ts", flow: "logout", objective: "o" },
@@ -90,8 +103,8 @@ test("reconcileManifest upserts by id — an existing id is overwritten, a new i
     writeFileSync(manifestPath(specDir), JSON.stringify(seeded, null, 2));
 
     const out = await reconcileManifest(specDir, [
-      { id: "login", file: "e2e/login.spec.ts", flow: "login", objective: "NEW objective" },
-      { id: "checkout", file: "e2e/checkout.spec.ts", flow: "checkout", objective: "o" },
+      { id: "login", file: "e2e/login.spec.ts", flow: "login", objective: "NEW objective", targets: ["t"], changeRef: { sha: "s", type: "feat" } },
+      { id: "checkout", file: "e2e/checkout.spec.ts", flow: "checkout", objective: "o", targets: ["t"], changeRef: { sha: "s", type: "feat" } },
     ]);
 
     const byId = new Map(out.map((e) => [e.id, e]));
@@ -126,6 +139,7 @@ test("reconcileManifest preserves an unrelated entry's targets/changeRef when a 
   const specDir = makeSpecDir();
   try {
     mkdirSync(join(specDir, ".qa"), { recursive: true });
+    writeSpecFile(specDir, "e2e/checkout.spec.ts");
     const seeded = [
       {
         id: "login", file: "e2e/login.spec.ts", flow: "login", objective: "given creds, then dashboard",
@@ -157,6 +171,7 @@ test("reconcileManifest overwrites targets/changeRef when the SAME id is re-upse
   const specDir = makeSpecDir();
   try {
     mkdirSync(join(specDir, ".qa"), { recursive: true });
+    writeSpecFile(specDir, "e2e/checkout.spec.ts");
     const seeded = [
       {
         id: "checkout", file: "e2e/checkout.spec.ts", flow: "checkout", objective: "old objective",
@@ -185,9 +200,121 @@ test("reconcileManifest rebuilds from the given entries when the existing manife
   try {
     mkdirSync(join(specDir, ".qa"), { recursive: true });
     writeFileSync(manifestPath(specDir), "not json at all");
-    const entries = [{ id: "a", file: "e2e/a.spec.ts", flow: "a", objective: "o" }];
+    writeSpecFile(specDir, "e2e/a.spec.ts");
+    const entries = [{ id: "a", file: "e2e/a.spec.ts", flow: "a", objective: "o", targets: ["t"], changeRef: { sha: "s", type: "feat" } }];
     const out = await reconcileManifest(specDir, entries);
-    assert.deepEqual(out, entries);
+    assert.equal(out.length, 1);
+    assert.equal(out[0]?.id, "a");
+    assert.ok(out[0]?.sha256);
+  } finally {
+    rmSync(specDir, { recursive: true, force: true });
+  }
+});
+
+// ── phantom-drop + schema-validation safety nets (task #41, ported from opencode-client.ts:764-810) ──
+
+test("reconcileManifest drops a specMeta whose file is NOT on disk (phantom), and logs a warning", async () => {
+  const specDir = makeSpecDir();
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (msg: string) => { warnings.push(String(msg)); };
+  try {
+    writeSpecFile(specDir, "e2e/real.spec.ts");
+    const out = await reconcileManifest(specDir, [
+      { id: "real", file: "e2e/real.spec.ts", flow: "real", objective: "o", targets: ["t"], changeRef: { sha: "s", type: "feat" } },
+      { id: "phantom", file: "e2e/phantom.spec.ts", flow: "phantom", objective: "o", targets: ["t"], changeRef: { sha: "s", type: "feat" } },
+    ]);
+
+    const ids = out.map((e) => e.id);
+    assert.deepEqual(ids, ["real"], "the phantom entry is absent from the written manifest");
+    assert.ok(
+      warnings.some((w) => w.includes("phantom") && w.includes("e2e/phantom.spec.ts")),
+      "a warning names the dropped phantom entry — never silent",
+    );
+
+    const onDisk = JSON.parse(readFileSync(manifestPath(specDir), "utf8"));
+    assert.deepEqual(onDisk.map((e: { id: string }) => e.id), ["real"]);
+  } finally {
+    console.warn = originalWarn;
+    rmSync(specDir, { recursive: true, force: true });
+  }
+});
+
+test("reconcileManifest stamps sha256 on a surviving entry whose file IS on disk", async () => {
+  const specDir = makeSpecDir();
+  try {
+    writeSpecFile(specDir, "e2e/real.spec.ts");
+    const out = await reconcileManifest(specDir, [
+      { id: "real", file: "e2e/real.spec.ts", flow: "real", objective: "o", targets: ["t"], changeRef: { sha: "s", type: "feat" } },
+    ]);
+    assert.equal(out.length, 1);
+    assert.equal(typeof out[0]?.sha256, "string");
+    assert.equal(out[0]?.sha256?.length, 64, "sha256 hex digest is 64 chars");
+  } finally {
+    rmSync(specDir, { recursive: true, force: true });
+  }
+});
+
+test("reconcileManifest drops a malformed entry (empty objective) even when its file IS on disk, and logs a warning", async () => {
+  const specDir = makeSpecDir();
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (msg: string) => { warnings.push(String(msg)); };
+  try {
+    writeSpecFile(specDir, "e2e/bad.spec.ts");
+    const out = await reconcileManifest(specDir, [
+      { id: "bad", file: "e2e/bad.spec.ts", flow: "bad", objective: "", targets: ["t"], changeRef: { sha: "s", type: "feat" } },
+    ]);
+    assert.deepEqual(out, [], "malformed entry dropped — nothing written");
+    assert.equal(existsSync(manifestPath(specDir)), false, "no manifest file created for an all-dropped batch");
+    assert.ok(
+      warnings.some((w) => w.includes("bad") && w.includes("schema")),
+      "a warning names the dropped malformed entry — never silent",
+    );
+  } finally {
+    console.warn = originalWarn;
+    rmSync(specDir, { recursive: true, force: true });
+  }
+});
+
+test("reconcileManifest drops a malformed entry (empty targets) with a warning", async () => {
+  const specDir = makeSpecDir();
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (msg: string) => { warnings.push(String(msg)); };
+  try {
+    writeSpecFile(specDir, "e2e/bad.spec.ts");
+    const out = await reconcileManifest(specDir, [
+      { id: "bad", file: "e2e/bad.spec.ts", flow: "bad", objective: "o", targets: [], changeRef: { sha: "s", type: "feat" } },
+    ]);
+    assert.deepEqual(out, []);
+    assert.ok(warnings.some((w) => w.includes("bad") && w.includes("schema")));
+  } finally {
+    console.warn = originalWarn;
+    rmSync(specDir, { recursive: true, force: true });
+  }
+});
+
+test("reconcileManifest still merges valid entries by id while dropping a phantom sibling in the same batch", async () => {
+  const specDir = makeSpecDir();
+  try {
+    mkdirSync(join(specDir, ".qa"), { recursive: true });
+    writeSpecFile(specDir, "e2e/login.spec.ts");
+    const seeded = [
+      { id: "logout", file: "e2e/logout.spec.ts", flow: "logout", objective: "old", targets: ["t"], changeRef: { sha: "s0", type: "chore" } },
+    ];
+    writeFileSync(manifestPath(specDir), JSON.stringify(seeded, null, 2));
+
+    const out = await reconcileManifest(specDir, [
+      { id: "login", file: "e2e/login.spec.ts", flow: "login", objective: "NEW", targets: ["t2"], changeRef: { sha: "s1", type: "feat" } },
+      { id: "ghost", file: "e2e/ghost.spec.ts", flow: "ghost", objective: "o", targets: ["t"], changeRef: { sha: "s1", type: "feat" } },
+    ]);
+
+    const byId = new Map(out.map((e) => [e.id, e]));
+    assert.equal(byId.get("login")?.objective, "NEW", "valid entry merged in");
+    assert.equal(byId.get("logout")?.flow, "logout", "prior enriched entry preserved across the batch");
+    assert.equal(byId.has("ghost"), false, "phantom sibling dropped, doesn't block its valid batch-mate");
+    assert.equal(out.length, 2);
   } finally {
     rmSync(specDir, { recursive: true, force: true });
   }
