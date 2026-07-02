@@ -231,6 +231,79 @@ test("JD-R2: the failure-sourced fix branch carries the anti-blinding escape too
   );
 });
 
+// ── C1: fix-cases evidence rendering (httpStatus/finalUrl/runtimeErrors) ─────
+// The FixLoop already carries runtime evidence on each failing QaCase (A2), but the fix-cases
+// prompt sections rendered only `name` + `detail`, discarding the strongest signal available for
+// telling an app defect (5xx, console error) apart from a test defect. Both render sites — the
+// initial fixContent in buildPromptAssembled/buildPrompt and the RE-3 buildFollowupPrompt — must
+// surface it.
+
+const evidenceCase: QaCase = {
+  name: "owners list",
+  status: "fail",
+  detail: "locator not found",
+  httpStatus: 503,
+  finalUrl: "https://dev.example.com/owners",
+  runtimeErrors: [
+    { type: "pageerror", text: "TypeError: cannot read properties of undefined" },
+    { type: "console.error", text: "Failed to load resource: the server responded with a status of 503" },
+  ],
+};
+
+test("C1: buildPrompt fix-cases section renders httpStatus for a failing case", () => {
+  const text = buildPrompt(mkInput({ fixCases: [evidenceCase] }));
+  assert.match(text, /HTTP 503/, "the fix-cases section must surface the correlated HTTP status");
+});
+
+test("C1: buildPrompt fix-cases section renders finalUrl for a failing case", () => {
+  const text = buildPrompt(mkInput({ fixCases: [evidenceCase] }));
+  assert.ok(
+    text.includes("https://dev.example.com/owners"),
+    "the fix-cases section must surface the page URL at the failure point",
+  );
+});
+
+test("C1: buildPrompt fix-cases section renders up to 3 runtimeErrors lines", () => {
+  const text = buildPrompt(mkInput({ fixCases: [evidenceCase] }));
+  assert.match(text, /\[pageerror\] TypeError: cannot read properties of undefined/);
+  assert.match(text, /\[console\.error\] Failed to load resource: the server responded with a status of 503/);
+});
+
+test("C1: buildPrompt fix-cases section caps runtimeErrors at 3 lines", () => {
+  const manyErrors: QaCase = {
+    ...evidenceCase,
+    runtimeErrors: [
+      { type: "pageerror", text: "error one" },
+      { type: "pageerror", text: "error two" },
+      { type: "pageerror", text: "error three" },
+      { type: "pageerror", text: "error four" },
+    ],
+  };
+  const text = buildPrompt(mkInput({ fixCases: [manyErrors] }));
+  assert.ok(text.includes("error one") && text.includes("error two") && text.includes("error three"));
+  assert.ok(!text.includes("error four"), "runtimeErrors rendering must cap at 3 lines per case");
+});
+
+test("C1: buildPrompt fix-cases section slices a long runtimeErrors text to ~200 chars", () => {
+  const longText = "X".repeat(500);
+  const longErrorCase: QaCase = { ...evidenceCase, runtimeErrors: [{ type: "pageerror", text: longText }] };
+  const text = buildPrompt(mkInput({ fixCases: [longErrorCase] }));
+  assert.ok(!text.includes("X".repeat(500)), "a long runtimeErrors text must be sliced, not rendered in full");
+  assert.ok(text.includes("X".repeat(200)), "the slice must keep roughly the first 200 chars");
+});
+
+test("C1: buildPrompt fix-cases section omits evidence lines when absent (no httpStatus/finalUrl/runtimeErrors)", () => {
+  const text = buildPrompt(mkInput({ fixCases: [failingCase] }));
+  assert.doesNotMatch(text, /HTTP \d+ at/, "no httpStatus present must render no HTTP line");
+});
+
+test("C1: buildFollowupPrompt fix-cases section also renders httpStatus/finalUrl/runtimeErrors", () => {
+  const followup = buildFollowupPrompt(mkInput({ fixCases: [evidenceCase] }));
+  assert.match(followup, /HTTP 503/);
+  assert.ok(followup.includes("https://dev.example.com/owners"));
+  assert.match(followup, /\[pageerror\] TypeError: cannot read properties of undefined/);
+});
+
 // ── Slice 4: prompt-info-architecture seams a/b/c/d/e ────────────────────────
 
 // Helper: pad a string to a given byte count.

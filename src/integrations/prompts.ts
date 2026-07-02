@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { sanitizeText, capText } from "../orchestrator/sanitizer";
 import type { ArchitectureContext } from "../qa/context";
 import type { CommitIntent } from "../qa/commit-classify";
+import type { QaCase } from "../types";
 // Seam-2 break: these input contracts are canonical in the qa-engine generation context. Re-rooting
 // this type-only import off ./opencode-client dissolves the opencode-client ⇄ prompts cycle (the
 // generation-ports parity test keeps the legacy opencode-client copies structurally in sync).
@@ -473,6 +474,27 @@ const GROUNDING_UNCOVERED_ESCAPE =
   `If a route you must touch is NOT represented in the injected grounding above, you MUST still ` +
   `browser_navigate that specific route before writing its selectors — never guess them.`;
 
+// C1: renders the runtime evidence (httpStatus/finalUrl/runtimeErrors — captured by the
+// orchestrator, see QaCase in ../types.ts) already carried on a failing case, so a fix-cases
+// regen prompt can tell an app defect (5xx, console error) apart from a test defect instead of
+// seeing only the Playwright error `detail`. Matches the fix-cases section's existing convention
+// of NOT running `detail` through sanitizeText (only truncating) — these fields come from the
+// SAME orchestrator-captured evidence, not user input.
+function renderFixCaseEvidenceLines(c: QaCase): string[] {
+  const lines: string[] = [];
+  if (c.httpStatus !== undefined || c.finalUrl !== undefined) {
+    const statusPart = c.httpStatus !== undefined ? `HTTP ${c.httpStatus}` : "HTTP (unknown)";
+    const urlPart = c.finalUrl !== undefined ? ` at ${c.finalUrl}` : "";
+    lines.push(`  ${statusPart}${urlPart}`);
+  }
+  if (c.runtimeErrors?.length) {
+    for (const e of c.runtimeErrors.slice(0, 3)) {
+      lines.push(`  [${e.type}] ${e.text.slice(0, 200)}`);
+    }
+  }
+  return lines;
+}
+
 export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
   const isGenerationMode = input.mode !== "context";
   const openapiHint = Array.isArray(input.openapi) ? input.openapi.join(", ") : input.openapi;
@@ -672,9 +694,10 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
         `tests; do NOT rewrite or touch tests that passed.`,
         ``,
         `Failed cases:`,
-        ...input.fixCases.map(
-          (c) => `- ${c.name}\n  Error: ${c.detail?.slice(0, 500) ?? "(no detail)"}`,
-        ),
+        ...input.fixCases.flatMap((c) => [
+          `- ${c.name}\n  Error: ${c.detail?.slice(0, 500) ?? "(no detail)"}`,
+          ...renderFixCaseEvidenceLines(c),
+        ]),
         ``,
         ...(input.failureSourced
           ? [
@@ -913,7 +936,10 @@ export function buildFollowupPrompt(input: OpencodeRunInput): string {
     parts.push(
       `## Fix failing tests`,
       `These tests FAILED against DEV. Fix ONLY these; do NOT touch tests that passed.`,
-      ...input.fixCases.map((c) => `- ${c.name}\n  Error: ${c.detail?.slice(0, 500) ?? "(no detail)"}`),
+      ...input.fixCases.flatMap((c) => [
+        `- ${c.name}\n  Error: ${c.detail?.slice(0, 500) ?? "(no detail)"}`,
+        ...renderFixCaseEvidenceLines(c),
+      ]),
       ``,
     );
   }
