@@ -25,6 +25,7 @@
 // that sibling context's own concern, supplied here via CompositionConfig. This keeps the
 // composition root's job exactly what the plan names it: "wires ALL 11 ports to the REAL bridge
 // adapters" — not "constructs every leaf IO integration from scratch".
+import { join } from "node:path";
 import type { Sha } from "@kernel/sha.ts";
 import type { RunMode, TestTarget } from "@kernel/run-mode.ts";
 import type { RunPipelinePort, ObserverPort, RunHistoryPort } from "../application/ports/index.ts";
@@ -44,9 +45,11 @@ import { WorkspacePortAdapter, type CheckoutFn } from "../infrastructure/bridges
 import { DeployGatePortAdapter, NullDeployGateAdapter, type VersionPollFn } from "../infrastructure/bridges/deploy-gate-port.adapter.ts";
 import { InMemoryRunHistoryAdapter, FileRunHistoryAdapter } from "../infrastructure/bridges/run-history-port.adapter.ts";
 import { SetupPortAdapter, type SetupPortCollaborators } from "../infrastructure/bridges/setup-port.adapter.ts";
+import { PreGenerationGroundingPortAdapter, type PreGenerationGroundingCollaborators } from "../infrastructure/bridges/pre-generation-grounding-port.adapter.ts";
+import { ReviewDomGroundingPortAdapter, type ReviewDomGroundingCollaborators } from "../infrastructure/bridges/review-dom-grounding-port.adapter.ts";
 
 import { GenerateTestsUseCase, type GenerationResult, type GenerateOpts } from "@contexts/generation/application/generate-tests.use-case.ts";
-import type { OpencodeRunInput } from "@contexts/generation/application/ports/generation-ports.ts";
+import type { OpencodeRunInput, ArchitectureContext } from "@contexts/generation/application/ports/generation-ports.ts";
 import type { AgentRuntimePort } from "@kernel/ports/agent-runtime.port.ts";
 import type { PromptRenderingPort, VerdictParserPort } from "@contexts/generation/application/ports/index.ts";
 import type { StaticGateAdapter } from "@contexts/test-execution/infrastructure/static-gate.adapter.ts";
@@ -119,6 +122,21 @@ export interface CompositionConfig {
   // (RunQaUseCaseDeps.setup itself stays optional), matching every composition built before this
   // field existed.
   setupCollaborators?: SetupPortCollaborators;
+
+  // PreGenerationGroundingPort / ReviewDomGroundingPort collaborators (Plan 7-R W4, audit CRITICAL):
+  // OPTIONAL, mirroring setupCollaborators' own "[SWAP] absent -> the phase is a no-op" precedent.
+  // isCode target has no DOM/routes to ground (mirrors legacy's `!isCode` guards at both call
+  // sites, pipeline.ts:1466/1643/2078) — wireBridges() below skips wiring both ports when
+  // cfg.isCode is true, regardless of whether these collaborators are supplied.
+  groundingCollaborators?: PreGenerationGroundingCollaborators;
+  reviewDomGroundingCollaborators?: ReviewDomGroundingCollaborators;
+  // The FE<->BE architecture map (context.json), if loaded — feeds the context pack's contract
+  // filtering. Absent -> the pack degrades to blast-radius + DOM only (mirrors buildContextPack's
+  // own graceful degradation when contextMap is absent).
+  contextMap?: ArchitectureContext;
+  // Union of changed files across the PR's full commit range — further filters contracts to
+  // operations the PR actually touched. Absent -> contracts are filtered by contextMap/brief alone.
+  prChangedFiles?: string[];
 
   // ObjectiveSignalPort collaborators — the keystone. assembleChangeCoverage is OPTIONAL (absent, or
   // no per-run diff at measure() call time -> decide() receives null -> "unknown" -> NEVER blocks,
@@ -284,6 +302,35 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
   // running exactly as before.
   const setup = cfg.setupCollaborators ? new SetupPortAdapter(cfg.setupCollaborators, { target: cfg.target }) : undefined;
 
+  // Plan 7-R W4 (audit CRITICAL): the pre-generation grounding phase — isCode has no DOM/routes to
+  // ground (mirrors legacy's own `!isCode` guards, pipeline.ts:1466/1643/2078), so wire NEITHER port
+  // on the code target regardless of what collaborators cfg supplies. OPTIONAL otherwise: absent ->
+  // both stay undefined and RunQaUseCaseDeps.preGenerationGrounding/reviewDomGrounding (also
+  // optional) make both phases a no-op — every composition built before these fields existed keeps
+  // running exactly as before.
+  const preGenerationGrounding = !cfg.isCode
+    ? new PreGenerationGroundingPortAdapter(
+        {
+          e2eDir: join(cfg.mirrorDir, cfg.e2eRelDir),
+          baseUrl: cfg.baseUrl,
+          testIdAttribute: cfg.testIdAttribute,
+          contextMap: cfg.contextMap,
+          prChangedFiles: cfg.prChangedFiles,
+        },
+        cfg.groundingCollaborators ?? {},
+      )
+    : undefined;
+  const reviewDomGrounding = !cfg.isCode
+    ? new ReviewDomGroundingPortAdapter(
+        {
+          e2eDir: join(cfg.mirrorDir, cfg.e2eRelDir),
+          baseUrl: cfg.baseUrl,
+          testIdAttribute: cfg.testIdAttribute,
+        },
+        cfg.reviewDomGroundingCollaborators ?? {},
+      )
+    : undefined;
+
   const objectiveSignal = new ObjectiveSignalPortAdapter(
     {
       collector: cfg.objectiveSignal.collector as CoverageCollectorPort,
@@ -357,6 +404,8 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
     deployGate,
     runHistory,
     ...(setup ? { setup } : {}),
+    ...(preGenerationGrounding ? { preGenerationGrounding } : {}),
+    ...(reviewDomGrounding ? { reviewDomGrounding } : {}),
     ...(cfg.observer ? { observer: cfg.observer } : {}),
     config: {
       needsReview: cfg.needsReview,

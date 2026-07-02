@@ -90,6 +90,11 @@ export class ReviewPortAdapter implements ReviewPort {
       // renderLearnedRulesForReviewer's own header) so the reviewer judges against the SAME earned
       // app-specific rules.
       ...(enrichment?.learnedRules?.length ? { learnedRules: renderLearnedRulesForReviewer(enrichment.learnedRules) } : {}),
+      // Plan 7-R W4 (audit CRITICAL): the reviewer's live-DEV-DOM grounding (ReviewDomGroundingPort,
+      // run-qa.use-case.ts) — mirrors legacy's reviewGenerated() domSnapshot threading
+      // (src/pipeline.ts:1680). Absent -> omitted; the reviewer defers on unverifiable UI facts
+      // (today's behavior, unchanged).
+      ...(enrichment?.domSnapshot ? { domSnapshot: enrichment.domSnapshot } : {}),
     };
     const assembled = rendering.renderReviewer(reviewInput);
 

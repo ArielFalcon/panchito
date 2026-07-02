@@ -247,6 +247,62 @@ test("generate() maps enrichment.reviewCorrections/fixCases/selectorContradictio
   }
 });
 
+// ── Plan 7-R W4 (audit CRITICAL): enrichment.contextPack/existingSpecFiles (PreGenerationGroundingPort,
+// run-qa.use-case.ts) must map 1:1 onto OpencodeRunInput — the SAME fields buildPromptAssembled
+// already renders sections for (contextPack's "VOLATILE context-pack section" / existingSpecFiles'
+// "existing-suite-manifest" section, generation-ports.ts).
+
+test("generate() maps enrichment.contextPack/existingSpecFiles onto OpencodeRunInput", async () => {
+  const ports = fakeGenerationPorts();
+  let capturedInput: OpencodeRunInput | undefined;
+  const originalGenerate = GenerateTestsUseCase.prototype.generate;
+  GenerateTestsUseCase.prototype.generate = async function (input: OpencodeRunInput, opts) {
+    capturedInput = input;
+    return originalGenerate.call(this, input, opts);
+  };
+  try {
+    const useCase = new GenerateTestsUseCase(ports);
+    const adapter = new GenerationPortAdapter(useCase, {
+      repo: "org/app", appName: "app", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e",
+      namespace: "qa-bot-abc1234", needsReview: false, target: "e2e", mode: "diff", diff: "",
+    });
+
+    await adapter.generate([], "/mirrors/org/app/e2e", undefined, "the-diff", {
+      contextPack: "## Context Pack\n\nblast radius...",
+      existingSpecFiles: ["flows/checkout.spec.ts", "home.spec.ts"],
+    });
+
+    assert.equal(capturedInput?.contextPack, "## Context Pack\n\nblast radius...");
+    assert.deepEqual(capturedInput?.existingSpecFiles, ["flows/checkout.spec.ts", "home.spec.ts"]);
+  } finally {
+    GenerateTestsUseCase.prototype.generate = originalGenerate;
+  }
+});
+
+test("generate() with absent enrichment.contextPack/existingSpecFiles omits both from OpencodeRunInput (never fabricated)", async () => {
+  const ports = fakeGenerationPorts();
+  let capturedInput: OpencodeRunInput | undefined;
+  const originalGenerate = GenerateTestsUseCase.prototype.generate;
+  GenerateTestsUseCase.prototype.generate = async function (input: OpencodeRunInput, opts) {
+    capturedInput = input;
+    return originalGenerate.call(this, input, opts);
+  };
+  try {
+    const useCase = new GenerateTestsUseCase(ports);
+    const adapter = new GenerationPortAdapter(useCase, {
+      repo: "org/app", appName: "app", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e",
+      namespace: "qa-bot-abc1234", needsReview: false, target: "e2e", mode: "diff", diff: "",
+    });
+
+    await adapter.generate([], "/mirrors/org/app/e2e", undefined, "the-diff", {});
+
+    assert.equal(capturedInput?.contextPack, undefined);
+    assert.equal(capturedInput?.existingSpecFiles, undefined);
+  } finally {
+    GenerateTestsUseCase.prototype.generate = originalGenerate;
+  }
+});
+
 // ── Manifest-enrichment fix: enrichment.sha must reach OpencodeRunInput.sha so
 // GenerateTestsUseCase can stamp ManifestEntry.changeRef.sha (previously hardcoded to "" here,
 // which made every manifest entry fail the real schema's changeRef.sha non-empty check).

@@ -132,6 +132,42 @@ test("review() maps enrichment.priorCorrections onto ReviewInput.priorCorrection
   assert.deepEqual(seenInput?.priorCorrections, ["fix the assertion on line 12"]);
 });
 
+// ── Plan 7-R W4 (audit CRITICAL): enrichment.domSnapshot (ReviewDomGroundingPort, run-qa.use-
+// case.ts) must map onto ReviewInput.domSnapshot — mirrors legacy's reviewGenerated() domSnapshot
+// threading (src/pipeline.ts:1680), grounding the reviewer's UI-fact claims in the live DEV DOM.
+
+test("review() maps enrichment.domSnapshot onto ReviewInput.domSnapshot verbatim", async () => {
+  let seenInput: { domSnapshot?: string } | undefined;
+  const rendering: PromptRenderingPort = {
+    ...fakeRendering(),
+    renderReviewer: (input) => { seenInput = input as { domSnapshot?: string }; return { text: "reviewer-prompt", sectionSizes: {} }; },
+  };
+  const verdicts = fakeVerdicts({ approved: true, corrections: [], parsed: true, valid: true, issues: [] });
+  const adapter = new ReviewPortAdapter({ runtime: fakeRuntime("verdict-json"), rendering, verdicts }, {
+    diff: "", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e", appName: "app", mode: "diff",
+  });
+
+  await adapter.review("/mirrors/org/app/e2e", cases, undefined, { domSnapshot: "route /owners:\n  heading: Owners" });
+
+  assert.equal(seenInput?.domSnapshot, "route /owners:\n  heading: Owners");
+});
+
+test("review() with absent enrichment.domSnapshot omits it from ReviewInput (never fabricated)", async () => {
+  let seenInput: { domSnapshot?: string } | undefined;
+  const rendering: PromptRenderingPort = {
+    ...fakeRendering(),
+    renderReviewer: (input) => { seenInput = input as { domSnapshot?: string }; return { text: "reviewer-prompt", sectionSizes: {} }; },
+  };
+  const verdicts = fakeVerdicts({ approved: true, corrections: [], parsed: true, valid: true, issues: [] });
+  const adapter = new ReviewPortAdapter({ runtime: fakeRuntime("verdict-json"), rendering, verdicts }, {
+    diff: "", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e", appName: "app", mode: "diff",
+  });
+
+  await adapter.review("/mirrors/org/app/e2e", cases, undefined, {});
+
+  assert.equal(seenInput?.domSnapshot, undefined);
+});
+
 test("review() derives objective from enrichment.intent.message when ctx.guidance is absent (legacy's opts.guidance ?? intent?.message)", async () => {
   let seenInput: { objective?: string } | undefined;
   const rendering: PromptRenderingPort = {

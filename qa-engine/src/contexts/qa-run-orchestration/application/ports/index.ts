@@ -122,6 +122,25 @@ export interface GenerationEnrichment {
   // mapping. Absent/empty -> unchanged prompt (retrieval found nothing, or the app's
   // LearningRepositoryPort is the StubLearningRepository no-op default).
   learnedRules?: readonly RetrievedRule[];
+  // W4 (Plan 7-R, selector-grounding cutover): the PRE-generate grounding data — mirrors legacy's
+  // baseGenInput({ contextPack: builtContextPack, existingSpecFiles, ... }) (src/pipeline.ts:1898,
+  // 1908). Unlike domSnapshot above (which is REGEN-time grounding, sourced from a failure-point or
+  // pre-review capture), these two are FIRST-WRITE grounding: built ONCE before the initial
+  // generate() call (PreGenerationGroundingPort, below) and reused unchanged across every
+  // regeneration in the SAME run (mirrors legacy's own "the pack is first-write ground truth; fix/
+  // review/coverage passes use domSnapshot instead" comment, pipeline.ts:1820-1822). Absent -> the
+  // generator falls back to its own live-MCP exploration (today's rewritten-engine behavior,
+  // unchanged) — never fabricated, never required.
+  //
+  // contextPack: the assembled blast-radius + DOM + contracts text block (generation/infrastructure's
+  // ContextPackAssembly.text, buildContextPack) — pushed into the VOLATILE "context-pack" prompt
+  // section buildPromptAssembled already renders (OpencodeRunInput.contextPack's own doc).
+  contextPack?: string;
+  // existingSpecFiles: the suite's on-disk spec file paths (relative to e2eRelDir), enumerated
+  // BEFORE the first generate() call so the "existing-suite-manifest" prompt section lets the
+  // generator reuse/extend instead of duplicating a flow (mirrors legacy's Seam b,
+  // src/pipeline.ts:1845-1872 + OpencodeRunInput.existingSpecFiles's own doc).
+  existingSpecFiles?: string[];
 }
 export interface GenerationPort {
   // signal: Plan 7.1 (engram #913) — an optional, separate transport arg (mirrors RunPipelinePort's
@@ -167,6 +186,14 @@ export interface ReviewEnrichment {
   // reject-on-sight rules" section so the independent reviewer judges against the SAME earned
   // rules the generator was grounded on. Absent/empty -> unchanged prompt (today's behavior).
   learnedRules?: readonly RetrievedRule[];
+  // W4 (Plan 7-R, selector-grounding cutover): the live DEV a11y snapshot of the routes the specs
+  // under review target — mirrors legacy's reviewGenerated() captureDom call (src/pipeline.ts:1643-
+  // 1649's `domSnapshot = await deps.captureDom(...).catch(() => undefined)`), grounding the
+  // independent reviewer's UI-fact claims (labels, button/link text) in the real DOM instead of its
+  // training memory (the SAME anti-hallucination rationale ReviewInput.domSnapshot's own doc states
+  // — "it claimed PetClinic's submit button says 'Add Owner' when the live DOM says 'Submit'").
+  // Absent -> the reviewer defers on unverifiable UI facts (today's behavior, unchanged).
+  domSnapshot?: string;
 }
 export interface ReviewPort {
   // diff: the run's REAL per-run commit diff (Plan 7.6 dynamic-diff), so the reviewer grounds on the
@@ -363,5 +390,75 @@ export interface PreExecGroundingPort {
       testIds?: Map<string, number>;
     }[];
   }>;
+}
+
+// PreGenerationGroundingPort — Plan 7-R W4 (audit CRITICAL): the FIRST-WRITE grounding phase, run
+// AFTER setup and BEFORE the initial generate() call — mirrors legacy's ordering EXACTLY (the
+// explorer pass + buildContextPack block sits at src/pipeline.ts:2078-2138, strictly between
+// baseGenInput's declaration and the first `generateOnce(baseGenInput(...))` call at :2164). Builds
+// the Pillar-1/Pillar-2 selector-grounding data (DOM tree, route catalog, context pack) the
+// GENERATION prompt needs so the agent transcribes real selectors instead of grounding via its own
+// live-MCP exploration alone — closing the audit gap where a live jhipster run used getByRole()
+// where the diff carried data-cy="shopNowMenu" because the prompt received NO DOM/route/context-pack
+// data at all.
+//
+// Distinct from PreExecGroundingPort (above): that port is a POST-generate corrective gate (W1/W2 —
+// re-checks the ALREADY-WRITTEN specs for ambiguity/fabricated test-ids). This port is a PRE-generate
+// enrichment source (mirrors legacy's explorer+buildContextPack closure) — it runs ONCE per run,
+// before ANY spec exists, and its output is threaded into GenerationEnrichment.contextPack /
+// .existingSpecFiles for the ENTIRE run (never rebuilt on regen passes — "the pack is first-write
+// ground truth", pipeline.ts:1820-1822). Distinct ALSO from ReviewDomGroundingPort (below): the
+// reviewer's DOM snapshot is keyed on the GENERATED specs' routes (they don't exist yet at this
+// phase) and captured fresh at review time, mirroring legacy's reviewGenerated() capture exactly —
+// it is NOT part of this port's output.
+//
+// [SWAP] absent -> the whole phase is skipped entirely, the SAME backward-compatible posture
+// DeployGatePort/SetupPort/PreExecGroundingPort already established: GenerationEnrichment.contextPack/
+// existingSpecFiles stay absent, and generation degrades to its own live-MCP exploration — never a
+// broken run, never fabricated data.
+//
+// Failures are non-fatal by design (mirrors legacy's own fail-open posture EXACTLY): buildContextPack's
+// own call site wraps the WHOLE build in try/catch and logs a non-blocking warning on failure
+// (pipeline.ts:2135-2137's `context-pack: build FAILED (non-blocking)`); the explorer pass is
+// independently best-effort (pipeline.ts:2099-2101's own try/catch + warning). A real adapter
+// reproduces this: it must NEVER throw — a capture/build failure degrades to an absent field on
+// GroundingResult, loudly logged by the adapter itself, and RunQaUseCase proceeds with ungrounded
+// generation exactly as if the port were absent.
+export interface GroundingResult {
+  // The assembled context-pack text block (blast-radius + DOM + contracts) — feeds
+  // GenerationEnrichment.contextPack. Absent when the pack build failed or produced nothing.
+  contextPack?: string;
+  // The suite's on-disk spec file paths (relative to e2eRelDir), enumerated before the first
+  // generate() call — feeds GenerationEnrichment.existingSpecFiles. Absent/empty when the e2e dir
+  // does not exist yet or enumeration failed (mirrors legacy's Seam b try/catch, pipeline.ts:1845-
+  // 1872 — graceful, never blocks).
+  existingSpecFiles?: string[];
+}
+export interface PreGenerationGroundingPort {
+  ground(specDir: string, signal?: AbortSignal): Promise<GroundingResult>;
+}
+
+// ReviewDomGroundingPort — Plan 7-R W4: the reviewer's live-DEV-DOM grounding, mirroring legacy's
+// reviewGenerated() captureDom call EXACTLY (src/pipeline.ts:1643-1649's `if (!isCode && deps.
+// captureDom && app.dev?.baseUrl) { ... domSnapshot = await deps.captureDom(...).catch(() =>
+// undefined); }`). Distinct from PreGenerationGroundingPort (above): this is keyed on the
+// JUST-GENERATED specs' own `.goto(...)` routes (they do not exist before generate() runs), so it is
+// invoked at the review call site, not the pre-generate phase.
+//
+// specs are the relative spec file names under review (mirrors ReviewPort.review()'s own `cases`-
+// derived specs list) — the adapter re-reads their CURRENT on-disk content itself (the same
+// "adapter resolves its own paths" precedent PreExecGroundingPort.capture(specDir, ...) already
+// established), so the caller never needs the file text. The caller re-invokes this per round
+// (mirrors legacy's own per-round memoization keyed on the sorted spec-name set, reviewGenerated()'s
+// `specsKey`/`lastSpecsKey`) so a regenerated spec set is re-captured, never stale.
+//
+// [SWAP] absent -> ReviewEnrichment.domSnapshot stays absent every round; the reviewer defers on
+// unverifiable UI facts (today's behavior, unchanged) — never fabricated, never blocking.
+//
+// Failure is non-fatal by design (mirrors legacy's `.catch(() => undefined)` exactly): a real adapter
+// must NEVER throw — capture failure degrades to `undefined`, loudly logged by the adapter itself
+// (dom-snapshot.ts's captureDom already does this internally), and review proceeds ungrounded.
+export interface ReviewDomGroundingPort {
+  capture(specDir: string, specs: readonly string[], signal?: AbortSignal): Promise<string | undefined>;
 }
 

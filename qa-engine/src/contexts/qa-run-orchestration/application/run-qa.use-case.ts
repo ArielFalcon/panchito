@@ -46,6 +46,8 @@ import type {
   ObserverPort,
   CommitIntent,
   PreExecGroundingPort,
+  PreGenerationGroundingPort,
+  ReviewDomGroundingPort,
   RetrievedRule,
 } from "./ports/index.ts";
 import { decide, type RunEvidence } from "../domain/run-decision.service.ts";
@@ -146,6 +148,20 @@ export interface RunQaUseCaseDeps {
   // after every spec-producing pass (initial generate, static-fix repair rounds, FixLoop regens) —
   // see PreExecGroundingPort's own header for the full contract.
   preExecGrounding?: PreExecGroundingPort;
+  // [SWAP] absent -> the PRE-generate grounding phase (Plan 7-R W4) is skipped entirely: the SAME
+  // backward-compatible posture as deployGate/setup/preExecGrounding above. GenerationEnrichment.
+  // contextPack/existingSpecFiles and ReviewEnrichment.domSnapshot all stay absent, and generation
+  // falls back to its own live-MCP exploration — never fabricated, never blocking. When present,
+  // RunQaUseCase invokes it ONCE, after setup and BEFORE the initial generate() call, mirroring
+  // legacy's explorer+buildContextPack ordering (src/pipeline.ts:2078-2138) — see
+  // PreGenerationGroundingPort's own header for the full contract, including its fail-open posture.
+  preGenerationGrounding?: PreGenerationGroundingPort;
+  // [SWAP] absent -> ReviewEnrichment.domSnapshot stays absent every review round; the reviewer
+  // defers on unverifiable UI facts (today's behavior, unchanged) — never fabricated, never
+  // blocking. When present, invoked at the review call site, memoized per round the SAME way
+  // legacy's reviewGenerated() memoizes by the sorted spec-name set — see ReviewDomGroundingPort's
+  // own header for the full contract, including its fail-open posture.
+  reviewDomGrounding?: ReviewDomGroundingPort;
   config?: Partial<RunQaConfig>;
 }
 
@@ -350,7 +366,43 @@ export class RunQaUseCase {
     }
     const retrievedRuleTriggers = retrievedRules.map((r) => r.trigger);
 
+    // Phase: pre-generation grounding (Plan 7-R W4, audit CRITICAL). [SWAP] absent
+    // PreGenerationGroundingPort -> the phase is a no-op: contextPack/existingSpecFiles stay
+    // undefined, generation degrades to its own live-MCP exploration (today's behavior, unchanged).
+    // Mirrors legacy's ordering EXACTLY: runs AFTER setup, BEFORE the first generate() call
+    // (src/pipeline.ts:2078-2164) — ONCE per run; its output is reused unchanged across every
+    // regeneration (the pack is first-write ground truth, never rebuilt on a regen pass).
+    //
+    // Fail-open by design (mirrors legacy's own posture — see PreGenerationGroundingPort's own
+    // header): a real adapter never throws here, but this call is wrapped anyway as a defensive
+    // backstop mirroring every other best-effort phase in this use-case (learning.retrieve above,
+    // context-pack build in legacy) — a misbehaving adapter must never abort the run over grounding.
+    let groundingContextPack: string | undefined;
+    let groundingExistingSpecFiles: string[] | undefined;
+    if (this.deps.preGenerationGrounding) {
+      this.deps.observer?.onStep("generate", "pre-generation grounding");
+      try {
+        const grounding = await this.deps.preGenerationGrounding.ground(workspace.specDir, signal);
+        groundingContextPack = grounding.contextPack;
+        groundingExistingSpecFiles = grounding.existingSpecFiles;
+      } catch (err) {
+        console.error("[qa] WARNING: pre-generation grounding failed (non-fatal, generation continues ungrounded):", err);
+      }
+    }
+
     const baseEnrichment = {
+      sha: input.sha.toString(),
+      ...(classificationIntent ? { intent: classificationIntent } : {}),
+      ...(retrievedRules.length ? { learnedRules: retrievedRules } : {}),
+      ...(groundingContextPack ? { contextPack: groundingContextPack } : {}),
+      ...(groundingExistingSpecFiles?.length ? { existingSpecFiles: groundingExistingSpecFiles } : {}),
+    };
+    // The reviewer's own enrichment base — SEPARATE from baseEnrichment (generation-shaped) because
+    // ReviewEnrichment carries domSnapshot, not contextPack/existingSpecFiles (generation-only
+    // fields; ReviewPort has no slot for either). domSnapshot is threaded per-round at the review
+    // call site (below), keyed on the CURRENT specs — mirrors legacy's reviewGenerated() memoized
+    // capture exactly (ReviewDomGroundingPort's own header).
+    const baseReviewEnrichment = {
       sha: input.sha.toString(),
       ...(classificationIntent ? { intent: classificationIntent } : {}),
       ...(retrievedRules.length ? { learnedRules: retrievedRules } : {}),
@@ -926,10 +978,35 @@ export class RunQaUseCase {
       const MAX_REVIEW_ROUNDS = 2;
       let reviewCases = run.cases;
       let previousRoundCorrections: string[] | undefined;
+      // Plan 7-R W4: memoized per round the SAME way legacy's reviewGenerated() memoizes
+      // (src/pipeline.ts:1625-1651's `lastSpecsKey`/`specsKey`) — re-capture DOM ONLY when the
+      // reviewed spec set actually changed round-to-round, never on every round unconditionally.
+      let reviewDomSnapshot: string | undefined;
+      // Sentinel `undefined` (never a real key, even the EMPTY-cases key "") so round 0 always
+      // captures at least once — a plain "" initial value would collide with an empty reviewCases
+      // set's own key and silently skip round 0's capture entirely.
+      let lastReviewSpecsKey: string | undefined;
       for (let round = 0; round < MAX_REVIEW_ROUNDS; round++) {
+        // [SWAP] absent ReviewDomGroundingPort -> reviewDomSnapshot stays undefined every round
+        // (backward compatible — matches PreExecGroundingPort/PreGenerationGroundingPort's own
+        // absent-collaborator posture). Best-effort: mirrors legacy's own `.catch(() => undefined)`.
+        if (this.deps.reviewDomGrounding) {
+          const specsForReview = reviewCases.map((c) => c.file ?? c.name);
+          const specsKey = [...specsForReview].sort().join(",");
+          if (specsKey !== lastReviewSpecsKey) {
+            try {
+              reviewDomSnapshot = await this.deps.reviewDomGrounding.capture(workspace.specDir, specsForReview, signal);
+            } catch (err) {
+              console.error("[qa] WARNING: reviewer DOM grounding failed (non-fatal, review continues ungrounded):", err);
+              reviewDomSnapshot = undefined;
+            }
+            lastReviewSpecsKey = specsKey;
+          }
+        }
         const reviewResult = await this.deps.review.review(workspace.specDir, reviewCases, classificationDiff, {
-          ...baseEnrichment,
+          ...baseReviewEnrichment,
           ...(previousRoundCorrections ? { priorCorrections: previousRoundCorrections } : {}),
+          ...(reviewDomSnapshot ? { domSnapshot: reviewDomSnapshot } : {}),
         });
         // FIX A (judgment-day, HIGH) + F3 (legacy :1705-1714): parsed:false is a parse miss — NOT an
         // actionable rejection to re-prompt against, but ALSO never a free pass. Fails CLOSED

@@ -400,3 +400,87 @@ test("wireBridges hardcodes needsReview:false into the generation ctx even when 
     "GenerationPortAdapter's ctx must carry needsReview:false on every generate() call — the internal degraded reviewer must never fire on the orchestrated path",
   );
 });
+
+// ── Plan 7-R W4 (audit CRITICAL): PreGenerationGroundingPort / ReviewDomGroundingPort — genuine-
+// wiring proof. groundingCollaborators/reviewDomGroundingCollaborators (OPTIONAL on
+// CompositionConfig) must reach the run() call when supplied, and stay a silent no-op (isCode OR
+// absent collaborators) otherwise — every fakeConfig() base case above never supplies them, which
+// already proves the absent-collaborator backward-compat path across the OTHER tests in this file.
+
+test("buildProduction(rewritten) wires groundingCollaborators.buildContextPack into the run when target is 'e2e' — contextPack reaches OpencodeRunInput", async () => {
+  let buildCalled = false;
+  const seenContextPacks: Array<string | undefined> = [];
+  const cfg = fakeConfig({
+    target: "e2e",
+    isCode: false,
+    baseUrl: "https://dev.example.com",
+    groundingCollaborators: {
+      buildContextPack: async () => {
+        buildCalled = true;
+        return { text: "## Context Pack\n\nwired", blastRadiusBytes: 0, domBytes: 0, contractBytes: 0 };
+      },
+    },
+    generationUseCase: {
+      generate: async (input) => {
+        seenContextPacks.push(input.contextPack);
+        return { specs: ["a.spec.ts"], approved: true, reviewed: false };
+      },
+    },
+  });
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "e2e",
+    runId: "composition-root-grounding-contextpack",
+  });
+
+  assert.equal(buildCalled, true, "the injected buildContextPack collaborator must have run before the initial generate() call");
+  assert.ok(seenContextPacks.length > 0, "generationUseCase.generate must have been invoked");
+  assert.equal(seenContextPacks[0], "## Context Pack\n\nwired");
+  assert.equal(outcome.verdict, "pass");
+});
+
+test("buildProduction(rewritten) does NOT wire grounding on the code target, even when groundingCollaborators is supplied (isCode has no DOM/routes to ground)", async () => {
+  let buildCalled = false;
+  const cfg = fakeConfig({
+    target: "code",
+    isCode: true,
+    groundingCollaborators: {
+      buildContextPack: async () => { buildCalled = true; return { text: "should never run", blastRadiusBytes: 0, domBytes: 0, contractBytes: 0 }; },
+    },
+    setupCollaborators: { e2e: async () => {}, code: async () => {} },
+  });
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "code",
+    runId: "composition-root-grounding-code-skip",
+  });
+
+  assert.equal(buildCalled, false, "groundingCollaborators must never be invoked on the code target");
+  assert.equal(outcome.verdict, "pass");
+});
+
+test("buildProduction(rewritten) runs without groundingCollaborators/reviewDomGroundingCollaborators (absent -> no-op, backward compatible)", async () => {
+  const cfg = fakeConfig({ target: "e2e", isCode: false }); // fakeConfig()'s base never supplies either
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "e2e",
+    runId: "composition-root-grounding-absent",
+  });
+
+  assert.equal(outcome.verdict, "pass", "the run must complete normally with no grounding collaborators wired");
+});

@@ -17,6 +17,8 @@ import type {
   RunHistoryPort,
   SetupPort,
   PreExecGroundingPort,
+  PreGenerationGroundingPort,
+  ReviewDomGroundingPort,
   RetrievedRule,
 } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 import { BlastRadius } from "@kernel/blast-radius.ts";
@@ -50,6 +52,8 @@ function stubPorts(overrides: Partial<{
   save: RunHistoryPort["save"];
   setup: SetupPort["setup"];
   capture: PreExecGroundingPort["capture"];
+  ground: PreGenerationGroundingPort["ground"];
+  captureReviewDom: ReviewDomGroundingPort["capture"];
 }> = {}) {
   const savedOutcomes: RunOutcome[] = [];
   const foldedOutcomes: RunOutcome[] = [];
@@ -95,9 +99,20 @@ function stubPorts(overrides: Partial<{
   const preExecGrounding: PreExecGroundingPort | undefined = overrides.capture
     ? { capture: overrides.capture }
     : undefined;
+  const preGenerationGrounding: PreGenerationGroundingPort | undefined = overrides.ground
+    ? { ground: overrides.ground }
+    : undefined;
+  const reviewDomGrounding: ReviewDomGroundingPort | undefined = overrides.captureReviewDom
+    ? { capture: overrides.captureReviewDom }
+    : undefined;
 
   return {
-    ports: { changeAnalysis, generation, review, validation, execution, objectiveSignal, publication, learning, workspace, deployGate, runHistory, setup, ...(preExecGrounding ? { preExecGrounding } : {}) },
+    ports: {
+      changeAnalysis, generation, review, validation, execution, objectiveSignal, publication, learning, workspace, deployGate, runHistory, setup,
+      ...(preExecGrounding ? { preExecGrounding } : {}),
+      ...(preGenerationGrounding ? { preGenerationGrounding } : {}),
+      ...(reviewDomGrounding ? { reviewDomGrounding } : {}),
+    },
     savedOutcomes,
     foldedOutcomes,
   };
@@ -282,6 +297,165 @@ test("RunQaUseCase: PreExecGroundingPort wired — a FixLoop regen (post-executi
     (c) => (c.enrichment?.fixCases?.length ?? 0) > 0 && (c.enrichment?.selectorContradictions?.length ?? 0) > 0,
   );
   assert.ok(fixLoopCallWithCorrections, "expected a FixLoop regen call carrying both fixCases and selectorContradictions");
+});
+
+// ── Plan 7-R W4 (audit CRITICAL): PreGenerationGroundingPort + ReviewDomGroundingPort ──────────
+// The pre-generate grounding phase — contextPack/existingSpecFiles thread into GenerationEnrichment
+// on EVERY generate() call (first-write ground truth, reused across regen passes); domSnapshot
+// threads into ReviewEnrichment on the review call site, memoized per round by the reviewed spec set.
+
+test("RunQaUseCase: absent PreGenerationGroundingPort/ReviewDomGroundingPort -> generation/review enrichment carries neither field (backward compatible, [SWAP])", async () => {
+  const generateCalls: Array<{ enrichment?: { contextPack?: string; existingSpecFiles?: string[] } }> = [];
+  const reviewCalls: Array<{ enrichment?: { domSnapshot?: string } }> = [];
+  const { ports } = stubPorts({
+    generate: async (_objectives, _specDir, _signal, _diff, enrichment) => {
+      generateCalls.push({ enrichment });
+      return { specs: ["a.spec.ts"], approved: true };
+    },
+    review: async (_specDir, _cases, _diff, enrichment) => {
+      reviewCalls.push({ enrichment });
+      return { approved: true, corrections: [], blockingCount: 0, parsed: true };
+    },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: { needsReview: true } });
+
+  await useCase.run(baseInput);
+
+  assert.ok(generateCalls.length > 0);
+  for (const call of generateCalls) {
+    assert.equal(call.enrichment?.contextPack, undefined);
+    assert.equal(call.enrichment?.existingSpecFiles, undefined);
+  }
+  assert.ok(reviewCalls.length > 0);
+  for (const call of reviewCalls) {
+    assert.equal(call.enrichment?.domSnapshot, undefined);
+  }
+});
+
+test("RunQaUseCase: PreGenerationGroundingPort wired — contextPack + existingSpecFiles thread into the INITIAL generate() call", async () => {
+  const generateCalls: Array<{ enrichment?: { contextPack?: string; existingSpecFiles?: string[] } }> = [];
+  const { ports } = stubPorts({
+    ground: async () => ({ contextPack: "## Context Pack\n\nblast radius...", existingSpecFiles: ["flows/checkout.spec.ts"] }),
+    generate: async (_objectives, _specDir, _signal, _diff, enrichment) => {
+      generateCalls.push({ enrichment });
+      return { specs: ["a.spec.ts"], approved: true };
+    },
+  });
+  const useCase = new RunQaUseCase(ports);
+
+  const out = await useCase.run(baseInput);
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.ok(generateCalls.length > 0);
+  assert.equal(generateCalls[0]!.enrichment?.contextPack, "## Context Pack\n\nblast radius...");
+  assert.deepEqual(generateCalls[0]!.enrichment?.existingSpecFiles, ["flows/checkout.spec.ts"]);
+});
+
+test("RunQaUseCase: PreGenerationGroundingPort wired — grounding is reused UNCHANGED across a review-correction regen (first-write ground truth)", async () => {
+  const generateCalls: Array<{ enrichment?: { contextPack?: string } }> = [];
+  let groundCalls = 0;
+  const { ports } = stubPorts({
+    ground: async () => {
+      groundCalls++;
+      return { contextPack: "## Context Pack\n\nfirst-write" };
+    },
+    generate: async (_objectives, _specDir, _signal, _diff, enrichment) => {
+      generateCalls.push({ enrichment });
+      return { specs: ["a.spec.ts"], approved: true };
+    },
+    // Reject round 0 so a review-correction regen actually fires (round 1's generate() call).
+    review: (() => {
+      let round = 0;
+      return async () => {
+        round++;
+        if (round === 1) return { approved: false, corrections: ["fix the thing"], blockingCount: 1, parsed: true };
+        return { approved: true, corrections: [], blockingCount: 0, parsed: true };
+      };
+    })(),
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: { needsReview: true } });
+
+  await useCase.run(baseInput);
+
+  // ground() is called ONCE per run (before the initial generate()), never rebuilt for the
+  // review-correction regen — mirrors legacy's "the pack is first-write ground truth" contract.
+  assert.equal(groundCalls, 1);
+  assert.ok(generateCalls.length >= 2, "expected the initial call plus at least one review-correction regen");
+  for (const call of generateCalls) {
+    assert.equal(call.enrichment?.contextPack, "## Context Pack\n\nfirst-write");
+  }
+});
+
+test("RunQaUseCase: PreGenerationGroundingPort wired — a grounding failure is non-fatal; generation proceeds ungrounded", async () => {
+  const generateCalls: Array<{ enrichment?: { contextPack?: string } }> = [];
+  const { ports } = stubPorts({
+    ground: async () => { throw new Error("capture script crashed"); },
+    generate: async (_objectives, _specDir, _signal, _diff, enrichment) => {
+      generateCalls.push({ enrichment });
+      return { specs: ["a.spec.ts"], approved: true };
+    },
+  });
+  const useCase = new RunQaUseCase(ports);
+
+  const out = await useCase.run(baseInput);
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.ok(generateCalls.length > 0);
+  assert.equal(generateCalls[0]!.enrichment?.contextPack, undefined);
+});
+
+test("RunQaUseCase: ReviewDomGroundingPort wired — domSnapshot threads into the review() call", async () => {
+  const reviewCalls: Array<{ enrichment?: { domSnapshot?: string } }> = [];
+  const { ports } = stubPorts({
+    captureReviewDom: async () => "route /owners:\n  heading: Owners",
+    review: async (_specDir, _cases, _diff, enrichment) => {
+      reviewCalls.push({ enrichment });
+      return { approved: true, corrections: [], blockingCount: 0, parsed: true };
+    },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: { needsReview: true } });
+
+  const out = await useCase.run(baseInput);
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.ok(reviewCalls.length > 0);
+  assert.equal(reviewCalls[0]!.enrichment?.domSnapshot, "route /owners:\n  heading: Owners");
+});
+
+test("RunQaUseCase: ReviewDomGroundingPort wired — memoized per round: NOT re-captured when the reviewed spec set is unchanged", async () => {
+  let captureCalls = 0;
+  const { ports } = stubPorts({
+    captureReviewDom: async () => {
+      captureCalls++;
+      return "route /owners:\n  heading: Owners";
+    },
+    // Both rounds review the SAME spec set (approve on round 0 — no regen, so reviewCases never
+    // changes) — capture() must fire exactly once.
+    review: async () => ({ approved: true, corrections: [], blockingCount: 0, parsed: true }),
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: { needsReview: true } });
+
+  await useCase.run(baseInput);
+
+  assert.equal(captureCalls, 1);
+});
+
+test("RunQaUseCase: ReviewDomGroundingPort wired — a capture failure is non-fatal; review proceeds ungrounded", async () => {
+  const reviewCalls: Array<{ enrichment?: { domSnapshot?: string } }> = [];
+  const { ports } = stubPorts({
+    captureReviewDom: async () => { throw new Error("render crashed"); },
+    review: async (_specDir, _cases, _diff, enrichment) => {
+      reviewCalls.push({ enrichment });
+      return { approved: true, corrections: [], blockingCount: 0, parsed: true };
+    },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: { needsReview: true } });
+
+  const out = await useCase.run(baseInput);
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.ok(reviewCalls.length > 0);
+  assert.equal(reviewCalls[0]!.enrichment?.domSnapshot, undefined);
 });
 
 // ── The 10-scenario parity (mirrors Task A.4 for the rewritten core) ──────────────────────────

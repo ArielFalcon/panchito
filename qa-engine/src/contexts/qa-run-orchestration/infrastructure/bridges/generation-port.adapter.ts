@@ -212,6 +212,13 @@ export class GenerationPortAdapter implements GenerationPort {
       // renders a section for. Rendering (not just a join) happens HERE, at the adapter boundary —
       // matching every other enrichment field's own format-at-the-adapter precedent.
       ...(enrichment?.learnedRules?.length ? { learnedRules: renderLearnedRules(enrichment.learnedRules) } : {}),
+      // Plan 7-R W4 (audit CRITICAL, selector-grounding cutover): the PRE-generate grounding data
+      // (PreGenerationGroundingPort, run-qa.use-case.ts) — mapped 1:1 onto the SAME OpencodeRunInput
+      // fields buildPromptAssembled already renders sections for (contextPack's own "VOLATILE
+      // context-pack section" doc; existingSpecFiles' own "existing-suite-manifest" doc,
+      // generation-ports.ts). Absent -> omitted, unchanged prompt (today's behavior).
+      ...(enrichment?.contextPack ? { contextPack: enrichment.contextPack } : {}),
+      ...(enrichment?.existingSpecFiles?.length ? { existingSpecFiles: [...enrichment.existingSpecFiles] } : {}),
     };
 
     const generated = await this.useCase.generate(input, { ...(signal ? { signal } : {}) });
