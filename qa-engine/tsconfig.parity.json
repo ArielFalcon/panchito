@@ -38,6 +38,16 @@
     "test/characterization/capture-goldens-b2.ts",
     "src/shared-kernel/contract/index.ts",
     "test/shared-kernel/run-outcome.test.ts",
-    "test/characterization/side-effects.ts"
+    "test/characterization/side-effects.ts",
+    "test/shared-kernel/diff-parser/diff-parser-parity.test.ts",
+    "test/contexts/change-analysis/domain/commit-classification-parity.test.ts",
+    "test/contexts/test-execution/domain/adjudicate-parity.test.ts",
+    "test/contexts/test-execution/domain/selector-check-parity.test.ts",
+    "test/contexts/test-execution/domain/progress-gate-parity.test.ts",
+    "test/contexts/test-execution/domain/nav-gate-parity.test.ts",
+    "test/contexts/objective-signal/domain/decide-coverage-parity.test.ts",
+    "test/contexts/objective-signal/infrastructure/fault-injection-oracle-parity.test.ts",
+    "test/contexts/objective-signal/infrastructure/lcov-coverage-parity.test.ts",
+    "test/contexts/objective-signal/infrastructure/c8-coverage-parity.test.ts"
   ]
 }
