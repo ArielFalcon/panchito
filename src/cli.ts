@@ -23,6 +23,27 @@ import { loadAppConfig } from "./orchestrator/config-loader";
 import { RUN_MODES, RunMode, TestTarget } from "./types";
 import { runSucceeded } from "./cli-exit";
 import { renderRunReport } from "./qa/value-report";
+import { createAgentRuntimeManager } from "./server/agent-runtime";
+import { defaultEnvStoreFs } from "./server/env-store";
+import { OpenCodeRuntimeStrategy, CodexRuntimeStrategy } from "./agent-runtime";
+import { getOpenSessionCount } from "./integrations/opencode-client";
+import { createRewrittenEngineFactory } from "./server/rewritten-engine-factory";
+
+// Plan 7.6 (Part 2) — the rewritten-engine seam for the standalone CLI path (only reached when
+// `--allow-concurrent` bypasses the running-service delegation below). Matches src/index.ts's own
+// agentRuntime wiring exactly (same strategies, same :4097 supervisor target) so the CLI's
+// engineFactory — like every other real collaborator it wires — talks to the real agent runtime,
+// not the dead OPENCODE_SERVE_URL ?? :4096 fallback defaultAgentDeps() would otherwise use.
+const cliAgentRuntime = createAgentRuntimeManager({
+  env: process.env,
+  fs: defaultEnvStoreFs(),
+  strategies: {
+    opencode: new OpenCodeRuntimeStrategy({ env: process.env }),
+    codex: new CodexRuntimeStrategy({ env: process.env }),
+  },
+  hasOpenSessions: () => getOpenSessionCount() > 0,
+});
+const cliEngineFactory = createRewrittenEngineFactory({ getAgentDeps: () => cliAgentRuntime.facade().deps() });
 
 // Probe the local service's unauthenticated liveness endpoint. A 200 means a long-lived
 // orchestrator owns the queue on this host and a second queue here would race it against DEV.
@@ -121,7 +142,7 @@ async function main(): Promise<void> {
     mode: args.mode,
     guidance: args.guidance,
     source: "manual",
-  }, { runEvents });
+  }, { runEvents, engineFactory: cliEngineFactory });
   await queue.drain();
   const record = getRecord(id);
   // The end-of-run value report: a manual run used to print NOTHING (just an exit code), so in

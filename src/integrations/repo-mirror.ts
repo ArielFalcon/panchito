@@ -17,7 +17,10 @@ export interface MirrorDeps {
   root?: string;
 }
 
-function workdirRoot(): string {
+// Exported so any other module that needs to derive a repo's mirror dir (e.g. the rewritten-engine
+// factory's own vcs/mirrorDir composition) resolves it from this SINGLE source of truth, instead of
+// re-deriving the same formula and silently diverging if the two definitions ever drift apart.
+export function workdirRoot(): string {
   return process.env.MIRROR_DIR ?? join(process.cwd(), ".mirrors");
 }
 

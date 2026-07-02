@@ -178,6 +178,77 @@ test("PIPELINE_ENGINE=rewritten + engineFactory — routes to port.run, never ca
   }
 });
 
+// ── CRITICAL fix (judgment-day) — the runner MUST compute a PER-RUN namespace and pass it into
+// engineFactory, mirroring the exact formula legacy uses (testDataNamespace(prefix, sha, runId) at
+// src/pipeline.ts:1222). Without this, every run of every app collided on the SAME static branch
+// literal ("qa-bot/rewritten"), which flows into BOTH GenerationPort's and ExecutionPort's
+// `namespace` — the live DEV test-data scoping. These tests pin the runner's own dispatch, NOT the
+// factory's internals (already covered in rewritten-engine-factory.test.ts).
+
+test("PIPELINE_ENGINE=rewritten — the runner passes a testDataNamespace-shaped, per-run namespace to engineFactory (never a static literal)", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const { port } = fakePort({ verdict: "pass" });
+    let receivedNamespace: string | undefined;
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-namespace-shape", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
+      {
+        pipeline: stubDeps(),
+        loadApp: cfg,
+        engineFactory: (_appConfig, namespace) => {
+          receivedNamespace = namespace;
+          return port;
+        },
+      },
+    );
+    await queue.drain();
+    assert.equal(getRecord(id)!.verdict, "pass");
+    assert.ok(receivedNamespace, "engineFactory must receive a namespace argument");
+    assert.notEqual(receivedNamespace, "qa-bot/rewritten", "must never be the old static literal");
+    // testDataNamespace(prefix, sha, runId) formula: `${prefix}-${shortSha(sha)}-${runToken(runId)}`.
+    // cfg(...) fixtures use testDataPrefix "qa-bot"; shortSha("def5678") === "def5678" (already 7 chars).
+    assert.match(receivedNamespace!, /^qa-bot-def5678-/, "namespace must start with testDataPrefix-shortSha, matching legacy's formula");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("PIPELINE_ENGINE=rewritten — two DIFFERENT runs (different sha) produce DIFFERENT namespaces passed to engineFactory", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue1 = new JobQueue();
+    const queue2 = new JobQueue();
+    const { port: port1 } = fakePort({ verdict: "pass" });
+    const { port: port2 } = fakePort({ verdict: "pass" });
+    let namespace1: string | undefined;
+    let namespace2: string | undefined;
+    const id1 = enqueueTrackedRun(
+      queue1,
+      { app: "runner-namespace-diff", sha: "aaa1111", target: "e2e", mode: "diff", source: "manual" },
+      { pipeline: stubDeps(), loadApp: cfg, engineFactory: (_a, ns) => { namespace1 = ns; return port1; } },
+    );
+    const id2 = enqueueTrackedRun(
+      queue2,
+      { app: "runner-namespace-diff", sha: "bbb2222", target: "e2e", mode: "diff", source: "manual" },
+      { pipeline: stubDeps(), loadApp: cfg, engineFactory: (_a, ns) => { namespace2 = ns; return port2; } },
+    );
+    await Promise.all([queue1.drain(), queue2.drain()]);
+    assert.equal(getRecord(id1)!.verdict, "pass");
+    assert.equal(getRecord(id2)!.verdict, "pass");
+    assert.ok(namespace1);
+    assert.ok(namespace2);
+    assert.notEqual(namespace1, namespace2, "two different-sha runs must never share the same DEV test-data namespace");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
 test("PIPELINE_ENGINE=rewritten but NO engineFactory supplied — falls back to legacy (fail-safe)", async () => {
   const prev = process.env.PIPELINE_ENGINE;
   process.env.PIPELINE_ENGINE = "rewritten";

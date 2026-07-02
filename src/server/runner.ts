@@ -71,7 +71,13 @@ export interface RunnerDeps {
   // GitHub client, the agent runtime, …) is deliberately NOT this file's job — that heavy
   // assembly belongs to the caller (an operator script per Slice F.2), keeping this hot-path
   // dispatch free of qa-engine's leaf-IO imports.
-  engineFactory?: (appConfig: AppConfig) => RunPipelinePort;
+  //
+  // `namespace` (2nd param, judgment-day CRITICAL fix): the runner computes this PER RUN — see
+  // enqueueTrackedRun's queue callback below — via testDataNamespace(app.qa.testDataPrefix, sha,
+  // runId), the SAME formula legacy runPipeline uses at src/pipeline.ts:1222. Without this the
+  // rewritten engine's own namespace/branch would be static, colliding every run of every app on
+  // the same live-DEV test-data namespace the moment the flag flips.
+  engineFactory?: (appConfig: AppConfig, namespace: string) => RunPipelinePort;
 }
 
 // Maps a RunRequest + record id into the strangler seam's RunInput and drives the injected
@@ -169,9 +175,15 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
       // below, byte-identical to before this task. "rewritten" WITH a supplied engineFactory routes
       // through RunPipelinePort instead — runPipeline is NEVER called on that branch.
       const engine = selectEngine(process.env);
+      // CRITICAL fix (judgment-day): compute the PER-RUN namespace exactly like legacy runPipeline
+      // does at src/pipeline.ts:1222 — testDataNamespace(prefix, sha, runId) — and pass it into the
+      // rewritten engineFactory. `appConfig` is already loaded above (no double-load); `record.id`
+      // is this run's id, matching legacy's `opts.runId`. Without this, the rewritten engine's own
+      // branch/namespace collided across every run of every app (a static literal).
+      const runNamespace = testDataNamespace(appConfig.qa.testDataPrefix, req.sha, record.id);
       const run: QaRunResult =
         engine === "rewritten" && deps.engineFactory
-          ? await runViaRewrittenEngine(deps.engineFactory(appConfig), req, record.id, signal)
+          ? await runViaRewrittenEngine(deps.engineFactory(appConfig, runNamespace), req, record.id, signal)
           : await runPipeline(
               appConfig,
               req.sha,

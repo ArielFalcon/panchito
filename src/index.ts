@@ -19,6 +19,7 @@ import { serveDashboard } from "./server/static";
 import { handleMaintainerApi, recordIncident, getMaintainerStatus, getIncidents } from "./server/maintainer";
 import { getRecord, listRecords, currentRun, updateRecord, interruptedRecords, continuationDepth, MAX_CONTINUATION_DEPTH, listLearningRules, loadScorecard, loadCurriculum, listRunOutcomes, getRunOutcome, getAgentTurns, computeTelemetryAnalysis } from "./server/history";
 import { enqueueTrackedRun, cancelTrackedRun } from "./server/runner";
+import { createRewrittenEngineFactory } from "./server/rewritten-engine-factory";
 import { defaultPipelineDeps } from "./pipeline";
 import { pruneMirrors, defaultMirrorPruneDeps, getDirectorySize } from "./server/mirror-prune";
 import { buildArtifactBytesMetrics, type ArtifactSizeCache } from "./server/metrics";
@@ -140,6 +141,13 @@ function currentPipelineDeps() {
   });
 }
 
+// Plan 7.6 (Part 2) — the rewritten-engine seam (RunnerDeps.engineFactory, src/server/runner.ts).
+// ADDITIVE + OPT-IN: with PIPELINE_ENGINE unset (the default), the runner's dispatch never invokes
+// this factory — it is only reached on the "rewritten" branch. Reuses THIS process's real
+// agentRuntime (currentAgentDeps) instead of building a second AgentRuntimeManager, matching every
+// other collaborator this file already owns (github, deploy-gate, repo-mirror, execute/code-runner).
+const engineFactory = createRewrittenEngineFactory({ getAgentDeps: currentAgentDeps });
+
 // Auto-maintenance runtime (ARCH-01): the self-deploy path lives in maintainer-runtime.ts; the
 // entrypoint only wires it to the values it owns (queue, agent deps, the shuttingDown setter, the
 // repo identity, the port). The destructured handles keep the existing call sites unchanged.
@@ -207,7 +215,7 @@ function enqueueApiRun(app: string, sha: string, target: string, mode: RunMode, 
   }
   // Orphan-data cleanup is reconstructed inside enqueueTrackedRun (the single funnel), so
   // every trigger gets it — not just this webhook path.
-  return enqueueTrackedRun(queue, { app, sha, target: target as TestTarget, mode, guidance, shadow, commits, source: "webhook", triggerRepo, baseSha }, { runEvents, pipeline: currentPipelineDeps() });
+  return enqueueTrackedRun(queue, { app, sha, target: target as TestTarget, mode, guidance, shadow, commits, source: "webhook", triggerRepo, baseSha }, { runEvents, pipeline: currentPipelineDeps(), engineFactory });
 }
 
 // Orphan-session sweep threshold. Must always exceed the longest possible agent
@@ -487,7 +495,7 @@ const apiDeps: ApiDeps = {
       source: "manual",
       // Honor the active agent runtime (Codex/dual) on continuations, exactly like the
       // webhook path above — otherwise the runner falls back to static OpenCode deps.
-    }, { runEvents, pipeline: currentPipelineDeps() });
+    }, { runEvents, pipeline: currentPipelineDeps(), engineFactory });
   },
 };
 
