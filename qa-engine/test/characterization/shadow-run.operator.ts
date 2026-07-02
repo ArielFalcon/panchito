@@ -51,12 +51,12 @@
 // both files' diffs in this same commit. `npm run typecheck` must stay exit 0 after this change.
 //
 // ── Genuine adapter/port gaps found while assembling this config (reported, not fabricated) ──────
-// See the "GAP:" comments below (VcsReadPort's runner, the browser coverage collector, and
-// PromptBudgetPort/ManifestRepositoryPort's exact real-fn names) — each is either a thin, faithful
-// wiring wrapper over an ALREADY-REAL function (documented inline, not fabricated business logic)
-// or a currently-unshipped qa-engine primitive (SandboxedBinaryRunner has no concrete class yet).
-// None of these blocked assembling a complete CompositionConfig — see this task's return summary
-// for the full list.
+// See the "GAP:" comments below (the browser coverage collector and PromptBudgetPort/
+// ManifestRepositoryPort's exact real-fn names) — each is either a thin, faithful wiring wrapper
+// over an ALREADY-REAL function (documented inline, not fabricated business logic) or a currently-
+// unshipped qa-engine primitive. None of these blocked assembling a complete CompositionConfig.
+// VcsReadPort's runner GAP is now CLOSED (Sub-Plan 7.2 item 1): SandboxedBinaryRunner ships a real
+// concrete SandboxedBinaryRunnerAdapter, wired below with ProcessKillAdapter.
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseShadowRunArgs } from "./shadow-run-args.ts";
@@ -67,6 +67,12 @@ import { buildShadow, type CompositionConfig } from "@contexts/qa-run-orchestrat
 import { LegacyPipelineAdapter, type LegacyRunner } from "@contexts/qa-run-orchestration/infrastructure/legacy-pipeline.adapter.ts";
 import { Sha } from "@kernel/sha.ts";
 import type { RunOutcome } from "@kernel/run-outcome.ts";
+// No @-alias exists for shared-infrastructure/ (only @kernel/@contexts/@interface are registered
+// path aliases) and this file already imports enough root src/ that adding a 4th alias for one
+// import is not worth it. Relative path stays inside qa-engine/ — this is qa-engine's OWN adapter,
+// not a root src/ import.
+import { SandboxedBinaryRunnerAdapter } from "../../src/shared-infrastructure/process-sandbox/sandboxed-binary-runner.adapter.ts";
+import { ProcessKillAdapter } from "../../src/shared-infrastructure/process-sandbox/process-kill.adapter.ts";
 import type { AgentRole } from "@kernel/agent-role.ts";
 
 import { GitMirrorReadAdapter } from "@contexts/change-analysis/infrastructure/git-mirror-read.adapter.ts";
@@ -84,26 +90,6 @@ import { FaultInjectionOracleAdapter } from "@contexts/objective-signal/infrastr
 import { GitHubPrAdapter } from "@contexts/workspace-and-publication/infrastructure/github-pr.adapter.ts";
 import { GitHubIssueAdapter } from "@contexts/workspace-and-publication/infrastructure/github-issue.adapter.ts";
 import type { CoverageCollectorPort, CoverageReport } from "@contexts/objective-signal/application/ports/index.ts";
-
-// A locally-declared structural mirror of SandboxedBinaryRunner's contract (no @-alias exists for
-// shared-infrastructure/ — only @kernel/@contexts/@interface are registered path aliases — and this
-// file already imports enough root src/ that adding a 4th alias just for one interface is not worth
-// it). Kept structurally identical to sandboxed-binary-runner.ts's SandboxedRunRequest/Result so
-// GitMirrorReadAdapter (which imports the REAL type) accepts this at the call site.
-interface SpawnRunRequest {
-  command: string;
-  args: readonly string[];
-  cwd: string;
-  env: Record<string, string>;
-  timeoutMs?: number;
-  signal?: AbortSignal;
-}
-interface SpawnRunResult {
-  exitCode: number | null;
-  stdout: string;
-  stderr: string;
-  timedOut: boolean;
-}
 
 // ── Root src/ collaborators (the REAL production pieces — see the TS6307 note above) ─────────────
 import { loadAppConfig, type AppConfig } from "../../../src/orchestrator/config-loader.ts";
@@ -130,46 +116,12 @@ import { defaultCollectCoverage } from "../../../src/qa/change-coverage.ts";
 import { waitForDeploy } from "../../../src/env/deploy-gate.ts";
 import { ensureMirror, getCommitDiff, defaultMirrorDeps, type MirrorDeps } from "../../../src/integrations/repo-mirror.ts";
 
-// ── GAP: SandboxedBinaryRunner ships as an interface-only contract (qa-engine's own header:
-// "v1 ships the interface + a thin default; the rich impl ... lands when callers migrate") — there
-// is NO concrete implementing class anywhere in qa-engine/src. GitMirrorReadAdapter needs one to be
-// constructed for real. Rather than fabricate a fake, this is a minimal, faithful implementation of
-// the DOCUMENTED SandboxedRunRequest/SandboxedRunResult contract over node:child_process — no new
-// business logic, just the process-spawn primitive the interface itself describes. Reported as a
-// gap in the return summary: qa-engine should ship this as its own adapter (with the ProcessKillPort
-// wiring the interface's own SandboxedBinaryRunnerDeps declares) rather than every caller inlining it.
-function makeSpawnRunner(): { run(req: SpawnRunRequest): Promise<SpawnRunResult> } {
-  return {
-    run(req: SpawnRunRequest): Promise<SpawnRunResult> {
-      return new Promise((resolve) => {
-        import("node:child_process").then(({ spawn }) => {
-          const child = spawn(req.command, [...req.args], { cwd: req.cwd, env: req.env });
-          let stdout = "";
-          let stderr = "";
-          let timedOut = false;
-          const timer = req.timeoutMs
-            ? setTimeout(() => {
-                timedOut = true;
-                child.kill("SIGKILL");
-              }, req.timeoutMs)
-            : undefined;
-          const onAbort = () => {
-            timedOut = true;
-            child.kill("SIGKILL");
-          };
-          req.signal?.addEventListener("abort", onAbort, { once: true });
-          child.stdout?.on("data", (d) => (stdout += String(d)));
-          child.stderr?.on("data", (d) => (stderr += String(d)));
-          child.on("close", (code) => {
-            if (timer) clearTimeout(timer);
-            req.signal?.removeEventListener("abort", onAbort);
-            resolve({ exitCode: code, stdout, stderr, timedOut });
-          });
-        });
-      });
-    },
-  };
-}
+// SandboxedBinaryRunner is now a REAL, concrete qa-engine adapter (SandboxedBinaryRunnerAdapter,
+// Sub-Plan 7.2 item 1 — see qa-engine/src/shared-infrastructure/process-sandbox/
+// sandboxed-binary-runner.adapter.ts) wired here with ProcessKillAdapter for the process-tree kill
+// on timeout/abort (the Seam-3 killTree decoupling). This closes the F.2 GAP that used to require
+// this script to inline its own spawn primitive — GitMirrorReadAdapter now consumes the same real
+// class the rest of qa-engine will use once assembled outside this operator script.
 
 // ── GAP: no standalone V8-dump reader / CoverageReport-shaped collector exists in src/ (only the
 // private browserCoverageDir()/collectBrowserCoverage() inside change-coverage.ts, unexported, and
@@ -254,8 +206,8 @@ function buildCompositionConfig(app: AppConfig, sha: string, mirrorDir: string, 
     .filter((f) => f && f !== "/dev/null");
   const branch = `qa-bot/${sha.slice(0, 7)}`;
 
-  const runner = makeSpawnRunner();
-  const vcs = new GitMirrorReadAdapter(mirrorDir, runner as never);
+  const runner = new SandboxedBinaryRunnerAdapter({ processKill: new ProcessKillAdapter() });
+  const vcs = new GitMirrorReadAdapter(mirrorDir, runner);
 
   // onUsage/onTurn are DELIBERATELY not forwarded: AgentRuntimeAdapter's LegacyAgentDeps types them
   // against the KERNEL UsageSnapshot/AgentTurnEvent shapes, while the REAL AgentDeps.open (src/
