@@ -82,6 +82,24 @@ RUN ARCH="$(dpkg --print-architecture)" \
   && unzip -j /tmp/sg.zip sg ast-grep -d /usr/local/bin \
   && rm /tmp/sg.zip
 
+# codebase-memory-mcp v0.8.1 (exact pin — pre-1.0, per the "pin exact versions on the execution
+# path" convention already applied to Playwright/difft/ast-grep above). Verified against the
+# real GitHub release (github.com/DeusData/codebase-memory-mcp, tag v0.8.1): Linux assets are
+# named `codebase-memory-mcp-linux-<goarch>.tar.gz` (plain gzip, like difft — NOT a zip like
+# ast-grep) and the archive is flat (no subdirectory), containing the `codebase-memory-mcp`
+# binary directly alongside LICENSE/install.sh/THIRD_PARTY_NOTICES.md — confirmed by downloading
+# and listing the linux-arm64 asset before writing this block. Fail loud (no || true): a missing
+# v0.8.1 asset for either arch must fail the build, never silently skip or fall back to another
+# version.
+RUN ARCH="$(dpkg --print-architecture)" \
+  && case "$ARCH" in \
+       amd64) GOARCH=amd64 ;; \
+       arm64) GOARCH=arm64 ;; \
+       *) echo "unsupported arch for codebase-memory-mcp: $ARCH" >&2; exit 1 ;; \
+     esac \
+  && curl -fsSL "https://github.com/DeusData/codebase-memory-mcp/releases/download/v0.8.1/codebase-memory-mcp-linux-${GOARCH}.tar.gz" \
+  | tar -C /usr/local/bin -xz codebase-memory-mcp
+
 # Unprivileged user for executing UNTRUSTED code-mode commands (the watched repo's own
 # install/test/coverage). The orchestrator runs as root and DROPS to this user for those spawns
 # (src/qa/code-runner.ts → resolveSandbox), so untrusted code cannot read the root-owned API token

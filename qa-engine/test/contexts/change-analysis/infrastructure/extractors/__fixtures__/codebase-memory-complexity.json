@@ -1,0 +1,22 @@
+{
+  "_provenance": "REAL captured stdout from `codebase-memory-mcp cli query_graph` v0.8.1 (not hand-written). Tool: query_graph (Plan B — Cypher). Query: MATCH (m:Method) WHERE m.complexity > 1 RETURN m.name, m.file_path, m.complexity, m.cognitive, m.start_line, m.end_line, m.lines ORDER BY m.complexity DESC LIMIT 15. Source: an already-indexed real Java/Spring repo. Empirical finding for design R6: graph nodes carry `complexity`, `cognitive`, `start_line`, `end_line`, `lines` — there is NO field literally named `nloc` anywhere in the schema (confirmed via get_graph_schema against Function/Method/Class labels). `lines` (end_line - start_line, inclusive) is the closest analogue but is a DIFFERENT metric name than the ComplexityHotspot VO's `nloc` field, so 2b's adapter mapping must fall back (`?? 0`) whenever the query does not alias a `nloc`-shaped column — this is the R6 gap, now confirmed real, not speculative.",
+  "columns": ["m.name", "m.file_path", "m.complexity", "m.cognitive", "m.start_line", "m.end_line", "m.lines"],
+  "rows": [
+    ["assertLazyMapsIdAssociation", "src/test/java/es/name/restaurants/architecture/PersistenceMappingArchTest.java", "5", "7", "106", "132", "27"],
+    ["stringToIntegerSafe", "src/main/java/es/name/restaurants/infraestructure/mappers/place/PlaceInfrastructureMapper.java", "3", "4", "82", "92", "11"],
+    ["equals", "src/main/java/es/name/restaurants/infraestructure/adapters/persistence/entity/RestaurantEntity.java", "3", "3", "128", "141", "14"],
+    ["loadPrompt", "src/main/java/es/name/restaurants/infraestructure/adapters/ai/prompt/ClassPathSpringAiPromptResolver.java", "3", "4", "35", "46", "12"],
+    ["parseDailyMenu", "src/main/java/es/name/restaurants/infraestructure/adapters/ai/chat/SpringAiChatServiceBaseAdapter.java", "2", "3", "105", "112", "8"],
+    ["parseErrorLlm", "src/main/java/es/name/restaurants/infraestructure/adapters/ai/chat/SpringAiChatServiceBaseAdapter.java", "2", "3", "114", "121", "8"],
+    ["parseCourseI18nDescriptions", "src/main/java/es/name/restaurants/infraestructure/adapters/ai/chat/SpringAiChatServiceBaseAdapter.java", "2", "3", "123", "130", "8"],
+    ["restaurantGeoJsonProjectionToValueObject", "src/main/java/es/name/restaurants/infraestructure/mappers/RestaurantInfrastructureMapper.java", "2", "2", "235", "246", "12"],
+    ["getPlaceImage", "src/main/java/es/name/restaurants/infraestructure/adapters/places/PlaceRepositoryAdapter.java", "2", "3", "59", "85", "27"],
+    ["doSave", "src/main/java/es/name/restaurants/infraestructure/adapters/images/base/BasePublicImageRepositoryAdapter.java", "2", "3", "25", "52", "28"],
+    ["toPredicate", "src/main/java/es/name/restaurants/infraestructure/adapters/persistence/specifications/MenuPriceTypeSpecification.java", "2", "2", "22", "40", "19"],
+    ["generateCourseI18nDescriptions", "src/main/java/es/name/restaurants/infraestructure/adapters/ai/chat/LlmChatServiceOpenaiAdapter.java", "2", "3", "88", "98", "11"],
+    ["parseDailyMenu", "src/main/java/es/name/restaurants/infraestructure/adapters/ai/chat/LlmChatServiceOpenaiAdapter.java", "2", "3", "100", "107", "8"],
+    ["parseErrorLlm", "src/main/java/es/name/restaurants/infraestructure/adapters/ai/chat/LlmChatServiceOpenaiAdapter.java", "2", "3", "109", "116", "8"],
+    ["assertEmbeddedId", "src/test/java/es/name/restaurants/architecture/PersistenceMappingArchTest.java", "2", "2", "91", "104", "14"]
+  ],
+  "total": 15
+}
