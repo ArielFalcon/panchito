@@ -107,3 +107,48 @@ test("capture(): a captureDom throw is non-fatal — resolves undefined, never r
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── capture(): AbortSignal plumbing (judgment-day, FIX 1) ────────────────────────────────────────
+
+test("capture(): an already-aborted signal skips the capture entirely — resolves undefined without calling captureDom", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "qa-review-dom-abort-precheck-"));
+  try {
+    writeFileSync(join(dir, "a.spec.ts"), `await page.goto("/x");`);
+    let called = false;
+    const adapter = new ReviewDomGroundingPortAdapter(
+      { e2eDir: "/mirrors/org/app/e2e", baseUrl: "https://dev.example.com" },
+      { captureDom: async () => { called = true; return "should not be reached"; } },
+    );
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await adapter.capture(dir, ["a.spec.ts"], controller.signal);
+
+    assert.equal(result, undefined);
+    assert.equal(called, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("capture(): an in-flight abort unblocks the caller promptly, even when captureDom never resolves", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "qa-review-dom-abort-inflight-"));
+  try {
+    writeFileSync(join(dir, "a.spec.ts"), `await page.goto("/x");`);
+    const adapter = new ReviewDomGroundingPortAdapter(
+      { e2eDir: "/mirrors/org/app/e2e", baseUrl: "https://dev.example.com" },
+      { captureDom: () => new Promise(() => {}) }, // never resolves — simulates a hung render
+    );
+    const controller = new AbortController();
+
+    const capturePromise = adapter.capture(dir, ["a.spec.ts"], controller.signal);
+    queueMicrotask(() => controller.abort());
+    const result = await capturePromise;
+
+    // The adapter's own contract (never rejects) still holds — abort degrades to undefined, NOT a
+    // throw, so a caller without a signal?.aborted check after this call is not broken.
+    assert.equal(result, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

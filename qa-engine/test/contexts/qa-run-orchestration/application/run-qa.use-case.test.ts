@@ -463,6 +463,45 @@ test("RunQaUseCase: ReviewDomGroundingPort wired — a capture failure is non-fa
   assert.equal(reviewCalls[0]!.enrichment?.domSnapshot, undefined);
 });
 
+// ── Judgment-day W4 abort-plumbing (FIX 1): an abort observed DURING pre-generation grounding or
+// reviewer DOM grounding must take the ABORT path (infra-error, matching every other phase-boundary
+// abort), NEVER the degraded-ungrounded-continue path — coherent with SETUP's own
+// "aborting during setup() ... stops before generate()" test above. Both grounding ports themselves
+// never throw on abort (their own contract) — it is the use-case's OWN signal?.aborted check
+// immediately after each grounding call that does the routing. ───────────────────────────────────
+
+test("PRE-GENERATION GROUNDING: aborting during ground() (signal fires inside the collaborator) stops before generate() — takes the ABORT route, not degraded-ungrounded-continue", async () => {
+  const controller = new AbortController();
+  let generateCalled = false;
+  const { ports } = stubPorts({
+    ground: async () => { controller.abort(); return {}; },
+    generate: async () => { generateCalled = true; return { specs: ["a.spec.ts"], approved: true }; },
+  });
+  const useCase = new RunQaUseCase(ports);
+
+  const out = await useCase.run({ ...baseInput, runId: "ground-abort-mid-call" }, controller.signal);
+
+  assert.equal(generateCalled, false, "generate() must never run once the signal aborts during pre-generation grounding");
+  assert.equal(out.decision.verdict, "infra-error", "an abort during grounding must map to the SAME aborted-terminal shape every other phase-boundary check uses, not a degraded-ungrounded pass");
+  assert.equal(out.decision.sideEffect, "none");
+});
+
+test("REVIEWER DOM GROUNDING: aborting during capture() (signal fires inside the collaborator) stops the review loop — takes the ABORT route, not degraded-ungrounded-continue", async () => {
+  const controller = new AbortController();
+  let reviewCalled = false;
+  const { ports } = stubPorts({
+    captureReviewDom: async () => { controller.abort(); return undefined; },
+    review: async () => { reviewCalled = true; return { approved: true, corrections: [], blockingCount: 0, parsed: true }; },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: { needsReview: true } });
+
+  const out = await useCase.run({ ...baseInput, runId: "review-dom-abort-mid-call" }, controller.signal);
+
+  assert.equal(reviewCalled, false, "review() must never run once the signal aborts during reviewer DOM grounding");
+  assert.equal(out.decision.verdict, "infra-error", "an abort during reviewer DOM grounding must map to the SAME aborted-terminal shape every other phase-boundary check uses, not a degraded-ungrounded review round");
+  assert.equal(out.decision.sideEffect, "none");
+});
+
 // ── The 10-scenario parity (mirrors Task A.4 for the rewritten core) ──────────────────────────
 // Drives ALL 10 scenarios.ts goldens through RunQaUseCase, with per-scenario stub ports built from
 // the SAME fixture semantics scenarios.ts's makeDeps() encodes (never a new, invented behavior) —

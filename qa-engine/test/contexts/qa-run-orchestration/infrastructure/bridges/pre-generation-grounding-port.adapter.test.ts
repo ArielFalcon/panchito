@@ -154,3 +154,36 @@ test("ground(): both existingSpecFiles enumeration and context-pack build failin
 
   assert.deepEqual(result, {});
 });
+
+// ── ground(): AbortSignal plumbing (judgment-day, FIX 1) ─────────────────────────────────────────
+
+test("ground(): an already-aborted signal skips capture entirely — resolves {} without calling buildContextPack", async () => {
+  let called = false;
+  const adapter = new PreGenerationGroundingPortAdapter(
+    { e2eDir: "/mirrors/org/app/e2e" },
+    { buildContextPack: async () => { called = true; return { text: "should not be reached", blastRadiusBytes: 0, domBytes: 0, contractBytes: 0 }; } },
+  );
+  const controller = new AbortController();
+  controller.abort();
+
+  const result = await adapter.ground("/tmp/qa-golden/e2e", controller.signal);
+
+  assert.deepEqual(result, {});
+  assert.equal(called, false);
+});
+
+test("ground(): an in-flight abort unblocks the caller promptly, even when buildContextPack never resolves", async () => {
+  const adapter = new PreGenerationGroundingPortAdapter(
+    { e2eDir: "/mirrors/org/app/e2e" },
+    { buildContextPack: () => new Promise(() => {}) }, // never resolves — simulates a hung render
+  );
+  const controller = new AbortController();
+
+  const groundPromise = adapter.ground("/tmp/qa-golden/e2e", controller.signal);
+  queueMicrotask(() => controller.abort());
+  const result = await groundPromise;
+
+  // The adapter's own contract (never rejects) still holds — abort degrades to an empty result,
+  // NOT a throw, so a caller without a signal?.aborted check after this call is not broken.
+  assert.equal(result.contextPack, undefined);
+});

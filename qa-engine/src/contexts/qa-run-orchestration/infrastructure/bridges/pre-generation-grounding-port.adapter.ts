@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { buildContextPack, defaultContextPackDeps } from "@contexts/generation/infrastructure/context-pack.ts";
 import type { ContextPackDeps } from "@contexts/generation/infrastructure/context-pack.ts";
 import type { ArchitectureContext } from "@contexts/generation/application/ports/generation-ports.ts";
+import { raceWithAbort, isAbortError } from "./abort-race.ts";
 
 export interface PreGenerationGroundingStaticContext {
   e2eDir: string; // absolute path to the seeded e2e project (mirrors legacy's own `e2eDir`)
@@ -70,7 +71,13 @@ export class PreGenerationGroundingPortAdapter implements PreGenerationGrounding
     private readonly collaborators: PreGenerationGroundingCollaborators = {},
   ) {}
 
-  async ground(_specDir: string, _signal?: AbortSignal): Promise<GroundingResult> {
+  async ground(_specDir: string, signal?: AbortSignal): Promise<GroundingResult> {
+    // Cheap, exact pre-check (FIX 1a, judgment-day W4 abort-plumbing): an already-aborted signal
+    // skips BOTH collaborator calls entirely — no point starting a capture/build the caller has
+    // already given up on. Mirrors the use-case's own `if (signal?.aborted) return` posture at
+    // every other phase boundary (run-qa.use-case.ts).
+    if (signal?.aborted) return {};
+
     const result: GroundingResult = {};
 
     // Seam b: enumerate existing specs BEFORE the pack build (mirrors legacy's own ordering —
@@ -85,10 +92,24 @@ export class PreGenerationGroundingPortAdapter implements PreGenerationGrounding
     // Context pack: brief is intentionally undefined (explorer pass not wired at this bridge —
     // see this file's own header). Degrades to contextMap-only contract filtering + no DOM/blast
     // radius when no brief is present, matching buildContextPack's own documented fallback.
+    //
+    // FIX 1b (judgment-day W4 abort-plumbing): buildContextPack (context-pack.ts) does NOT accept
+    // an AbortSignal — a pre-existing legacy-parity gap (the underlying Playwright render has its
+    // own internal ~200s cap but no cooperative cancellation). Racing the build against an abort
+    // listener unblocks the RUN's control flow promptly on cancel; the in-flight render keeps
+    // running to its own timeout in the background (harmless — its result is discarded here).
+    // Killing the spawn tree from this adapter would reach into dom-snapshot.ts's shared render
+    // internals — tracked as a follow-up, not done here (see this file's own docs).
+    //
+    // Abort resolves (never rejects) here — the port's OWN "must NEVER throw" contract holds
+    // unconditionally; it is the use-case's own `if (signal?.aborted) return this.abortedResult()`
+    // check IMMEDIATELY AFTER this call (run-qa.use-case.ts) that routes an abort to the ABORT
+    // path instead of the degraded-ungrounded-continue path — coherent with how it already treats
+    // every other phase boundary.
     try {
       const build = this.collaborators.buildContextPack ?? buildContextPack;
       const deps = this.collaborators.contextPackDeps ?? defaultContextPackDeps;
-      const packResult = await build(
+      const buildPromise = build(
         {
           baseUrl: this.ctx.baseUrl,
           e2eDir: this.ctx.e2eDir,
@@ -98,8 +119,10 @@ export class PreGenerationGroundingPortAdapter implements PreGenerationGrounding
         },
         deps,
       );
+      const packResult = signal ? await raceWithAbort(buildPromise, signal) : await buildPromise;
       if (packResult.text) result.contextPack = packResult.text;
     } catch (err) {
+      if (isAbortError(err)) return result; // abort: return whatever was gathered so far, never throw — see the note above.
       console.warn(`[qa] WARNING: context-pack build FAILED (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
     }
 

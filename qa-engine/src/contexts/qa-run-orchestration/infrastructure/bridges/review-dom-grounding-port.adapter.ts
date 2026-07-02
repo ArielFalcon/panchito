@@ -17,6 +17,7 @@ import { join } from "node:path";
 import type { ReviewDomGroundingPort } from "../../application/ports/index.ts";
 import { captureDom, defaultCaptureDomDeps } from "@contexts/generation/infrastructure/dom-snapshot.ts";
 import type { CaptureDomDeps } from "@contexts/generation/infrastructure/dom-snapshot.ts";
+import { raceWithAbort } from "./abort-race.ts";
 
 export interface ReviewDomGroundingStaticContext {
   e2eDir: string; // absolute path to the seeded e2e project (mirrors CaptureDomInput.e2eDir)
@@ -35,7 +36,11 @@ export class ReviewDomGroundingPortAdapter implements ReviewDomGroundingPort {
     private readonly collaborators: ReviewDomGroundingCollaborators = {},
   ) {}
 
-  async capture(specDir: string, specs: readonly string[], _signal?: AbortSignal): Promise<string | undefined> {
+  async capture(specDir: string, specs: readonly string[], signal?: AbortSignal): Promise<string | undefined> {
+    // Cheap, exact pre-check (FIX 1a, judgment-day W4 abort-plumbing): an already-aborted signal
+    // skips the capture entirely — mirrors PreGenerationGroundingPortAdapter.ground()'s own
+    // pre-check and the use-case's `if (signal?.aborted) return` posture at every phase boundary.
+    if (signal?.aborted) return undefined;
     if (!this.ctx.baseUrl || specs.length === 0) return undefined;
     const specContents = specs.map((spec) => {
       try {
@@ -46,9 +51,27 @@ export class ReviewDomGroundingPortAdapter implements ReviewDomGroundingPort {
     });
     const capture = this.collaborators.captureDom ?? captureDom;
     const deps = this.collaborators.captureDomDeps ?? defaultCaptureDomDeps;
-    return capture(
+    const capturePromise = capture(
       { e2eDir: this.ctx.e2eDir, baseUrl: this.ctx.baseUrl, specContents, testIdAttribute: this.ctx.testIdAttribute },
       deps,
-    ).catch(() => undefined);
+    );
+    // FIX 1b (judgment-day W4 abort-plumbing): captureDom (dom-snapshot.ts) does NOT accept an
+    // AbortSignal — same pre-existing legacy-parity gap as buildContextPack (see this file's own
+    // header + abort-race.ts). Racing against the signal unblocks the caller promptly on cancel;
+    // the in-flight render finishes on its own internal timeout in the background.
+    //
+    // Abort resolves undefined (never rejects) here — the port's OWN "must NEVER throw" contract
+    // holds unconditionally (same posture as captureDom's own `.catch(() => undefined)`); it is
+    // the use-case's own `if (signal?.aborted) return this.abortedResult()` check IMMEDIATELY
+    // AFTER this call (run-qa.use-case.ts) that routes an abort to the ABORT path instead of the
+    // degraded-ungrounded-continue path.
+    try {
+      return await (signal ? raceWithAbort(capturePromise, signal) : capturePromise);
+    } catch {
+      // Both an abort and any other capture failure degrade to undefined here (mirrors legacy's
+      // own `.catch(() => undefined)` at this exact call site) — the use-case's post-call
+      // signal?.aborted check is what distinguishes "aborted" from "ordinary grounding failure".
+      return undefined;
+    }
   }
 }
