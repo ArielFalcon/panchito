@@ -67,6 +67,20 @@ function toGenerationIntent(intent: GenerationEnrichment["intent"]): GenerationC
   return intent as GenerationCommitIntent | undefined;
 }
 
+// W3 F2: renders LearningPort.retrieve(sha)'s rule-trigger strings into the same
+// "reject-on-sight" prompt-section shape legacy's renderRulesForPrompt/renderRulesForReviewer
+// (src/qa/learning/learning-rule.ts) produce — a minimal faithful port (this bridge has no access
+// to the full LearningRule record, only the trigger text the port's own established contract
+// returns; see ports/index.ts's GenerationEnrichment.learnedRules doc). Empty input never reaches
+// here (guarded at the call site by `.length` before invoking).
+export function renderLearnedRules(triggers: readonly string[]): string {
+  const lines = ["## App-specific reject-on-sight rules (earned from past runs on this app)", ""];
+  for (const trigger of triggers) {
+    lines.push(`- ${trigger}`);
+  }
+  return lines.join("\n");
+}
+
 export interface GenerationPortStaticContext {
   repo: string;
   appName: string;
@@ -143,6 +157,12 @@ export class GenerationPortAdapter implements GenerationPort {
       ...(enrichment?.domSnapshot ? { domSnapshot: enrichment.domSnapshot } : {}),
       ...(enrichment?.coverageGap ? { coverageGap: enrichment.coverageGap } : {}),
       ...(enrichment?.intent ? { intent: toGenerationIntent(enrichment.intent) } : {}),
+      // W3 F2 (cross-run learning retrieval): mirrors legacy's baseGenInput({ learnedRules, ... })
+      // threading (src/pipeline.ts:1899) — LearningPort.retrieve(sha)'s rule-trigger strings,
+      // rendered into the SAME OpencodeRunInput.learnedRules field buildPromptAssembled already
+      // renders a section for. Rendering (not just a join) happens HERE, at the adapter boundary —
+      // matching every other enrichment field's own format-at-the-adapter precedent.
+      ...(enrichment?.learnedRules?.length ? { learnedRules: renderLearnedRules(enrichment.learnedRules) } : {}),
     };
 
     const generated = await this.useCase.generate(input, { ...(signal ? { signal } : {}) });

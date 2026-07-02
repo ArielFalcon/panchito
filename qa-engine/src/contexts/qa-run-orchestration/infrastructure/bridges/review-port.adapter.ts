@@ -33,6 +33,7 @@ import type { AgentRuntimePort } from "@kernel/ports/agent-runtime.port.ts";
 import type { PromptRenderingPort, VerdictParserPort } from "@contexts/generation/application/ports/index.ts";
 import type { ReviewInput } from "@contexts/generation/application/ports/generation-ports.ts";
 import type { RunMode } from "@kernel/run-mode.ts";
+import { renderLearnedRules } from "./generation-port.adapter.ts";
 
 export interface ReviewPortRuntime {
   runtime: AgentRuntimePort;
@@ -83,6 +84,11 @@ export class ReviewPortAdapter implements ReviewPort {
       // (src/pipeline.ts:1682) exactly (guidance wins, intent is the fallback).
       ...(enrichment?.priorCorrections?.length ? { priorCorrections: [...enrichment.priorCorrections] } : {}),
       ...(!this.ctx.guidance && enrichment?.intent?.message ? { objective: enrichment.intent.message } : {}),
+      // W3 F2 (cross-run learning retrieval): mirrors legacy's renderRulesForReviewer(retrievedRules)
+      // threading (src/pipeline.ts:1679) — the SAME retrieved rule triggers the generator's prompt
+      // received, rendered here (the SAME renderLearnedRules the generation bridge uses) so the
+      // reviewer judges against the SAME earned app-specific rules.
+      ...(enrichment?.learnedRules?.length ? { learnedRules: renderLearnedRules(enrichment.learnedRules) } : {}),
     };
     const assembled = rendering.renderReviewer(reviewInput);
 

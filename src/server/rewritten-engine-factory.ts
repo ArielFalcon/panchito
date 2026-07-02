@@ -116,6 +116,9 @@ import { runMutationOracle, realMutationDeps } from "../qa/learning/mutation-cod
 import { runFaultInjectionOracle, defaultFaultInjectionDeps } from "../qa/learning/fault-injection-e2e";
 import { shaMatches } from "../env/deploy-gate";
 import { ensureMirror, defaultMirrorDeps, workdirRoot } from "../integrations/repo-mirror";
+import { SqliteRunHistoryAdapter } from "./run-history-sqlite-adapter";
+import { SqliteLearningRepository, type LearningStore } from "@contexts/cross-run-learning/infrastructure/sqlite-learning-repository.adapter";
+import { listLearningRules, upsertLearningRule } from "./history";
 
 // Same role→agent-name mapping the F.2 operator template uses (roleToAgentName) — the
 // AgentRuntimeAdapter needs it to resolve which of the agents container's role configs
@@ -151,17 +154,82 @@ async function fetchVersion(url: string): Promise<{ sha?: string; healthy?: bool
   }
 }
 
+// Bridges cross-run-learning's LearningStore port onto src/server/history.ts's existing
+// learning_rules exports (listLearningRules/upsertLearningRule — the SAME SQLite table the legacy
+// engine's own retrieval/distillation already reads/writes). selectRules re-shapes history.ts's
+// already-camelCased LearningRule[] back into the port's raw-row LearningRow[] shape
+// (trigger_text/action_text) because history.ts exposes no raw-row query publicly and
+// SqliteLearningRepository's own rowToRule immediately re-maps it right back — a lossless
+// round-trip, not a second source of truth. upsert() narrows the port's full LearningRule down to
+// legacy's RuleUpsert (trigger/action/errorClass/archetype/source) — upsertLearningRule's own
+// contract always resets confidence/usageCount/status to their insert-time defaults on ANY upsert
+// (see that function's own header comment in history.ts), so a caller-supplied confidence/status
+// would be silently discarded by the legacy fn regardless; narrowing here just makes that existing
+// contract explicit at the bridge, rather than passing fields the sink ignores.
+function historyLearningStore(): LearningStore {
+  return {
+    selectRules: (app) =>
+      listLearningRules(app, 200).map((r) => ({
+        id: r.id,
+        trigger_text: r.trigger,
+        action_text: r.action,
+        error_class: r.errorClass,
+        archetype: r.archetype ?? null,
+        status: r.status,
+        confidence: r.confidence,
+        usage_count: r.usageCount,
+        outcome_count: r.outcomeCount,
+        success_rate: r.successRate,
+        last_verified: r.lastVerified,
+        source: r.source,
+        at: r.at,
+      })),
+    upsert: (rule) =>
+      upsertLearningRule({
+        id: rule.id,
+        app: rule.archetype ?? "", // CRL-02: the port's own LearningRule carries no `app` field yet
+        // (save() has zero call sites on the orchestrated path — see this fn's own header); the
+        // distiller (Plan 6, not yet ported) is the real future caller and will thread the actual
+        // app name. Left as an explicit placeholder rather than silently defaulting to "" via a
+        // narrower type, so a future distillation wiring cannot forget to supply it for real.
+        trigger: rule.trigger,
+        action: rule.action,
+        // The port's LearningRule.errorClass is WIDE (`string` — cross-run-learning/application/
+        // ports/index.ts's own doc: "the real owner; the kernel RunOutcome.errorClass widens to
+        // this"), matching the kernel's own widening pattern (run-outcome.ts's ErrorClass alias).
+        // upsertLearningRule expects legacy's narrow ErrorClass union — safe to cast here because
+        // the ONLY genuine producer of a port LearningRule.errorClass value is the SAME re-ported
+        // labeler taxonomy (domain/helpers/error-class.ts, a verbatim port of
+        // src/qa/learning/taxonomy.ts) every RunOutcome.errorClass already derives from.
+        errorClass: rule.errorClass as import("../qa/learning/taxonomy").ErrorClass,
+        archetype: rule.archetype ?? null,
+        source: rule.source,
+      }),
+    recordOutcome: (outcome) => {
+      // Off-path fold (LearningPort.fold -> LearningRepositoryPort.applyOutcome -> here): the
+      // legacy's own recordRuleOutcome operates per-RULE (ruleId, score), not per-run — folding a
+      // RunOutcome into individual rules' running statistics requires the retrievedRuleIds ↔
+      // valueScore mapping the distiller/reflection layer computes (not yet ported to qa-engine;
+      // this package's scope is RETRIEVAL — see W3 F2's own header). No-op until that lands; never
+      // gates publish either way (LearningPort.fold's own off-path contract).
+      void outcome;
+    },
+  };
+}
+
 // The host's already-built real collaborators this factory reuses instead of re-assembling.
 export interface RewrittenEngineFactoryDeps {
   // Reads the SAME AgentDeps facade the host's currentAgentDeps() resolves (src/index.ts) — the
   // real :4097 supervisor, not a second AgentRuntimeManager instance.
   getAgentDeps: () => AgentDeps;
-  // Optional durable RunHistoryPort path — when absent, buildProduction's wireBridges() falls back
-  // to an in-memory history for the rewritten engine's own record (composition-root.ts's own
-  // documented default). The host's real durable history lives in src/server/history.ts's SQLite
-  // store, reached through the SAME RunnerDeps.runEvents/updateRecord plumbing every engine's
-  // outcome flows through in src/server/runner.ts — this field is for the REWRITTEN adapter's own
-  // internal RunHistoryPort.save() bookkeeping, not a replacement for that plumbing.
+  // Optional RunHistoryPort override — when absent (the production default), this factory wires the
+  // REAL durable SqliteRunHistoryAdapter (src/server/run-history-sqlite-adapter.ts), which bridges
+  // into the SAME src/server/history.ts SQLite run_outcomes table the TUI trends view, /ask learning
+  // context, and the audit process all read (W3 F1, CRITICAL cutover blocker — prior to this fix,
+  // production never set this field, so composition-root.ts's wireBridges() silently fell back to a
+  // process-lifetime InMemoryRunHistoryAdapter). historyFilePath remains as an ESCAPE HATCH (a
+  // caller that explicitly wants the file-backed JSONL adapter instead of SQLite — e.g. a test, or
+  // a future non-SQLite deployment) — set it to opt OUT of the SQLite default.
   historyFilePath?: string;
   env?: Record<string, string | undefined>;
   mirrorRoot?: string;
@@ -405,7 +473,19 @@ export function buildRewrittenCompositionConfig(
     deployGateIntervalMs: app.dev?.pollIntervalMs ?? 2000,
     deployGateTimeoutMs: app.dev?.deployTimeoutMs ?? 60000,
 
-    ...(deps.historyFilePath ? { historyFilePath: deps.historyFilePath } : {}),
+    // W3 F1 (CRITICAL cutover blocker): the REAL durable RunHistoryPort by default — takes
+    // precedence over historyFilePath in composition-root.ts's wireBridges(). historyFilePath stays
+    // available as an explicit opt-OUT (see RewrittenEngineFactoryDeps's own doc above).
+    ...(deps.historyFilePath ? { historyFilePath: deps.historyFilePath } : { runHistory: new SqliteRunHistoryAdapter() }),
+    // W3 F2 (CRITICAL cutover blocker): the REAL SqliteLearningRepository — wraps the SAME
+    // learning_rules SQLite table src/server/history.ts already owns (historyLearningStore(), this
+    // module's own bridge, above) via the SAME LearningRepositoryPort -> LearningPort seam
+    // composition-root.ts's wireBridges() already wires (LearningPortAdapter). Prior to this fix,
+    // composition-root.ts's `cfg.learningRepo ?? new StubLearningRepository()` default meant
+    // production had ZERO real constructors of SqliteLearningRepository anywhere — retrieval and
+    // the outcome fold were both provable no-ops end-to-end, regardless of what history.ts's own
+    // SQLite table held.
+    learningRepo: new SqliteLearningRepository(historyLearningStore()),
     ...(observer ? { observer } : {}),
   };
 }

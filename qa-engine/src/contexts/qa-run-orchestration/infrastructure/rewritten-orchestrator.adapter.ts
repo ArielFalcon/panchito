@@ -79,13 +79,34 @@ function toOutcome(input: RunInput, result: RunQaResult): RunOutcome {
       retries: result.gateSignals.retries,
       preExecAmbiguityCatches: result.gateSignals.preExecAmbiguityCatches,
       deterministicSelectorBlocks: result.gateSignals.deterministicSelectorBlocks,
+      // Plan 7-R B5.3 (pre-existing gap, not part of the W3 persistence/learning package this file
+      // otherwise documents): forward the SAME catalogGate* counters toRunOutcome() already persists
+      // — this adapter's own returns-the-SAME-shape-RunHistoryPort.save-receives invariant
+      // (rewritten-orchestrator.adapter.test.ts) requires it; these fields were newly added to
+      // toRunOutcome()'s persisted shape but never mirrored back here.
+      catalogGateInWindow: result.gateSignals.catalogGateInWindow,
+      catalogGateAdvisory: result.gateSignals.catalogGateAdvisory,
+      catalogGateFailClosed: result.gateSignals.catalogGateFailClosed,
     },
-    rulesRetrieved: [],
+    // W3 F2 (CRITICAL cutover blocker): forward the SAME rulesRetrieved the use-case already
+    // derived (via LearningPort.retrieve(sha)) and persisted — RunHistoryPort has no read-back
+    // path, so re-hardcoding [] here would silently drop what the use-case computed, exactly the
+    // SAME class of gap FIX 1/FIX 3/FIX 4 (errorClass/valueScore/reviewerApproved, above) already
+    // closed for their own fields.
+    rulesRetrieved: result.rulesRetrieved,
     // CLAUDE.md invariant ("surface integration errors loudly"): forward the SAME diagnostic note
     // the use-case's infra-error-shaped terminals now carry — previously dropped entirely here,
     // which is exactly the gap that let a live infra-error surface with NO note downstream (src/
     // server/runner.ts's runViaRewrittenEngine only reads outcome.note off THIS returned RunOutcome).
     ...(result.note !== undefined ? { note: result.note } : {}),
     at: new Date().toISOString(),
+    // W3 F3 (HIGH cutover blocker): forward the SAME per-case results + execution logs the use-case
+    // already computed — previously dropped entirely here, which is exactly why every passing
+    // rewritten-engine run showed passed=0/failed=0 with an empty case list and empty logs
+    // downstream (src/server/runner.ts's runViaRewrittenEngine had genuinely nothing to map;
+    // hardcoding cases:[]/logs:"" there was not a bug in that function — it was the only value
+    // available at this exact boundary until now).
+    cases: result.cases,
+    ...(result.logs !== undefined ? { logs: result.logs } : {}),
   };
 }

@@ -1108,3 +1108,169 @@ test("cancelTrackedRun is a no-op on an already-terminal record", () => {
 test("cancelTrackedRun returns false for an unknown run id", () => {
   assert.equal(cancelTrackedRun(new JobQueue(), "does-not-exist"), false);
 });
+
+// ── W3 F3 (HIGH cutover blocker): runViaRewrittenEngine maps outcome.cases -> history.addCase +
+// outcome.logs -> the run record — previously hardcoded cases:[]/logs:"" unconditionally, so every
+// passing rewritten-engine run showed passed=0/failed=0 with an empty case list regardless of what
+// actually ran. ─────────────────────────────────────────────────────────────────────────────────
+
+test("PIPELINE_ENGINE=rewritten — outcome.cases populate the run record's cases + passed/failed counts (was: permanent 0/0)", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const { port } = fakePort({
+      verdict: "pass",
+      cases: [
+        { name: "login flow", status: "pass" },
+        { name: "checkout flow", status: "fail", detail: "timeout" },
+      ],
+    });
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-w3f3-cases", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
+      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port },
+    );
+    await queue.drain();
+    const r = getRecord(id)!;
+    assert.equal(r.status, "done");
+    assert.equal(r.cases.length, 2, "the run record's cases must reflect the REAL outcome.cases, not the previous permanent []");
+    assert.equal(r.passed, 1, "passed must be recomputed from the real cases (history.addCase's own single-source-of-truth contract)");
+    assert.equal(r.failed, 1);
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("PIPELINE_ENGINE=rewritten — an absent outcome.cases (early-exit terminal) leaves the run record's cases empty, never throws", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const { port } = fakePort({ verdict: "invalid", cases: undefined });
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-w3f3-no-cases", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
+      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port },
+    );
+    await queue.drain();
+    const r = getRecord(id)!;
+    assert.equal(r.status, "done");
+    assert.equal(r.verdict, "invalid");
+    assert.deepEqual(r.cases, []);
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+// ── W3 F4 (MEDIUM): per-case RunEvents (test.passed/test.failed/test.flaky) + reviewer.verdict are
+// published from the already-returned RunOutcome, closing the "no live events on the rewritten
+// path" gap for what IS available without widening ExecutionPort (true per-case LIVE events during
+// execution need #35 — flagged, not built here). ──────────────────────────────────────────────
+
+test("PIPELINE_ENGINE=rewritten — outcome.cases publish test.passed/test.failed RunEvents", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const runEvents = createRunEventStore();
+    const { port } = fakePort({
+      verdict: "pass",
+      cases: [
+        { name: "login flow", status: "pass", durationMs: 500 },
+        { name: "checkout flow", status: "fail", detail: "timeout" },
+      ],
+    });
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-w3f4-case-events", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
+      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port, runEvents },
+    );
+    await queue.drain();
+    const events = runEvents.replay(id).map((e) => e.body);
+    const passed = events.find((e) => e.type === "test.passed");
+    const failed = events.find((e) => e.type === "test.failed");
+    assert.ok(passed, "a test.passed event must be published for the passing case");
+    assert.ok(failed, "a test.failed event must be published for the failing case");
+    assert.equal((passed as { name: string }).name, "login flow");
+    assert.equal((failed as { name: string }).name, "checkout flow");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("PIPELINE_ENGINE=rewritten — a flaky case publishes a test.flaky RunEvent", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const runEvents = createRunEventStore();
+    const { port } = fakePort({
+      verdict: "flaky",
+      cases: [{ name: "flaky checkout", status: "flaky" }],
+    });
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-w3f4-flaky-event", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
+      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port, runEvents },
+    );
+    await queue.drain();
+    const events = runEvents.replay(id).map((e) => e.body);
+    const flaky = events.find((e) => e.type === "test.flaky");
+    assert.ok(flaky, "a test.flaky event must be published for the flaky case");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("PIPELINE_ENGINE=rewritten — outcome.gateSignals.reviewerApproved publishes a reviewer.verdict RunEvent", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const runEvents = createRunEventStore();
+    const { port } = fakePort({
+      verdict: "pass",
+      gateSignals: { static: true, coverageRatio: null, valueScore: null, reviewerCorrections: ["nit: naming"], reviewerApproved: true, flaky: false, retries: 0 },
+    });
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-w3f4-reviewer-event", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
+      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port, runEvents },
+    );
+    await queue.drain();
+    const events = runEvents.replay(id).map((e) => e.body);
+    const verdict = events.find((e) => e.type === "reviewer.verdict");
+    assert.ok(verdict, "a reviewer.verdict event must be published when the outcome carries reviewerApproved");
+    assert.equal((verdict as { approved: boolean }).approved, true);
+    assert.deepEqual((verdict as { reasons: string[] }).reasons, ["nit: naming"]);
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("PIPELINE_ENGINE=rewritten — no reviewer.verdict event when outcome.gateSignals.reviewerApproved is absent (review never ran)", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const runEvents = createRunEventStore();
+    const { port } = fakePort({ verdict: "invalid" }); // no reviewerApproved on the default outcome
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-w3f4-no-reviewer-event", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
+      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port, runEvents },
+    );
+    await queue.drain();
+    const events = runEvents.replay(id).map((e) => e.body);
+    assert.equal(events.some((e) => e.type === "reviewer.verdict"), false, "no reviewer.verdict must be fabricated when the use-case never computed one");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});

@@ -139,10 +139,19 @@ function buildRewrittenObserver(runId: string, runEvents: RunEventStore | undefi
 // RunPipelinePort, surfacing its RunOutcome as a QaRunResult so the rest of the queue callback
 // (RunEvents publish, updateRecord, logging) is UNCHANGED regardless of which engine ran.
 //
-// Mapping gap (documented, not fabricated): RunOutcome carries gateSignals (coverage/value/
-// reviewer signals) but no per-case QaCase[] and no PR/Issue "outcome" string at this port
-// boundary — those stay `[]`/`""`/undefined here rather than invented. Full per-case + outcome
-// fidelity is the shadow-comparison harness's job (Slice F.1), not this dispatch seam.
+// W3 F3 (HIGH, audit-verified cutover blocker): outcome.cases/outcome.logs ARE now forwarded —
+// RunOutcome was widened (qa-engine/src/shared-kernel/run-outcome.ts) with optional cases/logs
+// fields precisely so this boundary has real data to map, closing the gap that left every passing
+// rewritten-engine run showing passed=0/failed=0 with an empty case list (confirmed in both live
+// validation runs — see this fn's own W3 F3 history). Each case is threaded through the SAME
+// addCase/appendActivity/RunEvents flow the legacy queue callback's own onCase callback uses
+// (runner.ts's `(c) => { addCase(...); appendActivity(...); deps.runEvents?.publish(...) }`, below
+// in enqueueTrackedRun) — a single shared helper (recordCase) keeps both engines' per-case
+// bookkeeping byte-identical. PR/Issue "outcome" string mapping (run.outcome) remains a documented
+// gap — RunOutcome carries no such field at this port boundary; deliberately left undefined rather
+// than invented (updateRecord's own note:run.note fallback already surfaces the publish outcome via
+// RunQaResult.note -> RunOutcome.note, so this is not a total loss of information, only the
+// dedicated `outcome` field the legacy branch's own report() return additionally provides).
 //
 // CLAUDE.md invariant ("surface integration errors loudly — never swallow errors into an empty
 // result"): outcome.note IS forwarded — previously dropped here entirely, which is exactly why a
@@ -174,12 +183,29 @@ function assertTriggerRepoDeclared(appConfig: AppConfig, triggerRepo: string | u
   }
 }
 
+// W3 F3 + F4: records one finished case into the SAME store the legacy engine's onCase callback
+// writes to (history.addCase — passed/failed counts are RECOMPUTED from the cases table, per
+// addCase's own "single source of truth" doc) and publishes the matching RunEvent, mirroring the
+// legacy queue callback's own onCase closure exactly (kind:"todo" activity + test.passed/
+// test.failed/test.flaky). Shared by runViaRewrittenEngine (this file) so both engines' per-case
+// side effects are byte-identical, not two independently-drifting implementations.
+function recordCase(runId: string, c: QaCase, runEvents: RunEventStore | undefined): void {
+  addCase(runId, c);
+  appendActivity(runId, { kind: "todo", text: c.name, status: "completed" });
+  runEvents?.publish(runId, c.status === "pass"
+    ? { type: "test.passed", name: c.name, durationMs: c.durationMs ?? 0 }
+    : c.status === "fail"
+      ? { type: "test.failed", name: c.name, detail: c.detail, ...(c.durationMs !== undefined ? { durationMs: c.durationMs } : {}) }
+      : { type: "test.flaky", name: c.name, attempts: 2 });
+}
+
 async function runViaRewrittenEngine(
   port: RunPipelinePort,
   req: RunRequest,
   runId: string,
   signal: AbortSignal,
   appConfig: AppConfig,
+  runEvents: RunEventStore | undefined,
 ): Promise<QaRunResult> {
   assertTriggerRepoDeclared(appConfig, req.triggerRepo);
   const input: RunInput = {
@@ -193,12 +219,39 @@ async function runViaRewrittenEngine(
     ...(req.triggerRepo ? { triggerRepo: req.triggerRepo } : {}),
   };
   const outcome = await port.run(input, signal);
+  // W3 F3: thread the real per-case results into history.addCase (the single source of truth for
+  // passed/failed — see recordCase's own doc) BEFORE returning, so the queue callback's own
+  // `run.cases.filter(...)` (run.verdict event) and updateRecord read a populated case list, not
+  // the previous permanent [].
+  const cases = outcome.cases ?? [];
+  for (const c of cases) {
+    recordCase(runId, c, runEvents);
+  }
+  // W3 F4: reviewer.verdict — derivable from the already-returned RunOutcome without widening any
+  // port. Mirrors the legacy queue callback's own reviewer.verdict publish closure.
+  //
+  // coverage.computed is DELIBERATELY NOT emitted here: RunEventBody's coverage.computed carries
+  // raw changedLines/coveredLines counts, but ObjectiveSignalPort.measure()'s own contract (ports/
+  // index.ts) surfaces only a ratio, never raw line counts — there is no real count to report at
+  // this boundary, and synthesizing one (e.g. a fixed changedLines with coveredLines derived from
+  // the ratio) would be a fabricated absolute figure neither engine ever measured, violating
+  // CLAUDE.md's "never fabricate" invariant. Flagged as a gap: closing it needs
+  // ObjectiveSignalPort.measure() widened to return real counts (or the assembled ChangeCoverage
+  // read-model threaded through), which is a port-shape change out of this package's scope (per the
+  // mission's own "do NOT widen ExecutionPort/ports beyond what's available" boundary).
+  if (outcome.gateSignals.reviewerApproved !== undefined) {
+    runEvents?.publish(runId, {
+      type: "reviewer.verdict",
+      approved: outcome.gateSignals.reviewerApproved,
+      reasons: outcome.gateSignals.reviewerCorrections,
+    });
+  }
   return {
     sha: outcome.sha,
     verdict: outcome.verdict,
     passed: outcome.verdict === "pass",
-    cases: [],
-    logs: "",
+    cases,
+    logs: outcome.logs ?? "",
     ...(outcome.note !== undefined ? { note: outcome.note } : {}),
   };
 }
@@ -287,6 +340,7 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
               record.id,
               signal,
               appConfig,
+              deps.runEvents,
             )
           : await runPipeline(
               appConfig,

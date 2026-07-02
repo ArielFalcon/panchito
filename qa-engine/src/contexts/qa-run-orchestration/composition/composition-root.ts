@@ -27,7 +27,7 @@
 // adapters" — not "constructs every leaf IO integration from scratch".
 import type { Sha } from "@kernel/sha.ts";
 import type { RunMode, TestTarget } from "@kernel/run-mode.ts";
-import type { RunPipelinePort, ObserverPort } from "../application/ports/index.ts";
+import type { RunPipelinePort, ObserverPort, RunHistoryPort } from "../application/ports/index.ts";
 import { RewrittenOrchestratorAdapter, type RewrittenOrchestratorAdapterDeps } from "../infrastructure/rewritten-orchestrator.adapter.ts";
 import { LegacyPipelineAdapter, type LegacyRunner } from "../infrastructure/legacy-pipeline.adapter.ts";
 import { selectEngine } from "./pipeline-engine-flag.ts";
@@ -169,6 +169,20 @@ export interface CompositionConfig {
   // path is given (falls back to in-memory otherwise); buildShadow ALWAYS forces in-memory
   // regardless of this field (no side effect on the real history store during a shadow run).
   historyFilePath?: string;
+
+  // W3 F1 (CRITICAL, audit-verified cutover blocker): an explicit RunHistoryPort override — takes
+  // PRECEDENCE over historyFilePath when supplied. This is the seam the production factory
+  // (src/server/rewritten-engine-factory.ts, the ONLY module permitted to import both qa-engine's
+  // @contexts/@kernel aliases AND root src/) uses to wire the REAL durable store
+  // (src/server/run-history-sqlite-adapter.ts's SqliteRunHistoryAdapter, bridging into
+  // src/server/history.ts's saveRunOutcome — the SAME SQLite run_outcomes table the TUI trends
+  // view, /ask learning context, and the audit process all read). Mirrors learningRepo's own
+  // "[SWAP] optional override, absent -> a provable no-op default" precedent below. buildShadow
+  // ALWAYS forces InMemoryRunHistoryAdapter regardless of THIS field too (not just
+  // historyFilePath) — a shadow run must have zero observable side effects on the real history
+  // store, and an explicit runHistory override is exactly the kind of real-store wiring shadow
+  // mode exists to bypass.
+  runHistory?: RunHistoryPort;
 
   // ObserverPort collaborator (bug fix: rewritten-engine runs left their RunRecord/RunEvents
   // frozen — record.step never advanced and /api/runs/:id/events stayed empty, because nothing
@@ -325,7 +339,10 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
     },
   );
 
-  const runHistory = cfg.historyFilePath ? new FileRunHistoryAdapter(cfg.historyFilePath) : new InMemoryRunHistoryAdapter();
+  // W3 F1: an explicit runHistory override wins over historyFilePath (real durable SQLite store,
+  // wired by the production factory) — historyFilePath's FileRunHistoryAdapter/InMemoryRunHistoryAdapter
+  // stay the fallback for callers (tests, the F.2 operator template) that never supply one.
+  const runHistory = cfg.runHistory ?? (cfg.historyFilePath ? new FileRunHistoryAdapter(cfg.historyFilePath) : new InMemoryRunHistoryAdapter());
 
   return {
     changeAnalysis,
@@ -387,6 +404,8 @@ export function buildProduction(
 // REGARDLESS of cfg.historyFilePath) so a shadow run has zero observable side effects on the
 // watched repo or the production history store.
 export function buildShadow(cfg: CompositionConfig): RunPipelinePort {
-  const shadowCfg: CompositionConfig = { ...cfg, shadow: true, historyFilePath: undefined };
+  // W3 F1: strip BOTH historyFilePath and an explicit runHistory override — a shadow run must never
+  // reach the real durable store either way.
+  const shadowCfg: CompositionConfig = { ...cfg, shadow: true, historyFilePath: undefined, runHistory: undefined };
   return new RewrittenOrchestratorAdapter(wireBridges(shadowCfg));
 }

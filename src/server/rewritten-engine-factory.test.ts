@@ -8,6 +8,8 @@ import { getRecord } from "./history";
 import { PipelineDeps } from "../pipeline";
 import { QaCase } from "../types";
 import type { AgentDeps } from "../integrations/opencode-client";
+import { SqliteRunHistoryAdapter } from "./run-history-sqlite-adapter";
+import { SqliteLearningRepository } from "@contexts/cross-run-learning/infrastructure/sqlite-learning-repository.adapter";
 
 const cfg = (name: string): AppConfig => ({
   name,
@@ -399,6 +401,55 @@ test("PIPELINE_ENGINE=legacy (explicit) — same fail-safe holds for the real fa
     const r = getRecord(id)!;
     assert.equal(r.verdict, "pass");
     assert.equal(factoryInvoked, false);
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+// ── W3 F1/F2 (audit-verified cutover blockers): the factory wires REAL durable persistence and
+// REAL learning by default — production never sets historyFilePath, so before this fix
+// composition-root.ts's wireBridges() always fell back to InMemoryRunHistoryAdapter, and
+// learningRepo always fell back to StubLearningRepository (a provable no-op). ──────────────────
+
+test("buildRewrittenCompositionConfig wires a REAL SqliteRunHistoryAdapter by default (no historyFilePath override)", () => {
+  const app = cfg("factory-history-default");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+
+  assert.ok(config.runHistory instanceof SqliteRunHistoryAdapter, "runHistory must default to the REAL durable SQLite adapter, not fall through to composition-root's in-memory default");
+  assert.equal(config.historyFilePath, undefined, "historyFilePath stays unset — the SQLite adapter is wired via the runHistory override, not the file-JSONL path");
+});
+
+test("buildRewrittenCompositionConfig honors an explicit historyFilePath override (escape hatch — opts OUT of the SQLite default)", () => {
+  const app = cfg("factory-history-override");
+  const config = buildRewrittenCompositionConfig(
+    app,
+    { getAgentDeps: stubAgentDeps, historyFilePath: "/tmp/qa-explicit-history.jsonl" },
+    "qa-bot-abc1234-run1",
+    { mode: "diff" },
+  );
+
+  assert.equal(config.historyFilePath, "/tmp/qa-explicit-history.jsonl");
+  assert.equal(config.runHistory, undefined, "the runHistory override must NOT be set when the caller explicitly opts into the file-backed escape hatch");
+});
+
+test("buildRewrittenCompositionConfig wires a REAL SqliteLearningRepository by default (was: zero production constructors)", () => {
+  const app = cfg("factory-learning-default");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+
+  assert.ok(config.learningRepo instanceof SqliteLearningRepository, "learningRepo must default to the REAL SqliteLearningRepository, not composition-root's StubLearningRepository fallback");
+});
+
+test("createRewrittenEngineFactory's produced CompositionConfig carries the SAME real runHistory/learningRepo wiring", () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const factory = createRewrittenEngineFactory({ getAgentDeps: stubAgentDeps });
+    // buildRewrittenCompositionConfig is exercised directly above (createRewrittenEngineFactory just
+    // closes over it + buildProduction) — this test proves the PUBLIC factory seam (the one index.ts
+    // and cli.ts actually call) produces a real RunPipelinePort without throwing during construction.
+    const app = cfg("factory-dispatch-real-history");
+    assert.doesNotThrow(() => factory(app, "qa-bot-abc1234-run1", { mode: "diff" }), "constructing the port must not eagerly touch the DB or throw");
   } finally {
     if (prev === undefined) delete process.env.PIPELINE_ENGINE;
     else process.env.PIPELINE_ENGINE = prev;

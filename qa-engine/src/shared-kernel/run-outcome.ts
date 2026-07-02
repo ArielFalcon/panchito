@@ -10,6 +10,7 @@
 
 import type { RunMode, TestTarget } from "./run-mode.ts";
 import type { RunVerdict } from "./run-verdict.ts";
+import type { QaCase } from "./qa-case.ts";
 
 // Wide kernel alias: string is a supertype of the legacy ErrorClass string-literal union,
 // so legacy values always satisfy this type without importing from downstream contexts.
@@ -58,4 +59,23 @@ export interface RunOutcome {
   // on the rewritten path.
   note?: string;
   at: string;
+  // W3 F3 (HIGH, audit-verified cutover blocker): the run's per-case results — RunHistoryPort has no
+  // read-back path (see rewritten-orchestrator.adapter.ts's own header), so a driving-side caller
+  // with ONLY a RunOutcome (src/server/runner.ts's runViaRewrittenEngine) had no cases to thread
+  // into history.addCase(), leaving every rewritten-engine run's passed/failed counts at 0/0 and its
+  // case list empty regardless of the real Playwright/code-runner result. Optional — comparator-blind
+  // by construction (equivalence.ts's behavioralProjection() reads only the fields it explicitly
+  // names; cases is not one of them, so adding it cannot change golden-parity comparisons). Absent
+  // only for outcomes that never reached execution (e.g. a skip/invalid/infra-error terminal that
+  // never ran an ExecutionPort.execute() call) — never a fabricated empty array standing in for
+  // "unknown", which is why this is `cases?` and not `cases: QaCase[] = []`.
+  cases?: QaCase[];
+  // W3 F3: a minimal log string for the run — RunOutcome carries no execution-log field at all
+  // before this fix, so runViaRewrittenEngine's own `logs: ""` was not a bug in that function, it
+  // was the ONLY value available at that boundary. Optional, same comparator-blind reasoning as
+  // cases above. This is NOT a full log-streaming port (CLAUDE.md scope note: a dedicated
+  // emitLog-shaped streaming port is a larger, separate concern — flagged, not built here); it is
+  // the same one-shot "whatever ExecutionPort.execute() already returned" string legacy's own
+  // QaRunResult.logs carries for a completed run.
+  logs?: string;
 }
