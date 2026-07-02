@@ -137,6 +137,56 @@ test("retrieve() never calls incrementUsage when nothing was retrieved (no phant
   assert.equal(incrementCalled, false);
 });
 
+// ── FIX 3 (judgment-day hardening): incrementUsage is isolated in its own try/catch — a telemetry
+// write failure must NEVER discard the already-successful topRules() retrieval. Mirrors fold()'s
+// own documented off-path contract on this SAME port. Legacy (src/qa/learning/retrieval.ts) has NO
+// equivalent isolation — this is a deliberate hardening over legacy, justified by fold()'s own
+// precedent, not a preserved legacy behavior. ───────────────────────────────────────────────────
+
+test("retrieve() still returns the retrieved rules when incrementUsage REJECTS, and logs a warning (isolated, off-path)", async () => {
+  const rule: LearningRule = {
+    id: "r5", trigger: "missing alt text", action: "add alt attribute", errorClass: "E-EXEC-FAIL",
+    archetype: null, status: "active", confidence: "high", usageCount: 2, outcomeCount: 2,
+    successRate: 1, lastVerified: null, source: "run-5", at: new Date().toISOString(),
+  };
+  const repo: LearningRepositoryPort = {
+    save: async () => {},
+    topRules: async () => [rule],
+    applyOutcome: async () => {},
+    incrementUsage: async () => { throw new Error("telemetry store unreachable"); },
+  };
+  let warned: unknown;
+  const adapter = new LearningPortAdapter(repo, "app", 20, undefined, (err) => { warned = err; });
+
+  const result = await adapter.retrieve(Sha.of("abc1234"));
+
+  assert.deepEqual(result, [{
+    trigger: "missing alt text",
+    action: "add alt attribute",
+    errorClass: "E-EXEC-FAIL",
+    status: "active",
+    confidence: "high",
+  }], "the already-successful topRules() retrieval must survive an incrementUsage failure");
+  assert.ok(warned instanceof Error && warned.message === "telemetry store unreachable", "the incrementUsage failure must be logged, not silently dropped");
+});
+
+test("retrieve() with a rejecting incrementUsage does NOT reject the caller's own promise", async () => {
+  const rule: LearningRule = {
+    id: "r6", trigger: "t", action: "a", errorClass: "E-X", archetype: null, status: "candidate",
+    confidence: "low", usageCount: 0, outcomeCount: 0, successRate: null, lastVerified: null,
+    source: "run-6", at: new Date().toISOString(),
+  };
+  const repo: LearningRepositoryPort = {
+    save: async () => {},
+    topRules: async () => [rule],
+    applyOutcome: async () => {},
+    incrementUsage: async () => { throw new Error("boom"); },
+  };
+  const adapter = new LearningPortAdapter(repo, "app", 20, undefined, () => {});
+
+  await assert.doesNotReject(() => adapter.retrieve(Sha.of("abc1234")));
+});
+
 test("retrieve() tolerates a store without incrementUsage wired (optional method, off-path)", async () => {
   const rule: LearningRule = {
     id: "r4", trigger: "t", action: "a", errorClass: "E-X", archetype: null, status: "active",

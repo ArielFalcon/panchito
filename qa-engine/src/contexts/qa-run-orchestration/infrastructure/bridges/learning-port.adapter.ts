@@ -31,6 +31,9 @@ export class LearningPortAdapter implements LearningPort {
     private readonly limit = DEFAULT_RETRIEVE_LIMIT,
     // Injectable so a test can assert the swallow without polluting stderr; defaults to console.error.
     private readonly onFoldError: (err: unknown) => void = (err) => console.error("[LearningPortAdapter] fold failed (off-path, swallowed):", err),
+    // judgment-day hardening (FIX 3): injectable so a test can assert the swallow without polluting
+    // stderr; defaults to console.warn. See retrieve()'s own doc for why this is isolated.
+    private readonly onIncrementUsageError: (err: unknown) => void = (err) => console.warn("[LearningPortAdapter] incrementUsage failed (off-path, swallowed):", err),
   ) {}
 
   async fold(outcome: RunOutcome): Promise<void> {
@@ -49,8 +52,20 @@ export class LearningPortAdapter implements LearningPort {
     // yet, so the retrieved set IS the "what the generator will see" set). Off-path: never
     // gates the run — a store without incrementUsage wired is a silent no-op (see the port's
     // own optional-method doc).
+    //
+    // judgment-day hardening (FIX 3): isolated in its own try/catch so a telemetry-write failure
+    // can NEVER discard the already-successful topRules() retrieval — the caller must still get its
+    // rules even if usage tracking fails. Mirrors fold()'s own documented off-path contract on this
+    // SAME port (LearningRepositoryPort): a learning-store fault must never propagate and gate the
+    // run. Legacy (src/qa/learning/retrieval.ts's incrementRuleUsage call) has NO such isolation —
+    // this is a deliberate hardening over legacy, not a behavior this port is merely preserving,
+    // justified by fold()'s own precedent on the identical port.
     if (rules.length > 0) {
-      await this.repo.incrementUsage?.(rules.map((r) => r.id));
+      try {
+        await this.repo.incrementUsage?.(rules.map((r) => r.id));
+      } catch (err) {
+        this.onIncrementUsageError(err);
+      }
     }
     return rules.map((r) => ({
       trigger: r.trigger,

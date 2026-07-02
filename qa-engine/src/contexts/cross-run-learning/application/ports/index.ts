@@ -7,6 +7,13 @@
 
 import type { Sha } from "@kernel/sha.ts";
 import type { RunOutcome } from "@kernel/run-outcome.ts";
+// [judgment-day FIX 4] RelevanceBias's canonical declaration lives in the domain
+// (rule-governance.service.ts) — domain owns it; this layer imports + re-exports, mirroring the
+// RetrievedRule precedent one layer up (qa-run-orchestration's own application/ports re-exports its
+// domain-owned shapes rather than redeclaring them). Previously declared identically in BOTH files
+// with no import relationship — a silent duplicate that could drift undetected.
+import type { RelevanceBias } from "@contexts/cross-run-learning/domain/rule-governance.service.ts";
+export type { RelevanceBias };
 
 export type ErrorClass = string; // the real owner; the kernel RunOutcome.errorClass widens to this.
 export type RuleStatus = "candidate" | "active" | "deprecated" | "superseded";
@@ -39,11 +46,7 @@ export interface LearningRule {
 // (errorClass/archetype matching) — see RuleGovernanceService's own RelevanceBias header for the
 // full rationale and the documented "not yet threaded from a real caller" gap. Optional field on
 // topRules' own opts bag, not a positional param, so every existing call site (which omits it)
-// keeps compiling unchanged.
-export interface RelevanceBias {
-  errorClass?: string | null;
-  archetypes?: readonly string[];
-}
+// keeps compiling unchanged. (RelevanceBias itself is imported + re-exported above — domain owns it.)
 export interface LearningRepositoryPort {
   save(rule: LearningRule): Promise<void>;
   topRules(app: string, sha: Sha, limit: number, relevance?: RelevanceBias): Promise<LearningRule[]>;

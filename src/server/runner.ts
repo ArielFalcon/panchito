@@ -115,15 +115,28 @@ export interface RunnerDeps {
 // storage hiccup) must never propagate up through ObserverPort.onStep/onEvent and abort an
 // otherwise-healthy run. Mirrors the codebase's own advisory-callback pattern (src/index.ts:
 // "a bad event must never break..."): catch, log once, never rethrow.
-// liveAnnounced (single-ownership dedup, #35 live-events reconciliation): the use-case now streams
+// Terminal status of a case's LIVE announcement, as observed through onEvent — one of the three
+// RunEventBody "test.*" terminal types, stripped of the "test." prefix.
+type LiveAnnouncedStatus = "passed" | "failed" | "flaky";
+
+// liveAnnounced (dedup + convergence, judgment-day CRITICAL fix): the use-case streams
 // test.started/passed/failed/flaky LIVE through onEvent (ExecutionOpts.onCase), while
 // runViaRewrittenEngine's post-hoc loop still walks outcome.cases for the record-store writes
-// (addCase carries the FULL QaCase evidence the live event body cannot). Without dedup every
-// terminal case event would publish twice — once live, once post-hoc. The shared Set records which
-// case names were already ANNOUNCED live; the post-hoc loop then writes the record for every case
-// but re-publishes only the never-announced ones (the safety net for strategies without live
-// callbacks, e.g. code-mode).
-function buildRewrittenObserver(runId: string, runEvents: RunEventStore | undefined, liveAnnounced?: Set<string>): ObserverPort {
+// (addCase carries the FULL QaCase evidence the live event body cannot). A naive Set-based dedup
+// (recording only THAT a name was announced) suppressed the terminal event unconditionally once any
+// live event fired for that name — but Playwright fires onTestEnd PER ATTEMPT
+// (config/e2e/playwright.config.ts retries:2), so a flaky test live-announces test.failed then
+// test.passed within ONE execute(); the final report classifies it correctly as "flaky"
+// (src/qa/playwright-report.ts), yet the Set dedup silently suppressed the correcting test.flaky
+// terminal event — the stream diverged from the record store's own truth.
+//
+// Map<string, LiveAnnouncedStatus> tracks the LAST announced terminal status per case name instead.
+// recordCase's own record-store write (addCase/appendActivity) ALWAYS runs regardless. The terminal
+// event publish is skipped only when the name was announced live AND its final status matches what
+// was last announced; otherwise (never announced, e.g. code-mode — or DIVERGENT, e.g. the flaky
+// case above) recordCase publishes the correcting terminal event. Net effect: exactly one publish
+// in the common case, and the stream always converges to the store's own final truth.
+function buildRewrittenObserver(runId: string, runEvents: RunEventStore | undefined, liveAnnounced?: Map<string, LiveAnnouncedStatus>): ObserverPort {
   return {
     onStep(step: RunStep, detail?: string): void {
       try {
@@ -140,7 +153,8 @@ function buildRewrittenObserver(runId: string, runEvents: RunEventStore | undefi
           (body.type === "test.passed" || body.type === "test.failed" || body.type === "test.flaky") &&
           typeof (body as { name?: unknown }).name === "string"
         ) {
-          liveAnnounced.add((body as { name: string }).name);
+          const status = body.type.slice("test.".length) as LiveAnnouncedStatus;
+          liveAnnounced.set((body as { name: string }).name, status);
         }
         runEvents?.publish(runId, body);
       } catch (err) {
@@ -148,6 +162,13 @@ function buildRewrittenObserver(runId: string, runEvents: RunEventStore | undefi
       }
     },
   };
+}
+
+// Maps a final QaCase.status ("pass"|"fail"|"flaky") into the LiveAnnouncedStatus vocabulary
+// ("passed"|"failed"|"flaky") so recordCase can compare the store's own truth against what was last
+// announced live.
+function finalStatusAsAnnounced(status: QaCase["status"]): LiveAnnouncedStatus {
+  return status === "pass" ? "passed" : status === "fail" ? "failed" : "flaky";
 }
 
 // Maps a RunRequest + record id into the strangler seam's RunInput and drives the injected
@@ -204,13 +225,18 @@ function assertTriggerRepoDeclared(appConfig: AppConfig, triggerRepo: string | u
 // legacy queue callback's own onCase closure exactly (kind:"todo" activity + test.passed/
 // test.failed/test.flaky). Shared by runViaRewrittenEngine (this file) so both engines' per-case
 // side effects are byte-identical, not two independently-drifting implementations.
-function recordCase(runId: string, c: QaCase, runEvents: RunEventStore | undefined, liveAnnounced?: Set<string>): void {
+//
+// Dedup + convergence (judgment-day CRITICAL fix, see buildRewrittenObserver's own liveAnnounced
+// doc): the record-store write above ALWAYS runs. The terminal event publish is skipped ONLY when
+// the case was announced live AND its last-announced status matches the final QaCase.status —
+// otherwise (never announced, e.g. code-mode; or DIVERGENT, e.g. a flaky test whose live attempts
+// announced failed then passed but the final report says flaky) this publishes the correcting
+// terminal event, so the stream always converges to the store's own final truth.
+function recordCase(runId: string, c: QaCase, runEvents: RunEventStore | undefined, liveAnnounced?: Map<string, LiveAnnouncedStatus>): void {
   addCase(runId, c);
   appendActivity(runId, { kind: "todo", text: c.name, status: "completed" });
-  // Dedup (see buildRewrittenObserver's liveAnnounced note): a case already announced LIVE through
-  // the observer must not publish its terminal event twice — the record-store writes above still
-  // always run (the live event body cannot carry the full QaCase evidence addCase persists).
-  if (liveAnnounced?.has(c.name)) return;
+  const lastAnnounced = liveAnnounced?.get(c.name);
+  if (lastAnnounced !== undefined && lastAnnounced === finalStatusAsAnnounced(c.status)) return;
   runEvents?.publish(runId, c.status === "pass"
     ? { type: "test.passed", name: c.name, durationMs: c.durationMs ?? 0 }
     : c.status === "fail"
@@ -225,7 +251,7 @@ async function runViaRewrittenEngine(
   signal: AbortSignal,
   appConfig: AppConfig,
   runEvents: RunEventStore | undefined,
-  liveAnnounced?: Set<string>,
+  liveAnnounced?: Map<string, LiveAnnouncedStatus>,
 ): Promise<QaRunResult> {
   assertTriggerRepoDeclared(appConfig, req.triggerRepo);
   const input: RunInput = {
@@ -350,8 +376,9 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
       // instead of staying frozen until the final verdict.
       // liveAnnounced: shared between the observer (live test.* announcements from the use-case's
       // ExecutionOpts.onCase streaming) and runViaRewrittenEngine's post-hoc recordCase loop, so a
-      // case's terminal event publishes exactly once (see buildRewrittenObserver's own dedup note).
-      const liveAnnounced = new Set<string>();
+      // case's terminal event publishes exactly once in the common case — and the correcting event
+      // still publishes on divergence (see buildRewrittenObserver's own dedup + convergence note).
+      const liveAnnounced = new Map<string, LiveAnnouncedStatus>();
       const observer = buildRewrittenObserver(record.id, deps.runEvents, liveAnnounced);
       const run: QaRunResult =
         engine === "rewritten" && deps.engineFactory

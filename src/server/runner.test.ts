@@ -1254,6 +1254,192 @@ test("PIPELINE_ENGINE=rewritten — outcome.gateSignals.reviewerApproved publish
   }
 });
 
+// ── liveAnnounced dedup + convergence (judgment-day CRITICAL fix) ──────────────────────────────
+// Playwright fires onTestEnd PER ATTEMPT (config/e2e/playwright.config.ts retries:2): a flaky test
+// live-announces test.failed then test.passed within ONE execute(), but the final report correctly
+// classifies it "flaky" (src/qa/playwright-report.ts). A naive Set<string> dedup ("was this name
+// announced live at all?") permanently suppressed the terminal event once ANY live event fired for
+// that name — silently dropping the correcting test.flaky the record store itself carries. These
+// tests drive the SAME seam the engineFactory-based tests above use: the port receives the live
+// ObserverPort as its 4th engineFactory argument (so it can fire onEvent mid-run, standing in for
+// RunQaUseCase's own ExecutionOpts.onCase streaming) and returns outcome.cases for the post-hoc
+// recordCase loop — exactly how runViaRewrittenEngine wires the two paths together.
+
+test("liveAnnounced dedup — a case announced live with a MATCHING final status publishes its terminal event exactly once (no re-publish)", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const runEvents = createRunEventStore();
+    let observer: { onEvent(body: { type: string; name?: string; durationMs?: number; attempts?: number }): void } | undefined;
+    const port: RunPipelinePort = {
+      run: async (input, _signal) => {
+        // Live-announce a clean pass for "login flow" BEFORE the run resolves — mirrors
+        // ExecutionOpts.onCase streaming test.passed through the use-case's own onEvent.
+        observer?.onEvent({ type: "test.passed", name: "login flow", durationMs: 500 });
+        return {
+          runId: input.runId, app: input.app, sha: input.sha.value, mode: input.mode, target: input.target,
+          verdict: "pass", errorClass: null,
+          gateSignals: { static: true, coverageRatio: null, valueScore: null, reviewerCorrections: [], flaky: false, retries: 0 },
+          rulesRetrieved: [], at: new Date().toISOString(),
+          cases: [{ name: "login flow", status: "pass", durationMs: 500 }],
+        };
+      },
+    };
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-dedup-match", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
+      {
+        pipeline: stubDeps(),
+        loadApp: cfg,
+        runEvents,
+        engineFactory: (_appConfig, _namespace, _run, obs) => {
+          observer = obs as { onEvent(body: { type: string; name?: string; durationMs?: number; attempts?: number }): void };
+          return port;
+        },
+      },
+    );
+    await queue.drain();
+    const r = getRecord(id)!;
+    assert.equal(r.status, "done");
+    // The record store's own write (addCase) still happened — the case is present in the record.
+    assert.equal(r.cases.length, 1);
+    assert.equal(r.cases[0]?.status, "pass");
+    const passedEvents = runEvents.replay(id).map((e) => e.body).filter((b) => b.type === "test.passed");
+    assert.equal(passedEvents.length, 1, "a matching final status must publish its terminal event exactly once (live announcement, no post-hoc re-publish)");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("liveAnnounced dedup — the flaky divergence: live announces failed then passed, final status flaky → publishes the correcting test.flaky exactly once", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const runEvents = createRunEventStore();
+    let observer: { onEvent(body: { type: string; name?: string; durationMs?: number; attempts?: number }): void } | undefined;
+    const port: RunPipelinePort = {
+      run: async (input, _signal) => {
+        // Playwright retries:2 — attempt 1 fails live, attempt 2 (retry) passes live. The final
+        // report classifies the case as "flaky" (src/qa/playwright-report.ts), which diverges from
+        // the LAST live-announced status ("passed").
+        observer?.onEvent({ type: "test.failed", name: "checkout flow" });
+        observer?.onEvent({ type: "test.passed", name: "checkout flow", durationMs: 300 });
+        return {
+          runId: input.runId, app: input.app, sha: input.sha.value, mode: input.mode, target: input.target,
+          verdict: "flaky", errorClass: null,
+          gateSignals: { static: true, coverageRatio: null, valueScore: null, reviewerCorrections: [], flaky: true, retries: 1 },
+          rulesRetrieved: [], at: new Date().toISOString(),
+          cases: [{ name: "checkout flow", status: "flaky" }],
+        };
+      },
+    };
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-dedup-flaky", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
+      {
+        pipeline: stubDeps(),
+        loadApp: cfg,
+        runEvents,
+        engineFactory: (_appConfig, _namespace, _run, obs) => {
+          observer = obs as { onEvent(body: { type: string; name?: string; durationMs?: number; attempts?: number }): void };
+          return port;
+        },
+      },
+    );
+    await queue.drain();
+    const r = getRecord(id)!;
+    assert.equal(r.status, "done");
+    assert.equal(r.verdict, "flaky");
+    assert.equal(r.cases.length, 1);
+    assert.equal(r.cases[0]?.status, "flaky", "the record store's own truth is flaky");
+    const bodies = runEvents.replay(id).map((e) => e.body);
+    const flakyEvents = bodies.filter((b) => b.type === "test.flaky");
+    assert.equal(flakyEvents.length, 1, "the divergence (live: passed, final: flaky) must publish exactly one correcting test.flaky event");
+    // The live-announced test.failed/test.passed from onEvent are still present (they are real
+    // per-attempt announcements) — the correction is additive, not a rewrite of history.
+    assert.ok(bodies.some((b) => b.type === "test.failed" && (b as { name: string }).name === "checkout flow"));
+    assert.ok(bodies.some((b) => b.type === "test.passed" && (b as { name: string }).name === "checkout flow"));
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("liveAnnounced dedup — a case NEVER announced live (e.g. code-mode) always publishes post-hoc", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const runEvents = createRunEventStore();
+    // No onEvent calls at all — standing in for a strategy without live callbacks (code-mode).
+    const { port } = fakePort({
+      verdict: "pass",
+      cases: [{ name: "unit: parses config", status: "pass" }],
+    });
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-dedup-never-announced", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
+      { pipeline: stubDeps(), loadApp: cfg, runEvents, engineFactory: () => port },
+    );
+    await queue.drain();
+    const bodies = runEvents.replay(id).map((e) => e.body);
+    const passedEvents = bodies.filter((b) => b.type === "test.passed" && (b as { name: string }).name === "unit: parses config");
+    assert.equal(passedEvents.length, 1, "a never-announced case must publish its terminal event post-hoc (the safety net for code-mode)");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("liveAnnounced dedup — addCase (the record-store write) always runs regardless of live announcement or dedup outcome", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const runEvents = createRunEventStore();
+    let observer: { onEvent(body: { type: string; name?: string; durationMs?: number; attempts?: number }): void } | undefined;
+    const port: RunPipelinePort = {
+      run: async (input, _signal) => {
+        observer?.onEvent({ type: "test.passed", name: "case A", durationMs: 100 }); // live-announced, matching final
+        // "case B" is never live-announced at all.
+        return {
+          runId: input.runId, app: input.app, sha: input.sha.value, mode: input.mode, target: input.target,
+          verdict: "pass", errorClass: null,
+          gateSignals: { static: true, coverageRatio: null, valueScore: null, reviewerCorrections: [], flaky: false, retries: 0 },
+          rulesRetrieved: [], at: new Date().toISOString(),
+          cases: [
+            { name: "case A", status: "pass" },
+            { name: "case B", status: "pass" },
+          ],
+        };
+      },
+    };
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-dedup-addcase-always", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
+      {
+        pipeline: stubDeps(),
+        loadApp: cfg,
+        runEvents,
+        engineFactory: (_appConfig, _namespace, _run, obs) => {
+          observer = obs as { onEvent(body: { type: string; name?: string; durationMs?: number; attempts?: number }): void };
+          return port;
+        },
+      },
+    );
+    await queue.drain();
+    const r = getRecord(id)!;
+    assert.equal(r.cases.length, 2, "addCase must write BOTH cases to the record store regardless of live-announcement/dedup status");
+    assert.equal(r.passed, 2);
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
 test("PIPELINE_ENGINE=rewritten — no reviewer.verdict event when outcome.gateSignals.reviewerApproved is absent (review never ran)", async () => {
   const prev = process.env.PIPELINE_ENGINE;
   process.env.PIPELINE_ENGINE = "rewritten";
