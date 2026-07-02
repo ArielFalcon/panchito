@@ -184,3 +184,32 @@ test("review() with no enrichment argument omits priorCorrections/objective (unc
   assert.equal(seenInput?.priorCorrections, undefined);
   assert.equal(seenInput?.objective, undefined);
 });
+
+// ── W3 F2 (dual-judge round): enrichment.learnedRules is rendered via the reviewer-specific
+// faithful port (renderLearnedRulesForReviewer) — active-only, matching legacy's
+// renderRulesForReviewer (src/qa/learning/learning-rule.ts:299-313), NOT the generator's
+// proven/experimental renderer. ─────────────────────────────────────────────────────────────────
+
+test("review() renders enrichment.learnedRules via the reviewer-specific (active-only) faithful renderer", async () => {
+  let seenInput: { learnedRules?: string } | undefined;
+  const rendering: PromptRenderingPort = {
+    ...fakeRendering(),
+    renderReviewer: (input) => { seenInput = input as { learnedRules?: string }; return { text: "reviewer-prompt", sectionSizes: {} }; },
+  };
+  const verdicts = fakeVerdicts({ approved: true, corrections: [], parsed: true, valid: true, issues: [] });
+  const adapter = new ReviewPortAdapter({ runtime: fakeRuntime("verdict-json"), rendering, verdicts }, {
+    diff: "", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e", appName: "app", mode: "diff",
+  });
+
+  await adapter.review("/mirrors/org/app/e2e", cases, undefined, {
+    learnedRules: [
+      { trigger: "selector absent", action: "use role+name", errorClass: "E-EXEC-FAIL", status: "active", confidence: "high" },
+      { trigger: "flaky wait", action: "use expect.poll", errorClass: "E-FLAKY", status: "candidate", confidence: "low" },
+    ],
+  });
+
+  assert.ok(seenInput?.learnedRules?.includes("- selector absent → use role+name (E-EXEC-FAIL)"));
+  assert.ok(!seenInput?.learnedRules?.includes("flaky wait"), "candidate rules must never reach the reviewer's reject-on-sight list");
+  assert.ok(seenInput?.learnedRules?.includes("Each was learned from a real failure and proven by the value oracle or sustained prevention."));
+  assert.ok(seenInput?.learnedRules?.includes("Treat them as an extension of the anti-pattern catalog: if a spec violates one, REJECT."));
+});

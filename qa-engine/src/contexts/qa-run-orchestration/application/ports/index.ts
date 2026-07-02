@@ -111,16 +111,17 @@ export interface GenerationEnrichment {
   // own comment for the adapter-side half of this fix); until wired, OpencodeRunInput.sha stays ""
   // and changeRef.sha fails the schema, exactly the live-run evidence this fix responds to.
   sha?: string;
-  // W3 F2 (cross-run learning retrieval): the rule trigger strings LearningPort.retrieve(sha)
-  // returned (the port's OWN established contract — learning-port.adapter.test.ts's "returns rule
-  // triggers" pin) — mirrors legacy's own retrieval injection (src/pipeline.ts's `learnedRules`
-  // local, baseGenInput({ learnedRules, ... }) at pipeline.ts:1899). The adapter boundary
-  // (GenerationPortAdapter) renders this array into the SAME OpencodeRunInput.learnedRules string
-  // field buildPromptAssembled already renders a section for — format decisions belong at that
-  // boundary, matching every other enrichment field's own 1:1-at-the-adapter mapping. Absent/empty
-  // -> unchanged prompt (retrieval found nothing, or the app's LearningRepositoryPort is the
-  // StubLearningRepository no-op default).
-  learnedRules?: readonly string[];
+  // W3 F2 (cross-run learning retrieval): the structured rules LearningPort.retrieve(sha) returned
+  // (the port's OWN established contract — RetrievedRule, widened per W3 F1 above) — mirrors
+  // legacy's own retrieval injection (src/pipeline.ts's `learnedRules` local, baseGenInput({
+  // learnedRules, ... }) at pipeline.ts:1899). The adapter boundary (GenerationPortAdapter) renders
+  // this array into the SAME OpencodeRunInput.learnedRules string field buildPromptAssembled
+  // already renders a section for, using the SAME proven/experimental split legacy's own
+  // renderRulesForPrompt applies (src/qa/learning/learning-rule.ts:237-278) — format decisions
+  // belong at that boundary, matching every other enrichment field's own 1:1-at-the-adapter
+  // mapping. Absent/empty -> unchanged prompt (retrieval found nothing, or the app's
+  // LearningRepositoryPort is the StubLearningRepository no-op default).
+  learnedRules?: readonly RetrievedRule[];
 }
 export interface GenerationPort {
   // signal: Plan 7.1 (engram #913) — an optional, separate transport arg (mirrors RunPipelinePort's
@@ -158,12 +159,14 @@ export interface ReviewEnrichment {
   // no manual guidance exists, the reviewer's objective is derived from the commit intent's message.
   intent?: CommitIntent;
   // W3 F2 (cross-run learning retrieval): mirrors legacy's `learnedRules: renderRulesForReviewer(
-  // retrievedRules)` (src/pipeline.ts:1679) — the SAME retrieved rule triggers the generator's
-  // prompt received (LearningPort.retrieve(sha)'s own established string[] contract), rendered at
-  // the adapter boundary for the reviewer's "app-specific reject-on-sight rules" section so the
-  // independent reviewer judges against the SAME earned rules the generator was grounded on.
-  // Absent/empty -> unchanged prompt (today's behavior).
-  learnedRules?: readonly string[];
+  // retrievedRules)` (src/pipeline.ts:1679) — the SAME retrieved structured rules the generator's
+  // prompt received (LearningPort.retrieve(sha)'s own established RetrievedRule[] contract),
+  // rendered at the adapter boundary — using ONLY active rules, exactly legacy's
+  // renderRulesForReviewer (src/qa/learning/learning-rule.ts:299-313; candidates are for the
+  // generator to explore, never for the judge to gate on) — for the reviewer's "app-specific
+  // reject-on-sight rules" section so the independent reviewer judges against the SAME earned
+  // rules the generator was grounded on. Absent/empty -> unchanged prompt (today's behavior).
+  learnedRules?: readonly RetrievedRule[];
 }
 export interface ReviewPort {
   // diff: the run's REAL per-run commit diff (Plan 7.6 dynamic-diff), so the reviewer grounds on the
@@ -280,10 +283,28 @@ export interface PublicationPort {
     issueRepo?: string;
   }): Promise<{ outcome: string }>;
 }
+// W3 fix (F1, dual-judge round): LearningPort.retrieve() previously returned bare trigger strings
+// (readonly string[]), which starved BOTH prompt renderers of the fields legacy's own LearningRule
+// shape carries and legacy's renderRulesForPrompt/renderRulesForReviewer actually render (src/qa/
+// learning/learning-rule.ts:15-32,237-313) — action, errorClass, status (proven vs experimental),
+// and confidence. The minimal FAITHFUL widening: the fields BOTH legacy renderers consume, and
+// nothing else (no successRate/usageCount/archetype/etc. — those stay internal to
+// cross-run-learning's own LearningRule; this is a PORT-BOUNDARY projection, not a re-export of the
+// full internal shape). `status` is narrowed to the two render-relevant buckets ("active" |
+// "candidate") because deprecated/superseded rules are never retrieved (RuleGovernanceService.
+// topRules's own RETRIEVABLE gate) — a widened union here would let callers handle branches that
+// can structurally never occur.
+export interface RetrievedRule {
+  trigger: string;
+  action: string;
+  errorClass: string;
+  status: "active" | "candidate";
+  confidence: "low" | "medium" | "high";
+}
 export interface LearningPort {
   // Off-path by contract — a failure is logged and swallowed, never gates publish.
   fold(outcome: RunOutcome): Promise<void>;
-  retrieve(sha: Sha): Promise<string[]>;
+  retrieve(sha: Sha): Promise<RetrievedRule[]>;
 }
 // DeployGatePort is a cross-cutting infra port; it is kernel-resident (Task 8) so neither context
 // needs to import it from the other. Re-export it here so callers of this barrel get a single import.

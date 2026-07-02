@@ -35,10 +35,29 @@ export interface LearningRule {
 // SQLite store passes it to the injected selectRules, whose filtering lands in Plan 6). Carrying it on
 // the signature now makes the Plan-6 wiring closure physically unable to compile without supplying the
 // app — converting a silent cross-app-contamination landmine into a compiler error.
+// W3 fix (F3c, dual-judge round): the portable half of legacy's selectForRetrieval relevance bias
+// (errorClass/archetype matching) — see RuleGovernanceService's own RelevanceBias header for the
+// full rationale and the documented "not yet threaded from a real caller" gap. Optional field on
+// topRules' own opts bag, not a positional param, so every existing call site (which omits it)
+// keeps compiling unchanged.
+export interface RelevanceBias {
+  errorClass?: string | null;
+  archetypes?: readonly string[];
+}
 export interface LearningRepositoryPort {
   save(rule: LearningRule): Promise<void>;
-  topRules(app: string, sha: Sha, limit: number): Promise<LearningRule[]>;
+  topRules(app: string, sha: Sha, limit: number, relevance?: RelevanceBias): Promise<LearningRule[]>;
   applyOutcome(outcome: RunOutcome): Promise<void>;
+  // W3 fix (F3a, dual-judge round): legacy increments usage_count per RETRIEVED rule
+  // (src/qa/learning/retrieval.ts's `incrementRuleUsage(included.map((r) => r.id))`, called on the
+  // budget-fitted retrieval set) — topRules() had no equivalent call anywhere in the port, so
+  // usageCount never advanced past 0 for any rule retrieved through this port, no matter how many
+  // times it was actually injected into a prompt. Optional (not folded into topRules itself) so a
+  // caller/test that never retrieves need not stub it; the LearningPort bridge (learning-
+  // port.adapter.ts) is the one production call site, invoked with the SAME ids topRules just
+  // returned, immediately after retrieval — matching legacy's own "record usage on exactly what the
+  // generator will see" ordering.
+  incrementUsage?(ids: readonly string[]): Promise<void>;
 }
 // Aligned to legacy src/types.ts StructuredReflection (8 fields). Field pruning, if any, is decided
 // when porting the learning context (Plan 6), not here — do not silently truncate.

@@ -440,6 +440,63 @@ test("buildRewrittenCompositionConfig wires a REAL SqliteLearningRepository by d
   assert.ok(config.learningRepo instanceof SqliteLearningRepository, "learningRepo must default to the REAL SqliteLearningRepository, not composition-root's StubLearningRepository fallback");
 });
 
+// W3 fix (F3b, dual-judge round): historyLearningStore(appName).upsert() previously wrote
+// `app: rule.archetype ?? ""` — a cross-app data-corruption landmine (archetype is a diff-shape
+// tag, not an app identifier). Real-DB integration test (same convention as src/qa/learning/
+// retrieval.test.ts): a unique app name per run avoids collisions with other tests' rows.
+test("historyLearningStore(appName).upsert() persists the REAL app name, not the rule's archetype", async () => {
+  const { historyLearningStore } = await import("./rewritten-engine-factory");
+  const { listLearningRules } = await import("./history");
+  const app = `factory-learning-appname-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const store = historyLearningStore(app);
+  store.upsert({
+    id: `rule-appname-${app}`,
+    trigger: "selector absent",
+    action: "use role+name",
+    errorClass: "E-EXEC-FAIL",
+    archetype: "form", // deliberately DIFFERENT from `app` — pins the fix distinguishes the two
+    status: "candidate",
+    confidence: "low",
+    usageCount: 0,
+    outcomeCount: 0,
+    successRate: null,
+    lastVerified: null,
+    source: "test",
+    at: new Date().toISOString(),
+  });
+
+  const rows = listLearningRules(app, 10);
+  assert.equal(rows.length, 1, "the rule must be retrievable under the REAL app name");
+  assert.equal(rows[0]?.trigger, "selector absent");
+  // If the bug regressed (app: rule.archetype ?? ""), this row would be filed under "form",
+  // not `app` — listLearningRules(app, ...) would find nothing.
+  const underArchetype = listLearningRules("form", 10);
+  assert.ok(!underArchetype.some((r) => r.trigger === "selector absent"), "the rule must NOT be filed under the archetype as if it were the app name");
+});
+
+// W3 fix (F3a, dual-judge round): historyLearningStore(appName).incrementUsage() bridges onto
+// legacy's incrementRuleUsage (src/server/history.ts) — the SAME usage_count column
+// LearningPortAdapter.retrieve() now increments through this store.
+test("historyLearningStore(appName).incrementUsage() bridges onto history.ts's incrementRuleUsage", async () => {
+  const { historyLearningStore } = await import("./rewritten-engine-factory");
+  const { listLearningRules } = await import("./history");
+  const app = `factory-learning-usage-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const ruleId = `rule-usage-${app}`;
+
+  const store = historyLearningStore(app);
+  store.upsert({
+    id: ruleId, trigger: "t", action: "a", errorClass: "E-X", archetype: null,
+    status: "candidate", confidence: "low", usageCount: 0, outcomeCount: 0,
+    successRate: null, lastVerified: null, source: "test", at: new Date().toISOString(),
+  });
+
+  store.incrementUsage?.([ruleId]);
+
+  const rows = listLearningRules(app, 10);
+  assert.equal(rows[0]?.usageCount, 1, "usageCount must advance from 0 to 1 after incrementUsage");
+});
+
 test("createRewrittenEngineFactory's produced CompositionConfig carries the SAME real runHistory/learningRepo wiring", () => {
   const prev = process.env.PIPELINE_ENGINE;
   process.env.PIPELINE_ENGINE = "rewritten";

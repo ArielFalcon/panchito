@@ -82,3 +82,36 @@ test("applyOutcome delegates to store.recordOutcome exactly once with the outcom
   assert.equal(recordedOutcomes.length, 1, "store.recordOutcome must be called exactly once");
   assert.strictEqual(recordedOutcomes[0], fakeOutcome, "store.recordOutcome must receive the exact outcome object");
 });
+
+// W3 fix (F3c, dual-judge round): topRules() forwards the optional relevance bias verbatim to
+// RuleGovernanceService — pinned here so the port-boundary forwarding cannot silently drop it.
+test("topRules forwards an optional relevance bias to RuleGovernanceService", async () => {
+  const relevantRow = { id: "rel", trigger_text: "rel", action_text: "a", error_class: "E-EXEC-FAIL", archetype: null, status: "active", confidence: "low", usage_count: 0, outcome_count: 0, success_rate: 0.1, last_verified: null, source: "oracle", at: "2026-01-01T00:00:00.000Z" };
+  const irrelevantRow = { id: "irrel", trigger_text: "irrel", action_text: "a", error_class: "E-FLAKY", archetype: null, status: "active", confidence: "low", usage_count: 0, outcome_count: 0, success_rate: 0.6, last_verified: null, source: "oracle", at: "2026-01-01T00:00:00.000Z" };
+  const repo = new SqliteLearningRepository({ selectRules: () => [relevantRow, irrelevantRow], upsert: () => {}, recordOutcome: () => {} });
+
+  const withoutBias = await repo.topRules("test-app", Sha.of("abcdef1"), 10);
+  assert.deepEqual(withoutBias.map((r) => r.trigger), ["irrel", "rel"], "no bias -> pure successRate ordering");
+
+  const withBias = await repo.topRules("test-app", Sha.of("abcdef1"), 10, { errorClass: "E-EXEC-FAIL" });
+  assert.deepEqual(withBias.map((r) => r.trigger), ["rel", "irrel"], "errorClass bias must be forwarded and flip the ordering");
+});
+
+// W3 fix (F3a, dual-judge round): incrementUsage delegates to the injected store's own
+// incrementUsage when present, and tolerates its absence (optional store method).
+test("incrementUsage delegates to the injected store.incrementUsage", async () => {
+  const incremented: (readonly string[])[] = [];
+  const repo = new SqliteLearningRepository({
+    selectRules: () => [],
+    upsert: () => {},
+    recordOutcome: () => {},
+    incrementUsage: (ids) => { incremented.push(ids); },
+  });
+  await repo.incrementUsage(["r1", "r2"]);
+  assert.deepEqual(incremented, [["r1", "r2"]]);
+});
+
+test("incrementUsage tolerates a store without incrementUsage wired", async () => {
+  const repo = new SqliteLearningRepository({ selectRules: () => [], upsert: () => {}, recordOutcome: () => {} });
+  await assert.doesNotReject(() => repo.incrementUsage(["r1"]));
+});

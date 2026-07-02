@@ -17,6 +17,7 @@ import type {
   RunHistoryPort,
   SetupPort,
   PreExecGroundingPort,
+  RetrievedRule,
 } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 import { BlastRadius } from "@kernel/blast-radius.ts";
 import { ok, err } from "@kernel/result.ts";
@@ -2473,12 +2474,25 @@ test("W2-F5: a non-diff mode never calls classify(), so generate() receives no i
 // generate()/review()'s enrichment.learnedRules, and the persisted/returned rulesRetrieved carries
 // what retrieve() returned — LearningPortAdapter.retrieve() existed with zero call sites before
 // this fix (retrieval was a provable no-op end-to-end even with a real learning store wired). ────
+//
+// W3 F1 (dual-judge round): retrieve() now returns structured RetrievedRule[] (trigger/action/
+// errorClass/status/confidence), not bare trigger strings — these fixtures/assertions were updated
+// to match the widened port contract; RunOutcome.rulesRetrieved stays trigger-text (unchanged
+// contract — see run-qa.use-case.ts's own `retrievedRuleTriggers` derivation comment).
+const makeRetrievedRule = (trigger: string, overrides: Partial<RetrievedRule> = {}): RetrievedRule => ({
+  trigger,
+  action: overrides.action ?? "default action",
+  errorClass: overrides.errorClass ?? "E-EXEC-FAIL",
+  status: overrides.status ?? "active",
+  confidence: overrides.confidence ?? "high",
+});
 
 test("W3 F2: learning.retrieve(sha) is called before the first generate(), and its result reaches generate()'s enrichment.learnedRules", async () => {
   let retrieveCalledWithSha: string | undefined;
-  const capturedLearnedRules: (readonly string[] | undefined)[] = [];
+  const capturedLearnedRules: (readonly RetrievedRule[] | undefined)[] = [];
+  const rules = [makeRetrievedRule("selector absent"), makeRetrievedRule("use role+name")];
   const { ports } = stubPorts({
-    retrieve: async (sha) => { retrieveCalledWithSha = sha.toString(); return ["selector absent", "use role+name"]; },
+    retrieve: async (sha) => { retrieveCalledWithSha = sha.toString(); return rules; },
   });
   ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
     capturedLearnedRules.push(enrichment?.learnedRules);
@@ -2491,14 +2505,15 @@ test("W3 F2: learning.retrieve(sha) is called before the first generate(), and i
   assert.equal(retrieveCalledWithSha, "abc1234", "retrieve() must be called with the run's sha");
   assert.ok(capturedLearnedRules.length > 0, "generate() must have been called at least once");
   for (const captured of capturedLearnedRules) {
-    assert.deepEqual(captured, ["selector absent", "use role+name"], "every generate() call must receive the SAME retrieved rules");
+    assert.deepEqual(captured, rules, "every generate() call must receive the SAME retrieved rules");
   }
 });
 
 test("W3 F2: retrieved rules also reach review()'s enrichment.learnedRules", async () => {
-  const capturedLearnedRules: (readonly string[] | undefined)[] = [];
+  const capturedLearnedRules: (readonly RetrievedRule[] | undefined)[] = [];
+  const rules = [makeRetrievedRule("never invent a test-id")];
   const { ports } = stubPorts({
-    retrieve: async () => ["never invent a test-id"],
+    retrieve: async () => rules,
   });
   ports.review.review = async (_specDir, _cases, _diff, enrichment) => {
     capturedLearnedRules.push(enrichment?.learnedRules);
@@ -2509,11 +2524,11 @@ test("W3 F2: retrieved rules also reach review()'s enrichment.learnedRules", asy
   await useCase.run({ ...baseInput, runId: "w3-f2-retrieve-into-review" });
 
   assert.ok(capturedLearnedRules.length > 0, "review() must have been called (needsReview:true, clean pass)");
-  assert.deepEqual(capturedLearnedRules[0], ["never invent a test-id"]);
+  assert.deepEqual(capturedLearnedRules[0], rules);
 });
 
 test("W3 F2: an empty retrieve() result omits enrichment.learnedRules entirely (never a fabricated empty marker)", async () => {
-  const capturedLearnedRules: (readonly string[] | undefined)[] = [];
+  const capturedLearnedRules: (readonly RetrievedRule[] | undefined)[] = [];
   const { ports } = stubPorts({ retrieve: async () => [] });
   ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
     capturedLearnedRules.push(enrichment?.learnedRules);
@@ -2541,7 +2556,7 @@ test("W3 F2: a retrieve() failure does not abort the run — generation still pr
 
 test("W3 F2: the retrieved rule triggers reach the persisted RunOutcome.rulesRetrieved on the mainline exit", async () => {
   let savedRulesRetrieved: string[] | undefined;
-  const { ports } = stubPorts({ retrieve: async () => ["fabricated-testid-guard"] });
+  const { ports } = stubPorts({ retrieve: async () => [makeRetrievedRule("fabricated-testid-guard")] });
   ports.runHistory.save = async (outcome) => { savedRulesRetrieved = outcome.rulesRetrieved; };
   const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
 
@@ -2551,7 +2566,7 @@ test("W3 F2: the retrieved rule triggers reach the persisted RunOutcome.rulesRet
 });
 
 test("W3 F2: the returned RunQaResult also carries rulesRetrieved (RewrittenOrchestratorAdapter's own read-back path)", async () => {
-  const { ports } = stubPorts({ retrieve: async () => ["rule-a", "rule-b"] });
+  const { ports } = stubPorts({ retrieve: async () => [makeRetrievedRule("rule-a"), makeRetrievedRule("rule-b")] });
   const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
 
   const out = await useCase.run({ ...baseInput, runId: "w3-f2-returned-rules-retrieved" });
@@ -2562,7 +2577,7 @@ test("W3 F2: the returned RunQaResult also carries rulesRetrieved (RewrittenOrch
 test("W3 F2: an early-exit terminal (static-gate invalid) persists rulesRetrieved:[] — legacy parity, retrieve() result is never threaded to a non-mainline exit", async () => {
   let savedRulesRetrieved: string[] | undefined;
   const { ports } = stubPorts({
-    retrieve: async () => ["would-be-injected-rule"],
+    retrieve: async () => [makeRetrievedRule("would-be-injected-rule")],
     validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }),
   });
   ports.runHistory.save = async (outcome) => { savedRulesRetrieved = outcome.rulesRetrieved; };

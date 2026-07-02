@@ -46,6 +46,7 @@ import type {
   ObserverPort,
   CommitIntent,
   PreExecGroundingPort,
+  RetrievedRule,
 } from "./ports/index.ts";
 import { decide, type RunEvidence } from "../domain/run-decision.service.ts";
 import { RunDecision } from "../domain/run-decision.ts";
@@ -335,20 +336,24 @@ export class RunQaUseCase {
     // contract (learning-port.adapter.ts's fold() doc: "a failure is logged and swallowed"); retrieve()
     // itself has no such guard documented on the port, but retrieval failing must not abort generation
     // either (retrieval is an enrichment, not a requirement) — bestEffort-shaped inline try/catch, never
-    // propagated. `retrievedRuleTriggers` feeds BOTH the prompt enrichment (below) and the persisted
+    // propagated. `retrievedRules` (W3 F1, widened from bare trigger strings to structured RetrievedRule[])
+    // feeds the prompt enrichment (below); `retrievedRuleTriggers` (derived) feeds the persisted
     // RunOutcome.rulesRetrieved (toRunOutcome), matching legacy's retrievedRuleIds dual-use exactly
-    // (src/pipeline.ts:2038's retrievedRuleIds assignment, later reused at persistOutcome time).
-    let retrievedRuleTriggers: string[] = [];
+    // (src/pipeline.ts:2038's retrievedRuleIds assignment, later reused at persistOutcome time) — this
+    // use-case's own RunOutcome.rulesRetrieved contract is (and was, pre-widening) trigger text, not
+    // rule ids; the widening only changes what generate()/review() receive, not what gets persisted.
+    let retrievedRules: RetrievedRule[] = [];
     try {
-      retrievedRuleTriggers = await this.deps.learning.retrieve(input.sha);
+      retrievedRules = await this.deps.learning.retrieve(input.sha);
     } catch (err) {
       console.error("[qa] learning retrieval failed (non-fatal, generation continues ungrounded):", err);
     }
+    const retrievedRuleTriggers = retrievedRules.map((r) => r.trigger);
 
     const baseEnrichment = {
       sha: input.sha.toString(),
       ...(classificationIntent ? { intent: classificationIntent } : {}),
-      ...(retrievedRuleTriggers.length ? { learnedRules: retrievedRuleTriggers } : {}),
+      ...(retrievedRules.length ? { learnedRules: retrievedRules } : {}),
     };
 
     // Phase: generate (GenerationPort).

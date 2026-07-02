@@ -118,7 +118,7 @@ import { shaMatches } from "../env/deploy-gate";
 import { ensureMirror, defaultMirrorDeps, workdirRoot } from "../integrations/repo-mirror";
 import { SqliteRunHistoryAdapter } from "./run-history-sqlite-adapter";
 import { SqliteLearningRepository, type LearningStore } from "@contexts/cross-run-learning/infrastructure/sqlite-learning-repository.adapter";
-import { listLearningRules, upsertLearningRule } from "./history";
+import { listLearningRules, upsertLearningRule, incrementRuleUsage } from "./history";
 
 // Same role→agent-name mapping the F.2 operator template uses (roleToAgentName) — the
 // AgentRuntimeAdapter needs it to resolve which of the agents container's role configs
@@ -155,9 +155,9 @@ async function fetchVersion(url: string): Promise<{ sha?: string; healthy?: bool
 }
 
 // Bridges cross-run-learning's LearningStore port onto src/server/history.ts's existing
-// learning_rules exports (listLearningRules/upsertLearningRule — the SAME SQLite table the legacy
-// engine's own retrieval/distillation already reads/writes). selectRules re-shapes history.ts's
-// already-camelCased LearningRule[] back into the port's raw-row LearningRow[] shape
+// learning_rules exports (listLearningRules/upsertLearningRule/incrementRuleUsage — the SAME SQLite
+// table the legacy engine's own retrieval/distillation already reads/writes). selectRules re-shapes
+// history.ts's already-camelCased LearningRule[] back into the port's raw-row LearningRow[] shape
 // (trigger_text/action_text) because history.ts exposes no raw-row query publicly and
 // SqliteLearningRepository's own rowToRule immediately re-maps it right back — a lossless
 // round-trip, not a second source of truth. upsert() narrows the port's full LearningRule down to
@@ -166,7 +166,18 @@ async function fetchVersion(url: string): Promise<{ sha?: string; healthy?: bool
 // (see that function's own header comment in history.ts), so a caller-supplied confidence/status
 // would be silently discarded by the legacy fn regardless; narrowing here just makes that existing
 // contract explicit at the bridge, rather than passing fields the sink ignores.
-function historyLearningStore(): LearningStore {
+//
+// W3 fix (F3b, dual-judge round): `appName` is now an explicit parameter, threaded from the
+// factory's own AppConfig.name (buildRewrittenCompositionConfig's `app` argument, already in scope
+// at every call site below) — upsert() previously wrote `app: rule.archetype ?? ""`, a genuine
+// cross-app data-corruption landmine (archetype is a diff-shape tag like "form"/"api-call", not an
+// app identifier, and a bare upsert() caller would have silently mixed every app's rules under one
+// wrong/empty `app` column, corrupting listLearningRules(app, ...)'s per-app filtering the moment
+// upsert() gets a real caller). save() still has zero call sites on the orchestrated retrieval path
+// (this module's scope is RETRIEVAL — see W3 F2's own header), so this fix has no behavioral effect
+// until the distiller (Plan 6) starts calling save(); it closes the landmine before that day arrives.
+// Exported for direct unit testing (same precedent as buildRewrittenCompositionConfig above).
+export function historyLearningStore(appName: string): LearningStore {
   return {
     selectRules: (app) =>
       listLearningRules(app, 200).map((r) => ({
@@ -187,11 +198,8 @@ function historyLearningStore(): LearningStore {
     upsert: (rule) =>
       upsertLearningRule({
         id: rule.id,
-        app: rule.archetype ?? "", // CRL-02: the port's own LearningRule carries no `app` field yet
-        // (save() has zero call sites on the orchestrated path — see this fn's own header); the
-        // distiller (Plan 6, not yet ported) is the real future caller and will thread the actual
-        // app name. Left as an explicit placeholder rather than silently defaulting to "" via a
-        // narrower type, so a future distillation wiring cannot forget to supply it for real.
+        app: appName, // W3 fix (F3b): the REAL app name, not the archetype placeholder — see this
+        // function's own header for the corruption this closes.
         trigger: rule.trigger,
         action: rule.action,
         // The port's LearningRule.errorClass is WIDE (`string` — cross-run-learning/application/
@@ -214,6 +222,13 @@ function historyLearningStore(): LearningStore {
       // gates publish either way (LearningPort.fold's own off-path contract).
       void outcome;
     },
+    // W3 fix (F3a, dual-judge round): bridges LearningRepositoryPort.incrementUsage (called by
+    // LearningPortAdapter.retrieve() on every real retrieval) onto legacy's OWN incrementRuleUsage
+    // (src/server/history.ts) — the SAME learning_rules.usage_count column the legacy engine's own
+    // retrieveRules() increments. Prior to this fix, no caller anywhere in the store contract
+    // incremented usage_count, so it stayed 0 for every rule retrieved through the rewritten engine
+    // regardless of real injection count.
+    incrementUsage: (ids) => incrementRuleUsage([...ids]),
   };
 }
 
@@ -485,7 +500,7 @@ export function buildRewrittenCompositionConfig(
     // production had ZERO real constructors of SqliteLearningRepository anywhere — retrieval and
     // the outcome fold were both provable no-ops end-to-end, regardless of what history.ts's own
     // SQLite table held.
-    learningRepo: new SqliteLearningRepository(historyLearningStore()),
+    learningRepo: new SqliteLearningRepository(historyLearningStore(app.name)),
     ...(observer ? { observer } : {}),
   };
 }

@@ -7,7 +7,7 @@
 // §11 BASE-FIX: legacy rows may carry status 'pending' (retired in the port's RuleStatus). The read
 // path coerces 'pending' → 'candidate' BEFORE typing so no row violates the port type and no rule
 // is silently dropped.
-import type { LearningRepositoryPort, LearningRule, RuleStatus, ErrorClass } from "../application/ports/index.ts";
+import type { LearningRepositoryPort, LearningRule, RuleStatus, ErrorClass, RelevanceBias } from "../application/ports/index.ts";
 import type { Sha } from "@kernel/sha.ts";
 import type { RunOutcome } from "@kernel/run-outcome.ts";
 import { RuleGovernanceService } from "../domain/rule-governance.service.ts";
@@ -44,6 +44,10 @@ export interface LearningStore {
   selectRules(app: string): LearningRow[];      // UNORDERED — ranking is the service's job
   upsert(rule: LearningRule): void;
   recordOutcome(outcome: RunOutcome): void;
+  // W3 fix (F3a, dual-judge round): mirrors legacy's incrementRuleUsage(ruleIds) (src/server/
+  // history.ts) — the store-level primitive LearningRepositoryPort.incrementUsage delegates to.
+  // Optional: a store fake that never exercises retrieval-usage tracking need not implement it.
+  incrementUsage?(ids: readonly string[]): void;
 }
 
 // §11: 'pending' (retired) maps to 'candidate'. Any unknown status also falls back to 'candidate'
@@ -81,16 +85,27 @@ export class SqliteLearningRepository implements LearningRepositoryPort {
     this.store.upsert(rule);
   }
 
-  async topRules(app: string, _sha: Sha, limit: number): Promise<LearningRule[]> {
+  async topRules(app: string, _sha: Sha, limit: number, relevance?: RelevanceBias): Promise<LearningRule[]> {
     // CRL-02: `app` is threaded into the store seam so the Plan-6 wiring closure must supply it.
     // v1 stores ignore the argument (no per-app filtering yet); the typed obligation is the point.
     const rules = this.store.selectRules(app).map(rowToRule);
-    return this.governance.topRules(rules, limit);
+    // W3 fix (F3c): forwards the optional relevance bias verbatim to RuleGovernanceService — see
+    // that service's own RelevanceBias header for why this is optional (no real caller supplies it
+    // yet) and what it does when a future caller does.
+    return this.governance.topRules(rules, limit, relevance);
   }
 
   async applyOutcome(outcome: RunOutcome): Promise<void> {
     // Off-path governance fold. The promotion math lives in the injected store's recordOutcome
     // (which wraps the legacy applyOutcome at wiring time) — never imported from history.ts here.
     this.store.recordOutcome(outcome);
+  }
+
+  // W3 fix (F3a, dual-judge round): mirrors legacy's retrieveRules() calling incrementRuleUsage()
+  // on the retrieved set (src/qa/learning/retrieval.ts) — delegates to the injected store's own
+  // incrementUsage when present; a store fake that omits it is unaffected (this is off-path
+  // telemetry, never gates publish, same contract class as applyOutcome).
+  async incrementUsage(ids: readonly string[]): Promise<void> {
+    this.store.incrementUsage?.(ids);
   }
 }

@@ -8,11 +8,12 @@
 // fabricated number.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { GenerationPortAdapter } from "@contexts/qa-run-orchestration/infrastructure/bridges/generation-port.adapter.ts";
+import { GenerationPortAdapter, renderLearnedRules, renderLearnedRulesForReviewer } from "@contexts/qa-run-orchestration/infrastructure/bridges/generation-port.adapter.ts";
 import { Objective } from "@kernel/objective.ts";
 import type { GenerationPorts, GenerationResult } from "@contexts/generation/application/generate-tests.use-case.ts";
 import { GenerateTestsUseCase } from "@contexts/generation/application/generate-tests.use-case.ts";
 import type { OpencodeRunInput } from "@contexts/generation/application/ports/generation-ports.ts";
+import type { RetrievedRule } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 
 function fakeGenerationPorts(overrides: {
   generatorOutput?: string;
@@ -322,4 +323,114 @@ test("generate() with no enrichment argument omits every enrichment field from O
   } finally {
     GenerateTestsUseCase.prototype.generate = originalGenerate;
   }
+});
+
+// ── W3 F2 (dual-judge round): renderLearnedRules is a FAITHFUL, byte-comparable port of legacy's
+// renderRulesForPrompt (src/qa/learning/learning-rule.ts:237-270) — same section headers, same
+// framing sentences, same proven/experimental split, same per-rule field layout. ──────────────────
+
+const activeRule: RetrievedRule = {
+  trigger: "selector absent", action: "use role+name", errorClass: "E-EXEC-FAIL",
+  status: "active", confidence: "high",
+};
+const candidateRule: RetrievedRule = {
+  trigger: "flaky wait", action: "use expect.poll", errorClass: "E-FLAKY",
+  status: "candidate", confidence: "low",
+};
+
+test("renderLearnedRules: active-only rule set matches legacy's renderRulesForPrompt byte-for-byte", () => {
+  const rendered = renderLearnedRules([activeRule]);
+
+  assert.equal(
+    rendered,
+    [
+      "## Proven rules from past QA runs",
+      "These rules were earned from real failures and validated by measured outcomes. Apply them when they match the current change.",
+      "",
+      "### Rule (E-EXEC-FAIL, confidence=high)",
+      "- Trigger: selector absent",
+      "- Action: use role+name",
+      "",
+    ].join("\n"),
+  );
+});
+
+test("renderLearnedRules: candidate-only rule set uses the experimental framing, not the proven one", () => {
+  const rendered = renderLearnedRules([candidateRule]);
+
+  assert.equal(
+    rendered,
+    [
+      "## Experimental rules (unproven — consider, not prescriptive)",
+      "These are hypotheses from recent runs that have not yet been validated by enough measured outcomes. Consider them when clearly applicable, but do not let them override your judgment.",
+      "",
+      "### Experimental rule (E-FLAKY)",
+      "- Trigger: flaky wait",
+      "- Consider: use expect.poll",
+      "",
+    ].join("\n"),
+  );
+});
+
+test("renderLearnedRules: mixed active+candidate renders BOTH sections, proven first, byte-for-byte", () => {
+  const rendered = renderLearnedRules([activeRule, candidateRule]);
+
+  assert.equal(
+    rendered,
+    [
+      "## Proven rules from past QA runs",
+      "These rules were earned from real failures and validated by measured outcomes. Apply them when they match the current change.",
+      "",
+      "### Rule (E-EXEC-FAIL, confidence=high)",
+      "- Trigger: selector absent",
+      "- Action: use role+name",
+      "",
+      "## Experimental rules (unproven — consider, not prescriptive)",
+      "These are hypotheses from recent runs that have not yet been validated by enough measured outcomes. Consider them when clearly applicable, but do not let them override your judgment.",
+      "",
+      "### Experimental rule (E-FLAKY)",
+      "- Trigger: flaky wait",
+      "- Consider: use expect.poll",
+      "",
+    ].join("\n"),
+  );
+});
+
+test("renderLearnedRules: empty input renders the empty string (matches legacy's early return)", () => {
+  assert.equal(renderLearnedRules([]), "");
+});
+
+// ── W3 F2 (dual-judge round): renderLearnedRulesForReviewer is a FAITHFUL, byte-comparable port of
+// legacy's renderRulesForReviewer (src/qa/learning/learning-rule.ts:299-313) — active-only (never
+// candidates), the 2 framing sentences verbatim, and the `- trigger → action (errorClass)` line
+// format. ────────────────────────────────────────────────────────────────────────────────────────
+
+test("renderLearnedRulesForReviewer: active rule matches legacy's renderRulesForReviewer byte-for-byte", () => {
+  const rendered = renderLearnedRulesForReviewer([activeRule]);
+
+  assert.equal(
+    rendered,
+    [
+      "## App-specific reject-on-sight rules (earned from past runs on this app)",
+      "Each was learned from a real failure and proven by the value oracle or sustained prevention.",
+      "Treat them as an extension of the anti-pattern catalog: if a spec violates one, REJECT.",
+      "",
+      "- selector absent → use role+name (E-EXEC-FAIL)",
+    ].join("\n"),
+  );
+});
+
+test("renderLearnedRulesForReviewer: candidate-only input renders '' — unproven rules never gate the reviewer", () => {
+  assert.equal(renderLearnedRulesForReviewer([candidateRule]), "");
+});
+
+test("renderLearnedRulesForReviewer: a mixed set renders ONLY the active rule's line", () => {
+  const rendered = renderLearnedRulesForReviewer([activeRule, candidateRule]);
+
+  assert.ok(rendered.includes("- selector absent → use role+name (E-EXEC-FAIL)"));
+  assert.ok(!rendered.includes("flaky wait"), "candidate rules must never appear in the reviewer's reject-on-sight list");
+});
+
+test("renderLearnedRulesForReviewer: empty input renders the empty string", () => {
+  assert.equal(renderLearnedRulesForReviewer([]), "");
 });
