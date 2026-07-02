@@ -103,16 +103,28 @@ export interface RunQaUseCaseDeps {
   // agent has the fixtures/config" — a throw from setup() propagates to infraErrorResult(), never a
   // code verdict (src/qa/setup.ts's own doc).
   setup?: SetupPort;
-  // [SWAP] absent -> every onStep() call below is a no-op (backward compatible with every
-  // pre-existing composition/test that has not wired an ObserverPort yet — this is exactly why
-  // ObserverPort.onStep/onEvent were never called anywhere before this fix: nothing in this
-  // use-case ever reached for `this.deps.observer`). When present, onStep(step, detail) fires at
-  // each phase boundary this use-case actually crosses, using the SAME step VOCABULARY the legacy
-  // runPipeline's own onStep callback emits (src/server/runner.ts's RUN_EVENT_STEPS: "gate" |
-  // "classify" | "setup" | "generate" | "validate" | "health" | "execute" | "coverage" | "retry" |
-  // "decide" | "done"). Only phases this use-case genuinely executes emit a step — a step the
-  // use-case never reaches (e.g. "coverage" on a non-"pass" verdict, or on a non-diff/cross-repo
-  // pass — see the guard at the measure phase below) is never fabricated.
+  // [SWAP] absent -> every onStep()/onEvent() call below is a no-op (backward compatible with
+  // every pre-existing composition/test that has not wired an ObserverPort yet). When present,
+  // onStep(step, detail) fires at each phase boundary this use-case actually crosses, using the
+  // SAME step VOCABULARY the legacy runPipeline's own onStep callback emits (src/server/runner.ts's
+  // RUN_EVENT_STEPS: "gate" | "classify" | "setup" | "generate" | "validate" | "health" | "execute" |
+  // "coverage" | "retry" | "decide" | "done"). Only phases this use-case genuinely executes emit a
+  // step — a step the use-case never reaches (e.g. "coverage" on a non-"pass" verdict, or on a
+  // non-diff/cross-repo pass — see the guard at the measure phase below) is never fabricated.
+  //
+  // W4 fix (F1b, audit-verified cutover blocker): onEvent(body) NOW fires LIVE, DURING execute() —
+  // test.started/test.passed/test.failed/test.flaky/test.discovered, threaded through
+  // ExecutionOpts.onCase/onRunning/onDiscovered at every execute() call site (initial execute AND
+  // every FixLoop retry). Previously onEvent was never called anywhere in this use-case (the port
+  // existed but nothing reached for it); a caller wanting per-case progress had to reconstruct it
+  // POST-HOC from the final RunOutcome.cases array once the whole run had already resolved (the
+  // shape src/server/runner.ts's own recordCase() loop still uses on the qa-engine boundary — see
+  // that file's own W3 F3/F4 doc). A caller wired to THIS use-case's observer directly now receives
+  // both a live per-case stream (via onEvent, as the test actually finishes) and, if it also does
+  // its own post-hoc reconstruction from the returned RunQaResult.cases, a SECOND, duplicate set of
+  // events — callers combining both must pick one path, not both (this use-case does not de-dupe
+  // across that boundary; it is a caller-side composition concern, since the post-hoc path lives
+  // outside this port).
   //
   // Honesty note (judgment-day, both judges — this is a DELIBERATE, strictly-additive divergence,
   // not identical rendering): a caller mapping onStep -> RunRecord.step/RunEvents does NOT render
@@ -637,9 +649,33 @@ export class RunQaUseCase {
     if (input.mode !== "context") {
       this.deps.observer?.onStep("execute");
     }
+    // W4 fix (F1b, audit-verified cutover blocker): live per-case/per-test progress, threaded
+    // through ExecutionOpts.onCase/onRunning/onDiscovered so ObserverPort.onEvent fires
+    // test.started/test.passed/test.failed/test.discovered DURING execution rather than only being
+    // reconstructable AFTER the fact from the final case list. Absent observer -> every callback is
+    // a no-op (matches every other onStep/onEvent call site in this use-case — [SWAP] backward
+    // compatible with a composition that has not wired an ObserverPort).
+    const liveExecutionOpts = {
+      ...(signal ? { signal } : {}),
+      onCase: (c: QaCase) => {
+        this.deps.observer?.onEvent(
+          c.status === "pass"
+            ? { type: "test.passed", name: c.name, durationMs: c.durationMs ?? 0 }
+            : c.status === "fail"
+              ? { type: "test.failed", name: c.name, detail: c.detail, ...(c.durationMs !== undefined ? { durationMs: c.durationMs } : {}) }
+              : { type: "test.flaky", name: c.name, attempts: 2 },
+        );
+      },
+      onRunning: (title: string) => {
+        this.deps.observer?.onEvent({ type: "test.started", name: title });
+      },
+      onDiscovered: (title: string, file?: string) => {
+        this.deps.observer?.onEvent({ type: "test.discovered", name: title, ...(file ? { file } : {}) });
+      },
+    };
     let run = input.mode === "context"
       ? { verdict: "pass" as const, cases: [] as QaCase[], logs: generated.note ?? "" }
-      : await this.deps.execution.execute(workspace.specDir, signal);
+      : await this.deps.execution.execute(workspace.specDir, liveExecutionOpts);
     if (signal?.aborted) {
       return this.abortedResult();
     }
@@ -653,8 +689,28 @@ export class RunQaUseCase {
     if (run.verdict === "fail") {
       this.deps.observer?.onStep("retry", "fix-loop engaged after a failing execute()");
       const fixLoopExecution: FixLoopExecutionPort = {
-        execute: async () => {
-          const r = await this.deps.execution.execute(workspace.specDir, signal);
+        // W4 fix (F1a, audit-verified cutover blocker): FixLoopExecuteInput.specFiles (the
+        // aggregate's OWN filtered-retry decision — fix-loop.aggregate.ts:359-382's canFilter/
+        // failedSpecFiles, mirroring legacy's `canFilter ? { specFiles: failedSpecFiles } : {}`,
+        // src/pipeline.ts:2833) was previously dropped on the floor here: this closure ignored its
+        // own `input` argument and always re-ran the FULL suite. Now threaded through the widened
+        // ExecutionPort.execute(specDir, opts) opts bag — a filtered retry genuinely scopes to only
+        // the failing spec files, matching the legacy's re-run-time savings on large suites. Live
+        // per-case events (F1b) are threaded on every retry too, not just the initial execute.
+        //
+        // NOT threaded: fixLoopInput.namespace (the aggregate's own per-attempt `retryNs =
+        // "${namespace}-r${retry+1}"`, fix-loop.aggregate.ts:357/380) — ExecutionPort.execute's
+        // namespace is STATIC, baked into the composition root's ExecutionPortAdapter constructor
+        // context (composition-root.ts's `namespace: cfg.branch`), not a per-call parameter this
+        // barrel exposes. This is a PRE-EXISTING, separate gap (FixLoopResult.coverageNamespace is
+        // not read anywhere in this use-case today either — confirmed unwired before this fix) and
+        // out of scope for the execute()-opts widening this fix makes: closing it needs a per-call
+        // namespace override added to ExecutionOpts, a distinct follow-up.
+        execute: async (fixLoopInput) => {
+          const r = await this.deps.execution.execute(workspace.specDir, {
+            ...liveExecutionOpts,
+            ...(fixLoopInput.specFiles ? { specFiles: fixLoopInput.specFiles } : {}),
+          });
           return { verdict: r.verdict, cases: r.cases };
         },
       };
@@ -787,10 +843,19 @@ export class RunQaUseCase {
         // "unknown" coverage is diagnosable, never a silent null.
         console.log(`[qa] change-coverage: skipped — the changed lines live in ${input.triggerRepo}; browser coverage maps only the frontend (status=unknown).`);
       }
+      // W4 fix (F2, audit-verified cutover blocker — "the dead value oracle"): this run's OWN
+      // passing case names, mirroring the legacy's PER-RUN computation exactly
+      // (src/pipeline.ts:731's `run.cases.filter(c=>c.status==="pass").map(c=>c.name)`) — this
+      // block only ever runs when `run.verdict === "pass"` (the guard above), so `run.cases` here
+      // IS the green baseline the fault-injection oracle needs to score against. Threaded as the
+      // NEW optional trailing arg (see ObjectiveSignalPort.measure's own header) rather than left
+      // for the composition root's static, always-empty `baselineCases: []` placeholder to supply.
+      const baselineCases = run.cases.filter((c) => c.status === "pass").map((c) => c.name);
       const signal = await this.deps.objectiveSignal.measure(
         BlastRadius.of(input.sha, []),
         workspace.specDir,
         input.triggerRepo ? undefined : classificationDiff,
+        baselineCases,
       );
       coverageRatio = signal.ratio;
       valueScore = signal.valueScore ?? null;

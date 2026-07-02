@@ -183,3 +183,69 @@ test("measure() derives changedFiles from the diff and threads them into collect
 
   assert.deepEqual(seenChangedFiles, [["src/checkout.ts"]]);
 });
+
+// ── W4 fix (F2) — per-call baselineCases (the dead value oracle). The e2e fault-injection oracle
+// returns valueScore:null forever unless it knows the green run's passing spec names; the
+// composition root's static ctx.baselineCases is a permanent [] placeholder (no per-run case list
+// exists at composition time) — the PER-CALL arg is what finally supplies a real value. ──────────
+
+test("measure() forwards a PER-CALL baselineCases arg into ValueOraclePort.measure, taking precedence over ctx.baselineCases", async () => {
+  const seenBaselineCases: (string[] | undefined)[] = [];
+  const collector = fakeCollector({ covered: [] });
+  const decide = new DecideCoverageService();
+  const oracle: ValueOraclePort = {
+    measure: async (_br, _repoDir, _namespace, baselineCases) => {
+      seenBaselineCases.push(baselineCases);
+      return { valueScore: 0.9, mutantCount: 10, killedCount: 9, details: "9/10" };
+    },
+  };
+  const adapter = new ObjectiveSignalPortAdapter(
+    { collector, decide, oracle },
+    { policy: { mode: "signal", minRatio: 0.7 }, repoDir: "/mirrors/org/app", baselineCases: ["stale-static-case"] },
+  );
+
+  const br = BlastRadius.of(Sha.of("abc1234"), []);
+  const result = await adapter.measure(br, "/mirrors/org/app/e2e", undefined, ["login", "checkout"]);
+
+  assert.deepEqual(seenBaselineCases, [["login", "checkout"]], "the per-call baselineCases must win over the static ctx.baselineCases placeholder");
+  assert.equal(result.valueScore, 0.9);
+});
+
+test("measure() falls back to ctx.baselineCases when the per-call arg is absent (backward compatible)", async () => {
+  const seenBaselineCases: (string[] | undefined)[] = [];
+  const collector = fakeCollector({ covered: [] });
+  const decide = new DecideCoverageService();
+  const oracle: ValueOraclePort = {
+    measure: async (_br, _repoDir, _namespace, baselineCases) => {
+      seenBaselineCases.push(baselineCases);
+      return { valueScore: null, mutantCount: 0, killedCount: 0, details: "" };
+    },
+  };
+  const adapter = new ObjectiveSignalPortAdapter(
+    { collector, decide, oracle },
+    { policy: { mode: "signal", minRatio: 0.7 }, repoDir: "/mirrors/org/app", baselineCases: ["ctx-fallback-case"] },
+  );
+
+  const br = BlastRadius.of(Sha.of("abc1234"), []);
+  await adapter.measure(br, "/mirrors/org/app/e2e"); // no baselineCases arg at all
+
+  assert.deepEqual(seenBaselineCases, [["ctx-fallback-case"]]);
+});
+
+test("measure() passes undefined to the oracle when NEITHER a per-call arg NOR ctx.baselineCases is supplied", async () => {
+  const seenBaselineCases: (string[] | undefined)[] = [];
+  const collector = fakeCollector({ covered: [] });
+  const decide = new DecideCoverageService();
+  const oracle: ValueOraclePort = {
+    measure: async (_br, _repoDir, _namespace, baselineCases) => {
+      seenBaselineCases.push(baselineCases);
+      return { valueScore: null, mutantCount: 0, killedCount: 0, details: "" };
+    },
+  };
+  const adapter = new ObjectiveSignalPortAdapter({ collector, decide, oracle }, { policy: { mode: "signal", minRatio: 0.7 }, repoDir: "/mirrors/org/app" });
+
+  const br = BlastRadius.of(Sha.of("abc1234"), []);
+  await adapter.measure(br, "/mirrors/org/app/e2e");
+
+  assert.deepEqual(seenBaselineCases, [undefined]);
+});

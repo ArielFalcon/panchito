@@ -115,7 +115,15 @@ export interface RunnerDeps {
 // storage hiccup) must never propagate up through ObserverPort.onStep/onEvent and abort an
 // otherwise-healthy run. Mirrors the codebase's own advisory-callback pattern (src/index.ts:
 // "a bad event must never break..."): catch, log once, never rethrow.
-function buildRewrittenObserver(runId: string, runEvents: RunEventStore | undefined): ObserverPort {
+// liveAnnounced (single-ownership dedup, #35 live-events reconciliation): the use-case now streams
+// test.started/passed/failed/flaky LIVE through onEvent (ExecutionOpts.onCase), while
+// runViaRewrittenEngine's post-hoc loop still walks outcome.cases for the record-store writes
+// (addCase carries the FULL QaCase evidence the live event body cannot). Without dedup every
+// terminal case event would publish twice — once live, once post-hoc. The shared Set records which
+// case names were already ANNOUNCED live; the post-hoc loop then writes the record for every case
+// but re-publishes only the never-announced ones (the safety net for strategies without live
+// callbacks, e.g. code-mode).
+function buildRewrittenObserver(runId: string, runEvents: RunEventStore | undefined, liveAnnounced?: Set<string>): ObserverPort {
   return {
     onStep(step: RunStep, detail?: string): void {
       try {
@@ -127,6 +135,13 @@ function buildRewrittenObserver(runId: string, runEvents: RunEventStore | undefi
     },
     onEvent(body: RunEventBody): void {
       try {
+        if (
+          liveAnnounced &&
+          (body.type === "test.passed" || body.type === "test.failed" || body.type === "test.flaky") &&
+          typeof (body as { name?: unknown }).name === "string"
+        ) {
+          liveAnnounced.add((body as { name: string }).name);
+        }
         runEvents?.publish(runId, body);
       } catch (err) {
         console.error("[qa] observer onEvent failed (non-fatal, run continues):", err);
@@ -189,9 +204,13 @@ function assertTriggerRepoDeclared(appConfig: AppConfig, triggerRepo: string | u
 // legacy queue callback's own onCase closure exactly (kind:"todo" activity + test.passed/
 // test.failed/test.flaky). Shared by runViaRewrittenEngine (this file) so both engines' per-case
 // side effects are byte-identical, not two independently-drifting implementations.
-function recordCase(runId: string, c: QaCase, runEvents: RunEventStore | undefined): void {
+function recordCase(runId: string, c: QaCase, runEvents: RunEventStore | undefined, liveAnnounced?: Set<string>): void {
   addCase(runId, c);
   appendActivity(runId, { kind: "todo", text: c.name, status: "completed" });
+  // Dedup (see buildRewrittenObserver's liveAnnounced note): a case already announced LIVE through
+  // the observer must not publish its terminal event twice — the record-store writes above still
+  // always run (the live event body cannot carry the full QaCase evidence addCase persists).
+  if (liveAnnounced?.has(c.name)) return;
   runEvents?.publish(runId, c.status === "pass"
     ? { type: "test.passed", name: c.name, durationMs: c.durationMs ?? 0 }
     : c.status === "fail"
@@ -206,6 +225,7 @@ async function runViaRewrittenEngine(
   signal: AbortSignal,
   appConfig: AppConfig,
   runEvents: RunEventStore | undefined,
+  liveAnnounced?: Set<string>,
 ): Promise<QaRunResult> {
   assertTriggerRepoDeclared(appConfig, req.triggerRepo);
   const input: RunInput = {
@@ -225,7 +245,7 @@ async function runViaRewrittenEngine(
   // the previous permanent [].
   const cases = outcome.cases ?? [];
   for (const c of cases) {
-    recordCase(runId, c, runEvents);
+    recordCase(runId, c, runEvents, liveAnnounced);
   }
   // W3 F4: reviewer.verdict — derivable from the already-returned RunOutcome without widening any
   // port. Mirrors the legacy queue callback's own reviewer.verdict publish closure.
@@ -328,7 +348,11 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
       // updateRecord + RunEvents.publish machinery the legacy branch's own onStep callback (below)
       // already uses — this is what makes the TUI/API render the rewritten path's progress live
       // instead of staying frozen until the final verdict.
-      const observer = buildRewrittenObserver(record.id, deps.runEvents);
+      // liveAnnounced: shared between the observer (live test.* announcements from the use-case's
+      // ExecutionOpts.onCase streaming) and runViaRewrittenEngine's post-hoc recordCase loop, so a
+      // case's terminal event publishes exactly once (see buildRewrittenObserver's own dedup note).
+      const liveAnnounced = new Set<string>();
+      const observer = buildRewrittenObserver(record.id, deps.runEvents, liveAnnounced);
       const run: QaRunResult =
         engine === "rewritten" && deps.engineFactory
           ? await runViaRewrittenEngine(
@@ -341,6 +365,7 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
               signal,
               appConfig,
               deps.runEvents,
+              liveAnnounced,
             )
           : await runPipeline(
               appConfig,

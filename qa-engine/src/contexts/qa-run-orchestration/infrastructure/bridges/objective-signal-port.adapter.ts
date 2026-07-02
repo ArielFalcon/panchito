@@ -45,7 +45,7 @@ export class ObjectiveSignalPortAdapter implements ObjectiveSignalPort {
     private readonly ctx: ObjectiveSignalPortStaticContext,
   ) {}
 
-  async measure(br: BlastRadius, specDir: string, diff?: string): Promise<{ status: "pass" | "fail" | "unknown"; ratio: number | null; valueScore?: number | null }> {
+  async measure(br: BlastRadius, specDir: string, diff?: string, baselineCases?: string[]): Promise<{ status: "pass" | "fail" | "unknown"; ratio: number | null; valueScore?: number | null }> {
     // NAMESPACE FIX: the run's coverage dumps (V8 browser dumps AND the Playwright PW_NAMESPACE env
     // that names their directory — config/e2e/fixtures.ts, `.qa/coverage/<namespace>/`) are written
     // under the SAME namespace ExecutionPortAdapter passes to the execution strategies — which is
@@ -78,7 +78,17 @@ export class ObjectiveSignalPortAdapter implements ObjectiveSignalPort {
     const status = this.deps.decide.decide(cc, this.ctx.policy);
     const ratio = cc?.measured ? cc.overall.ratio : null;
 
-    const oracleResult = await this.deps.oracle.measure(br, this.ctx.repoDir, namespace, this.ctx.baselineCases);
+    // W4 fix (F2, audit-verified cutover blocker — "the dead value oracle"): the PER-CALL
+    // baselineCases (the run's own passing case names, threaded from RunQaUseCase's post-execute
+    // `run.cases` — see the port barrel's own measure() header) takes PRECEDENCE over the static
+    // ctx.baselineCases fallback. The composition root's own ctx.baselineCases is a composition-time
+    // placeholder (rewritten-engine-factory.ts's `baselineCases: []`, ALWAYS empty — no per-run case
+    // list exists yet when CompositionConfig is built), so without this per-call arg the oracle
+    // received [] on EVERY run and runFaultInjectionOracle returned valueScore:null forever
+    // (fault-injection-oracle.adapter.ts's own `baselineCases && baselineCases.length` guard).
+    // Absent (a caller/stub that predates this param) -> falls back to ctx.baselineCases, backward
+    // compatible with every pre-existing composition/test.
+    const oracleResult = await this.deps.oracle.measure(br, this.ctx.repoDir, namespace, baselineCases ?? this.ctx.baselineCases);
 
     return { status, ratio, valueScore: oracleResult.valueScore };
   }

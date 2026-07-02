@@ -745,13 +745,12 @@ test("FIX C: context mode NEVER calls execute() (context.json is not a Playwrigh
 });
 
 test("FIX D: a diff-mode fail retry computes coverageWillMeasure per the legacy formula and threads it into the FixLoop", async () => {
-  // The use-case's own ExecutionPort (a single-arg `execute(specDir: string)`) cannot express a
-  // specFiles-scoped retry — the FixLoopExecutionPort closure that wraps it necessarily drops
-  // FixLoopExecuteInput.specFiles on the floor no matter what this use-case passes as
-  // coverageWillMeasure (that richer contract is Task E.0's composition-root concern, per
-  // fix-loop.aggregate.ts's own header). So the only port-observable proof available at THIS
-  // layer is instrumenting FixLoop.run itself and asserting the use-case invokes it with
-  // coverageWillMeasure computed per the legacy formula (src/pipeline.ts:2563-2564):
+  // W4 fix (F1a) update: the use-case's ExecutionPort now accepts an ExecutionOpts bag (see
+  // ports/index.ts) and the fixLoopExecution closure below DOES thread FixLoopExecuteInput.specFiles
+  // through to it (see "W4 fix (F1a): filtered-retry threads specFiles" tests further down in this
+  // file) — that gap is closed. This test's own scope stays coverageWillMeasure specifically: the
+  // narrowest port-observable proof is instrumenting FixLoop.run itself and asserting the use-case
+  // invokes it with coverageWillMeasure computed per the legacy formula (src/pipeline.ts:2563-2564):
   // `generating && mode === "diff" && covPolicy.mode !== "off"` (RunQaInput.triggerRepo exists now,
   // but this formula deliberately omits the !triggerRepo conjunct — over-firing true for cross-repo
   // only disables the FixLoop's filtered-retry optimization, a documented harmless trade-off; the
@@ -1587,20 +1586,27 @@ test("KEYSTONE: the SAME diff-mode PASS run WITHOUT input.triggerRepo still thre
 // the port barrel but nothing in this use-case ever reached for `this.deps.observer`. These tests
 // pin (1) the phase-boundary emission order on a representative happy path, and (2) that an
 // absent observer remains a pure no-op (backward compatible with every pre-existing test/
-// composition above, none of which supply one). ──────────────────────────────────────────────────
+// composition above, none of which supply one). W4 fix (F1b): onEvent() IS now exercised — see the
+// "live per-case events" suite further down, which reads `events` off this same fakeObserver(). ──
 
-function fakeObserver(): { observer: import("@contexts/qa-run-orchestration/application/ports/index.ts").ObserverPort; steps: Array<{ step: string; detail?: string }> } {
+function fakeObserver(): {
+  observer: import("@contexts/qa-run-orchestration/application/ports/index.ts").ObserverPort;
+  steps: Array<{ step: string; detail?: string }>;
+  events: import("@kernel/run-event.ts").RunEventBody[];
+} {
   const steps: Array<{ step: string; detail?: string }> = [];
+  const events: import("@kernel/run-event.ts").RunEventBody[] = [];
   return {
     observer: {
       onStep(step, detail) {
         steps.push({ step, ...(detail !== undefined ? { detail } : {}) });
       },
-      onEvent() {
-        /* not exercised by these tests — RunQaUseCase never calls onEvent today */
+      onEvent(body) {
+        events.push(body);
       },
     },
     steps,
+    events,
   };
 }
 
@@ -1755,6 +1761,184 @@ test("ObserverPort: an ABSENT observer is a pure no-op — every RunQaUseCaseDep
   const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
 
   await assert.doesNotReject(useCase.run({ ...baseInput, mode: "diff" }));
+});
+
+// ── W4 fix (F1b) — live per-case/per-test events. ExecutionOpts.onCase/onRunning/onDiscovered
+// (threaded through the widened ExecutionPort.execute opts bag) now drive ObserverPort.onEvent
+// DURING execute(), not only reconstructable post-hoc from the final case list. ─────────────────
+
+test("live events: a passing execute() invoking onCase/onRunning/onDiscovered emits test.started/test.discovered/test.passed via onEvent, DURING execute()", async () => {
+  const { ports } = stubPorts({
+    execute: async (_specDir, opts) => {
+      const o = opts && !(opts instanceof AbortSignal) ? opts : {};
+      o.onDiscovered?.("checkout flow", "checkout.spec.ts");
+      o.onRunning?.("checkout flow");
+      o.onCase?.({ name: "checkout flow", status: "pass", durationMs: 1200 });
+      return { verdict: "pass", cases: [{ name: "checkout flow", status: "pass", durationMs: 1200 }], logs: "" };
+    },
+  });
+  const { observer, events } = fakeObserver();
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig, observer });
+
+  const out = await useCase.run({ ...baseInput, runId: "live-events-pass" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.deepEqual(events.filter((e) => e.type.startsWith("test.")), [
+    { type: "test.discovered", name: "checkout flow", file: "checkout.spec.ts" },
+    { type: "test.started", name: "checkout flow" },
+    { type: "test.passed", name: "checkout flow", durationMs: 1200 },
+  ]);
+});
+
+test("live events: a failing case's onCase invocation emits test.failed via onEvent", async () => {
+  const { ports } = stubPorts({
+    execute: async (_specDir, opts) => {
+      const o = opts && !(opts instanceof AbortSignal) ? opts : {};
+      o.onCase?.({ name: "login", status: "fail", detail: "timeout waiting for selector" });
+      return { verdict: "fail", cases: [{ name: "login", status: "fail", detail: "timeout waiting for selector" }], logs: "" };
+    },
+  });
+  const { observer, events } = fakeObserver();
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig, observer });
+
+  await useCase.run({ ...baseInput, runId: "live-events-fail", mode: "manual" });
+
+  assert.ok(
+    events.some((e) => e.type === "test.failed" && e.name === "login" && e.detail === "timeout waiting for selector"),
+    "a failing case must emit test.failed with its detail",
+  );
+});
+
+test("live events: NO duplicate events — RunQaUseCase itself emits each onCase invocation exactly once (no post-hoc re-emission on top of the live stream)", async () => {
+  let onCaseCallCount = 0;
+  const { ports } = stubPorts({
+    execute: async (_specDir, opts) => {
+      const o = opts && !(opts instanceof AbortSignal) ? opts : {};
+      o.onCase?.({ name: "checkout", status: "pass", durationMs: 500 });
+      onCaseCallCount++;
+      return { verdict: "pass", cases: [{ name: "checkout", status: "pass", durationMs: 500 }], logs: "" };
+    },
+  });
+  const { observer, events } = fakeObserver();
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig, observer });
+
+  await useCase.run({ ...baseInput, runId: "live-events-no-dup" });
+
+  const passedEvents = events.filter((e) => e.type === "test.passed" && e.name === "checkout");
+  assert.equal(onCaseCallCount, 1, "sanity: the stub's onCase fired exactly once");
+  assert.equal(passedEvents.length, 1, "RunQaUseCase must emit exactly ONE test.passed per onCase invocation — it must never additionally re-walk the returned cases[] and re-emit");
+});
+
+test("live events: onCase/onRunning/onDiscovered are threaded on EVERY FixLoop retry, not just the initial execute()", async () => {
+  let executeCallCount = 0;
+  const { ports } = stubPorts({
+    execute: async (_specDir, opts) => {
+      executeCallCount++;
+      const o = opts && !(opts instanceof AbortSignal) ? opts : {};
+      if (executeCallCount === 1) {
+        o.onCase?.({ name: "login", status: "fail", detail: "boom" });
+        return { verdict: "fail", cases: [{ name: "login", status: "fail", detail: "boom" }], logs: "" };
+      }
+      o.onCase?.({ name: "login", status: "pass", durationMs: 300 });
+      return { verdict: "pass", cases: [{ name: "login", status: "pass", durationMs: 300 }], logs: "" };
+    },
+    generate: async () => ({ specs: ["a.spec.ts"], approved: true }),
+  });
+  const { observer, events } = fakeObserver();
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig, observer });
+
+  await useCase.run({ ...baseInput, runId: "live-events-retry", mode: "diff" });
+
+  assert.ok(executeCallCount > 1, "sanity: the FixLoop must have engaged a retry");
+  const testEvents = events.filter((e) => e.type === "test.failed" || e.type === "test.passed");
+  assert.equal(testEvents.length, 2, "both the initial failing case AND the retry's passing case must emit their own live event");
+  assert.equal(testEvents[0]?.type, "test.failed");
+  assert.equal(testEvents[1]?.type, "test.passed");
+});
+
+test("live events: an ABSENT observer is a pure no-op for onCase/onRunning/onDiscovered too (backward compatible)", async () => {
+  const { ports } = stubPorts({
+    execute: async (_specDir, opts) => {
+      const o = opts && !(opts instanceof AbortSignal) ? opts : {};
+      // Must not throw when no observer is wired.
+      o.onDiscovered?.("x", "x.spec.ts");
+      o.onRunning?.("x");
+      o.onCase?.({ name: "x", status: "pass" });
+      return { verdict: "pass", cases: [{ name: "x", status: "pass" }], logs: "" };
+    },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig }); // no observer
+
+  await assert.doesNotReject(useCase.run({ ...baseInput, runId: "live-events-no-observer" }));
+});
+
+// ── W4 fix (F1a) — FixLoop filtered-retry threads specFiles. FixLoopExecuteInput.specFiles (the
+// aggregate's OWN canFilter/failedSpecFiles decision, fix-loop.aggregate.ts:359-382) now reaches
+// the REAL ExecutionPort.execute() call, instead of being dropped by the wiring closure. ─────────
+
+test("FixLoop filtered-retry: a scoped retry (single failing spec, no coverage measurement) threads ONLY the failed spec file into execute()'s opts.specFiles", async () => {
+  let executeCallCount = 0;
+  const capturedSpecFiles: (string[] | undefined)[] = [];
+  const { ports } = stubPorts({
+    execute: async (_specDir, opts) => {
+      executeCallCount++;
+      const o = opts && !(opts instanceof AbortSignal) ? opts : {};
+      capturedSpecFiles.push(o.specFiles);
+      if (executeCallCount === 1) {
+        // Both cases fail, but only "login" carries a file — matches FixLoop's own
+        // allFailedHaveFile guard needing every failed case to carry a file to filter.
+        return {
+          verdict: "fail" as const,
+          cases: [{ name: "login", status: "fail" as const, file: "login.spec.ts", detail: "boom" }],
+          logs: "",
+        };
+      }
+      return { verdict: "pass" as const, cases: [{ name: "login", status: "pass" as const }], logs: "" };
+    },
+    // The regen only rewrites the failing spec (stays inside the failed set — canFilter requires
+    // regenStayedInFailedSet), so filtering is not blocked by an "outsider" spec being touched too.
+    generate: async () => ({ specs: ["login.spec.ts"], approved: true }),
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: { ...baseConfig, needsReview: false, coveragePolicyMode: "off" } });
+
+  const out = await useCase.run({ ...baseInput, runId: "filtered-retry-specfiles", mode: "diff" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.ok(executeCallCount >= 2, "sanity: the FixLoop must have retried at least once");
+  // The FIRST execute() (initial, pre-FixLoop) never carries specFiles (nothing has failed yet).
+  assert.equal(capturedSpecFiles[0], undefined);
+  // The retry (2nd execute() call) must be scoped to ONLY the failing spec file.
+  assert.deepEqual(capturedSpecFiles[1], ["login.spec.ts"], "the filtered retry must thread ONLY the failed spec file(s) into ExecutionOpts.specFiles");
+});
+
+test("FixLoop filtered-retry: coverageWillMeasure:true (diff mode + coveragePolicyMode!=='off') disables filtering — the retry re-runs the FULL suite (no specFiles)", async () => {
+  let executeCallCount = 0;
+  const capturedSpecFiles: (string[] | undefined)[] = [];
+  const { ports } = stubPorts({
+    execute: async (_specDir, opts) => {
+      executeCallCount++;
+      const o = opts && !(opts instanceof AbortSignal) ? opts : {};
+      capturedSpecFiles.push(o.specFiles);
+      if (executeCallCount === 1) {
+        return {
+          verdict: "fail" as const,
+          cases: [{ name: "login", status: "fail" as const, file: "login.spec.ts", detail: "boom" }],
+          logs: "",
+        };
+      }
+      return { verdict: "pass" as const, cases: [{ name: "login", status: "pass" as const }], logs: "" };
+    },
+    generate: async () => ({ specs: ["login.spec.ts"], approved: true }),
+  });
+  // coveragePolicyMode defaults to "signal" in baseConfig -> coverageWillMeasure:true in diff mode
+  // -> FixLoop's own canFilter guard (!coverageWillMeasure) must block filtering.
+  const useCase = new RunQaUseCase({ ...ports, config: { ...baseConfig, needsReview: false } });
+
+  const out = await useCase.run({ ...baseInput, runId: "filtered-retry-coverage-blocks-filter", mode: "diff" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.ok(executeCallCount >= 2, "sanity: the FixLoop must have retried at least once");
+  assert.equal(capturedSpecFiles[1], undefined, "when change-coverage WILL measure this run, the retry must NOT be filtered — every prior case's lines must stay observable");
 });
 
 // ── W1 publication-correctness package (audit-verified, cutover-blocking) ─────────────────────
@@ -2433,4 +2617,67 @@ test("W3 F3: an early-exit terminal (invalid) carries cases:[] and no logs — n
   assert.equal(out.decision.verdict, "invalid");
   assert.deepEqual(out.cases, []);
   assert.equal(out.logs, undefined, "an exit that never reached execute() must not fabricate a logs string");
+});
+
+// ── W4 fix (F2) — per-run baselineCases (the dead value oracle). measure() is only ever called
+// when run.verdict === "pass", so run.cases AT THAT POINT is exactly the green baseline the legacy
+// computes post-execution (src/pipeline.ts:731's `run.cases.filter(c=>c.status==="pass")
+// .map(c=>c.name)`). This closes the gap where the composition root's static ctx.baselineCases
+// placeholder (rewritten-engine-factory.ts's `baselineCases: []`) left the oracle permanently null.
+
+test("F2: measure() receives the run's own passing case names as baselineCases (mirrors legacy's post-execution src/pipeline.ts:731 formula)", async () => {
+  const passingCases = [
+    { name: "login flow", status: "pass" as const },
+    { name: "checkout flow", status: "pass" as const },
+  ];
+  let capturedBaselineCases: string[] | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass", cases: passingCases, logs: "2 passed" }),
+    measure: async (_br, _specDir, _diff, baselineCases) => {
+      capturedBaselineCases = baselineCases;
+      return { status: "unknown", ratio: null, valueScore: 0.75 };
+    },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "f2-baseline-cases-from-run", mode: "diff" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.deepEqual(capturedBaselineCases, ["login flow", "checkout flow"]);
+  assert.equal(out.gateSignals.valueScore, 0.75, "the oracle's real score must survive to the returned RunQaResult");
+});
+
+test("F2: measure() excludes non-passing case names from baselineCases (a flaky-then-pass run's own flaky case is not a 'clean baseline' case)", async () => {
+  // A verdict of "pass" can still carry non-"pass" cases in its list (e.g. a flaky case that
+  // eventually passed on retry is recorded with status:"flaky", not "pass" — CaseStatus union).
+  const mixedCases = [
+    { name: "login flow", status: "pass" as const },
+    { name: "checkout flow", status: "flaky" as const },
+  ];
+  let capturedBaselineCases: string[] | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass", cases: mixedCases, logs: "1 passed, 1 flaky" }),
+    measure: async (_br, _specDir, _diff, baselineCases) => {
+      capturedBaselineCases = baselineCases;
+      return { status: "unknown", ratio: null };
+    },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "f2-baseline-cases-excludes-flaky", mode: "diff" });
+
+  assert.deepEqual(capturedBaselineCases, ["login flow"], "only genuinely-passing cases belong in the baseline, matching the legacy's own status==='pass' filter exactly");
+});
+
+test("F2: a non-pass verdict never calls measure() at all — no baselineCases question arises (measure is gated on run.verdict==='pass')", async () => {
+  let measureCallCount = 0;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "fail", cases: [{ name: "login", status: "fail" as const }], logs: "x" }),
+    measure: async () => { measureCallCount++; return { status: "unknown", ratio: null }; },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "f2-no-measure-on-fail", mode: "diff" });
+
+  assert.equal(measureCallCount, 0, "measure() must never be called for a non-pass verdict — baselineCases threading is entirely moot here");
 });

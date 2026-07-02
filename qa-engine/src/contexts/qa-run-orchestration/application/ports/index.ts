@@ -183,10 +183,48 @@ export interface ReviewPort {
 export interface ValidationPort {
   validate(specDir: string): Promise<{ ok: boolean; errors: string[]; infra?: boolean }>; // infra optional: mirrors src/qa/validate.ts CheckResult
 }
+// W4 fix (F1, audit-verified cutover blocker): the legacy's execute() opts (src/qa/execute.ts
+// ExecuteOptions, threaded through pipeline.ts's own runE2E/runCodeTests call sites) carry
+// faultInject/specFiles/project/timeoutMs/onCase/onRunning/onDiscovered — E2eExecutionStrategy
+// (test-execution/infrastructure/e2e-execution.strategy.ts) already forwards every one of these
+// into ExecutionRequest, but THIS port previously exposed only `signal` as a 2nd positional arg,
+// so every capability past signal was structurally unreachable at the orchestration layer no
+// matter what the strategy supported underneath. Widened with ONE optional opts bag — the SAME
+// "enrichment object" precedent GenerationEnrichment/ReviewEnrichment already established (no
+// further positional creep) — so each field is independently absent-safe.
+//
+// Backward compat: `opts` accepts EITHER the bag OR a bare AbortSignal (the pre-existing 2nd
+// positional arg shape) so every caller/stub/test written against `execute(specDir, signal?)`
+// keeps compiling and behaving identically — a bare AbortSignal is normalized to `{ signal }`
+// internally by the adapter (see execution-port.adapter.ts). Distinguishing the two shapes needs
+// no runtime type-check ambiguity: AbortSignal is a class instance (has `.aborted`/`.addEventListener`),
+// the opts bag is a plain object literal — callers pass one or the other, never both.
+export interface ExecutionOpts {
+  signal?: AbortSignal;
+  faultInject?: boolean;
+  // Filtered-retry (F1a): scope a re-execution to ONLY the specs that failed (mirrors legacy's
+  // `canFilter ? { specFiles: failedSpecFiles } : {}`, src/pipeline.ts's own filtered-retry gate) —
+  // the FixLoop aggregate (domain/fix-loop.aggregate.ts) already computes canFilter/failedSpecFiles
+  // on its OWN local FixLoopExecutionPort; this field is what lets the use-case-level wiring thread
+  // that decision through to the REAL strategy instead of dropping it on the floor.
+  specFiles?: string[];
+  project?: string;
+  timeoutMs?: number;
+  // Live per-case/per-test progress (F1b): mirrors ExecutionRequest's own onCase/onRunning/
+  // onDiscovered (test-execution/application/ports/index.ts) — threading these through lets a
+  // caller emit ObserverPort.onEvent("test.started"/"test.passed"/"test.failed"/"test.discovered")
+  // DURING execution instead of only reconstructing them post-hoc from the final case list.
+  onCase?: (c: QaCase) => void;
+  onRunning?: (title: string) => void;
+  onDiscovered?: (title: string, file?: string) => void;
+}
 export interface ExecutionPort {
   // signal: Plan 7.1 (engram #913) — see GenerationPort's own signal note; wraps runE2E's existing
   // signal-aware execute() so a cancelled run's in-flight test execution can be interrupted.
-  execute(specDir: string, signal?: AbortSignal): Promise<{ verdict: RunVerdict; cases: QaCase[]; logs: string }>;
+  //
+  // opts: W4 fix (F1) — see ExecutionOpts's own header above. A bare AbortSignal (the pre-existing
+  // shape) or the richer opts bag; absent -> no capability beyond specDir (unchanged default).
+  execute(specDir: string, opts?: AbortSignal | ExecutionOpts): Promise<{ verdict: RunVerdict; cases: QaCase[]; logs: string }>;
 }
 export interface ObjectiveSignalPort {
   // valueScore: the value-oracle (mutation-testing) result the legacy persists alongside
@@ -201,7 +239,21 @@ export interface ObjectiveSignalPort {
   // own `mode === "diff"` coverage gate). Absent (every non-diff mode, or a caller that predates this
   // param) -> the adapter's assembler is never invoked -> decide() receives null -> "unknown" -> NEVER
   // blocks (the keystone's own architecturally-safe default, unchanged).
-  measure(br: BlastRadius, specDir: string, diff?: string): Promise<{ status: "pass" | "fail" | "unknown"; ratio: number | null; valueScore?: number | null }>;
+  //
+  // baselineCases: W4 fix (F2, audit-verified cutover blocker — "the dead value oracle"). The
+  // e2e fault-injection oracle (ValueOraclePort.measure's own baselineCases param,
+  // objective-signal/application/ports/index.ts) returns valueScore:null FOREVER unless it is
+  // told which specs are the green baseline to inject faults against — the legacy computes this
+  // PER RUN, post-execution, from the just-executed run's own passing case names
+  // (src/pipeline.ts:731's `run.cases.filter(c=>c.status==="pass").map(c=>c.name)`). The
+  // composition root previously had no per-run value to supply here (rewritten-engine-factory.ts's
+  // own `baselineCases: []` is a STATIC, composition-time placeholder — always empty, since no
+  // per-run case list exists yet when CompositionConfig is built) — every rewritten-engine run's
+  // valueScore was silently null. Same "dynamic diff" precedent as the `diff` param immediately
+  // above: an OPTIONAL trailing arg, threaded from RunQaUseCase's own just-executed `run.cases` at
+  // the measure() call site. Absent -> the adapter falls back to its static ctx.baselineCases
+  // (backward compatible with every pre-existing caller/stub/test).
+  measure(br: BlastRadius, specDir: string, diff?: string, baselineCases?: string[]): Promise<{ status: "pass" | "fail" | "unknown"; ratio: number | null; valueScore?: number | null }>;
 }
 export interface PublicationPort {
   // reviewerApproved/coverageBlocks/e2eChanged (audit fix, judgment-day): the REAL per-run values
