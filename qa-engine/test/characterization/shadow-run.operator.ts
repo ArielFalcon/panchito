@@ -44,19 +44,20 @@
 // ── TS6307 note (obs #911 — CI-gated qa-engine files must not drag root src/ into project scope) ─
 // This file imports root src/ (config-loader, pipeline, opencode-client, prompts, verdict parsers,
 // model-window-catalog, sanitizer, validate, execute, code-runner, github, mutation-code,
-// fault-injection-e2e, change-coverage, deploy-gate, repo-mirror) to assemble the REAL production
+// fault-injection-e2e, deploy-gate, repo-mirror) to assemble the REAL production
 // collaborators. Per the TS6307 cascade discovery, it is therefore added to
 // qa-engine/tsconfig.json's `exclude` list and typecheck-covered instead via
 // qa-engine/tsconfig.parity.json (the same pattern generation-ports-parity.test.ts uses) — see
 // both files' diffs in this same commit. `npm run typecheck` must stay exit 0 after this change.
 //
 // ── Genuine adapter/port gaps found while assembling this config (reported, not fabricated) ──────
-// See the "GAP:" comments below (the browser coverage collector and PromptBudgetPort/
-// ManifestRepositoryPort's exact real-fn names) — each is either a thin, faithful wiring wrapper
-// over an ALREADY-REAL function (documented inline, not fabricated business logic) or a currently-
-// unshipped qa-engine primitive. None of these blocked assembling a complete CompositionConfig.
-// VcsReadPort's runner GAP is now CLOSED (Sub-Plan 7.2 item 1): SandboxedBinaryRunner ships a real
-// concrete SandboxedBinaryRunnerAdapter, wired below with ProcessKillAdapter.
+// See the "GAP:" comments below (PromptBudgetPort/ManifestRepositoryPort's exact real-fn names) —
+// each is either a thin, faithful wiring wrapper over an ALREADY-REAL function (documented inline,
+// not fabricated business logic) or a currently-unshipped qa-engine primitive. None of these
+// blocked assembling a complete CompositionConfig. VcsReadPort's runner GAP is now CLOSED (Sub-Plan
+// 7.2 item 1): SandboxedBinaryRunner ships a real concrete SandboxedBinaryRunnerAdapter, wired below
+// with ProcessKillAdapter. The coverage-collector GAP is now CLOSED (Sub-Plan 7.2 item 2): see the
+// note near the coverage import below.
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseShadowRunArgs } from "./shadow-run-args.ts";
@@ -89,7 +90,7 @@ import { StrykerMutationOracleAdapter } from "@contexts/objective-signal/infrast
 import { FaultInjectionOracleAdapter } from "@contexts/objective-signal/infrastructure/fault-injection-oracle.adapter.ts";
 import { GitHubPrAdapter } from "@contexts/workspace-and-publication/infrastructure/github-pr.adapter.ts";
 import { GitHubIssueAdapter } from "@contexts/workspace-and-publication/infrastructure/github-issue.adapter.ts";
-import type { CoverageCollectorPort, CoverageReport } from "@contexts/objective-signal/application/ports/index.ts";
+import { makeTargetCoverageCollector } from "@contexts/objective-signal/infrastructure/target-coverage-collector.ts";
 
 // ── Root src/ collaborators (the REAL production pieces — see the TS6307 note above) ─────────────
 import { loadAppConfig, type AppConfig } from "../../../src/orchestrator/config-loader.ts";
@@ -112,7 +113,6 @@ import { runCodeTests, defaultCodeExecuteDeps } from "../../../src/qa/code-runne
 import { github } from "../../../src/integrations/github.ts";
 import { runMutationOracle, realMutationDeps } from "../../../src/qa/learning/mutation-code.ts";
 import { runFaultInjectionOracle, defaultFaultInjectionDeps } from "../../../src/qa/learning/fault-injection-e2e.ts";
-import { defaultCollectCoverage } from "../../../src/qa/change-coverage.ts";
 import { waitForDeploy } from "../../../src/env/deploy-gate.ts";
 import { ensureMirror, getCommitDiff, defaultMirrorDeps, type MirrorDeps } from "../../../src/integrations/repo-mirror.ts";
 
@@ -123,26 +123,12 @@ import { ensureMirror, getCommitDiff, defaultMirrorDeps, type MirrorDeps } from 
 // this script to inline its own spawn primitive — GitMirrorReadAdapter now consumes the same real
 // class the rest of qa-engine will use once assembled outside this operator script.
 
-// ── GAP: no standalone V8-dump reader / CoverageReport-shaped collector exists in src/ (only the
-// private browserCoverageDir()/collectBrowserCoverage() inside change-coverage.ts, unexported, and
-// the exported defaultCollectCoverage() returns a flattened CoveredLines Map — a DIFFERENT shape
-// than CoverageCollectorPort's `{ covered: { file, lines }[] }`). Rather than reimplement dump
-// parsing (which would duplicate real, already-correct logic) or leave it unwired, this adapts the
-// REAL defaultCollectCoverage()'s output into the port shape — same underlying V8/lcov/Istanbul/
-// JaCoCo collection defaultCollectCoverage already performs, just re-shaped at the boundary. This
-// bypasses CoverageCollectorAdapter/V8BrowserCoverageAdapter (both need per-collector primitives
-// that are not exported either) — reported as a gap: qa-engine should export a
-// (specDir, namespace) => Promise<V8DumpFile[]> reader from src/qa/change-coverage.ts (or its own
-// port-shaped adapter) so V8BrowserCoverageAdapter can be constructed without this workaround.
-function makeCoverageCollector(repoDir: string, e2eDir: string, target: "e2e" | "code", changedFiles: string[]): CoverageCollectorPort {
-  return {
-    async collect(_specDir: string, namespace: string): Promise<CoverageReport> {
-      const lines = defaultCollectCoverage({ target, repoDir, e2eDir, changedFiles, namespace });
-      if (!lines) return { covered: [] };
-      return { covered: [...lines].map(([file, ln]) => ({ file, lines: [...ln] })) };
-    },
-  };
-}
+// The browser-coverage / native-coverage GAP is now CLOSED (Sub-Plan 7.2 item 2): a real, src/-free
+// CoverageCollectorPort is built via makeTargetCoverageCollector (qa-engine/src/contexts/
+// objective-signal/infrastructure/target-coverage-collector.ts), which composes the ALREADY-REAL
+// V8BrowserCoverageAdapter / LcovCoverageAdapter / C8CoverageAdapter / JacocoCoverageAdapter with
+// real FS dump readers (coverage-dump-reader.ts) — no more re-shaping defaultCollectCoverage()'s
+// output at this script's own boundary.
 
 // ── GAP: ManifestRepositoryPort's exact real fn pair (readManifest/reconcileManifest) does not
 // exist by those names — src/integrations/opencode-client.ts exports only the lower-level
@@ -254,7 +240,7 @@ function buildCompositionConfig(app: AppConfig, sha: string, mirrorDir: string, 
   const e2e = new E2eExecutionStrategy((specDir, opts) => runE2E(specDir, opts, defaultExecuteDeps));
   const code = new CodeExecutionStrategy((repoDir, opts) => runCodeTests(repoDir, opts, defaultCodeExecuteDeps));
 
-  const collector = makeCoverageCollector(mirrorDir, e2eDir, target, changedFiles);
+  const collector = makeTargetCoverageCollector({ target, repoDir: mirrorDir, e2eDir, changedFiles });
   const oracle = isCode
     ? new StrykerMutationOracleAdapter((input) => runMutationOracle(input, realMutationDeps))
     : new FaultInjectionOracleAdapter(
