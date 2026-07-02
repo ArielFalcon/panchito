@@ -51,14 +51,18 @@
 // both files' diffs in this same commit. `npm run typecheck` must stay exit 0 after this change.
 //
 // ── Genuine adapter/port gaps found while assembling this config (reported, not fabricated) ──────
-// See the "GAP:" comments below (PromptBudgetPort/ManifestRepositoryPort's exact real-fn names) —
-// each is either a thin, faithful wiring wrapper over an ALREADY-REAL function (documented inline,
-// not fabricated business logic) or a currently-unshipped qa-engine primitive. None of these
-// blocked assembling a complete CompositionConfig. VcsReadPort's runner GAP is now CLOSED (Sub-Plan
-// 7.2 item 1): SandboxedBinaryRunner ships a real concrete SandboxedBinaryRunnerAdapter, wired below
-// with ProcessKillAdapter. The coverage-collector GAP is now CLOSED (Sub-Plan 7.2 item 2): see the
-// note near the coverage import below.
-import { existsSync, readFileSync } from "node:fs";
+// See the "GAP:" comments below — each was either a thin, faithful wiring wrapper over an
+// ALREADY-REAL function (documented inline, not fabricated business logic) or a currently-unshipped
+// qa-engine primitive. None of these blocked assembling a complete CompositionConfig. VcsReadPort's
+// runner GAP is now CLOSED (Sub-Plan 7.2 item 1): SandboxedBinaryRunner ships a real concrete
+// SandboxedBinaryRunnerAdapter, wired below with ProcessKillAdapter. The coverage-collector GAP is
+// now CLOSED (Sub-Plan 7.2 item 2): see the note near the coverage import below. The
+// ManifestRepositoryPort GAP is now CLOSED (Sub-Plan 7.2 item 3): readManifest/reconcileManifest are
+// real, src/-free qa-engine fns (manifest-fs.ts) — the old readManifestFile/reconcileManifestFile
+// local stopgaps (a raw JSON read + a delegate into src/'s upsertManifest) are removed. The
+// PromptBudgetPort.capDiff GAP is now CLOSED (Sub-Plan 7.2 item 4): capDiff/capText are real,
+// src/-free qa-engine fns (prompt-cap.ts, a verbatim port of sanitizer.ts's ALREADY-DISTINCT capDiff/
+// capText) — the old "capText wired into both slots" substitution is removed.
 import { join } from "node:path";
 import { parseShadowRunArgs } from "./shadow-run-args.ts";
 import { compareShadowRun } from "./shadow-comparison.ts";
@@ -82,7 +86,9 @@ import { AgentRuntimeAdapter } from "@contexts/generation/infrastructure/agent-r
 import { PromptRenderingAdapter } from "@contexts/generation/infrastructure/prompt-rendering.adapter.ts";
 import { VerdictParserAdapter } from "@contexts/generation/infrastructure/verdict-parser.adapter.ts";
 import { ManifestRepositoryAdapter } from "@contexts/generation/infrastructure/manifest-repository.adapter.ts";
+import { readManifest, reconcileManifest } from "@contexts/generation/infrastructure/manifest-fs.ts";
 import { PromptBudgetAdapter } from "@contexts/generation/infrastructure/prompt-budget.adapter.ts";
+import { capDiff, capText } from "@contexts/generation/infrastructure/prompt-cap.ts";
 import { StaticGateAdapter } from "@contexts/test-execution/infrastructure/static-gate.adapter.ts";
 import { E2eExecutionStrategy } from "@contexts/test-execution/infrastructure/e2e-execution.strategy.ts";
 import { CodeExecutionStrategy } from "@contexts/test-execution/infrastructure/code-execution.strategy.ts";
@@ -106,7 +112,6 @@ import {
 import { parseVerdict } from "../../../src/integrations/verdict-parse.ts";
 import { parseReviewerVerdict } from "../../../src/integrations/verdict-validate.ts";
 import { roleWindowBytes } from "../../../src/integrations/model-window-catalog.ts";
-import { capText } from "../../../src/orchestrator/sanitizer.ts";
 import { validateSpecs, defaultValidateDeps } from "../../../src/qa/validate.ts";
 import { runE2E, defaultExecuteDeps } from "../../../src/qa/execute.ts";
 import { runCodeTests, defaultCodeExecuteDeps } from "../../../src/qa/code-runner.ts";
@@ -129,30 +134,6 @@ import { ensureMirror, getCommitDiff, defaultMirrorDeps, type MirrorDeps } from 
 // V8BrowserCoverageAdapter / LcovCoverageAdapter / C8CoverageAdapter / JacocoCoverageAdapter with
 // real FS dump readers (coverage-dump-reader.ts) — no more re-shaping defaultCollectCoverage()'s
 // output at this script's own boundary.
-
-// ── GAP: ManifestRepositoryPort's exact real fn pair (readManifest/reconcileManifest) does not
-// exist by those names — src/integrations/opencode-client.ts exports only the lower-level
-// upsertManifest(fs, path, entries) + realManifestFs primitives (a raw JSON read/write, not a
-// read+reconcile pair). These two thin fns are a faithful wrap of those REAL primitives (parsing
-// the on-disk manifest.json via realManifestFs.read, delegating the write path to the REAL
-// upsertManifest — no new reconciliation rule invented).
-interface RealManifestEntry { id: string; file: string; flow: string; objective: string; }
-
-function readManifestFile(specDir: string): RealManifestEntry[] {
-  const path = join(specDir, ".qa", "manifest.json");
-  if (!existsSync(path)) return [];
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf8"));
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-async function reconcileManifestFile(specDir: string, entries: readonly RealManifestEntry[]): Promise<RealManifestEntry[]> {
-  const { realManifestFs, upsertManifest } = await import("../../../src/integrations/opencode-client.ts");
-  upsertManifest(realManifestFs, join(specDir, ".qa", "manifest.json"), entries as never);
-  return readManifestFile(specDir);
-}
 
 function roleToAgentName(role: AgentRole): string {
   const map: Record<AgentRole, string> = {
@@ -221,12 +202,11 @@ function buildCompositionConfig(app: AppConfig, sha: string, mirrorDir: string, 
     runtime: agentRuntime,
     rendering,
     verdicts,
-    manifest: new ManifestRepositoryAdapter({ readManifest: async (specDir) => readManifestFile(specDir), reconcileManifest: reconcileManifestFile }),
-    // GAP: PromptBudgetPort's capDiff slot has no distinct real fn — sanitizer.ts exports only
-    // capText (a single text-truncation capper), not a diff-specific capDiff. Wiring the SAME real
-    // capText into both slots is a documented substitution (one real capper for both roles), not a
-    // fabrication of new truncation logic.
-    budget: new PromptBudgetAdapter(roleWindowBytes, capText, capText),
+    // Real, src/-free ManifestRepositoryPort fns (Sub-Plan 7.2 item 3 — manifest-fs.ts).
+    manifest: new ManifestRepositoryAdapter({ readManifest, reconcileManifest }),
+    // Real, src/-free capDiff/capText (Sub-Plan 7.2 item 4 — prompt-cap.ts, a verbatim port of
+    // sanitizer.ts's ALREADY-DISTINCT diff-aware capDiff and flat-text capText — no substitution).
+    budget: new PromptBudgetAdapter(roleWindowBytes, capDiff, capText),
   });
 
   const staticGate = new StaticGateAdapter({
