@@ -24,7 +24,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scrubEnv } from "../../../shared-infrastructure/process-sandbox/scrub-env.ts";
 import { ProcessKillAdapter } from "../../../shared-infrastructure/process-sandbox/process-kill.adapter.ts";
-import { buildRouteCatalog, buildTestIdIndex, degradedRouteWarning } from "./route-catalog.ts";
+import { buildRouteCatalog, buildTestIdIndex, degradedRouteWarning, ROUTE_STATUS } from "./route-catalog.ts";
 import type { ChangedElement } from "../../../shared-kernel/diff-parser/changed-element.ts";
 
 const processKill = new ProcessKillAdapter();
@@ -70,6 +70,12 @@ export interface RouteSnapshot {
   testIds?: Map<string, number>; // Pillar 2 catalog: role-independent test-id value→count index (presence + uniqueness) — feeds the pre-execution selector gate
   settled?: boolean; // Pillar 2 (Slice 2): a SECONDARY waitForLoadState("networkidle") AFTER goto resolved within budget → the catalog is post-hydration and the gate may fail-closed. Absent/false ⇒ possibly pre-hydration ⇒ advisory only.
   error?: string; // capture failed for this route (degrade — never blocks review)
+  // Fix 2 (audit leak 5): RAW captured browser runtime signals — the child script does NOT classify
+  // these; classification (mirroring src/qa/failure-adjudicator.ts's FRAMEWORK_ERROR_RE/BENIGN_NOISE_RE)
+  // happens in route-catalog.ts's buildRouteCatalog. Reset per route (never accumulated across routes).
+  runtimeErrors?: { type: string; text: string }[];
+  finalUrl?: string; // page.url() after the settle probe — lets buildRouteCatalog detect a redirect
+                      // (e.g. bounced to a login page) by comparing pathnames against the requested route.
 }
 
 export interface CaptureDomInput {
@@ -288,6 +294,15 @@ export function formatDomSnapshot(snaps: RouteSnapshot[], changed?: ChangedEleme
   for (const s of snaps) {
     if (s.error) {
       lines.push(`route ${s.route}: (could not capture — ${s.error})`);
+      continue;
+    }
+    // Fix 2 (audit leak 5) sub-case 5: a route can render WITHOUT a capture `error` yet still be
+    // degraded (empty nodes, a classified runtimeErrors signal, or a redirect) — reuse
+    // buildRouteCatalog's SAME degrade policy (imported above) so this warning never drifts from the
+    // gate's own trust decision. A degraded/empty route gets a warning line instead of a silent bare
+    // header, so the agent knows NOT to trust this route's grounding.
+    if (buildRouteCatalog(s).status === ROUTE_STATUS.DEGRADED) {
+      lines.push(`route ${s.route}: (route rendered empty or errored — possibly broken app; verify live)`);
       continue;
     }
     const all = s.nodes ?? [];
@@ -705,10 +720,10 @@ const renderTimeoutFor = (routeCount: number): number =>
   Math.min(RENDER_BASE_TIMEOUT_MS + Math.max(1, routeCount) * RENDER_PER_ROUTE_TIMEOUT_MS, RENDER_MAX_TIMEOUT_MS);
 
 // Pure string-builder for the render child's script text — extracted so the httpCredentials wiring
-// (Fix 1, audit leak 4) is assertable without spawning a real browser. `playwrightRequirePath`
-// defaults to a placeholder so the function is callable with no args for script-text assertions in
-// tests; defaultCaptureDomDeps.render passes the real derived LOCAL path (not agent input, so its
-// interpolation is safe).
+// (Fix 1, audit leak 4) and the runtime-error/redirect capture (Fix 2, audit leak 5) are assertable
+// without spawning a real browser. `playwrightRequirePath` defaults to a placeholder so the function
+// is callable with no args for script-text assertions in tests; defaultCaptureDomDeps.render passes
+// the real derived LOCAL path (not agent input, so its interpolation is safe).
 export function buildCaptureScript(playwrightRequirePath = "playwright"): string {
   return `const { chromium } = require(${JSON.stringify(playwrightRequirePath)});
 const { baseUrl, routes } = JSON.parse(process.env.PW_CAPTURE_INPUT || "{}");
@@ -728,7 +743,15 @@ const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
       ? { httpCredentials: { username: user, password: pass, origin: new URL(baseUrl).origin } }
       : {});
     const page = await context.newPage();
+    // Fix 2 (audit leak 5): per-route runtime-error accumulator. Registered ONCE, reset per route
+    // iteration (matches the adjudicator's per-case model) so a broken render (uncaught exception /
+    // framework console error) is captured RAW here and classified downstream in route-catalog.ts —
+    // the child script never classifies, it only collects.
+    let currentRouteErrors = [];
+    page.on("pageerror", function(err) { currentRouteErrors.push({ type: "pageerror", text: String(err && err.message || err) }); });
+    page.on("console", function(msg) { if (msg.type() === "error") currentRouteErrors.push({ type: "console", text: msg.text() }); });
     for (const route of routes) {
+      currentRouteErrors = [];
       try {
         // Primary navigation resolves at domcontentloaded (always yields a DOM, even for a SPA that
         // never reaches network-idle). Settledness is probed SEPARATELY below so a non-settling route
@@ -740,6 +763,9 @@ const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
         // the capture proceeds rather than losing the route entirely.
         let settled = false;
         try { await page.waitForLoadState("networkidle", { timeout: 5000 }); settled = true; } catch (_settle) {}
+        // Fix 2: record the settled URL — buildRouteCatalog compares its pathname against the
+        // requested route to detect a redirect (e.g. bounced to a login page).
+        const finalUrl = page.url();
         // ariaSnapshot() (PW >=1.57) returns a YAML string; page.accessibility.snapshot() was removed.
         const yaml = await page.locator('body').ariaSnapshot();
         // Attribute walk: after ariaSnapshot(), query interactive/labelled nodes to extract stable
@@ -799,8 +825,8 @@ const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
             return Array.from(document.querySelectorAll('[' + a + ']')).map(function(el) { return el.getAttribute(a); }).filter(function(v) { return v; });
           }, testIdAttr);
         } catch(_e) { testIdRawList = []; }
-        out.push({ route, yaml, rawAttrs, testIdRawList, testIdAttr, settled });
-      } catch (e) { out.push({ route, error: String(e && e.message || e).slice(0, 200) }); }
+        out.push({ route, yaml, rawAttrs, testIdRawList, testIdAttr, settled, runtimeErrors: currentRouteErrors, finalUrl });
+      } catch (e) { out.push({ route, error: String(e && e.message || e).slice(0, 200), runtimeErrors: currentRouteErrors }); }
     }
   } catch (e) { process.stderr.write(String(e)); } finally { if (browser) await browser.close().catch(() => {}); }
   process.stdout.write(JSON.stringify(out));
@@ -836,9 +862,15 @@ export const defaultCaptureDomDeps: CaptureDomDeps = {
       child.on("error", (err) => { console.warn(`[qa] WARNING: DOM capture script failed to spawn (${err instanceof Error ? err.message : String(err)}) — no grounding this run.`); done([]); });
       child.on("close", () => {
         try {
-          const raw = JSON.parse(stdout) as Array<{ route: string; yaml?: string; rawAttrs?: RawAttr[]; testIdRawList?: string[]; testIdAttr?: string; settled?: boolean; error?: string }>;
+          const raw = JSON.parse(stdout) as Array<{ route: string; yaml?: string; rawAttrs?: RawAttr[]; testIdRawList?: string[]; testIdAttr?: string; settled?: boolean; error?: string; runtimeErrors?: { type: string; text: string }[]; finalUrl?: string }>;
           done(raw.map((r) => {
-            if (r.error) return { route: r.route, error: r.error };
+            if (r.error) {
+              const errored: RouteSnapshot = { route: r.route, error: r.error };
+              // Fix 2: preserve any runtimeErrors collected before the error was thrown (e.g. an
+              // uncaught exception fired before goto() rejected) — still useful signal for classification.
+              if (r.runtimeErrors && r.runtimeErrors.length > 0) errored.runtimeErrors = r.runtimeErrors;
+              return errored;
+            }
             // Seam A (Slice 3): use parseAriaSnapshotWithState to populate both nodes[] and the
             // parallel states map. nodes[] is byte-identical to parseAriaSnapshot output (same join keys).
             const { nodes, states } = parseAriaSnapshotWithState(r.yaml ?? "");
@@ -850,6 +882,10 @@ export const defaultCaptureDomDeps: CaptureDomDeps = {
             const testIds = buildTestIdIndex(r.testIdRawList ?? []);
             if (testIds.size > 0) snap.testIds = testIds;
             if (r.settled === true) snap.settled = true; // absent ⇒ buildRouteCatalog defaults to advisory
+            // Fix 2 (audit leak 5): thread the RAW runtime signals + settled URL — classification and
+            // redirect detection happen in route-catalog.ts's buildRouteCatalog, not here.
+            if (r.runtimeErrors && r.runtimeErrors.length > 0) snap.runtimeErrors = r.runtimeErrors;
+            if (r.finalUrl) snap.finalUrl = r.finalUrl;
             return snap;
           }));
         } catch {

@@ -54,12 +54,71 @@ export function buildTestIdIndex(capturedValues: readonly string[]): Map<string,
   return index;
 }
 
+// Fix 2 (audit leak 5): inline mirror of src/qa/failure-adjudicator.ts's classifyRuntimeErrors
+// (FRAMEWORK_ERROR_RE / BENIGN_NOISE_RE). classifyRuntimeErrors does NOT exist in qa-engine/src, so
+// the regex logic is duplicated here rather than imported — same conservative, project-agnostic
+// signature set: NG#### (Angular runtime error codes), the Angular zone/ErrorHandler "ERROR Error:"
+// console prefix, "Uncaught" (any framework's browser prefix), and "Unhandled Promise rejection".
+// Deliberately does NOT match a bare "Error:" — a false positive on a handled/logged error would mask
+// a real generated-test defect, which is the wrong safe direction (mirrors the legacy decision).
+const FRAMEWORK_ERROR_RE = /\bNG\d+\b|ERROR Error:|Uncaught|Unhandled Promise rejection/;
+const BENIGN_NOISE_RE = /Failed to load resource|favicon|net::ERR_/i;
+
+/** True when a route's raw captured runtime signals contain a genuine app defect: ANY `pageerror`
+ *  (always a strong signal — an uncaught JS exception, regardless of text), or a `console` entry that
+ *  matches FRAMEWORK_ERROR_RE after excluding BENIGN_NOISE_RE. Mirrors classifyRuntimeErrors' logic. */
+function hasAppDefectSignal(errors: readonly { type: string; text: string }[]): boolean {
+  for (const e of errors) {
+    if (e.type === "pageerror") return true;
+    if (BENIGN_NOISE_RE.test(e.text)) continue;
+    if (FRAMEWORK_ERROR_RE.test(e.text)) return true;
+  }
+  return false;
+}
+
+/** True when the settled finalUrl's PATHNAME diverges from the requested route's PATHNAME — the
+ *  signature of a redirect (e.g. bounced to a login page). The requested route is PARSED against a
+ *  dummy base (never compared as a raw string) so its ?query and #hash — including hash-router paths
+ *  like "/#!/owners/new", whose URL pathname is "/" — can never count as a path mismatch; comparing
+ *  the raw route string against finalUrl.pathname would falsely degrade every hash-routed or
+ *  query-carrying route (a false trust-loss — the wrong safe direction). Trailing slashes are
+ *  normalized ("/owners" vs "/owners/" is a server normalization, not a redirect away). `route` is a
+ *  relative app path (not a full URL) — no baseUrl parameter is threaded through buildRouteCatalog's
+ *  signature (kept narrow per the design). A hash-routed redirect (fragment-only change) is therefore
+ *  undetectable here by design: an ambiguous signal must default to trust, never to degrade. */
+function isRedirect(route: string, finalUrl: string | undefined): boolean {
+  if (!finalUrl) return false;
+  let finalPath: string;
+  let requestedPath: string;
+  try {
+    finalPath = new URL(finalUrl).pathname;
+    requestedPath = new URL(route, "http://q.invalid").pathname;
+  } catch {
+    return false; // an unparseable URL is not treated as a redirect signal (safe direction)
+  }
+  const normalize = (p: string): string => {
+    const withSlash = p.startsWith("/") ? p : `/${p}`;
+    return withSlash.length > 1 ? withSlash.replace(/\/+$/, "") : withSlash;
+  };
+  return normalize(finalPath) !== normalize(requestedPath);
+}
+
 /** Pure adapter from the capture DTO (RouteSnapshot) to the gate-facing RouteCatalog. Owns the
  *  confidence policy: a capture `error` ⇒ `degraded` (never trusted); an unconfirmed settle ⇒
  *  `settled:false` (conservative — the fail-closed path may trust ONLY a captured && settled route, so
- *  an unknown must default to advisory, never to a false block). No browser, no I/O — fully testable. */
+ *  an unknown must default to advisory, never to a false block). No browser, no I/O — fully testable.
+ *
+ *  Fix 2 (audit leak 5): a route is ALSO degraded — SAFE DIRECTION, only removes trust, never blocks
+ *  (see catalog-gate.ts) — when its captured runtimeErrors classify as an app defect, its nodes[] came
+ *  back empty (likely a broken client-side render), or its finalUrl redirected away from the requested
+ *  route (e.g. bounced to a login page). These are ADDITIONAL degrade reasons layered on top of the
+ *  existing `error` check; none of them change the `error` path's behavior. */
 export function buildRouteCatalog(snapshot: RouteSnapshot): RouteCatalog {
-  const degraded = snapshot.error !== undefined;
+  const captureFailed = snapshot.error !== undefined;
+  const runtimeDefect = !captureFailed && hasAppDefectSignal(snapshot.runtimeErrors ?? []);
+  const emptyRender = !captureFailed && (snapshot.nodes?.length ?? 0) === 0;
+  const redirected = !captureFailed && isRedirect(snapshot.route, snapshot.finalUrl);
+  const degraded = captureFailed || runtimeDefect || emptyRender || redirected;
   return {
     route: snapshot.route,
     status: degraded ? ROUTE_STATUS.DEGRADED : ROUTE_STATUS.CAPTURED,

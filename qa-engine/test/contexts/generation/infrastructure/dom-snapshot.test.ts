@@ -428,6 +428,42 @@ test("formatDomSnapshot surfaces a per-route capture failure instead of hiding i
   assert.match(out, /route \/x: \(could not capture — timeout\)/);
 });
 
+// Fix 2 (audit leak 5) sub-case 5: a degraded-but-not-`error` route (empty nodes, classified
+// runtimeErrors, or a redirect) must ALSO surface a warning line instead of a silent bare header —
+// same spirit as the `error` case above, extended to the new degrade reasons from buildRouteCatalog.
+test("formatDomSnapshot warns on a route that rendered empty (zero nodes, no capture error)", () => {
+  const out = formatDomSnapshot([{ route: "/blank", nodes: [] }]);
+  assert.match(out, /route \/blank:/);
+  assert.match(out, /possibly broken app/, "an empty route must warn, not render a silent bare header");
+});
+
+test("formatDomSnapshot warns on a route degraded via a classified runtimeErrors signal", () => {
+  const out = formatDomSnapshot([{
+    route: "/owners/new",
+    nodes: ["button: Submit"],
+    settled: true,
+    runtimeErrors: [{ type: "pageerror", text: "TypeError: undefined is not a function" }],
+  }]);
+  assert.match(out, /route \/owners\/new:/);
+  assert.match(out, /possibly broken app/, "a runtimeErrors-degraded route must warn");
+});
+
+test("formatDomSnapshot warns on a route degraded via a redirect (finalUrl mismatch)", () => {
+  const out = formatDomSnapshot([{
+    route: "/owners/new",
+    nodes: ["button: Login"],
+    settled: true,
+    finalUrl: "http://dev.example.com/login",
+  }]);
+  assert.match(out, /route \/owners\/new:/);
+  assert.match(out, /possibly broken app/, "a redirect-degraded route must warn");
+});
+
+test("formatDomSnapshot does NOT warn on a healthy captured route (nodes present, no runtimeErrors/redirect)", () => {
+  const out = formatDomSnapshot([{ route: "/home", nodes: ["button: Submit"], settled: true }]);
+  assert.doesNotMatch(out, /possibly broken app/, "a healthy route must not carry the degrade warning");
+});
+
 // The node cap MUST NOT drop the table that drives selectors. A real page sorts nav/header/links
 // BEFORE the data table, so a naive head-slice truncates every cell — re-creating the "author sees
 // nothing about the table" failure one layer down. Table/list roles survive past the cap.
@@ -1239,5 +1275,40 @@ test("buildCaptureScript only sets httpCredentials when both user and pass are p
   // The generated script must guard on BOTH user and pass before building httpCredentials — an
   // absent pair (e.g. only DEV_ENV_USER set) must not construct a broken/partial credentials object.
   assert.match(script, /user\s*&&\s*pass/, "must guard on user && pass before wiring httpCredentials");
+});
+
+// ── Fix 2 (audit leak 5): capture pageerror/console + degrade empty or redirected routes ──
+
+test("buildCaptureScript registers pageerror and console error collectors before navigation", () => {
+  const script = buildCaptureScript();
+  assert.match(script, /page\.on\(\s*["']pageerror["']/, "must register a pageerror listener");
+  assert.match(script, /page\.on\(\s*["']console["']/, "must register a console listener");
+  // Registration must happen BEFORE the goto() call so errors during navigation/settle are caught.
+  const pageErrorIdx = script.indexOf('page.on("pageerror"');
+  const gotoIdx = script.indexOf("page.goto(");
+  assert.ok(pageErrorIdx !== -1 && gotoIdx !== -1 && pageErrorIdx < gotoIdx,
+    "pageerror listener must be registered before goto()");
+});
+
+test("buildCaptureScript accumulates runtimeErrors per-route (reset each iteration) and records finalUrl", () => {
+  const script = buildCaptureScript();
+  assert.match(script, /runtimeErrors/, "must include runtimeErrors in the per-route output");
+  assert.match(script, /finalUrl/, "must include finalUrl in the per-route output");
+  assert.match(script, /page\.url\(\)/, "finalUrl must be captured via page.url()");
+});
+
+test("RouteSnapshot accepts runtimeErrors and finalUrl fields", () => {
+  const snap: RouteSnapshot = {
+    route: "/login",
+    nodes: [],
+    runtimeErrors: [{ type: "pageerror", text: "Uncaught TypeError: x is not a function" }],
+    finalUrl: "http://dev/login",
+  };
+  assert.equal(snap.runtimeErrors?.length, 1);
+  assert.equal(snap.finalUrl, "http://dev/login");
+  // Absent is still valid — byte-identical to today's shape when unset.
+  const withoutFields: RouteSnapshot = { route: "/home", nodes: [] };
+  assert.equal(withoutFields.runtimeErrors, undefined);
+  assert.equal(withoutFields.finalUrl, undefined);
 });
 

@@ -69,3 +69,85 @@ test("degradedRouteWarning lists the degraded routes loudly and is undefined whe
   assert.doesNotMatch(warning, /\/ok/, "captured routes are not named in the degraded warning");
   assert.equal(degradedRouteWarning([captured]), undefined, "all-captured ⇒ no warning");
 });
+
+// ── Fix 2 (audit leak 5): degrade on classified runtimeErrors, zero nodes, or a redirect ──
+// A route can render "successfully" (no capture `error`) yet still be UNTRUSTWORTHY grounding: a
+// broken client-side render throws a pageerror / logs a framework error, the page ends up with zero
+// interactive nodes, or the app silently redirected (e.g. bounced to a login page). All three must
+// degrade the SAME way a capture `error` does — never fail-closed-block (that invariant belongs to
+// catalog-gate.ts and is NOT touched here), only lose trust.
+
+test("buildRouteCatalog degrades a route with a pageerror runtime signal (always a strong signal)", () => {
+  const cat = buildRouteCatalog({
+    route: "/owners/new",
+    nodes: ["button: Submit"],
+    settled: true,
+    runtimeErrors: [{ type: "pageerror", text: "TypeError: Cannot read properties of undefined" }],
+  });
+  assert.equal(cat.status, "degraded", "an uncaught pageerror must degrade the route");
+});
+
+test("buildRouteCatalog degrades a route whose console errors match FRAMEWORK_ERROR_RE (NG#### / ERROR Error: / Uncaught / Unhandled Promise rejection)", () => {
+  const cases = ["NG0100: Expression changed", "ERROR Error: something broke", "Uncaught ReferenceError: x", "Unhandled Promise rejection: y"];
+  for (const text of cases) {
+    const cat = buildRouteCatalog({ route: "/x", nodes: ["button: y"], settled: true, runtimeErrors: [{ type: "console", text }] });
+    assert.equal(cat.status, "degraded", `console text "${text}" must match FRAMEWORK_ERROR_RE and degrade`);
+  }
+});
+
+test("buildRouteCatalog does NOT degrade on benign console noise (favicon / resource load / net::ERR_)", () => {
+  const cases = ["Failed to load resource: the server responded with 404", "favicon.ico 404", "net::ERR_INTERNET_DISCONNECTED"];
+  for (const text of cases) {
+    const cat = buildRouteCatalog({ route: "/x", nodes: ["button: y"], settled: true, runtimeErrors: [{ type: "console", text }] });
+    assert.equal(cat.status, "captured", `benign noise "${text}" must NOT degrade the route`);
+  }
+});
+
+test("buildRouteCatalog does NOT degrade on a bare 'Error:' console message (deliberate — avoids false positives on handled/logged errors)", () => {
+  const cat = buildRouteCatalog({ route: "/x", nodes: ["button: y"], settled: true, runtimeErrors: [{ type: "console", text: "Error: something was logged, not thrown" }] });
+  assert.equal(cat.status, "captured", "a bare 'Error:' must not match the classifier (mirrors failure-adjudicator.ts)");
+});
+
+test("buildRouteCatalog degrades a route with zero captured nodes", () => {
+  const cat = buildRouteCatalog({ route: "/blank", nodes: [], settled: true });
+  assert.equal(cat.status, "degraded", "an empty nodes[] must degrade — likely a broken render");
+});
+
+test("buildRouteCatalog degrades a route with undefined nodes (never captured)", () => {
+  const cat = buildRouteCatalog({ route: "/blank", settled: true });
+  assert.equal(cat.status, "degraded");
+});
+
+test("buildRouteCatalog degrades a route whose finalUrl path diverges from the requested route (redirect)", () => {
+  const cat = buildRouteCatalog({ route: "/owners/new", nodes: ["button: Login"], settled: true, finalUrl: "http://dev.example.com/login" });
+  assert.equal(cat.status, "degraded", "a redirect away from the requested route must degrade — the captured DOM is not the requested page");
+});
+
+test("buildRouteCatalog does NOT degrade when finalUrl matches the requested route (same path, normalized leading slash)", () => {
+  const cat = buildRouteCatalog({ route: "/owners/new", nodes: ["button: Submit"], settled: true, finalUrl: "http://dev.example.com/owners/new" });
+  assert.equal(cat.status, "captured");
+});
+
+test("buildRouteCatalog does NOT degrade a hash-routed SPA route (the route lives in the fragment, not the URL path)", () => {
+  // AngularJS-style hash router (e.g. PetClinic "/#!/owners/new"): the requested route's URL pathname
+  // is "/" and so is the finalUrl's — comparing the RAW route string against finalUrl.pathname would
+  // falsely degrade EVERY hash route. Redirect detection must compare parsed pathnames only.
+  const cat = buildRouteCatalog({ route: "/#!/owners/new", nodes: ["button: Submit"], settled: true, finalUrl: "http://dev.example.com/#!/owners/new" });
+  assert.equal(cat.status, "captured", "a hash route whose finalUrl carries the same fragment must NOT be treated as a redirect");
+});
+
+test("buildRouteCatalog does NOT degrade a route carrying a query string (query is not a path divergence)", () => {
+  const cat = buildRouteCatalog({ route: "/owners?page=2", nodes: ["button: Next"], settled: true, finalUrl: "http://dev.example.com/owners?page=2" });
+  assert.equal(cat.status, "captured", "the ?query must be excluded from the pathname comparison");
+});
+
+test("buildRouteCatalog does NOT degrade on a trailing-slash normalization by the server (/owners → /owners/)", () => {
+  const cat = buildRouteCatalog({ route: "/owners", nodes: ["button: Add"], settled: true, finalUrl: "http://dev.example.com/owners/" });
+  assert.equal(cat.status, "captured", "a trailing-slash-only difference is not a redirect away from the route");
+});
+
+test("buildRouteCatalog is byte-identical to today's behavior when runtimeErrors/finalUrl are absent (parity guard)", () => {
+  const cat = buildRouteCatalog({ route: "/login", nodes: ["button: Save"], settled: true, testIds: new Map([["save", 1]]) });
+  assert.equal(cat.status, "captured");
+  assert.equal(cat.settled, true);
+});

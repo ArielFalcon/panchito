@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { catalogGate } from "@contexts/generation/infrastructure/catalog-gate.ts";
+import { buildRouteCatalog } from "@contexts/generation/infrastructure/route-catalog.ts";
 import type { RouteCatalog } from "@contexts/generation/infrastructure/route-catalog.ts";
 
 // Pillar 2 slice 4 (docs/superpowers/selector-grounding-root-cause-and-design.md): the confidence-aware
@@ -55,4 +56,44 @@ test("catalogGate: a post-navigation test-id is advisory even if absent (no fals
 test("catalogGate: no test-ids → empty result (never throws)", () => {
   const r = catalogGate(`await page.goto("/x"); await page.getByRole("button", { name: "Save" }).click();`, cat({}));
   assert.deepEqual(r, { failClosed: [], inWindow: 0, advisory: 0 });
+});
+
+// Regression guard (SAFE DIRECTION invariant, Fix 2 / audit leak 5): buildRouteCatalog's NEW degrade
+// reasons (classified runtimeErrors, empty nodes, redirect) MUST behave exactly like the existing
+// degraded-via-`error` case here — advisory only, NEVER fail-closed-block. catalog-gate.ts itself is
+// untouched; these tests pipe a REAL RouteSnapshot through buildRouteCatalog (not a hand-built
+// RouteCatalog) so the invariant is proven end-to-end, not just asserted on a pre-shaped fixture.
+
+test("catalogGate: a RouteSnapshot degraded via a classified runtimeErrors signal is advisory, never fail-closed", () => {
+  const spec = `await page.goto("/owners/new"); await page.getByTestId("ghost-btn").click();`;
+  const snapshot = {
+    route: "/owners/new",
+    nodes: ["button: Submit"],
+    settled: true,
+    testIds: new Map([["real-btn", 1]]),
+    runtimeErrors: [{ type: "pageerror", text: "TypeError: undefined is not a function" }],
+  };
+  const catalog = buildRouteCatalog(snapshot);
+  assert.equal(catalog.status, "degraded", "sanity: the snapshot must actually degrade");
+  const r = catalogGate(spec, catalog);
+  assert.deepEqual(r.failClosed, [], "a runtimeErrors-degraded route must never fail-closed-block");
+  assert.equal(r.advisory, 1);
+});
+
+test("catalogGate: a RouteSnapshot degraded via zero captured nodes is advisory, never fail-closed", () => {
+  const spec = `await page.goto("/blank"); await page.getByTestId("ghost-btn").click();`;
+  const catalog = buildRouteCatalog({ route: "/blank", nodes: [], settled: true });
+  assert.equal(catalog.status, "degraded", "sanity: the snapshot must actually degrade");
+  const r = catalogGate(spec, catalog);
+  assert.deepEqual(r.failClosed, [], "an empty-nodes-degraded route must never fail-closed-block");
+  assert.equal(r.advisory, 1);
+});
+
+test("catalogGate: a RouteSnapshot degraded via a redirect (finalUrl mismatch) is advisory, never fail-closed", () => {
+  const spec = `await page.goto("/owners/new"); await page.getByTestId("ghost-btn").click();`;
+  const catalog = buildRouteCatalog({ route: "/owners/new", nodes: ["button: Login"], settled: true, finalUrl: "http://dev.example.com/login" });
+  assert.equal(catalog.status, "degraded", "sanity: the snapshot must actually degrade");
+  const r = catalogGate(spec, catalog);
+  assert.deepEqual(r.failClosed, [], "a redirect-degraded route must never fail-closed-block");
+  assert.equal(r.advisory, 1);
 });
