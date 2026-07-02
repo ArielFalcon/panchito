@@ -44,6 +44,7 @@ import { LearningPortAdapter } from "../infrastructure/bridges/learning-port.ada
 import { WorkspacePortAdapter, type CheckoutFn } from "../infrastructure/bridges/workspace-port.adapter.ts";
 import { DeployGatePortAdapter, NullDeployGateAdapter, type VersionPollFn } from "../infrastructure/bridges/deploy-gate-port.adapter.ts";
 import { InMemoryRunHistoryAdapter, FileRunHistoryAdapter } from "../infrastructure/bridges/run-history-port.adapter.ts";
+import { SetupPortAdapter, type SetupPortCollaborators } from "../infrastructure/bridges/setup-port.adapter.ts";
 
 import { GenerateTestsUseCase, type GenerationResult, type GenerateOpts } from "@contexts/generation/application/generate-tests.use-case.ts";
 import type { OpencodeRunInput } from "@contexts/generation/application/ports/generation-ports.ts";
@@ -113,6 +114,12 @@ export interface CompositionConfig {
     e2e: Pick<E2eExecutionStrategy, "run">;
     code: Pick<CodeExecutionStrategy, "run">;
   };
+
+  // SetupPort collaborator (CLAUDE.md run-flow step 3) — target-selected dispatch, mirroring
+  // executionStrategies' own shape. OPTIONAL: absent -> the use-case's setup phase is a no-op
+  // (RunQaUseCaseDeps.setup itself stays optional), matching every composition built before this
+  // field existed.
+  setupCollaborators?: SetupPortCollaborators;
 
   // ObjectiveSignalPort collaborators — the keystone. assembleChangeCoverage is OPTIONAL (absent
   // -> decide() receives null -> "unknown" -> NEVER blocks, the documented safe default while the
@@ -206,6 +213,11 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
     },
   );
 
+  // OPTIONAL: absent -> `setup` stays undefined, and RunQaUseCaseDeps.setup (also optional) makes
+  // the use-case's setup phase a no-op — every composition built before this field existed keeps
+  // running exactly as before.
+  const setup = cfg.setupCollaborators ? new SetupPortAdapter(cfg.setupCollaborators, { target: cfg.target }) : undefined;
+
   const objectiveSignal = new ObjectiveSignalPortAdapter(
     {
       collector: cfg.objectiveSignal.collector as CoverageCollectorPort,
@@ -265,6 +277,7 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
     workspace,
     deployGate,
     runHistory,
+    ...(setup ? { setup } : {}),
     config: {
       needsReview: cfg.needsReview,
       shadow: cfg.shadow,

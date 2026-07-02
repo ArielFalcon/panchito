@@ -250,6 +250,98 @@ test("buildProduction(rewritten) threads testIdAttribute into the ExecutionPortA
   assert.equal(capturedTestIdAttribute, "data-cy");
 });
 
+// SetupPort (CLAUDE.md run-flow step 3) — genuine-wiring proof: setupCollaborators (OPTIONAL on
+// CompositionConfig) must reach the run() call when supplied, and stay a silent no-op when absent
+// (every fakeConfig() base case above never supplies it — that already proves the absent-collaborator
+// backward-compat path across all the OTHER tests in this file).
+
+test("buildProduction(rewritten) wires setupCollaborators.e2e into the run when target is 'e2e'", async () => {
+  let setupCalled = false;
+  const cfg = fakeConfig({
+    target: "e2e",
+    setupCollaborators: {
+      e2e: async () => { setupCalled = true; },
+      code: async () => { throw new Error("must not be called for target 'e2e'"); },
+    },
+  });
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "e2e",
+    runId: "composition-root-setup-e2e",
+  });
+
+  assert.equal(setupCalled, true, "the e2e setup collaborator must run before generation when setupCollaborators is wired");
+  assert.equal(outcome.verdict, "pass");
+});
+
+test("buildProduction(rewritten) wires setupCollaborators.code into the run when target is 'code'", async () => {
+  let setupCalled = false;
+  const cfg = fakeConfig({
+    target: "code",
+    isCode: true,
+    setupCollaborators: {
+      e2e: async () => { throw new Error("must not be called for target 'code'"); },
+      code: async () => { setupCalled = true; },
+    },
+  });
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "code",
+    runId: "composition-root-setup-code",
+  });
+
+  assert.equal(setupCalled, true, "the code setup collaborator must run before generation when setupCollaborators is wired");
+  assert.equal(outcome.verdict, "pass");
+});
+
+test("buildProduction(rewritten) surfaces infra-error when a wired setup collaborator throws", async () => {
+  const cfg = fakeConfig({
+    target: "e2e",
+    setupCollaborators: {
+      e2e: async () => { throw new Error("npm ci in e2e failed (code 1)"); },
+      code: async () => {},
+    },
+  });
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "e2e",
+    runId: "composition-root-setup-throw",
+  });
+
+  assert.equal(outcome.verdict, "infra-error", "a setup failure must surface as infra-error, matching src/qa/setup.ts's own contract");
+});
+
+test("buildProduction(rewritten) runs without setupCollaborators (absent -> no-op, backward compatible)", async () => {
+  const cfg = fakeConfig(); // fakeConfig()'s base never supplies setupCollaborators
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "e2e",
+    runId: "composition-root-setup-absent",
+  });
+
+  assert.equal(outcome.verdict, "pass");
+});
+
 test("buildProduction(rewritten) surfaces infra-error when the real deploy gate never serves", async () => {
   const cfg = fakeConfig({
     versionUrl: "https://dev.example.com/version",

@@ -113,3 +113,15 @@ export interface RunHistoryPort {
   save(outcome: RunOutcome): Promise<void>;
 }
 
+// SetupPort — CLAUDE.md's run-flow step 3 ("Setup — bootstrap the config/e2e seed into e2e/, then
+// npm ci; runs BEFORE generation so the agent has the fixtures/config"), missing from this rewrite.
+// Prepares specDir so the generator has fixtures/deps to build on: e2e bootstraps the seed (first
+// run) + npm ci; code installs the repo's own deps. e2e-vs-code dispatch is the ADAPTER's concern
+// (mirrors ExecutionPort's own target-dispatch split) — this port's own signature stays generic. A
+// throw MUST propagate to the caller: the legacy treats a setup failure as infra-error, never a code
+// verdict (src/qa/setup.ts's own doc: "the pipeline surfaces that as infra-error, never a code
+// verdict"), and RunQaUseCase.run is the place that maps the throw to infraErrorResult().
+export interface SetupPort {
+  setup(specDir: string, signal?: AbortSignal): Promise<void>;
+}
+

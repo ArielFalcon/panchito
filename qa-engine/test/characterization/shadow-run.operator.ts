@@ -118,6 +118,8 @@ import { roleWindowBytes } from "../../../src/integrations/model-window-catalog.
 import { validateSpecs, defaultValidateDeps } from "../../../src/qa/validate.ts";
 import { runE2E, defaultExecuteDeps } from "../../../src/qa/execute.ts";
 import { runCodeTests, defaultCodeExecuteDeps } from "../../../src/qa/code-runner.ts";
+import { setupE2eProject, defaultSetupDeps } from "../../../src/qa/setup.ts";
+import { setupCodeProject, defaultCodeSetupDeps } from "../../../src/qa/code-runner.ts";
 import { github } from "../../../src/integrations/github.ts";
 import { runMutationOracle, realMutationDeps } from "../../../src/qa/learning/mutation-code.ts";
 import { runFaultInjectionOracle, defaultFaultInjectionDeps } from "../../../src/qa/learning/fault-injection-e2e.ts";
@@ -294,6 +296,13 @@ function buildCompositionConfig(app: AppConfig, sha: string, mirrorDir: string, 
     },
     staticGate,
     executionStrategies: { e2e, code },
+    // SetupPort (CLAUDE.md run-flow step 3): matches production's own factory wiring
+    // (src/server/rewritten-engine-factory.ts) — a real shadow run must set up e2e/deps exactly
+    // like production, or this proof stops being a genuine end-to-end comparison.
+    setupCollaborators: {
+      e2e: (specDir, opts) => setupE2eProject(specDir, defaultSetupDeps, opts),
+      code: (specDir, opts) => setupCodeProject(specDir, defaultCodeSetupDeps, opts),
+    },
     objectiveSignal: { collector, oracle },
     coveragePolicy: { mode: app.qa.changeCoverage?.mode ?? "signal", minRatio: app.qa.changeCoverage?.minRatio ?? 0.7 },
     baselineCases: [],

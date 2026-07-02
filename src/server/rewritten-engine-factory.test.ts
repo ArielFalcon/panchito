@@ -73,6 +73,8 @@ test("buildRewrittenCompositionConfig maps an e2e AppConfig into a complete Comp
   assert.ok(config.staticGate, "staticGate collaborator must be wired");
   assert.ok(config.executionStrategies.e2e, "e2e execution strategy must be wired");
   assert.ok(config.executionStrategies.code, "code execution strategy must be wired");
+  assert.ok(config.setupCollaborators?.e2e, "SetupPort e2e collaborator must be wired (CLAUDE.md run-flow step 3 — missing before this fix)");
+  assert.ok(config.setupCollaborators?.code, "SetupPort code collaborator must be wired");
   assert.ok(config.objectiveSignal.collector, "coverage collector must be wired");
   assert.ok(config.objectiveSignal.oracle, "value oracle must be wired");
   assert.ok(config.githubPr, "githubPr collaborator must be wired (production path, not buildShadow)");

@@ -42,6 +42,7 @@ import type {
   WorkspacePort,
   DeployGatePort,
   RunHistoryPort,
+  SetupPort,
 } from "./ports/index.ts";
 import { decide, type RunEvidence } from "../domain/run-decision.service.ts";
 import { RunDecision } from "../domain/run-decision.ts";
@@ -92,6 +93,12 @@ export interface RunQaUseCaseDeps {
   workspace: WorkspacePort;
   deployGate?: DeployGatePort; // [SWAP] absent for static sites and the code target
   runHistory: RunHistoryPort;
+  // [SWAP] absent -> the setup phase is skipped entirely (backward compatible with every
+  // pre-existing composition that has not wired a SetupPort yet). CLAUDE.md run-flow step 3:
+  // "Setup — bootstrap the config/e2e seed into e2e/, then npm ci; runs BEFORE generation so the
+  // agent has the fixtures/config" — a throw from setup() propagates to infraErrorResult(), never a
+  // code verdict (src/qa/setup.ts's own doc).
+  setup?: SetupPort;
   config?: Partial<RunQaConfig>;
 }
 
@@ -190,6 +197,28 @@ export class RunQaUseCase {
     }
 
     const generating = true; // this composition always attempts generation (diff-mode skip already handled above)
+
+    // Phase: setup (SetupPort) — CLAUDE.md run-flow step 3: bootstraps the config/e2e seed into
+    // e2e/ (first time) + npm ci (e2e target), or installs the repo's own deps (code target), so the
+    // generator has fixtures/dependencies to build on. Runs strictly AFTER classify resolves to
+    // generate/regression (a classify-skip already returned above — setup never runs for a skip) and
+    // BEFORE generate() (src/pipeline.ts:1294-1306's own ordering: "Set up the project so the agent
+    // has what it needs to build on"). [SWAP] absent SetupPort -> the phase is a no-op (backward
+    // compatible with a composition that has not wired one yet). A throw here mirrors the legacy's
+    // own contract EXACTLY: src/qa/setup.ts's setupE2eProject/setupCodeProject throw on a failed
+    // install/timeout/abort, and the legacy pipeline surfaces that as infra-error, NEVER a code
+    // verdict — never persisted (matches infraErrorResult()'s own no-persist convention for every
+    // other entry-gate-shaped failure).
+    if (this.deps.setup) {
+      try {
+        await this.deps.setup.setup(workspace.specDir, signal);
+      } catch {
+        return this.infraErrorResult();
+      }
+    }
+    if (signal?.aborted) {
+      return this.abortedResult();
+    }
 
     // Phase: generate (GenerationPort).
     const generated = await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff);

@@ -99,6 +99,8 @@ import { roleWindowBytes } from "../integrations/model-window-catalog";
 import { validateSpecs, defaultValidateDeps } from "../qa/validate";
 import { runE2E, defaultExecuteDeps } from "../qa/execute";
 import { runCodeTests, defaultCodeExecuteDeps } from "../qa/code-runner";
+import { setupE2eProject, defaultSetupDeps } from "../qa/setup";
+import { setupCodeProject, defaultCodeSetupDeps } from "../qa/code-runner";
 import { github } from "../integrations/github";
 import { runMutationOracle, realMutationDeps } from "../qa/learning/mutation-code";
 import { runFaultInjectionOracle, defaultFaultInjectionDeps } from "../qa/learning/fault-injection-e2e";
@@ -276,6 +278,16 @@ export function buildRewrittenCompositionConfig(app: AppConfig, deps: RewrittenE
     },
     staticGate,
     executionStrategies: { e2e, code },
+    // SetupPort (CLAUDE.md run-flow step 3): bootstraps the config/e2e seed into e2e/ (first run) +
+    // npm ci, or installs the repo's own deps for code mode — the SAME real src/qa/setup.ts /
+    // src/qa/code-runner.ts functions defaultPipelineDeps() wires for the legacy engine, so both
+    // engines set up a fresh mirror identically. specDir here is whatever WorkspacePortAdapter's
+    // checkout(sha) resolved (composition-root.ts's own contract) — e2eDir under the REAL per-run
+    // mirrorDir, not this factory's static placeholder mirrorDir/e2eDir above.
+    setupCollaborators: {
+      e2e: (specDir, opts) => setupE2eProject(specDir, defaultSetupDeps, opts),
+      code: (specDir, opts) => setupCodeProject(specDir, defaultCodeSetupDeps, opts),
+    },
     objectiveSignal: { collector, oracle },
     coveragePolicy: { mode: app.qa.changeCoverage?.mode ?? "signal", minRatio: app.qa.changeCoverage?.minRatio ?? 0.7 },
     baselineCases: [],

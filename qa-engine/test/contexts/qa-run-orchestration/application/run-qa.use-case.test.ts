@@ -15,6 +15,7 @@ import type {
   WorkspacePort,
   DeployGatePort,
   RunHistoryPort,
+  SetupPort,
 } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 import { BlastRadius } from "@kernel/blast-radius.ts";
 import { ok } from "@kernel/result.ts";
@@ -45,6 +46,7 @@ function stubPorts(overrides: Partial<{
   prepare: WorkspacePort["prepare"];
   waitUntilServing: DeployGatePort["waitUntilServing"];
   save: RunHistoryPort["save"];
+  setup: SetupPort["setup"];
 }> = {}) {
   const savedOutcomes: RunOutcome[] = [];
   const foldedOutcomes: RunOutcome[] = [];
@@ -84,9 +86,12 @@ function stubPorts(overrides: Partial<{
   const runHistory: RunHistoryPort = {
     save: overrides.save ?? (async (outcome) => { savedOutcomes.push(outcome); }),
   };
+  const setup: SetupPort = {
+    setup: overrides.setup ?? (async () => {}),
+  };
 
   return {
-    ports: { changeAnalysis, generation, review, validation, execution, objectiveSignal, publication, learning, workspace, deployGate, runHistory },
+    ports: { changeAnalysis, generation, review, validation, execution, objectiveSignal, publication, learning, workspace, deployGate, runHistory, setup },
     savedOutcomes,
     foldedOutcomes,
   };
@@ -630,6 +635,107 @@ test("FIX E: invalid calls BOTH runHistory.save() AND learning.fold()", async ()
   assert.equal(out.decision.verdict, "invalid");
   assert.equal(saveCallCount, 1, "invalid must call runHistory.save() exactly once (matches persistOutcome at pipeline.ts:2313-2325)");
   assert.equal(foldCallCount, 1, "invalid must call learning.fold() exactly once (matches foldRunLearning at pipeline.ts:2321)");
+});
+
+// ── SETUP phase (CLAUDE.md run-flow step 3): "bootstrap the config/e2e seed into e2e/, then npm ci;
+// runs BEFORE generation so the agent has the fixtures/config". Missing from this rewrite until now
+// — src/pipeline.ts:1299 calls deps.setupE2e/setupCode AFTER classify resolves to generate/
+// regression and BEFORE generate(); a setup throw surfaces as infra-error, never a code verdict
+// (src/qa/setup.ts's own doc). ─────────────────────────────────────────────────────────────────
+
+test("SETUP: setup() is called AFTER classify resolves to generate and BEFORE generate()", async () => {
+  const callOrder: string[] = [];
+  const { ports } = stubPorts({
+    classify: async () => { callOrder.push("classify"); return { action: "generate", reason: "diff touches src/x.ts", diff: "" }; },
+    setup: async () => { callOrder.push("setup"); },
+    generate: async () => { callOrder.push("generate"); return { specs: ["a.spec.ts"], approved: true }; },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "setup-order-generate" });
+
+  assert.deepEqual(callOrder, ["classify", "setup", "generate"], "setup must run strictly between classify and generate, never before or after");
+});
+
+test("SETUP: setup() is called on a non-diff mode too (which never classifies)", async () => {
+  let setupCalled = false;
+  const { ports } = stubPorts({ setup: async () => { setupCalled = true; } });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "setup-non-diff-mode", mode: "complete" });
+
+  assert.equal(setupCalled, true, "setup must run for whole-repo/guided modes too (CLAUDE.md: setup runs before generation for every generating run)");
+});
+
+test("SETUP: setup() is SKIPPED on a classify-skip (nothing to generate for)", async () => {
+  let setupCalled = false;
+  const { ports } = stubPorts({
+    classify: async () => ({ action: "skip", reason: "docs-only commit", diff: "" }),
+    setup: async () => { setupCalled = true; },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "setup-skipped-on-classify-skip", mode: "diff" });
+
+  assert.equal(out.decision.verdict, "skipped");
+  assert.equal(setupCalled, false, "a classify-skip never reaches generation, so setup must not run either — matches legacy's classify-then-setup ordering (src/pipeline.ts:1263 returns before :1299)");
+});
+
+test("SETUP: a setup() throw maps to infra-error, never a code verdict — and does NOT persist", async () => {
+  let saveCallCount = 0;
+  let generateCalled = false;
+  const { ports } = stubPorts({
+    setup: async () => { throw new Error("npm ci in e2e failed (code 1)"); },
+    generate: async () => { generateCalled = true; return { specs: ["a.spec.ts"], approved: true }; },
+  });
+  ports.runHistory.save = async () => { saveCallCount++; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "setup-throw-infra-error" });
+
+  assert.equal(out.decision.verdict, "infra-error", "a setup failure must be infra-error, matching src/qa/setup.ts's own doc: 'the pipeline surfaces that as infra-error, never a code verdict'");
+  assert.equal(out.decision.sideEffect, "none");
+  assert.equal(generateCalled, false, "generate() must never run once setup has thrown");
+  assert.equal(saveCallCount, 0, "a setup failure must NOT persist a RunOutcome — matches the entry-gate infra-error's own no-persist convention (infraErrorResult never saves)");
+});
+
+test("SETUP: an absent SetupPort (deps.setup undefined) is a no-op — generation still runs (backward compatible)", async () => {
+  const { ports } = stubPorts();
+  const { setup: _unused, ...portsWithoutSetup } = ports;
+  const useCase = new RunQaUseCase({ ...portsWithoutSetup, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "setup-absent-backward-compat" });
+
+  assert.equal(out.decision.verdict, "pass", "an absent SetupPort must never break a run — this composition simply skips the setup phase (matches the pre-fix behavior)");
+});
+
+test("SETUP: an already-aborted signal short-circuits before setup() ever runs", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let setupCalled = false;
+  const { ports } = stubPorts({ setup: async () => { setupCalled = true; } });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "setup-already-aborted" }, controller.signal);
+
+  assert.equal(setupCalled, false, "setup must never run once the signal is already aborted — the entry short-circuit fires first");
+  assert.equal(out.decision.verdict, "infra-error");
+});
+
+test("SETUP: aborting during setup() (signal fires inside the collaborator) stops before generate()", async () => {
+  const controller = new AbortController();
+  let generateCalled = false;
+  const { ports } = stubPorts({
+    setup: async () => { controller.abort(); },
+    generate: async () => { generateCalled = true; return { specs: ["a.spec.ts"], approved: true }; },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "setup-abort-mid-setup" }, controller.signal);
+
+  assert.equal(generateCalled, false, "generate() must never run once the signal aborts during setup");
+  assert.equal(out.decision.verdict, "infra-error");
+  assert.equal(out.decision.sideEffect, "none");
 });
 
 // ── Judgment-day D.7 FIX 1-4: closing the 5 CONFIRMED dual-engine cross-validation divergences
