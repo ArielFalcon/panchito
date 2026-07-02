@@ -3,11 +3,18 @@
 // generate/review/reconcile shell (fail-closed reviewer gate, bounded repair, blockingCount) is
 // GenerateTestsUseCase's OWN logic, reused verbatim.
 //
-// Shape translation: GenerationPort.generate(objectives, specDir, signal?) -> GenerationResult
+// Shape translation: GenerationPort.generate(objectives, specDir, signal?, diff?) -> GenerationResult
 // {specs, reviewed, approved, note}. This bridge holds the STATIC per-run context
 // (repo/appName/mirrorDir/e2eRelDir/namespace/needsReview/target/mode/diff) as constructor config —
-// the composition root (Task E.1/E.2) supplies these once per run; only specDir/objectives/signal
-// vary per generate() call, matching the barrel's narrower GenerationPort signature.
+// the composition root (Task E.1/E.2) supplies these once per run; specDir/objectives/signal/diff
+// vary per generate() call, matching the barrel's GenerationPort signature.
+//
+// "Dynamic diff" fix (engram #936): ctx.diff alone is a STATIC composition-time value — the real
+// production engineFactory constructs this adapter BEFORE the run's checkout/diff exist, so ctx.diff
+// is always "" there (only the F.2 shadow operator pre-computes it before building the config). The
+// optional per-call `diff` argument carries the run's REAL commit diff (RunQaUseCase threads it from
+// ChangeAnalysisPort.classify()'s own result) and takes precedence; ctx.diff is now only the fallback
+// for callers/modes that never supply one.
 //
 // Plan 7.2 (closes engram #916): signal is forwarded verbatim into
 // GenerateTestsUseCase.generate(input, {signal}) — the use-case already forwards opts?.signal into
@@ -65,11 +72,16 @@ export class GenerationPortAdapter implements GenerationPort {
     private readonly collaborators: GenerationPortCollaborators = {},
   ) {}
 
-  async generate(_objectives: readonly Objective[], specDir: string, signal?: AbortSignal): Promise<GenerationPortResult> {
+  async generate(_objectives: readonly Objective[], specDir: string, signal?: AbortSignal, diff?: string): Promise<GenerationPortResult> {
     const input: OpencodeRunInput = {
       repo: this.ctx.repo,
       sha: "", // provenance only; the use-case never branches on it — the caller's Sha VO owns identity
-      diff: this.ctx.diff,
+      // "Dynamic diff" fix (engram #936): PREFER the run's real diff (threaded per-call from
+      // RunQaUseCase's ChangeAnalysisPort.classify() result) over the STATIC ctx.diff supplied at
+      // construction time — the real production engineFactory builds this adapter BEFORE the
+      // run/checkout, so ctx.diff is always "" there. Falling back to ctx.diff when the caller omits
+      // the argument keeps the F.2 operator's own pre-computed-diff composition working unchanged.
+      diff: diff ?? this.ctx.diff,
       mirrorDir: this.ctx.mirrorDir,
       e2eRelDir: this.ctx.e2eRelDir,
       namespace: this.ctx.namespace,

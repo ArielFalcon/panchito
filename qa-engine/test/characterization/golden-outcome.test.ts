@@ -969,7 +969,7 @@ for (const c of allDualCases) {
     // stub-fidelity-mirrored port overrides derived above.
     const changeAnalysis: ChangeAnalysisPort = {
       analyze: async (sha) => BlastRadius.of(sha, ["src/x.ts"]),
-      classify: c.overrides.classify ?? (async () => ({ action: "generate", reason: "diff touches src/x.ts" })),
+      classify: c.overrides.classify ?? (async () => ({ action: "generate", reason: "diff touches src/x.ts", diff: "" })),
     };
     const generation: GenerationPort = {
       generate: c.overrides.generate ?? (async () => ({ specs: ["a.spec.ts"], approved: true })),

@@ -4,7 +4,9 @@
 // analyze(sha): delegates to VcsReadPort.blastRadius(sha) verbatim.
 // classify(sha): sources message()+diff() from the SAME VcsReadPort, then delegates to the domain
 //   classifyCommit(message, diff) function VERBATIM (commit-classification.ts) — Conventional
-//   Commits + the diff cross-check that escalates a message/diff contradiction to "generate".
+//   Commits + the diff cross-check that escalates a message/diff contradiction to "generate". Also
+//   returns the SAME fetched diff ("dynamic diff" fix, engram #936) so the caller can thread the
+//   run's REAL commit diff into generation, instead of a stale static composition-time value.
 //
 // PLAN DRIFT (recorded per Task E.0's own instruction — "if a sibling entry point named in the plan
 // does NOT exist at HEAD, STOP and report it"): the plan named "AnalyzeChangeUseCase" as the
@@ -28,9 +30,13 @@ export class ChangeAnalysisPortAdapter implements ChangeAnalysisPort {
     return this.vcs.blastRadius(sha);
   }
 
-  async classify(sha: Sha): Promise<{ action: "skip" | "regression" | "generate"; reason: string }> {
+  async classify(sha: Sha): Promise<{ action: "skip" | "regression" | "generate"; reason: string; diff: string }> {
     const [message, diff] = await Promise.all([this.vcs.message(sha), this.vcs.diff(sha)]);
     const classification = classifyCommit(message, diff);
-    return { action: classification.action, reason: classification.reason };
+    // "Dynamic diff" fix (engram #936): surface the SAME diff already fetched above (no second
+    // VcsReadPort.diff() call) so the caller (RunQaUseCase) can thread the run's REAL commit diff
+    // into generation, instead of the static composition-time value the bridge previously fell
+    // back to for every production run.
+    return { action: classification.action, reason: classification.reason, diff };
   }
 }

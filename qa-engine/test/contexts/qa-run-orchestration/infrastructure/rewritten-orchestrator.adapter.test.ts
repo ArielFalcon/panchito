@@ -53,7 +53,7 @@ function stubPorts(overrides: Partial<{
 
   const changeAnalysis: ChangeAnalysisPort = {
     analyze: overrides.analyze ?? (async (sha) => BlastRadius.of(sha, ["src/x.ts"])),
-    classify: overrides.classify ?? (async () => ({ action: "generate", reason: "diff touches src/x.ts" })),
+    classify: overrides.classify ?? (async () => ({ action: "generate", reason: "diff touches src/x.ts", diff: "" })),
   };
   const generation: GenerationPort = {
     generate: overrides.generate ?? (async () => ({ specs: ["a.spec.ts"], approved: true })),

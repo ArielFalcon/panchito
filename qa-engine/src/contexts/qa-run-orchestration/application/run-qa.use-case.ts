@@ -170,8 +170,17 @@ export class RunQaUseCase {
     // — no persistOutcome call at all (save NO, fold NO). This is DISTINCT from the agent-no-op skip
     // below (save YES, fold NO) even though both currently return the SAME "skipped" verdict — the
     // two sources must diverge on persistence, matching each legacy site exactly.
+    //
+    // "Dynamic diff" fix (engram #936): classify() (diff mode only) now also returns the commit diff
+    // it already fetched internally. Hoisted to `classificationDiff` (undefined outside diff mode,
+    // which never classifies) so every GenerationPort.generate() call below — the initial call, the
+    // static-fix repair loop, and the FixLoop's own regenerate() — threads the SAME real per-run diff
+    // instead of relying on the adapter's static composition-time fallback. This is the ONLY new
+    // behavior this fix introduces; classifyCommit's own action/reason table is untouched.
+    let classificationDiff: string | undefined;
     if (input.mode === "diff") {
       const classification = await this.deps.changeAnalysis.classify(input.sha);
+      classificationDiff = classification.diff;
       if (classification.action === "skip") {
         return this.skippedResult();
       }
@@ -183,7 +192,7 @@ export class RunQaUseCase {
     const generating = true; // this composition always attempts generation (diff-mode skip already handled above)
 
     // Phase: generate (GenerationPort).
-    const generated = await this.deps.generation.generate([], workspace.specDir, signal);
+    const generated = await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff);
 
     // Agent no-op: approved + zero specs -> skipped (CLAUDE.md invariant: a VALID skipped, never invalid).
     //
@@ -244,7 +253,10 @@ export class RunQaUseCase {
       }
       staticFixRounds++;
       retries++;
-      lastGenerated = await this.deps.generation.generate([], workspace.specDir, signal);
+      // "Dynamic diff" fix: the repair regeneration reuses the SAME classificationDiff, not a
+      // dropped/empty value — a repair round must see the same real change context the initial
+      // generate() call did.
+      lastGenerated = await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff);
       validation = await this.deps.validation.validate(workspace.specDir);
     }
 
@@ -349,7 +361,10 @@ export class RunQaUseCase {
       };
       const fixLoopGeneration: FixLoopGenerationPort = {
         generate: async () => {
-          const r = await this.deps.generation.generate([], workspace.specDir, signal);
+          // "Dynamic diff" fix: the FixLoop's own regenerate() call also reuses the SAME
+          // classificationDiff — every generation attempt across the whole run sees the same real
+          // per-run diff, never a stale/empty static fallback.
+          const r = await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff);
           return { specs: r.specs, approved: r.approved, note: r.note };
         },
       };
@@ -443,7 +458,7 @@ export class RunQaUseCase {
     // pass+review call.
     let reviewerApprovedForOutcome: boolean | undefined = reviewerApprovedFromGeneration;
     if (run.verdict === "pass" && cfg.needsReview) {
-      const reviewResult = await this.deps.review.review(workspace.specDir, run.cases);
+      const reviewResult = await this.deps.review.review(workspace.specDir, run.cases, classificationDiff);
       // FIX A (judgment-day, HIGH): parsed:false is a parse miss — NOT an actionable rejection to
       // re-prompt against, but ALSO never a free pass. The legacy fails CLOSED on a parse-miss/
       // reviewer outage: green-but-unreviewed work must never publish (src/integrations/

@@ -51,7 +51,7 @@ function stubPorts(overrides: Partial<{
 
   const changeAnalysis: ChangeAnalysisPort = {
     analyze: overrides.analyze ?? (async (sha) => BlastRadius.of(sha, ["src/x.ts"])),
-    classify: overrides.classify ?? (async () => ({ action: "generate", reason: "diff touches src/x.ts" })),
+    classify: overrides.classify ?? (async () => ({ action: "generate", reason: "diff touches src/x.ts", diff: "" })),
   };
   const generation: GenerationPort = {
     generate: overrides.generate ?? (async () => ({ specs: ["a.spec.ts"], approved: true })),
@@ -350,6 +350,105 @@ test("RunQaUseCase — infra-error: execute() is NEVER called (DEV unhealthy bef
   assert.equal(executeCallCount, 0, "DEV-unhealthy must block BEFORE execution, never call it");
 });
 
+// ── "Dynamic diff" fix: the Plan 7.5 shadow proof (engram #936) found that GenerationPortAdapter
+// only ever saw the STATIC CompositionConfig.diff (set at composition-BUILD time), which is empty
+// for the real production engineFactory (constructed BEFORE the run/checkout) — generation always
+// got an empty diff -> zero specs -> a false skip. classify() already computes the commit's diff
+// internally (ChangeAnalysisPortAdapter sources it from the SAME VcsReadPort it uses for
+// classifyCommit) but previously discarded it. This proves the use-case now surfaces that
+// classification-sourced diff into EVERY generate() call, in place of an empty/static value. ───────
+
+test("dynamic diff: generate() receives the change-analysis diff (diff mode), not an empty/static value", async () => {
+  const capturedDiffs: (string | undefined)[] = [];
+  const { ports } = stubPorts({
+    classify: async () => ({ action: "generate", reason: "diff touches src/x.ts", diff: "diff --git a/src/x.ts b/src/x.ts\n+real change\n" }),
+  });
+  ports.generation.generate = async (_objectives, _specDir, _signal, diff) => {
+    capturedDiffs.push(diff);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "dynamic-diff-generate-receives-classification-diff", mode: "diff" });
+
+  assert.ok(capturedDiffs.length > 0, "generate() must have been called at least once");
+  for (const captured of capturedDiffs) {
+    assert.equal(
+      captured,
+      "diff --git a/src/x.ts b/src/x.ts\n+real change\n",
+      "every generate() call must receive the SAME diff classify() computed for this run, not an empty string or a stale static value",
+    );
+  }
+});
+
+test("dynamic diff: the static-fix repair loop also threads the SAME classification diff into its regenerate() call", async () => {
+  let validateCallCount = 0;
+  const capturedDiffs: (string | undefined)[] = [];
+  const { ports } = stubPorts({
+    classify: async () => ({ action: "generate", reason: "diff touches src/x.ts", diff: "diff --git a/src/x.ts b/src/x.ts\n+repair-round change\n" }),
+    validate: async () => {
+      validateCallCount++;
+      return validateCallCount === 1
+        ? { ok: false, errors: ["39:11  error  'x' is assigned a value but never used"] }
+        : { ok: true, errors: [] };
+    },
+  });
+  ports.generation.generate = async (_objectives, _specDir, _signal, diff) => {
+    capturedDiffs.push(diff);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "dynamic-diff-static-fix-loop-threads-diff", mode: "diff" });
+
+  assert.equal(out.decision.verdict, "pass", "the static-fix loop must still recover exactly as before");
+  assert.ok(capturedDiffs.length >= 2, `expected at least 2 generate() calls (initial + 1 repair round), got ${capturedDiffs.length}`);
+  for (const captured of capturedDiffs) {
+    assert.equal(captured, "diff --git a/src/x.ts b/src/x.ts\n+repair-round change\n", "the repair regeneration must reuse the SAME classification diff, not drop it on the retry");
+  }
+});
+
+test("dynamic diff: the FixLoop's own regenerate() call also threads the SAME classification diff", async () => {
+  const capturedDiffs: (string | undefined)[] = [];
+  const { ports } = stubPorts({
+    classify: async () => ({ action: "generate", reason: "diff touches src/x.ts", diff: "diff --git a/src/x.ts b/src/x.ts\n+fixloop change\n" }),
+    execute: async () => ({ verdict: "fail" as const, cases: [{ name: "login", status: "fail" as const }], logs: "x" }),
+  });
+  ports.generation.generate = async (_objectives, _specDir, _signal, diff) => {
+    capturedDiffs.push(diff);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "dynamic-diff-fixloop-threads-diff", mode: "diff" });
+
+  assert.ok(capturedDiffs.length > 1, `expected the FixLoop to call generate() more than once, got ${capturedDiffs.length}`);
+  for (const captured of capturedDiffs) {
+    assert.equal(captured, "diff --git a/src/x.ts b/src/x.ts\n+fixloop change\n", "the FixLoop's own regenerate() call must reuse the SAME classification diff on every round");
+  }
+});
+
+test("dynamic diff: a non-diff mode (e.g. complete) never calls classify(), so generate() receives undefined — the adapter's static ctx.diff fallback stays intact", async () => {
+  let classifyCallCount = 0;
+  const capturedDiffs: (string | undefined)[] = [];
+  const { ports } = stubPorts({
+    classify: async () => { classifyCallCount++; return { action: "generate", reason: "n/a", diff: "should never be read" }; },
+  });
+  ports.generation.generate = async (_objectives, _specDir, _signal, diff) => {
+    capturedDiffs.push(diff);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "dynamic-diff-non-diff-mode-no-classify", mode: "complete" });
+
+  assert.equal(classifyCallCount, 0, "only diff mode runs classifyCommit — complete/exhaustive/manual/context always generate without classifying");
+  assert.ok(capturedDiffs.length > 0, "generate() must still have been called");
+  for (const captured of capturedDiffs) {
+    assert.equal(captured, undefined, "without a classification diff, the use-case must pass undefined (never a fabricated value) so the adapter's own ctx.diff fallback applies");
+  }
+});
+
 // ── Judgment-day FIX A-E: exposing tests written FIRST (STRICT TDD RED), each proves the
 // 10-scenario parity is vacuous for that specific defect — none of the 10 goldens exercises
 // needsReview:true + a reviewer parse-miss, coveragePolicyMode:"signal", context-mode execute()
@@ -506,7 +605,7 @@ test("FIX E: agent no-op skip calls runHistory.save() but NOT learning.fold()", 
 test("FIX E: classify-skip does NOT call runHistory.save() or learning.fold() (distinct from the agent no-op skip source)", async () => {
   let saveCallCount = 0;
   let foldCallCount = 0;
-  const { ports } = stubPorts({ classify: async () => ({ action: "skip", reason: "docs-only commit" }) });
+  const { ports } = stubPorts({ classify: async () => ({ action: "skip", reason: "docs-only commit", diff: "" }) });
   ports.runHistory.save = async () => { saveCallCount++; };
   ports.learning.fold = async () => { foldCallCount++; };
   const useCase = new RunQaUseCase({ ...ports, config: baseConfig });

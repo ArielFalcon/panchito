@@ -92,3 +92,21 @@ test("review() threads blockingCount so the caller can distinguish blocking vs a
   assert.equal(result.blockingCount, 0);
   assert.deepEqual(result.corrections, ["nit: rename var"]);
 });
+
+test("review() prefers the run's DYNAMIC diff over the static ctx.diff (Plan 7.6), falling back when absent", async () => {
+  let seenDiff: string | undefined;
+  const rendering: PromptRenderingPort = {
+    ...fakeRendering(),
+    renderReviewer: (input) => { seenDiff = (input as { diff?: string }).diff; return { text: "reviewer-prompt", sectionSizes: {} }; },
+  };
+  const verdicts = fakeVerdicts({ approved: true, corrections: [], rationale: undefined, parsed: true, valid: true, issues: [] });
+  const adapter = new ReviewPortAdapter({ runtime: fakeRuntime("verdict-json"), rendering, verdicts }, {
+    diff: "STATIC-ctx-diff", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e", appName: "app", mode: "diff",
+  });
+
+  await adapter.review("/mirrors/org/app/e2e", cases, "DYNAMIC-run-diff");
+  assert.equal(seenDiff, "DYNAMIC-run-diff", "the reviewer must ground on the run's REAL diff, not the empty composition-time value");
+
+  await adapter.review("/mirrors/org/app/e2e", cases);
+  assert.equal(seenDiff, "STATIC-ctx-diff", "absent dynamic diff falls back to ctx.diff (operator / unit-test path)");
+});

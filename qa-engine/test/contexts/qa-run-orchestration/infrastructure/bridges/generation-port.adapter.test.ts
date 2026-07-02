@@ -154,3 +154,55 @@ test("generate() with no signal at all behaves exactly as before (no third-arg r
   assert.deepEqual(result.specs, ["flows/checkout.spec.ts"]);
   assert.equal(result.approved, true);
 });
+
+// ── "Dynamic diff" fix (engram #936): the real production engineFactory constructs this adapter
+// BEFORE the run/checkout, so the STATIC ctx.diff supplied at composition time is always "". This
+// bridge must accept the run's ACTUAL diff as a fourth generate() argument and PREFER it over the
+// static ctx.diff — falling back to ctx.diff only when the caller omits the argument (keeps the
+// F.2 operator, which pre-computes ctx.diff before building CompositionConfig, working unchanged).
+
+test("generate() PREFERS a dynamic diff argument over the static ctx.diff supplied at construction time", async () => {
+  const ports = fakeGenerationPorts();
+  let capturedInput: OpencodeRunInput | undefined;
+  const originalGenerate = GenerateTestsUseCase.prototype.generate;
+  GenerateTestsUseCase.prototype.generate = async function (input: OpencodeRunInput, opts) {
+    capturedInput = input;
+    return originalGenerate.call(this, input, opts);
+  };
+  try {
+    const useCase = new GenerateTestsUseCase(ports);
+    const adapter = new GenerationPortAdapter(useCase, {
+      repo: "org/app", appName: "app", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e",
+      namespace: "qa-bot-abc1234", needsReview: false, target: "e2e", mode: "diff", diff: "STALE-STATIC-DIFF",
+    });
+
+    await adapter.generate([], "/mirrors/org/app/e2e", undefined, "REAL-DYNAMIC-DIFF");
+
+    assert.equal(capturedInput?.diff, "REAL-DYNAMIC-DIFF", "a diff argument passed to generate() must win over the static ctx.diff, matching the run's actual commit diff");
+  } finally {
+    GenerateTestsUseCase.prototype.generate = originalGenerate;
+  }
+});
+
+test("generate() FALLS BACK to the static ctx.diff when no dynamic diff argument is supplied (preserves the F.2 operator's own pre-computed-diff path)", async () => {
+  const ports = fakeGenerationPorts();
+  let capturedInput: OpencodeRunInput | undefined;
+  const originalGenerate = GenerateTestsUseCase.prototype.generate;
+  GenerateTestsUseCase.prototype.generate = async function (input: OpencodeRunInput, opts) {
+    capturedInput = input;
+    return originalGenerate.call(this, input, opts);
+  };
+  try {
+    const useCase = new GenerateTestsUseCase(ports);
+    const adapter = new GenerationPortAdapter(useCase, {
+      repo: "org/app", appName: "app", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e",
+      namespace: "qa-bot-abc1234", needsReview: false, target: "e2e", mode: "diff", diff: "OPERATOR-PRECOMPUTED-DIFF",
+    });
+
+    await adapter.generate([], "/mirrors/org/app/e2e");
+
+    assert.equal(capturedInput?.diff, "OPERATOR-PRECOMPUTED-DIFF", "omitting the diff argument must fall back to ctx.diff unchanged — the operator's own pre-computed-diff composition must keep working");
+  } finally {
+    GenerateTestsUseCase.prototype.generate = originalGenerate;
+  }
+});

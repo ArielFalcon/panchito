@@ -36,14 +36,24 @@ export interface RunPipelinePort {
 // ── Driven capability ports (one per orchestrated context) ────────────────────
 export interface ChangeAnalysisPort {
   analyze(sha: Sha): Promise<BlastRadius>;
-  classify(sha: Sha): Promise<{ action: "skip" | "regression" | "generate"; reason: string }>;
+  // diff: the "dynamic diff" fix (engram #936) — classify() already fetches the commit's diff
+  // internally (to feed classifyCommit); surfacing it here lets the caller thread the REAL per-run
+  // diff into generation instead of a stale/empty static value. Only "diff" mode calls classify()
+  // (CLAUDE.md "Run modes"), so this is the only source of a genuine per-run diff at this layer.
+  classify(sha: Sha): Promise<{ action: "skip" | "regression" | "generate"; reason: string; diff: string }>;
 }
 export interface GenerationPort {
   // signal: Plan 7.1 (engram #913) — an optional, separate transport arg (mirrors RunPipelinePort's
   // own signal), threaded through so a cancelled run's in-flight generation can be interrupted
   // rather than resolving late. Wraps runE2E/runPipeline's own signal-aware generate() in
   // production; a port stub that ignores it is unaffected (backward compatible).
-  generate(objectives: readonly Objective[], specDir: string, signal?: AbortSignal): Promise<{ specs: string[]; approved: boolean; note?: string }>;
+  //
+  // diff: the "dynamic diff" fix (engram #936) — an optional, separate transport arg carrying the
+  // RUN's actual commit diff (sourced from ChangeAnalysisPort.classify() in diff mode), threaded
+  // through so generation gets real change context instead of a static composition-time value.
+  // Absent (non-diff modes, which never classify) -> the adapter falls back to its own static
+  // per-run diff, unaffected (backward compatible).
+  generate(objectives: readonly Objective[], specDir: string, signal?: AbortSignal, diff?: string): Promise<{ specs: string[]; approved: boolean; note?: string }>;
 }
 // ReviewPort is the authoritative publish gate's seam. blockingCount distinguishes blocking
 // corrections (must regenerate) from advisory ones (may approve when only advisory remain);
@@ -52,7 +62,10 @@ export interface GenerationPort {
 // ReviewResult (src/integrations/opencode-client.ts) so the domain drops no behavior (the #1
 // fail-closed invariant: parsed).
 export interface ReviewPort {
-  review(specDir: string, cases: readonly QaCase[]): Promise<{
+  // diff: the run's REAL per-run commit diff (Plan 7.6 dynamic-diff), so the reviewer grounds on the
+  // actual change — NOT a static composition-time value that is empty in production. Optional: absent
+  // -> the adapter falls back to its static ctx.diff (the F.2 operator / unit-test path).
+  review(specDir: string, cases: readonly QaCase[], diff?: string): Promise<{
     approved: boolean;
     corrections: string[];
     rationale?: string;

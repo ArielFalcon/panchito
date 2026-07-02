@@ -65,3 +65,24 @@ test("classify() escalates a contradicting refactor message to generate (delegat
   assert.equal(result.action, "generate");
   assert.match(result.reason, /escalated to generate/);
 });
+
+// ── "Dynamic diff" fix (engram #936): classify() already sources the commit's diff from
+// VcsReadPort.diff(sha) internally (to pass into classifyCommit), but previously discarded it after
+// classification — RunQaUseCase had no way to reach the REAL per-run diff for generation. Surfacing
+// the SAME diff already fetched here (no second VCS round-trip) closes that gap.
+
+test("classify() surfaces the SAME diff it already fetched from VcsReadPort for classifyCommit (no second VCS round-trip)", async () => {
+  const sha = Sha.of("def5678");
+  let diffCallCount = 0;
+  const theDiff = "diff --git a/src/checkout.ts b/src/checkout.ts\n+++ b/src/checkout.ts\n+if (total > 0) { charge(); }\n";
+  const vcs = fakeVcsRead({
+    message: async () => "feat: new checkout flow",
+    diff: async () => { diffCallCount++; return theDiff; },
+  });
+  const adapter = new ChangeAnalysisPortAdapter(vcs);
+
+  const result = await adapter.classify(sha);
+
+  assert.equal(result.diff, theDiff, "classify() must return the SAME diff it fetched to classify the commit, not discard it");
+  assert.equal(diffCallCount, 1, "classify() must fetch the diff exactly once — reuse the SAME value for both classification and the returned diff, never a second VcsReadPort.diff() call");
+});

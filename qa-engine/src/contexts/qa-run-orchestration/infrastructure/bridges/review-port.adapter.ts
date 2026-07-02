@@ -49,7 +49,7 @@ export class ReviewPortAdapter implements ReviewPort {
     private readonly ctx: ReviewPortStaticContext,
   ) {}
 
-  async review(specDir: string, cases: readonly QaCase[]): Promise<{
+  async review(specDir: string, cases: readonly QaCase[], diff?: string): Promise<{
     approved: boolean;
     corrections: string[];
     rationale?: string;
@@ -63,7 +63,7 @@ export class ReviewPortAdapter implements ReviewPort {
     const specs = cases.map((c) => c.file ?? c.name);
 
     const reviewInput: ReviewInput = {
-      diff: this.ctx.diff,
+      diff: diff ?? this.ctx.diff, // prefer the dynamic per-run diff (Plan 7.6); fall back to static ctx.diff (operator/tests)
       specs,
       mirrorDir: this.ctx.mirrorDir,
       e2eRelDir: this.ctx.e2eRelDir,
