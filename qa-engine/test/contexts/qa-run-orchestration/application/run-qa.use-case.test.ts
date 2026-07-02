@@ -127,7 +127,7 @@ test("RunQaUseCase: emits preExecAmbiguityCatches:0 + deterministicSelectorBlock
 // Drives ALL 10 scenarios.ts goldens through RunQaUseCase, with per-scenario stub ports built from
 // the SAME fixture semantics scenarios.ts's makeDeps() encodes (never a new, invented behavior) —
 // asserting RunDecision (verdict + sideEffect) equals the EXPECTED_VERDICT/EXPECTED_SIDE_EFFECT
-// golden-outcome.harness.ts already proves for LegacyPipelineAdapter (and run-decision-parity.test.ts
+// golden-outcome.test.ts already proves for LegacyPipelineAdapter (and run-decision-parity.test.ts
 // already proves for decide() in isolation). This test's OWN job is proving the WIRING reaches the
 // same decision — not re-deriving decide()'s policy.
 
@@ -589,7 +589,7 @@ test("FIX 2: a context-mode INVALID result does NOT persist (SUPERSEDES the orig
   // this: it files an Issue via issueOrShadow() then returns WITHOUT ever calling persistOutcome —
   // the SAME no-persist convention as the clean context pass, not the generic static-gate invalid
   // path. The original assumption was a D.7-era harness comment error (also corrected in
-  // golden-outcome.harness.ts's context-invalid row) — never independently re-verified against the
+  // golden-outcome.test.ts's context-invalid row) — never independently re-verified against the
   // actual legacy source until this fix batch.
   let saveCallCount = 0;
   const { ports } = stubPorts({

@@ -59,7 +59,7 @@ export type ScenarioKey =
 
 // Slice B.2: additional scenarios, kept in a SEPARATE union (not folded into ScenarioKey) so GATE
 // A's locked "10 goldens" invariant (golden-parity.test.ts) is untouched — these replay ONLY
-// through golden-outcome.harness.ts, never through golden-parity.test.ts/capture-goldens.ts.
+// through golden-outcome.test.ts, never through golden-parity.test.ts/capture-goldens.ts.
 export type ScenarioKeyB2 =
   | "static-repair-recovers"
   | "coverage-enforce-blocks"

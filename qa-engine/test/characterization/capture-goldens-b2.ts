@@ -1,7 +1,7 @@
 // Probe script (Plan 6, Slice B.2) — runs each new scenario through the REAL legacy runPipeline
 // ONCE to confirm the actual verdict + which side effect fired, before hardcoding those values in
-// golden-outcome.harness.ts. Mirrors capture-goldens.ts's mechanism but does NOT write JSON golden
-// files (golden-outcome.harness.ts asserts inline expectedVerdict/expectedSideEffect, it does not
+// golden-outcome.test.ts. Mirrors capture-goldens.ts's mechanism but does NOT write JSON golden
+// files (golden-outcome.test.ts asserts inline expectedVerdict/expectedSideEffect, it does not
 // read from goldens/ — GATE A's "10 goldens" invariant in golden-parity.test.ts stays untouched).
 // Run via: node --import ../../../test-setup.mjs --import tsx capture-goldens-b2.ts
 import { runPipeline } from "../../../src/pipeline.ts";

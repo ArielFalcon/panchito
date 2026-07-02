@@ -11,7 +11,7 @@ import { runOutcomeEquivalent, type ComparableOutcome } from "./equivalence.ts";
 import type { SideEffect } from "./side-effect-type.ts";
 
 // RunOutcome is structurally a ComparableOutcome (the SAME cast the golden harness uses at
-// golden-outcome.harness.ts:937) — one comparator surface for both engines, no parallel projection.
+// golden-outcome.test.ts:937) — one comparator surface for both engines, no parallel projection.
 function toComparable(o: RunOutcome): ComparableOutcome {
   return o as unknown as ComparableOutcome;
 }

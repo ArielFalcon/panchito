@@ -7,7 +7,7 @@ import { decide, type RunEvidence } from "@contexts/qa-run-orchestration/domain/
 // transcribes the evidence a real runPipeline invocation would present at decide-time for that
 // scenario — derived from the scenario's own AppConfig/deps in
 // qa-engine/test/characterization/scenarios.ts — and asserts decide() lands on the SAME
-// verdict+sideEffect the harness (test/characterization/golden-outcome.harness.ts) already proved
+// verdict+sideEffect the harness (test/characterization/golden-outcome.test.ts) already proved
 // the LegacyPipelineAdapter produces for that scenario (EXPECTED_VERDICT/EXPECTED_SIDE_EFFECT and
 // EXPECTED_VERDICT_B2/EXPECTED_SIDE_EFFECT_B2).
 //
@@ -35,7 +35,7 @@ interface ParityCase {
 }
 
 // ── Part 1: the 10 scenarios.ts goldens (GATE A) — mirrors EXPECTED_VERDICT/EXPECTED_SIDE_EFFECT
-// from golden-outcome.harness.ts:94-117 exactly. Evidence transcribed from each scenario's
+// from golden-outcome.test.ts:94-117 exactly. Evidence transcribed from each scenario's
 // AppConfig/deps in scenarios.ts (see the per-case comment for the exact source).
 const goldenCases: ParityCase[] = [
   {
@@ -123,7 +123,7 @@ const goldenCases: ParityCase[] = [
 ];
 
 // ── Part 2: the 11 Slice B.2 widened-net scenarios — mirrors EXPECTED_VERDICT_B2/
-// EXPECTED_SIDE_EFFECT_B2 from golden-outcome.harness.ts:145-170 exactly. Evidence transcribed
+// EXPECTED_SIDE_EFFECT_B2 from golden-outcome.test.ts:145-170 exactly. Evidence transcribed
 // from each scenario's AppConfig/deps in scenarios.ts's buildScenarioDepsB2 (per-case source line
 // noted below).
 const goldenCasesB2: ParityCase[] = [
@@ -138,7 +138,7 @@ const goldenCasesB2: ParityCase[] = [
   {
     // covApp("enforce") (needsReview:true, spread from scenarioApp); the improvement regen produces
     // no new specs so the coverage gap never closes → blocksPublish=true. Verdict stays "pass" —
-    // the harness's own comment (golden-outcome.harness.ts:160) confirms blocksPublish holds the PR
+    // the harness's own comment (golden-outcome.test.ts:160) confirms blocksPublish holds the PR
     // WITHOUT reclassifying RunOutcome.verdict. Source: scenarios.ts:400-428.
     scenario: "coverage-enforce-blocks",
     evidence: { verdict: "pass", generating: true, needsReview: true, reviewerApproved: true, blocksPublish: true, shadow: false, onFailure: "github-issue" },
@@ -228,11 +228,11 @@ const goldenCasesB2: ParityCase[] = [
 // ── Part 3: the pipeline-codex.test.ts scenarios with a real decide-relevant outcome (the harness
 // replays 3 codex scenarios that assert a verdict/sideEffect; a 4th is a pure config-shape
 // assertion that never calls runPipeline — not decide-relevant, so not included here). Mirrors
-// golden-outcome.harness.ts:246-305.
+// golden-outcome.test.ts:246-305.
 const codexCases: ParityCase[] = [
   {
     // codexApp (needsReview:false), a green single-provider codex run → pass, PR published.
-    // Source: golden-outcome.harness.ts:247-259.
+    // Source: golden-outcome.test.ts:247-259.
     scenario: "pipeline-codex.ts:green-pass",
     evidence: { verdict: "pass", generating: true, needsReview: false, reviewerApproved: true, blocksPublish: false, shadow: false, onFailure: "github-issue" },
     expectedVerdict: "pass",
@@ -241,7 +241,7 @@ const codexCases: ParityCase[] = [
   {
     // codexApp; the SAME green fixture as green-pass, only the assertion differs (usage
     // attribution, not decide-relevant beyond verdict/sideEffect). Source:
-    // golden-outcome.harness.ts:260-283.
+    // golden-outcome.test.ts:260-283.
     scenario: "pipeline-codex.ts:usage-attribution",
     evidence: { verdict: "pass", generating: true, needsReview: false, reviewerApproved: true, blocksPublish: false, shadow: false, onFailure: "github-issue" },
     expectedVerdict: "pass",
@@ -250,7 +250,7 @@ const codexCases: ParityCase[] = [
   // "pipeline-codex.ts:infra-error-propagates" is deliberately EXCLUDED: it asserts the adapter
   // THROWS (an AgentUnavailableError from generate()) rather than returning any RunOutcome for
   // decide() to consume — there is no verdict/sideEffect for a thrown-before-verdict error to pin
-  // against. See golden-outcome.harness.ts:284-304 and its expectThrows handling.
+  // against. See golden-outcome.test.ts:284-304 and its expectThrows handling.
 ];
 
 const allCases: ParityCase[] = [...goldenCases, ...goldenCasesB2, ...codexCases];

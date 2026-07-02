@@ -1,4 +1,4 @@
-// test/characterization/golden-outcome.harness.ts
+// test/characterization/golden-outcome.test.ts
 // Plan 6, Slice B: the full-scenario parity harness. Replays scenarios through
 // LegacyPipelineAdapter and asserts (verdict, sideEffect, and — where a full expected outcome
 // exists — equivalence) per scenario. Undeclared divergence fails the gate unconditionally;
