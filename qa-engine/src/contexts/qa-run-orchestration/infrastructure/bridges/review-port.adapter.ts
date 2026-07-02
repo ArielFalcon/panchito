@@ -20,8 +20,15 @@
 // fields VERBATIM per their own documented contract (generation/application/ports/index.ts's
 // ReviewJudgment comment) — the SAME formula GenerateTestsUseCase.generate() applies internally
 // (`reviewJudgment.parsed === false ? false : ...`). The #1 fail-closed invariant.
+//
+// W2 fix (F3, reviewer-corrections regeneration loop): review()'s new optional trailing
+// `enrichment` (ReviewEnrichment, ports/index.ts) maps priorCorrections onto ReviewInput.
+// priorCorrections verbatim (mirrors legacy's `previousRoundCorrections` threading, src/
+// pipeline.ts:1682) and intent onto ReviewInput.objective the SAME way the legacy derives the
+// reviewer's objective when no manual guidance exists (`opts.guidance ?? intent?.message`,
+// src/pipeline.ts:1682) — guidance still wins when both are present.
 import type { QaCase } from "@kernel/qa-case.ts";
-import type { ReviewPort } from "../../application/ports/index.ts";
+import type { ReviewPort, ReviewEnrichment } from "../../application/ports/index.ts";
 import type { AgentRuntimePort } from "@kernel/ports/agent-runtime.port.ts";
 import type { PromptRenderingPort, VerdictParserPort } from "@contexts/generation/application/ports/index.ts";
 import type { ReviewInput } from "@contexts/generation/application/ports/generation-ports.ts";
@@ -49,7 +56,7 @@ export class ReviewPortAdapter implements ReviewPort {
     private readonly ctx: ReviewPortStaticContext,
   ) {}
 
-  async review(specDir: string, cases: readonly QaCase[], diff?: string): Promise<{
+  async review(specDir: string, cases: readonly QaCase[], diff?: string, enrichment?: ReviewEnrichment): Promise<{
     approved: boolean;
     corrections: string[];
     rationale?: string;
@@ -71,6 +78,11 @@ export class ReviewPortAdapter implements ReviewPort {
       mode: this.ctx.mode,
       ...(this.ctx.baseUrl ? { baseUrl: this.ctx.baseUrl } : {}),
       ...(this.ctx.guidance ? { guidance: this.ctx.guidance } : {}),
+      // W2 fix (F3): priorCorrections verbatim; objective falls back to intent.message ONLY when no
+      // manual guidance was already set above — mirrors legacy's `opts.guidance ?? intent?.message`
+      // (src/pipeline.ts:1682) exactly (guidance wins, intent is the fallback).
+      ...(enrichment?.priorCorrections?.length ? { priorCorrections: [...enrichment.priorCorrections] } : {}),
+      ...(!this.ctx.guidance && enrichment?.intent?.message ? { objective: enrichment.intent.message } : {}),
     };
     const assembled = rendering.renderReviewer(reviewInput);
 

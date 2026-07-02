@@ -86,3 +86,38 @@ test("classify() surfaces the SAME diff it already fetched from VcsReadPort for 
   assert.equal(result.diff, theDiff, "classify() must return the SAME diff it fetched to classify the commit, not discard it");
   assert.equal(diffCallCount, 1, "classify() must fetch the diff exactly once — reuse the SAME value for both classification and the returned diff, never a second VcsReadPort.diff() call");
 });
+
+// ── W2 fix (F5, CommitIntent threading): classifyCommit() already derives the FULL CommitIntent
+// (type/breaking/message/body/changedFiles) as part of its own CommitClassification return — this
+// bridge previously discarded everything except {action, reason}. classify() must now surface it.
+
+test("classify() surfaces the FULL CommitIntent classifyCommit() already derived (type/breaking/message/body/changedFiles)", async () => {
+  const sha = Sha.of("def5678");
+  const vcs = fakeVcsRead({
+    message: async () => "feat: new checkout flow\n\nAdds the checkout total calculation.",
+    diff: async () => "diff --git a/src/checkout.ts b/src/checkout.ts\n+++ b/src/checkout.ts\n+if (total > 0) { charge(); }\n",
+  });
+  const adapter = new ChangeAnalysisPortAdapter(vcs);
+
+  const result = await adapter.classify(sha);
+
+  assert.equal(result.intent.type, "feat");
+  assert.equal(result.intent.breaking, false);
+  assert.equal(result.intent.message, "feat: new checkout flow");
+  assert.equal(result.intent.body, "Adds the checkout total calculation.");
+  assert.deepEqual(result.intent.changedFiles, ["src/checkout.ts"]);
+});
+
+test("classify() surfaces breaking:true for a BREAKING CHANGE commit, matching classifyCommit's own escalation", async () => {
+  const sha = Sha.of("bbb1111");
+  const vcs = fakeVcsRead({
+    message: async () => "feat!: remove legacy endpoint",
+    diff: async () => "diff --git a/src/api.ts b/src/api.ts\n+++ b/src/api.ts\n+if (v2) { return newHandler(); }\n",
+  });
+  const adapter = new ChangeAnalysisPortAdapter(vcs);
+
+  const result = await adapter.classify(sha);
+
+  assert.equal(result.intent.breaking, true);
+  assert.equal(result.action, "generate");
+});

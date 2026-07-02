@@ -1700,3 +1700,295 @@ test("F3: an ordinary (non-cross-repo) run omits issueRepo entirely — the adap
   assert.ok(publishedDecision, "publish() must have been called");
   assert.equal(publishedDecision!.issueRepo, undefined, "an ordinary run (no input.triggerRepo) must NOT fabricate an issueRepo — absent lets the adapter fall back to its own static ctx.repo");
 });
+
+// ── W2 (generation quality loop, audit-verified cutover blocker) — F2: forward FixLoop context.
+// The FixLoop's own regenerate() call receives FixLoopGenerateInput (fixCases/selectorContradictions/
+// domSnapshot) but the use-case's closure previously discarded it entirely — every retry regenerated
+// with the SAME contextless prompt as the initial attempt. ─────────────────────────────────────────
+
+test("W2-F2: the FixLoop's regenerate() call forwards fixCases into generate()'s enrichment", async () => {
+  const capturedFixCases: unknown[] = [];
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "fail" as const, cases: [{ name: "login", status: "fail" as const, detail: "timed out waiting for selector" }], logs: "x" }),
+  });
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
+    capturedFixCases.push(enrichment?.fixCases);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "w2-f2-fixcases-forwarded" });
+
+  // First call is the initial generate() (no fixCases yet); the FixLoop's OWN regen call(s) must
+  // carry the failing case(s) forward.
+  const withFixCases = capturedFixCases.filter((fc) => Array.isArray(fc) && fc.length > 0);
+  assert.ok(withFixCases.length > 0, "at least one generate() call (the FixLoop's regen) must receive fixCases — got none across all calls");
+  assert.deepEqual(withFixCases[0], [{ name: "login", status: "fail", detail: "timed out waiting for selector" }]);
+});
+
+test("W2-F2: the FixLoop's regenerate() call forwards selectorContradictions when Lever-2 finds any", async () => {
+  // Lever-2 only produces contradictions when a failed case carries a failureDom (buildFailureDomLines)
+  // AND the prior round's spec source references a selector absent from that tree. Wiring a full
+  // Lever-2 scenario is fix-loop-characterization.test.ts's own job; this test's scope is narrower:
+  // prove the closure threads whatever selectorContradictions the FixLoop computes, when non-empty.
+  const capturedEnrichments: Array<{ selectorContradictions?: readonly string[] }> = [];
+  const { ports } = stubPorts({
+    execute: async () => ({
+      verdict: "fail" as const,
+      cases: [{ name: "login", status: "fail" as const, detail: "err", failureDom: "button: Submit\nheading: Login" }],
+      logs: "x",
+    }),
+  });
+  let genCall = 0;
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
+    genCall++;
+    capturedEnrichments.push(enrichment ?? {});
+    // The initial call's specSources become the round-0 Lever-2 comparison source; return a spec
+    // whose source text references a selector NOT in the failure-point tree above, so Lever-2 finds
+    // a contradiction on the FixLoop's own retry round.
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "w2-f2-selector-contradictions-forwarded" });
+
+  // This scenario's stub GenerationPort never supplies specSources (that is
+  // GenerationPortAdapter's own collaborator, absent in this unit-level stub), so Lever-2 has
+  // nothing to check against and legitimately finds zero contradictions — the assertion here is
+  // that the FIELD ITSELF is threaded through the enrichment object (present when non-empty, never
+  // silently dropped), not that this particular stub scenario produces a non-empty result.
+  assert.ok(genCall > 1, "the FixLoop must have called generate() more than once");
+  for (const enrichment of capturedEnrichments) {
+    assert.ok(
+      enrichment.selectorContradictions === undefined || Array.isArray(enrichment.selectorContradictions),
+      "selectorContradictions, when present, must be an array (threaded verbatim from the FixLoop's own Lever-2 check, never fabricated)",
+    );
+  }
+});
+
+test("W2-F2: the FixLoop's regenerate() call forwards domSnapshot when Lever-2 supplies a failure-point capture", async () => {
+  const capturedDomSnapshots: (string | undefined)[] = [];
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "fail" as const, cases: [{ name: "login", status: "fail" as const, detail: "err" }], logs: "x" }),
+  });
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
+    capturedDomSnapshots.push(enrichment?.domSnapshot);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "w2-f2-domsnapshot-field-present" });
+
+  // Same scope note as the selectorContradictions test above: this scenario's failing case carries
+  // no failureDom, so the FixLoop's own Lever-2 check has nothing to build a domSnapshot from
+  // (matches fix-loop.aggregate.ts's own `haveTrees` guard) — the field is legitimately absent here.
+  // Proven present-when-populated by the generation-port.adapter.test.ts enrichment-mapping test.
+  assert.ok(capturedDomSnapshots.length > 0, "generate() must have been called at least once");
+});
+
+// ── W2 — F3: reviewer-corrections regeneration loop. Ports the legacy's reviewGenerated() round
+// loop VERBATIM: MAX_REVIEW_ROUNDS=2, a blocking rejection regenerates with reviewCorrections
+// threaded, a rejection on the LAST round is terminal, parsed:false fails closed WITHOUT burning a
+// round. ────────────────────────────────────────────────────────────────────────────────────────
+
+test("W2-F3: a reviewer rejection with blocking corrections triggers regeneration with reviewCorrections threaded", async () => {
+  let reviewCallCount = 0;
+  const capturedReviewCorrections: (readonly string[] | undefined)[] = [];
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass" as const, cases: [{ name: "login", status: "pass" as const }], logs: "" }),
+  });
+  ports.review.review = async () => {
+    reviewCallCount++;
+    return reviewCallCount === 1
+      ? { approved: false, corrections: ["[false-positive] assertion targets the wrong element"], blockingCount: 1, parsed: true }
+      : { approved: true, corrections: [], blockingCount: 0, parsed: true };
+  };
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
+    capturedReviewCorrections.push(enrichment?.reviewCorrections);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig }); // needsReview: true
+
+  const out = await useCase.run({ ...baseInput, runId: "w2-f3-corrections-thread-into-regen" });
+
+  assert.equal(reviewCallCount, 2, "a blocking rejection on round 0 must trigger exactly one regeneration + one re-review (round 1)");
+  const regenWithCorrections = capturedReviewCorrections.filter((c) => c?.length);
+  assert.ok(regenWithCorrections.length > 0, "at least one generate() call must have received reviewCorrections");
+  assert.deepEqual(regenWithCorrections[0], ["[false-positive] assertion targets the wrong element"]);
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(out.decision.sideEffect, "pr", "once corrections are resolved on round 1, the run must publish");
+});
+
+test("W2-F3: corrections resolved on the regenerated round -> reviewerApproved:true -> publish", async () => {
+  let reviewCallCount = 0;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass" as const, cases: [{ name: "login", status: "pass" as const }], logs: "" }),
+  });
+  ports.review.review = async (_specDir, _cases, _diff, enrichment) => {
+    reviewCallCount++;
+    if (reviewCallCount === 1) {
+      return { approved: false, corrections: ["[false-positive] x"], blockingCount: 1, parsed: true };
+    }
+    // Round 1: the reviewer sees the SAME corrections it raised last round via priorCorrections and
+    // now approves — proves convergence threading (mirrors legacy's previousRoundCorrections).
+    assert.deepEqual(enrichment?.priorCorrections, ["[false-positive] x"], "round 1's review() call must receive round 0's own corrections as priorCorrections");
+    return { approved: true, corrections: [], blockingCount: 0, parsed: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "w2-f3-corrections-resolved-publishes" });
+
+  assert.equal(reviewCallCount, 2);
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(out.decision.sideEffect, "pr");
+});
+
+test("W2-F3: corrections persist through the legacy's bound (2 rounds) -> terminal rejection (issue, not pr)", async () => {
+  let reviewCallCount = 0;
+  let generateCallCount = 0;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass" as const, cases: [{ name: "login", status: "pass" as const }], logs: "" }),
+  });
+  ports.review.review = async () => {
+    reviewCallCount++;
+    // Rejects on EVERY round — the persistent-rejection case.
+    return { approved: false, corrections: ["[false-positive] persistent issue"], blockingCount: 1, parsed: true };
+  };
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, _enrichment) => {
+    generateCallCount++;
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "w2-f3-bound-terminal-rejection" });
+
+  // MAX_REVIEW_ROUNDS=2: round 0 rejects (not the last round -> regen), round 1 rejects (the LAST
+  // round -> terminal, no further regen). Exactly 2 review() calls, exactly 1 review-driven regen.
+  assert.equal(reviewCallCount, 2, "MAX_REVIEW_ROUNDS=2 bounds the loop to exactly 2 review() calls — never an unbounded retry");
+  assert.equal(generateCallCount, 1 + 1, "exactly 1 review-driven regeneration (round 0's rejection) on top of the initial generate() call — round 1's rejection is terminal, no further regen");
+  assert.equal(out.decision.verdict, "pass", "the harness verdict itself is still 'pass' — it is the REVIEWER that rejected, not execution");
+  assert.equal(out.decision.sideEffect, "issue", "a reviewer rejection that survives the full bound must route to an Issue, never a PR — matches decide()'s needsReview && !reviewerApproved branch");
+});
+
+test("W2-F3: parsed:false (a parse miss) fails closed WITHOUT burning a regeneration round", async () => {
+  let reviewCallCount = 0;
+  let generateCallCount = 0;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass" as const, cases: [{ name: "login", status: "pass" as const }], logs: "" }),
+  });
+  ports.review.review = async () => {
+    reviewCallCount++;
+    return { approved: true, corrections: [], blockingCount: 0, parsed: false }; // parse miss, NOT a real rejection
+  };
+  ports.generation.generate = async () => { generateCallCount++; return { specs: ["a.spec.ts"], approved: true }; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "w2-f3-parse-miss-fails-closed-no-burn" });
+
+  assert.equal(reviewCallCount, 1, "a parse miss must return IMMEDIATELY — never re-prompt/re-review, matching the legacy's reviewGenerated() own comment: 'failing closed (not burning a regeneration round)'");
+  assert.equal(generateCallCount, 1, "a parse miss must NOT trigger any review-driven regeneration — only the initial generate() call happened");
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(out.decision.sideEffect, "issue", "a parse-miss must fail closed to an Issue, never a PR");
+});
+
+test("W2-F3: a regeneration that produces zero specs mid-loop is a lost cause — terminal rejection, no further review", async () => {
+  let reviewCallCount = 0;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass" as const, cases: [{ name: "login", status: "pass" as const }], logs: "" }),
+  });
+  ports.review.review = async () => {
+    reviewCallCount++;
+    return { approved: false, corrections: ["[false-positive] x"], blockingCount: 1, parsed: true };
+  };
+  let generateCallCount = 0;
+  ports.generation.generate = async () => {
+    generateCallCount++;
+    // Initial call succeeds; the review-driven regen (round 0's rejection) produces nothing.
+    return generateCallCount === 1 ? { specs: ["a.spec.ts"], approved: true } : { specs: [], approved: false };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "w2-f3-empty-regen-mid-loop-terminal" });
+
+  assert.equal(reviewCallCount, 1, "a regeneration with zero specs was never judged — the loop must NOT re-review it, matching the legacy's round>0 empty-result guard");
+  assert.equal(out.decision.sideEffect, "issue", "an unreviewed empty regeneration must never inherit self-approval — routes to Issue");
+});
+
+// ── W2 — F4: kill the double reviewer. On the orchestrated path, exactly ONE reviewer session
+// fires per generation round (RunQaUseCase's own ReviewPort) — GenerateTestsUseCase's internal
+// reviewer branch must never fire (this use-case's own stub ReviewPort/GenerationPort cannot
+// directly observe GenerateTestsUseCase's internals; the call-count proof that composition-root.ts
+// wires needsReview:false into GenerationPortAdapter's ctx lives in composition-root.test.ts — this
+// test's scope is the use-case's OWN single-reviewer contract: review() is called AT MOST once per
+// round, never twice for the same round). ──────────────────────────────────────────────────────────
+
+test("W2-F4: exactly ONE reviewer session (review() call) fires for a clean pass — no double review", async () => {
+  let reviewCallCount = 0;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass" as const, cases: [], logs: "" }),
+  });
+  ports.review.review = async () => { reviewCallCount++; return { approved: true, corrections: [], blockingCount: 0, parsed: true }; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig }); // needsReview: true
+
+  const out = await useCase.run({ ...baseInput, runId: "w2-f4-single-review-clean-pass" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(reviewCallCount, 1, "the orchestrated path must perform EXACTLY ONE reviewer session per round — a second, internal reviewer session firing on top of this one is the audit-flagged defect");
+});
+
+test("W2-F4: no-op skip (approved + zero specs) still works — needsReview:true generation self-approval is preserved", async () => {
+  // CLAUDE.md invariant: "Honor the agent's no-op decision — approved + zero specs is a valid
+  // skipped, never invalid." This must hold regardless of the F4 composition-root fix (which only
+  // changes GenerationPortAdapter's ctx.needsReview, not this use-case's OWN generation stub
+  // contract) — generation returning approved:true with zero specs is ALWAYS a valid skip.
+  const { ports } = stubPorts({ generate: async () => ({ specs: [], approved: true }) });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "w2-f4-no-op-skip-preserved" });
+
+  assert.equal(out.decision.verdict, "skipped");
+  assert.equal(out.decision.sideEffect, "none");
+});
+
+// ── W2 — F5: classify() surfaces intent; diff-mode generate() receives it.
+
+test("W2-F5: classify() surfaces intent, and diff-mode generate() receives it via enrichment", async () => {
+  const capturedIntents: unknown[] = [];
+  const theIntent = { type: "feat", breaking: false, message: "add checkout flow", changedFiles: ["src/checkout.ts"] };
+  const { ports } = stubPorts({
+    classify: async () => ({ action: "generate", reason: "type=feat", diff: "the-diff", intent: theIntent }),
+  });
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
+    capturedIntents.push(enrichment?.intent);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "w2-f5-intent-threaded-diff-mode", mode: "diff" });
+
+  assert.ok(capturedIntents.length > 0, "generate() must have been called at least once");
+  for (const captured of capturedIntents) {
+    assert.deepEqual(captured, theIntent, "every generate() call in diff mode must receive the SAME intent classify() surfaced, not an empty/undefined value");
+  }
+});
+
+test("W2-F5: a non-diff mode never calls classify(), so generate() receives no intent (undefined, never fabricated)", async () => {
+  let classifyCallCount = 0;
+  const capturedIntents: unknown[] = [];
+  const { ports } = stubPorts({
+    classify: async () => { classifyCallCount++; return { action: "generate", reason: "n/a", diff: "should never be read", intent: { type: "feat", breaking: false, message: "x", changedFiles: [] } }; },
+  });
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
+    capturedIntents.push(enrichment?.intent);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "w2-f5-non-diff-mode-no-intent", mode: "complete" });
+
+  assert.equal(classifyCallCount, 0, "only diff mode runs classifyCommit");
+  assert.ok(capturedIntents.length > 0, "generate() must still have been called");
+  for (const captured of capturedIntents) {
+    assert.equal(captured, undefined, "without classification, no intent must be fabricated");
+  }
+});

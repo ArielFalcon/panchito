@@ -110,3 +110,77 @@ test("review() prefers the run's DYNAMIC diff over the static ctx.diff (Plan 7.6
   await adapter.review("/mirrors/org/app/e2e", cases);
   assert.equal(seenDiff, "STATIC-ctx-diff", "absent dynamic diff falls back to ctx.diff (operator / unit-test path)");
 });
+
+// ── W2 fix (F3, reviewer-corrections regeneration loop): review()'s new optional 4th `enrichment`
+// argument maps priorCorrections verbatim and derives objective from intent.message ONLY when no
+// manual ctx.guidance is already set (mirrors legacy's `opts.guidance ?? intent?.message`,
+// src/pipeline.ts:1682 — guidance wins, intent is the fallback).
+
+test("review() maps enrichment.priorCorrections onto ReviewInput.priorCorrections verbatim", async () => {
+  let seenInput: { priorCorrections?: string[] } | undefined;
+  const rendering: PromptRenderingPort = {
+    ...fakeRendering(),
+    renderReviewer: (input) => { seenInput = input as { priorCorrections?: string[] }; return { text: "reviewer-prompt", sectionSizes: {} }; },
+  };
+  const verdicts = fakeVerdicts({ approved: true, corrections: [], parsed: true, valid: true, issues: [] });
+  const adapter = new ReviewPortAdapter({ runtime: fakeRuntime("verdict-json"), rendering, verdicts }, {
+    diff: "", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e", appName: "app", mode: "diff",
+  });
+
+  await adapter.review("/mirrors/org/app/e2e", cases, undefined, { priorCorrections: ["fix the assertion on line 12"] });
+
+  assert.deepEqual(seenInput?.priorCorrections, ["fix the assertion on line 12"]);
+});
+
+test("review() derives objective from enrichment.intent.message when ctx.guidance is absent (legacy's opts.guidance ?? intent?.message)", async () => {
+  let seenInput: { objective?: string } | undefined;
+  const rendering: PromptRenderingPort = {
+    ...fakeRendering(),
+    renderReviewer: (input) => { seenInput = input as { objective?: string }; return { text: "reviewer-prompt", sectionSizes: {} }; },
+  };
+  const verdicts = fakeVerdicts({ approved: true, corrections: [], parsed: true, valid: true, issues: [] });
+  const adapter = new ReviewPortAdapter({ runtime: fakeRuntime("verdict-json"), rendering, verdicts }, {
+    diff: "", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e", appName: "app", mode: "diff",
+  });
+
+  await adapter.review("/mirrors/org/app/e2e", cases, undefined, {
+    intent: { type: "feat", breaking: false, message: "add checkout flow", changedFiles: ["src/x.ts"] },
+  });
+
+  assert.equal(seenInput?.objective, "add checkout flow");
+});
+
+test("review() prefers ctx.guidance over enrichment.intent.message when both are present (guidance wins)", async () => {
+  let seenInput: { objective?: string } | undefined;
+  const rendering: PromptRenderingPort = {
+    ...fakeRendering(),
+    renderReviewer: (input) => { seenInput = input as { objective?: string }; return { text: "reviewer-prompt", sectionSizes: {} }; },
+  };
+  const verdicts = fakeVerdicts({ approved: true, corrections: [], parsed: true, valid: true, issues: [] });
+  const adapter = new ReviewPortAdapter({ runtime: fakeRuntime("verdict-json"), rendering, verdicts }, {
+    diff: "", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e", appName: "app", mode: "diff", guidance: "test the contact form",
+  });
+
+  await adapter.review("/mirrors/org/app/e2e", cases, undefined, {
+    intent: { type: "feat", breaking: false, message: "add checkout flow", changedFiles: ["src/x.ts"] },
+  });
+
+  assert.equal(seenInput?.objective, undefined, "objective is only set from intent when ctx.guidance is absent — guidance itself flows through ReviewInput.guidance, not .objective");
+});
+
+test("review() with no enrichment argument omits priorCorrections/objective (unchanged prompt)", async () => {
+  let seenInput: { priorCorrections?: string[]; objective?: string } | undefined;
+  const rendering: PromptRenderingPort = {
+    ...fakeRendering(),
+    renderReviewer: (input) => { seenInput = input as { priorCorrections?: string[]; objective?: string }; return { text: "reviewer-prompt", sectionSizes: {} }; },
+  };
+  const verdicts = fakeVerdicts({ approved: true, corrections: [], parsed: true, valid: true, issues: [] });
+  const adapter = new ReviewPortAdapter({ runtime: fakeRuntime("verdict-json"), rendering, verdicts }, {
+    diff: "", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e", appName: "app", mode: "diff",
+  });
+
+  await adapter.review("/mirrors/org/app/e2e", cases);
+
+  assert.equal(seenInput?.priorCorrections, undefined);
+  assert.equal(seenInput?.objective, undefined);
+});

@@ -14,6 +14,21 @@ import type { Objective } from "@kernel/objective.ts";
 import type { RunOutcome } from "@kernel/run-outcome.ts";
 import type { RunEventBody } from "@kernel/run-event.ts";
 
+// W2 fix (F5, CommitIntent threading): a structural mirror of generation's own CommitIntent
+// (@contexts/generation/application/ports/generation-ports.ts) — NOT imported, per this barrel's
+// own "no cross-context import" rule (every type here is kernel-resident). Mirrors the legacy's
+// GenerateInput.intent/ReviewInput.intent shape (src/integrations/opencode-client.ts) exactly:
+// type/breaking/message/body/changedFiles. A generation-context CommitIntent value is structurally
+// assignable to this port-local shape (both are plain data), so no adapter-side remapping is
+// needed beyond a type-level cast at the bridge boundary.
+export interface CommitIntent {
+  type: string;
+  breaking: boolean;
+  message: string; // first line (what the agent uses as intent)
+  body?: string; // the commit message body (lines after the subject) — the richest statement of intent
+  changedFiles: string[]; // the agent derives the scope/area from these
+}
+
 // The immovable strangler seam: a single input → a RunOutcome. Both LegacyPipelineAdapter and the
 // RewrittenOrchestratorAdapter satisfy this (Plan 6).
 export interface RunInput {
@@ -47,7 +62,45 @@ export interface ChangeAnalysisPort {
   // internally (to feed classifyCommit); surfacing it here lets the caller thread the REAL per-run
   // diff into generation instead of a stale/empty static value. Only "diff" mode calls classify()
   // (CLAUDE.md "Run modes"), so this is the only source of a genuine per-run diff at this layer.
-  classify(sha: Sha): Promise<{ action: "skip" | "regression" | "generate"; reason: string; diff: string }>;
+  //
+  // intent: W2 fix (F5) — classifyCommit() ALREADY derives the full CommitIntent (type/breaking/
+  // message/body/changedFiles) as part of computing action/reason (it returns a CommitClassification
+  // extends CommitIntent), but the port previously discarded everything except {action, reason}.
+  // Surfacing it here mirrors the diff fix's own precedent: the caller (RunQaUseCase) threads intent
+  // into GenerationPort.generate()'s enrichment (diff-mode generation) and — where the legacy's own
+  // reviewer objective derivation reads intent?.message (src/pipeline.ts:1682) — into review() too.
+  // Optional: a stub/legacy caller that omits it is unaffected (matches every other optional field
+  // this barrel has widened with — dynamic diff, signal, etc.).
+  classify(sha: Sha): Promise<{ action: "skip" | "regression" | "generate"; reason: string; diff: string; intent?: CommitIntent }>;
+}
+// W2 fix (F1, generation regen/enrichment context — audit-verified cutover blocker): the legacy's
+// GenerateInput (src/integrations/opencode-client.ts's OpencodeRunInput) carries fixCases/
+// reviewCorrections/selectorContradictions/domSnapshot/coverageGap/intent — the fields a regen or
+// reviewer-correction round needs so the agent sees WHY it is being asked to try again. This barrel's
+// GenerationPort.generate() had no slot for any of them, so every regen (the FixLoop's own retry,
+// the reviewer-correction loop, F3) silently generated with the SAME contextless prompt as the
+// initial attempt. Widened with ONE optional trailing object (not more positional args — the diff/
+// signal precedent already set two; a 3rd/4th/5th positional arg would be unreadable at call sites)
+// so every field is independently absent-safe: an adapter/stub that never reads `enrichment` is
+// unaffected (backward compatible with every existing GenerationPort implementation/test).
+export interface GenerationEnrichment {
+  // Reviewer rejection corrections (F3) — mirrors the legacy's reviewCorrections: threaded into the
+  // regen prompt's "Apply reviewer corrections HIGHEST priority" section (src/integrations/
+  // prompts.ts:727-737).
+  reviewCorrections?: string[];
+  // FixLoop retry context (F2) — mirrors FixLoopGenerateInput's own fixCases/selectorContradictions/
+  // domSnapshot (../../domain/fix-loop.aggregate.ts) so a fix-loop regen renders the legacy's "Fix
+  // failing tests" section instead of a bare re-prompt.
+  fixCases?: readonly QaCase[];
+  selectorContradictions?: readonly string[];
+  domSnapshot?: string;
+  // Change-coverage enforce-mode regeneration (src/pipeline.ts's renderUncovered(cc) call site,
+  // baseGenInput({ coverageGap: ... })) — the changed lines a green run failed to exercise.
+  coverageGap?: string;
+  // F5 — the run's CommitIntent (diff mode), threaded from ChangeAnalysisPort.classify() the same
+  // way the dynamic diff already is, so diff-mode generation receives the SAME intent the legacy's
+  // baseGenInput() forwards on every call (src/pipeline.ts:1678's `intent,`).
+  intent?: CommitIntent;
 }
 export interface GenerationPort {
   // signal: Plan 7.1 (engram #913) — an optional, separate transport arg (mirrors RunPipelinePort's
@@ -60,7 +113,11 @@ export interface GenerationPort {
   // through so generation gets real change context instead of a static composition-time value.
   // Absent (non-diff modes, which never classify) -> the adapter falls back to its own static
   // per-run diff, unaffected (backward compatible).
-  generate(objectives: readonly Objective[], specDir: string, signal?: AbortSignal, diff?: string): Promise<{ specs: string[]; approved: boolean; note?: string }>;
+  //
+  // enrichment: W2 fix (F1) — see GenerationEnrichment's own header. Optional trailing object;
+  // absent -> the adapter's OpencodeRunInput carries none of these fields, an unchanged prompt
+  // (exactly today's behavior).
+  generate(objectives: readonly Objective[], specDir: string, signal?: AbortSignal, diff?: string, enrichment?: GenerationEnrichment): Promise<{ specs: string[]; approved: boolean; note?: string }>;
 }
 // ReviewPort is the authoritative publish gate's seam. blockingCount distinguishes blocking
 // corrections (must regenerate) from advisory ones (may approve when only advisory remain);
@@ -68,11 +125,27 @@ export interface GenerationPort {
 // so the FixLoop re-prompts once instead of burning a fix round. Both are carried from the legacy
 // ReviewResult (src/integrations/opencode-client.ts) so the domain drops no behavior (the #1
 // fail-closed invariant: parsed).
+// W2 fix (F3, reviewer-corrections regeneration loop): the legacy's reviewGenerated() threads the
+// PRIOR round's own corrections into the NEXT review call (src/pipeline.ts:1682's
+// `...(previousRoundCorrections ? { priorCorrections: previousRoundCorrections } : {})`) so the
+// reviewer can judge CONVERGENCE — approve once the previously-raised BLOCKING issues are resolved,
+// rather than inventing new nits on unchanged specs. Optional trailing object, same precedent as
+// GenerationEnrichment (F1) — absent -> the adapter's ReviewInput carries none of these, unchanged
+// prompt (today's behavior).
+export interface ReviewEnrichment {
+  priorCorrections?: readonly string[];
+  // F5 — mirrors legacy's `objective: opts.guidance ?? intent?.message` (src/pipeline.ts:1682): when
+  // no manual guidance exists, the reviewer's objective is derived from the commit intent's message.
+  intent?: CommitIntent;
+}
 export interface ReviewPort {
   // diff: the run's REAL per-run commit diff (Plan 7.6 dynamic-diff), so the reviewer grounds on the
   // actual change — NOT a static composition-time value that is empty in production. Optional: absent
   // -> the adapter falls back to its static ctx.diff (the F.2 operator / unit-test path).
-  review(specDir: string, cases: readonly QaCase[], diff?: string): Promise<{
+  //
+  // enrichment: W2 fix (F3) — see ReviewEnrichment's own header. Optional trailing object; absent ->
+  // the adapter's ReviewInput carries no priorCorrections/intent, unchanged prompt.
+  review(specDir: string, cases: readonly QaCase[], diff?: string, enrichment?: ReviewEnrichment): Promise<{
     approved: boolean;
     corrections: string[];
     rationale?: string;

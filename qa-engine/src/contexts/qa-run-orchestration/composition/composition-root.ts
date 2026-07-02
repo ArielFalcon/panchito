@@ -201,7 +201,34 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
       mirrorDir: cfg.mirrorDir,
       e2eRelDir: cfg.e2eRelDir,
       namespace: cfg.branch,
-      needsReview: cfg.needsReview,
+      // W2 fix (F4, audit-verified cutover blocker — "kill the double reviewer"): DELIBERATELY
+      // false here, NOT cfg.needsReview. GenerateTestsUseCase.generate() (generation/application/
+      // generate-tests.use-case.ts:124-191) fires its OWN internal reviewer session whenever
+      // input.needsReview is true — a SEPARATE, independently-blind reviewer session from
+      // RunQaUseCase's own ReviewPort.review() call (review-port.adapter.ts), which is threaded on
+      // the SAME cfg.needsReview a few lines below via RunQaConfig.needsReview. On the orchestrated
+      // path (this composition root), RunQaUseCase.run()'s "Phase: review (ReviewPort)" is the
+      // AUTHORITATIVE publish gate (matches the legacy: EXACTLY ONE reviewer call per generation
+      // round, src/pipeline.ts's reviewGenerated(), never two independent reviewer sessions per
+      // round) — so the generation-internal reviewer must never fire on this path, or every run
+      // pays for two blind LLM reviewer sessions and the SECOND, undocumented one (this one) — not
+      // RunQaUseCase's own ReviewPort — silently drives the agent's own self-reported `approved`
+      // flag that the no-op-skip check reads (`generated.approved && generated.specs.length === 0`,
+      // run-qa.use-case.ts).
+      //
+      // Semantics preserved: with needsReview:false, GenerateTestsUseCase.generate() returns
+      // EARLY (generate-tests.use-case.ts:124-131) with `approved: true` UNCONDITIONALLY — the
+      // generator's own self-reported completion signal, not a review verdict. This is EXACTLY the
+      // legacy's own no-op contract for this shape (src/pipeline.ts's reviewGenerated():
+      // `if (!(app.qa.needsReview && deps.review)) return r;` — a passthrough of the generator's OWN
+      // `r.approved`, never a rubber-stamped true) — RunQaUseCase's own FIX 1 comment (D.7 batch 2)
+      // independently documents this SAME legacy behavior. So `generated.approved` here still
+      // means "the generator's own contract check passed", and the CLAUDE.md no-op-skip invariant
+      // (approved + zero specs -> skipped, never invalid) holds unchanged: a zero-spec approved
+      // generation is still a valid skip, exactly as before this fix. GenerateTestsUseCase's own
+      // needsReview:true branch stays intact and untouched for any standalone caller that invokes
+      // it directly (outside this composition root).
+      needsReview: false,
       target: cfg.target,
       mode: cfg.mode,
       diff: cfg.diff ?? "",

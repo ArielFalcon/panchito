@@ -8,6 +8,11 @@
 //   returns the SAME fetched diff ("dynamic diff" fix, engram #936) so the caller can thread the
 //   run's REAL commit diff into generation, instead of a stale static composition-time value.
 //
+// intent: W2 fix (F5) — classifyCommit() already computes the FULL CommitIntent (type/breaking/
+// message/body/changedFiles) as part of its own CommitClassification return (it `extends
+// CommitIntent`) — every field was already being thrown away except action/reason. Surfaced here,
+// verbatim, no re-derivation: the SAME classification object already computed above.
+//
 // PLAN DRIFT (recorded per Task E.0's own instruction — "if a sibling entry point named in the plan
 // does NOT exist at HEAD, STOP and report it"): the plan named "AnalyzeChangeUseCase" as the
 // analyze()/classify() collaborator. No such class/use-case exists anywhere under
@@ -19,7 +24,7 @@
 // confirmed present and behavior-preserving. Reported in the apply summary; not fabricated here.
 import type { Sha } from "@kernel/sha.ts";
 import type { BlastRadius } from "@kernel/blast-radius.ts";
-import type { ChangeAnalysisPort } from "../../application/ports/index.ts";
+import type { ChangeAnalysisPort, CommitIntent } from "../../application/ports/index.ts";
 import type { VcsReadPort } from "@contexts/change-analysis/application/ports/index.ts";
 import { classifyCommit } from "@contexts/change-analysis/domain/commit-classification.ts";
 
@@ -30,13 +35,28 @@ export class ChangeAnalysisPortAdapter implements ChangeAnalysisPort {
     return this.vcs.blastRadius(sha);
   }
 
-  async classify(sha: Sha): Promise<{ action: "skip" | "regression" | "generate"; reason: string; diff: string }> {
+  async classify(sha: Sha): Promise<{ action: "skip" | "regression" | "generate"; reason: string; diff: string; intent: CommitIntent }> {
     const [message, diff] = await Promise.all([this.vcs.message(sha), this.vcs.diff(sha)]);
     const classification = classifyCommit(message, diff);
     // "Dynamic diff" fix (engram #936): surface the SAME diff already fetched above (no second
     // VcsReadPort.diff() call) so the caller (RunQaUseCase) can thread the run's REAL commit diff
     // into generation, instead of the static composition-time value the bridge previously fell
     // back to for every production run.
-    return { action: classification.action, reason: classification.reason, diff };
+    //
+    // intent (F5): the SAME classification object already carries type/breaking/message/body/
+    // changedFiles (CommitClassification extends CommitIntent) — structurally assignable to the
+    // port-local CommitIntent shape (ports/index.ts), never re-derived.
+    return {
+      action: classification.action,
+      reason: classification.reason,
+      diff,
+      intent: {
+        type: classification.type,
+        breaking: classification.breaking,
+        message: classification.message,
+        body: classification.body,
+        changedFiles: classification.changedFiles,
+      },
+    };
   }
 }

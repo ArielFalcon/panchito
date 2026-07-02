@@ -206,3 +206,70 @@ test("generate() FALLS BACK to the static ctx.diff when no dynamic diff argument
     GenerateTestsUseCase.prototype.generate = originalGenerate;
   }
 });
+
+// ── W2 fix (F1, generation regen/enrichment context): the adapter's new optional 5th `enrichment`
+// argument must map EVERY field 1:1 onto OpencodeRunInput — absent fields stay absent, present
+// fields flow through unchanged (never re-derived, never dropped).
+
+test("generate() maps enrichment.reviewCorrections/fixCases/selectorContradictions/domSnapshot/coverageGap/intent onto OpencodeRunInput", async () => {
+  const ports = fakeGenerationPorts();
+  let capturedInput: OpencodeRunInput | undefined;
+  const originalGenerate = GenerateTestsUseCase.prototype.generate;
+  GenerateTestsUseCase.prototype.generate = async function (input: OpencodeRunInput, opts) {
+    capturedInput = input;
+    return originalGenerate.call(this, input, opts);
+  };
+  try {
+    const useCase = new GenerateTestsUseCase(ports);
+    const adapter = new GenerationPortAdapter(useCase, {
+      repo: "org/app", appName: "app", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e",
+      namespace: "qa-bot-abc1234", needsReview: false, target: "e2e", mode: "diff", diff: "",
+    });
+
+    await adapter.generate([], "/mirrors/org/app/e2e", undefined, "the-diff", {
+      reviewCorrections: ["fix the assertion"],
+      fixCases: [{ name: "login", status: "fail", detail: "timed out" }],
+      selectorContradictions: ["role:button is NOT in the tree"],
+      domSnapshot: "- button \"Submit\"",
+      coverageGap: "src/x.ts:12-15 not exercised",
+      intent: { type: "feat", breaking: false, message: "add checkout", changedFiles: ["src/x.ts"] },
+    });
+
+    assert.deepEqual(capturedInput?.reviewCorrections, ["fix the assertion"]);
+    assert.deepEqual(capturedInput?.fixCases, [{ name: "login", status: "fail", detail: "timed out" }]);
+    assert.deepEqual(capturedInput?.selectorContradictions, ["role:button is NOT in the tree"]);
+    assert.equal(capturedInput?.domSnapshot, "- button \"Submit\"");
+    assert.equal(capturedInput?.coverageGap, "src/x.ts:12-15 not exercised");
+    assert.deepEqual(capturedInput?.intent, { type: "feat", breaking: false, message: "add checkout", changedFiles: ["src/x.ts"] });
+  } finally {
+    GenerateTestsUseCase.prototype.generate = originalGenerate;
+  }
+});
+
+test("generate() with no enrichment argument omits every enrichment field from OpencodeRunInput (unchanged prompt)", async () => {
+  const ports = fakeGenerationPorts();
+  let capturedInput: OpencodeRunInput | undefined;
+  const originalGenerate = GenerateTestsUseCase.prototype.generate;
+  GenerateTestsUseCase.prototype.generate = async function (input: OpencodeRunInput, opts) {
+    capturedInput = input;
+    return originalGenerate.call(this, input, opts);
+  };
+  try {
+    const useCase = new GenerateTestsUseCase(ports);
+    const adapter = new GenerationPortAdapter(useCase, {
+      repo: "org/app", appName: "app", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e",
+      namespace: "qa-bot-abc1234", needsReview: false, target: "e2e", mode: "diff", diff: "",
+    });
+
+    await adapter.generate([], "/mirrors/org/app/e2e");
+
+    assert.equal(capturedInput?.reviewCorrections, undefined);
+    assert.equal(capturedInput?.fixCases, undefined);
+    assert.equal(capturedInput?.selectorContradictions, undefined);
+    assert.equal(capturedInput?.domSnapshot, undefined);
+    assert.equal(capturedInput?.coverageGap, undefined);
+    assert.equal(capturedInput?.intent, undefined);
+  } finally {
+    GenerateTestsUseCase.prototype.generate = originalGenerate;
+  }
+});

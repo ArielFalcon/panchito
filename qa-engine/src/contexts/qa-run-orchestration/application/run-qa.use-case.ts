@@ -44,6 +44,7 @@ import type {
   RunHistoryPort,
   SetupPort,
   ObserverPort,
+  CommitIntent,
 } from "./ports/index.ts";
 import { decide, type RunEvidence } from "../domain/run-decision.service.ts";
 import { RunDecision } from "../domain/run-decision.ts";
@@ -231,11 +232,19 @@ export class RunQaUseCase {
     // static-fix repair loop, and the FixLoop's own regenerate() — threads the SAME real per-run diff
     // instead of relying on the adapter's static composition-time fallback. This is the ONLY new
     // behavior this fix introduces; classifyCommit's own action/reason table is untouched.
+    //
+    // W2 fix (F5): classify() also now surfaces the CommitIntent it already derived internally
+    // (classifyCommit()'s own CommitClassification extends CommitIntent) — hoisted alongside
+    // classificationDiff for the SAME reason: every generate()/review() call below threads the SAME
+    // real per-run intent, matching the legacy's baseGenInput({ intent, ... }) (src/pipeline.ts:1678)
+    // and the reviewer's own objective derivation (src/pipeline.ts:1682).
     let classificationDiff: string | undefined;
+    let classificationIntent: CommitIntent | undefined;
     if (input.mode === "diff") {
       this.deps.observer?.onStep("classify");
       const classification = await this.deps.changeAnalysis.classify(input.sha);
       classificationDiff = classification.diff;
+      classificationIntent = classification.intent;
       if (classification.action === "skip") {
         return this.skippedResult();
       }
@@ -273,9 +282,15 @@ export class RunQaUseCase {
       return this.abortedResult();
     }
 
+    // W2 fix (F5): the base enrichment every generate()/review() call below shares — just the
+    // classification-sourced intent, absent when non-diff mode never classified. Each call site
+    // spreads its OWN additional fields (fixCases/reviewCorrections/etc.) on top of this base,
+    // mirroring the legacy's baseGenInput({ intent, ...extra }) pattern (src/pipeline.ts:1666-1712).
+    const baseEnrichment = classificationIntent ? { intent: classificationIntent } : undefined;
+
     // Phase: generate (GenerationPort).
     this.deps.observer?.onStep("generate");
-    const generated = await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff);
+    const generated = await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff, baseEnrichment);
 
     // Diagnosability fix (live-run root cause): when generation comes back with ZERO specs AND
     // approved===false, the agent almost always left an explanatory note (e.g. "no LIVE DEV URL
@@ -354,8 +369,8 @@ export class RunQaUseCase {
       this.deps.observer?.onStep("retry", `static-fix round ${staticFixRounds}/${MAX_STATIC_FIX_ROUNDS}`);
       // "Dynamic diff" fix: the repair regeneration reuses the SAME classificationDiff, not a
       // dropped/empty value — a repair round must see the same real change context the initial
-      // generate() call did.
-      lastGenerated = await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff);
+      // generate() call did. W2 fix (F5): same for classificationIntent, via baseEnrichment.
+      lastGenerated = await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff, baseEnrichment);
       validation = await this.deps.validation.validate(workspace.specDir);
     }
 
@@ -504,11 +519,25 @@ export class RunQaUseCase {
         },
       };
       const fixLoopGeneration: FixLoopGenerationPort = {
-        generate: async () => {
+        // W2 fix (F2, audit-verified cutover blocker): the FixLoop calls this closure with
+        // FixLoopGenerateInput (fixCases, selectorContradictions, domSnapshot, cycleBudget,
+        // wallClockBudget) — see fix-loop.aggregate.ts's own regeneration call site (:316-322). This
+        // closure previously DISCARDED that entire input, so every fix-loop retry regenerated with
+        // the SAME contextless prompt as the very first attempt, never rendering the legacy's "Fix
+        // failing tests" section (src/pipeline.ts:912-924's fixCases/reviewCorrections rendering) —
+        // the agent had no idea WHAT failed or WHY. Forwarded here through F1's enrichment object,
+        // alongside the SAME classificationDiff/classificationIntent every other generate() call
+        // site already threads.
+        generate: async (fixLoopInput) => {
           // "Dynamic diff" fix: the FixLoop's own regenerate() call also reuses the SAME
           // classificationDiff — every generation attempt across the whole run sees the same real
           // per-run diff, never a stale/empty static fallback.
-          const r = await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff);
+          const r = await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff, {
+            ...baseEnrichment,
+            fixCases: fixLoopInput.fixCases,
+            ...(fixLoopInput.selectorContradictions?.length ? { selectorContradictions: fixLoopInput.selectorContradictions } : {}),
+            ...(fixLoopInput.domSnapshot ? { domSnapshot: fixLoopInput.domSnapshot } : {}),
+          });
           return { specs: r.specs, approved: r.approved, note: r.note };
         },
       };
@@ -639,15 +668,77 @@ export class RunQaUseCase {
     // pass+review call.
     let reviewerApprovedForOutcome: boolean | undefined = reviewerApprovedFromGeneration;
     if (run.verdict === "pass" && cfg.needsReview) {
-      const reviewResult = await this.deps.review.review(workspace.specDir, run.cases, classificationDiff);
-      // FIX A (judgment-day, HIGH): parsed:false is a parse miss — NOT an actionable rejection to
-      // re-prompt against, but ALSO never a free pass. The legacy fails CLOSED on a parse-miss/
-      // reviewer outage: green-but-unreviewed work must never publish (src/integrations/
-      // opencode-client.ts:1704-1710: "A parse miss is NOT an actionable rejection... Treat it like
-      // a reviewer error (fail closed)."; src/pipeline.ts:1690-1694: "A reviewer outage must never
-      // silently degrade every run to generator-self-approval"). Treating parsed:false as approved
-      // would fail OPEN — the opposite of the invariant.
-      reviewerApproved = reviewResult.parsed === false ? false : reviewResult.approved;
+      // W2 fix (F3, reviewer-corrections regeneration loop — audit-verified cutover blocker): ports
+      // the legacy's reviewGenerated() round loop VERBATIM (src/pipeline.ts:1608-1802). Legacy bounds
+      // (re-verified against src/pipeline.ts:803 + the loop body, not invented here):
+      //   MAX_REVIEW_ROUNDS = 2 (module-level const, src/pipeline.ts:803) — round indices 0 and 1.
+      //   Round 0 reviews the initial (post-execute) specs.
+      //   A parse miss (parsed:false) is NOT an actionable rejection — the legacy returns
+      //     IMMEDIATELY with approved:false, WITHOUT burning a regeneration round (:1705-1714's own
+      //     comment: "A parse miss is NOT an actionable rejection: feeding the synthetic correction
+      //     back just burns a round and re-hits the same miss... failing closed (not burning a
+      //     regeneration round)"). Distinct from GenerateTestsUseCase's OWN internal reviewer
+      //     JSON-repair (a SEPARATE re-prompt-once-on-invalid-schema mechanism, generate-tests.
+      //     use-case.ts:155-169) — that repairs `v.valid` (schema conformance) BEFORE a verdict is
+      //     ever parsed; this loop's `parsed` is "did we get a parseable verdict AT ALL".
+      //   The gate passes when `review.approved && blockingCount === 0` (:1773's `gateApproves`,
+      //     Phase 4 + FIX 4 — both conditions required, an advisory-only correction never overrides
+      //     an explicit approved:false). blockingCount defaults to corrections.length when absent
+      //     (fail-closed: an unclassified correction counts as blocking).
+      //   On rejection (`!gateApproves`) that is NOT the LAST round (round < MAX_REVIEW_ROUNDS - 1):
+      //     regenerate with reviewCorrections threaded (the "Apply reviewer corrections HIGHEST
+      //     priority" prompt section), then loop to the NEXT round with THIS round's corrections
+      //     threaded into the reviewer's own priorCorrections (:1856's previousRoundCorrections
+      //     assignment) so the reviewer can judge convergence.
+      //   On rejection on the LAST round (round === MAX_REVIEW_ROUNDS - 1, i.e. round 1): TERMINAL —
+      //     reviewerApproved stays false, no further regeneration (:1773's own early return).
+      //   A regeneration that produces ZERO specs is a lost cause — the legacy returns approved:false
+      //     immediately rather than reviewing an empty set again (:1607-1611's own round-0-vs-later
+      //     distinction collapses here since this loop never re-enters with 0 specs from round 0,
+      //     that path is the agent-no-op skip above; a LATER round losing all specs must still not
+      //     silently inherit self-approval).
+      const MAX_REVIEW_ROUNDS = 2;
+      let reviewCases = run.cases;
+      let previousRoundCorrections: string[] | undefined;
+      for (let round = 0; round < MAX_REVIEW_ROUNDS; round++) {
+        const reviewResult = await this.deps.review.review(workspace.specDir, reviewCases, classificationDiff, {
+          ...baseEnrichment,
+          ...(previousRoundCorrections ? { priorCorrections: previousRoundCorrections } : {}),
+        });
+        // FIX A (judgment-day, HIGH) + F3 (legacy :1705-1714): parsed:false is a parse miss — NOT an
+        // actionable rejection to re-prompt against, but ALSO never a free pass. Fails CLOSED
+        // IMMEDIATELY, without burning a regeneration round (matches the legacy exactly — see the
+        // header comment above).
+        if (reviewResult.parsed === false) {
+          reviewerApproved = false;
+          break;
+        }
+        const blockingCount = reviewResult.blockingCount ?? reviewResult.corrections.length;
+        const gateApproves = reviewResult.approved && blockingCount === 0;
+        reviewerApproved = gateApproves;
+        if (gateApproves) break;
+        // Rejected. Terminal on the LAST round — no further regeneration (mirrors legacy's
+        // `if (round === MAX_REVIEW_ROUNDS - 1) return {...}`, :1773).
+        if (round === MAX_REVIEW_ROUNDS - 1) break;
+        retries++;
+        this.deps.observer?.onStep("retry", `reviewer-correction round ${round + 1}/${MAX_REVIEW_ROUNDS}`);
+        previousRoundCorrections = reviewResult.corrections;
+        const regen = await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff, {
+          ...baseEnrichment,
+          reviewCorrections: reviewResult.corrections,
+        });
+        if (regen.specs.length === 0) {
+          // A regeneration that produced no reviewable specs was never judged — it must NOT inherit
+          // the generator's self-approval (mirrors legacy's round>0 empty-result guard, :1607-1611).
+          reviewerApproved = false;
+          break;
+        }
+        // The regenerated spec set was not re-executed against DEV by this loop (mirrors the
+        // legacy's own reviewGenerated() contract: the reviewer judges the NEW spec text, execution
+        // evidence is round-0-only per the executedRed guard, :1682-1692) — only the reviewed case
+        // identity (file/name) changes for the NEXT round's review() call.
+        reviewCases = regen.specs.map((file) => ({ name: file, file, status: run.cases[0]?.status ?? "pass" }));
+      }
       // FIX 1 (judgment-day D.7 batch 2): a GENUINE review call's own verdict OVERWRITES generation's
       // self-approval default above — the independent reviewer's judgment always wins when it
       // actually ran, matching the legacy's real (non-no-op) reviewGenerated() path, which returns

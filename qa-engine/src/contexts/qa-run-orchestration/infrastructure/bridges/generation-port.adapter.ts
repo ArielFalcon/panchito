@@ -42,11 +42,30 @@
 // GenerationResult carries no navigation count). Omitted here; the FixLoop's own contract treats
 // absent as 0 ("matching the legacy's `result?.reexploreNavigations ?? 0`"), the documented safe
 // default — never invented.
+//
+// W2 fix (F1, generation regen/enrichment context): generate()'s new optional trailing `enrichment`
+// (GenerationEnrichment, ports/index.ts) is spread-conditionally into the OpencodeRunInput this
+// adapter already builds — reviewCorrections/fixCases/selectorContradictions/domSnapshot/
+// coverageGap/intent are ALL fields OpencodeRunInput already carries (generation-ports.ts's FULL
+// current field set, copied verbatim from src/integrations/opencode-client.ts) and buildPromptAssembled
+// already renders sections for (src/integrations/prompts.ts:667-737,912-924) — this bridge was
+// simply never given the data to forward. Absent enrichment/fields -> unchanged prompt, exactly
+// today's behavior (every field is independently optional, matching the barrel's own precedent).
 import type { Objective } from "@kernel/objective.ts";
-import type { GenerationPort } from "../../application/ports/index.ts";
+import type { GenerationPort, GenerationEnrichment } from "../../application/ports/index.ts";
 import { GenerateTestsUseCase } from "@contexts/generation/application/generate-tests.use-case.ts";
-import type { OpencodeRunInput } from "@contexts/generation/application/ports/generation-ports.ts";
+import type { OpencodeRunInput, CommitIntent as GenerationCommitIntent } from "@contexts/generation/application/ports/generation-ports.ts";
 import type { RunMode, TestTarget } from "@kernel/run-mode.ts";
+
+// The barrel's CommitIntent (ports/index.ts) is kernel-resident/structural — `type` is a plain
+// `string` there (this bridge, not the barrel, is where cross-context types are allowed). Generation's
+// OWN CommitIntent narrows `type` to its CommitType union. The value ALWAYS originates from
+// ChangeAnalysisPortAdapter's classifyCommit() call (commit-classification.ts's own CommitType union
+// is structurally identical to generation's), so this is a same-shape re-assertion at the bridge
+// boundary, never a fabricated narrowing.
+function toGenerationIntent(intent: GenerationEnrichment["intent"]): GenerationCommitIntent | undefined {
+  return intent as GenerationCommitIntent | undefined;
+}
 
 export interface GenerationPortStaticContext {
   repo: string;
@@ -88,7 +107,7 @@ export class GenerationPortAdapter implements GenerationPort {
     private readonly collaborators: GenerationPortCollaborators = {},
   ) {}
 
-  async generate(_objectives: readonly Objective[], specDir: string, signal?: AbortSignal, diff?: string): Promise<GenerationPortResult> {
+  async generate(_objectives: readonly Objective[], specDir: string, signal?: AbortSignal, diff?: string, enrichment?: GenerationEnrichment): Promise<GenerationPortResult> {
     const input: OpencodeRunInput = {
       repo: this.ctx.repo,
       sha: "", // provenance only; the use-case never branches on it — the caller's Sha VO owns identity
@@ -107,6 +126,16 @@ export class GenerationPortAdapter implements GenerationPort {
       appName: this.ctx.appName,
       ...(this.ctx.guidance ? { guidance: this.ctx.guidance } : {}),
       ...(this.ctx.baseUrl ? { baseUrl: this.ctx.baseUrl } : {}),
+      // W2 fix (F1): spread-conditional — every enrichment field is independently optional, mapped
+      // 1:1 onto the SAME OpencodeRunInput fields buildPromptAssembled already renders sections for.
+      // Absent enrichment or an absent/empty individual field -> that field is omitted from `input`,
+      // unchanged prompt (exactly the pre-fix behavior).
+      ...(enrichment?.reviewCorrections?.length ? { reviewCorrections: [...enrichment.reviewCorrections] } : {}),
+      ...(enrichment?.fixCases?.length ? { fixCases: [...enrichment.fixCases] } : {}),
+      ...(enrichment?.selectorContradictions?.length ? { selectorContradictions: [...enrichment.selectorContradictions] } : {}),
+      ...(enrichment?.domSnapshot ? { domSnapshot: enrichment.domSnapshot } : {}),
+      ...(enrichment?.coverageGap ? { coverageGap: enrichment.coverageGap } : {}),
+      ...(enrichment?.intent ? { intent: toGenerationIntent(enrichment.intent) } : {}),
     };
 
     const generated = await this.useCase.generate(input, { ...(signal ? { signal } : {}) });
