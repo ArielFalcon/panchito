@@ -40,7 +40,11 @@ export class RewrittenOrchestratorAdapter implements RunPipelinePort {
 
   async run(input: RunInput, signal?: AbortSignal): Promise<RunOutcome> {
     const result = await this.useCase.run(input, signal);
-    return toOutcome(input, result);
+    // Determinism fix (the millisecond gate-flake): when the use-case persisted an outcome, return
+    // THAT exact object — returned-vs-persisted equality by identity, not by a re-derivation whose
+    // own `new Date()` diverged at millisecond boundaries. toOutcome() remains the fallback for the
+    // never-persisted terminals (infra-error/aborted entry gates, context-mode skipPersist).
+    return result.outcome ?? toOutcome(input, result);
   }
 }
 

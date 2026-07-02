@@ -26,6 +26,7 @@
 // into evidence assembly") — absent DeployGatePort (static sites/code target) defaults to always-healthy.
 
 import { Sha } from "@kernel/sha.ts";
+import type { RunOutcome } from "@kernel/run-outcome.ts";
 import type { RunMode, TestTarget, TriggerSource } from "@kernel/run-mode.ts";
 import type { QaCase } from "@kernel/qa-case.ts";
 import { isOk } from "@kernel/result.ts";
@@ -200,6 +201,12 @@ export interface RunQaInput {
 
 export interface RunQaResult {
   decision: RunDecision;
+  // Determinism fix (the millisecond gate-flake): the EXACT RunOutcome this run persisted via
+  // RunHistoryPort.save(), attached so RewrittenOrchestratorAdapter returns the SAME object instead
+  // of re-deriving one with a SECOND `new Date()` (returned-vs-persisted `at` diverged at
+  // millisecond boundaries). Absent when nothing was persisted (infra-error/aborted entry-gate
+  // terminals, context-mode skipPersist) — the adapter then falls back to its own derivation.
+  outcome?: RunOutcome;
   // FIX 1 (judgment-day D.7): errorClass (E-STATIC/E-EXEC-FAIL/E-FLAKY/E-INFRA/E-COVERAGE-GAP/
   // E-VALUE-SURVIVED — the re-ported labeler taxonomy, domain/helpers/error-class.ts), valueScore
   // (FIX 3, the mutation-testing oracle) and reviewerApproved (FIX 1) are surfaced HERE (not just
@@ -504,12 +511,11 @@ export class RunQaUseCase {
       // of this very branch's own guard). Thread the SAME generation-sourced value the terminal
       // exits below use, not a silently-dropped undefined.
       const skipped = this.skippedResult(cfg.needsReview ? generated.approved : undefined);
-      await this.deps.runHistory.save(
-        this.toRunOutcome(input, skipped.decision, [], 0, null, skipped.errorClass, {
-          reviewerApproved: skipped.gateSignals.reviewerApproved,
-        }),
-      );
-      return skipped;
+      const skippedOutcome = this.toRunOutcome(input, skipped.decision, [], 0, null, skipped.errorClass, {
+        reviewerApproved: skipped.gateSignals.reviewerApproved,
+      });
+      await this.deps.runHistory.save(skippedOutcome);
+      return { ...skipped, outcome: skippedOutcome };
     }
 
     // FIX 3 (judgment-day D.7 batch 2): retries is hoisted ABOVE the validate phase (the legacy's
@@ -1239,8 +1245,12 @@ export class RunQaUseCase {
     // independently-derived (and potentially drifting) computation.
     const gateValueScore = valueScore;
     const errorClass = this.deriveErrorClass(decision.verdict, coverageRatio, gateValueScore);
+    let mainlineOutcome: RunOutcome | undefined;
     if (!isContextCleanPass) {
-      const mainlineOutcome = this.toRunOutcome(input, decision, run.cases, retries, coverageRatio, errorClass, {
+      mainlineOutcome = this.toRunOutcome(input, decision, run.cases, retries, coverageRatio, errorClass, {
+        // Legacy parity: the mainline persists the REAL static-gate result (the same value the
+        // returned RunQaResult.gateSignals.static carries below) — see toRunOutcome's staticOk doc.
+        staticOk: validation.ok,
         reviewerApproved: reviewerApprovedForOutcome,
         valueScore: gateValueScore,
         // FIX F1: the publish outcome string (e.g. "pr: <url>", "issue: <url>", "quarantine: ...",
@@ -1276,6 +1286,8 @@ export class RunQaUseCase {
     return {
       decision,
       errorClass,
+      // Determinism fix: return the EXACT persisted outcome (see RunQaResult.outcome's own doc).
+      ...(mainlineOutcome ? { outcome: mainlineOutcome } : {}),
       // FIX F1: surface the SAME publish outcome on the returned RunQaResult (mirrors the persisted
       // RunOutcome above) — so a caller with no read-back path on RunHistoryPort (e.g.
       // RewrittenOrchestratorAdapter's toOutcome()) can still report what publish() actually did.
@@ -1367,6 +1379,9 @@ export class RunQaUseCase {
     // never fabricated, exactly the same "0 not undefined" contract this use-case's own header
     // documents for these fields.
     extra?: {
+      // Legacy persistOutcome's `overrides?.staticOk ?? false` (see the gateSignals.static note
+      // below) — only callers whose path genuinely passed the static gate thread true.
+      staticOk?: boolean;
       reviewerApproved?: boolean;
       valueScore?: number | null;
       note?: string;
@@ -1392,7 +1407,13 @@ export class RunQaUseCase {
       verdict: decision.verdict,
       errorClass,
       gateSignals: {
-        static: true,
+        // Legacy parity (exposed by the determinism fix — the persisted-vs-returned identity made
+        // the goldens finally see the PERSISTED shape): legacy's persistOutcome defaults
+        // `overrides?.staticOk ?? false` (src/pipeline.ts:1100 region) — a hardcoded `true` here
+        // wrote static:true into the store for every skipped/invalid/infra-error outcome where
+        // legacy persists false. Callers pass the REAL per-path value (mainline: validation.ok;
+        // terminal: the evidence's own static; skipped: default false).
+        static: extra?.staticOk ?? false,
         coverageRatio: gateCoverageRatio,
         valueScore: gateValueScore,
         reviewerCorrections: [],
@@ -1599,20 +1620,26 @@ export class RunQaUseCase {
     // such as the static-gate's joined validation errors or the health pre-flight's captured
     // InfraError message) — mirrors the mainline's own publishOutcome-into-note threading.
     const combinedNote = [note, publishOutcome].filter((part): part is string => Boolean(part)).join("\n\n") || undefined;
+    let terminalOutcome: RunOutcome | undefined;
     if (!skipPersist) {
-      const outcome = this.toRunOutcome(input, decision, [], retries, null, errorClass, {
+      terminalOutcome = this.toRunOutcome(input, decision, [], retries, null, errorClass, {
+        // Legacy parity: the terminal persists the SAME static value its returned gateSignals carry
+        // (ev.static — false for the static-gate invalid AND the health-preflight quirk alike).
+        staticOk: ev.static,
         reviewerApproved: reviewerApprovedForOutcome,
         note: combinedNote,
         ...groundingSignals,
       });
-      await this.deps.runHistory.save(outcome);
+      await this.deps.runHistory.save(terminalOutcome);
       if (verdict === "invalid") {
-        await this.deps.learning.fold(outcome);
+        await this.deps.learning.fold(terminalOutcome);
       }
     }
     this.deps.observer?.onStep("done");
     return {
       decision,
+      // Determinism fix: return the EXACT persisted outcome (see RunQaResult.outcome's own doc).
+      ...(terminalOutcome ? { outcome: terminalOutcome } : {}),
       // FIX 2 (judgment-day D.7 batch 2): when skipPersist is true (the context-mode invalid path),
       // nothing was genuinely persisted — the legacy's own comparator counterpart
       // (LegacyPipelineAdapter's synthesizeContextOutcome(), the SAME placeholder the context CLEAN
