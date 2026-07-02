@@ -52,3 +52,24 @@ test("compareShadowRun flags an observed side-effect divergence even when the ou
   assert.match(r.diff ?? "", /sideEffect/);
   assert.match(r.report, /DIVERGENT/);
 });
+
+// LLM-non-determinism guard (the real shadow proof caught this on portfolio@26614bd): on a
+// non-review verdict the independent reviewer never ran, so reviewerApproved is GENERATION's own
+// self-approval — an LLM value two independent live runs will differ on even for identical engines.
+test("compareShadowRun EXCLUDES reviewerApproved on a non-review verdict (invalid) — it is LLM self-approval noise there, not an engine decision", () => {
+  const gs = { static: false, coverageRatio: null, valueScore: null, reviewerCorrections: [], flaky: false, retries: 0 };
+  const legacy = outcome({ verdict: "invalid", gateSignals: { ...gs, reviewerApproved: true } });
+  const rewritten = outcome({ verdict: "invalid", gateSignals: { ...gs, reviewerApproved: false } });
+  const r = compareShadowRun(legacy, rewritten);
+  assert.equal(r.equal, true, "two live invalid runs differing only in the LLM's self-approval must NOT read as an engine divergence");
+  assert.match(r.report, /EQUIVALENT/);
+});
+
+test("compareShadowRun STILL compares reviewerApproved when the reviewer ran (pass) — a real review-decision divergence is flagged", () => {
+  const gs = { static: true, coverageRatio: 0.9, valueScore: null, reviewerCorrections: [], flaky: false, retries: 0 };
+  const legacy = outcome({ verdict: "pass", gateSignals: { ...gs, reviewerApproved: true } });
+  const rewritten = outcome({ verdict: "pass", gateSignals: { ...gs, reviewerApproved: false } });
+  const r = compareShadowRun(legacy, rewritten);
+  assert.equal(r.equal, false, "on a pass verdict a real review ran, so a reviewerApproved divergence IS a genuine decision divergence");
+  assert.match(r.diff ?? "", /reviewerApproved/);
+});

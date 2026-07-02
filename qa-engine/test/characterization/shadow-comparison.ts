@@ -16,6 +16,28 @@ function toComparable(o: RunOutcome): ComparableOutcome {
   return o as unknown as ComparableOutcome;
 }
 
+// LIVE-run non-determinism guard. Unlike the golden net (deterministic stubbed generation),
+// the shadow proof runs TWO INDEPENDENT real agent generations — so any LLM-DERIVED field will
+// differ run-to-run even for behaviorally identical engines. reviewerApproved is such a field ONLY
+// when the independent reviewer did NOT run: on invalid/skipped/infra-error the reviewer is never
+// reached, so gateSignals.reviewerApproved falls back to GENERATION's own self-approval flag (an LLM
+// value), and both engines source it identically (run-qa.use-case.ts:257 ≡ pipeline.ts:1114) — the
+// only difference is the two agents' different self-approvals. Excluding it on those non-review
+// verdicts compares what the ENGINES decided, not what the two LLMs happened to emit. On pass/fail a
+// real review ran, so it stays compared. (The golden-parity net is untouched — this normalization is
+// shadow-only.)
+function reviewerActuallyRan(verdict: RunOutcome["verdict"]): boolean {
+  return verdict === "pass" || verdict === "fail" || verdict === "flaky";
+}
+function normalizeForShadow(o: RunOutcome): ComparableOutcome {
+  const c = toComparable(o);
+  // reviewerApproved lives under gateSignals; behavioralProjection reads `?? null`, so clearing it to
+  // undefined makes BOTH engines project null on the non-review verdicts (equal, not compared).
+  return reviewerActuallyRan(o.verdict)
+    ? c
+    : { ...c, gateSignals: { ...c.gateSignals, reviewerApproved: undefined } };
+}
+
 export interface ShadowSideEffects {
   legacy?: SideEffect;
   rewritten?: SideEffect;
@@ -33,7 +55,7 @@ export function compareShadowRun(
   rewritten: RunOutcome,
   observed?: ShadowSideEffects,
 ): ShadowComparison {
-  const cmp = runOutcomeEquivalent(toComparable(legacy), toComparable(rewritten));
+  const cmp = runOutcomeEquivalent(normalizeForShadow(legacy), normalizeForShadow(rewritten));
 
   // Under shadow:true both engines suppress PR/Issue and log instead, so a concrete side effect is
   // "shadow-log" or "none" for both. When the probe recorded them, flag a divergence between the two.

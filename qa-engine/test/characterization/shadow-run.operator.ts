@@ -101,7 +101,10 @@ import { makeTargetCoverageCollector } from "@contexts/objective-signal/infrastr
 // ── Root src/ collaborators (the REAL production pieces — see the TS6307 note above) ─────────────
 import { loadAppConfig, type AppConfig } from "../../../src/orchestrator/config-loader.ts";
 import { runPipeline, defaultPipelineDeps } from "../../../src/pipeline.ts";
-import { defaultAgentDeps } from "../../../src/integrations/opencode-client.ts";
+import { withStallWatchdog, withUsageSink, getOpenSessionCount, type AgentDeps } from "../../../src/integrations/opencode-client.ts";
+import { createAgentRuntimeManager } from "../../../src/server/agent-runtime.ts";
+import { defaultEnvStoreFs } from "../../../src/server/env-store.ts";
+import { OpenCodeRuntimeStrategy, CodexRuntimeStrategy } from "../../../src/agent-runtime/index.ts";
 import {
   buildPromptAssembled,
   buildWorkerPromptAssembled,
@@ -134,6 +137,32 @@ import { ensureMirror, getCommitDiff, defaultMirrorDeps, type MirrorDeps } from 
 // V8BrowserCoverageAdapter / LcovCoverageAdapter / C8CoverageAdapter / JacocoCoverageAdapter with
 // real FS dump readers (coverage-dump-reader.ts) — no more re-shaping defaultCollectCoverage()'s
 // output at this script's own boundary.
+
+// ── Real agent runtime (production wiring, NOT the dead opencode-serve:4096 target) ───────────────
+// Matches src/index.ts exactly: the "agents" container runs ONLY the supervisor on :4097
+// (entrypoint agent-supervisor.mjs) — there is no standalone `opencode serve` on :4096. The old
+// `defaultAgentDeps()` (src/integrations/opencode-client.ts) targets `OPENCODE_SERVE_URL ??
+// http://agents:4096`, a dead endpoint that fails every agent call with `TypeError: fetch failed`.
+// Production never uses defaultAgentDeps() directly — it builds one AgentRuntimeManager and reads
+// AgentDeps from its facade (src/index.ts lines ~115-141). This operator script must match that
+// wiring exactly so both engines it drives (rewritten + legacy) talk to the real :4097 agent.
+const agentRuntime = createAgentRuntimeManager({
+  env: process.env,
+  fs: defaultEnvStoreFs(),
+  strategies: {
+    opencode: new OpenCodeRuntimeStrategy({ env: process.env }),
+    codex: new CodexRuntimeStrategy({ env: process.env }),
+  },
+  // Same signal as src/index.ts: whether the real AgentDeps facade (opencode-client.ts) currently
+  // has any in-flight session. This script drives one run at a time to completion, so this is
+  // almost always false in practice, but matching the real signal (instead of a hardcoded false)
+  // is the correct/minimal choice — it still reports truthfully if a session leaks or is draining.
+  hasOpenSessions: () => getOpenSessionCount() > 0,
+});
+
+function currentAgentDeps(): AgentDeps {
+  return agentRuntime.facade().deps();
+}
 
 function roleToAgentName(role: AgentRole): string {
   const map: Record<AgentRole, string> = {
@@ -182,10 +211,16 @@ function buildCompositionConfig(app: AppConfig, sha: string, mirrorDir: string, 
   // genuinely different, incompatible shape (this script does not need usage telemetry for a
   // pass/fail equivalence comparison, so dropping both callbacks is correct here, not a workaround
   // for a bug this script owns).
-  const agentRuntime = new AgentRuntimeAdapter(
+  //
+  // The `real` source is currentAgentDeps() — the module-scope agentRuntime (AgentRuntimeManager,
+  // built at the top of this file with the SAME strategies/env wiring as src/index.ts) resolved
+  // through its facade, i.e. the real :4097 supervisor. This used to be defaultAgentDeps()
+  // (src/integrations/opencode-client.ts), which targets the dead OPENCODE_SERVE_URL ??
+  // http://agents:4096 endpoint — production never calls that function directly.
+  const runtimeAdapter = new AgentRuntimeAdapter(
     {
       open: async (agent, cwd, opts) => {
-        const real = await defaultAgentDeps();
+        const real = currentAgentDeps();
         return real.open(agent, cwd, {
           ...(opts?.signal ? { signal: opts.signal } : {}),
           ...(opts?.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
@@ -199,7 +234,7 @@ function buildCompositionConfig(app: AppConfig, sha: string, mirrorDir: string, 
   const verdicts = new VerdictParserAdapter({ parseVerdict, parseReviewerVerdict });
 
   const generationUseCase = new GenerateTestsUseCase({
-    runtime: agentRuntime,
+    runtime: runtimeAdapter,
     rendering,
     verdicts,
     // Real, src/-free ManifestRepositoryPort fns (Sub-Plan 7.2 item 3 — manifest-fs.ts).
@@ -248,11 +283,12 @@ function buildCompositionConfig(app: AppConfig, sha: string, mirrorDir: string, 
     maxRetries: app.qa.fixLoop?.maxRetries ?? 2,
     isCode,
     coveragePolicyMode: app.qa.changeCoverage?.mode ?? "signal",
+    diff, // thread the REAL commit diff into generation/review — without it composition-root defaults to "" → agent gets no change context → zero specs → agent-no-op skip (the divergence the shadow proof caught)
 
     vcs,
     generationUseCase,
     reviewRuntime: {
-      runtime: agentRuntime,
+      runtime: runtimeAdapter,
       rendering,
       verdicts,
     },
@@ -329,11 +365,18 @@ function probeLegacySideEffect(deps: ReturnType<typeof defaultPipelineDeps>): {
 }
 
 // ── Legacy runner adapter: drives the UNCHANGED runPipeline (defaultPipelineDeps) so the legacy
-// side of the comparison is the exact production path, not a re-derivation. ─────────────────────
+// side of the comparison is the exact production path, not a re-derivation. Called with the SAME
+// agentDepsFactory/hasOpenSessions/agentRuntimeConfig options as src/index.ts's currentPipelineDeps()
+// — bare defaultPipelineDeps() (no options) falls back to defaultAgentDeps(), the dead :4096 target;
+// this keeps the legacy engine on the real :4097 supervisor exactly like production. ───────────────
 function makeLegacyRunner(app: AppConfig): LegacyRunner & { probe: { seen(): SideEffect } } {
   const savedOutcomes: RunOutcome[] = [];
   const base = {
-    ...defaultPipelineDeps(),
+    ...defaultPipelineDeps({
+      agentDepsFactory: async (onUsage) => withStallWatchdog(withUsageSink(currentAgentDeps(), onUsage)),
+      hasOpenSessions: () => agentRuntime.hasOpenSessions(),
+      agentRuntimeConfig: agentRuntime.facade().config,
+    }),
     saveOutcome: async (outcome: RunOutcome) => {
       savedOutcomes.push(outcome);
     },
