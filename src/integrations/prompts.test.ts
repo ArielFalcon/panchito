@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPrompt, buildPromptAssembled, buildPlanPromptAssembled, buildFollowupPrompt } from "./prompts";
+import { buildPrompt, buildPromptAssembled, buildPlanPromptAssembled, buildFollowupPrompt, buildWorkerPrompt } from "./prompts";
 import { assemble as caAssemble, section as caSection } from "./context-assembler";
 import type { OpencodeRunInput } from "./opencode-client";
+import type { ParallelWorkerInput } from "@contexts/generation/application/ports/generation-ports.ts";
 import type { QaCase } from "../types";
 
 // RE-1 — the orchestrator's regeneration prompts must NOT command the agent to re-navigate /
@@ -808,5 +809,84 @@ test("C2 regression: e2e-mode with staticSignal still renders static-signal sect
   assert.ok(
     text.includes("Static signal") && text.includes("Foo.bar"),
     "e2e-mode prompt with staticSignal must include the static-signal section (regression guard)",
+  );
+});
+
+// ── Audit C4a — two prompt defects (docs/superpowers/plans/2026-07-02-qa-engine-audit-remediation.md) ──
+//
+// Defect 1: buildAttrHint (qa-engine dom-snapshot.ts / legacy src/qa/dom-snapshot.ts) emits a
+// `-> [attr]` hint for id=/name=/href/type= too, not just test-id. The selector-priority rule
+// wrongly instructs getByTestId for ANY `-> [attr]` hint, which cannot resolve for a non-test-id
+// hint. The rule must name the discriminator: the hint text must start with the configured
+// testIdAttribute name (e.g. "data-testid=") — NOT just "carries a hint".
+
+function mkWorkerInput(overrides: Partial<ParallelWorkerInput> = {}): ParallelWorkerInput {
+  return {
+    objective: "verify the owner list renders",
+    flow: "owners list",
+    symbols: ["OwnerListComponent"],
+    needsUi: true,
+    specFile: "flows/owners-list.spec.ts",
+    repo: "org/app",
+    mirrorDir: "/mirrors/org__app",
+    e2eRelDir: "e2e",
+    namespace: "qa-bot-abc1234",
+    appName: "testapp",
+    mode: "diff",
+    ...overrides,
+  };
+}
+
+test("C4a defect 1: worker selector-priority rule names the test-id-attribute-name discriminator, not just 'carries a hint'", () => {
+  const text = buildWorkerPrompt(mkWorkerInput({ domSnapshot: "button: Add Owner -> [data-testid=add-owner]" }));
+  const rule = /Selector priority:[^\n]*/.exec(text)?.[0] ?? "";
+  assert.ok(rule.length > 0, "worker prompt must contain a Selector priority rule");
+  // The old wording ("carries a ... hint") is ambiguous about id=/name=/href hints. The fixed
+  // wording must name the discriminator concretely: the hint must START WITH the testIdAttribute
+  // name (e.g. "data-testid=") — not merely "a hint is present".
+  assert.ok(
+    /starts with|begins with|testIdAttribute name|the configured test-id attribute/i.test(rule),
+    `worker selector-priority rule must name the test-id-only discriminator concretely; got: ${rule}`,
+  );
+  assert.doesNotMatch(
+    rule,
+    /carries a (trailing )?`?-> \[attr\]`? hint\b(?!.*test-id)/i,
+    "worker rule must not instruct getByTestId for ANY hint — only test-id hints",
+  );
+});
+
+test("C4a defect 1: stable-band selector-priority rule names the test-id-attribute-name discriminator, not just 'carries a hint'", () => {
+  const text = buildPrompt(mkInput({ domSnapshot: undefined }));
+  const rule = /Selector priority:[^\n]*/.exec(text)?.[0] ?? "";
+  assert.ok(rule.length > 0, "stable band must contain a Selector priority rule");
+  assert.ok(
+    /starts with|begins with|testIdAttribute name|the configured test-id attribute/i.test(rule),
+    `stable-band selector-priority rule must name the test-id-only discriminator concretely; got: ${rule}`,
+  );
+});
+
+test("C4a defect 1: DOM-snapshot section guidance also names the test-id-only discriminator (not 'any hint')", () => {
+  const text = buildPrompt(mkInput({ fixCases: [failingCase], domSnapshot: "button: Add Owner", failureSourced: false }));
+  // The volatile "Live DEV accessibility tree" section explains the `-> [attr]` hint; it must not
+  // claim ANY hint implies a test-id — it must name the discriminator (attribute-name prefix).
+  const domSection = text.slice(text.indexOf("Live DEV accessibility tree"));
+  assert.ok(
+    /starts with|begins with|testIdAttribute name|the configured test-id attribute/i.test(domSection),
+    "DOM-snapshot section must name the test-id-only discriminator concretely",
+  );
+});
+
+// Defect 2: the GROUND-TRUTH-AT-FAILURE quote-then-assert block currently offers a CSS/data-testid
+// fallback for an unquotable locator — a fabrication license (Pillar 3 forbids inventing
+// data-testid/CSS values not present in any grounding). The ONLY permitted fallback is getByText
+// quoted from the failure tree.
+test("C4a defect 2: GROUND-TRUTH-AT-FAILURE fallback offers getByText only, not CSS/data-testid", () => {
+  const text = buildPrompt(mkInput({ fixCases: [failingCase], domSnapshot: "button: Add Owner", failureSourced: true }));
+  const block = text.slice(text.indexOf("GROUND TRUTH AT FAILURE"), text.indexOf("GROUND TRUTH AT FAILURE") + 1500);
+  assert.ok(block.includes("getByText"), "the fallback must still offer getByText");
+  assert.doesNotMatch(
+    block,
+    /CSS\/data-testid|data-testid locator|scoped CSS\/data-testid/i,
+    "the fallback must NOT offer a CSS/data-testid locator — that invites fabricating an unverified value",
   );
 });

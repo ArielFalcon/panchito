@@ -78,7 +78,7 @@ export function buildWorkerPromptAssembled(w: ParallelWorkerInput): AssembledPro
         w.domSnapshot
           ? `- You have NO browser. The injected a11y tree section in this prompt is your ONLY source of DOM truth — transcribe it directly into selectors; do NOT navigate or snapshot.`
           : `- You have NO browser. No a11y tree was injected — derive selectors from the brief and mark them unverified in a comment (e.g. // selector unverified — no snapshot available).`,
-        `- Selector priority: (1) when a tree line carries a trailing \`-> [attr]\` hint, use \`getByTestId('value')\` — Playwright resolves it against the per-app testIdAttribute config; (2) fall back to \`getByRole\`/\`getByLabel\` when no hint is present; (3) no CSS/XPath.`,
+        `- Selector priority: (1) when a tree line's \`-> [attr]\` hint STARTS WITH the configured testIdAttribute name (e.g. \`data-testid=value\`) — not an \`id=\`/\`name=\`/href hint — use \`getByTestId('value')\`; (2) fall back to \`getByRole\`/\`getByLabel\` when no test-id hint is present; (3) no CSS/XPath.`,
         `- Dynamic-DOM: the injected tree is a STATIC snapshot of initial load. Post-interaction elements (modals, dynamic lists) are NOT in this tree — assert them with auto-waiting (\`await expect(locator).toBeVisible()\`, \`waitForURL\`), never \`waitForTimeout\`.`,
         `- getByRole matches the ACCESSIBILITY TREE, not the HTML tag: a <th> is often NOT a "columnheader", a <table> may lose its "table"/"row"/"cell" roles (Bootstrap/CSS strips them). Use ONLY roles + names you LITERALLY SEE in the injected tree; if the role isn't there, use getByText or a scoped locator. A getByRole that matches 0 elements passes review but TIMES OUT on execution.`,
         `- Framework authoring attributes are NOT runtime DOM attributes — never assert them. Examples: Angular's \`routerLink\` is transformed to a rendered \`href\` (assert the \`href\`); \`*ngIf\`, \`ng-reflect-*\`, and \`formControlName\` do not appear in the live DOM (use \`getByLabel\`, \`getByTestId\`, or \`getByRole\` targeting the rendered element instead). The same principle applies to Vue directive attrs and React prop-only attrs. Asserting them always fails at runtime.`,
@@ -577,7 +577,10 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
           // A3: selector-priority rule in the STABLE band — fires regardless of whether a DOM snapshot
           // was captured. When a DOM snapshot IS present, its section already contains a `-> [attr]`
           // hint for getByTestId; this stable rule is concise (no duplication of the tree guidance).
-          `- Selector priority: (1) getByTestId when the tree line carries a \`-> [attr]\` hint; (2) getByRole / getByLabel when no hint; (3) getByText for text-only elements; (4) scoped CSS/locator only as last resort. No raw CSS classes or XPath — these break on refactor.`,
+          // Audit C4a defect 1: `-> [attr]` hints are ALSO emitted for id=/name=/href/type= (see
+          // buildAttrHint in dom-snapshot.ts) — only a hint STARTING WITH the testIdAttribute name
+          // (e.g. "data-testid=value") is a test-id hint; other hints must NOT trigger getByTestId.
+          `- Selector priority: (1) getByTestId when the tree line's \`-> [attr]\` hint STARTS WITH the configured testIdAttribute name (e.g. \`data-testid=value\`) — an \`id=\`/\`name=\`/href hint does NOT qualify; (2) getByRole / getByLabel when no test-id hint; (3) getByText for text-only elements; (4) scoped CSS/locator only as last resort. No raw CSS classes or XPath — these break on refactor.`,
         ]),
     `- engram memory: scoped per app AND per mode (e2e, code, or context). Use project="${input.appName}" on ALL mem_save, mem_search, mem_context, and mem_session_summary calls. Prefix every topic_key with "${memTarget}/" so each mode's memory lives in its own namespace (e.g. topic_key="context/angular-routes" or "e2e/checkout-flow"). When searching, include "${memTarget}" in the query text to filter results to this mode. Never save or search without the mode prefix.`,
     input.needsReview
@@ -633,8 +636,9 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
           ``,
           `📌 Quote-then-assert contract: before writing any locator, cite the EXACT \`role: name\``,
           `line from the tree below that the locator relies on. An unquotable locator`,
-          `(i.e. no matching line exists in this tree) MUST be rejected and replaced with`,
-          `\`getByText\` or a scoped CSS/data-testid locator instead.`,
+          `(i.e. no matching line exists in this tree) MUST be rejected and replaced with a`,
+          `\`getByText\` locator quoted from the SAME tree — text visible in the tree below. NEVER`,
+          `invent a CSS selector or data-testid value that is not present in this grounding.`,
           ``,
           input.domSnapshot,
           ``,
@@ -643,9 +647,11 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
           `## Live DEV accessibility tree (GROUND TRUTH for selectors — trust this over HTML intuition)`,
           ``,
           `These are the roles + accessible names the browser ACTUALLY exposes for the target routes.`,
-          `Lines may carry a trailing \`-> [attr=…]\` hint showing the stable test-id attribute — when present, prefer \`getByTestId('value')\``,
-          `(Playwright resolves it against the per-app testIdAttribute config) over \`getByRole\`/\`getByLabel\`.`,
-          `When no \`-> [...]\` hint is present, use \`getByRole\` with the accessible name from the tree.`,
+          `Lines may carry a trailing \`-> [attr=…]\` hint — it can show id=, name=, href, or type= as well as`,
+          `the test-id attribute, so only a hint that STARTS WITH the configured testIdAttribute name (e.g.`,
+          `\`data-testid=value\`) means \`getByTestId('value')\` will resolve; an \`id=\`/\`name=\`/href/type= hint does`,
+          `NOT qualify — use \`getByRole\`/\`getByLabel\` with the accessible name from the tree instead.`,
+          `When no \`-> [...]\` hint is present at all, also use \`getByRole\` with the accessible name from the tree.`,
           `Author selectors ONLY from what appears below:`,
           `- If a role you expected (e.g. \`columnheader\`) is NOT listed, it is NOT in the a11y tree —`,
           `  do NOT use \`getByRole\` for it. Fall back to \`getByText\` or a scoped locator.`,
