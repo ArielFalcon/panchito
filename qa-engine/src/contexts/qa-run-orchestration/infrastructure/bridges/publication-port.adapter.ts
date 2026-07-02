@@ -78,13 +78,23 @@ export class PublicationPortAdapter implements PublicationPort {
     private readonly ctx: PublicationPortStaticContext,
   ) {}
 
-  async publish(decision: { verdict: RunVerdict; cases: readonly QaCase[]; logs: string }): Promise<{ outcome: string }> {
+  async publish(decision: {
+    verdict: RunVerdict;
+    cases: readonly QaCase[];
+    logs: string;
+    reviewerApproved?: boolean;
+    coverageBlocks?: boolean;
+    e2eChanged?: boolean;
+  }): Promise<{ outcome: string }> {
+    // Audit fix (judgment-day): prefer the REAL per-run decision value when the caller supplies
+    // one; fall back to the static composition-time ctx only when absent (backward-compat for
+    // pre-existing callers that only ever passed {verdict, cases, logs} — see the port's own doc).
     const publishDecision = this.deps.decide.decide({
       verdict: decision.verdict,
-      reviewerApproved: this.ctx.reviewerApproved,
-      coverageBlocks: this.ctx.coverageBlocks,
+      reviewerApproved: decision.reviewerApproved ?? this.ctx.reviewerApproved,
+      coverageBlocks: decision.coverageBlocks ?? this.ctx.coverageBlocks,
       shadow: this.ctx.shadow,
-      e2eChanged: this.ctx.e2eChanged,
+      e2eChanged: decision.e2eChanged ?? this.ctx.e2eChanged,
     });
 
     const title = renderTitle(decision.verdict);

@@ -249,6 +249,95 @@ test("PIPELINE_ENGINE=rewritten — two DIFFERENT runs (different sha) produce D
   }
 });
 
+// ── Fix 3+4 (engram #961) — mode/guidance MUST thread through the engineFactory seam, per-run,
+// following the namespace precedent. The factory previously hardcoded mode:"diff" and never
+// received guidance at all, so a manual run with --guidance generated with a stale diff-mode
+// prompt and silently dropped the guidance.
+
+test("PIPELINE_ENGINE=rewritten — the runner passes req.mode to engineFactory's 3rd (run) argument", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const { port } = fakePort({ verdict: "pass" });
+    let receivedMode: string | undefined;
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-mode-manual", sha: "def5678", target: "e2e", mode: "manual", source: "manual", guidance: "test the contact form" },
+      {
+        pipeline: stubDeps(),
+        loadApp: cfg,
+        engineFactory: (_appConfig, _namespace, run) => {
+          receivedMode = run.mode;
+          return port;
+        },
+      },
+    );
+    await queue.drain();
+    assert.equal(getRecord(id)!.verdict, "pass");
+    assert.equal(receivedMode, "manual", "engineFactory must receive req.mode, not a hardcoded 'diff'");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("PIPELINE_ENGINE=rewritten — the runner passes req.guidance to engineFactory's 3rd (run) argument when present", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const { port } = fakePort({ verdict: "pass" });
+    let receivedGuidance: string | undefined;
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-guidance", sha: "def5678", target: "e2e", mode: "manual", source: "manual", guidance: "test the contact form" },
+      {
+        pipeline: stubDeps(),
+        loadApp: cfg,
+        engineFactory: (_appConfig, _namespace, run) => {
+          receivedGuidance = run.guidance;
+          return port;
+        },
+      },
+    );
+    await queue.drain();
+    assert.equal(getRecord(id)!.verdict, "pass");
+    assert.equal(receivedGuidance, "test the contact form", "engineFactory must receive req.guidance when the run supplies it");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("PIPELINE_ENGINE=rewritten — engineFactory's run.guidance is absent (not an empty string) when req.guidance is omitted", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const { port } = fakePort({ verdict: "pass" });
+    let receivedRun: { mode: string; guidance?: string } | undefined;
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-guidance-absent", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
+      {
+        pipeline: stubDeps(),
+        loadApp: cfg,
+        engineFactory: (_appConfig, _namespace, run) => {
+          receivedRun = run;
+          return port;
+        },
+      },
+    );
+    await queue.drain();
+    assert.equal(getRecord(id)!.verdict, "pass");
+    assert.equal(receivedRun?.guidance, undefined, "guidance must be absent, not fabricated, when the request never supplied one");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
 test("PIPELINE_ENGINE=rewritten but NO engineFactory supplied — falls back to legacy (fail-safe)", async () => {
   const prev = process.env.PIPELINE_ENGINE;
   process.env.PIPELINE_ENGINE = "rewritten";

@@ -47,6 +47,13 @@
 //      uses at src/pipeline.ts:1222 — and passes it through RunnerDeps.engineFactory. A static
 //      branch here would collide every run of every app on the same live-DEV test-data namespace
 //      the moment PIPELINE_ENGINE=rewritten is set (fixed after judgment-day caught it).
+//   5. mode/guidance are caller-supplied PER RUN (audit-remediation fix, judgment-day): the operator
+//      template hardcodes a single mode for its one-shot comparison run; this factory's runner caller
+//      knows the REAL req.mode/req.guidance for every run (diff/complete/exhaustive/manual/context),
+//      so buildRewrittenCompositionConfig(app, deps, namespace, run) takes them as an explicit `run`
+//      argument instead of a static "diff" literal — a hardcode here silently mis-prompted every
+//      non-diff run's Generation/Review phase (composition-root.ts:187,199 feed cfg.mode/cfg.guidance
+//      straight into prompt assembly).
 import { join } from "node:path";
 import type { AppConfig } from "../orchestrator/config-loader";
 import type { AgentDeps } from "../integrations/opencode-client";
@@ -54,6 +61,7 @@ import type { RunPipelinePort } from "@contexts/qa-run-orchestration/application
 import { buildProduction, type CompositionConfig } from "@contexts/qa-run-orchestration/composition/composition-root";
 import { Sha } from "@kernel/sha";
 import type { AgentRole } from "@kernel/agent-role";
+import type { RunMode } from "@kernel/run-mode";
 
 import { GitMirrorReadAdapter } from "@contexts/change-analysis/infrastructure/git-mirror-read.adapter";
 import { GenerateTestsUseCase } from "@contexts/generation/application/generate-tests.use-case";
@@ -168,7 +176,18 @@ export interface RewrittenEngineFactoryDeps {
 // GenerationPortAdapter's and ExecutionPortAdapter's `namespace` field — i.e. it is the live-DEV
 // test-data scoping AND the publish branch. A caller MUST pass a fresh namespace per run; passing
 // the same value twice reproduces the exact DEV-data collision this fix closes.
-export function buildRewrittenCompositionConfig(app: AppConfig, deps: RewrittenEngineFactoryDeps, namespace: string): CompositionConfig {
+//
+// `run` (audit fix, judgment-day): mode/guidance are PER-RUN values, not app-static — the runner
+// knows req.mode/req.guidance at call time (mirrors the namespace precedent above). Mode feeds
+// GenerationPortAdapter's/ReviewPortAdapter's own prompt assembly (composition-root.ts:187,199), so
+// a hardcoded "diff" here silently mis-prompted every non-diff run (complete/exhaustive/manual/
+// context) as if it were a diff run.
+export function buildRewrittenCompositionConfig(
+  app: AppConfig,
+  deps: RewrittenEngineFactoryDeps,
+  namespace: string,
+  run: { mode: RunMode; guidance?: string },
+): CompositionConfig {
   const isCode = app.code === true;
   const target: "e2e" | "code" = isCode ? "code" : "e2e";
   const e2eRelDir = "e2e";
@@ -254,7 +273,11 @@ export function buildRewrittenCompositionConfig(app: AppConfig, deps: RewrittenE
     e2eRelDir,
     branch,
     target,
-    mode: "diff",
+    // Audit fix (judgment-day): PER-RUN, not a static "diff" literal — see this fn's own header.
+    // A hardcoded "diff" fed GenerationPortAdapter/ReviewPortAdapter the wrong mode prompt for
+    // every complete/exhaustive/manual/context run.
+    mode: run.mode,
+    ...(run.guidance ? { guidance: run.guidance } : {}),
     needsReview: app.qa.needsReview,
     shadow: app.qa.shadow ?? false,
     onFailure: app.report.onFailure,
@@ -288,6 +311,21 @@ export function buildRewrittenCompositionConfig(app: AppConfig, deps: RewrittenE
       e2e: (specDir, opts) => setupE2eProject(specDir, defaultSetupDeps, opts),
       code: (specDir, opts) => setupCodeProject(specDir, defaultCodeSetupDeps, opts),
     },
+    // CRITICAL fix (live crash, judgment-day audit): baseUrl is app-static (the live DEV URL from
+    // config), so it is correct to set it once here at composition time — unlike diff/mode/guidance,
+    // there is no per-run value to thread. Without this, E2eExecutionStrategy.run() (wired via
+    // executionStrategies.e2e above) never receives a baseUrl and throws "E2eExecutionStrategy
+    // requires a baseUrl (live DEV URL)" the moment a real e2e run reaches execution.
+    ...(app.dev?.baseUrl ? { baseUrl: app.dev.baseUrl } : {}),
+    // Audit fix (worst leak in audit-2026-07-flaky-selector-leaks): mirrors legacy's
+    // resolveTestIdAttribute(app) (src/pipeline.ts:835: `config.e2e?.testIdAttribute ?? "data-testid"`)
+    // — but deliberately WITHOUT the "data-testid" default. CompositionConfig's own doc
+    // (composition-root.ts:87-89) already documents "NO defaulting logic here; undefined flows
+    // through and the seed playwright.config.ts already defaults to data-testid" — applying the
+    // default a second time here would just be redundant, not wrong, but omitting it keeps this
+    // factory's mapping a pure pass-through of the app's declared config, matching every other
+    // optional field in this object.
+    ...(app.e2e?.testIdAttribute !== undefined ? { testIdAttribute: app.e2e.testIdAttribute } : {}),
     objectiveSignal: { collector, oracle },
     coveragePolicy: { mode: app.qa.changeCoverage?.mode ?? "signal", minRatio: app.qa.changeCoverage?.minRatio ?? 0.7 },
     baselineCases: [],
@@ -324,7 +362,7 @@ export function buildRewrittenCompositionConfig(app: AppConfig, deps: RewrittenE
 }
 
 // The RunnerDeps.engineFactory seam (src/server/runner.ts) — returns a factory mapping
-// (AppConfig, namespace) → RunPipelinePort. Only ever invoked by the runner when
+// (AppConfig, namespace, run) → RunPipelinePort. Only ever invoked by the runner when
 // selectEngine(process.env) already resolved to "rewritten"; buildProduction internally reads the
 // SAME flag and returns the RewrittenOrchestratorAdapter on that branch (never
 // LegacyPipelineAdapter — that branch requires options.legacyRunner, which this factory never
@@ -336,10 +374,16 @@ export function buildRewrittenCompositionConfig(app: AppConfig, deps: RewrittenE
 // own src/pipeline.ts:1222 formula) and passes it here on every invocation. This closure itself
 // stays stateless: no namespace is cached or defaulted internally, so two calls with two different
 // namespaces always compose two independent CompositionConfigs with two different `branch` values.
-export function createRewrittenEngineFactory(deps: RewrittenEngineFactoryDeps): (appConfig: AppConfig, namespace: string) => RunPipelinePort {
+//
+// The `run` parameter (audit fix, judgment-day) carries the PER-RUN mode/guidance — see
+// buildRewrittenCompositionConfig's own header. Same statelessness contract: nothing here is
+// cached, so two calls with two different `run` values compose two independent configs.
+export function createRewrittenEngineFactory(
+  deps: RewrittenEngineFactoryDeps,
+): (appConfig: AppConfig, namespace: string, run: { mode: RunMode; guidance?: string }) => RunPipelinePort {
   const env = deps.env ?? process.env;
-  return (appConfig: AppConfig, namespace: string): RunPipelinePort => {
-    const cfg = buildRewrittenCompositionConfig(appConfig, deps, namespace);
+  return (appConfig: AppConfig, namespace: string, run: { mode: RunMode; guidance?: string }): RunPipelinePort => {
+    const cfg = buildRewrittenCompositionConfig(appConfig, deps, namespace, run);
     return buildProduction(env, cfg);
   };
 }

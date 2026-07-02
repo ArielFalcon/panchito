@@ -80,3 +80,73 @@ test("publish() produces a noop outcome with no side effect when verdict is skip
 
   assert.match(result.outcome, /noop/);
 });
+
+// ── Fix 5 (engram #961, CRITICAL) — the decision's REAL per-run reviewerApproved/coverageBlocks/
+// e2eChanged must override the adapter's static ctx when the caller supplies them. Previously
+// PublicationPort.publish() only carried {verdict,cases,logs}, so RunQaUseCase's genuinely
+// computed reviewerApproved (run-qa.use-case.ts ~line 511) never reached this adapter — a
+// green-but-reviewer-rejected run would still publish a PR because ctx.reviewerApproved defaulted
+// to a static `true`. Backward-compatible: absent fields still fall back to ctx (existing
+// stubs/tests keep working unchanged).
+
+test("publish() prefers decision.reviewerApproved (dynamic) over ctx.reviewerApproved (static) when both are supplied", async () => {
+  const decide = new PublishDecisionService();
+  const pr = fakePr();
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  // ctx says reviewerApproved:true (the OLD static default), but the decision's dynamic value says
+  // the reviewer actually rejected this run — the dynamic value must win, routing to "issue" not "pr".
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "pass", cases: [], logs: "", reviewerApproved: false });
+
+  assert.match(result.outcome, /issue/, "a dynamic reviewerApproved:false must override the static ctx default and hold the PR");
+});
+
+test("publish() falls back to ctx.reviewerApproved (static) when the decision omits it (backward-compat)", async () => {
+  const decide = new PublishDecisionService();
+  const pr = fakePr();
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "pass", cases: [], logs: "" });
+
+  assert.match(result.outcome, /pr/, "with no dynamic override, the static ctx.reviewerApproved:true must still apply");
+});
+
+test("publish() prefers decision.coverageBlocks (dynamic) over ctx.coverageBlocks (static) when both are supplied", async () => {
+  const decide = new PublishDecisionService();
+  const pr = fakePr();
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  // ctx says coverageBlocks:false (the OLD static default), but the dynamic value says an
+  // enforce-mode coverage-fail must hold the PR — the dynamic value must win.
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "pass", cases: [], logs: "", coverageBlocks: true });
+
+  assert.match(result.outcome, /issue/, "a dynamic coverageBlocks:true must override the static ctx default and hold the PR");
+});
+
+test("publish() prefers decision.e2eChanged (dynamic) over ctx.e2eChanged (static) when both are supplied", async () => {
+  const decide = new PublishDecisionService();
+  const pr = fakePr();
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  // ctx says e2eChanged:true (the OLD static default), but the dynamic value says no e2e/ files
+  // actually changed this run — publish() should reflect the REAL signal when supplied.
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "pass", cases: [], logs: "", e2eChanged: false });
+
+  assert.match(result.outcome, /noop/, "a dynamic e2eChanged:false must override the static ctx default (green with no e2e changes publishes nothing)");
+});

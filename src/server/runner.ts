@@ -77,7 +77,12 @@ export interface RunnerDeps {
   // runId), the SAME formula legacy runPipeline uses at src/pipeline.ts:1222. Without this the
   // rewritten engine's own namespace/branch would be static, colliding every run of every app on
   // the same live-DEV test-data namespace the moment the flag flips.
-  engineFactory?: (appConfig: AppConfig, namespace: string) => RunPipelinePort;
+  //
+  // `run` (3rd param, audit-remediation fix): mode/guidance are PER-RUN values (req.mode/
+  // req.guidance below) — the composition root's own CompositionConfig.mode/guidance feed straight
+  // into Generation/Review prompt assembly, so these must reflect the actual requested run mode
+  // (diff/complete/exhaustive/manual/context), never a hardcoded literal.
+  engineFactory?: (appConfig: AppConfig, namespace: string, run: { mode: RunMode; guidance?: string }) => RunPipelinePort;
 }
 
 // Maps a RunRequest + record id into the strangler seam's RunInput and drives the injected
@@ -183,7 +188,15 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
       const runNamespace = testDataNamespace(appConfig.qa.testDataPrefix, req.sha, record.id);
       const run: QaRunResult =
         engine === "rewritten" && deps.engineFactory
-          ? await runViaRewrittenEngine(deps.engineFactory(appConfig, runNamespace), req, record.id, signal)
+          ? await runViaRewrittenEngine(
+              // Audit fix (judgment-day): thread the REQUESTED mode/guidance into the rewritten
+              // engineFactory — mirrors the namespace precedent immediately above. Previously the
+              // factory hardcoded mode:"diff" internally, silently mis-prompting every non-diff run.
+              deps.engineFactory(appConfig, runNamespace, { mode: req.mode, ...(req.guidance ? { guidance: req.guidance } : {}) }),
+              req,
+              record.id,
+              signal,
+            )
           : await runPipeline(
               appConfig,
               req.sha,

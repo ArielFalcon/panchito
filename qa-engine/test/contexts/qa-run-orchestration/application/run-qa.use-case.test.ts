@@ -998,6 +998,49 @@ test("FIX 1 (D.7 batch 2): reviewerApproved is ABSENT (not fabricated) when need
   assert.equal(saved!.gateSignals.reviewerApproved, undefined, "needsReview:false must never persist a reviewerApproved value (matches the legacy's `app.qa.needsReview && result ? ... : null` guard's first conjunct)");
 });
 
+// ── Fix 5 (engram #961) — the publish() call site threads reviewerApproved/coverageBlocks into the
+// widened PublicationPort decision. Scope note (judgment-day): these tests pin FIELD THREADING only
+// (the fields reach publish() instead of being dropped). They cannot pin value PROVENANCE — decide()
+// only returns sideEffect "pr" when reviewerApproved===true && blocksPublish===false, so at this
+// call site the values are structurally constant. The dynamic-over-static override semantics
+// (a real computed false beating a static ctx true) are owned by the adapter-level tests in
+// publication-port.adapter.test.ts.
+
+test("FIX 5: publish() is called with the reviewerApproved field threaded (not dropped) on the 'pr' side effect", async () => {
+  let publishedDecision: { verdict: string; reviewerApproved?: boolean; coverageBlocks?: boolean } | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass", cases: [], logs: "" }),
+    review: async () => ({ approved: true, corrections: [], blockingCount: 0, parsed: true }),
+  });
+  ports.publication.publish = async (decision) => { publishedDecision = decision; return { outcome: "pr" }; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig }); // needsReview: true
+
+  const out = await useCase.run({ ...baseInput, runId: "fix-5-publish-reviewer-approved-true" });
+
+  assert.equal(out.decision.sideEffect, "pr");
+  assert.ok(publishedDecision, "publication.publish() must have been called for the 'pr' side effect");
+  assert.equal(publishedDecision!.reviewerApproved, true, "publish() must receive a threaded reviewerApproved field (undefined here would mean the call site dropped it)");
+});
+
+test("FIX 5: publish() is called with the coverageBlocks field threaded (not dropped) under signal-mode coverage", async () => {
+  let publishedDecision: { verdict: string; reviewerApproved?: boolean; coverageBlocks?: boolean } | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass", cases: [], logs: "" }),
+    measure: async () => ({ status: "fail", ratio: 0.2 }),
+  });
+  ports.publication.publish = async (decision) => { publishedDecision = decision; return { outcome: "pr" }; };
+  const useCase = new RunQaUseCase({
+    ...ports,
+    config: { ...baseConfig, needsReview: false, coveragePolicyMode: "signal" },
+  });
+
+  const out = await useCase.run({ ...baseInput, runId: "fix-5-publish-coverage-blocks-false" });
+
+  assert.equal(out.decision.sideEffect, "pr", "signal mode must still publish even with a failing coverage signal");
+  assert.ok(publishedDecision, "publication.publish() must have been called");
+  assert.equal(publishedDecision!.coverageBlocks, false, "publish() must receive a threaded coverageBlocks field (undefined here would mean the call site dropped it)");
+});
+
 test("FIX 1 (D.7 batch 2): reviewerApproved on a genuine pass+review call still reflects the INDEPENDENT reviewer's verdict, not generation's", async () => {
   // Guards against a regression where FIX 1 batch 2 accidentally always sources reviewerApproved
   // from generation — on a genuine pass verdict with needsReview:true, the independent REVIEW

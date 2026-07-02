@@ -519,8 +519,26 @@ export class RunQaUseCase {
     // "issue"/"shadow-log"/"quarantine"/"none" are the CALLER's (composition root's) publication
     // concern once real bridge adapters (Task E.0) are wired — this use-case's own scope is the
     // decision, not the 11 bridges' dispatch logic.
+    //
+    // Audit fix (judgment-day): thread the REAL per-run values this use-case already computed —
+    // `reviewerApproved` (the review phase, above) and `blocksPublish` (the measure/coverage phase,
+    // above) — into the publish decision, so PublicationPortAdapter's real PublishDecisionService
+    // call reflects THIS run's outcome instead of silently falling back to a static composition-time
+    // ctx that predates any run ever existing. Without this, a green-but-reviewer-rejected run could
+    // still publish a PR, and an enforce-mode coverage failure could never hold one.
+    //
+    // e2eChanged: deliberately OMITTED — this use-case has no computed source for "did this run
+    // change e2e/ files" anywhere in its ports (GenerationPort's own return shape carries no such
+    // signal). Passing a fabricated value would be worse than falling back to the static ctx;
+    // flagged as a gap for a follow-up rather than invented here.
     if (decision.sideEffect === "pr") {
-      await this.deps.publication.publish({ verdict: run.verdict, cases: run.cases, logs: run.logs });
+      await this.deps.publication.publish({
+        verdict: run.verdict,
+        cases: run.cases,
+        logs: run.logs,
+        reviewerApproved,
+        coverageBlocks: blocksPublish,
+      });
     }
 
     // Phase: persist (RunHistoryPort) + fold (LearningPort).

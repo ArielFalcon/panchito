@@ -90,7 +90,24 @@ export interface ObjectiveSignalPort {
   measure(br: BlastRadius, specDir: string): Promise<{ status: "pass" | "fail" | "unknown"; ratio: number | null; valueScore?: number | null }>;
 }
 export interface PublicationPort {
-  publish(decision: { verdict: RunVerdict; cases: readonly QaCase[]; logs: string }): Promise<{ outcome: string }>;
+  // reviewerApproved/coverageBlocks/e2eChanged (audit fix, judgment-day): the REAL per-run values
+  // RunQaUseCase already computes (reviewerApproved at the review phase; coverageBlocks at the
+  // measure phase) — OPTIONAL so every pre-existing caller/stub/test that only ever passed
+  // {verdict, cases, logs} keeps compiling and behaving identically. Absent -> the adapter falls
+  // back to its static composition-time ctx (the F.2 operator / unit-test path), exactly the
+  // dynamic-diff precedent (ReviewPort.review's own optional `diff` param, above). When PRESENT,
+  // these override the static ctx so a green-but-reviewer-rejected run correctly routes to an Issue
+  // instead of a PR, and an enforce-mode coverage failure correctly holds the PR — neither of which
+  // the static ctx (fixed at composition-build time, before any run's real verdict exists) can ever
+  // reflect on its own.
+  publish(decision: {
+    verdict: RunVerdict;
+    cases: readonly QaCase[];
+    logs: string;
+    reviewerApproved?: boolean;
+    coverageBlocks?: boolean;
+    e2eChanged?: boolean;
+  }): Promise<{ outcome: string }>;
 }
 export interface LearningPort {
   // Off-path by contract — a failure is logged and swallowed, never gates publish.

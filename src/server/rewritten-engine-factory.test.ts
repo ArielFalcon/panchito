@@ -58,7 +58,7 @@ function stubPipelineDeps(): PipelineDeps {
 
 test("buildRewrittenCompositionConfig maps an e2e AppConfig into a complete CompositionConfig", () => {
   const app = cfg("factory-e2e");
-  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
   assert.equal(config.repo, "org/demo");
   assert.equal(config.appName, "factory-e2e");
   assert.equal(config.target, "e2e");
@@ -82,9 +82,56 @@ test("buildRewrittenCompositionConfig maps an e2e AppConfig into a complete Comp
   assert.equal(typeof config.checkout, "function");
 });
 
+// ── Gap fixes (engram #961) — baseUrl, testIdAttribute, mode/guidance, publish flags ──────────────
+
+test("buildRewrittenCompositionConfig sets baseUrl from app.dev.baseUrl (the live E2eExecutionStrategy crash fix)", () => {
+  const app = cfg("factory-baseurl");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.equal(config.baseUrl, "https://dev", "baseUrl must be threaded from app.dev.baseUrl into CompositionConfig, not just the FaultInjectionOracle");
+});
+
+test("buildRewrittenCompositionConfig leaves baseUrl absent for a code-mode app (no dev block)", () => {
+  const app: AppConfig = { ...cfg("factory-baseurl-code"), code: true, dev: undefined };
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.equal(config.baseUrl, undefined);
+});
+
+test("buildRewrittenCompositionConfig sets testIdAttribute from app.e2e.testIdAttribute (closes the worst audit-2026-07 flaky-selector leak on the rewritten path)", () => {
+  const app: AppConfig = { ...cfg("factory-testid"), e2e: { testIdAttribute: "data-qa" } };
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.equal(config.testIdAttribute, "data-qa");
+});
+
+test("buildRewrittenCompositionConfig leaves testIdAttribute undefined when the app declares none (NO 'data-testid' default here — the seed playwright.config.ts owns that default)", () => {
+  const app = cfg("factory-testid-absent");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.equal(config.testIdAttribute, undefined);
+});
+
+test("buildRewrittenCompositionConfig sets mode from the passed run param, not a hardcoded 'diff'", () => {
+  const app = cfg("factory-mode-manual");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "manual" });
+  assert.equal(config.mode, "manual");
+});
+
+test("buildRewrittenCompositionConfig sets guidance from the passed run param when present", () => {
+  const app = cfg("factory-guidance");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", {
+    mode: "manual",
+    guidance: "test the contact form",
+  });
+  assert.equal(config.guidance, "test the contact form");
+});
+
+test("buildRewrittenCompositionConfig leaves guidance absent when the run param omits it", () => {
+  const app = cfg("factory-guidance-absent");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.equal(config.guidance, undefined);
+});
+
 test("buildRewrittenCompositionConfig selects the code target + Stryker oracle for a code:true app", () => {
   const app: AppConfig = { ...cfg("factory-code"), code: true, dev: undefined };
-  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-def5678-run2");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-def5678-run2", { mode: "diff" });
   assert.equal(config.target, "code");
   assert.equal(config.isCode, true);
   assert.equal(config.versionUrl, undefined, "a code-mode app has no dev.versionUrl — no deploy gate");
@@ -93,7 +140,7 @@ test("buildRewrittenCompositionConfig selects the code target + Stryker oracle f
 
 test("buildRewrittenCompositionConfig honors coveragePolicy from app.qa.changeCoverage", () => {
   const app: AppConfig = { ...cfg("factory-coverage"), qa: { ...cfg("factory-coverage").qa, changeCoverage: { mode: "enforce", minRatio: 0.85 } } };
-  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-cov1234-run3");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-cov1234-run3", { mode: "diff" });
   assert.equal(config.coveragePolicyMode, "enforce");
   assert.equal(config.coveragePolicy.mode, "enforce");
   assert.equal(config.coveragePolicy.minRatio, 0.85);
@@ -109,14 +156,14 @@ test("buildRewrittenCompositionConfig honors coveragePolicy from app.qa.changeCo
 
 test("buildRewrittenCompositionConfig sets branch to the PASSED namespace, not a static literal", () => {
   const app = cfg("factory-namespace");
-  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-runA");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-runA", { mode: "diff" });
   assert.equal(config.branch, "qa-bot-abc1234-runA", "branch must equal the per-run namespace passed in, not a hardcoded literal");
 });
 
 test("two calls to buildRewrittenCompositionConfig with DIFFERENT namespaces produce DIFFERENT branch values", () => {
   const app = cfg("factory-namespace-diff");
-  const configRun1 = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-runA");
-  const configRun2 = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-runB");
+  const configRun1 = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-runA", { mode: "diff" });
+  const configRun2 = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-runB", { mode: "diff" });
   assert.notEqual(configRun1.branch, configRun2.branch, "two runs must never collide on the same DEV test-data namespace/branch");
   assert.equal(configRun1.branch, "qa-bot-abc1234-runA");
   assert.equal(configRun2.branch, "qa-bot-abc1234-runB");
@@ -135,7 +182,7 @@ test("createRewrittenEngineFactory returns a factory whose output satisfies RunP
   process.env.PIPELINE_ENGINE = "rewritten";
   try {
     const factory = createRewrittenEngineFactory({ getAgentDeps: stubAgentDeps });
-    const port = factory(cfg("factory-port-shape"), "qa-bot-abc1234-runA");
+    const port = factory(cfg("factory-port-shape"), "qa-bot-abc1234-runA", { mode: "diff" });
     assert.equal(typeof port.run, "function", "the returned RunPipelinePort must expose run()");
   } finally {
     if (prev === undefined) delete process.env.PIPELINE_ENGINE;
@@ -154,7 +201,7 @@ test("createRewrittenEngineFactory never calls getAgentDeps during construction 
         return stubAgentDeps();
       },
     });
-    factory(cfg("factory-lazy-agent"), "qa-bot-abc1234-runA");
+    factory(cfg("factory-lazy-agent"), "qa-bot-abc1234-runA", { mode: "diff" });
     assert.equal(calls, 0, "constructing the factory + composing the port must not eagerly open an agent session");
   } finally {
     if (prev === undefined) delete process.env.PIPELINE_ENGINE;
@@ -164,7 +211,7 @@ test("createRewrittenEngineFactory never calls getAgentDeps during construction 
 
 test("createRewrittenEngineFactory's port throws a clear error if ever invoked while PIPELINE_ENGINE is legacy (defense-in-depth — the runner's own dispatch guard is the real protection)", () => {
   const factory = createRewrittenEngineFactory({ getAgentDeps: stubAgentDeps });
-  assert.throws(() => factory(cfg("factory-legacy-guard"), "qa-bot-abc1234-runA"), /PIPELINE_ENGINE is 'legacy'/);
+  assert.throws(() => factory(cfg("factory-legacy-guard"), "qa-bot-abc1234-runA", { mode: "diff" }), /PIPELINE_ENGINE is 'legacy'/);
 });
 
 test("createRewrittenEngineFactory's returned closure threads the namespace argument into branch for two consecutive calls with different namespaces", () => {
@@ -178,8 +225,8 @@ test("createRewrittenEngineFactory's returned closure threads the namespace argu
     // it builds carries branch=namespace; this test proves the FACTORY CLOSURE's own arity accepts
     // and threads a second, distinct namespace argument without throwing (the composition succeeds
     // for both), which is the observable contract at the createRewrittenEngineFactory seam.
-    const portRun1 = factory(app, "qa-bot-abc1234-runA");
-    const portRun2 = factory(app, "qa-bot-abc1234-runB");
+    const portRun1 = factory(app, "qa-bot-abc1234-runA", { mode: "diff" });
+    const portRun2 = factory(app, "qa-bot-abc1234-runB", { mode: "diff" });
     assert.equal(typeof portRun1.run, "function");
     assert.equal(typeof portRun2.run, "function");
   } finally {
@@ -203,9 +250,9 @@ test("PIPELINE_ENGINE unset — the runner takes legacy, the REAL rewritten engi
     {
       pipeline: stubPipelineDeps(),
       loadApp: cfg,
-      engineFactory: (appConfig, namespace) => {
+      engineFactory: (appConfig, namespace, run) => {
         factoryInvoked = true;
-        return realFactory(appConfig, namespace);
+        return realFactory(appConfig, namespace, run);
       },
     },
   );
@@ -229,9 +276,9 @@ test("PIPELINE_ENGINE=legacy (explicit) — same fail-safe holds for the real fa
       {
         pipeline: stubPipelineDeps(),
         loadApp: cfg,
-        engineFactory: (appConfig, namespace) => {
+        engineFactory: (appConfig, namespace, run) => {
           factoryInvoked = true;
-          return realFactory(appConfig, namespace);
+          return realFactory(appConfig, namespace, run);
         },
       },
     );
