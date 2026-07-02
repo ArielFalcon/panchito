@@ -58,6 +58,10 @@
     "test/contexts/generation/infrastructure/exploration-brief.adapter-parity.test.ts",
     "test/contexts/generation/infrastructure/verdict-parser.adapter-parity.test.ts",
     "test/contexts/generation/infrastructure/plan-parser.adapter-parity.test.ts",
-    "test/contexts/test-execution/infrastructure/static-gate-validate-parity.test.ts"
+    "test/contexts/test-execution/infrastructure/static-gate-validate-parity.test.ts",
+    "test/contexts/generation/application/generate-tests.characterization.test.ts",
+    "test/contexts/qa-run-orchestration/infrastructure/legacy-pipeline.adapter.test.ts",
+    "test/characterization/golden-parity.test.ts",
+    "test/characterization/golden-outcome.test.ts"
   ]
 }

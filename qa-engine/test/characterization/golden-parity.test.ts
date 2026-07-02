@@ -15,6 +15,22 @@ import { Sha } from "@kernel/sha.ts";
 import { buildScenarioDeps, type ScenarioKey } from "./scenarios.ts";
 import { probeSideEffects, type SideEffect } from "./side-effects.ts";
 import { loadAllowlist, fingerprint } from "./parity-allowlist.ts";
+import type { RunOutcome as KernelRunOutcome } from "@kernel/run-outcome.ts";
+
+// Structural aliases matching LegacyPipelineAdapter's intentionally opaque LegacyRunner type (see
+// legacy-pipeline.adapter.ts) — the adapter stays src/-free at type level, so the real, concretely
+// typed scenarios.ts CaptureDeps / src/pipeline.ts runPipeline need a structural cast at the call
+// site. Runtime-compatible (same values), not a real behavior gap. Mirrors golden-outcome.test.ts's
+// LegacyRunnerDeps/LegacyRunnerFn.
+type LegacyRunnerDeps = { savedOutcomes?: KernelRunOutcome[] } & Record<string, unknown>;
+type LegacyRunnerFn = (
+  app: unknown,
+  sha: string,
+  deps: unknown,
+  source: string,
+  opts: unknown,
+  ...cbs: unknown[]
+) => Promise<{ verdict: string }>;
 
 // Each committed golden must round-trip through the comparator against itself (sanity: the
 // comparator accepts real captured shapes).
@@ -59,8 +75,8 @@ for (const key of Object.keys(EXPECTED_SIDE_EFFECT) as ScenarioKey[]) {
     const { deps: probed, seen } = probeSideEffects(deps);
     const adapter = new LegacyPipelineAdapter({
       app,
-      deps: probed,
-      runPipeline,
+      deps: probed as unknown as LegacyRunnerDeps,
+      runPipeline: runPipeline as unknown as LegacyRunnerFn,
       legacyOpts: opts.triggerRepo ? { triggerRepo: opts.triggerRepo } : undefined,
     });
     const outcome = await adapter.run({

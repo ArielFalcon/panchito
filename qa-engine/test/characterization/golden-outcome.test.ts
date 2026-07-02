@@ -87,6 +87,12 @@ import { Sha } from "@kernel/sha.ts";
 import { buildScenarioDeps, buildScenarioDepsB2, type ScenarioKey, type ScenarioKeyB2, type CaptureDeps } from "./scenarios.ts";
 import { probeSideEffects, type SideEffect } from "./side-effects.ts";
 import { runOutcomeEquivalent, type ComparableOutcome } from "./equivalence.ts";
+// Kernel RunOutcome, aliased: LegacyPipelineAdapter/RewrittenOrchestratorAdapter (RunPipelinePort)
+// both return THIS type, not the legacy src/types.ts RunOutcome imported above (which stays the
+// right type for the file's single-engine legacy-only harness sections). The dual-engine section
+// below (toComparable) compares two kernel RunOutcome values, so it must be typed against this one —
+// the kernel's ErrorClass is intentionally wider than the frozen legacy errorClass union.
+import type { RunOutcome as KernelRunOutcome } from "@kernel/run-outcome.ts";
 import { loadAllowlist, fingerprint } from "./parity-allowlist.ts";
 
 const allow = loadAllowlist();
@@ -347,7 +353,7 @@ for (const scn of allScenarios) {
     const adapter = new LegacyPipelineAdapter({
       app: scn.app,
       deps: probed as unknown as LegacyRunnerDeps,
-      runPipeline,
+      runPipeline: runPipeline as unknown as LegacyRunnerFn,
       legacyOpts: scn.legacyOpts,
     });
 
@@ -394,6 +400,20 @@ for (const scn of allScenarios) {
 // legacy-pipeline.adapter.ts). Kept local to this harness file only.
 type LegacyRunnerDeps = { savedOutcomes?: RunOutcome[] } & Record<string, unknown>;
 void (0 as unknown as PipelineDeps); // referenced for the type-only import above; no runtime use
+
+// Same structural-opaqueness rationale as LegacyRunnerDeps above, for the adapter's runPipeline
+// slot: LegacyRunner.runPipeline is typed with `unknown` params by design (adapter stays src/-free
+// at type level), so the real, concretely-typed src/pipeline.ts runPipeline needs a structural cast
+// at the call site — it is runtime-compatible (same function, wider param types accepted at the
+// call site than TS's contravariant check allows), not a real behavior gap.
+type LegacyRunnerFn = (
+  app: unknown,
+  sha: string,
+  deps: unknown,
+  source: string,
+  opts: unknown,
+  ...cbs: unknown[]
+) => Promise<{ verdict: string }>;
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // DUAL-ENGINE CROSS-VALIDATION (Task D.7 — the false-green gate, R1)
@@ -941,7 +961,7 @@ test("dual-engine cross-validation: the scenario set is non-trivial (guards agai
   assert.equal(allDualCases.length, 21, "expected exactly 10 primaries + 11 B2 scenarios cross-validated");
 });
 
-function toComparable(o: RunOutcome): ComparableOutcome {
+function toComparable(o: KernelRunOutcome): ComparableOutcome {
   return o as unknown as ComparableOutcome;
 }
 
@@ -959,7 +979,7 @@ for (const c of allDualCases) {
     const legacyAdapter = new LegacyPipelineAdapter({
       app: rebuilt.app,
       deps: legacyProbed as unknown as LegacyRunnerDeps,
-      runPipeline,
+      runPipeline: runPipeline as unknown as LegacyRunnerFn,
       legacyOpts: "triggerRepo" in rebuilt.opts && rebuilt.opts.triggerRepo ? { triggerRepo: rebuilt.opts.triggerRepo } : undefined,
     });
     const legacyOutcome = await legacyAdapter.run({
@@ -1053,7 +1073,11 @@ for (const c of allDualCases) {
       // Cross-repo faithfulness (judgment-day): thread the scenario's triggerRepo exactly like the
       // legacy side's legacyOpts above — without it, the cross-repo golden case never exercises the
       // rewritten path's own !triggerRepo coverage guard (false sense of parity coverage).
-      ...("triggerRepo" in rebuilt.opts && rebuilt.opts.triggerRepo ? { triggerRepo: rebuilt.opts.triggerRepo } : {}),
+      // B2 scenarios' opts shape never declares triggerRepo at all (see buildScenarioDepsB2), so the
+      // `in` check narrows to `{}` for that arm — read it defensively as a possibly-absent string.
+      ...(typeof (rebuilt.opts as { triggerRepo?: string }).triggerRepo === "string"
+        ? { triggerRepo: (rebuilt.opts as { triggerRepo?: string }).triggerRepo }
+        : {}),
     });
     void savedRewritten; // captured for potential future inspection; the adapter's own return is asserted
 

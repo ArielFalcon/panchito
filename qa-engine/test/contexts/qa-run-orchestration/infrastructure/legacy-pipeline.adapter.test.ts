@@ -10,10 +10,30 @@ import { LegacyPipelineAdapter } from "@contexts/qa-run-orchestration/infrastruc
 import { Sha } from "@kernel/sha.ts";
 import { buildScenarioDeps } from "../../../characterization/scenarios.ts";
 import { runPipeline } from "../../../../../src/pipeline.ts";
+import type { RunOutcome as KernelRunOutcome } from "@kernel/run-outcome.ts";
+
+// Structural aliases matching LegacyPipelineAdapter's intentionally opaque LegacyRunner type (see
+// legacy-pipeline.adapter.ts) — the adapter stays src/-free at type level, so the real, concretely
+// typed scenarios.ts CaptureDeps / src/pipeline.ts runPipeline need a structural cast at the call
+// site. Runtime-compatible (same values), not a real behavior gap. Mirrors
+// golden-outcome.test.ts's LegacyRunnerDeps/LegacyRunnerFn.
+type LegacyRunnerDeps = { savedOutcomes?: KernelRunOutcome[] } & Record<string, unknown>;
+type LegacyRunnerFn = (
+  app: unknown,
+  sha: string,
+  deps: unknown,
+  source: string,
+  opts: unknown,
+  ...cbs: unknown[]
+) => Promise<{ verdict: string }>;
 
 test("run() delegates to runPipeline and returns the SAVED RunOutcome (verdict pass for green-pr)", async () => {
   const { app, sha, source, opts, deps } = buildScenarioDeps("green-pr");
-  const adapter = new LegacyPipelineAdapter({ app, deps, runPipeline });
+  const adapter = new LegacyPipelineAdapter({
+    app,
+    deps: deps as unknown as LegacyRunnerDeps,
+    runPipeline: runPipeline as unknown as LegacyRunnerFn,
+  });
   const outcome = await adapter.run({
     app: app.name,
     sha: Sha.of(sha),
@@ -31,7 +51,11 @@ test("run() delegates to runPipeline and returns the SAVED RunOutcome (verdict p
 
 test("run() synthesizes a context-mode outcome when runPipeline returns before saveOutcome", async () => {
   const { app, sha, source, opts, deps } = buildScenarioDeps("context");
-  const adapter = new LegacyPipelineAdapter({ app, deps, runPipeline });
+  const adapter = new LegacyPipelineAdapter({
+    app,
+    deps: deps as unknown as LegacyRunnerDeps,
+    runPipeline: runPipeline as unknown as LegacyRunnerFn,
+  });
   const outcome = await adapter.run({
     app: app.name,
     sha: Sha.of(sha),
@@ -50,8 +74,8 @@ test("run() threads legacyOpts (e.g. triggerRepo) over the derived opts without 
   const { app, sha, source, opts, deps } = buildScenarioDeps("cross-repo");
   const adapter = new LegacyPipelineAdapter({
     app,
-    deps,
-    runPipeline,
+    deps: deps as unknown as LegacyRunnerDeps,
+    runPipeline: runPipeline as unknown as LegacyRunnerFn,
     legacyOpts: { triggerRepo: opts.triggerRepo },
   });
   const outcome = await adapter.run({
