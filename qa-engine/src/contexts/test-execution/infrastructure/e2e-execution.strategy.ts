@@ -17,29 +17,17 @@ import type {
   ExecutionRequest,
   ExecutionResult,
 } from "../application/ports/index.ts";
+import type { QaCase } from "@kernel/qa-case.ts";
 import { AdjudicateService } from "../domain/adjudicate.service.ts";
 
-// Structural shape of the legacy runE2E return (src/types.ts QaRunResult) — declared locally so
-// this file does not import from src/ (only the parity test may). Mirrors kernel QaCase (@kernel/
-// qa-case.ts) field-for-field: G1 widened the kernel type precisely so this evidence — failureDom/
-// httpStatus/finalUrl/runtimeErrors/file/durationMs/flow/objective/reason — survives the port
-// boundary instead of being re-projected away. The FixLoop aggregate reads these fields off QaCase
-// for adjudicator Rules 2.5/2.6 and Lever-2; dropping them here silently starved that logic.
+// Structural shape of the legacy runE2E return — the OUTER shape mirrors src/types.ts QaRunResult
+// and stays locally declared: the rule for this file is NO src/ imports (only the parity test may);
+// kernel imports are allowed and expected. Cases are kernel QaCase directly (src/types.ts CaseStatus
+// is the identical union, so nothing the legacy runner emits is narrowed away) — the G1-widened
+// evidence (failureDom/httpStatus/finalUrl/runtimeErrors/file/durationMs/flow/objective/reason)
+// survives the port boundary by construction, with no hand-synced mirror left to drift. The FixLoop
+// aggregate reads these fields off QaCase for adjudicator Rules 2.5/2.6 and Lever-2.
 interface LegacyRunResult { verdict: string; cases: QaCase[]; logs: string; }
-type QaCase = {
-  name: string;
-  status: string;
-  detail?: string;
-  flow?: string;
-  objective?: string;
-  reason?: string;
-  durationMs?: number;
-  failureDom?: string;
-  file?: string;
-  httpStatus?: number;
-  finalUrl?: string;
-  runtimeErrors?: { type: string; text: string }[];
-};
 type RunE2eFn = (
   specDir: string,
   opts: {
@@ -76,9 +64,9 @@ export class E2eExecutionStrategy implements ExecutionStrategyPort {
       ...(req.onRunning ? { onRunning: req.onRunning } : {}),
       ...(req.onDiscovered ? { onDiscovered: req.onDiscovered } : {}),
     });
-    // Status-narrowing pass-through: keep every evidence field the runner emitted (no re-projection)
-    // and only narrow `status` to the port's literal union.
-    const cases = result.cases.map((c) => ({ ...c, status: c.status as "pass" | "fail" | "flaky" }));
+    // Pass-through: cases are already kernel QaCase — every evidence field the runner emitted
+    // crosses the boundary untouched (no re-projection, no cast).
+    const cases = result.cases;
     const adjudged = this.adjudicator.adjudicate(result.verdict as ExecutionResult["verdict"], cases);
     return { verdict: adjudged.verdict, cases, logs: result.logs };
   }
