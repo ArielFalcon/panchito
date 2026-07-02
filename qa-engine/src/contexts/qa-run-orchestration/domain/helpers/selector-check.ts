@@ -1,22 +1,42 @@
 // qa-engine/src/contexts/qa-run-orchestration/domain/helpers/selector-check.ts
-// PORT (VERBATIM, not a rewrite) of src/qa/selector-check.ts's Lever-2 core — checkSpecSelectors and
-// its direct dependencies — consumed by FixLoop (Task D.4, sub-decision 2: the per-case selector
-// check against the failure-point trees).
+// PORT (VERBATIM, not a rewrite, except where declared) of src/qa/selector-check.ts's Lever-2 core —
+// checkSpecSelectors and its direct dependencies — consumed by FixLoop (Task D.4, sub-decision 2: the
+// per-case selector check against the failure-point trees) and, as of Plan 7-R B5, by
+// pre-exec-grounding.service.ts (the pre-execution ambiguity/catalog gate).
 //
-// SCOPE: this re-port carries ONLY checkSpecSelectors and what it needs (selectorPresent,
-// selectorUnique, extractProposedSelectors, hasNonExtractableLocator, selectorKey,
-// stripCommentsAndJoin + its string-aware trailing-// stripper). The Pillar-2 CATALOG-GATE additions
-// (extractCatalogSelectors, confidentWindowEnd, extractTestIdSelectorsWithIndex, firstGotoRoute,
-// unscopedMultipleContradictions) are addendum G2's SEPARATE, out-of-scope concern (telemetry the
-// comparator doesn't yet track) — not re-ported here.
+// SCOPE (Plan 7-R B5.1 widened this beyond the original checkSpecSelectors-only cut): this module now
+// carries the FULL current src/qa/selector-check.ts surface — checkSpecSelectors and its dependencies
+// (selectorPresent, selectorUnique, extractProposedSelectors, hasNonExtractableLocator, selectorKey,
+// stripCommentsAndJoin + its string-aware trailing-// stripper) PLUS the Pillar-2 catalog-gate family
+// (extractCatalogSelectors, confidentWindowEnd, extractTestIdSelectorsWithIndex, firstGotoRoute) and
+// unscopedMultipleContradictions — previously deferred as "addendum G2's separate, out-of-scope
+// concern" but needed here so pre-exec-grounding.service.ts can compose ONE canonical module instead
+// of a second, parallel port (generation/infrastructure/selector-catalog-window.ts already ported the
+// four catalog extractors standalone for catalog-gate.ts's OWN direction of dependency — that copy is
+// untouched by this port; see this file's own parity pin for how the two stay independently verified).
+//
+// DECLARED DIVERGENCE (Plan 7-R B5.1, safe-direction only — see unscopedMultipleContradictions below):
+// this canonical unscopedMultipleContradictions suppresses false-block idioms legacy's version still
+// surfaces a MULTIPLE for: (1) a selector immediately followed by .first(/.nth(/.filter( — the author
+// already disambiguated it, so a MULTIPLE there is never a real ambiguity; (2) the page-rooted check
+// now applies UNCONDITIONALLY (no longer gated behind `anyNonExtractable` — legacy's fast path
+// `if (!anyNonExtractable) return findings.contradictions.filter(MULTIPLE)` skipped the per-selector
+// scoping walk entirely whenever a spec had zero non-extractable locators, so idiom (1) could never
+// suppress anything on such a spec). A selector chained after ANOTHER extractable selector (e.g.
+// `.getByRole("table").getByRole("row", {...})`) was ALREADY suppressed by legacy's own page-rooted
+// check (it is not page-rooted — the immediate prefix is `)`, not `page`), so role-chained scoping is
+// not a NEW rule here, only a consequence of applying the same rooting test unconditionally. Per B5's
+// own safe-direction invariant this ONLY narrows blocking (a suppressed selector was never a hard
+// block to begin with — MULTIPLE contradictions feed the one-shot corrective regen, never a bare
+// pass/fail), so it cannot fabricate a NEW contradiction the legacy didn't already have.
 //
 // Re-homed here rather than imported cross-context: qa-engine's test-execution/domain/
 // selector-check.service.ts carries an OLDER copy of this same source (missing the recent
-// string-aware comment-strip fix and the catalog-gate additions) — reusing it would either silently
-// propagate its staleness or require qa-run-orchestration to import test-execution's domain (the same
-// hexagonal-boundary violation adjudicate.service.ts's re-home avoids). This copy is pinned by
-// selector-check-parity.test.ts against src/qa/selector-check.ts DIRECTLY (the true current source),
-// independent of test-execution's own (now-stale) parity pin.
+// string-aware comment-strip fix and this module's catalog-gate additions) — reusing it would either
+// silently propagate its staleness or require qa-run-orchestration to import test-execution's domain
+// (the same hexagonal-boundary violation adjudicate.service.ts's re-home avoids). This copy is pinned
+// by selector-check-parity.test.ts against src/qa/selector-check.ts DIRECTLY (the true current
+// source), independent of test-execution's own (now-stale) parity pin.
 //
 // Pure module — no pipeline deps, no browser, no FS I/O. All exports are standalone functions.
 
@@ -284,6 +304,100 @@ export function extractProposedSelectors(specSrc: string): ProposedSelector[] {
   return found.sort((a, b) => a.index - b.index).map((f) => f.sel);
 }
 
+// The selector families the ARIA-path checker is BLIND to (test-ids live in the attribute side-channel,
+// not the a11y tree). The Pillar 2 catalog gate matches each against its per-route index in the
+// RouteCatalog. Empty arrays when a family is unused. `idsNames` unifies id and name locators.
+export interface CatalogSelectors {
+  testIds: string[];
+  placeholders: string[];
+  altTexts: string[];
+  titles: string[];
+  idsNames: string[]; // from locator('#id') and locator('[name=x]') — simple, groundable forms only
+}
+
+// Extracts the catalog families a spec emits (getByTestId/getByPlaceholder/getByAltText/getByTitle and
+// SIMPLE id/name locators) so the pre-exec catalog gate can verify each against the captured
+// RouteCatalog. This is PARALLEL to extractProposedSelectors (role/text/label) and ADDITIVE — it does
+// NOT touch NON_EXTRACTABLE_LOCATOR_RE or the W5 real-bug guard; the aria-path semantics are unchanged.
+// Matched over the COMMENT-STRIPPED source (stripCommentsAndJoin) so a commented-out getByTestId
+// cannot leak (W5 parity). Only STRING-LITERAL first args and simple locator forms are groundable;
+// complex CSS/XPath, computed `${…}` values, and attribute locators other than `[name=…]` (e.g.
+// `[data-cy=…]`, the escape-hatch Pillar 3 forbids) are intentionally NOT extracted → the gate treats
+// them as un-groundable → advisory, never a false block.
+export function extractCatalogSelectors(specSrc: string): CatalogSelectors {
+  const joined = stripCommentsAndJoin(specSrc);
+  const collect = (re: RegExp): string[] => {
+    const out: string[] = [];
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(joined)) !== null) {
+      const v = m[1]!.trim();
+      if (v && !v.includes("${")) out.push(v); // drop interpolated/computed → un-groundable
+    }
+    return out;
+  };
+  return {
+    testIds: collect(/\.getByTestId\(\s*["'`]([^"'`]+)["'`]/g),
+    placeholders: collect(/\.getByPlaceholder\(\s*["'`]([^"'`]+)["'`]/g),
+    altTexts: collect(/\.getByAltText\(\s*["'`]([^"'`]+)["'`]/g),
+    titles: collect(/\.getByTitle\(\s*["'`]([^"'`]+)["'`]/g),
+    idsNames: [
+      ...collect(/\.locator\(\s*["'`]#([\w-]+)["'`]\s*\)/g),
+      ...collect(/\.locator\(\s*["'`]\[name=["']?([^"'\]\s]+)["']?(?:\s+[isIS])?\s*\]["'`]\s*\)/g), // exclude ws + drop a trailing ` i`/` s` case modifier or a bare trailing space
+    ],
+  };
+}
+
+// The lexical end of the catalog gate's "confident window": the index (in the comment-stripped joined
+// source) of the first action that makes the INITIAL-route catalog stale — the first `.click()`/`.tap()`
+// or the SECOND `.goto()`. A selector after this point may live on a page reached post-navigation, which
+// the initial catalog cannot see, so the gate must NOT fail-close there (it would false-block).
+// `fill`/`type`/`press`/`hover`/`check`/`selectOption` do NOT close the window (they don't navigate).
+// The 2nd-goto rule is conservative: the design keeps the window open across `goto(<same route>)`, but
+// closing on ANY second goto only NARROWS the window (fewer fail-closes, never a false block) — the safe
+// direction. Returns Infinity when nothing closes it (the whole spec is the confident window).
+export function confidentWindowEnd(specSrc: string): number {
+  const joined = stripCommentsAndJoin(specSrc);
+  const firstClick = joined.search(/\.(?:dblclick|click|tap)\s*\(/); // dblclick is a click variant that can navigate too
+  const gotoRe = /\.goto\s*\(/g;
+  let count = 0;
+  let secondGoto = -1;
+  for (let m: RegExpExecArray | null; (m = gotoRe.exec(joined)) !== null; ) {
+    if (++count === 2) { secondGoto = m.index; break; }
+  }
+  const ends = [firstClick, secondGoto].filter((i) => i >= 0);
+  return ends.length > 0 ? Math.min(...ends) : Infinity;
+}
+
+// getByTestId selectors WITH their position in the comment-stripped joined source, so the gate can tell
+// which fall inside the confident window (index < confidentWindowEnd). Same comment-stripping as the
+// aria extractor (W5 parity). Interpolated `${…}` values are dropped (computed → un-groundable). The
+// index is in the SAME coordinate space as confidentWindowEnd (both strip the identical source).
+export function extractTestIdSelectorsWithIndex(specSrc: string): Array<{ value: string; index: number }> {
+  const joined = stripCommentsAndJoin(specSrc);
+  const re = /\.getByTestId\(\s*["'`]([^"'`]+)["'`]/g;
+  const out: Array<{ value: string; index: number }> = [];
+  for (let m: RegExpExecArray | null; (m = re.exec(joined)) !== null; ) {
+    const value = m[1]!.trim();
+    if (value && !value.includes("${")) out.push({ value, index: m.index });
+  }
+  return out;
+}
+
+// The route of the spec's FIRST literal page.goto(...) — the catalog gate's confident-window route — or
+// undefined when that first goto is un-navigable (interpolated ${…} or an absolute URL), in which case
+// the window route cannot be pinned and the gate must leave the whole spec advisory. Kept CONSISTENT
+// with confidentWindowEnd (which counts the raw first goto), so a first-route selector is never checked
+// against a LATER route's catalog. Normalizes the leading slash exactly like extractTargetRoutes, so it
+// matches the RouteSnapshot.route keys. Comment-stripped (W5 parity).
+export function firstGotoRoute(specSrc: string): string | undefined {
+  const m = /\.goto\(\s*["'`]([^"'`]+)["'`]/.exec(stripCommentsAndJoin(specSrc));
+  if (!m) return undefined;
+  const raw = m[1]!.trim();
+  if (!raw || raw.includes("${") || /^https?:\/\//i.test(raw)) return undefined; // un-navigable → advisory
+  return raw.startsWith("/") ? raw : `/${raw}`;
+}
+
 // Locator families Lever-2 CANNOT extract/verify against an aria snapshot: getByTestId (test ids
 // are not in the a11y tree), raw CSS/XPath `.locator(…)`, getByPlaceholder/getByAltText/getByTitle
 // (names parseAriaSnapshot does not surface), AND the REGEX-first-arg forms `getByText(/…/)` /
@@ -301,6 +415,132 @@ const NON_EXTRACTABLE_LOCATOR_RE = /\.(?:getByTestId|locator|getByPlaceholder|ge
 // so a commented-out call — wrapped, inline, or trailing — does not count.
 export function hasNonExtractableLocator(specSrc: string): boolean {
   return NON_EXTRACTABLE_LOCATOR_RE.test(stripCommentsAndJoin(specSrc));
+}
+
+// A non-extractable scope prefix immediately followed (on the same call chain) by an extractable
+// selector: e.g. `.locator('.x').getByRole(...)`, `.getByTestId('x').getByRole(...)`.
+// A1 safe-direction (per-selector). A "MULTIPLE" ambiguity is surfaced pre-execution ONLY for a
+// selector we can PROVE is unscoped — rooted directly on the `page` fixture (`page.getByRole(…)` /
+// `this.page.getByRole(…)`). Any other rooting narrows the tree in a way the full-tree check cannot
+// see — a `.locator(…)` chain OR a locator held in a variable (`const row = page.getByTestId(…);
+// row.getByRole(…)`) — so its uniqueness is INDETERMINATE and a "MULTIPLE" there would be a FALSE
+// positive that could wrongly hold a good spec `invalid` at W2. We SUPPRESS by default and surface
+// only the page-rooted case: the same conservative guarantee the old blanket
+// `if (anyNonExtractable) return []` gave, now applied PER-SELECTOR instead of per-spec (so a
+// standalone terminal `getByTestId('x')` no longer silences an unrelated page-rooted getByRole).
+//
+// `before` is the comment-stripped joined source up to the selector's `.getByXxx(` (the exact index
+// extractProposedSelectorsWithIndex returns), so the check is alignment-safe. stripCommentsAndJoin
+// joins lines with spaces, hence the trailing-whitespace trim and the optional `\s*` around `this.`.
+const PAGE_ROOT_BEFORE_RE = /(?:^|[^.\w$])(?:this\s*\.\s*)?page$/;
+function isPageRootedAt(joined: string, index: number): boolean {
+  return PAGE_ROOT_BEFORE_RE.test(joined.slice(0, index).replace(/\s+$/, ""));
+}
+
+// DECLARED DIVERGENCE (Plan 7-R B5.1): a selector followed by `.first(`/`.nth(`/`.filter(` is ALWAYS
+// suppressed (the author already disambiguated a MULTIPLE match themselves — surfacing it as a
+// contradiction would be a false block on a deliberately-scoped locator), regardless of rooting.
+const DISAMBIGUATING_SUFFIX_RE = /^\s*\.(?:first|nth|filter)\s*\(/;
+function isDisambiguatedAfter(joined: string, endIndex: number): boolean {
+  return DISAMBIGUATING_SUFFIX_RE.test(joined.slice(endIndex));
+}
+
+// Returns MULTIPLE-node ambiguity contradictions ONLY for extractable selectors that are PROVABLY
+// unscoped (page-rooted AND not disambiguated by a trailing .first()/.nth()/.filter() — B5.1
+// declared divergence). This is the per-selector replacement for the blanket
+// `if (findings.anyNonExtractable) return []` the consumer (pre-exec-grounding.service.ts's
+// ambiguityContradictionsFrom, mirroring legacy's ambiguousSelectorsNow) used to apply.
+//
+// Only returns contradictions that include "MULTIPLE" (pre-execution ambiguity check). Absent and
+// unverifiable contradictions are unchanged — they are not affected here.
+//
+// HOW IT WORKS:
+//   1. Run checkSpecSelectors normally → all MULTIPLE contradictions (computed over the FULL tree,
+//      which cannot see locator/variable scoping).
+//   2. DECLARED DIVERGENCE (B5.1): unlike legacy, which fast-paths straight to returning MULTIPLE
+//      as-is whenever `!findings.anyNonExtractable`, this canonical version ALWAYS walks each
+//      extractable selector individually — page-rooted suppression is no longer gated on
+//      anyNonExtractable. This only matters when a selector's own idiom (.first()/.nth()/.filter())
+//      needs suppressing even though no non-extractable locator exists anywhere else in the spec —
+//      the anyNonExtractable-gated fast path could never reach that suppression. A genuine
+//      page-rooted, non-idiomatic MULTIPLE with zero non-extractable locators anywhere still surfaces
+//      exactly as before (see the parity test asserting this).
+//   3. A MULTIPLE contradiction is kept ONLY when its selector is page-rooted (`page.getByRole(…)` /
+//      `this.page.getByRole(…)` — the SAME rooting test legacy uses) AND NOT immediately followed by
+//      `.first(`/`.nth(`/`.filter(`. Everything else — locator-chained, variable-scoped,
+//      non-extractable-scoped, role-chained after ANOTHER extractable selector (e.g.
+//      `.getByRole("table").getByRole("row", {...})` — not page-rooted, so already indeterminate under
+//      the SAME rule as any other non-page-root chain), or disambiguated — stays suppressed (safe
+//      direction, only NARROWS blocking, never fabricates a new contradiction beyond what legacy's own
+//      page-rooted check already surfaced for a NON-idiomatic selector).
+//
+// INVARIANT: anyNonExtractable is still computed by checkSpecSelectors and returned unchanged in its
+// own findings. The W5 real-bug branch (RunQaUseCase's own consumer) must still hold false when any
+// non-extractable locator is present — unaffected by this function's own suppression logic.
+export function unscopedMultipleContradictions(
+  specSources: string[],
+  trees: string[][],
+  treeLabel = "pre-write",
+): string[] {
+  const findings = checkSpecSelectors(specSources, trees, treeLabel);
+  const unsuppressed: string[] = [];
+  for (const specSrc of specSources) {
+    const joined = stripCommentsAndJoin(specSrc);
+    // Re-extract with indices so we can map contradictions to their source position.
+    const extractedWithIndex = extractProposedSelectorsWithIndex(joined);
+    for (const { index, endIndex, sel } of extractedWithIndex) {
+      // B5.1: a trailing .first(/.nth(/.filter( means the author already disambiguated this selector
+      // — never a contradiction, regardless of rooting.
+      if (isDisambiguatedAfter(joined, endIndex)) continue;
+      // Surface a MULTIPLE only for a selector PROVABLY unscoped (page-rooted). A locator chain, a
+      // variable-held locator, OR a chain rooted on ANOTHER extractable selector (e.g.
+      // `.getByRole("table").getByRole(...)`) narrows the tree invisibly to this full-tree check →
+      // indeterminate → suppress (safe direction).
+      if (!isPageRootedAt(joined, index)) continue;
+      // Page-rooted, non-idiomatic → check if it produces a MULTIPLE contradiction in findings.
+      // Match by reconstructing the role label and name label used in contradiction messages.
+      const roleLabel = sel.role ?? sel.kind;
+      const nameLabel = sel.name ? ` "${sel.name}"` : "";
+      const contradictionPrefix = `${roleLabel}:${nameLabel} matches MULTIPLE`;
+      const match = findings.contradictions.find((c) => c.startsWith(contradictionPrefix));
+      if (match) unsuppressed.push(match);
+    }
+  }
+  // Deduplicate: the same contradiction may appear from multiple spec sources.
+  return [...new Set(unsuppressed)];
+}
+
+// Variant of extractProposedSelectors that also returns the character index of each selector's
+// `.getByRole(` / `.getByText(` / `.getByLabel(` call in the comment-stripped joined source, AND the
+// end index (the index just past the call's closing `)`) — the end index is what B5.1's
+// isDisambiguatedAfter needs to look for a trailing `.first(`/`.nth(`/`.filter(`. Internal — used only
+// by unscopedMultipleContradictions to correlate with the page-rooted/disambiguated checks.
+function extractProposedSelectorsWithIndex(joined: string): Array<{ index: number; endIndex: number; sel: ProposedSelector }> {
+  const found: Array<{ index: number; endIndex: number; sel: ProposedSelector }> = [];
+
+  const roleRe = /\.getByRole\(\s*["'`]([^"'`]+)["'`](?:\s*,\s*\{([\s\S]*?)\})?\s*\)/g;
+  let m: RegExpExecArray | null;
+  while ((m = roleRe.exec(joined)) !== null) {
+    const role = m[1]!.trim();
+    const { name, exact, isRegex } = extractNameOpts(m[2] ?? "");
+    found.push({ index: m.index, endIndex: m.index + m[0].length, sel: { kind: "role", role, ...(name !== undefined ? { name } : {}), ...(exact ? { exact } : {}), ...(isRegex ? { isRegex } : {}) } });
+  }
+
+  const textRe = /\.getByText\(\s*["'`]([^"'`]+)["'`](?:\s*,\s*\{([\s\S]*?)\})?\s*\)/g;
+  while ((m = textRe.exec(joined)) !== null) {
+    const name = m[1]!.trim();
+    const { exact } = extractNameOpts(m[2] ?? "");
+    found.push({ index: m.index, endIndex: m.index + m[0].length, sel: { kind: "text", name, ...(exact ? { exact } : {}) } });
+  }
+
+  const labelRe = /\.getByLabel\(\s*["'`]([^"'`]+)["'`](?:\s*,\s*\{([\s\S]*?)\})?\s*\)/g;
+  while ((m = labelRe.exec(joined)) !== null) {
+    const name = m[1]!.trim();
+    const { exact } = extractNameOpts(m[2] ?? "");
+    found.push({ index: m.index, endIndex: m.index + m[0].length, sel: { kind: "label", name, ...(exact ? { exact } : {}) } });
+  }
+
+  return found.sort((a, b) => a.index - b.index);
 }
 
 // Parses the option string from a locator call (the `{ name: …, exact: … }` part).
