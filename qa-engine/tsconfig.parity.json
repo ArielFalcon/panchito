@@ -32,6 +32,12 @@
     "test/contexts/generation/infrastructure/sanitize-text-parity.test.ts",
     "test/contexts/generation/infrastructure/context-pack-parity.test.ts",
     "test/contexts/generation/infrastructure/selector-catalog-window-parity.test.ts",
-    "test/contexts/generation/infrastructure/catalog-gate-parity.test.ts"
+    "test/contexts/generation/infrastructure/catalog-gate-parity.test.ts",
+    "test/characterization/scenarios.ts",
+    "test/characterization/capture-goldens.ts",
+    "test/characterization/capture-goldens-b2.ts",
+    "src/shared-kernel/contract/index.ts",
+    "test/shared-kernel/run-outcome.test.ts",
+    "test/characterization/side-effects.ts"
   ]
 }

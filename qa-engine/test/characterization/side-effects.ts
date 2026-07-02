@@ -19,13 +19,12 @@ const SHADOW_LOG_MARKER = "(shadow)";
 
 export function probeSideEffects(deps: CaptureDeps): { deps: CaptureDeps; seen: () => SideEffect } {
   let effect: SideEffect = "none";
-  const wrap = <A extends unknown[], R>(orig: ((...a: A) => R) | undefined, tag: SideEffect) =>
-    orig
-      ? (...a: A): R => {
-          effect = tag;
-          return orig(...a);
-        }
-      : orig;
+  const wrap =
+    <A extends unknown[], R>(orig: (...a: A) => R, tag: SideEffect) =>
+    (...a: A): R => {
+      effect = tag;
+      return orig(...a);
+    };
   deps.publish = wrap(deps.publish, "pr");
   deps.publishCode = wrap(deps.publishCode, "pr");
   deps.publishContext = wrap(deps.publishContext, "pr");
