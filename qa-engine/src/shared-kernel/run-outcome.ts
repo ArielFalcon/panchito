@@ -39,6 +39,13 @@ export interface RunOutcome {
     phaseTimings?: Record<string, number>;
     preExecAmbiguityCatches?: number;
     deterministicSelectorBlocks?: number;
+    // Plan 7-R B5.2: Pillar-2 catalog-gate honest-coverage telemetry (mirrors legacy src/types.ts:
+    // 267-269 exactly). Optional — absent means the gate never ran for this outcome (e.g. no
+    // getByTestId selectors in the run's specs), never a fabricated 0. The characterization
+    // comparator (equivalence.ts) already normalizes an absent value to 0 for behavioral comparison.
+    catalogGateInWindow?: number;
+    catalogGateAdvisory?: number;
+    catalogGateFailClosed?: number;
   };
   rulesRetrieved: string[];
   // Wide: the real type is cross-run-learning's StructuredReflection; `unknown` for the same reason.
