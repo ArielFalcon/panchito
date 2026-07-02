@@ -144,6 +144,12 @@ export interface CompositionConfig {
   reviewerApprovedForPublish?: boolean;
   coverageBlocksForPublish?: boolean;
   e2eChangedForPublish?: boolean;
+  // F4 (CRITICAL security invariant): CLAUDE.md "Sanitize data leaving the system — execution logs
+  // -> Issue... pass through src/orchestrator/sanitizer.ts". OPTIONAL — absent defaults to identity
+  // inside PublicationPortAdapter (backward-compat for every pre-existing composition/test). The
+  // composition root that owns a src/ import (src/server/rewritten-engine-factory.ts) wires the REAL
+  // sanitizeText here; qa-engine/src stays src/-free — the sanitizer is injected, never imported.
+  sanitize?: (text: string) => string;
 
   // LearningPort collaborator. v1 default: StubLearningRepository (a provable no-op) when absent.
   learningRepo?: LearningRepositoryPort;
@@ -275,7 +281,13 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
   // own decide() can independently route to "shadow" when cfg.shadow is true — the production path
   // must honor a shadow-mode APP's config too, not only buildShadow()'s own forced override.
   const publication = new PublicationPortAdapter(
-    { decide: new PublishDecisionService(), pr: cfg.githubPr, issue: cfg.githubIssue, shadowLog: new ShadowLogAdapter() },
+    {
+      decide: new PublishDecisionService(),
+      pr: cfg.githubPr,
+      issue: cfg.githubIssue,
+      shadowLog: new ShadowLogAdapter(),
+      ...(cfg.sanitize ? { sanitize: cfg.sanitize } : {}),
+    },
     {
       repo: cfg.repo,
       branch: cfg.branch,

@@ -111,6 +111,7 @@ import { runCodeTests, defaultCodeExecuteDeps, runCodeCoverage } from "../qa/cod
 import { setupE2eProject, defaultSetupDeps } from "../qa/setup";
 import { setupCodeProject, defaultCodeSetupDeps } from "../qa/code-runner";
 import { github } from "../integrations/github";
+import { sanitizeText } from "../orchestrator/sanitizer";
 import { runMutationOracle, realMutationDeps } from "../qa/learning/mutation-code";
 import { runFaultInjectionOracle, defaultFaultInjectionDeps } from "../qa/learning/fault-injection-e2e";
 import { shaMatches } from "../env/deploy-gate";
@@ -368,15 +369,28 @@ export function buildRewrittenCompositionConfig(
     // buildShadow). PublishDecisionService's own decide() still routes to the ShadowLogAdapter when
     // cfg.shadow is true (composition-root.ts wireBridges() wires that unconditionally), so a
     // shadow-mode app never fires these even on this REAL path.
-    githubPr: new GitHubPrAdapter({
-      createPullRequest: (repo, args) => github.createPullRequest(repo, args),
-      enableAutoMerge: (nodeId) => github.enableAutoMerge(nodeId),
-      mergePullRequest: (repo, number) => github.mergePullRequest(repo, number),
-    }),
+    // F5 fix (HIGH): GitHubPrAdapter defaults its own `base` param to "main" when omitted
+    // (github-pr.adapter.ts:14) — this call previously never passed app.baseBranch at all, so every
+    // app with a non-"main" default branch (mirrors legacy's own `app.baseBranch ?? "main"` used
+    // throughout src/pipeline.ts, e.g. :1214/:1430/:3138/:3222) would silently target the wrong base
+    // branch for its suite PR.
+    githubPr: new GitHubPrAdapter(
+      {
+        createPullRequest: (repo, args) => github.createPullRequest(repo, args),
+        enableAutoMerge: (nodeId) => github.enableAutoMerge(nodeId),
+        mergePullRequest: (repo, number) => github.mergePullRequest(repo, number),
+      },
+      app.baseBranch ?? "main",
+    ),
     githubIssue: new GitHubIssueAdapter((repo, title, body) => github.openIssue(repo, title, body)),
     reviewerApprovedForPublish: true,
     coverageBlocksForPublish: false,
     e2eChangedForPublish: true,
+    // F4 fix (CRITICAL security invariant): the REAL sanitizeText (this module is the E.3 seam
+    // permitted to import src/ — see this file's own header) — PublicationPortAdapter's renderBody/
+    // renderTitle apply it to every log/case-detail/note reaching an Issue/PR body, matching
+    // src/report/reporter.ts's own `s = (v) => sanitizeText(v).text` precedent for the legacy engine.
+    sanitize: (text: string) => sanitizeText(text).text,
 
     checkout,
     versionUrl: app.dev?.versionUrl,

@@ -121,6 +121,11 @@ export interface PublicationPort {
     reviewerApproved?: boolean;
     coverageBlocks?: boolean;
     e2eChanged?: boolean;
+    // F3 (CRITICAL, cross-repo Issue routing): mirrors legacy's `issueRepo = triggerService ?
+    // triggerService.repo : app.repo` (src/pipeline.ts:1021). OPTIONAL — absent falls back to the
+    // adapter's static ctx.repo (every ordinary monorepo run), same precedent as the fields above.
+    // PR creation always targets ctx.repo (the primary repo), regardless of this field.
+    issueRepo?: string;
   }): Promise<{ outcome: string }>;
 }
 export interface LearningPort {

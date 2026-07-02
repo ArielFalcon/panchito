@@ -162,11 +162,17 @@ export interface RunQaResult {
     deterministicSelectorBlocks: number;
   };
   cases: QaCase[];
-  // Diagnostic note for an infra-error-shaped terminal (CLAUDE.md "surface integration errors loudly
-  // — never swallow errors into an empty result"): the InfraError/thrown-error message that caused
-  // the terminal exit, so a run that dead-ends here is diagnosable from the run record alone instead
-  // of requiring live-container instrumentation. Optional — absent on every OTHER terminal (skipped/
-  // invalid/pass/fail/flaky) unless a caller explicitly threads one; never fabricated.
+  // Diagnostic note. Two distinct sources, never both at once (mutually exclusive terminal shapes):
+  //  1. An infra-error/invalid-shaped terminal (CLAUDE.md "surface integration errors loudly — never
+  //     swallow errors into an empty result"): the InfraError/thrown-error message that caused the
+  //     terminal exit, so a run that dead-ends here is diagnosable from the run record alone instead
+  //     of requiring live-container instrumentation.
+  //  2. FIX F1: the mainline path's PublicationPort.publish() outcome string (e.g. "pr: <url>",
+  //     "issue: <url>", "quarantine: ...", "shadow: ...", "noop: ...") whenever publish() was
+  //     actually called (decision.sideEffect !== "none") — so a caller can see what the publish
+  //     phase did without a RunHistoryPort read-back path.
+  // Optional — absent on every terminal that neither threads a diagnostic nor calls publish(); never
+  // fabricated.
   note?: string;
 }
 
@@ -665,10 +671,21 @@ export class RunQaUseCase {
     };
     const decision = decide(evidence);
 
-    // Phase: publish (PublicationPort) — only the "pr" side effect actually calls the publish port;
-    // "issue"/"shadow-log"/"quarantine"/"none" are the CALLER's (composition root's) publication
-    // concern once real bridge adapters (Task E.0) are wired — this use-case's own scope is the
-    // decision, not the 11 bridges' dispatch logic.
+    // Phase: publish (PublicationPort).
+    //
+    // FIX F1 (audit, CRITICAL): every side-effect-bearing decision dispatches to the publish port —
+    // not just "pr". Before this fix, ONLY sideEffect==="pr" ever called publish(), so a fail/invalid
+    // verdict never opened a GitHub Issue, a flaky verdict never surfaced its quarantine outcome, and
+    // a shadow-mode green run never logged — PublicationPortAdapter's own routing (decide -> pr/
+    // issue/shadow-log/quarantine/noop, publication-port.adapter.ts:103-121) was built to handle all
+    // of these but was simply never reached. "none" is the only sideEffect that still skips the call
+    // (RunDecisionService already decided there is nothing to publish — e.g. an onFailure guard
+    // suppressed the Issue, or a regression-green run with nothing new to publish; see this class's
+    // own deriveErrorClass/decide() header for the onFailure precedence). This also closes FIX F2's
+    // reconciliation gap: PublishDecisionService (workspace-and-publication) has no onFailure guard
+    // of its own, but it can no longer be REACHED for an onFailure-suppressed verdict, because
+    // RunDecisionService already resolved that case to "none" upstream of this gate — the adapter's
+    // independent re-decision never runs for a case the decision layer already suppressed.
     //
     // Audit fix (judgment-day): thread the REAL per-run values this use-case already computed —
     // `reviewerApproved` (the review phase, above) and `blocksPublish` (the measure/coverage phase,
@@ -681,14 +698,23 @@ export class RunQaUseCase {
     // change e2e/ files" anywhere in its ports (GenerationPort's own return shape carries no such
     // signal). Passing a fabricated value would be worse than falling back to the static ctx;
     // flagged as a gap for a follow-up rather than invented here.
-    if (decision.sideEffect === "pr") {
-      await this.deps.publication.publish({
+    //
+    // FIX F3 (CRITICAL, cross-repo Issue routing): mirrors legacy's `issueRepo = triggerService ?
+    // triggerService.repo : app.repo` (src/pipeline.ts:1021) — a deploy-event run triggered by a
+    // service repo must file its Issue in the TRIGGERING repo, the SAME repo input.triggerRepo
+    // already names elsewhere in this method (the measure-phase cross-repo guard, above). Absent ->
+    // the adapter falls back to its own static ctx.repo (the primary repo), unaffected.
+    let publishOutcome: string | undefined;
+    if (decision.sideEffect !== "none") {
+      const published = await this.deps.publication.publish({
         verdict: run.verdict,
         cases: run.cases,
         logs: run.logs,
         reviewerApproved,
         coverageBlocks: blocksPublish,
+        ...(input.triggerRepo ? { issueRepo: input.triggerRepo } : {}),
       });
+      publishOutcome = published.outcome;
     }
 
     // Phase: persist (RunHistoryPort) + fold (LearningPort).
@@ -713,6 +739,11 @@ export class RunQaUseCase {
       const mainlineOutcome = this.toRunOutcome(input, decision, run.cases, retries, coverageRatio, errorClass, {
         reviewerApproved: reviewerApprovedForOutcome,
         valueScore: gateValueScore,
+        // FIX F1: the publish outcome string (e.g. "pr: <url>", "issue: <url>", "quarantine: ...",
+        // "shadow: ...", "noop: ...") reaches the persisted RunOutcome so a run's publish result is
+        // diagnosable from the run record alone — never fabricated when publish() was never called
+        // (decision.sideEffect === "none").
+        ...(publishOutcome !== undefined ? { note: publishOutcome } : {}),
       });
       await this.deps.runHistory.save(mainlineOutcome);
 
@@ -725,6 +756,10 @@ export class RunQaUseCase {
     return {
       decision,
       errorClass,
+      // FIX F1: surface the SAME publish outcome on the returned RunQaResult (mirrors the persisted
+      // RunOutcome above) — so a caller with no read-back path on RunHistoryPort (e.g.
+      // RewrittenOrchestratorAdapter's toOutcome()) can still report what publish() actually did.
+      ...(publishOutcome !== undefined ? { note: publishOutcome } : {}),
       gateSignals: {
         // FIX 2 (judgment-day D.7 batch 2): a CLEAN context-mode pass never persists a real
         // RunOutcome at all (see isContextCleanPass above) — the legacy's own comparator counterpart

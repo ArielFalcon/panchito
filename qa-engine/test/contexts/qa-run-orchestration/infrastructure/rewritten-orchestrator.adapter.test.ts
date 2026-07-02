@@ -360,12 +360,18 @@ test("NOTE CHAIN (adapter): RunQaResult.note is forwarded into the returned RunO
   );
 });
 
-test("NOTE CHAIN (adapter): a clean pass never fabricates a note (absent by default)", async () => {
+test("NOTE CHAIN (adapter): a clean pass carries the real publish() outcome, never a fabricated diagnostic", async () => {
+  // F1 fix (audit, CRITICAL): a "pass"/"pr" decision now genuinely calls PublicationPort.publish()
+  // (previously the ONLY side effect that ever did), and its real return value threads into
+  // RunQaResult.note -> RunOutcome.note (see run-qa.use-case.ts's own FIX F1 comment). The stub here
+  // (stubPorts' default `publish: async () => ({ outcome: "pr" })`) makes this note genuinely
+  // reflect what publish() returned — not a fabricated value — so a clean pass's note is now
+  // "pr" (the publish outcome string), not absent.
   const { ports } = stubPorts();
   const adapter = new RewrittenOrchestratorAdapter({ ...ports, config: baseConfig });
 
   const outcome = await adapter.run({ ...baseInput, runId: "note-chain-adapter-no-note" });
 
   assert.equal(outcome.verdict, "pass");
-  assert.equal(outcome.note, undefined, "a clean pass must never carry a fabricated note — optional field, absent by default, exactly like legacy");
+  assert.equal(outcome.note, "pr", "a clean pass's note must reflect the REAL publish() outcome string (F1), not be silently dropped");
 });

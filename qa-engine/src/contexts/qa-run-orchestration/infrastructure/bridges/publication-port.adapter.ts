@@ -53,6 +53,12 @@ export interface PublicationPortCollaborators {
   pr: GitHubPrCollaborator;
   issue: GitHubIssueCollaborator;
   shadowLog: ShadowLogCollaborator;
+  // F4 (audit fix, judgment-day): CLAUDE.md "Sanitize data leaving the system — execution logs ->
+  // Issue... pass through src/orchestrator/sanitizer.ts". OPTIONAL — absent defaults to identity
+  // (backward-compat for every pre-existing test/composition that never wired one). The composition
+  // root (src/server/rewritten-engine-factory.ts, which already imports src/) wires the REAL
+  // sanitizeText here; qa-engine/src stays src/-free — the sanitizer is injected, never imported.
+  sanitize?: (text: string) => string;
 }
 
 export interface PublicationPortStaticContext {
@@ -67,9 +73,11 @@ export interface PublicationPortStaticContext {
 function renderTitle(verdict: RunVerdict): string {
   return `qa-bot: ${verdict} run`;
 }
-function renderBody(cases: readonly QaCase[], logs: string): string {
-  const failing = cases.filter((c) => c.status === "fail").map((c) => `- ${c.name}: ${c.detail ?? ""}`);
-  return [logs, ...(failing.length > 0 ? ["", "Failing cases:", ...failing] : [])].join("\n");
+function renderBody(cases: readonly QaCase[], logs: string, sanitize: (text: string) => string): string {
+  const failing = cases
+    .filter((c) => c.status === "fail")
+    .map((c) => `- ${sanitize(c.name)}: ${c.detail ? sanitize(c.detail) : ""}`);
+  return [sanitize(logs), ...(failing.length > 0 ? ["", "Failing cases:", ...failing] : [])].join("\n");
 }
 
 export class PublicationPortAdapter implements PublicationPort {
@@ -85,6 +93,13 @@ export class PublicationPortAdapter implements PublicationPort {
     reviewerApproved?: boolean;
     coverageBlocks?: boolean;
     e2eChanged?: boolean;
+    // F3 (CRITICAL, cross-repo Issue routing): mirrors legacy's `issueRepo = triggerService ?
+    // triggerService.repo : app.repo` (src/pipeline.ts:1021) — a deploy-event run triggered by a
+    // service repo must file its Issue in the TRIGGERING repo, never the primary. OPTIONAL: absent
+    // (every ordinary monorepo run) falls back to ctx.repo, exactly like every other dynamic field
+    // on this port (the established backward-compat precedent above). PR creation ALWAYS uses
+    // ctx.repo — the suite PR targets the primary repo regardless of which repo triggered the run.
+    issueRepo?: string;
   }): Promise<{ outcome: string }> {
     // Audit fix (judgment-day): prefer the REAL per-run decision value when the caller supplies
     // one; fall back to the static composition-time ctx only when absent (backward-compat for
@@ -97,8 +112,14 @@ export class PublicationPortAdapter implements PublicationPort {
       e2eChanged: decision.e2eChanged ?? this.ctx.e2eChanged,
     });
 
+    // F4 (CRITICAL security invariant): identity when no sanitizer was wired (backward-compat) —
+    // the REAL sanitizeText is injected by the composition root (src/server/rewritten-engine-factory.ts).
+    const sanitize = this.deps.sanitize ?? ((text: string) => text);
     const title = renderTitle(decision.verdict);
-    const body = renderBody(decision.cases, decision.logs);
+    const body = renderBody(decision.cases, decision.logs, sanitize);
+    // F3: Issue creation routes to the triggering repo when supplied; PR creation always targets
+    // ctx.repo (the primary repo) — never the trigger repo.
+    const issueRepo = decision.issueRepo ?? this.ctx.repo;
 
     switch (publishDecision.outcome) {
       case "shadow": {
@@ -110,7 +131,7 @@ export class PublicationPortAdapter implements PublicationPort {
         return { outcome: `pr: ${pr.url}` };
       }
       case "issue": {
-        const issue = await this.deps.issue.open(this.ctx.repo, title, body);
+        const issue = await this.deps.issue.open(issueRepo, title, body);
         return { outcome: `issue: ${issue.url}` };
       }
       case "quarantine":

@@ -203,6 +203,28 @@ test("two calls to buildRewrittenCompositionConfig with DIFFERENT namespaces pro
   assert.equal(configRun2.branch, "qa-bot-abc1234-runB");
 });
 
+// ── F5 (HIGH) — GitHubPrAdapter's own `base` param defaults to "main" when the caller omits it
+// (github-pr.adapter.ts:14); this factory previously never passed app.baseBranch at all, so every
+// app with a non-"main" default branch silently targeted the wrong PR base branch. Verified via
+// structural introspection of the constructed GitHubPrAdapter's own private `base` field — the
+// collaborator cannot be invoked directly in this test file (its injected createPullRequest wraps
+// the REAL github.createPullRequest, which requires GITHUB_TOKEN + real network), so pinning the
+// constructor-injected value is the faithful, side-effect-free way to assert this wiring.
+
+test("F5: buildRewrittenCompositionConfig wires githubPr with app.baseBranch as the PR base", () => {
+  const app: AppConfig = { ...cfg("factory-basebranch"), baseBranch: "develop" };
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  const base = (config.githubPr as unknown as { base?: string }).base;
+  assert.equal(base, "develop", "githubPr must be constructed with app.baseBranch, not silently defaulting to GitHubPrAdapter's own 'main' fallback");
+});
+
+test("F5: buildRewrittenCompositionConfig falls back to 'main' when app.baseBranch is absent (matches legacy's app.baseBranch ?? \"main\")", () => {
+  const app = cfg("factory-basebranch-default"); // no baseBranch field
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  const base = (config.githubPr as unknown as { base?: string }).base;
+  assert.equal(base, "main", "an app with no configured baseBranch must fall back to 'main', mirroring legacy's app.baseBranch ?? \"main\"");
+});
+
 // ── createRewrittenEngineFactory — the RunnerDeps.engineFactory seam ──────────────────────────────
 // buildProduction(env, cfg) internally re-checks selectEngine(env) itself (composition-root.ts) —
 // on its "legacy" branch it THROWS unless a legacyRunner is supplied (which this factory never

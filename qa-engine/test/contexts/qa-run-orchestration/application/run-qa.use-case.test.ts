@@ -292,16 +292,26 @@ for (const c of tenScenarios) {
 // dead branch) — call-count instrumentation on the specific ports each scenario's OWN semantics
 // says must (or must not) be invoked. ──────────────────────────────────────────────────────────
 
-test("RunQaUseCase — shadow: publish() is NEVER called (green routes to shadow-log, not a real PR)", async () => {
+test("RunQaUseCase — shadow: publish() IS called (dispatches to PublicationPort, which routes shadow-log internally)", async () => {
+  // F1 fix (audit, CRITICAL): before this fix, ONLY sideEffect==="pr" ever called publish() — shadow
+  // mode's "shadow-log" side effect silently never reached the publish port, so a shadow-mode green
+  // run never logged anything (CLAUDE.md "Shadow mode... replaces every PR/Issue side effect with a
+  // log line" — a promise the use-case could not keep on its own, since PublicationPortAdapter's
+  // shadow-log routing (publication-port.adapter.ts:103-107) was simply unreachable). RunQaUseCase's
+  // own scope is the DECISION (sideEffect !== "none"), not which concrete side effect the real
+  // PublicationPortAdapter picks — routing shadow-log vs pr vs issue is that adapter's own decide()
+  // collaborator's job (see publish-decision.service.ts), exercised separately in
+  // publication-port.adapter.test.ts. This test's job is proving the WIRING reaches the port at all.
   let publishCallCount = 0;
   const { ports } = stubPorts({ execute: async () => ({ verdict: "pass", cases: [], logs: "" }) });
-  ports.publication.publish = async () => { publishCallCount++; return { outcome: "pr" }; };
+  ports.publication.publish = async () => { publishCallCount++; return { outcome: "shadow: shadow mode — side effects replaced with logs" }; };
   const useCase = new RunQaUseCase({ ...ports, config: { ...baseConfig, shadow: true } });
 
   const out = await useCase.run({ ...baseInput, runId: "golden-shadow-wiring-proof" });
 
   assert.equal(out.decision.sideEffect, "shadow-log");
-  assert.equal(publishCallCount, 0, "shadow mode must never call the real publish port");
+  assert.equal(publishCallCount, 1, "shadow mode's sideEffect ('shadow-log' !== 'none') must still dispatch to the publish port — the REAL PublicationPortAdapter is what routes it to a log line, not this use-case skipping the call");
+  assert.equal(out.note, "shadow: shadow mode — side effects replaced with logs", "the publish outcome must thread into RunQaResult.note");
 });
 
 test("RunQaUseCase — cross-repo (needsReview:false): review() is NEVER called", async () => {
@@ -1590,4 +1600,103 @@ test("ObserverPort: an ABSENT observer is a pure no-op — every RunQaUseCaseDep
   const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
 
   await assert.doesNotReject(useCase.run({ ...baseInput, mode: "diff" }));
+});
+
+// ── W1 publication-correctness package (audit-verified, cutover-blocking) ─────────────────────
+// F1 — publish() now dispatches for EVERY side-effect-bearing decision ("pr" | "issue" |
+// "quarantine" | "shadow-log"), not just "pr". F2 — onFailure suppression is reconciled: a
+// "none" sideEffect (already decided by RunDecisionService's own onFailure guard) never reaches
+// the publish port at all, so PublishDecisionService's own missing onFailure guard can never fire
+// through this call site. F3 — issueRepo is threaded from input.triggerRepo.
+
+test("F1: publish() is called for an 'issue' side effect (fail verdict, onFailure:'github-issue') — previously ONLY 'pr' ever called publish()", async () => {
+  let publishCallCount = 0;
+  let publishedDecision: { verdict: string; issueRepo?: string } | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "fail", cases: [{ name: "login", status: "fail" as const }], logs: "x" }),
+  });
+  ports.publication.publish = async (decision) => {
+    publishCallCount++;
+    publishedDecision = decision;
+    return { outcome: "issue: https://github.com/org/app/issues/1" };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: { ...baseConfig, needsReview: false, maxRetries: 0 } });
+
+  const out = await useCase.run({ ...baseInput, runId: "f1-publish-issue-fail" });
+
+  assert.equal(out.decision.verdict, "fail");
+  assert.equal(out.decision.sideEffect, "issue");
+  assert.equal(publishCallCount, 1, "a fail verdict with onFailure:'github-issue' must dispatch to publish() — F1's bug left this call site unreachable for anything but 'pr'");
+  assert.ok(publishedDecision, "publish() must have been called");
+  assert.equal(out.note, "issue: https://github.com/org/app/issues/1", "the publish outcome must thread into RunQaResult.note");
+});
+
+test("F1: publish() is called for a 'quarantine' side effect (flaky verdict) — previously ONLY 'pr' ever called publish()", async () => {
+  let publishCallCount = 0;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "flaky", cases: [{ name: "checkout", status: "flaky" as const }], logs: "" }),
+  });
+  ports.publication.publish = async () => { publishCallCount++; return { outcome: "quarantine: flaky — quarantine, no PR" }; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "f1-publish-quarantine-flaky" });
+
+  assert.equal(out.decision.verdict, "flaky");
+  assert.equal(out.decision.sideEffect, "quarantine");
+  assert.equal(publishCallCount, 1, "a flaky verdict must dispatch to publish() so the quarantine outcome genuinely surfaces (CLAUDE.md: 'flaky never surfaced its quarantine outcome' before F1)");
+});
+
+test("F2: onFailure:'none' + fail verdict resolves to sideEffect:'none' and publish() is NEVER called (reconciles PublishDecisionService's missing onFailure guard)", async () => {
+  // PublishDecisionService (workspace-and-publication) has NO onFailure guard of its own — it would
+  // unconditionally return "issue" for a fail/invalid verdict if it were ever reached. F2's
+  // reconciliation: RunDecisionService's own onFailure guard resolves this case to sideEffect:"none"
+  // BEFORE this use-case's publish-dispatch gate (F1's `decision.sideEffect !== "none"`) is even
+  // evaluated — so PublicationPortAdapter (and its PublishDecisionService collaborator) is never
+  // reached for an onFailure-suppressed verdict; the guard the adapter itself lacks never needs to
+  // fire because the decision layer already suppressed the call one level up.
+  let publishCallCount = 0;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "fail", cases: [{ name: "login", status: "fail" as const }], logs: "x" }),
+  });
+  ports.publication.publish = async () => { publishCallCount++; return { outcome: "issue: should never happen" }; };
+  const useCase = new RunQaUseCase({ ...ports, config: { ...baseConfig, needsReview: false, maxRetries: 0, onFailure: "none" } });
+
+  const out = await useCase.run({ ...baseInput, runId: "f2-onfailure-none-no-issue" });
+
+  assert.equal(out.decision.verdict, "fail");
+  assert.equal(out.decision.sideEffect, "none", "onFailure:'none' must suppress the side effect for a fail verdict (report()'s own top-guard, src/pipeline.ts:3337-3340)");
+  assert.equal(publishCallCount, 0, "an onFailure-suppressed decision ('none') must NEVER reach the publish port — no Issue must open");
+});
+
+test("F3: a triggerRepo run threads issueRepo into publish() so the Issue routes to the triggering service repo, not the primary", async () => {
+  let publishedDecision: { verdict: string; issueRepo?: string } | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "fail", cases: [{ name: "login", status: "fail" as const }], logs: "x" }),
+  });
+  ports.publication.publish = async (decision) => {
+    publishedDecision = decision;
+    return { outcome: "issue: https://github.com/org/orders-svc/issues/9" };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: { ...baseConfig, needsReview: false, maxRetries: 0 } });
+
+  const out = await useCase.run({ ...baseInput, runId: "f3-cross-repo-issue-routing", triggerRepo: "org/orders-svc" });
+
+  assert.equal(out.decision.sideEffect, "issue");
+  assert.ok(publishedDecision, "publish() must have been called");
+  assert.equal(publishedDecision!.issueRepo, "org/orders-svc", "publish() must receive issueRepo from input.triggerRepo so PublicationPortAdapter can route the Issue to the triggering repo, not the primary (mirrors legacy's issueRepo = triggerService ? triggerService.repo : app.repo, src/pipeline.ts:1021)");
+});
+
+test("F3: an ordinary (non-cross-repo) run omits issueRepo entirely — the adapter falls back to its own static ctx.repo", async () => {
+  let publishedDecision: { verdict: string; issueRepo?: string } | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "fail", cases: [{ name: "login", status: "fail" as const }], logs: "x" }),
+  });
+  ports.publication.publish = async (decision) => { publishedDecision = decision; return { outcome: "issue: https://github.com/org/app/issues/2" }; };
+  const useCase = new RunQaUseCase({ ...ports, config: { ...baseConfig, needsReview: false, maxRetries: 0 } });
+
+  const out = await useCase.run({ ...baseInput, runId: "f3-no-trigger-repo-omits-issue-repo" });
+
+  assert.equal(out.decision.sideEffect, "issue");
+  assert.ok(publishedDecision, "publish() must have been called");
+  assert.equal(publishedDecision!.issueRepo, undefined, "an ordinary run (no input.triggerRepo) must NOT fabricate an issueRepo — absent lets the adapter fall back to its own static ctx.repo");
 });

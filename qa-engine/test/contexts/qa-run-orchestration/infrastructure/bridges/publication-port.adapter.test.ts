@@ -150,3 +150,113 @@ test("publish() prefers decision.e2eChanged (dynamic) over ctx.e2eChanged (stati
 
   assert.match(result.outcome, /noop/, "a dynamic e2eChanged:false must override the static ctx default (green with no e2e changes publishes nothing)");
 });
+
+// ── F3 (CRITICAL, cross-repo Issue routing) — Issue creation routes to decision.issueRepo when
+// supplied; PR creation ALWAYS targets ctx.repo (the primary repo), never the trigger repo. ──────
+
+test("F3: publish() routes Issue creation to decision.issueRepo (the triggering service repo), not ctx.repo (the primary)", async () => {
+  const decide = new PublishDecisionService();
+  let issueRepoSeen: string | undefined;
+  const issue = { open: async (repo: string) => { issueRepoSeen = repo; return { url: "https://github.com/org/orders-svc/issues/9", number: 9 }; } };
+  const pr = fakePr();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "fail", cases: [], logs: "", issueRepo: "org/orders-svc" });
+
+  assert.match(result.outcome, /issue/);
+  assert.equal(issueRepoSeen, "org/orders-svc", "the Issue must open in the TRIGGERING service repo, not ctx.repo");
+});
+
+test("F3: publish() still targets ctx.repo for a PR even when issueRepo is supplied (PR never targets the trigger repo)", async () => {
+  const decide = new PublishDecisionService();
+  let prRepoSeen: string | undefined;
+  const pr = { openWithAutoMerge: async (repo: string) => { prRepoSeen = repo; return { url: "https://github.com/org/app/pull/1", number: 1 }; } };
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "pass", cases: [], logs: "", issueRepo: "org/orders-svc" });
+
+  assert.match(result.outcome, /pr/);
+  assert.equal(prRepoSeen, "org/app", "PR creation must always target ctx.repo (the primary repo), never the trigger repo, even when issueRepo is present");
+});
+
+test("F3: publish() falls back to ctx.repo for an Issue when issueRepo is absent (ordinary monorepo run)", async () => {
+  const decide = new PublishDecisionService();
+  let issueRepoSeen: string | undefined;
+  const issue = { open: async (repo: string) => { issueRepoSeen = repo; return { url: "https://github.com/org/app/issues/2", number: 2 }; } };
+  const pr = fakePr();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "fail", cases: [], logs: "" });
+
+  assert.match(result.outcome, /issue/);
+  assert.equal(issueRepoSeen, "org/app", "absent issueRepo must fall back to ctx.repo (the ordinary, non-cross-repo case)");
+});
+
+// ── F4 (CRITICAL security invariant) — logs + case details + names are sanitized before reaching
+// an Issue/PR body. Absent sanitizer -> identity (backward-compat). ──────────────────────────────
+
+test("F4: publish() applies the injected sanitize() to logs before they reach the Issue body", async () => {
+  const decide = new PublishDecisionService();
+  let bodySeen = "";
+  const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/3", number: 3 }; } };
+  const pr = fakePr();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const sanitize = (text: string) => text.replace(/sk-[A-Za-z0-9]+/g, "[REDACTED_SECRET]");
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "fail", cases: [], logs: "leaked token sk-abc123XYZ during the run" });
+
+  assert.match(result.outcome, /issue/);
+  assert.ok(!bodySeen.includes("sk-abc123XYZ"), `the secret-looking token must be sanitized out of the Issue body — got: ${bodySeen}`);
+  assert.ok(bodySeen.includes("[REDACTED_SECRET]"), "the sanitized replacement must appear in the rendered body");
+});
+
+test("F4: publish() applies the injected sanitize() to each failing case's name and detail", async () => {
+  const decide = new PublishDecisionService();
+  let bodySeen = "";
+  const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/4", number: 4 }; } };
+  const pr = fakePr();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const sanitize = (text: string) => text.replace(/sk-[A-Za-z0-9]+/g, "[REDACTED_SECRET]");
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({
+    verdict: "fail",
+    cases: [{ name: "checkout leaks sk-def456UVW", status: "fail", detail: "assertion failed near sk-ghi789RST" }],
+    logs: "",
+  });
+
+  assert.match(result.outcome, /issue/);
+  assert.ok(!bodySeen.includes("sk-def456UVW"), `the case name's secret must be sanitized — got: ${bodySeen}`);
+  assert.ok(!bodySeen.includes("sk-ghi789RST"), `the case detail's secret must be sanitized — got: ${bodySeen}`);
+});
+
+test("F4: publish() falls back to identity when no sanitizer is wired (backward-compat)", async () => {
+  const decide = new PublishDecisionService();
+  let bodySeen = "";
+  const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/5", number: 5 }; } };
+  const pr = fakePr();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "fail", cases: [], logs: "plain text, no secrets" });
+
+  assert.match(result.outcome, /issue/);
+  assert.ok(bodySeen.includes("plain text, no secrets"), "with no sanitizer wired, the body must pass through unchanged (identity default)");
+});
