@@ -83,6 +83,10 @@ export interface CompositionConfig {
   guidance?: string;
   diff?: string;
   baseUrl?: string;
+  // injected as PW_TEST_ID_ATTRIBUTE so playwright.config.ts resolves getByTestId against the app's
+  // convention — NO defaulting logic here; undefined flows through and the seed playwright.config.ts
+  // already defaults to data-testid (mirrors legacy resolveTestIdAttribute semantics at the config edge).
+  testIdAttribute?: string;
 
   // ChangeAnalysisPort collaborator.
   vcs: VcsReadPort;
@@ -194,7 +198,12 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
 
   const execution = new ExecutionPortAdapter(
     { e2e: cfg.executionStrategies.e2e as E2eExecutionStrategy, code: cfg.executionStrategies.code as CodeExecutionStrategy },
-    { target: cfg.target, namespace: cfg.branch, ...(cfg.baseUrl ? { baseUrl: cfg.baseUrl } : {}) },
+    {
+      target: cfg.target,
+      namespace: cfg.branch,
+      ...(cfg.baseUrl ? { baseUrl: cfg.baseUrl } : {}),
+      ...(cfg.testIdAttribute !== undefined ? { testIdAttribute: cfg.testIdAttribute } : {}),
+    },
   );
 
   const objectiveSignal = new ObjectiveSignalPortAdapter(

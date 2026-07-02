@@ -29,6 +29,8 @@ export interface ExecutionRequest {
   specFiles?: string[];
   signal?: AbortSignal;
   timeoutMs?: number;
+  // injected as PW_TEST_ID_ATTRIBUTE so playwright.config.ts resolves getByTestId against the app's convention
+  testIdAttribute?: string;
   // e2e live-progress callbacks (ExecuteOptions capability set — no regression vs legacy):
   project?: string;                                          // Playwright --project filter
   onCase?: (c: { name: string; status: string; detail?: string }) => void;

@@ -68,6 +68,17 @@ test("threads all optional ExecutionRequest fields (project, onCase, onRunning, 
   assert.equal((capturedOpts as Opts).faultInject, true, "faultInject must be threaded");
 });
 
+// A3: testIdAttribute must reach the runner opts — apps declare their test-id convention in config
+// (e.g. data-cy for jhipster) and the DOM capture / selector catalog / authoring contract all
+// validate against it, but the VERDICTUAL Playwright run never received it, so PW_TEST_ID_ATTRIBUTE
+// was never set and getByTestId silently resolved the default data-testid on non-default apps.
+test("testIdAttribute reaches the runner opts", async () => {
+  let seen: Record<string, unknown> = {};
+  const strategy = new E2eExecutionStrategy(async (_dir, opts) => { seen = opts as Record<string, unknown>; return { verdict: "pass", cases: [], logs: "" }; });
+  await strategy.run({ specDir: "/tmp/x", baseUrl: "http://dev", namespace: "ns", testIdAttribute: "data-cy" });
+  assert.equal(seen.testIdAttribute, "data-cy");
+});
+
 // G1 kernel widening: the legacy re-projection used to keep only {name, status, detail?}, silently
 // dropping failureDom/httpStatus/finalUrl/runtimeErrors/file/durationMs/flow/objective/reason before
 // they ever reached the FixLoop aggregate (adjudicator Rules 2.5/2.6, Lever-2). This pins that the

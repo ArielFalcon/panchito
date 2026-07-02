@@ -80,6 +80,25 @@ test("execute() forwards an AbortSignal into the code strategy's ExecutionReques
   assert.equal(capturedSignal, controller.signal, "the SAME AbortSignal instance passed to execute() must reach the code strategy's ExecutionRequest.signal, not be dropped at the bridge");
 });
 
+// A3: testIdAttribute must reach the e2e strategy so PW_TEST_ID_ATTRIBUTE is set for the verdictual
+// Playwright run — otherwise getByTestId silently resolves the default data-testid on non-default apps.
+test("execute() forwards testIdAttribute from static context into the e2e strategy's ExecutionRequest", async () => {
+  let capturedOpts: unknown;
+  const e2e = new E2eExecutionStrategy(async (_specDir, opts) => {
+    capturedOpts = opts;
+    return { verdict: "pass", cases: [], logs: "" };
+  });
+  const code = new CodeExecutionStrategy(async () => ({ verdict: "pass", cases: [], logs: "" }));
+  const adapter = new ExecutionPortAdapter(
+    { e2e, code },
+    { target: "e2e", baseUrl: "https://dev.example.com", namespace: "qa-bot-abc1234", testIdAttribute: "data-cy" },
+  );
+
+  await adapter.execute("/mirrors/org/app/e2e");
+
+  assert.equal((capturedOpts as { testIdAttribute?: string }).testIdAttribute, "data-cy");
+});
+
 test("execute() with no signal at all behaves exactly as before (no second-arg regression)", async () => {
   let capturedOpts: unknown;
   const e2e = new E2eExecutionStrategy(async (_specDir, opts) => {

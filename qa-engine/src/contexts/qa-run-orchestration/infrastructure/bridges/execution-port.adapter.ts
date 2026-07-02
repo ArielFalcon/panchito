@@ -23,6 +23,7 @@ export interface ExecutionPortStaticContext {
   target: TestTarget;
   namespace: string;
   baseUrl?: string; // required for target:"e2e"; absent for target:"code"
+  testIdAttribute?: string; // injected as PW_TEST_ID_ATTRIBUTE so playwright.config.ts resolves getByTestId against the app's convention
 }
 
 export class ExecutionPortAdapter implements ExecutionPort {
@@ -44,6 +45,7 @@ export class ExecutionPortAdapter implements ExecutionPort {
       namespace: this.ctx.namespace,
       ...(this.ctx.baseUrl ? { baseUrl: this.ctx.baseUrl } : {}),
       ...(signal ? { signal } : {}),
+      ...(this.ctx.testIdAttribute !== undefined ? { testIdAttribute: this.ctx.testIdAttribute } : {}),
     });
   }
 }

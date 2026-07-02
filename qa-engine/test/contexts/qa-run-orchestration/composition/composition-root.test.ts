@@ -219,6 +219,37 @@ test("buildProduction(rewritten) selects the real DeployGatePortAdapter when ver
   assert.equal(outcome.verdict, "pass");
 });
 
+// A3: testIdAttribute must flow from CompositionConfig into the ExecutionPortAdapter's static
+// context so PW_TEST_ID_ATTRIBUTE reaches the verdictual Playwright run. NO defaulting logic here —
+// undefined flows through; the seed playwright.config.ts already defaults to data-testid.
+test("buildProduction(rewritten) threads testIdAttribute into the ExecutionPortAdapter", async () => {
+  let capturedTestIdAttribute: string | undefined;
+  const cfg = fakeConfig({
+    testIdAttribute: "data-cy",
+    executionStrategies: {
+      e2e: {
+        run: async (req) => {
+          capturedTestIdAttribute = req.testIdAttribute;
+          return { verdict: "pass", cases: [], logs: "" };
+        },
+      },
+      code: { run: async () => ({ verdict: "pass", cases: [], logs: "" }) },
+    },
+  });
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "e2e",
+    runId: "composition-root-test-id-attribute",
+  });
+
+  assert.equal(capturedTestIdAttribute, "data-cy");
+});
+
 test("buildProduction(rewritten) surfaces infra-error when the real deploy gate never serves", async () => {
   const cfg = fakeConfig({
     versionUrl: "https://dev.example.com/version",

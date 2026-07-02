@@ -37,6 +37,7 @@ type RunE2eFn = (
     specFiles?: string[];
     signal?: AbortSignal;
     timeoutMs?: number;
+    testIdAttribute?: string;                  // injected as PW_TEST_ID_ATTRIBUTE so playwright.config.ts resolves getByTestId against the app's convention
     // Carries the full ExecuteOptions capability set — no regression vs the legacy seam:
     project?: string;                          // Playwright --project (PW_PROJECT_RE validated by runE2E)
     onCase?: (c: QaCase) => void;              // per-test completion (live bar / history)
@@ -58,6 +59,7 @@ export class E2eExecutionStrategy implements ExecutionStrategyPort {
       ...(req.specFiles ? { specFiles: req.specFiles } : {}),
       ...(req.signal ? { signal: req.signal } : {}),
       ...(req.timeoutMs !== undefined ? { timeoutMs: req.timeoutMs } : {}),
+      ...(req.testIdAttribute !== undefined ? { testIdAttribute: req.testIdAttribute } : {}),
       // Thread the full ExecuteOptions capability set — no capability regression vs legacy seam:
       ...(req.project !== undefined ? { project: req.project } : {}),
       ...(req.onCase ? { onCase: req.onCase } : {}),
