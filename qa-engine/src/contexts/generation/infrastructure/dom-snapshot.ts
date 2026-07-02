@@ -704,22 +704,13 @@ const RENDER_MAX_TIMEOUT_MS = 200_000;
 const renderTimeoutFor = (routeCount: number): number =>
   Math.min(RENDER_BASE_TIMEOUT_MS + Math.max(1, routeCount) * RENDER_PER_ROUTE_TIMEOUT_MS, RENDER_MAX_TIMEOUT_MS);
 
-// Real render: a short Node script run with the e2e project's Playwright (its node_modules + the
-// baked browsers), under the same scrubbed env as execution. The orchestrator root has no
-// Playwright, so we borrow the watched repo's — exactly as execute.ts spawns it.
-export const defaultCaptureDomDeps: CaptureDomDeps = {
-  render: (e2eDir, baseUrl, routes, testIdAttribute = "data-testid") =>
-    new Promise<RouteSnapshot[]>((resolve) => {
-      const work = mkdtempSync(join(tmpdir(), "qa-dom-"));
-      const script = join(work, "capture.cjs");
-      // routes + baseUrl come from AGENT-AUTHORED specs (untrusted in this threat model). They are
-      // passed to the child via an ENV var and parsed there, NOT interpolated into the script source
-      // — JSON.stringify does not escape U+2028/U+2029, so interpolating untrusted strings into JS
-      // source could inject. The require() path is a derived LOCAL path (not agent input), so its
-      // interpolation is safe.
-      writeFileSync(
-        script,
-        `const { chromium } = require(${JSON.stringify(join(e2eDir, "node_modules", "playwright"))});
+// Pure string-builder for the render child's script text — extracted so the httpCredentials wiring
+// (Fix 1, audit leak 4) is assertable without spawning a real browser. `playwrightRequirePath`
+// defaults to a placeholder so the function is callable with no args for script-text assertions in
+// tests; defaultCaptureDomDeps.render passes the real derived LOCAL path (not agent input, so its
+// interpolation is safe).
+export function buildCaptureScript(playwrightRequirePath = "playwright"): string {
+  return `const { chromium } = require(${JSON.stringify(playwrightRequirePath)});
 const { baseUrl, routes } = JSON.parse(process.env.PW_CAPTURE_INPUT || "{}");
 const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
 (async () => {
@@ -727,7 +718,16 @@ const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
   let browser;
   try {
     browser = await chromium.launch();
-    const page = await (await browser.newContext()).newPage();
+    // Fix 1 (audit leak 4): DEV_ENV_USER/DEV_ENV_PASS were scrubbed through to the child's env
+    // (scrubEnv(/^DEV_/)) but never wired into newContext() — gated routes rendered on the login/401
+    // page. Mirrors config/e2e/playwright.config.ts's httpCredentials idiom, scoped to baseUrl's
+    // origin so creds never leak to a different-origin auth provider (e.g. Keycloak).
+    const user = process.env.DEV_ENV_USER;
+    const pass = process.env.DEV_ENV_PASS;
+    const context = await browser.newContext(user && pass
+      ? { httpCredentials: { username: user, password: pass, origin: new URL(baseUrl).origin } }
+      : {});
+    const page = await context.newPage();
     for (const route of routes) {
       try {
         // Primary navigation resolves at domcontentloaded (always yields a DOM, even for a SPA that
@@ -804,8 +804,23 @@ const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
     }
   } catch (e) { process.stderr.write(String(e)); } finally { if (browser) await browser.close().catch(() => {}); }
   process.stdout.write(JSON.stringify(out));
-})();`,
-      );
+})();`;
+}
+
+// Real render: a short Node script run with the e2e project's Playwright (its node_modules + the
+// baked browsers), under the same scrubbed env as execution. The orchestrator root has no
+// Playwright, so we borrow the watched repo's — exactly as execute.ts spawns it.
+export const defaultCaptureDomDeps: CaptureDomDeps = {
+  render: (e2eDir, baseUrl, routes, testIdAttribute = "data-testid") =>
+    new Promise<RouteSnapshot[]>((resolve) => {
+      const work = mkdtempSync(join(tmpdir(), "qa-dom-"));
+      const script = join(work, "capture.cjs");
+      // routes + baseUrl come from AGENT-AUTHORED specs (untrusted in this threat model). They are
+      // passed to the child via an ENV var and parsed there, NOT interpolated into the script source
+      // — JSON.stringify does not escape U+2028/U+2029, so interpolating untrusted strings into JS
+      // source could inject. The require() path is a derived LOCAL path (not agent input), so its
+      // interpolation is safe.
+      writeFileSync(script, buildCaptureScript(join(e2eDir, "node_modules", "playwright")));
       let stdout = "";
       // detached → own process group so the timeout kill reaps the chromium grandchildren too (a
       // plain child.kill would orphan them). scrubEnv(/^DEV_/) keeps the app's DEV_* login creds so

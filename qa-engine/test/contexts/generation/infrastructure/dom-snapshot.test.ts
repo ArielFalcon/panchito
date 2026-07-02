@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   extractTargetRoutes, formatDomSnapshot, parseAriaSnapshot, captureDom, captureDomByRoute, captureDomForRoutes,
   captureRouteTrees, normalizeRoutes, capDomLines, isPriorityNode, mergeAttrs, normalizeKey, parseAriaSnapshotWithState,
+  buildCaptureScript,
   type CaptureDomDeps, type NodeAttr, type RouteSnapshot,
 } from "@contexts/generation/infrastructure/dom-snapshot.ts";
 
@@ -1211,3 +1212,32 @@ test("captureDomForRoutes warns when a render returns an errored route (4th path
   assert.ok(msg.includes("/owners"), "warning names the degraded route");
   assert.ok(msg.includes("DEGRADED") || msg.includes("WARNING"), "attributed as a degraded-capture event");
 });
+
+// ── Fix 1 (audit leak 4): authenticated DOM capture — DEV_ENV_* httpCredentials in the render child ──
+// The render child spawns a separate Node process that does chromium.launch() + newContext(). A
+// comment claimed scrubEnv(/^DEV_/) passes DEV_ENV_USER/PASS through to the child so gated routes
+// render authenticated — but the child script never read those env vars into newContext(). Auth-gated
+// routes therefore grounded on the login/401 page. Mirrors config/e2e/playwright.config.ts's
+// httpCredentials idiom, scoped to baseUrl's origin so creds never leak to a different-origin auth
+// provider (e.g. Keycloak).
+
+test("buildCaptureScript wires DEV_ENV_USER/DEV_ENV_PASS into httpCredentials on newContext()", () => {
+  const script = buildCaptureScript();
+  assert.match(script, /process\.env\.DEV_ENV_USER/, "must read DEV_ENV_USER from the child's env");
+  assert.match(script, /process\.env\.DEV_ENV_PASS/, "must read DEV_ENV_PASS from the child's env");
+  assert.match(script, /httpCredentials/, "must wire httpCredentials into newContext()");
+  assert.match(script, /newContext\(/, "newContext() call must still be present");
+});
+
+test("buildCaptureScript scopes httpCredentials to baseUrl's origin (creds must not leak cross-origin)", () => {
+  const script = buildCaptureScript();
+  assert.match(script, /origin:\s*new URL\(baseUrl\)\.origin/, "httpCredentials must be scoped via origin: new URL(baseUrl).origin");
+});
+
+test("buildCaptureScript only sets httpCredentials when both user and pass are present", () => {
+  const script = buildCaptureScript();
+  // The generated script must guard on BOTH user and pass before building httpCredentials — an
+  // absent pair (e.g. only DEV_ENV_USER set) must not construct a broken/partial credentials object.
+  assert.match(script, /user\s*&&\s*pass/, "must guard on user && pass before wiring httpCredentials");
+});
+
