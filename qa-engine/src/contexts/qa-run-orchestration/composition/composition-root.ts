@@ -200,6 +200,12 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
       mode: cfg.mode,
       diff: cfg.diff ?? "",
       ...(cfg.guidance ? { guidance: cfg.guidance } : {}),
+      // Live-run root cause fix: without this, GenerationPortAdapter never received the app's live
+      // DEV URL, so the agent correctly refused to write selectors without DOM grounding (see
+      // generation-port.adapter.ts's own header for the full incident trace) — zero specs, every
+      // run. ExecutionPortAdapter/ReviewPortAdapter already consumed cfg.baseUrl below; generation
+      // was the missing link.
+      ...(cfg.baseUrl ? { baseUrl: cfg.baseUrl } : {}),
     },
     { ...(cfg.readSpecSource ? { readSpecSource: cfg.readSpecSource } : {}) },
   );

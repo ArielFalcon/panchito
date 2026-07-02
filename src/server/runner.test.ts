@@ -621,6 +621,78 @@ test("PIPELINE_ENGINE=rewritten — ObserverPort.onStep('retry', detail) sets re
   }
 });
 
+// ── Observer fault isolation (judgment-day, both judges) ───────────────────────
+// buildRewrittenObserver's onStep/onEvent wrap updateRecord/runEvents.publish in try/catch — a
+// transient write failure (e.g. a flaky event-bus subscriber) must never propagate up through
+// ObserverPort and abort an otherwise-healthy run. Before this fix, a throwing onStep call would
+// have escaped RunQaUseCase's `this.deps.observer?.onStep(...)` call site and converted a genuine
+// "pass" into an unrelated crash — the SAME class of bug CLAUDE.md's own "a bad event must never
+// break..." pattern (src/index.ts) already guards against elsewhere in this codebase.
+//
+// Scoped precisely to buildRewrittenObserver's own onStep/onEvent (not every runEvents.publish
+// call site in the runner, several of which are outside this fix's scope): the throwing stub only
+// fails on "step.changed" events, which are published EXCLUSIVELY from inside
+// buildRewrittenObserver.onStep — every other event type in this run (run.started, etc.) still
+// publishes normally, isolating the assertion to the observer's own fault boundary.
+test("PIPELINE_ENGINE=rewritten — a port that drives ObserverPort.onStep, where runEvents.publish throws on step.changed, still finalizes the run's own verdict (non-fatal, isolated)", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    let currentObserver: { onStep(step: string, detail?: string): void } | undefined;
+    const observingPort: RunPipelinePort = {
+      run: async (input) => {
+        // Drive onStep through several phases — every call must swallow the publish throw below
+        // without ever propagating into this run() call (which would otherwise reject the port's
+        // own promise and convert this "pass" into an infra-error).
+        for (const step of ["gate", "generate", "validate", "execute"] as const) {
+          currentObserver?.onStep(step);
+        }
+        return {
+          runId: input.runId,
+          app: input.app,
+          sha: input.sha.value,
+          mode: input.mode,
+          target: input.target,
+          verdict: "pass",
+          errorClass: null,
+          gateSignals: { static: true, coverageRatio: null, valueScore: null, reviewerCorrections: [], flaky: false, retries: 0 },
+          rulesRetrieved: [],
+          at: new Date().toISOString(),
+        };
+      },
+    };
+    const realRunEvents = createRunEventStore({ now: () => 1 });
+    const throwingOnStepChanged = {
+      ...realRunEvents,
+      publish(runId: string, body: Parameters<typeof realRunEvents.publish>[1]) {
+        if (body.type === "step.changed") throw new Error("simulated event-bus failure on step.changed");
+        return realRunEvents.publish(runId, body);
+      },
+    };
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-observer-fault", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
+      {
+        pipeline: stubDeps(),
+        loadApp: cfg,
+        runEvents: throwingOnStepChanged,
+        engineFactory: (_appConfig, _namespace, _run, observer) => {
+          currentObserver = observer as { onStep(step: string, detail?: string): void };
+          return observingPort;
+        },
+      },
+    );
+    await queue.drain();
+    const record = getRecord(id);
+    assert.equal(record?.status, "done", "a throwing observer must not prevent the run from finalizing");
+    assert.equal(record?.verdict, "pass", "a throwing observer must not change the run's own verdict");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
 test("a crashing rewritten port finalizes the record as infra-error (no zombie)", async () => {
   const prev = process.env.PIPELINE_ENGINE;
   process.env.PIPELINE_ENGINE = "rewritten";

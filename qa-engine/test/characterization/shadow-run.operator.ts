@@ -286,6 +286,11 @@ function buildCompositionConfig(app: AppConfig, sha: string, mirrorDir: string, 
     isCode,
     coveragePolicyMode: app.qa.changeCoverage?.mode ?? "signal",
     diff, // thread the REAL commit diff into generation/review — without it composition-root defaults to "" → agent gets no change context → zero specs → agent-no-op skip (the divergence the shadow proof caught)
+    // baseUrl fix (live-run root cause): thread the SAME app.dev?.baseUrl already used for the
+    // fault-injection oracle above into CompositionConfig itself, so this shadow run exercises the
+    // identical live-DEV-URL wiring production's rewritten-engine-factory now does — without this
+    // the shadow proof would never catch the "no LIVE DEV URL -> agent aborts" failure mode.
+    baseUrl: app.dev?.baseUrl,
 
     vcs,
     generationUseCase,

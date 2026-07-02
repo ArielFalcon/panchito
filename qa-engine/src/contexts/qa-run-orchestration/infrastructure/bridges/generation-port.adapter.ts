@@ -5,9 +5,17 @@
 //
 // Shape translation: GenerationPort.generate(objectives, specDir, signal?, diff?) -> GenerationResult
 // {specs, reviewed, approved, note}. This bridge holds the STATIC per-run context
-// (repo/appName/mirrorDir/e2eRelDir/namespace/needsReview/target/mode/diff) as constructor config —
-// the composition root (Task E.1/E.2) supplies these once per run; specDir/objectives/signal/diff
-// vary per generate() call, matching the barrel's GenerationPort signature.
+// (repo/appName/mirrorDir/e2eRelDir/namespace/needsReview/target/mode/diff/baseUrl) as constructor
+// config — the composition root (Task E.1/E.2) supplies these once per run; specDir/objectives/
+// signal/diff vary per generate() call, matching the barrel's GenerationPort signature.
+//
+// "baseUrl" fix (live-run root cause): ctx.baseUrl was missing entirely until this fix — a live
+// codex run returned zero specs with the agent's own note that Playwright DOM grounding is
+// mandatory and no LIVE DEV URL was provided, so it correctly aborted rather than inventing
+// selectors. The bug was never the agent's refusal; it was this adapter never forwarding the
+// app's configured baseUrl into OpencodeRunInput.baseUrl. See composition-root.ts's wireBridges()
+// for where CompositionConfig.baseUrl (already used by ExecutionPortAdapter/ReviewPortAdapter) is
+// now also threaded into this context.
 //
 // "Dynamic diff" fix (engram #936): ctx.diff alone is a STATIC composition-time value — the real
 // production engineFactory constructs this adapter BEFORE the run's checkout/diff exist, so ctx.diff
@@ -51,6 +59,14 @@ export interface GenerationPortStaticContext {
   mode: RunMode;
   diff: string;
   guidance?: string;
+  // Live-run root cause (baseUrl gap): the LIVE DEV URL the agent must navigate to (Playwright
+  // MCP) — OpencodeRunInput.baseUrl's own contract. Absent here left the generator with no live
+  // URL, which a correctly-behaving agent treats as "DOM grounding is mandatory, abort" (the
+  // anti-hallucination invariant working as designed) rather than inventing selectors — the bug
+  // was never the agent's refusal, it was this adapter silently never forwarding the app's
+  // configured baseUrl into OpencodeRunInput. Optional: absent -> unchanged (matches every other
+  // optional field on this context).
+  baseUrl?: string;
 }
 
 export interface GenerationPortCollaborators {
@@ -90,6 +106,7 @@ export class GenerationPortAdapter implements GenerationPort {
       mode: this.ctx.mode,
       appName: this.ctx.appName,
       ...(this.ctx.guidance ? { guidance: this.ctx.guidance } : {}),
+      ...(this.ctx.baseUrl ? { baseUrl: this.ctx.baseUrl } : {}),
     };
 
     const generated = await this.useCase.generate(input, { ...(signal ? { signal } : {}) });

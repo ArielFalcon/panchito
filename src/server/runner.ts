@@ -110,14 +110,27 @@ export interface RunnerDeps {
 //     vocabulary (RunQaUseCase.onStep calls are already RunStep-typed at the port boundary, so no
 //     "publish" -> "decide" normalization is needed here — that normalization existed only because
 //     the legacy pipeline's own step strings included "publish", which RunStep does not).
+// Observer-fault isolation (judgment-day, both judges): updateRecord/runEvents.publish are
+// side-effecting writes to the record store / event bus — a transient failure there (e.g. a
+// storage hiccup) must never propagate up through ObserverPort.onStep/onEvent and abort an
+// otherwise-healthy run. Mirrors the codebase's own advisory-callback pattern (src/index.ts:
+// "a bad event must never break..."): catch, log once, never rethrow.
 function buildRewrittenObserver(runId: string, runEvents: RunEventStore | undefined): ObserverPort {
   return {
     onStep(step: RunStep, detail?: string): void {
-      updateRecord(runId, { step, stepDetail: detail, retrying: step === "retry" });
-      runEvents?.publish(runId, { type: "step.changed", step, detail });
+      try {
+        updateRecord(runId, { step, stepDetail: detail, retrying: step === "retry" });
+        runEvents?.publish(runId, { type: "step.changed", step, detail });
+      } catch (err) {
+        console.error("[qa] observer onStep failed (non-fatal, run continues):", err);
+      }
     },
     onEvent(body: RunEventBody): void {
-      runEvents?.publish(runId, body);
+      try {
+        runEvents?.publish(runId, body);
+      } catch (err) {
+        console.error("[qa] observer onEvent failed (non-fatal, run continues):", err);
+      }
     },
   };
 }

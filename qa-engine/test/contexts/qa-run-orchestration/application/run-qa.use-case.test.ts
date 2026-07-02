@@ -1495,6 +1495,46 @@ test("ObserverPort: a failing execute() emits a 'retry' step (fix-loop engaged) 
   assert.ok(!steps.some((s) => s.step === "coverage"), "coverage is never measured for a non-pass verdict");
 });
 
+// ── FIX (judgment-day, cross-engine parity): the legacy runner only ever emits onStep("coverage")
+// inside its own `mode === "diff" && ... && !triggerService` gate (src/pipeline.ts:2912). Before
+// this fix, RunQaUseCase emitted "coverage" on EVERY passing verdict regardless of mode/triggerRepo
+// — a step the legacy engine never produces for those runs. These three tests pin the gate exactly:
+// a non-diff pass never emits it, a diff-mode pass DOES (already pinned above), and a cross-repo
+// diff-mode pass does NOT. ──────────────────────────────────────────────────────────────────────
+
+test("ObserverPort: a non-diff-mode (complete) PASS run never emits a 'coverage' step, mirroring the legacy's mode==='diff' gate", async () => {
+  const { ports } = stubPorts();
+  const { observer, steps } = fakeObserver();
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig, observer });
+
+  const out = await useCase.run({ ...baseInput, runId: "coverage-step-non-diff-mode", mode: "complete" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.ok(!steps.some((s) => s.step === "coverage"), "a non-diff mode pass must never emit 'coverage' — legacy's own onStep('coverage') site lives strictly inside the mode==='diff' branch (src/pipeline.ts:2919)");
+});
+
+test("ObserverPort: a diff-mode PASS run WITH triggerRepo set never emits a 'coverage' step, mirroring the legacy's !triggerService conjunct", async () => {
+  const { ports } = stubPorts();
+  const { observer, steps } = fakeObserver();
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig, observer });
+
+  const out = await useCase.run({ ...baseInput, runId: "coverage-step-cross-repo", mode: "diff", triggerRepo: "org/orders-svc" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.ok(!steps.some((s) => s.step === "coverage"), "a cross-repo diff-mode pass must never emit 'coverage' — browser coverage cannot map the triggering service repo's changed lines (CLAUDE.md), matching legacy's !triggerService conjunct at src/pipeline.ts:2912");
+});
+
+test("ObserverPort: a diff-mode PASS run WITHOUT triggerRepo still emits a 'coverage' step (control case for the two guards above)", async () => {
+  const { ports } = stubPorts();
+  const { observer, steps } = fakeObserver();
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig, observer });
+
+  const out = await useCase.run({ ...baseInput, runId: "coverage-step-diff-monorepo", mode: "diff" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.ok(steps.some((s) => s.step === "coverage"), "an ordinary monorepo diff-mode pass must still emit 'coverage' — unaffected by either guard");
+});
+
 test("ObserverPort: a static-gate repair round emits its own 'retry' step with a round-number detail", async () => {
   let validateCalls = 0;
   const { ports } = stubPorts({
