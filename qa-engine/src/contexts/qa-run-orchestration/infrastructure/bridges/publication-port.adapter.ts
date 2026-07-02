@@ -46,6 +46,11 @@ export interface GitHubIssueCollaborator {
 }
 export interface ShadowLogCollaborator {
   openPr(repo: string, branch: string, title: string, body: string): Promise<void>;
+  // Shadow fidelity (live-monitoring find): the shadow branch previews the UNDERLYING side effect,
+  // so an Issue-shaped suppression must log through openIssue, never openPr. Optional so any
+  // pre-existing PR-only stub keeps compiling; absent -> the Issue preview is skipped (the
+  // outcome string still names the would-be action).
+  openIssue?(repo: string, title: string, body: string): Promise<void>;
 }
 
 export interface PublicationPortCollaborators {
@@ -127,8 +132,26 @@ export class PublicationPortAdapter implements PublicationPort {
 
     switch (publishDecision.outcome) {
       case "shadow": {
-        await this.deps.shadowLog.openPr(this.ctx.repo, this.ctx.branch, title, body);
-        return { outcome: `shadow: ${publishDecision.reason}` };
+        // Shadow fidelity (live-monitoring find): shadow mode's whole purpose is telling the
+        // operator what WOULD have happened — so re-decide with shadow:false to learn the
+        // UNDERLYING side effect and log the matching would-be action. Previously this branch
+        // unconditionally logged "would open PR" even for a fail run whose real action is an
+        // Issue (legacy's issueOrShadow logs the Issue side; publishSuite's shadow logs the PR
+        // side — two distinct messages, src/pipeline.ts:3131/3218).
+        const underlying = this.deps.decide.decide({
+          verdict: decision.verdict,
+          reviewerApproved: decision.reviewerApproved ?? this.ctx.reviewerApproved,
+          coverageBlocks: decision.coverageBlocks ?? this.ctx.coverageBlocks,
+          shadow: false,
+          e2eChanged: decision.e2eChanged ?? this.ctx.e2eChanged,
+        });
+        if (underlying.outcome === "pr") {
+          await this.deps.shadowLog.openPr(this.ctx.repo, this.ctx.branch, title, body);
+        } else if (underlying.outcome === "issue") {
+          await this.deps.shadowLog.openIssue?.(issueRepo, title, body);
+        }
+        // quarantine/noop suppressed side effects have nothing to preview — the reason says it all.
+        return { outcome: `shadow: ${publishDecision.reason} (would: ${underlying.outcome})` };
       }
       case "pr": {
         const pr = await this.deps.pr.openWithAutoMerge(this.ctx.repo, this.ctx.branch, title, body);

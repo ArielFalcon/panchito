@@ -260,3 +260,43 @@ test("F4: publish() falls back to identity when no sanitizer is wired (backward-
   assert.match(result.outcome, /issue/);
   assert.ok(bodySeen.includes("plain text, no secrets"), "with no sanitizer wired, the body must pass through unchanged (identity default)");
 });
+
+// ── SHADOW FIDELITY (live-monitoring find) ─────────────────────────────────────────────────────
+// Shadow mode's purpose is previewing the UNDERLYING side effect: a fail run's suppressed action
+// is an ISSUE, so the shadow log must say "would open Issue" — previously the shadow branch
+// unconditionally logged "would open PR" for every verdict (observed live: a fail run logging
+// 'would open PR ... title="qa-bot: fail run"').
+
+test("shadow fidelity: a FAIL run's shadow preview logs the would-be ISSUE, not a PR", async () => {
+  const decide = new PublishDecisionService();
+  const pr = fakePr();
+  const issue = fakeIssue();
+  const logs: string[] = [];
+  const shadowLog = new ShadowLogAdapter((msg) => { logs.push(msg); });
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: true, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "fail", cases: [], logs: "" });
+
+  assert.match(result.outcome, /shadow/);
+  assert.match(result.outcome, /would: issue/, "the outcome string must name the underlying action");
+  assert.ok(logs.some((l) => l.includes("would open Issue")), `expected an Issue preview, got: ${logs.join(" | ")}`);
+  assert.ok(!logs.some((l) => l.includes("would open PR")), "a fail run must never preview a PR");
+});
+
+test("shadow fidelity: a PASS run's shadow preview still logs the would-be PR", async () => {
+  const decide = new PublishDecisionService();
+  const pr = fakePr();
+  const issue = fakeIssue();
+  const logs: string[] = [];
+  const shadowLog = new ShadowLogAdapter((msg) => { logs.push(msg); });
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: true, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "pass", cases: [], logs: "" });
+
+  assert.match(result.outcome, /would: pr/);
+  assert.ok(logs.some((l) => l.includes("would open PR")), `expected a PR preview, got: ${logs.join(" | ")}`);
+});
