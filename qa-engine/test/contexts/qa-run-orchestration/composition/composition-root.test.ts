@@ -365,3 +365,38 @@ test("buildProduction(rewritten) surfaces infra-error when the real deploy gate 
 
   assert.equal(outcome.verdict, "infra-error");
 });
+
+// ── W2 F4 (judgment-day, both rounds): the single-reviewer architecture's load-bearing wire ────
+// composition-root MUST pass needsReview:false into GenerationPortAdapter's static ctx REGARDLESS
+// of cfg.needsReview — RunQaUseCase's ReviewPort is the single reviewer; GenerateTestsUseCase's
+// internal degraded reviewer must never fire on the orchestrated path. The prior judge round found
+// this wiring correct but UNTESTED (a one-line revert to `needsReview: cfg.needsReview` would have
+// passed the whole gate). This test is the executable proof: a recording generationUseCase fake
+// observes the actual input the adapter builds from its ctx.
+test("wireBridges hardcodes needsReview:false into the generation ctx even when cfg.needsReview is true (single-reviewer architecture)", async () => {
+  const seenNeedsReview: boolean[] = [];
+  const cfg = fakeConfig({
+    needsReview: true, // the RunQaConfig knob — must NOT leak into the generation ctx
+    generationUseCase: {
+      generate: async (input: { needsReview?: boolean }) => {
+        seenNeedsReview.push(input.needsReview === true);
+        return { specs: ["a.spec.ts"], approved: true, reviewed: false };
+      },
+    },
+  });
+  const port = buildShadow(cfg);
+  await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "e2e",
+    runId: "composition-root-single-reviewer",
+  });
+
+  assert.ok(seenNeedsReview.length > 0, "the generation use-case must have been invoked");
+  assert.ok(
+    seenNeedsReview.every((v) => v === false),
+    "GenerationPortAdapter's ctx must carry needsReview:false on every generate() call — the internal degraded reviewer must never fire on the orchestrated path",
+  );
+});
