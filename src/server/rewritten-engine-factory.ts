@@ -55,6 +55,7 @@
 //      non-diff run's Generation/Review phase (composition-root.ts:187,199 feed cfg.mode/cfg.guidance
 //      straight into prompt assembly).
 import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 import type { AppConfig } from "../orchestrator/config-loader";
 import type { AgentDeps } from "../integrations/opencode-client";
 import type { RunPipelinePort, ObserverPort } from "@contexts/qa-run-orchestration/application/ports/index.ts";
@@ -405,6 +406,14 @@ export function buildRewrittenCompositionConfig(
 
     vcs,
     generationUseCase,
+    // W5 fix (seam-parity FIXME): the file-read collaborator for FixLoop's Lever-2 selector-
+    // contradiction check (fix-loop.aggregate.ts's own FixLoopGenerateResult.specSources contract,
+    // consumed via GenerationPortAdapter's optional readSpecSource — see that adapter's own header).
+    // Without this, GenerationPortAdapter.generate() never populates specSources, so Lever-2's
+    // checkSpecSelectors always receives [] on the real production path and can never fire. A plain
+    // fs read is sufficient — the adapter already resolves the absolute path (`${specDir}/${spec}`)
+    // before calling this collaborator, so no further path resolution belongs here.
+    readSpecSource: (absolutePath: string) => readFile(absolutePath, "utf8"),
     reviewRuntime: {
       runtime: runtimeAdapter,
       rendering,
@@ -467,6 +476,10 @@ export function buildRewrittenCompositionConfig(
     // executionStrategies.e2e above) never receives a baseUrl and throws "E2eExecutionStrategy
     // requires a baseUrl (live DEV URL)" the moment a real e2e run reaches execution.
     ...(app.dev?.baseUrl ? { baseUrl: app.dev.baseUrl } : {}),
+    // W5 fix (seam-parity FIXME): app.openapi is app-static (a config-time hint, like baseUrl above)
+    // — threaded straight through to CompositionConfig.openapi so GenerationPortAdapter's ctx
+    // carries it into OpencodeRunInput.openapi (prompts.ts:500,1068's OpenAPI-hint rendering).
+    ...(app.openapi ? { openapi: app.openapi } : {}),
     // Audit fix (worst leak in audit-2026-07-flaky-selector-leaks): mirrors legacy's
     // resolveTestIdAttribute(app) (src/pipeline.ts:835: `config.e2e?.testIdAttribute ?? "data-testid"`)
     // — but deliberately WITHOUT the "data-testid" default. CompositionConfig's own doc

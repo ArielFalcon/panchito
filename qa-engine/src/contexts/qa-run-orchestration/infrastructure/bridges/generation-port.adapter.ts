@@ -149,6 +149,13 @@ export interface GenerationPortStaticContext {
   // configured baseUrl into OpencodeRunInput. Optional: absent -> unchanged (matches every other
   // optional field on this context).
   baseUrl?: string;
+  // W5 fix (seam-parity FIXME): the app's declared OpenAPI glob hint (AppConfig.openapi,
+  // src/orchestrator/schemas.ts) — mirrors OpencodeRunInput.openapi's own doc: "optional hint (from
+  // app config): where the repo's OpenAPI contract(s) live" (prompts.ts:500,1068 renders it so the
+  // agent knows where to look for backend contracts). App-static (composition-time), the SAME
+  // "known once per run, not per generate() call" shape as baseUrl above — NOT per-call/dynamic like
+  // diff/intent. Absent -> unchanged (matches every other optional field on this context).
+  openapi?: string | string[];
 }
 
 export interface GenerationPortCollaborators {
@@ -181,6 +188,12 @@ export class GenerationPortAdapter implements GenerationPort {
       // it already threads intent — see GenerationEnrichment.sha's own comment for why that call
       // site is out of this change's scope).
       sha: enrichment?.sha ?? "",
+      // W5 fix (seam-parity FIXME): threads the run's id onto OpencodeRunInput.runId, which
+      // opencode-client.ts uses for the SSE session descriptor (registerRunSession/appendLog
+      // telemetry) — without it, rewritten-path generator sessions never appeared in live run
+      // activity/telemetry. Absent -> omitted, unchanged (today's behavior for a caller that
+      // predates this enrichment field).
+      ...(enrichment?.runId ? { runId: enrichment.runId } : {}),
       // "Dynamic diff" fix (engram #936): PREFER the run's real diff (threaded per-call from
       // RunQaUseCase's ChangeAnalysisPort.classify() result) over the STATIC ctx.diff supplied at
       // construction time — the real production engineFactory builds this adapter BEFORE the
@@ -196,6 +209,8 @@ export class GenerationPortAdapter implements GenerationPort {
       appName: this.ctx.appName,
       ...(this.ctx.guidance ? { guidance: this.ctx.guidance } : {}),
       ...(this.ctx.baseUrl ? { baseUrl: this.ctx.baseUrl } : {}),
+      // W5 fix (seam-parity FIXME): app-static, mirrors baseUrl's own "known once per run" shape.
+      ...(this.ctx.openapi ? { openapi: this.ctx.openapi } : {}),
       // W2 fix (F1): spread-conditional — every enrichment field is independently optional, mapped
       // 1:1 onto the SAME OpencodeRunInput fields buildPromptAssembled already renders sections for.
       // Absent enrichment or an absent/empty individual field -> that field is omitted from `input`,

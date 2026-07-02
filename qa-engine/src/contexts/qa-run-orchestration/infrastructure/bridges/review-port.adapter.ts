@@ -95,10 +95,19 @@ export class ReviewPortAdapter implements ReviewPort {
       // (src/pipeline.ts:1680). Absent -> omitted; the reviewer defers on unverifiable UI facts
       // (today's behavior, unchanged).
       ...(enrichment?.domSnapshot ? { domSnapshot: enrichment.domSnapshot } : {}),
+      // W5 fix (seam-parity FIXME): mirrors the SAME runId threading as GenerationPortAdapter — the
+      // reviewer session's own SSE descriptor (opencode-client.ts) needs it too.
+      ...(enrichment?.runId ? { runId: enrichment.runId } : {}),
     };
     const assembled = rendering.renderReviewer(reviewInput);
 
-    const session = await runtime.openSession("reviewer", this.ctx.mirrorDir);
+    // W5 fix (seam-parity FIXME, runId/onTurn threading): threads descriptor.runId so the real
+    // AgentDeps.open() can register this standalone reviewer session for SSE live activity and its
+    // own internal agent_turns persistence (defaultOnTurn) — mirrors GenerateTestsUseCase's own
+    // reviewer-session descriptor fix (generate-tests.use-case.ts).
+    const session = await runtime.openSession("reviewer", this.ctx.mirrorDir, {
+      descriptor: { runId: enrichment?.runId, role: "qa-reviewer" },
+    });
     let output: string;
     try {
       const out = await session.prompt(assembled.text, { sectionSizes: assembled.sectionSizes });

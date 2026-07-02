@@ -118,6 +118,13 @@ export interface GenerationEnrichment {
   // own comment for the adapter-side half of this fix); until wired, OpencodeRunInput.sha stays ""
   // and changeRef.sha fails the schema, exactly the live-run evidence this fix responds to.
   sha?: string;
+  // W5 fix (seam-parity FIXME, runId threading half): the run's id (RunInput.runId, this barrel,
+  // above), mirrors legacy's OpencodeRunInput.runId — opencode-client.ts uses it for the SSE session
+  // descriptor (registerRunSession/appendLog telemetry) so a generator session appears in live run
+  // activity/telemetry. Threaded here (not the static per-run context) because it is a genuinely
+  // PER-RUN value, the same "dynamic" precedent `sha`/`intent` above already establish. Absent ->
+  // OpencodeRunInput.runId stays unset, unchanged (today's behavior).
+  runId?: string;
   // W3 F2 (cross-run learning retrieval): the structured rules LearningPort.retrieve(sha) returned
   // (the port's OWN established contract — RetrievedRule, widened per W3 F1 above) — mirrors
   // legacy's own retrieval injection (src/pipeline.ts's `learnedRules` local, baseGenInput({
@@ -201,6 +208,10 @@ export interface ReviewEnrichment {
   // — "it claimed PetClinic's submit button says 'Add Owner' when the live DOM says 'Submit'").
   // Absent -> the reviewer defers on unverifiable UI facts (today's behavior, unchanged).
   domSnapshot?: string;
+  // W5 fix (seam-parity FIXME, runId threading half): mirrors GenerationEnrichment.runId's own doc
+  // above — opencode-client.ts uses input.runId for the reviewer session's OWN SSE descriptor too
+  // (a SEPARATE session from the generator's). Absent -> ReviewInput.runId stays unset, unchanged.
+  runId?: string;
 }
 export interface ReviewPort {
   // diff: the run's REAL per-run commit diff (Plan 7.6 dynamic-diff), so the reviewer grounds on the

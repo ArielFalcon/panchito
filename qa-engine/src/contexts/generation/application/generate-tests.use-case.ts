@@ -75,8 +75,15 @@ export class GenerateTestsUseCase {
 
     // ── 2. Open a generator session and fire the initial prompt ───────────────
     const generatorRole: AgentRole = "primary"; // maps to "qa-generator" at wiring time
+    // W5 fix (seam-parity FIXME, runId/onTurn threading): descriptor.runId is what the real
+    // AgentDeps.open() (src/integrations/opencode-client.ts) needs to register this session for SSE
+    // live activity AND to fire its own internal agent_turns persistence (defaultOnTurn) — mirrors
+    // legacy's own generator descriptor (opencode-client.ts:701's `descriptor: { runId: input.runId,
+    // role: "qa-generator", objective: ... }`). Absent input.runId -> descriptor.runId is undefined,
+    // matching every other optional field's "absent -> unchanged" contract on this input.
     const session = await runtime.openSession(generatorRole, input.mirrorDir, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
+      descriptor: { runId: input.runId, role: "qa-generator" },
     });
     let generatorOutput: string;
     try {
@@ -170,8 +177,13 @@ export class GenerateTestsUseCase {
       mode: input.mode,
     };
     const reviewerAssembled = rendering.renderReviewer(reviewerInput as Parameters<typeof rendering.renderReviewer>[0]);
+    // W5 fix (seam-parity FIXME, runId/onTurn threading): mirrors the generator session's own
+    // descriptor fix above — the reviewer session (a SEPARATE session, legacy's own
+    // opencode-client.ts:969 `descriptor: { runId: input.runId, role: "qa-reviewer", ... }`) needs
+    // its own descriptor too, for the SAME SSE live-activity + agent_turns persistence reasons.
     const reviewerSession = await runtime.openSession(reviewerRole, input.mirrorDir, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
+      descriptor: { runId: input.runId, role: "qa-reviewer" },
     });
     let reviewJudgment;
     try {

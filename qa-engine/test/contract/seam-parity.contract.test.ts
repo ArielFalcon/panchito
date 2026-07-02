@@ -84,12 +84,10 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
     // reading src/integrations/prompts.ts's own consumers.
     explorer: "explorer-pass gating is NOT wired on the rewritten path (no GenerationEnrichment/ctx slot exists for it; grep of ports/index.ts confirms) — FIXME: prompts.ts:647 gates the entire Fase-3 explorer pass on input.explorer, so it silently never fires on the rewritten path.",
     contextBrief: "FIXME: no GenerationEnrichment/ctx slot exists (grep-confirmed) — prompts.ts renders the 'blast radius' plan-brief section from input.contextBrief; the rewritten path's PreGenerationGroundingPort produces a context PACK (enrichment.contextPack) instead, which is a DIFFERENT rendering path (prompts.ts:611) that partially covers this, but the raw ExplorationBrief object itself is never threaded.",
-    runId: "FIXME: no GenerationEnrichment/ctx slot exists (grep-confirmed) — opencode-client.ts uses input.runId for the SSE session descriptor (registerRunSession/appendLog telemetry, opencode-client.ts:483,653,706-707,853-858). Dropped means rewritten-path generator sessions never appear in live run activity/telemetry.",
     contextMap: "NOT dropped at this bridge — sourced via a DIFFERENT port (PreGenerationGroundingPort, composition-root.ts:cfg.contextMap), which folds it into enrichment.contextPack before this adapter ever sees it. Correct by design, not a gap.",
     staticSignal: "FIXME: no GenerationEnrichment/ctx slot exists (grep-confirmed) — prompts.ts:823 renders a deterministic pre-computed static-analysis section from input.staticSignal in generation mode. Dropped means the rewritten path never surfaces the static-signal extractors' output to the generator, even though qa-engine now ports the extractors themselves (Plan 7.3).",
     diffArchetypes: "FIXME: no GenerationEnrichment/ctx slot exists (grep-confirmed) — prompts.ts:829 renders a one-line 'change shape' hint from input.diffArchetypes (detectStructuralPatterns output). Dropped means the rewritten path never prioritises archetype-appropriate tests.",
     failureSourced: "FIXME: no GenerationEnrichment/ctx slot exists (grep-confirmed) — prompts.ts:624,708,922 switches domSnapshot framing to 'GROUND TRUTH AT FAILURE' when true. domSnapshot itself IS threaded (enrichment.domSnapshot); the framing flag that changes how it's presented is not.",
-    openapi: "FIXME: no GenerationEnrichment/ctx/CompositionConfig slot exists (grep-confirmed, and app.openapi IS a real schema field — src/orchestrator/schemas.ts:11) — prompts.ts:500,1068 renders an OpenAPI-hint so the agent knows where to look for backend contracts. Dropped means the rewritten path never forwards the app's declared openapi glob hint.",
     service: "FIXME: no GenerationEnrichment/ctx/CompositionConfig slot exists (grep-confirmed) — prompts.ts renders cross-repo framing from input.service (the triggering microservice) at 6+ call sites (286-291,433-434,456-457,1246-1251). Cross-repo runs are a documented CLAUDE.md feature (\"Cross-repo runs (microservices)\"); this is a real gap for that feature on the rewritten path.",
     services: "FIXME: no GenerationEnrichment/ctx/CompositionConfig slot exists (grep-confirmed, AppConfig.services IS real — src/orchestrator/schemas.ts) — prompts.ts:1069-1120 renders the full microservice-repo list (context mode). Same cross-repo gap as `service` above.",
   };
@@ -98,7 +96,8 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
     const mapped = [
       "repo", "sha", "diff", "mirrorDir", "e2eRelDir", "namespace", "needsReview", "target", "mode",
       "appName", "guidance", "baseUrl", "reviewCorrections", "fixCases", "selectorContradictions",
-      "domSnapshot", "coverageGap", "intent", "learnedRules", "contextPack", "existingSpecFiles",
+      "domSnapshot", "coverageGap", "intent", "learnedRules", "contextPack", "existingSpecFiles", "runId",
+      "openapi",
     ];
     const allFieldNames = Object.keys(ALL_FIELDS).sort();
     const accountedFor = [...new Set([...mapped, ...Object.keys(ALLOWLIST)])].sort();
@@ -142,6 +141,7 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
       diff: S("ctx.diff"), // overridden by the dynamic `diff` arg below
       guidance: S("guidance"),
       baseUrl: S("baseUrl"),
+      openapi: S("openapi"),
     });
 
     await adapter.generate([], "/specDir", undefined, S("diff"), {
@@ -155,6 +155,7 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
       learnedRules: [{ trigger: S("rule.trigger"), action: S("rule.action"), errorClass: "E-EXEC-FAIL", status: "active", confidence: "high" }],
       contextPack: S("contextPack"),
       existingSpecFiles: [S("existingSpecFiles")],
+      runId: S("runId"),
     });
 
     assert.ok(captured, "renderMain must have been called — the generator session never ran");
@@ -188,6 +189,8 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
     assert.ok(captured!.learnedRules?.includes(S("rule.trigger")), `learnedRules dropped/not-rendered at ${dyingLayer}`);
     assert.equal(captured!.contextPack, S("contextPack"), `contextPack dropped at ${dyingLayer}`);
     assert.deepEqual(captured!.existingSpecFiles, [S("existingSpecFiles")], `existingSpecFiles dropped at ${dyingLayer}`);
+    assert.equal(captured!.runId, S("runId"), `runId dropped at ${dyingLayer} (W5 fix: SSE session descriptor telemetry starved without it)`);
+    assert.equal(captured!.openapi, S("openapi"), `openapi dropped at ${dyingLayer} (W5 fix: app-static OpenAPI glob hint)`);
   });
 });
 
@@ -204,12 +207,11 @@ describe("seam-parity: REVIEW (ReviewInput vs ReviewPortAdapter)", () => {
   const ALLOWLIST: Record<string, string> = {
     target: "NOT threaded by ReviewPortAdapter — ReviewInput.target is optional and only 'adjusts wording and spec paths' (opencode-client.ts comment); ReviewPortStaticContext carries no target field at all (grep-confirmed). Low-severity: the reviewer prompt defaults to e2e wording even for code-mode reviews on the rewritten path. FIXME candidate, not yet evidenced by a live run.",
     intent: "NOT mapped to ReviewInput.intent directly — the bridge derives ReviewInput.objective from enrichment.intent.message instead (review-port.adapter.ts:86, mirrors legacy's `opts.guidance ?? intent?.message`). The raw CommitIntent object itself never reaches ReviewInput.intent, but its one consumed field (message) does, via a different field. Deliberate re-shape, not a drop.",
-    runId: "FIXME: no ReviewPortStaticContext/ReviewEnrichment slot exists (grep-confirmed) — mirrors the SAME runId gap as the generation surface (opencode-client.ts:969 uses input.runId for the reviewer session's SSE descriptor). Dropped means reviewer sessions never appear in live run activity/telemetry either.",
     executionResult: "FIXME: no ReviewEnrichment slot exists (grep-confirmed) — opencode-client.ts documents this as a D4/D5 field: sanitized HTTP statuses + final URLs captured during Filter C execution, injected as an authoritative VOLATILE section so the reviewer weighs an objective 5xx before judging test code. Dropped means the rewritten-path reviewer never sees this evidence.",
   };
 
   test("ReviewInput's own field list matches the allowlist + the adapter's mapped set exactly", () => {
-    const mapped = ["diff", "specs", "mirrorDir", "e2eRelDir", "appName", "mode", "baseUrl", "guidance", "priorCorrections", "objective", "learnedRules", "domSnapshot"];
+    const mapped = ["diff", "specs", "mirrorDir", "e2eRelDir", "appName", "mode", "baseUrl", "guidance", "priorCorrections", "objective", "learnedRules", "domSnapshot", "runId"];
     const allFieldNames = Object.keys(ALL_FIELDS).sort();
     const accountedFor = [...new Set([...mapped, ...Object.keys(ALLOWLIST)])].sort();
     assert.deepEqual(accountedFor, allFieldNames, "every ReviewInput field must be either mapped or allowlisted with a reason");
@@ -251,6 +253,7 @@ describe("seam-parity: REVIEW (ReviewInput vs ReviewPortAdapter)", () => {
         intent: { type: "feat", breaking: false, message: S("intent.message"), changedFiles: [] },
         learnedRules: [{ trigger: S("rule.trigger"), action: S("rule.action"), errorClass: "E-EXEC-FAIL", status: "active", confidence: "high" }],
         domSnapshot: S("domSnapshot"),
+        runId: S("runId"),
       },
     );
 
@@ -268,6 +271,7 @@ describe("seam-parity: REVIEW (ReviewInput vs ReviewPortAdapter)", () => {
     assert.equal(captured!.objective, S("intent.message"), `objective (derived from intent.message) dropped at ${dyingLayer}`);
     assert.ok(captured!.learnedRules?.includes(S("rule.trigger")), `learnedRules dropped/not-rendered at ${dyingLayer}`);
     assert.equal(captured!.domSnapshot, S("domSnapshot"), `domSnapshot dropped at ${dyingLayer}`);
+    assert.equal(captured!.runId, S("runId"), `runId dropped at ${dyingLayer} (W5 fix: reviewer session's own SSE descriptor telemetry starved without it)`);
   });
 
   test("review() carries ctx.guidance through verbatim (guidance wins over intent.message per the adapter's own documented contract)", async () => {
@@ -387,7 +391,22 @@ describe("seam-parity: PERSISTENCE (kernel RunOutcome vs toLegacyRunOutcome)", (
   } satisfies Record<keyof KernelRunOutcome["gateSignals"], true>;
 
   const ALLOWLIST: Record<string, string> = {
-    note: "FIXME: toLegacyRunOutcome never carries outcome.note through, even though it exists on BOTH the kernel RunOutcome (this file, per its own header: 'a human-readable reason surfaced to the run record') and LegacyRunOutcome's own `note?: string` field. Grep-confirmed absent from the mapping fn body. Diagnostic-only (never gates verdict/publish) but a real drop — the legacy run record loses the InfraError/setup-failure message on the rewritten persistence path.",
+    // W5 fix (seam-parity re-classification, evidence-verified): RE-CLASSIFIED from FIXME to
+    // correct-by-design. The original entry claimed "LegacyRunOutcome's own `note?: string` field" —
+    // this is WRONG: legacy's actual `RunOutcome` interface (src/types.ts:224-274 — runId, app, sha,
+    // mode, target, verdict, errorClass, gateSignals, rulesRetrieved, reflection, at) has NO `note`
+    // field at all, grep/read-confirmed exhaustively against the full interface body. The TWO
+    // `note?: string` fields that DO exist in src/types.ts belong to DIFFERENT types entirely:
+    // QaRunResult (types.ts:153, "human-readable summary... reviewer rejection, skip reason") and
+    // RunRecord (types.ts:194, the SQLite-persisted live-run record) — neither is RunOutcome. And
+    // src/server/runner.ts:196-199 (runViaRewrittenEngine's own header) independently confirms this
+    // exact gap from the OTHER direction: "RunOutcome carries no such field at this port boundary...
+    // updateRecord's own note:run.note fallback already surfaces the publish outcome via
+    // RunQaResult.note -> RunOutcome.note" — i.e. `note` reaches the run record through a DIFFERENT
+    // seam (QaRunResult.note -> RunRecord.note), never through toLegacyRunOutcome/saveRunOutcome's
+    // run_outcomes row. So toLegacyRunOutcome dropping `note` is FAITHFUL to the legacy shape it
+    // targets (LegacyRunOutcome, this adapter's own type, which also has no note field) — not a bug.
+    note: "CORRECT BY DESIGN (not a drop): toLegacyRunOutcome never carries outcome.note through because LegacyRunOutcome (src/types.ts's RunOutcome interface) has NO note field to carry it TO — grep/read-confirmed against the full interface. The kernel RunOutcome.note reaches the run record through a SEPARATE seam (QaRunResult.note -> RunRecord.note, src/server/runner.ts's own W3 F3 header), never through this mapping fn's run_outcomes row. Diagnostic-only either way (never gates verdict/publish).",
     cases: "DELIBERATELY not persisted via toLegacyRunOutcome — LegacyRunOutcome (src/types.ts) has NO cases field at all (grep-confirmed); this field exists on the kernel RunOutcome ONLY for a DIFFERENT driving-side consumer (src/server/runner.ts's runViaRewrittenEngine threads it into history.addCase() calls directly, per this file's own W3 F3 header comment), not for the run_outcomes row this adapter writes. Comparator-blind by the kernel type's own documented construction.",
     logs: "DELIBERATELY not persisted via toLegacyRunOutcome — same reason as cases above: LegacyRunOutcome has no logs field (grep-confirmed), and the kernel RunOutcome's own header says this is 'the same one-shot... string legacy's own QaRunResult.logs carries', a different sink than the run_outcomes row.",
   };
@@ -474,7 +493,7 @@ describe("seam-parity: PERSISTENCE (kernel RunOutcome vs toLegacyRunOutcome)", (
     assert.equal(gs.catalogGateAdvisory, 4, `gateSignals.catalogGateAdvisory dropped at ${dyingLayer}`);
     assert.equal(gs.catalogGateFailClosed, 0, `gateSignals.catalogGateFailClosed dropped at ${dyingLayer}`);
 
-    assert.equal("note" in out, false, `note IS in the allowlist as a confirmed FIXME drop — this assertion documents current (buggy) behavior so a silent fix doesn't go unnoticed; if this starts failing, remove the 'note' allowlist entry above instead of patching the assertion`);
+    assert.equal("note" in out, false, `note IS in the allowlist as CORRECT BY DESIGN (re-classified, W5) — LegacyRunOutcome genuinely has no note field, see the allowlist entry's own evidence trail; if this starts failing because LegacyRunOutcome gains a note field, update the allowlist entry above instead of patching the assertion`);
   });
 
   test("SqliteRunHistoryAdapter.save() forwards the mapped outcome to the injected saveOutcome (the seam a real caller uses)", async () => {
@@ -504,7 +523,7 @@ describe("seam-parity: COMPOSITION (CompositionConfig vs buildRewrittenCompositi
     diff: "DELIBERATELY static '' — see this fn's own header 'difference #2': GenerationPortAdapter/ReviewPortAdapter both resolve the REAL per-run diff dynamically from ChangeAnalysisPort.classify() instead, since no per-run diff exists yet at composition-build time.",
     baseUrl: "supplied ONLY when app.dev?.baseUrl is present (asserted below as a present-when-given case) — legitimately absent for code-mode apps (no dev: block).",
     testIdAttribute: "supplied ONLY when app.e2e?.testIdAttribute is present (asserted below as a present-when-given case) — deliberately NO 'data-testid' default applied here (the seed playwright.config.ts already defaults it); legitimately absent when the app declares none.",
-    readSpecSource: "not wired by this factory — the file-read collaborator for FixLoop's Lever-2 selector check has no production caller yet at this composition layer (grep-confirmed absent from buildRewrittenCompositionConfig's return object). FIXME candidate: Lever-2 gets no specSources on the real production path.",
+    readSpecSource: "FIXED (W5 quick win): IS supplied (a plain fs readFile) — asserted below as a present case. Wires the file-read collaborator FixLoop's Lever-2 selector-contradiction check needs (GenerationPortAdapter's optional collaborator, see that adapter's own header) so Lever-2 actually receives specSources on the real production path instead of [] forever.",
     setupCollaborators: "IS supplied (e2e + code) — asserted below as a present case; listed here only because this describe-block enumerates the type's full optional-field set before splitting into present/allowlisted.",
     cleanupCollaborators: "IS supplied (e2e only, matching composition-root.ts's own `!cfg.isCode` gate) — asserted below as a present case.",
     groundingCollaborators: "IS supplied ({} — resolves to the real production default per this factory's own header) — asserted below as a present case.",
@@ -544,7 +563,7 @@ describe("seam-parity: COMPOSITION (CompositionConfig vs buildRewrittenCompositi
     return { getAgentDeps: () => ({}) as unknown as AgentDeps };
   }
 
-  test("buildRewrittenCompositionConfig supplies every non-optional CompositionConfig field, and every optional field is either present-when-expected or documented in OPTIONAL_ALLOWLIST", () => {
+  test("buildRewrittenCompositionConfig supplies every non-optional CompositionConfig field, and every optional field is either present-when-expected or documented in OPTIONAL_ALLOWLIST", async () => {
     const cfg = buildRewrittenCompositionConfig(
       fakeAppConfig(),
       fakeFactoryDeps(),
@@ -585,13 +604,17 @@ describe("seam-parity: COMPOSITION (CompositionConfig vs buildRewrittenCompositi
     assert.equal(cfg.reviewerApprovedForPublish, true, `reviewerApprovedForPublish dropped at ${dyingLayer}`);
     assert.notEqual(cfg.sanitize, undefined, `sanitize (F4 CRITICAL security invariant) dropped at ${dyingLayer}`);
     assert.notEqual(cfg.learningRepo, undefined, `learningRepo dropped at ${dyingLayer}`);
+    // W5 fix (seam-parity FIXME, flipped): readSpecSource IS wired now — assert it's a real file-read
+    // collaborator, not just a truthy stub, by reading this very test file back through it.
+    assert.equal(typeof cfg.readSpecSource, "function", `readSpecSource dropped at ${dyingLayer} (Lever-2 selector-contradiction check starves without it)`);
+    const readBack = await cfg.readSpecSource!(import.meta.url.replace("file://", ""));
+    assert.ok(readBack.includes("seam-parity.contract.test.ts"), `readSpecSource at ${dyingLayer} did not return real file content`);
 
     // Deliberately-absent-at-this-call optional fields (see OPTIONAL_ALLOWLIST for why).
     assert.equal(cfg.diff, "", "diff is deliberately static '' at composition time — see OPTIONAL_ALLOWLIST.diff");
     assert.equal(cfg.contextMap, undefined, "contextMap is deliberately absent at composition time — see OPTIONAL_ALLOWLIST.contextMap");
     assert.equal(cfg.prChangedFiles, undefined, "prChangedFiles is deliberately absent at composition time — see OPTIONAL_ALLOWLIST.prChangedFiles");
     assert.equal(cfg.historyFilePath, undefined, "historyFilePath is the opt-OUT alternative to runHistory — absent by default, see OPTIONAL_ALLOWLIST.historyFilePath");
-    assert.equal(cfg.readSpecSource, undefined, "readSpecSource is NOT wired by this factory — confirmed FIXME, see OPTIONAL_ALLOWLIST.readSpecSource");
     assert.equal(cfg.observer, undefined, "observer is absent because this call omitted the 5th argument — see OPTIONAL_ALLOWLIST.observer");
   });
 

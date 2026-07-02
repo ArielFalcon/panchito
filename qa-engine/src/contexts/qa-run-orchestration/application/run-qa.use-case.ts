@@ -436,12 +436,25 @@ export class RunQaUseCase {
         groundingContextPack = grounding.contextPack;
         groundingExistingSpecFiles = grounding.existingSpecFiles;
       } catch (err) {
+        // FIX 1 (judgment-day W4 abort-plumbing): an abort DURING grounding must take the ABORT
+        // route, never the degraded-ungrounded-continue route below.
+        if (signal?.aborted) return this.abortedResult();
         console.error("[qa] WARNING: pre-generation grounding failed (non-fatal, generation continues ungrounded):", err);
       }
     }
+    // FIX 1 (judgment-day W4 abort-plumbing): the adapter's own contract never throws on abort
+    // (it resolves a possibly-partial GroundingResult instead — see the port adapter's own docs),
+    // so this is the check that actually catches an abort observed during ground() and routes it
+    // to the ABORT path instead of silently continuing into baseEnrichment/generate() below.
+    if (signal?.aborted) return this.abortedResult();
 
+    // W5 fix (seam-parity FIXME): thread runId into both enrichment bases — the SAME "dynamic"
+    // per-run precedent sha/intent above already establish. RunQaInput.runId (this use-case's own
+    // input) is available on every run, so it is unconditional (matching sha's own unconditional
+    // spread), not gated behind a presence check the way classificationIntent/retrievedRules are.
     const baseEnrichment = {
       sha: input.sha.toString(),
+      runId: input.runId,
       ...(classificationIntent ? { intent: classificationIntent } : {}),
       ...(retrievedRules.length ? { learnedRules: retrievedRules } : {}),
       ...(groundingContextPack ? { contextPack: groundingContextPack } : {}),
@@ -452,8 +465,12 @@ export class RunQaUseCase {
     // fields; ReviewPort has no slot for either). domSnapshot is threaded per-round at the review
     // call site (below), keyed on the CURRENT specs — mirrors legacy's reviewGenerated() memoized
     // capture exactly (ReviewDomGroundingPort's own header).
+    // FIX 2 (judgment-day, judge A finding #4): no `sha` field here — ReviewEnrichment does NOT
+    // declare one (unlike GenerationEnrichment, which needs sha for manifest changeRef stamping)
+    // and review-port.adapter.ts never reads it. runId IS the legitimate per-run identifier
+    // ReviewEnrichment declares (W5 fix) — carrying sha alongside it would be dead weight.
     const baseReviewEnrichment = {
-      sha: input.sha.toString(),
+      runId: input.runId,
       ...(classificationIntent ? { intent: classificationIntent } : {}),
       ...(retrievedRules.length ? { learnedRules: retrievedRules } : {}),
     };
@@ -1055,11 +1072,16 @@ export class RunQaUseCase {
             try {
               reviewDomSnapshot = await this.deps.reviewDomGrounding.capture(workspace.specDir, specsForReview, signal);
             } catch (err) {
+              // FIX 1 (judgment-day W4 abort-plumbing): same ABORT-over-degraded-continue routing
+              // as the pre-generation grounding call site above — an abort during capture must stop
+              // the run, not silently fall back to an ungrounded review round.
+              if (signal?.aborted) return this.abortedResult();
               console.error("[qa] WARNING: reviewer DOM grounding failed (non-fatal, review continues ungrounded):", err);
               reviewDomSnapshot = undefined;
             }
             lastReviewSpecsKey = specsKey;
           }
+          if (signal?.aborted) return this.abortedResult();
         }
         const reviewResult = await this.deps.review.review(workspace.specDir, reviewCases, classificationDiff, {
           ...baseReviewEnrichment,

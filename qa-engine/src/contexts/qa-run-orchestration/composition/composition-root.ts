@@ -87,6 +87,10 @@ export interface CompositionConfig {
   guidance?: string;
   diff?: string;
   baseUrl?: string;
+  // W5 fix (seam-parity FIXME): the app's declared OpenAPI glob hint (AppConfig.openapi), threaded
+  // through to GenerationPortAdapter's static ctx below — mirrors baseUrl's own app-static,
+  // composition-time shape (see GenerationPortStaticContext.openapi's own doc).
+  openapi?: string | string[];
   // injected as PW_TEST_ID_ATTRIBUTE so playwright.config.ts resolves getByTestId against the app's
   // convention — NO defaulting logic here; undefined flows through and the seed playwright.config.ts
   // already defaults to data-testid (mirrors legacy resolveTestIdAttribute semantics at the config edge).
@@ -287,6 +291,9 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
       // run. ExecutionPortAdapter/ReviewPortAdapter already consumed cfg.baseUrl below; generation
       // was the missing link.
       ...(cfg.baseUrl ? { baseUrl: cfg.baseUrl } : {}),
+      // W5 fix (seam-parity FIXME): threads the app's declared OpenAPI glob hint through — mirrors
+      // baseUrl's own conditional-spread precedent immediately above.
+      ...(cfg.openapi ? { openapi: cfg.openapi } : {}),
     },
     { ...(cfg.readSpecSource ? { readSpecSource: cfg.readSpecSource } : {}) },
   );
