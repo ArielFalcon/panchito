@@ -26,7 +26,11 @@ export interface RunInput {
   runId: string;
 }
 export interface RunPipelinePort {
-  run(input: RunInput): Promise<RunOutcome>;
+  // signal is a SEPARATE transport arg (mirrors legacy runPipeline's own trailing signal
+  // parameter), NOT a field on RunInput — the queue's cancellation is orthogonal to what run is
+  // being requested. Plan 7.1 (engram #913): closes the rewritten cancellation gap — a cancelled
+  // rewritten run must actually stop instead of resolving late and overwriting a finalized record.
+  run(input: RunInput, signal?: AbortSignal): Promise<RunOutcome>;
 }
 
 // ── Driven capability ports (one per orchestrated context) ────────────────────
@@ -35,7 +39,11 @@ export interface ChangeAnalysisPort {
   classify(sha: Sha): Promise<{ action: "skip" | "regression" | "generate"; reason: string }>;
 }
 export interface GenerationPort {
-  generate(objectives: readonly Objective[], specDir: string): Promise<{ specs: string[]; approved: boolean; note?: string }>;
+  // signal: Plan 7.1 (engram #913) — an optional, separate transport arg (mirrors RunPipelinePort's
+  // own signal), threaded through so a cancelled run's in-flight generation can be interrupted
+  // rather than resolving late. Wraps runE2E/runPipeline's own signal-aware generate() in
+  // production; a port stub that ignores it is unaffected (backward compatible).
+  generate(objectives: readonly Objective[], specDir: string, signal?: AbortSignal): Promise<{ specs: string[]; approved: boolean; note?: string }>;
 }
 // ReviewPort is the authoritative publish gate's seam. blockingCount distinguishes blocking
 // corrections (must regenerate) from advisory ones (may approve when only advisory remain);
@@ -56,7 +64,9 @@ export interface ValidationPort {
   validate(specDir: string): Promise<{ ok: boolean; errors: string[]; infra?: boolean }>; // infra optional: mirrors src/qa/validate.ts CheckResult
 }
 export interface ExecutionPort {
-  execute(specDir: string): Promise<{ verdict: RunVerdict; cases: QaCase[]; logs: string }>;
+  // signal: Plan 7.1 (engram #913) — see GenerationPort's own signal note; wraps runE2E's existing
+  // signal-aware execute() so a cancelled run's in-flight test execution can be interrupted.
+  execute(specDir: string, signal?: AbortSignal): Promise<{ verdict: RunVerdict; cases: QaCase[]; logs: string }>;
 }
 export interface ObjectiveSignalPort {
   // valueScore: the value-oracle (mutation-testing) result the legacy persists alongside

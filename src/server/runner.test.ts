@@ -252,6 +252,110 @@ test("a crashing rewritten port finalizes the record as infra-error (no zombie)"
   }
 });
 
+// ── Plan 7.1 — closes the rewritten cancellation gap (engram #913): cancelTrackedRun must abort
+// the rewritten port's OWN in-flight run via the queue's AbortSignal, and the port's late
+// resolution (after the record is already finalized as cancelled) must NEVER overwrite it. ──────
+
+test("cancelTrackedRun aborts the rewritten port's in-flight run.run() AND the record is not overwritten by the port's late resolution", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    let observedAborted = false;
+    let resolveLate: (() => void) | undefined;
+    // A port whose run() observes the signal (proving it was actually threaded in) and stays
+    // pending until the test explicitly resolves it late — standing in for a rewritten engine
+    // that keeps running headless after cancellation.
+    const cancellablePort: RunPipelinePort = {
+      run: async (input, signal) => {
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted) { observedAborted = true; return resolve(); }
+          signal?.addEventListener("abort", () => { observedAborted = true; resolve(); }, { once: true });
+        });
+        // Simulate the late resolution: the port's own promise only settles AFTER this point,
+        // well after cancelTrackedRun has already finalized the record.
+        await new Promise<void>((resolve) => { resolveLate = resolve; });
+        return {
+          runId: input.runId,
+          app: input.app,
+          sha: input.sha.value,
+          mode: input.mode,
+          target: input.target,
+          verdict: "pass",
+          errorClass: null,
+          gateSignals: { static: true, coverageRatio: null, valueScore: null, reviewerCorrections: [], flaky: false, retries: 0 },
+          rulesRetrieved: [],
+          at: new Date().toISOString(),
+        };
+      },
+    };
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-rewritten-cancel", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
+      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => cancellablePort },
+    );
+    await new Promise((r) => setImmediate(r)); // let the job claim the queue controller
+    assert.equal(cancelTrackedRun(queue, id), true, "a live rewritten run must be cancellable via the queue signal");
+    // Give the port's abort listener a tick to fire before asserting.
+    await new Promise((r) => setImmediate(r));
+    assert.equal(observedAborted, true, "the rewritten port's run() must observe the queue's AbortSignal — the gap this closes");
+    const cancelledRecord = getRecord(id)!;
+    assert.equal(cancelledRecord.status, "done");
+    assert.equal(cancelledRecord.verdict, "infra-error", "matches cancelTrackedRun's own aborted-terminal mapping");
+    // Now let the port's stale promise resolve LATE (as if it kept running headless) — this must
+    // NEVER overwrite the already-finalized cancelled record with a stale "pass" verdict.
+    resolveLate?.();
+    await queue.drain();
+    const finalRecord = getRecord(id)!;
+    assert.equal(finalRecord.status, "done");
+    assert.equal(finalRecord.verdict, "infra-error", "a late resolution from a cancelled rewritten run must NOT overwrite the finalized cancelled record");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("cancelTrackedRun + an UNRELATED late crash: the catch branch must NOT overwrite the finalized cancelled record", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    let rejectLate: ((e: Error) => void) | undefined;
+    // A rewritten port that observes the cancel, then — in the async gap after cancelTrackedRun has
+    // already finalized the record — its own work rejects with an UNRELATED (non-cancel) error,
+    // routing to the queue callback's catch branch. Without the catch-branch guard, that catch would
+    // overwrite the accurate "cancelled" record with a crash note + fire a spurious incident.
+    const crashingPort: RunPipelinePort = {
+      run: async (_input, signal) => {
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted) return resolve();
+          signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        await new Promise<never>((_resolve, reject) => { rejectLate = reject; });
+        throw new Error("unreachable — rejectLate drives the crash");
+      },
+    };
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-catch-cancel-race", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
+      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => crashingPort },
+    );
+    await new Promise((r) => setImmediate(r)); // let the job claim the queue controller
+    assert.equal(cancelTrackedRun(queue, id), true);
+    await new Promise((r) => setImmediate(r)); // let the port's abort listener fire
+    const cancelledNote = getRecord(id)!.note;
+    // Now the port's own work rejects LATE with an unrelated error → the catch branch runs.
+    rejectLate?.(new Error("OpenCode 500 — unrelated crash racing the cancel"));
+    await queue.drain();
+    const finalRecord = getRecord(id)!;
+    assert.equal(finalRecord.verdict, "infra-error");
+    assert.equal(finalRecord.note, cancelledNote, "the catch branch must NOT overwrite the cancelled record's note with a crash note (nor fire a spurious incident — the guard returns before both)");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
 test("the run does NOT execute synchronously — it is deferred to the queue (no bypass)", async () => {
   const queue = new JobQueue();
   const id = enqueueTrackedRun(

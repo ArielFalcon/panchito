@@ -38,8 +38,8 @@ export class RewrittenOrchestratorAdapter implements RunPipelinePort {
     this.useCase = new RunQaUseCase(deps);
   }
 
-  async run(input: RunInput): Promise<RunOutcome> {
-    const result = await this.useCase.run(input);
+  async run(input: RunInput, signal?: AbortSignal): Promise<RunOutcome> {
+    const result = await this.useCase.run(input, signal);
     return toOutcome(input, result);
   }
 }

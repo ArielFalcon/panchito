@@ -915,6 +915,63 @@ test("FIX 3 (D.7 batch 2): the static-fix loop is SKIPPED entirely when generati
   assert.equal(generateCallCount, 1, "the static-fix loop must never regenerate when there is nothing to repair (matches the legacy's (result?.specs.length ?? 0) > 0 guard)");
 });
 
+// ── Plan 7.1 — AbortSignal propagation (closes the rewritten cancellation gap, engram #913).
+// The queue's AbortSignal is a SEPARATE transport arg on run(), not a field on RunQaInput —
+// mirrors the legacy runPipeline's own trailing signal parameter. An already-aborted signal must
+// short-circuit BEFORE any port is called (no execution, no generation, no publish, no persist) —
+// this is a cancellation, not a real failure to teach the learner from. ─────────────────────────
+
+test("run() honors an already-aborted signal — no execution, no generation, no persist", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let generated = false;
+  let executed = false;
+  let saved = false;
+  const { ports } = stubPorts({
+    generate: async () => { generated = true; return { specs: ["a.spec.ts"], approved: true }; },
+    execute: async () => { executed = true; return { verdict: "pass", cases: [], logs: "" }; },
+  });
+  ports.runHistory.save = async () => { saved = true; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "plan7-1-already-aborted" }, controller.signal);
+
+  assert.equal(generated, false, "generation must never run once the signal is already aborted");
+  assert.equal(executed, false, "execution must never run once the signal is already aborted");
+  assert.equal(saved, false, "an aborted run must not persist a RunOutcome (it is a cancellation, not a real result)");
+  assert.equal(out.decision.verdict, "infra-error", "matches cancelTrackedRun's own aborted-terminal mapping (src/server/runner.ts)");
+  assert.equal(out.decision.sideEffect, "none");
+});
+
+test("run() aborted mid-run (between validate and execute) stops before execute() and does not persist", async () => {
+  const controller = new AbortController();
+  let executed = false;
+  const { ports } = stubPorts({
+    validate: async () => { controller.abort(); return { ok: true, errors: [] }; },
+    execute: async () => { executed = true; return { verdict: "pass", cases: [], logs: "" }; },
+  });
+  let saved = false;
+  ports.runHistory.save = async () => { saved = true; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "plan7-1-mid-run-abort" }, controller.signal);
+
+  assert.equal(executed, false, "execution must never run once the signal aborts mid-run");
+  assert.equal(saved, false);
+  assert.equal(out.decision.verdict, "infra-error");
+  assert.equal(out.decision.sideEffect, "none");
+});
+
+test("run() with no signal at all behaves exactly as before (no second-arg regression)", async () => {
+  const { ports } = stubPorts();
+  const useCase = new RunQaUseCase(ports);
+
+  const out = await useCase.run(baseInput);
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(out.decision.sideEffect, "pr");
+});
+
 test("FIX E: infra-error calls runHistory.save() but NOT learning.fold()", async () => {
   let saveCallCount = 0;
   let foldCallCount = 0;

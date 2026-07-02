@@ -83,19 +83,12 @@ export interface RunnerDeps {
 // boundary — those stay `[]`/`""`/undefined here rather than invented. Full per-case + outcome
 // fidelity is the shadow-comparison harness's job (Slice F.1), not this dispatch seam.
 //
-// Cancellation gap (DORMANT — surfaced by the dual judgment-day review of this diff): the queue
-// callback's AbortSignal is deliberately NOT threaded here, because RunPipelinePort.run(input)
-// carries no signal in its shape. On the opt-in rewritten path, cancelTrackedRun would finalize the
-// record as cancelled while port.run keeps running headless — and its late resolution could then
-// overwrite the finalized record with a stale verdict. This is UNREACHABLE in production today (no
-// caller supplies engineFactory — cli.ts/index.ts stay legacy) and stays dormant through Slice F.2
-// (operator-invoked shadow runs only, where the operator controls the process). BEFORE the cutover
-// (Plan 7) wires the rewritten engine as a production default, RunPipelinePort.run MUST be widened
-// to accept an AbortSignal threaded into RunQaUseCase so cancellation propagates — do NOT ship the
-// port production-live without it. A local Promise.race here was rejected as the fix: it would leave
-// port.run running headless anyway and risks double-finalizing against cancelTrackedRun; the correct
-// fix is at the port, designed and tested holistically when the port goes live.
-async function runViaRewrittenEngine(port: RunPipelinePort, req: RunRequest, runId: string): Promise<QaRunResult> {
+// Cancellation (Plan 7.1, engram #913): the queue callback's AbortSignal IS threaded into
+// port.run(input, signal) — RunPipelinePort.run now accepts an optional signal (widened at the
+// port), and RunQaUseCase checks signal?.aborted at every phase boundary, so a cancelled rewritten
+// run actually stops instead of resolving late and overwriting the record cancelTrackedRun already
+// finalized.
+async function runViaRewrittenEngine(port: RunPipelinePort, req: RunRequest, runId: string, signal: AbortSignal): Promise<QaRunResult> {
   const input: RunInput = {
     app: req.app,
     sha: Sha.of(req.sha),
@@ -105,7 +98,7 @@ async function runViaRewrittenEngine(port: RunPipelinePort, req: RunRequest, run
     runId,
     ...(req.guidance ? { guidance: req.guidance } : {}),
   };
-  const outcome = await port.run(input);
+  const outcome = await port.run(input, signal);
   return {
     sha: outcome.sha,
     verdict: outcome.verdict,
@@ -178,7 +171,7 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
       const engine = selectEngine(process.env);
       const run: QaRunResult =
         engine === "rewritten" && deps.engineFactory
-          ? await runViaRewrittenEngine(deps.engineFactory(appConfig), req, record.id)
+          ? await runViaRewrittenEngine(deps.engineFactory(appConfig), req, record.id, signal)
           : await runPipeline(
               appConfig,
               req.sha,
@@ -247,6 +240,19 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
                 deps.runEvents?.publish(record.id, { type: "test.discovered", name, ...(file ? { file } : {}) });
               },
             );
+      // Plan 7.1 (engram #913): guard the happy-path finalize against a race with cancelTrackedRun.
+      // A cancelled record is ALREADY "done" (cancelTrackedRun finalizes synchronously the moment it
+      // aborts the queue's signal — see cancelTrackedRun below). If run.run()'s own promise resolves
+      // late (e.g. a port that observed the abort but its own async boundary didn't propagate it
+      // fast enough), this stale resolution must NOT overwrite the already-finalized cancelled
+      // record with whatever verdict it happened to produce. A NO-OP on a normal run (status is
+      // "running" here until this very finalize) — it only fires when cancelTrackedRun already
+      // finalized the record. The catch branch below carries the SYMMETRIC guard for the crash path
+      // (an unrelated error racing a cancel), so BOTH exit paths are protected.
+      if (getRecord(record.id)?.status === "done") {
+        console.log(`[qa] discarding stale late resolution for ${req.app}@${req.sha} — record already finalized (cancelled)`);
+        return;
+      }
       deps.runEvents?.publish(record.id, {
         type: "run.verdict",
         verdict: run.verdict,
@@ -270,6 +276,17 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
       });
       console.log(`[qa] run finished ${req.app}@${req.sha}: verdict=${run.verdict}`);
     } catch (err) {
+      // Plan 7.1 (engram #913): SYMMETRIC guard to the happy-path one above. If the run was already
+      // finalized as cancelled (status "done"), an UNRELATED error that threw in the async gap
+      // between checkSignal() checkpoints AFTER an operator cancel must NOT overwrite the accurate
+      // "cancelled by operator" record with a misleading crash note — NOR fire the spurious
+      // maintainer-eligible incident (recordIncident below) for what was only a cancel race. (The
+      // cancel throw itself converges harmlessly via isInfraError; this guards the unrelated-crash
+      // case that does not.)
+      if (getRecord(record.id)?.status === "done") {
+        console.log(`[qa] discarding post-cancel crash for ${req.app}@${req.sha} — record already finalized`);
+        return;
+      }
       // A crash MUST finalize the record (status=done) — otherwise it stays
       // "running" forever and `qa run --watch` hangs waiting for a verdict.
       const msg = redactError(err);

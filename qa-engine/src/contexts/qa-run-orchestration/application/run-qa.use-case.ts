@@ -140,8 +140,14 @@ const DEFAULT_CONFIG: RunQaConfig = {
 export class RunQaUseCase {
   constructor(private readonly deps: RunQaUseCaseDeps) {}
 
-  async run(input: RunQaInput): Promise<RunQaResult> {
+  async run(input: RunQaInput, signal?: AbortSignal): Promise<RunQaResult> {
     const cfg: RunQaConfig = { ...DEFAULT_CONFIG, ...this.deps.config };
+
+    // Plan 7.1 (engram #913): an already-aborted signal short-circuits BEFORE the entry gate —
+    // the queue cancelled this run before it ever started; there is nothing to gate/prepare/etc.
+    if (signal?.aborted) {
+      return this.abortedResult();
+    }
 
     // Phase: gate (DeployGatePort). Absent -> always serving (static sites / code target [SWAP]).
     if (this.deps.deployGate) {
@@ -149,6 +155,9 @@ export class RunQaUseCase {
       if (!isOk(gateResult)) {
         return this.infraErrorResult();
       }
+    }
+    if (signal?.aborted) {
+      return this.abortedResult();
     }
 
     // Phase: prepare (WorkspacePort).
@@ -167,11 +176,14 @@ export class RunQaUseCase {
         return this.skippedResult();
       }
     }
+    if (signal?.aborted) {
+      return this.abortedResult();
+    }
 
     const generating = true; // this composition always attempts generation (diff-mode skip already handled above)
 
     // Phase: generate (GenerationPort).
-    const generated = await this.deps.generation.generate([], workspace.specDir);
+    const generated = await this.deps.generation.generate([], workspace.specDir, signal);
 
     // Agent no-op: approved + zero specs -> skipped (CLAUDE.md invariant: a VALID skipped, never invalid).
     //
@@ -225,7 +237,7 @@ export class RunQaUseCase {
     while (!validation.ok && !validation.infra && generating && lastGenerated.specs.length > 0 && staticFixRounds < MAX_STATIC_FIX_ROUNDS) {
       staticFixRounds++;
       retries++;
-      lastGenerated = await this.deps.generation.generate([], workspace.specDir);
+      lastGenerated = await this.deps.generation.generate([], workspace.specDir, signal);
       validation = await this.deps.validation.validate(workspace.specDir);
     }
 
@@ -285,6 +297,9 @@ export class RunQaUseCase {
       // the whole legacy function body, src/pipeline.ts:1027).
       return await this.terminalResult("infra-error", cfg, input, { generating, static: false }, reviewerApprovedFromGeneration, false, retries);
     }
+    if (signal?.aborted) {
+      return this.abortedResult();
+    }
 
     // Phase: execute (ExecutionPort) — SKIPPED entirely for "context" mode.
     //
@@ -307,7 +322,10 @@ export class RunQaUseCase {
     // to report per-case) — never fabricating a Playwright run.
     let run = input.mode === "context"
       ? { verdict: "pass" as const, cases: [] as QaCase[], logs: generated.note ?? "" }
-      : await this.deps.execution.execute(workspace.specDir);
+      : await this.deps.execution.execute(workspace.specDir, signal);
+    if (signal?.aborted) {
+      return this.abortedResult();
+    }
 
     // Phase: FixLoop (Task D.4) — driven only when the initial verdict is "fail". Context mode's
     // synthetic "pass" above never enters this branch, matching the legacy's "never execute" rule.
@@ -318,13 +336,13 @@ export class RunQaUseCase {
     if (run.verdict === "fail") {
       const fixLoopExecution: FixLoopExecutionPort = {
         execute: async () => {
-          const r = await this.deps.execution.execute(workspace.specDir);
+          const r = await this.deps.execution.execute(workspace.specDir, signal);
           return { verdict: r.verdict, cases: r.cases };
         },
       };
       const fixLoopGeneration: FixLoopGenerationPort = {
         generate: async () => {
-          const r = await this.deps.generation.generate([], workspace.specDir);
+          const r = await this.deps.generation.generate([], workspace.specDir, signal);
           return { specs: r.specs, approved: r.approved, note: r.note };
         },
       };
@@ -607,6 +625,16 @@ export class RunQaUseCase {
       gateSignals: { static: false, coverageRatio: null, valueScore: null, retries: 0, preExecAmbiguityCatches: 0, deterministicSelectorBlocks: 0 },
       cases: [],
     };
+  }
+
+  // Plan 7.1 (engram #913) — the aborted-terminal mapping. A cancelled run is NOT a real failure to
+  // teach the learner from: it maps to the SAME shape infraErrorResult() already returns
+  // (verdict:"infra-error", sideEffect:"none", never persisted) because that is EXACTLY what
+  // cancelTrackedRun (src/server/runner.ts) already writes when it finalizes a cancelled record
+  // (verdict:"infra-error", note:"cancelled by operator") — reusing the existing terminal shape
+  // keeps both engines' cancellation outcome byte-identical rather than inventing a new verdict.
+  private abortedResult(): RunQaResult {
+    return this.infraErrorResult();
   }
 
   // FIX E (judgment-day): persist/fold on the two terminal early-exits this helper serves,

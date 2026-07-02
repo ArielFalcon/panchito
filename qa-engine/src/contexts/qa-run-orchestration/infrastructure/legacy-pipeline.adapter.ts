@@ -28,7 +28,7 @@ export interface LegacyRunner {
 export class LegacyPipelineAdapter implements RunPipelinePort {
   constructor(private readonly legacy: LegacyRunner) {}
 
-  async run(input: RunInput): Promise<RunOutcome> {
+  async run(input: RunInput, signal?: AbortSignal): Promise<RunOutcome> {
     // legacyOpts carries cross-repo routing (triggerRepo) opaquely — the composition root/scenario
     // supplies it; RunInput is NOT widened (cross-repo stays opaque inside the adapter for Plan 6).
     const opts = {
@@ -38,7 +38,12 @@ export class LegacyPipelineAdapter implements RunPipelinePort {
       runId: input.runId,
       ...this.legacy.legacyOpts,
     };
-    const result = await this.legacy.runPipeline(this.legacy.app, input.sha.value, this.legacy.deps, input.source, opts);
+    // Plan 7.1 (engram #913): forward signal to runPipeline's OWN existing 9th positional parameter
+    // (src/pipeline.ts:975-993 — onStep, onCase, onSpecs, signal, in that order). onStep/onCase/
+    // onSpecs are padded undefined (this adapter never wired those callbacks before this change and
+    // still doesn't) so signal lands at its real position rather than being silently swallowed by
+    // the `...cbs: unknown[]` spread.
+    const result = await this.legacy.runPipeline(this.legacy.app, input.sha.value, this.legacy.deps, input.source, opts, undefined, undefined, undefined, signal);
     // R2 — consecutiveReviewerFailures is a module-level `let` in pipeline.ts that survives between
     // queue entries (a cross-run side effect). The adapter delegates to the unchanged function, so
     // it INHERITS this defect for the legacy path. Documented (bug register entry #1, behavior-
