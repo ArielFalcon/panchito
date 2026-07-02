@@ -27,7 +27,15 @@ function workdirRoot(): string {
 // the push credential to the LLM and to untrusted watched-repo lifecycle scripts.
 // Auth happens exclusively through the transient -c insteadOf rewrite (authHeaderArgs).
 function tokenlessUrl(repo: string): string {
-  const base = process.env.GIT_REMOTE_BASE ?? "https://github.com";
+  const base = (process.env.GIT_REMOTE_BASE ?? "https://github.com").replace(/\/+$/, "");
+  // Local-path clone bases are only intended for bare local repos like "jhipster-store".
+  // Applying a global `/app/local-repos` override to normal owner/repo apps rewrites
+  // them to nonexistent local paths (e.g. `/app/local-repos/ArielFalcon/portfolio.git`)
+  // and crashes `git fetch origin`. For GitHub-shaped repos, fall back to github.com
+  // unless the override is itself a URL.
+  if (!base.includes("://") && repo.includes("/")) {
+    return `https://github.com/${repo}.git`;
+  }
   return `${base}/${repo}.git`;
 }
 

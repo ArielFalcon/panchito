@@ -88,6 +88,28 @@ test("ensureMirrorAtBranch clone URL is tokenless with the insteadOf rewrite too
   }
 });
 
+test("owner/repo apps ignore a local-path GIT_REMOTE_BASE override and stay on github.com", async () => {
+  process.env.GIT_REMOTE_BASE = "/app/local-repos";
+  try {
+    const d = recorder(false);
+    await ensureMirror("ArielFalcon/portfolio", "abc1234", d);
+    assert.deepEqual(d.calls[0], ["clone", "https://github.com/ArielFalcon/portfolio.git", "/tmp/mirrors/ArielFalcon__portfolio"]);
+  } finally {
+    delete process.env.GIT_REMOTE_BASE;
+  }
+});
+
+test("bare local repos still honor a local-path GIT_REMOTE_BASE override", async () => {
+  process.env.GIT_REMOTE_BASE = "/app/local-repos";
+  try {
+    const d = recorder(false);
+    await ensureMirror("jhipster-store", "abc1234", d);
+    assert.deepEqual(d.calls[0], ["clone", "/app/local-repos/jhipster-store.git", "/tmp/mirrors/jhipster-store"]);
+  } finally {
+    delete process.env.GIT_REMOTE_BASE;
+  }
+});
+
 test("existing mirror: origin is reset to the tokenless URL before fetch (scrubs token persisted by older clones)", async () => {
   process.env.GITHUB_TOKEN = "sekret-token";
   try {

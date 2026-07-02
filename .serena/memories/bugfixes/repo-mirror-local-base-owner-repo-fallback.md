@@ -1,0 +1,4 @@
+- Bugfix: `src/integrations/repo-mirror.ts` must ignore a local-path `GIT_REMOTE_BASE` override for GitHub-shaped `owner/repo` app configs.
+- Root cause: the mirror URL builder applied `/app/local-repos` blindly to all repos, producing paths like `/app/local-repos/ArielFalcon/portfolio.git` and causing `git fetch origin` to fail when only bare local repos such as `jhipster-store` are mounted there.
+- Fix: when `GIT_REMOTE_BASE` is not a URL and the repo string contains `/`, fall back to `https://github.com/${repo}.git`; still honor local-path overrides for bare repo names.
+- Regression coverage: `src/integrations/repo-mirror.test.ts` covers both the portfolio-style owner/repo fallback and the intended local bare-repo path.
