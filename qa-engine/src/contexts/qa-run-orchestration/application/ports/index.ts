@@ -46,6 +46,13 @@ export interface RunInput {
   // "unknown" (src/pipeline.ts:2912's `!triggerService` conjunct; CLAUDE.md: "Change-coverage is
   // unknown for these [cross-repo] runs"). Absent (the common case) -> ordinary monorepo run.
   triggerRepo?: string;
+  // Audit CRITICAL (task #33): mirrors legacy's RunOptions.previousNamespace (src/types.ts) — see
+  // CleanupPort's own header (below) and RunQaInput.previousNamespace's own doc
+  // (run-qa.use-case.ts) for the full contract. Threaded straight through by
+  // RewrittenOrchestratorAdapter.run(input) into RunQaUseCase.run(input) unchanged (this type is
+  // structurally what RunQaInput expects — see that adapter's own header on why no remapping is
+  // needed beyond a type-level cast).
+  previousNamespace?: string;
 }
 export interface RunPipelinePort {
   // signal is a SEPARATE transport arg (mirrors legacy runPipeline's own trailing signal
@@ -359,6 +366,62 @@ export interface RunHistoryPort {
 // verdict"), and RunQaUseCase.run is the place that maps the throw to infraErrorResult().
 export interface SetupPort {
   setup(specDir: string, signal?: AbortSignal): Promise<void>;
+}
+
+// CleanupPort — audit CRITICAL (task #33): orphan test-data cleanup, missing from this rewrite
+// entirely until now. Mirrors legacy's src/pipeline.ts:1450-1458 EXACTLY:
+//
+//   if (opts.previousNamespace && !isCode && app.dev?.baseUrl) {
+//     await deps.cleanup(e2eDir, { baseUrl: app.dev.baseUrl, namespace: opts.previousNamespace, testIdAttribute })
+//       .catch((err) => { log(`cleanup warning (non-blocking): ${err.message}`); });
+//   }
+//
+// WHEN legacy cleans (verified against src/pipeline.ts + src/server/runner.ts's own
+// enqueueTrackedRun): NOT every run. Only when a PREVIOUS run's namespace is known to carry
+// possibly-orphaned data — src/server/runner.ts:313-324 computes `previousNamespace` from the
+// immediately-prior run RECORD (via testDataNamespace(prefix, prev.sha, prev.id)) ONLY when that
+// prior run's own status was "running"/"enqueued" (i.e. it never reached a terminal state — a
+// crash/SIGKILL/docker-restart interrupted it mid-flight) OR its verdict was "infra-error". A
+// prior run that finished cleanly (pass/fail/flaky/invalid/skipped) leaves previousNamespace
+// undefined -> cleanup is skipped entirely for that run (its own in-suite `cleanup` fixture,
+// config/e2e/fixtures.ts, already tore down its own data on every attempt — there is nothing
+// orphaned to sweep). This runs BEFORE this run's OWN generation/execution begins (legacy step
+// "4a", strictly before the context-map load) — it cleans the PRIOR interrupted run's leftover
+// data, not this run's own. e2e-only (isCode has no web test data) and requires app.dev.baseUrl
+// (no live DEV target to clean against otherwise).
+//
+// WHAT cleanup does (src/qa/execute.ts's runCleanup/defaultCleanupDeps): spawns ONLY
+// `cleanup.spec.ts` (a dedicated seed spec, config/e2e/cleanup.spec.ts) with PW_CLEANUP=1 and
+// PW_NAMESPACE=<the interrupted run's BASE prefix, no per-attempt -w<worker>r<retry> suffix> —
+// every OTHER spec in the suite self-skips via `test.skip(!process.env.PW_CLEANUP, ...)`, so this
+// is a narrowly-scoped single-spec pass, not a full suite re-run. The seed's own contract: delete
+// every entity whose name starts with the base PREFIX (covers every worker/retry the interrupted
+// run used), and be IDEMPOTENT (no entities -> pass).
+//
+// FAILURE SEMANTICS (best-effort, VERIFIED against both layers): defaultCleanupDeps.runCleanup
+// itself NEVER rejects — its Promise executor only ever calls resolve(), even on a spawn error, a
+// non-zero exit, or a timeout-triggered kill (DEFAULT_CLEANUP_TIMEOUT_MS = 5 min; a timeout kills
+// the process TREE via killTree() and still resolves). The pipeline call site ALSO wraps the call
+// in `.catch((err) => log(...))` as a second, redundant safety net. A cleanup failure of ANY kind
+// (spawn error, non-zero exit, timeout) is logged as a non-blocking warning and MUST NEVER alter
+// this run's verdict, block generation, or propagate — orphan data is reaped by a LATER run's own
+// cleanup pass if this one fails.
+//
+// [SWAP] absent -> the phase is a no-op, the SAME backward-compatible posture SetupPort/
+// PreExecGroundingPort/PreGenerationGroundingPort already established — no orphan-data cleanup
+// runs, never fabricated, never blocking (matches legacy's own `opts.previousNamespace` absent
+// case exactly, which also skips the call entirely).
+//
+// baseUrl/testIdAttribute are DELIBERATELY absent from this signature — mirrors SetupPort's own
+// "e2e-vs-code dispatch is the ADAPTER's concern... this port's own signature stays generic"
+// precedent immediately above: RunQaUseCase has no baseUrl of its own anywhere in its body (every
+// other port that needs it — ExecutionPort, GenerationPort's adapter — resolves it from its OWN
+// static per-run composition context, the "adapter resolves its own paths" precedent
+// PreExecGroundingPort/ExecutionPort already use). A real adapter (the bridge) is constructed with
+// baseUrl/testIdAttribute as STATIC per-run context (matching ExecutionPortAdapter/
+// SetupPortAdapter's own constructor shape) and reads them from there, not from this call.
+export interface CleanupPort {
+  cleanup(specDir: string, opts: { namespace: string; signal?: AbortSignal }): Promise<void>;
 }
 
 // PreExecGroundingPort — Plan 7-R B5.3: the capture half of the pre-execution grounding gate.

@@ -90,11 +90,20 @@ export interface RunnerDeps {
   // OPTIONAL: a factory that ignores the 4th argument keeps behaving exactly as before this fix
   // (record.step never advances) — this is what made the bug possible in the first place, so every
   // REAL factory (src/server/rewritten-engine-factory.ts) MUST thread it through.
+  //
+  // `previousNamespace` (5th param, audit CRITICAL fix, task #33): the RESOLVED prior-run
+  // namespace (enqueueTrackedRun's own local `previousNamespace`, below) — threaded through so the
+  // factory can wire it into CompositionConfig.previousNamespace, which composition-root.ts's
+  // wireBridges() and RunQaUseCase's own cleanup phase gate on. OPTIONAL: a factory that ignores
+  // the 5th argument keeps behaving exactly as before this fix (no orphan-data cleanup on the
+  // rewritten engine) — matches every other trailing-optional-arg precedent in this signature
+  // (namespace/run/observer above all followed the same additive pattern).
   engineFactory?: (
     appConfig: AppConfig,
     namespace: string,
     run: { mode: RunMode; guidance?: string },
     observer?: ObserverPort,
+    previousNamespace?: string,
   ) => RunPipelinePort;
 }
 
@@ -252,6 +261,12 @@ async function runViaRewrittenEngine(
   appConfig: AppConfig,
   runEvents: RunEventStore | undefined,
   liveAnnounced?: Map<string, LiveAnnouncedStatus>,
+  // Audit CRITICAL (task #33): the RESOLVED previousNamespace — mirrors the legacy branch's own
+  // `previousNamespace` field on runPipeline's RunOptions (below). NOT req.previousNamespace
+  // directly: enqueueTrackedRun's own local `previousNamespace` (its own doc, below) already
+  // reconciles req.previousNamespace with the reconstructed-from-history fallback — this param is
+  // that RESOLVED value, threaded through by the queue callback that already computed it.
+  previousNamespace?: string,
 ): Promise<QaRunResult> {
   assertTriggerRepoDeclared(appConfig, req.triggerRepo);
   const input: RunInput = {
@@ -263,6 +278,7 @@ async function runViaRewrittenEngine(
     runId,
     ...(req.guidance ? { guidance: req.guidance } : {}),
     ...(req.triggerRepo ? { triggerRepo: req.triggerRepo } : {}),
+    ...(previousNamespace ? { previousNamespace } : {}),
   };
   const outcome = await port.run(input, signal);
   // W3 F3: thread the real per-case results into history.addCase (the single source of truth for
@@ -386,13 +402,16 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
               // Audit fix (judgment-day): thread the REQUESTED mode/guidance into the rewritten
               // engineFactory — mirrors the namespace precedent immediately above. Previously the
               // factory hardcoded mode:"diff" internally, silently mis-prompting every non-diff run.
-              deps.engineFactory(appConfig, runNamespace, { mode: req.mode, ...(req.guidance ? { guidance: req.guidance } : {}) }, observer),
+              deps.engineFactory(appConfig, runNamespace, { mode: req.mode, ...(req.guidance ? { guidance: req.guidance } : {}) }, observer, previousNamespace),
               req,
               record.id,
               signal,
               appConfig,
               deps.runEvents,
               liveAnnounced,
+              // Audit CRITICAL (task #33): the SAME resolved previousNamespace the legacy branch's
+              // own RunOptions.previousNamespace receives below — threads the CleanupPort gate.
+              previousNamespace,
             )
           : await runPipeline(
               appConfig,

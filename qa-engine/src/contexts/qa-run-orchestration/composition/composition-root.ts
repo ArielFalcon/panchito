@@ -45,6 +45,7 @@ import { WorkspacePortAdapter, type CheckoutFn } from "../infrastructure/bridges
 import { DeployGatePortAdapter, NullDeployGateAdapter, type VersionPollFn } from "../infrastructure/bridges/deploy-gate-port.adapter.ts";
 import { InMemoryRunHistoryAdapter, FileRunHistoryAdapter } from "../infrastructure/bridges/run-history-port.adapter.ts";
 import { SetupPortAdapter, type SetupPortCollaborators } from "../infrastructure/bridges/setup-port.adapter.ts";
+import { CleanupPortAdapter, type CleanupPortCollaborators } from "../infrastructure/bridges/cleanup-port.adapter.ts";
 import { PreGenerationGroundingPortAdapter, type PreGenerationGroundingCollaborators } from "../infrastructure/bridges/pre-generation-grounding-port.adapter.ts";
 import { ReviewDomGroundingPortAdapter, type ReviewDomGroundingCollaborators } from "../infrastructure/bridges/review-dom-grounding-port.adapter.ts";
 
@@ -122,6 +123,21 @@ export interface CompositionConfig {
   // (RunQaUseCaseDeps.setup itself stays optional), matching every composition built before this
   // field existed.
   setupCollaborators?: SetupPortCollaborators;
+
+  // CleanupPort collaborator (audit CRITICAL, task #33) — orphan test-data cleanup, e2e-only
+  // (mirrors legacy's `!isCode` conjunct; wireBridges() below skips wiring this port entirely on
+  // the code target, mirroring groundingCollaborators' own `!cfg.isCode` gating precedent).
+  // OPTIONAL: absent -> the use-case's cleanup phase is a no-op (RunQaUseCaseDeps.cleanup itself
+  // stays optional), the SAME posture as setupCollaborators above.
+  //
+  // NOTE: the PRIOR run's namespace itself (RunQaInput.previousNamespace's own doc,
+  // run-qa.use-case.ts) is deliberately NOT a CompositionConfig field — unlike branch/mode/
+  // guidance (which the port adapters need as STATIC per-run context), previousNamespace is
+  // consumed directly off RunInput/RunQaInput by RunQaUseCase itself (the use-case reads
+  // `input.previousNamespace`, not a composition-time value) — unnecessary to duplicate onto this
+  // config too. The caller (src/server/runner.ts's runViaRewrittenEngine) sets it on RunInput at
+  // the port.run(input) call site, the SAME seam triggerRepo/guidance already use.
+  cleanupCollaborators?: CleanupPortCollaborators;
 
   // PreGenerationGroundingPort / ReviewDomGroundingPort collaborators (Plan 7-R W4, audit CRITICAL):
   // OPTIONAL, mirroring setupCollaborators' own "[SWAP] absent -> the phase is a no-op" precedent.
@@ -302,6 +318,15 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
   // running exactly as before.
   const setup = cfg.setupCollaborators ? new SetupPortAdapter(cfg.setupCollaborators, { target: cfg.target }) : undefined;
 
+  // CleanupPort (audit CRITICAL, task #33) — e2e-only (mirrors legacy's `!isCode` conjunct and
+  // groundingCollaborators' own `!cfg.isCode` gating precedent immediately below): wire NEITHER on
+  // the code target regardless of what collaborators cfg supplies (isCode has no web test data to
+  // clean). OPTIONAL otherwise: absent -> `cleanup` stays undefined, and RunQaUseCaseDeps.cleanup
+  // (also optional) makes the use-case's cleanup phase a no-op.
+  const cleanup = !cfg.isCode && cfg.cleanupCollaborators
+    ? new CleanupPortAdapter(cfg.cleanupCollaborators, { baseUrl: cfg.baseUrl, testIdAttribute: cfg.testIdAttribute })
+    : undefined;
+
   // Plan 7-R W4 (audit CRITICAL): the pre-generation grounding phase — isCode has no DOM/routes to
   // ground (mirrors legacy's own `!isCode` guards, pipeline.ts:1466/1643/2078), so wire NEITHER port
   // on the code target regardless of what collaborators cfg supplies. OPTIONAL otherwise: absent ->
@@ -404,6 +429,7 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
     deployGate,
     runHistory,
     ...(setup ? { setup } : {}),
+    ...(cleanup ? { cleanup } : {}),
     ...(preGenerationGrounding ? { preGenerationGrounding } : {}),
     ...(reviewDomGrounding ? { reviewDomGrounding } : {}),
     ...(cfg.observer ? { observer: cfg.observer } : {}),

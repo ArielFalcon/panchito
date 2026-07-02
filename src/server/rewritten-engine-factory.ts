@@ -106,7 +106,7 @@ import { parseVerdict } from "../integrations/verdict-parse";
 import { parseReviewerVerdict } from "../integrations/verdict-validate";
 import { roleWindowBytes } from "../integrations/model-window-catalog";
 import { validateSpecs, defaultValidateDeps } from "../qa/validate";
-import { runE2E, defaultExecuteDeps } from "../qa/execute";
+import { runE2E, defaultExecuteDeps, defaultCleanupDeps } from "../qa/execute";
 import { runCodeTests, defaultCodeExecuteDeps, runCodeCoverage } from "../qa/code-runner";
 import { setupE2eProject, defaultSetupDeps } from "../qa/setup";
 import { setupCodeProject, defaultCodeSetupDeps } from "../qa/code-runner";
@@ -422,6 +422,17 @@ export function buildRewrittenCompositionConfig(
       e2e: (specDir, opts) => setupE2eProject(specDir, defaultSetupDeps, opts),
       code: (specDir, opts) => setupCodeProject(specDir, defaultCodeSetupDeps, opts),
     },
+    // CleanupPort (audit CRITICAL, task #33): orphan test-data cleanup — the SAME real
+    // defaultCleanupDeps.runCleanup src/pipeline.ts's own defaultPipelineDeps() wires for the
+    // legacy engine (src/pipeline.ts:432's `cleanup: (e2eDir, opts) =>
+    // defaultCleanupDeps.runCleanup({ dir: e2eDir, ...opts })`), so both engines clean an
+    // interrupted prior run's DEV data identically. e2e-only by construction (CleanupPortAdapter's
+    // own collaborators shape has no `code` slot — composition-root.ts's wireBridges() also gates
+    // this entire port on `!cfg.isCode`, matching setupCollaborators' own e2e/code split one layer
+    // up here, since code mode has no web test data to clean).
+    cleanupCollaborators: {
+      e2e: (args) => defaultCleanupDeps.runCleanup(args),
+    },
     // W4 follow-up (Task #37 audit CRITICAL, a9e7dfb's own "KNOWN FOLLOW-UP" note): wire the
     // PreGenerationGroundingPort / ReviewDomGroundingPort collaborators explicitly, mirroring
     // setupCollaborators' own visible-wiring precedent immediately above, rather than relying on
@@ -558,9 +569,18 @@ export function buildRewrittenCompositionConfig(
 // past its initial value and /api/runs/:id/events stays empty for the ENTIRE run — this was the
 // root cause: RunnerDeps.engineFactory's signature had no seam for an observer at all, so even
 // though ObserverPort/RunQaUseCaseDeps.observer existed, nothing ever constructed one.
+// The `previousNamespace` parameter (audit CRITICAL fix, task #33): accepted here for signature
+// parity with RunnerDeps.engineFactory (src/server/runner.ts), which now threads it as a 5th
+// argument. NOT forwarded into CompositionConfig — RunQaUseCase reads previousNamespace directly
+// off RunInput/RunQaInput (set by runner.ts's runViaRewrittenEngine at the port.run(input) call
+// site, the SAME per-run seam triggerRepo/guidance already use), not off a composition-time
+// config — see CompositionConfig.cleanupCollaborators' own doc (composition-root.ts) for why this
+// field is deliberately NOT duplicated onto CompositionConfig. Accepting (and ignoring) it here
+// keeps this factory's own call signature aligned with the caller's, rather than silently
+// swallowing an argument the caller now always passes.
 export function createRewrittenEngineFactory(
   deps: RewrittenEngineFactoryDeps,
-): (appConfig: AppConfig, namespace: string, run: { mode: RunMode; guidance?: string }, observer?: ObserverPort) => RunPipelinePort {
+): (appConfig: AppConfig, namespace: string, run: { mode: RunMode; guidance?: string }, observer?: ObserverPort, previousNamespace?: string) => RunPipelinePort {
   const env = deps.env ?? process.env;
   return (appConfig: AppConfig, namespace: string, run: { mode: RunMode; guidance?: string }, observer?: ObserverPort): RunPipelinePort => {
     const cfg = buildRewrittenCompositionConfig(appConfig, deps, namespace, run, observer);

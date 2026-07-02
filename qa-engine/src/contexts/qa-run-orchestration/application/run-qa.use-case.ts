@@ -43,6 +43,7 @@ import type {
   DeployGatePort,
   RunHistoryPort,
   SetupPort,
+  CleanupPort,
   ObserverPort,
   CommitIntent,
   PreExecGroundingPort,
@@ -106,6 +107,14 @@ export interface RunQaUseCaseDeps {
   // agent has the fixtures/config" — a throw from setup() propagates to infraErrorResult(), never a
   // code verdict (src/qa/setup.ts's own doc).
   setup?: SetupPort;
+  // [SWAP] absent -> the cleanup phase is skipped entirely (backward compatible with every
+  // pre-existing composition that has not wired a CleanupPort yet) — the SAME posture as setup
+  // above. Audit CRITICAL (task #33): orphan test-data cleanup, mirrors legacy's
+  // src/pipeline.ts:1450-1458 EXACTLY — see CleanupPort's own header (ports/index.ts) for the full
+  // "when does legacy clean" contract (only when input.previousNamespace is set, i.e. the run
+  // immediately prior to this one was interrupted or ended infra-error) and failure semantics
+  // (best-effort: a cleanup failure is logged and MUST NEVER alter this run's verdict).
+  cleanup?: CleanupPort;
   // [SWAP] absent -> every onStep()/onEvent() call below is a no-op (backward compatible with
   // every pre-existing composition/test that has not wired an ObserverPort yet). When present,
   // onStep(step, detail) fires at each phase boundary this use-case actually crosses, using the
@@ -180,6 +189,13 @@ export interface RunQaInput {
   // coverage cannot map a service repo's changed lines) — the keystone invariant "unknown" NEVER
   // blocks, unchanged. Absent -> ordinary monorepo run, unaffected.
   triggerRepo?: string;
+  // Audit CRITICAL (task #33): mirrors legacy's RunOptions.previousNamespace (src/types.ts) — the
+  // interrupted PRIOR run's namespace, computed by the caller (src/server/runner.ts's
+  // enqueueTrackedRun) ONLY when that prior run's own status was "running"/"enqueued" or its
+  // verdict was "infra-error" (see CleanupPort's own header, ports/index.ts, for the full
+  // contract). Absent -> the cleanup phase never fires this run, matching legacy's own
+  // `opts.previousNamespace &&` guard exactly.
+  previousNamespace?: string;
 }
 
 export interface RunQaResult {
@@ -333,6 +349,40 @@ export class RunQaUseCase {
         const msg = err instanceof Error ? err.message : String(err);
         console.error("[qa] setup phase failed:", err);
         return this.infraErrorResult(`setup failed: ${msg}`);
+      }
+    }
+    if (signal?.aborted) {
+      return this.abortedResult();
+    }
+
+    // Phase: cleanup (CleanupPort) — audit CRITICAL (task #33), mirrors legacy's src/pipeline.ts's
+    // step "4a" EXACTLY: orphan test-data cleanup for a PREVIOUS run that was interrupted (crash,
+    // SIGKILL, docker restart) or ended infra-error, so its leftover DEV data does not accumulate
+    // across runs. Runs strictly AFTER setup (legacy's setup — step 4 — is awaited via
+    // `Promise.all([gatePromise, setupPromise])` BEFORE step 4a ever executes, src/pipeline.ts:1301-
+    // 1306) and BEFORE generation. e2e-only (isCode has no web test data to clean) — mirrors
+    // legacy's `!isCode` conjunct (pipeline.ts:1453); the baseUrl conjunct
+    // (`app.dev?.baseUrl`) is the ADAPTER's own concern (the SAME "adapter resolves its own
+    // static per-run context" precedent ExecutionPortAdapter/SetupPortAdapter already establish —
+    // this use-case has no baseUrl of its own anywhere else in its body either). Requires
+    // input.previousNamespace (see RunQaInput's own doc — absent means the prior run finished
+    // cleanly, nothing to sweep). [SWAP] absent CleanupPort -> the phase is a no-op (backward
+    // compatible with every composition that has not wired one yet — the SAME posture setup/
+    // preExecGrounding/preGenerationGrounding already established).
+    //
+    // Best-effort by design (mirrors legacy's own posture EXACTLY — see CleanupPort's own header,
+    // ports/index.ts, for the two-layer non-throwing contract this call site still wraps in a THIRD
+    // safety net): a cleanup failure of ANY kind is logged as a non-blocking warning and MUST NEVER
+    // alter this run's verdict, block generation, or propagate.
+    if (this.deps.cleanup && input.previousNamespace && !cfg.isCode) {
+      this.deps.observer?.onStep("setup", "orphan-data cleanup (prior interrupted run)");
+      try {
+        await this.deps.cleanup.cleanup(workspace.specDir, {
+          namespace: input.previousNamespace,
+          signal,
+        });
+      } catch (err) {
+        console.error(`[qa] cleanup warning (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
       }
     }
     if (signal?.aborted) {
@@ -854,6 +904,14 @@ export class RunQaUseCase {
       retries += fixLoopResult.retries;
     }
 
+    // executedRed override (task #42): captured here, BEFORE the `if (run.verdict === "pass")`
+    // guards below narrow `run.verdict` to the literal "pass" (TypeScript would otherwise flag the
+    // override's own `run.verdict === "fail"` check as an unreachable-comparison error once inside
+    // that narrowed block) — this is the run's FINAL, post-FixLoop verdict, widened back to the full
+    // RunVerdict union so the override's condition (below, inside the review loop) type-checks
+    // while still reading the SAME value `run.verdict` holds at review time.
+    const finalRunVerdict: typeof run.verdict = run.verdict;
+
     // Phase: measure (ObjectiveSignalPort) — the keystone: unknown NEVER blocks. Consumed, never
     // re-implemented.
     let blocksPublish = false;
@@ -1013,6 +1071,36 @@ export class RunQaUseCase {
         // IMMEDIATELY, without burning a regeneration round (matches the legacy exactly — see the
         // header comment above).
         if (reviewResult.parsed === false) {
+          reviewerApproved = false;
+          break;
+        }
+        // executedRed override (task #42, dual-judge confirmed) — mirrors legacy's D4/#669-close
+        // guard EXACTLY (src/pipeline.ts:1750-1755): "a reviewer LLM that receives evidence of a red
+        // spec must not be allowed to approve it, even if the model returns approved:true." Legacy's
+        // full shape is `round === 0 && executionEvidence?.verdict === "fail"`, where
+        // executionEvidence is the D1-D5 feedback-execute phase's OWN pre-reviewer Playwright run
+        // (pipeline.ts:2339-2432) — a SEPARATE execution, under a distinct `fbNs` namespace, run
+        // BEFORE the verdictual Filter C execution specifically so the reviewer has real runtime
+        // evidence to judge. That separate phase has NO counterpart here BY DESIGN, not by omission:
+        // this use-case's review loop is only ever entered when `run.verdict === "pass"` (the outer
+        // `if (run.verdict === "pass" && cfg.needsReview)` guard above) — review runs strictly AFTER
+        // this run's own verdictual execute()+FixLoop have ALREADY produced `run`, so the runtime
+        // evidence D1-D5 exists to manufacture is already in scope as `run.verdict` itself; a second,
+        // separate pre-reviewer execution would be redundant duplicate work the D1-D5 phase's own
+        // rationale (pipeline.ts:2339-2350's "the ~+15 min cost is justified") does not extend to
+        // when the SAME evidence already exists for free.
+        //
+        // Because the outer guard already restricts entry to verdict==="pass", `run.verdict` here is
+        // ALWAYS "pass" in every REACHABLE call — this override is DORMANT defense-in-depth under the
+        // current architecture (mirrors this file's own pre-existing comment a few lines below: "the
+        // executedRed guard... :1682-1692"), pinned by a stub-forced test (run-qa.use-case.test.ts)
+        // that bypasses the outer guard to prove the override itself is correct should the review
+        // loop ever become reachable on a non-pass verdict (e.g. a future D1-D5-equivalent phase).
+        // Round-0-only, matching legacy's own stale-evidence guard: after the internal regen further
+        // down the spec is fresh and unexecuted, so the override must not fire on round >= 1.
+        const executedRed = round === 0 && finalRunVerdict === "fail";
+        if (executedRed) {
+          console.error("[qa] executedRed override (task #42, mirrors legacy D4/#669): the executed run was red — reviewer approval overridden fail-closed (round 0, known-red spec, no regeneration).");
           reviewerApproved = false;
           break;
         }
