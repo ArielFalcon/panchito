@@ -155,8 +155,10 @@ test("agent runtime manager downgrades confirmed single-provider dual config to 
     mode: "dual",
     confirmSingleDowngrade: true,
     assignments: {
+      // primary and reviewer must be DIFFERENT models — see Audit C4b (2): identical models here
+      // would trip the reviewer!=primary runtime guard and this test isn't exercising that guard.
       primary: { provider: "codex", model: "gpt-5.4" },
-      reviewer: { provider: "codex", model: "gpt-5.4" },
+      reviewer: { provider: "codex", model: "gpt-5.5" },
       chat: { provider: "codex", model: "gpt-5.4-mini" },
     },
   });

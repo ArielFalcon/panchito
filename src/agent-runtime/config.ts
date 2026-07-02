@@ -24,7 +24,7 @@ export interface PublicAgentConfig {
 const DEFAULT_MODELS: Record<AgentProvider, Record<keyof AgentRuntimeConfig["assignments"], string>> = {
   opencode: {
     // MUST match opencode/opencode.json's qa-generator model (the primary that actually runs).
-    primary: "opencode-go/kimi-k2.7-code",
+    primary: "opencode-go/deepseek-v4-pro",
     // MUST match opencode/opencode.json's qa-reviewer model (the file that actually runs the
     // reviewer on the e2e path) AND differ from `primary` — two different models guarantee
     // independent judgment. A guard test (model-config.test.ts) asserts both, so this can
@@ -88,6 +88,24 @@ export function keyPresence(env: Record<string, string | undefined> = process.en
   return { opencode: Boolean(env.OPENCODE_API_KEY), codex: Boolean(env.CODEX_API_KEY) };
 }
 
+// Audit C4b (2): runtime-independence guard. reviewer.model must never equal primary.model —
+// two DIFFERENT models are what makes the reviewer's judgment independent of the generator (a
+// generator grading its own homework via an identical model defeats the whole review step). The
+// DEFAULT_MODELS constants are guarded at build-time (model-config.test.ts), but env overrides
+// (AGENT_PRIMARY_MODEL / AGENT_REVIEWER_MODEL) can still collapse both roles onto the same model
+// at runtime — this check makes that collision fail loudly instead of silently validating ok.
+function reviewerPrimaryCollisionErrors(config: AgentRuntimeConfig): string[] {
+  const primary = config.assignments.primary;
+  const reviewer = config.assignments.reviewer;
+  if (reviewer.model === primary.model) {
+    return [
+      `reviewer (${reviewer.provider}/${reviewer.model}) must run a different model from primary ` +
+        `(${primary.provider}/${primary.model}) — identical models defeat independent judgment`,
+    ];
+  }
+  return [];
+}
+
 export function validateAgentRuntimeConfig(config: AgentRuntimeConfig, keys: KeyPresence): AgentConfigValidation {
   const errors: string[] = [];
   if (config.mode === "single") {
@@ -97,6 +115,7 @@ export function validateAgentRuntimeConfig(config: AgentRuntimeConfig, keys: Key
       if (a.provider !== config.singleProvider) errors.push(`${role} must use ${config.singleProvider} in single mode`);
       if (!a.model.trim()) errors.push(`${role} model is required`);
     }
+    errors.push(...reviewerPrimaryCollisionErrors(config));
     return { ok: errors.length === 0, errors };
   }
 
@@ -106,6 +125,7 @@ export function validateAgentRuntimeConfig(config: AgentRuntimeConfig, keys: Key
     const a = config.assignments[role];
     if (!a.model.trim()) errors.push(`${role} model is required`);
   }
+  errors.push(...reviewerPrimaryCollisionErrors(config));
   const providers = new Set(visibleRoles().map((r) => config.assignments[r].provider));
   if (providers.size < 2) {
     const downgradeProvider = [...providers][0] ?? config.singleProvider;

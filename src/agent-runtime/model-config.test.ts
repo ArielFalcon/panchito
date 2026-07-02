@@ -63,6 +63,20 @@ test("config.ts default reviewer matches opencode.json's qa-reviewer (single sou
   );
 });
 
+// Audit C4b (1): mirrors the reviewer guard above for `primary`. config.ts's DEFAULT_MODELS.opencode.primary
+// claimed (in its own comment) to match opencode.json's qa-generator model but had drifted to
+// "opencode-go/kimi-k2.7-code" (qa-maintainer's model) — the primary role that actually GENERATES tests
+// on the e2e path was silently misdocumented. This guard makes that drift fail loudly.
+test("config.ts default primary matches opencode.json's qa-generator (single source of truth)", () => {
+  const models = opencodeAgentModels();
+  const cfg = singleProviderConfig("opencode", {});
+  assert.equal(
+    cfg.assignments.primary.model,
+    models["qa-generator"],
+    "config.ts DEFAULT_MODELS.opencode.primary must equal the model opencode.json actually runs for qa-generator.",
+  );
+});
+
 // T-P0-4: generalize the reviewer!=primary guard to cover BOTH providers (AC0.2.1, AC0.2.3).
 // This test is RED until DEFAULT_MODELS.codex.reviewer is set to a model distinct from primary.
 test("reviewer differs from primary for EVERY provider (independent judgment guard)", () => {
