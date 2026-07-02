@@ -79,6 +79,7 @@ import type {
   WorkspacePort,
   DeployGatePort,
   RunHistoryPort,
+  PreExecGroundingPort,
 } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 import { BlastRadius } from "@kernel/blast-radius.ts";
 import { ok } from "@kernel/result.ts";
@@ -502,6 +503,10 @@ interface DualEngineCase {
     execute: ExecutionPort["execute"];
     measure: ObjectiveSignalPort["measure"];
     waitUntilServing: DeployGatePort["waitUntilServing"];
+    // Plan 7-R B5.3: the pre-exec grounding gate's capture port, mirroring the legacy scenario's own
+    // deps.captureRouteTrees stub (scenarios.ts) so the rewritten side exercises the SAME gate
+    // legacy's W1/W2 does — closing parity-allowlist entry cb712ccb69d2959b.
+    capture: PreExecGroundingPort["capture"];
   }>;
   input: { mode: "diff" | "complete" | "exhaustive" | "manual" | "context"; target: "e2e" | "code" };
   // Declared divergences ONLY (empty for every scenario expected to agree). A non-empty string here
@@ -846,25 +851,27 @@ const b2DualCases: DualEngineCase[] = [
   },
   {
     // scenarios.ts:586-605 — w2-preexec-block: a PRE-EXECUTION deterministic-ambiguity block
-    // (captureRouteTrees + a Pillar-2 pre-exec catalog gate) that fires BEFORE any execute() call —
-    // this mechanism is EXPLICITLY documented as unwired in RunQaUseCase (preExecAmbiguityCatches
-    // and deterministicSelectorBlocks are hardcoded to the literal 0 — see run-qa.use-case.ts's own
-    // header comment and the D.5/D.6 apply-progress). RunQaUseCase's ValidationPort/generate/execute
-    // wiring has NO equivalent pre-exec ambiguity gate to invoke, so feeding this scenario's deps
-    // through RunQaUseCase inevitably proceeds past validate (ok:true by default) straight to a
-    // clean execute() pass — a GENUINE, DECLARED divergence from the legacy's "invalid" verdict, not
-    // a bug this task fixes (the plan's own Task D.7 text names this exact port gap: "the rewritten
-    // engine's W1/W2 wiring is a Task E.0/Slice E concern, absent here by design"). Declared in
-    // parity-allowlist.json below with the port-gap rationale; asserted explicitly (not silently
-    // skipped) in the loop.
+    // (captureRouteTrees + the W1/W2 pre-exec grounding gate) that fires BEFORE any execute() call.
+    // Plan 7-R B5.3 CLOSES this port gap: PreExecGroundingPort.capture is now wired (mirrors the
+    // legacy scenario's own deps.captureRouteTrees stub — scenarios.ts:593 — which ALWAYS reports a
+    // duplicate-node "Owners" heading on /owners) and the SAME spec source the legacy scenario writes
+    // to disk (scenarios.ts:594-597) is threaded here so both engines' ambiguity check reasons about
+    // IDENTICAL ground truth. RunQaUseCase now holds the run invalid at W2 exactly like the legacy —
+    // parity-allowlist entry cb712ccb69d2959b is RETIRED (removed from parity-allowlist.json in the
+    // same commit); this scenario is no longer a declared divergence.
     name: "scenarios.ts:w2-preexec-block",
     fixtureFamily: "b2",
     legacyScenario: allScenarios.find((s) => s.name === "scenarios.ts:w2-preexec-block")!,
     config: baseConfig,
-    overrides: {},
+    overrides: {
+      capture: async () => ({
+        specSources: [
+          `import { test } from "./fixtures";\ntest("owners", async ({ page }) => {\n  await page.goto("/owners");\n  await page.getByRole("heading", { name: "Owners" }).click();\n});\n`,
+        ],
+        routes: [{ route: "/owners", nodes: ["heading: Owners", "heading: Owners"] }],
+      }),
+    },
     input: { mode: "diff", target: "e2e" },
-    declaredDivergence:
-      "W2 pre-exec ambiguity block is unwired in RunQaUseCase (preExecAmbiguityCatches/deterministicSelectorBlocks hardcoded to 0, per run-qa.use-case.ts's own header + the D.5/D.6 apply-progress) — a Task E.0/Slice E port-gap, not reproducible at this layer. Legacy: invalid/issue (pre-exec block). Rewritten: pass/pr (no equivalent gate to invoke, proceeds through a clean execute()).",
   },
   {
     // scenarios.ts:607-624 — codemode-infra-toolchain: codeApp (isCode:true), the compile gate
@@ -1005,6 +1012,13 @@ for (const c of allDualCases) {
         savedRewritten = outcome as unknown as RunOutcome;
       },
     };
+    // Plan 7-R B5.3: wire PreExecGroundingPort ONLY when the scenario declares its own capture
+    // override (mirrors the legacy side's own opt-in: scenarios.ts only sets deps.captureRouteTrees
+    // for the scenarios that need it — every other scenario's legacy captureRouteTrees is absent too,
+    // both sides then correctly measure zero pre-exec grounding activity).
+    const preExecGrounding: PreExecGroundingPort | undefined = c.overrides.capture
+      ? { capture: c.overrides.capture }
+      : undefined;
 
     const rewrittenAdapter = new RewrittenOrchestratorAdapter({
       changeAnalysis,
@@ -1018,6 +1032,7 @@ for (const c of allDualCases) {
       workspace,
       deployGate,
       runHistory,
+      ...(preExecGrounding ? { preExecGrounding } : {}),
       config: c.config,
     });
 
@@ -1044,17 +1059,24 @@ for (const c of allDualCases) {
 
     // ── Comparator hazards (asserted OUTSIDE runOutcomeEquivalent — the "0 vs undefined" silent-
     // mismatch hole): preExecAmbiguityCatches/deterministicSelectorBlocks must be the NUMBER 0 (not
-    // undefined) on BOTH sides. The legacy adapter (mapToOutcome/synthesizeContextOutcome) does not
-    // emit these fields at all for scenarios that never persist an outcome through the real
-    // pipeline's W1/W2 instrumentation path — assert the type on whichever side actually carries the
-    // field; where a side omits it entirely (never wired), that omission itself is the declared
-    // W2 divergence for w2-preexec-block (handled below), not silently accepted as "absent is fine"
-    // for every other scenario.
+    // undefined) on BOTH sides. Plan 7-R B5.3 wired PreExecGroundingPort for w2-preexec-block — that
+    // scenario now genuinely exercises the gate and expects NON-ZERO telemetry (its whole point is a
+    // PERSISTING ambiguity), so it is asserted separately below; every OTHER scenario in this loop
+    // never wires a `capture` override (c.overrides.capture is undefined for them), so the gate
+    // never runs and both counters stay exactly 0 — the ORIGINAL "0 not undefined" pin, unaffected.
     const rewrittenGate = rewrittenOutcome.gateSignals as { preExecAmbiguityCatches?: unknown; deterministicSelectorBlocks?: unknown };
     assert.equal(typeof rewrittenGate.preExecAmbiguityCatches, "number", `${c.name}: rewritten preExecAmbiguityCatches must be a NUMBER (0), not undefined`);
-    assert.equal(rewrittenGate.preExecAmbiguityCatches, 0, `${c.name}: rewritten preExecAmbiguityCatches must be exactly 0 when W1/W2 is unwired`);
     assert.equal(typeof rewrittenGate.deterministicSelectorBlocks, "number", `${c.name}: rewritten deterministicSelectorBlocks must be a NUMBER (0), not undefined`);
-    assert.equal(rewrittenGate.deterministicSelectorBlocks, 0, `${c.name}: rewritten deterministicSelectorBlocks must be exactly 0 when W1/W2 is unwired`);
+    if (c.overrides.capture) {
+      // w2-preexec-block (the only scenario wiring PreExecGroundingPort): the gate genuinely fires —
+      // the ambiguity PERSISTS through the corrective regen (the stub generate() never rewrites
+      // anything), so both counters must be NON-ZERO, matching the legacy's own W1/W2 catch.
+      assert.ok((rewrittenGate.preExecAmbiguityCatches as number) > 0, `${c.name}: rewritten preExecAmbiguityCatches must be > 0 — this scenario wires a persisting ambiguity`);
+      assert.ok((rewrittenGate.deterministicSelectorBlocks as number) > 0, `${c.name}: rewritten deterministicSelectorBlocks must be > 0 — the persisting ambiguity must escalate to the W2 deterministic block`);
+    } else {
+      assert.equal(rewrittenGate.preExecAmbiguityCatches, 0, `${c.name}: rewritten preExecAmbiguityCatches must be exactly 0 when the gate is unwired for this scenario`);
+      assert.equal(rewrittenGate.deterministicSelectorBlocks, 0, `${c.name}: rewritten deterministicSelectorBlocks must be exactly 0 when the gate is unwired for this scenario`);
+    }
 
     // ── rulesRetrieved comparator hazard: both engines return [] for these 21 scenarios (neither
     // wires a real LearningPort.retrieve here) — assert equal, not silently accepted.

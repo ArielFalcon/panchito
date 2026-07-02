@@ -45,6 +45,7 @@ import type {
   SetupPort,
   ObserverPort,
   CommitIntent,
+  PreExecGroundingPort,
 } from "./ports/index.ts";
 import { decide, type RunEvidence } from "../domain/run-decision.service.ts";
 import { RunDecision } from "../domain/run-decision.ts";
@@ -53,6 +54,7 @@ import { checkSpecSelectors } from "../domain/helpers/selector-check.ts";
 import { resolveErrorClass } from "../domain/helpers/error-class.ts";
 import { CycleBudget } from "../domain/cycle-budget.ts";
 import { WallClockBudget } from "../domain/wall-clock-budget.ts";
+import { checkPreExecGrounding, checkPersistingAmbiguity } from "../domain/pre-exec-grounding.service.ts";
 
 // FIX B (judgment-day, HIGH)'s own value: the change-coverage minRatio default (src/qa/
 // change-coverage.ts's DEFAULT_COVERAGE_POLICY.minRatio) — needed here too so the FIX 4 errorClass
@@ -124,6 +126,13 @@ export interface RunQaUseCaseDeps {
   // cadence exactly is a known follow-up, not re-engineered here (FixLoop's own internal cycling
   // stays untouched by this fix).
   observer?: ObserverPort;
+  // [SWAP] absent -> the pre-execution grounding gate (Plan 7-R B5) is skipped entirely: the SAME
+  // backward-compatible posture as deployGate/setup/observer above. preExecAmbiguityCatches/
+  // deterministicSelectorBlocks/catalogGate* all stay the literal 0 they were before this port
+  // existed (see gateSignals' own doc), never fabricated. When present, RunQaUseCase invokes it
+  // after every spec-producing pass (initial generate, static-fix repair rounds, FixLoop regens) —
+  // see PreExecGroundingPort's own header for the full contract.
+  preExecGrounding?: PreExecGroundingPort;
   config?: Partial<RunQaConfig>;
 }
 
@@ -161,8 +170,27 @@ export interface RunQaResult {
     retries: number;
     preExecAmbiguityCatches: number;
     deterministicSelectorBlocks: number;
+    // Plan 7-R B5.2/B5.3: Pillar-2 catalog-gate honest-coverage telemetry (mirrors RunOutcome.
+    // gateSignals' own catalogGate* fields, @kernel/run-outcome.ts). Always a number (never
+    // undefined) once the pre-exec grounding gate is wired, same "0 not undefined" contract as
+    // preExecAmbiguityCatches/deterministicSelectorBlocks above.
+    catalogGateInWindow: number;
+    catalogGateAdvisory: number;
+    catalogGateFailClosed: number;
   };
   cases: QaCase[];
+  // W3 F3 (HIGH, audit-verified cutover blocker): the execution logs ExecutionPort.execute()
+  // already returned (`run.logs`) — mirrors cases' own "surfaced here so toOutcome() can forward
+  // it" reasoning. Optional: absent on every early exit that never reached execute() (skip/invalid/
+  // pre-execute infra-error), matching cases' own []-vs-absent distinction at those same call sites.
+  // NOT a full log-streaming port (CLAUDE.md scope note, see kernel RunOutcome.logs's own doc) —
+  // this is the one-shot post-execution string ExecutionPort already produces, nothing more.
+  logs?: string;
+  // W3 F2 (mirrors errorClass/valueScore/reviewerApproved's own doc above): the retrieved rule
+  // trigger strings, surfaced HERE so RewrittenOrchestratorAdapter's toOutcome() can mirror the SAME
+  // value toRunOutcome() persisted (mainline exit only — see toRunOutcome's own rulesRetrieved doc;
+  // every other exit's persisted outcome is [], matching legacy's persistOutcome asymmetry exactly).
+  rulesRetrieved: string[];
   // Diagnostic note. Two distinct sources, never both at once (mutually exclusive terminal shapes):
   //  1. An infra-error/invalid-shaped terminal (CLAUDE.md "surface integration errors loudly — never
   //     swallow errors into an empty result"): the InfraError/thrown-error message that caused the
@@ -289,14 +317,31 @@ export class RunQaUseCase {
     // it every entry's changeRef would carry an empty sha and fail the manifest schema). Each call
     // site spreads its OWN additional fields (fixCases/reviewCorrections/etc.) on top of this base,
     // mirroring the legacy's baseGenInput({ intent, ...extra }) pattern (src/pipeline.ts:1666-1712).
+    // W3 F2 (CRITICAL cutover blocker): retrieve cross-run learning rules BEFORE the first generate()
+    // call, mirroring legacy's own ordering (src/pipeline.ts:2019-2042 retrieves before `allPromptSections`
+    // is built and threaded into baseGenInput). LearningPort.retrieve() is OFF-PATH by the port's own
+    // contract (learning-port.adapter.ts's fold() doc: "a failure is logged and swallowed"); retrieve()
+    // itself has no such guard documented on the port, but retrieval failing must not abort generation
+    // either (retrieval is an enrichment, not a requirement) — bestEffort-shaped inline try/catch, never
+    // propagated. `retrievedRuleTriggers` feeds BOTH the prompt enrichment (below) and the persisted
+    // RunOutcome.rulesRetrieved (toRunOutcome), matching legacy's retrievedRuleIds dual-use exactly
+    // (src/pipeline.ts:2038's retrievedRuleIds assignment, later reused at persistOutcome time).
+    let retrievedRuleTriggers: string[] = [];
+    try {
+      retrievedRuleTriggers = await this.deps.learning.retrieve(input.sha);
+    } catch (err) {
+      console.error("[qa] learning retrieval failed (non-fatal, generation continues ungrounded):", err);
+    }
+
     const baseEnrichment = {
       sha: input.sha.toString(),
       ...(classificationIntent ? { intent: classificationIntent } : {}),
+      ...(retrievedRuleTriggers.length ? { learnedRules: retrievedRuleTriggers } : {}),
     };
 
     // Phase: generate (GenerationPort).
     this.deps.observer?.onStep("generate");
-    const generated = await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff, baseEnrichment);
+    let generated = await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff, baseEnrichment);
 
     // Diagnosability fix (live-run root cause): when generation comes back with ZERO specs AND
     // approved===false, the agent almost always left an explanatory note (e.g. "no LIVE DEV URL
@@ -338,6 +383,55 @@ export class RunQaUseCase {
     // verdictual round). Declared here (not reassigned to a fresh 0 at the FixLoop section below).
     let retries = 0;
 
+    // Phase: pre-exec grounding gate (Plan 7-R B5). [SWAP] absent PreExecGroundingPort -> the whole
+    // phase (W1 below + the W2 re-check further down) is a no-op; the counters stay the literal 0
+    // they were before this port existed (RunQaUseCaseDeps.preExecGrounding's own doc). Accumulated
+    // here so they survive into the final gateSignals regardless of which terminal this run reaches
+    // (mirrors legacy's module-scope accumulators, src/pipeline.ts:1928-1930/1975).
+    let preExecAmbiguityCatches = 0;
+    let deterministicSelectorBlocks = 0;
+    let catalogGateInWindow = 0;
+    let catalogGateAdvisory = 0;
+    let catalogGateFailClosed = 0;
+    // Re-runs the gate against the CURRENT on-disk specs (re-reads on every call, per
+    // PreExecGroundingPort's own doc — required so a re-check after a corrective regen sees the
+    // REWRITTEN specs, never a stale capture) and accumulates telemetry. Returns the corrections for
+    // the caller to thread into the NEXT spec-producing regen's selectorContradictions channel.
+    const runPreExecGrounding = async (): Promise<string[]> => {
+      if (!this.deps.preExecGrounding) return [];
+      const { specSources, routes } = await this.deps.preExecGrounding.capture(workspace.specDir, signal);
+      const result = checkPreExecGrounding({ specSources, routes });
+      preExecAmbiguityCatches += result.preExecAmbiguityCatches;
+      catalogGateInWindow += result.catalogGateInWindow;
+      catalogGateAdvisory += result.catalogGateAdvisory;
+      catalogGateFailClosed += result.catalogGateFailClosed;
+      return result.corrections;
+    };
+    // W1 — pre-execution corrective pass (Plan 7-R B5, mirrors src/pipeline.ts:2166-2188 exactly):
+    // detect ambiguity/fabricated-selector corrections against the INITIAL `generated` specs and, if
+    // any, feed them through ONE corrective regen via the SAME selectorContradictions channel FixLoop
+    // uses below, BEFORE the static gate ever runs — so the agent scopes/corrects before the first
+    // execution. ONLY adopt the corrective regen if it produced specs (mirrors legacy's own guard,
+    // src/pipeline.ts:2183-2187): an EMPTY result (cycle-ceiling hit, or an agent no-op) must NOT
+    // discard the original specs — they remain on disk and are what the static gate + W2 re-check
+    // below must reason about.
+    const w1Corrections = await runPreExecGrounding();
+    if (w1Corrections.length > 0) {
+      this.deps.observer?.onStep("retry", "pre-exec grounding: corrective regen (W1)");
+      const corrected = await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff, {
+        ...baseEnrichment,
+        selectorContradictions: w1Corrections,
+      });
+      if (corrected.specs.length > 0) {
+        generated = corrected;
+      }
+    }
+    // Any FixLoop regen further down still needs to see W1's own corrections (a persisting ambiguity
+    // the corrective regen above didn't resolve is exactly what the FixLoop's post-execution-failure
+    // regen should also be told about) — threaded via pendingSelectorContradictions, refreshed by the
+    // W2 re-check below once the static gate settles.
+    let pendingSelectorContradictions: string[] = w1Corrections;
+
     // Phase: validate (ValidationPort) — with the static-fix loop (Task D.5's own explicit scope:
     // "validate (ValidationPort, static-fix loop)"), ported VERBATIM from the legacy
     // (src/pipeline.ts:2258-2278). A single trivial static-gate error (an unused var, a stray
@@ -378,6 +472,29 @@ export class RunQaUseCase {
       // generate() call did. W2 fix (F5): same for classificationIntent, via baseEnrichment.
       lastGenerated = await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff, baseEnrichment);
       validation = await this.deps.validation.validate(workspace.specDir);
+    }
+
+    // W2 — deterministic block re-check (Plan 7-R B5, mirrors src/pipeline.ts:2282-2299 exactly):
+    // re-check the CURRENT (post static-fix) specs against the live DOM, and if a strict-mode
+    // ambiguity PERSISTS, fold it into the static gate so the EXISTING "invalid" path holds the run
+    // before execution. Re-checking FRESH here (not reusing W1's stale corrections) means a
+    // static-fix rewrite cannot leave a stale block AND a no-op corrective regen is still caught (the
+    // on-disk specs are authoritative). Guarded by `preExecAmbiguityCatches > 0` (only re-render when
+    // W1 found something) and `validation.ok` (a real tsc/eslint failure already routes to invalid
+    // first — mirrors legacy exactly). SAFE DIRECTION (load-bearing): checkPersistingAmbiguity is the
+    // AMBIGUITY-ONLY half of the gate — catalog corrections NEVER reach this block, only the one-shot
+    // repair channel above (W1) and the FixLoop's own regen channel below.
+    if (this.deps.preExecGrounding && preExecAmbiguityCatches > 0 && validation.ok) {
+      const { specSources, routes } = await this.deps.preExecGrounding.capture(workspace.specDir, signal);
+      const persisting = checkPersistingAmbiguity({ specSources, routes });
+      deterministicSelectorBlocks = persisting.length;
+      if (persisting.length > 0) {
+        validation = {
+          ok: false,
+          infra: false,
+          errors: persisting.map((a) => `strict-mode selector ambiguity (deterministic — would fail at runtime; scope to a unique parent): ${a}`),
+        };
+      }
     }
 
     // FIX 1 (judgment-day D.7 batch 2): the SAME generation-sourced reviewerApproved default the
@@ -427,6 +544,10 @@ export class RunQaUseCase {
         // MAX_STATIC_FIX_ROUNDS's own bound exactly).
         retries,
         staticGateNote,
+        // Plan 7-R B5.3 (leak 3 fix): this exit fires strictly after W1 (pre-validate) and, when
+        // validation.ok held long enough to reach it, W2 (post-static-fix-loop) — real accumulated
+        // values, not the hardcoded 0 this terminal used to carry.
+        { preExecAmbiguityCatches, deterministicSelectorBlocks, catalogGateInWindow, catalogGateAdvisory, catalogGateFailClosed },
       );
     }
 
@@ -475,7 +596,20 @@ export class RunQaUseCase {
         .filter((part): part is string => Boolean(part))
         .join("\n\n");
       console.error("[qa] health pre-flight failed before execute:", healthNote);
-      return await this.terminalResult("infra-error", cfg, input, { generating, static: false }, reviewerApprovedFromGeneration, false, retries, healthNote);
+      return await this.terminalResult(
+        "infra-error",
+        cfg,
+        input,
+        { generating, static: false },
+        reviewerApprovedFromGeneration,
+        false,
+        retries,
+        healthNote,
+        // Plan 7-R B5.3 (leak 3 fix): this exit fires strictly after both W1 and W2 have already run
+        // (post static-fix loop, pre-execute) — real accumulated values, not the hardcoded 0 this
+        // terminal used to carry.
+        { preExecAmbiguityCatches, deterministicSelectorBlocks, catalogGateInWindow, catalogGateAdvisory, catalogGateFailClosed },
+      );
     }
     if (signal?.aborted) {
       return this.abortedResult();
@@ -538,12 +672,28 @@ export class RunQaUseCase {
           // "Dynamic diff" fix: the FixLoop's own regenerate() call also reuses the SAME
           // classificationDiff — every generation attempt across the whole run sees the same real
           // per-run diff, never a stale/empty static fallback.
+          //
+          // Plan 7-R B5.3: merge the pre-exec grounding gate's own leftover corrections
+          // (pendingSelectorContradictions — W1's one-shot repair, refreshed by the W2 re-check
+          // above) with the FixLoop's OWN post-execution-failure selector check
+          // (fixLoopInput.selectorContradictions, a DIFFERENT mechanism — re-checks against the
+          // FAILURE-POINT DOM via fixLoopSelectorCheck below, not the pre-execution DOM). Both are
+          // real, independent evidence for the SAME regen call; neither suppresses the other.
+          const mergedSelectorContradictions = [
+            ...pendingSelectorContradictions,
+            ...(fixLoopInput.selectorContradictions ?? []),
+          ];
           const r = await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff, {
             ...baseEnrichment,
             fixCases: fixLoopInput.fixCases,
-            ...(fixLoopInput.selectorContradictions?.length ? { selectorContradictions: fixLoopInput.selectorContradictions } : {}),
+            ...(mergedSelectorContradictions.length ? { selectorContradictions: mergedSelectorContradictions } : {}),
             ...(fixLoopInput.domSnapshot ? { domSnapshot: fixLoopInput.domSnapshot } : {}),
           });
+          // Pre-exec grounding corrections are a ONE-SHOT repair (mirrors legacy's own W1 posture —
+          // never re-threaded into every subsequent FixLoop round once they've been offered once);
+          // clear them after this first FixLoop regen so later rounds rely solely on the FixLoop's
+          // own fresh post-failure selector check.
+          pendingSelectorContradictions = [];
           return { specs: r.specs, approved: r.approved, note: r.note };
         },
       };
@@ -841,6 +991,22 @@ export class RunQaUseCase {
         // diagnosable from the run record alone — never fabricated when publish() was never called
         // (decision.sideEffect === "none").
         ...(publishOutcome !== undefined ? { note: publishOutcome } : {}),
+        // W3 F2 (legacy parity: src/pipeline.ts:3267's persistOutcome(..., rulesRetrieved:
+        // retrievedRuleIds, ...) — the ONLY persistOutcome call site that threads it): the retrieved
+        // rule triggers reach the persisted RunOutcome on the mainline exit only.
+        ...(retrievedRuleTriggers.length ? { rulesRetrieved: retrievedRuleTriggers } : {}),
+        // Plan 7-R B5.3 (leak 3 fix): the pre-exec grounding gate's real, run-level accumulated
+        // counters — replaces the hardcoded 0 the persisted RunOutcome carried before this gate
+        // existed (mirrors legacy's persistOutcome() reading its own module-scope accumulators,
+        // src/pipeline.ts:1134-1140).
+        preExecAmbiguityCatches,
+        deterministicSelectorBlocks,
+        catalogGateInWindow,
+        catalogGateAdvisory,
+        catalogGateFailClosed,
+        // W3 F3: the execution logs ExecutionPort.execute() already returned — reaches the
+        // persisted RunOutcome the SAME way cases does (see toRunOutcome's own cases doc).
+        logs: run.logs,
       });
       await this.deps.runHistory.save(mainlineOutcome);
 
@@ -857,6 +1023,10 @@ export class RunQaUseCase {
       // RunOutcome above) — so a caller with no read-back path on RunHistoryPort (e.g.
       // RewrittenOrchestratorAdapter's toOutcome()) can still report what publish() actually did.
       ...(publishOutcome !== undefined ? { note: publishOutcome } : {}),
+      // W3 F2: mirrors the SAME isContextCleanPass gate the persisted mainlineOutcome above uses —
+      // a clean context pass never persists (see isContextCleanPass above), so its returned
+      // RunQaResult must not report retrieved rules either (nothing was genuinely persisted).
+      rulesRetrieved: isContextCleanPass ? [] : retrievedRuleTriggers,
       gateSignals: {
         // FIX 2 (judgment-day D.7 batch 2): a CLEAN context-mode pass never persists a real
         // RunOutcome at all (see isContextCleanPass above) — the legacy's own comparator counterpart
@@ -875,10 +1045,19 @@ export class RunQaUseCase {
         // reviewerApproved value either, matching the legacy's "nothing was genuinely persisted" gap.
         ...(!isContextCleanPass && reviewerApprovedForOutcome !== undefined ? { reviewerApproved: reviewerApprovedForOutcome } : {}),
         retries,
-        preExecAmbiguityCatches: 0,
-        deterministicSelectorBlocks: 0,
+        // Plan 7-R B5.3 (leak 3 fix): real, run-level accumulated counters — mirrors the SAME values
+        // just persisted into mainlineOutcome above (a caller with no read-back path on
+        // RunHistoryPort, e.g. RewrittenOrchestratorAdapter's toOutcome(), still sees them here).
+        preExecAmbiguityCatches,
+        deterministicSelectorBlocks,
+        catalogGateInWindow,
+        catalogGateAdvisory,
+        catalogGateFailClosed,
       },
       cases: run.cases,
+      // W3 F3: the execution logs ExecutionPort.execute() (or the context-mode synthetic run,
+      // which carries generated.note as its own "logs" per the branch above) already produced.
+      logs: run.logs,
     };
   }
 
@@ -913,7 +1092,37 @@ export class RunQaUseCase {
     // sources, which never thread a reviewerApproved/valueScore either — see src/pipeline.ts:1114's
     // `app.qa.needsReview && result ? result.approved : null`, where `result` stays unset before
     // review runs). Only the mainline persist call (after review/measure) supplies real values.
-    extra?: { reviewerApproved?: boolean; valueScore?: number | null; note?: string },
+    //
+    // W3 F2: rulesRetrieved mirrors the SAME asymmetry — legacy's persistOutcome() (src/pipeline.ts:
+    // 1100-1124) only ever threads `overrides.rulesRetrieved: retrievedRuleIds` at ITS OWN mainline
+    // call site (pipeline.ts:3267); every other persistOutcome call (skipped/invalid/infra-error,
+    // pipeline.ts:2233/2309/2315/2334/2473/2479/2506) omits the override entirely, so
+    // labelRunOutcome's own hardcoded `rulesRetrieved: []` (labeler.ts:45) is what actually persists
+    // for those exits — retrieval happened (or was attempted) but the run never reached a state
+    // whose learning is worth crediting. Optional here for the exact same reason: only the mainline
+    // caller below passes it; every other toRunOutcome() call site omits it and gets [].
+    // Plan 7-R B5.3 (leak 3 fix): the pre-exec grounding gate's real counters — OPTIONAL, same
+    // asymmetry as reviewerApproved/valueScore above: every caller that reaches this helper AFTER
+    // the gate has run (the mainline path, and terminalResult's invalid/infra-error exits that fire
+    // post-generate) threads the REAL accumulated values; a caller that exits before the gate could
+    // ever run (skippedResult's no-op skip, the classify-skip bare return, infraErrorResult's
+    // pre-generation entry-gate/setup failures) omits them and gets the literal 0 default below —
+    // never fabricated, exactly the same "0 not undefined" contract this use-case's own header
+    // documents for these fields.
+    extra?: {
+      reviewerApproved?: boolean;
+      valueScore?: number | null;
+      note?: string;
+      rulesRetrieved?: string[];
+      preExecAmbiguityCatches?: number;
+      deterministicSelectorBlocks?: number;
+      catalogGateInWindow?: number;
+      catalogGateAdvisory?: number;
+      catalogGateFailClosed?: number;
+      // W3 F3: the execution logs, same optional-override precedent as note/rulesRetrieved above —
+      // only the mainline caller (post-execute) has real logs to thread.
+      logs?: string;
+    },
   ) {
     const gateCoverageRatio = coverageRatio;
     const gateValueScore = extra?.valueScore ?? null;
@@ -933,12 +1142,23 @@ export class RunQaUseCase {
         ...(extra?.reviewerApproved !== undefined ? { reviewerApproved: extra.reviewerApproved } : {}),
         flaky: decision.verdict === "flaky",
         retries,
-        preExecAmbiguityCatches: 0,
-        deterministicSelectorBlocks: 0,
+        preExecAmbiguityCatches: extra?.preExecAmbiguityCatches ?? 0,
+        deterministicSelectorBlocks: extra?.deterministicSelectorBlocks ?? 0,
+        catalogGateInWindow: extra?.catalogGateInWindow ?? 0,
+        catalogGateAdvisory: extra?.catalogGateAdvisory ?? 0,
+        catalogGateFailClosed: extra?.catalogGateFailClosed ?? 0,
       },
-      rulesRetrieved: [],
+      rulesRetrieved: extra?.rulesRetrieved ?? [],
       ...(extra?.note !== undefined ? { note: extra.note } : {}),
       at: new Date().toISOString(),
+      // W3 F3 (HIGH cutover blocker): persist the SAME per-case results + logs the returned
+      // RunQaResult carries (mirrors `note`'s own precedent) — keeps toRunOutcome() (the persisted
+      // shape) and RewrittenOrchestratorAdapter's toOutcome() (the returned shape) STRUCTURALLY
+      // IDENTICAL, the invariant rewritten-orchestrator.adapter.test.ts's own "returns the SAME
+      // RunOutcome shape RunHistoryPort.save receives" pin enforces. cases is only ever non-empty
+      // when a real execute() happened (mainline path); every other caller passes [] (unchanged).
+      cases,
+      ...(extra?.logs !== undefined ? { logs: extra.logs } : {}),
     };
   }
 
@@ -964,8 +1184,15 @@ export class RunQaUseCase {
         retries: 0,
         preExecAmbiguityCatches: 0,
         deterministicSelectorBlocks: 0,
+        catalogGateInWindow: 0,
+        catalogGateAdvisory: 0,
+        catalogGateFailClosed: 0,
       },
       cases: [],
+      // W3 F2: legacy parity — neither skip source (classify-skip, agent-no-op) ever threads
+      // retrievedRuleIds into persistOutcome's overrides (src/pipeline.ts:2233's persistOutcome(
+      // skipped, ...) call omits it), so the persisted (or never-persisted) outcome is always [].
+      rulesRetrieved: [],
     };
   }
 
@@ -984,8 +1211,9 @@ export class RunQaUseCase {
       // which throws/returns before persistOutcome is reachable), but errorClass is still derived
       // consistently via the SAME taxonomy for internal consistency of this returned RunQaResult.
       errorClass: this.deriveErrorClass("infra-error", null, null),
-      gateSignals: { static: false, coverageRatio: null, valueScore: null, retries: 0, preExecAmbiguityCatches: 0, deterministicSelectorBlocks: 0 },
+      gateSignals: { static: false, coverageRatio: null, valueScore: null, retries: 0, preExecAmbiguityCatches: 0, deterministicSelectorBlocks: 0, catalogGateInWindow: 0, catalogGateAdvisory: 0, catalogGateFailClosed: 0 },
       cases: [],
+      rulesRetrieved: [],
       ...(note !== undefined ? { note } : {}),
     };
   }
@@ -1061,6 +1289,19 @@ export class RunQaUseCase {
     // specific than the verdict itself (the generic static-gate "invalid" callers, whose own errors
     // already reach the caller via ValidationPort's separate `errors` array elsewhere).
     note?: string,
+    // Plan 7-R B5.3 (leak 3 fix): the pre-exec grounding gate's real, run-level accumulated counters
+    // — BOTH call sites of this helper (static-gate invalid, health-preflight infra-error) fire AFTER
+    // the gate has already run (W1's one-shot pass always runs before validate; W2's re-check runs
+    // right after the static-fix loop settles), so both genuinely have real values to thread. Defaults
+    // to all-zero for callers that predate this fix (backward compatible; never fabricated for a
+    // caller that legitimately has nothing to report).
+    groundingSignals: {
+      preExecAmbiguityCatches: number;
+      deterministicSelectorBlocks: number;
+      catalogGateInWindow: number;
+      catalogGateAdvisory: number;
+      catalogGateFailClosed: number;
+    } = { preExecAmbiguityCatches: 0, deterministicSelectorBlocks: 0, catalogGateInWindow: 0, catalogGateAdvisory: 0, catalogGateFailClosed: 0 },
   ): Promise<RunQaResult> {
     const decision = decide({
       verdict,
@@ -1105,6 +1346,7 @@ export class RunQaUseCase {
       const outcome = this.toRunOutcome(input, decision, [], retries, null, errorClass, {
         reviewerApproved: reviewerApprovedForOutcome,
         note: combinedNote,
+        ...groundingSignals,
       });
       await this.deps.runHistory.save(outcome);
       if (verdict === "invalid") {
@@ -1131,10 +1373,17 @@ export class RunQaUseCase {
         valueScore: null,
         ...(!skipPersist && reviewerApprovedForOutcome !== undefined ? { reviewerApproved: reviewerApprovedForOutcome } : {}),
         retries: skipPersist ? 0 : retries,
-        preExecAmbiguityCatches: 0,
-        deterministicSelectorBlocks: 0,
+        preExecAmbiguityCatches: skipPersist ? 0 : groundingSignals.preExecAmbiguityCatches,
+        deterministicSelectorBlocks: skipPersist ? 0 : groundingSignals.deterministicSelectorBlocks,
+        catalogGateInWindow: skipPersist ? 0 : groundingSignals.catalogGateInWindow,
+        catalogGateAdvisory: skipPersist ? 0 : groundingSignals.catalogGateAdvisory,
+        catalogGateFailClosed: skipPersist ? 0 : groundingSignals.catalogGateFailClosed,
       },
       cases: [],
+      // W3 F2: legacy parity — neither invalid nor infra-error persistOutcome call threads
+      // retrievedRuleIds (src/pipeline.ts:2315/2334's persistOutcome(invalid/infra, ...) calls both
+      // omit it), so this terminal's outcome is always [], matching toRunOutcome's own default above.
+      rulesRetrieved: [],
       ...(!skipPersist && combinedNote !== undefined ? { note: combinedNote } : {}),
     };
   }

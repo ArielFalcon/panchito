@@ -16,6 +16,7 @@ import type {
   DeployGatePort,
   RunHistoryPort,
   SetupPort,
+  PreExecGroundingPort,
 } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 import { BlastRadius } from "@kernel/blast-radius.ts";
 import { ok, err } from "@kernel/result.ts";
@@ -47,6 +48,7 @@ function stubPorts(overrides: Partial<{
   waitUntilServing: DeployGatePort["waitUntilServing"];
   save: RunHistoryPort["save"];
   setup: SetupPort["setup"];
+  capture: PreExecGroundingPort["capture"];
 }> = {}) {
   const savedOutcomes: RunOutcome[] = [];
   const foldedOutcomes: RunOutcome[] = [];
@@ -89,9 +91,12 @@ function stubPorts(overrides: Partial<{
   const setup: SetupPort = {
     setup: overrides.setup ?? (async () => {}),
   };
+  const preExecGrounding: PreExecGroundingPort | undefined = overrides.capture
+    ? { capture: overrides.capture }
+    : undefined;
 
   return {
-    ports: { changeAnalysis, generation, review, validation, execution, objectiveSignal, publication, learning, workspace, deployGate, runHistory, setup },
+    ports: { changeAnalysis, generation, review, validation, execution, objectiveSignal, publication, learning, workspace, deployGate, runHistory, setup, ...(preExecGrounding ? { preExecGrounding } : {}) },
     savedOutcomes,
     foldedOutcomes,
   };
@@ -116,7 +121,7 @@ test("RunQaUseCase: green-pr — fully stubbed ports, reaches decide, returns pa
   assert.equal(out.decision.sideEffect, "pr");
 });
 
-test("RunQaUseCase: emits preExecAmbiguityCatches:0 + deterministicSelectorBlocks:0 (number, not undefined) when W1/W2 unwired", async () => {
+test("RunQaUseCase: emits preExecAmbiguityCatches:0 + deterministicSelectorBlocks:0 (number, not undefined) when PreExecGroundingPort is ABSENT ([SWAP])", async () => {
   const { ports } = stubPorts();
   const useCase = new RunQaUseCase(ports);
 
@@ -126,6 +131,156 @@ test("RunQaUseCase: emits preExecAmbiguityCatches:0 + deterministicSelectorBlock
   assert.equal(out.gateSignals.preExecAmbiguityCatches, 0);
   assert.equal(typeof out.gateSignals.deterministicSelectorBlocks, "number");
   assert.equal(out.gateSignals.deterministicSelectorBlocks, 0);
+});
+
+// ── B5.3: PreExecGroundingPort wired — real counters, corrective regen, W2 deterministic block ──
+// A page-rooted, page.goto("/owners")-targeting spec source drives the ambiguity check (matches the
+// captured route by name, per the domain service's per-spec route pairing); a getByTestId-only spec
+// drives the catalog gate independently.
+const AMBIGUOUS_SPEC_SOURCE = `await page.goto("/owners"); await page.getByRole("heading", { name: "Owners" }).click();`;
+const FABRICATED_TESTID_SPEC_SOURCE = `await page.goto("/owners"); await page.getByTestId("ghost-id").click();`;
+const CLEAN_SPEC_SOURCE = `await page.goto("/owners"); await page.getByRole("heading", { name: "Owners" }).click();`;
+
+test("RunQaUseCase: PreExecGroundingPort wired — a captured ambiguity is counted in preExecAmbiguityCatches", async () => {
+  const { ports } = stubPorts({
+    capture: async () => ({
+      specSources: [AMBIGUOUS_SPEC_SOURCE],
+      routes: [{ route: "/owners", nodes: ["heading: Owners", "heading: Owners"] }],
+    }),
+    generate: async () => ({
+      specs: ["a.spec.ts"],
+      approved: true,
+    }),
+  });
+  const useCase = new RunQaUseCase(ports);
+
+  const out = await useCase.run(baseInput);
+
+  assert.equal(out.gateSignals.preExecAmbiguityCatches, 1);
+});
+
+test("RunQaUseCase: PreExecGroundingPort wired — corrections feed the ONE-SHOT corrective regen via selectorContradictions", async () => {
+  const generateCalls: Array<{ enrichment?: { selectorContradictions?: readonly string[] } }> = [];
+  const { ports } = stubPorts({
+    capture: async () => ({
+      specSources: [AMBIGUOUS_SPEC_SOURCE],
+      routes: [{ route: "/owners", nodes: ["heading: Owners", "heading: Owners"] }],
+    }),
+    generate: async (_objectives, _specDir, _signal, _diff, enrichment) => {
+      generateCalls.push({ enrichment });
+      return { specs: ["a.spec.ts"], approved: true };
+    },
+  });
+  const useCase = new RunQaUseCase(ports);
+
+  await useCase.run(baseInput);
+
+  // The FIRST generate() call is the initial pass (no corrections yet — nothing captured before it).
+  // The pre-exec gate runs AFTER it, catches the ambiguity, and feeds it into exactly ONE corrective
+  // regen call (the one-shot repair channel), mirroring legacy's W1 (src/pipeline.ts:2166-2188).
+  const correctiveCall = generateCalls.find((c) => (c.enrichment?.selectorContradictions?.length ?? 0) > 0);
+  assert.ok(correctiveCall, "expected one generate() call carrying selectorContradictions");
+  assert.match(correctiveCall!.enrichment!.selectorContradictions![0]!, /MULTIPLE/);
+});
+
+test("RunQaUseCase: PreExecGroundingPort wired — a PERSISTING ambiguity after the corrective regen holds the run invalid (W2 deterministic block)", async () => {
+  const { ports } = stubPorts({
+    // The stub generation port never actually rewrites specs to resolve the ambiguity (the corrective
+    // regen is a no-op from the gate's point of view) — capture() keeps reporting the SAME
+    // duplicate-node tree every call, so the ambiguity PERSISTS after the one-shot repair.
+    capture: async () => ({
+      specSources: [AMBIGUOUS_SPEC_SOURCE],
+      routes: [{ route: "/owners", nodes: ["heading: Owners", "heading: Owners"] }],
+    }),
+    generate: async () => ({ specs: ["a.spec.ts"], approved: true }),
+  });
+  const useCase = new RunQaUseCase(ports);
+
+  const out = await useCase.run(baseInput);
+
+  assert.equal(out.decision.verdict, "invalid");
+  assert.equal(out.decision.sideEffect, "issue");
+  assert.ok(out.gateSignals.deterministicSelectorBlocks > 0);
+});
+
+test("RunQaUseCase: PreExecGroundingPort wired — catalog-gate fail-closed corrections NEVER trigger the deterministic block (safe direction)", async () => {
+  // A fabricated test-id (catalog gate) with ZERO role-based ambiguity — the block must stay
+  // ambiguity-only; a catalog correction alone can never hold the run invalid, only feed the
+  // one-shot repair (the established safe-direction split — catalogGate* is telemetry, not a gate).
+  const { ports } = stubPorts({
+    capture: async () => ({
+      specSources: [FABRICATED_TESTID_SPEC_SOURCE],
+      routes: [{ route: "/owners", nodes: [], status: "captured", settled: true, testIds: new Map() }],
+    }),
+    generate: async () => ({ specs: ["a.spec.ts"], approved: true }),
+  });
+  const useCase = new RunQaUseCase(ports);
+
+  const out = await useCase.run(baseInput);
+
+  assert.equal(out.gateSignals.preExecAmbiguityCatches, 0);
+  assert.equal(out.gateSignals.deterministicSelectorBlocks, 0);
+  assert.notEqual(out.decision.verdict, "invalid");
+});
+
+test("RunQaUseCase: PreExecGroundingPort wired — a clean capture (no ambiguity) leaves the run green, zero counters", async () => {
+  const { ports } = stubPorts({
+    capture: async () => ({
+      specSources: [CLEAN_SPEC_SOURCE],
+      routes: [{ route: "/owners", nodes: ["heading: Owners"] }],
+    }),
+  });
+  const useCase = new RunQaUseCase(ports);
+
+  const out = await useCase.run(baseInput);
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(out.gateSignals.preExecAmbiguityCatches, 0);
+  assert.equal(out.gateSignals.deterministicSelectorBlocks, 0);
+});
+
+test("RunQaUseCase: PreExecGroundingPort wired — a FixLoop regen (post-execution-failure) also receives pre-exec corrections via selectorContradictions", async () => {
+  let executeCalls = 0;
+  let captureCalls = 0;
+  const generateCalls: Array<{ enrichment?: { selectorContradictions?: readonly string[]; fixCases?: readonly unknown[] } }> = [];
+  const { ports } = stubPorts({
+    // W1 (1st capture call) sees the ambiguity -> triggers the one-shot corrective regen and sets
+    // pendingSelectorContradictions. W2's re-check (2nd capture call, post-static-fix-loop) sees a
+    // CLEAN tree (the corrective regen "fixed" it from the gate's point of view) -> validation.ok
+    // stays true -> the run proceeds to execute() with pendingSelectorContradictions STILL holding
+    // W1's corrections (nothing clears it until a FixLoop regen actually consumes it).
+    capture: async () => {
+      captureCalls++;
+      const nodes = captureCalls === 1 ? ["heading: Owners", "heading: Owners"] : ["heading: Owners"];
+      return { specSources: [AMBIGUOUS_SPEC_SOURCE], routes: [{ route: "/owners", nodes }] };
+    },
+    generate: async (_objectives, _specDir, _signal, _diff, enrichment) => {
+      generateCalls.push({ enrichment });
+      return { specs: ["a.spec.ts"], approved: true };
+    },
+    execute: async () => {
+      executeCalls++;
+      // First execute (post static-gate) fails -> engages the FixLoop; subsequent retries pass so
+      // the loop terminates promptly.
+      if (executeCalls === 1) {
+        return { verdict: "fail", cases: [{ name: "owners", status: "fail", detail: "boom" }], logs: "" };
+      }
+      return { verdict: "pass", cases: [{ name: "owners", status: "pass" }], logs: "" };
+    },
+  });
+  const useCase = new RunQaUseCase(ports);
+
+  const out = await useCase.run(baseInput);
+  assert.notEqual(out.decision.verdict, "invalid", "sanity: the run must reach execute()/FixLoop, not hold invalid at W2");
+
+  // At least one generate() call during/after the FixLoop's own engagement carries BOTH fixCases
+  // (the FixLoop's own regen context) AND selectorContradictions (W1's leftover pre-exec
+  // corrections) — proving the gate's corrections reach the FixLoop's regen channel too, not just
+  // the pre-execution W1 corrective regen.
+  const fixLoopCallWithCorrections = generateCalls.find(
+    (c) => (c.enrichment?.fixCases?.length ?? 0) > 0 && (c.enrichment?.selectorContradictions?.length ?? 0) > 0,
+  );
+  assert.ok(fixLoopCallWithCorrections, "expected a FixLoop regen call carrying both fixCases and selectorContradictions");
 });
 
 // ── The 10-scenario parity (mirrors Task A.4 for the rewritten core) ──────────────────────────
@@ -2128,4 +2283,154 @@ test("W2-F5: a non-diff mode never calls classify(), so generate() receives no i
   for (const captured of capturedIntents) {
     assert.equal(captured, undefined, "without classification, no intent must be fabricated");
   }
+});
+
+// ── W3 F2 (CRITICAL cutover blocker): LearningPort.retrieve(sha) is called and threaded into
+// generate()/review()'s enrichment.learnedRules, and the persisted/returned rulesRetrieved carries
+// what retrieve() returned — LearningPortAdapter.retrieve() existed with zero call sites before
+// this fix (retrieval was a provable no-op end-to-end even with a real learning store wired). ────
+
+test("W3 F2: learning.retrieve(sha) is called before the first generate(), and its result reaches generate()'s enrichment.learnedRules", async () => {
+  let retrieveCalledWithSha: string | undefined;
+  const capturedLearnedRules: (readonly string[] | undefined)[] = [];
+  const { ports } = stubPorts({
+    retrieve: async (sha) => { retrieveCalledWithSha = sha.toString(); return ["selector absent", "use role+name"]; },
+  });
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
+    capturedLearnedRules.push(enrichment?.learnedRules);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "w3-f2-retrieve-into-generate" });
+
+  assert.equal(retrieveCalledWithSha, "abc1234", "retrieve() must be called with the run's sha");
+  assert.ok(capturedLearnedRules.length > 0, "generate() must have been called at least once");
+  for (const captured of capturedLearnedRules) {
+    assert.deepEqual(captured, ["selector absent", "use role+name"], "every generate() call must receive the SAME retrieved rules");
+  }
+});
+
+test("W3 F2: retrieved rules also reach review()'s enrichment.learnedRules", async () => {
+  const capturedLearnedRules: (readonly string[] | undefined)[] = [];
+  const { ports } = stubPorts({
+    retrieve: async () => ["never invent a test-id"],
+  });
+  ports.review.review = async (_specDir, _cases, _diff, enrichment) => {
+    capturedLearnedRules.push(enrichment?.learnedRules);
+    return { approved: true, corrections: [], blockingCount: 0, parsed: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "w3-f2-retrieve-into-review" });
+
+  assert.ok(capturedLearnedRules.length > 0, "review() must have been called (needsReview:true, clean pass)");
+  assert.deepEqual(capturedLearnedRules[0], ["never invent a test-id"]);
+});
+
+test("W3 F2: an empty retrieve() result omits enrichment.learnedRules entirely (never a fabricated empty marker)", async () => {
+  const capturedLearnedRules: (readonly string[] | undefined)[] = [];
+  const { ports } = stubPorts({ retrieve: async () => [] });
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
+    capturedLearnedRules.push(enrichment?.learnedRules);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "w3-f2-empty-retrieve" });
+
+  for (const captured of capturedLearnedRules) {
+    assert.equal(captured, undefined, "an empty retrieval must not fabricate a present-but-empty learnedRules field");
+  }
+});
+
+test("W3 F2: a retrieve() failure does not abort the run — generation still proceeds ungrounded", async () => {
+  const { ports } = stubPorts({
+    retrieve: async () => { throw new Error("learning store unavailable"); },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "w3-f2-retrieve-failure" });
+
+  assert.equal(out.decision.verdict, "pass", "a retrieval failure must be swallowed, not propagated as a run failure");
+});
+
+test("W3 F2: the retrieved rule triggers reach the persisted RunOutcome.rulesRetrieved on the mainline exit", async () => {
+  let savedRulesRetrieved: string[] | undefined;
+  const { ports } = stubPorts({ retrieve: async () => ["fabricated-testid-guard"] });
+  ports.runHistory.save = async (outcome) => { savedRulesRetrieved = outcome.rulesRetrieved; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "w3-f2-persisted-rules-retrieved" });
+
+  assert.deepEqual(savedRulesRetrieved, ["fabricated-testid-guard"]);
+});
+
+test("W3 F2: the returned RunQaResult also carries rulesRetrieved (RewrittenOrchestratorAdapter's own read-back path)", async () => {
+  const { ports } = stubPorts({ retrieve: async () => ["rule-a", "rule-b"] });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "w3-f2-returned-rules-retrieved" });
+
+  assert.deepEqual(out.rulesRetrieved, ["rule-a", "rule-b"]);
+});
+
+test("W3 F2: an early-exit terminal (static-gate invalid) persists rulesRetrieved:[] — legacy parity, retrieve() result is never threaded to a non-mainline exit", async () => {
+  let savedRulesRetrieved: string[] | undefined;
+  const { ports } = stubPorts({
+    retrieve: async () => ["would-be-injected-rule"],
+    validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }),
+  });
+  ports.runHistory.save = async (outcome) => { savedRulesRetrieved = outcome.rulesRetrieved; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "w3-f2-invalid-exit-no-rules" });
+
+  assert.equal(out.decision.verdict, "invalid");
+  assert.deepEqual(savedRulesRetrieved, [], "legacy's persistOutcome() only threads retrievedRuleIds at its OWN mainline call site — every other exit gets []");
+});
+
+// ── W3 F3 (HIGH cutover blocker): the returned RunQaResult carries the real per-case results +
+// execution logs, and the persisted RunOutcome mirrors them — RunHistoryPort.save receives the
+// SAME cases/logs the caller sees, closing the "passed=0/failed=0 with empty logs" gap. ─────────
+
+test("W3 F3: a passing run's RunQaResult.cases mirrors ExecutionPort.execute()'s real cases, not an empty array", async () => {
+  const realCases = [{ name: "checkout flow", status: "pass" as const }];
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass", cases: realCases, logs: "1 passed" }),
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "w3-f3-real-cases" });
+
+  assert.deepEqual(out.cases, realCases);
+  assert.equal(out.logs, "1 passed");
+});
+
+test("W3 F3: the persisted RunOutcome carries the SAME cases/logs as the returned RunQaResult (adapter parity)", async () => {
+  const realCases = [{ name: "login flow", status: "pass" as const }];
+  let savedOutcome: { cases?: unknown[]; logs?: string } | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass", cases: realCases, logs: "1 passed, 0 failed" }),
+  });
+  ports.runHistory.save = async (outcome) => { savedOutcome = outcome; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "w3-f3-persisted-matches-returned" });
+
+  assert.deepEqual(savedOutcome?.cases, out.cases);
+  assert.equal(savedOutcome?.logs, out.logs);
+});
+
+test("W3 F3: an early-exit terminal (invalid) carries cases:[] and no logs — nothing was ever executed", async () => {
+  const { ports } = stubPorts({
+    validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }),
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "w3-f3-invalid-no-cases" });
+
+  assert.equal(out.decision.verdict, "invalid");
+  assert.deepEqual(out.cases, []);
+  assert.equal(out.logs, undefined, "an exit that never reached execute() must not fabricate a logs string");
 });

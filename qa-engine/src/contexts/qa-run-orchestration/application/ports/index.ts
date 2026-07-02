@@ -111,6 +111,16 @@ export interface GenerationEnrichment {
   // own comment for the adapter-side half of this fix); until wired, OpencodeRunInput.sha stays ""
   // and changeRef.sha fails the schema, exactly the live-run evidence this fix responds to.
   sha?: string;
+  // W3 F2 (cross-run learning retrieval): the rule trigger strings LearningPort.retrieve(sha)
+  // returned (the port's OWN established contract — learning-port.adapter.test.ts's "returns rule
+  // triggers" pin) — mirrors legacy's own retrieval injection (src/pipeline.ts's `learnedRules`
+  // local, baseGenInput({ learnedRules, ... }) at pipeline.ts:1899). The adapter boundary
+  // (GenerationPortAdapter) renders this array into the SAME OpencodeRunInput.learnedRules string
+  // field buildPromptAssembled already renders a section for — format decisions belong at that
+  // boundary, matching every other enrichment field's own 1:1-at-the-adapter mapping. Absent/empty
+  // -> unchanged prompt (retrieval found nothing, or the app's LearningRepositoryPort is the
+  // StubLearningRepository no-op default).
+  learnedRules?: readonly string[];
 }
 export interface GenerationPort {
   // signal: Plan 7.1 (engram #913) — an optional, separate transport arg (mirrors RunPipelinePort's
@@ -147,6 +157,13 @@ export interface ReviewEnrichment {
   // F5 — mirrors legacy's `objective: opts.guidance ?? intent?.message` (src/pipeline.ts:1682): when
   // no manual guidance exists, the reviewer's objective is derived from the commit intent's message.
   intent?: CommitIntent;
+  // W3 F2 (cross-run learning retrieval): mirrors legacy's `learnedRules: renderRulesForReviewer(
+  // retrievedRules)` (src/pipeline.ts:1679) — the SAME retrieved rule triggers the generator's
+  // prompt received (LearningPort.retrieve(sha)'s own established string[] contract), rendered at
+  // the adapter boundary for the reviewer's "app-specific reject-on-sight rules" section so the
+  // independent reviewer judges against the SAME earned rules the generator was grounded on.
+  // Absent/empty -> unchanged prompt (today's behavior).
+  learnedRules?: readonly string[];
 }
 export interface ReviewPort {
   // diff: the run's REAL per-run commit diff (Plan 7.6 dynamic-diff), so the reviewer grounds on the
@@ -242,5 +259,36 @@ export interface RunHistoryPort {
 // verdict"), and RunQaUseCase.run is the place that maps the throw to infraErrorResult().
 export interface SetupPort {
   setup(specDir: string, signal?: AbortSignal): Promise<void>;
+}
+
+// PreExecGroundingPort — Plan 7-R B5.3: the capture half of the pre-execution grounding gate.
+// Reads the CURRENT on-disk specs at specDir and captures the live DOM of the routes they target,
+// returning BOTH — mirrors legacy's capturePreExecSnaps EXACTLY (src/pipeline.ts:1943-1952, which
+// returns `{ specSources, snaps }` for the SAME reason: the domain-service ambiguity/catalog checks
+// need the spec TEXT to extract selectors from, not just the captured trees). Re-reading specSources
+// off disk on EVERY call (never cached) means a re-invocation after a corrective regen sees the
+// REWRITTEN specs, never a stale capture — required for the W2 persisting-ambiguity re-check to be
+// meaningful. Routes are returned in the domain service's own RouteTree shape
+// (pre-exec-grounding.service.ts) — kept structurally LOCAL here (not importing the domain type) so
+// this barrel's "every type is kernel-resident, no cross-context import" rule holds; RouteTree's
+// shape is duck-typed identical on purpose. [SWAP] absent -> RunQaUseCase's pre-exec grounding gate
+// is skipped entirely (the SAME backward-compatible posture DeployGatePort/SetupPort/ObserverPort
+// already established) — preExecAmbiguityCatches/deterministicSelectorBlocks/catalogGate* all stay
+// the literal 0 they were before this port existed, never fabricated. A real adapter (Task E.0/
+// Slice E) wraps generation/infrastructure's captureRouteTrees + buildRouteCatalog, reading the
+// app's baseUrl/testIdAttribute from its own composition-time config (this port's signature stays
+// generic — specDir is enough for the adapter to find + read the on-disk specs itself, the same
+// "adapter resolves its own paths" precedent SetupPort/ExecutionPort already use).
+export interface PreExecGroundingPort {
+  capture(specDir: string, signal?: AbortSignal): Promise<{
+    specSources: string[];
+    routes: {
+      route: string;
+      nodes: string[];
+      status?: "captured" | "degraded";
+      settled?: boolean;
+      testIds?: Map<string, number>;
+    }[];
+  }>;
 }
 
