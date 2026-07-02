@@ -422,6 +422,34 @@ export function buildRewrittenCompositionConfig(
       e2e: (specDir, opts) => setupE2eProject(specDir, defaultSetupDeps, opts),
       code: (specDir, opts) => setupCodeProject(specDir, defaultCodeSetupDeps, opts),
     },
+    // W4 follow-up (Task #37 audit CRITICAL, a9e7dfb's own "KNOWN FOLLOW-UP" note): wire the
+    // PreGenerationGroundingPort / ReviewDomGroundingPort collaborators explicitly, mirroring
+    // setupCollaborators' own visible-wiring precedent immediately above, rather than relying on
+    // composition-root.ts's wireBridges() implicit `cfg.groundingCollaborators ?? {}` fallback.
+    // `{}` here is not a stub: PreGenerationGroundingPortAdapter/ReviewDomGroundingPortAdapter each
+    // resolve an omitted collaborator to the REAL production fn (`this.collaborators.buildContextPack
+    // ?? buildContextPack`, `this.collaborators.captureDom ?? captureDom`, both backed by
+    // defaultContextPackDeps/defaultCaptureDomDeps — the same real-Playwright-spawn capture legacy's
+    // own defaultCaptureDomDeps uses) — so this was already functionally wired before this fix; this
+    // makes that fact explicit at the ONE seam permitted to say so, instead of leaving it implicit
+    // three files away. wireBridges() itself skips both ports entirely on the code target
+    // (isCode guard, mirroring legacy's own `!isCode` guards, pipeline.ts:1466/1643/2078), so no
+    // target check is needed here.
+    groundingCollaborators: {},
+    reviewDomGroundingCollaborators: {},
+    // contextMap / prChangedFiles: LEFT ABSENT, deliberately. Legacy sources contextMap by reading
+    // e2e/.qa/context.json off the REAL per-run mirrorDir (src/pipeline.ts's loadContextMap(),
+    // :1308-1320) and prChangedFiles from intent.changedFiles (classifyCommit(message, diff),
+    // src/pipeline.ts:2121) — both are per-run values that only exist AFTER checkout(sha) resolves
+    // the real mirrorDir and classifyCommit runs, neither of which has happened yet at this
+    // composition-build call (the SAME documented limitation as `diff: ""` and the static
+    // `mirrorDir` placeholder above: this factory has no per-run mirrorDir/diff in hand here).
+    // Wiring a value that doesn't exist yet would be fabrication, not grounding — per the
+    // CompositionConfig's own documented degrade path, buildContextPack falls back to
+    // blast-radius + DOM only, exactly the same graceful degradation legacy itself documents when
+    // context.json/the brief is absent. A future fix can thread these dynamically once
+    // GenerationPortAdapter/ReviewPortAdapter grow the SAME "dynamic diff" seam pattern the diff
+    // field already uses (composition-root.ts's own precedent for this class of gap).
     // CRITICAL fix (live crash, judgment-day audit): baseUrl is app-static (the live DEV URL from
     // config), so it is correct to set it once here at composition time — unlike diff/mode/guidance,
     // there is no per-run value to thread. Without this, E2eExecutionStrategy.run() (wired via

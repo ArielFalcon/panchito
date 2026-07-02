@@ -77,6 +77,8 @@ test("buildRewrittenCompositionConfig maps an e2e AppConfig into a complete Comp
   assert.ok(config.executionStrategies.code, "code execution strategy must be wired");
   assert.ok(config.setupCollaborators?.e2e, "SetupPort e2e collaborator must be wired (CLAUDE.md run-flow step 3 — missing before this fix)");
   assert.ok(config.setupCollaborators?.code, "SetupPort code collaborator must be wired");
+  assert.ok(config.groundingCollaborators, "PreGenerationGroundingPort collaborators must be wired (W4 follow-up, a9e7dfb) for an e2e app");
+  assert.ok(config.reviewDomGroundingCollaborators, "ReviewDomGroundingPort collaborators must be wired (W4 follow-up, a9e7dfb) for an e2e app");
   assert.ok(config.objectiveSignal.collector, "coverage collector must be wired");
   assert.ok(config.objectiveSignal.oracle, "value oracle must be wired");
   assert.ok(config.githubPr, "githubPr collaborator must be wired (production path, not buildShadow)");
@@ -96,6 +98,54 @@ test("buildRewrittenCompositionConfig leaves baseUrl absent for a code-mode app 
   const app: AppConfig = { ...cfg("factory-baseurl-code"), code: true, dev: undefined };
   const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
   assert.equal(config.baseUrl, undefined);
+});
+
+// ── W4 follow-up (Task #37 audit CRITICAL, a9e7dfb) — grounding collaborators ──────────────────────
+// a9e7dfb wired PreGenerationGroundingPort/ReviewDomGroundingPort into composition-root.ts's
+// wireBridges() but the production factory never supplied groundingCollaborators/
+// reviewDomGroundingCollaborators. wireBridges() itself already falls back to `cfg.groundingCollaborators
+// ?? {}` (and the bridge adapters resolve an empty `{}` to the REAL buildContextPack/captureDom fns
+// internally), so these were already functionally real — these tests pin that the factory now states
+// that wiring EXPLICITLY (matching setupCollaborators' own visible-wiring precedent) rather than
+// relying on an implicit fallback three files away, and that contextMap/prChangedFiles stay honestly
+// absent (no static per-run source exists at composition-build time).
+
+test("buildRewrittenCompositionConfig wires empty (real-default-resolving) groundingCollaborators for an e2e app", () => {
+  const app = cfg("factory-grounding-e2e");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.deepEqual(config.groundingCollaborators, {}, "an empty object lets PreGenerationGroundingPortAdapter fall back to the real buildContextPack/defaultContextPackDeps");
+  assert.deepEqual(config.reviewDomGroundingCollaborators, {}, "an empty object lets ReviewDomGroundingPortAdapter fall back to the real captureDom/defaultCaptureDomDeps");
+});
+
+test("buildRewrittenCompositionConfig still wires groundingCollaborators for a code-mode app (composition-root.ts's own isCode guard is the actual skip point, not the factory)", () => {
+  const app: AppConfig = { ...cfg("factory-grounding-code"), code: true, dev: undefined };
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  // The factory's own mapping is target-agnostic here — wireBridges()'s `!cfg.isCode` guard is what
+  // actually skips constructing both grounding ports for a code target (composition-root.ts), so
+  // asserting the factory's OWN output stays the same shape whether or not isCode is true is the
+  // faithful way to pin "the factory does not need its own target check — it already exists downstream".
+  assert.deepEqual(config.groundingCollaborators, {});
+  assert.deepEqual(config.reviewDomGroundingCollaborators, {});
+  assert.equal(config.isCode, true, "isCode is what composition-root.ts's wireBridges() reads to skip both grounding ports on this target");
+});
+
+test("buildRewrittenCompositionConfig leaves contextMap and prChangedFiles absent (no real per-run source at composition-build time)", () => {
+  const app = cfg("factory-grounding-contextmap-absent");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.equal(config.contextMap, undefined, "contextMap requires reading context.json off the REAL per-run mirrorDir, unknown at composition time — never fabricated");
+  assert.equal(config.prChangedFiles, undefined, "prChangedFiles requires classifyCommit's per-run diff, unknown at composition time — never fabricated");
+});
+
+test("baseUrl and testIdAttribute reach the grounding phase via CompositionConfig's own top-level fields (not duplicated inside groundingCollaborators)", () => {
+  const app: AppConfig = { ...cfg("factory-grounding-static-context"), e2e: { testIdAttribute: "data-cy" } };
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  // composition-root.ts's wireBridges() builds PreGenerationGroundingStaticContext/
+  // ReviewDomGroundingStaticContext from cfg.baseUrl/cfg.testIdAttribute/cfg.mirrorDir/cfg.e2eRelDir
+  // directly — this factory only needs to keep supplying those top-level fields (already covered by
+  // the baseUrl/testIdAttribute tests above); this test pins that grounding relies on the SAME
+  // fields rather than a second, parallel static-context input this factory would need to duplicate.
+  assert.equal(config.baseUrl, "https://dev");
+  assert.equal(config.testIdAttribute, "data-cy");
 });
 
 test("buildRewrittenCompositionConfig sets testIdAttribute from app.e2e.testIdAttribute (closes the worst audit-2026-07 flaky-selector leak on the rewritten path)", () => {
