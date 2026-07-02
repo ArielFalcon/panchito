@@ -10,6 +10,8 @@ import { PipelineDeps } from "../pipeline";
 import { AppConfig } from "../orchestrator/config-loader";
 import { QaCase } from "../types";
 import { createRunEventStore } from "./run-events";
+import type { RunPipelinePort, RunInput } from "@contexts/qa-run-orchestration/application/ports/index.ts";
+import type { RunOutcome } from "@kernel/run-outcome.ts";
 
 const cfg = (name: string): AppConfig => ({
   name,
@@ -56,6 +58,199 @@ function stubDeps(over: Partial<PipelineDeps> = {}): PipelineDeps {
     ...over,
   };
 }
+
+// A fake RunPipelinePort that records whether it was invoked, so the dispatch tests below can
+// assert routing without needing a real qa-engine wiring (deferred to Slice F.2's operator script).
+function fakePort(outcome: Partial<RunOutcome> = {}): { port: RunPipelinePort; calls: RunInput[] } {
+  const calls: RunInput[] = [];
+  const port: RunPipelinePort = {
+    async run(input) {
+      calls.push(input);
+      return {
+        runId: input.runId,
+        app: input.app,
+        sha: input.sha.value,
+        mode: input.mode,
+        target: input.target,
+        verdict: "pass",
+        errorClass: null,
+        gateSignals: { static: true, coverageRatio: null, valueScore: null, reviewerCorrections: [], flaky: false, retries: 0 },
+        rulesRetrieved: [],
+        at: new Date().toISOString(),
+        ...outcome,
+      };
+    },
+  };
+  return { port, calls };
+}
+
+// ── PIPELINE_ENGINE dispatch seam (Task E.3) ───────────────────────────────────
+// The runner is the ONLY src/ file allowed to consult the flag. With PIPELINE_ENGINE absent
+// (or any value other than the literal "rewritten"), the legacy runPipeline path must be
+// byte-identical to today — the rewritten RunPipelinePort must NEVER be invoked. With
+// PIPELINE_ENGINE=rewritten AND an injected engineFactory, the runner must route through the
+// factory's port and never call the legacy runPipeline.
+
+test("PIPELINE_ENGINE absent — routes to legacy runPipeline, never touches engineFactory", async () => {
+  const queue = new JobQueue();
+  let legacyCalled = false;
+  let factoryCalled = false;
+  const id = enqueueTrackedRun(
+    queue,
+    { app: "runner-flag-absent", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
+    {
+      pipeline: stubDeps({ prepare: async (...args) => { legacyCalled = true; return stubDeps().prepare(...args); } }),
+      loadApp: cfg,
+      engineFactory: () => {
+        factoryCalled = true;
+        return fakePort().port;
+      },
+    },
+  );
+  await queue.drain();
+  const r = getRecord(id)!;
+  assert.equal(r.status, "done");
+  assert.equal(r.verdict, "pass");
+  assert.equal(legacyCalled, true, "the legacy pipeline must run when PIPELINE_ENGINE is absent");
+  assert.equal(factoryCalled, false, "engineFactory must NEVER be consulted on the legacy path");
+});
+
+test("PIPELINE_ENGINE=legacy (explicit) — identical to absent: legacy runs, factory untouched", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "legacy";
+  try {
+    const queue = new JobQueue();
+    let legacyCalled = false;
+    let factoryCalled = false;
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-flag-legacy", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
+      {
+        pipeline: stubDeps({ prepare: async (...args) => { legacyCalled = true; return stubDeps().prepare(...args); } }),
+        loadApp: cfg,
+        engineFactory: () => {
+          factoryCalled = true;
+          return fakePort().port;
+        },
+      },
+    );
+    await queue.drain();
+    const r = getRecord(id)!;
+    assert.equal(r.verdict, "pass");
+    assert.equal(legacyCalled, true);
+    assert.equal(factoryCalled, false);
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("PIPELINE_ENGINE=rewritten + engineFactory — routes to port.run, never calls legacy runPipeline", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    let legacyCalled = false;
+    const { port, calls } = fakePort({ verdict: "pass" });
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-flag-rewritten", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
+      {
+        pipeline: stubDeps({ prepare: async (...args) => { legacyCalled = true; return stubDeps().prepare(...args); } }),
+        loadApp: cfg,
+        engineFactory: () => port,
+      },
+    );
+    await queue.drain();
+    const r = getRecord(id)!;
+    assert.equal(r.status, "done");
+    assert.equal(r.verdict, "pass");
+    assert.equal(legacyCalled, false, "legacy runPipeline must NEVER run when the rewritten engine is selected");
+    assert.equal(calls.length, 1, "the rewritten port must be invoked exactly once");
+    assert.equal(calls[0]?.app, "runner-flag-rewritten");
+    assert.equal(calls[0]?.sha.value, "def5678");
+    assert.equal(calls[0]?.mode, "diff");
+    assert.equal(calls[0]?.target, "e2e");
+    assert.equal(calls[0]?.source, "manual");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("PIPELINE_ENGINE=rewritten but NO engineFactory supplied — falls back to legacy (fail-safe)", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    let legacyCalled = false;
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-flag-no-factory", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
+      {
+        pipeline: stubDeps({ prepare: async (...args) => { legacyCalled = true; return stubDeps().prepare(...args); } }),
+        loadApp: cfg,
+        // engineFactory intentionally omitted.
+      },
+    );
+    await queue.drain();
+    const r = getRecord(id)!;
+    assert.equal(r.status, "done");
+    assert.equal(legacyCalled, true, "with no engineFactory, the runner must fail safe to legacy even if the flag says rewritten");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("the rewritten path finalizes the record + publishes run.verdict RunEvents from the port's RunOutcome", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const runEvents = createRunEventStore({ now: () => 999 });
+    const { port } = fakePort({ verdict: "fail" });
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-flag-events", sha: "def5678", target: "e2e", mode: "diff", source: "webhook" },
+      { pipeline: stubDeps(), loadApp: cfg, runEvents, engineFactory: () => port },
+    );
+    await queue.drain();
+    const r = getRecord(id)!;
+    assert.equal(r.status, "done");
+    assert.equal(r.verdict, "fail");
+    const bodies = runEvents.replay(id).map((e) => e.body);
+    assert.deepEqual(bodies[0], { type: "run.started", app: "runner-flag-events", sha: "def5678", mode: "diff", target: "e2e" });
+    const last = bodies.at(-1) as { type: string; verdict: string };
+    assert.equal(last.type, "run.verdict");
+    assert.equal(last.verdict, "fail");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("a crashing rewritten port finalizes the record as infra-error (no zombie)", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const crashingPort: RunPipelinePort = { run: async () => { throw new Error("rewritten engine boom"); } };
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-flag-crash", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
+      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => crashingPort },
+    );
+    await queue.drain();
+    const r = getRecord(id)!;
+    assert.equal(r.status, "done");
+    assert.equal(r.verdict, "infra-error");
+    assert.match(r.note ?? "", /boom/);
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
 
 test("the run does NOT execute synchronously — it is deferred to the queue (no bypass)", async () => {
   const queue = new JobQueue();

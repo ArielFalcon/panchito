@@ -6,5 +6,9 @@
   "description": "Hexagonal QA engine — built in parallel to src/, switched in via PIPELINE_ENGINE.",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json"
+  },
+  "optionalDependencies": {
+    "tree-sitter-wasms": "0.1.13",
+    "web-tree-sitter": "0.20.8"
   }
 }

@@ -11,13 +11,16 @@ import { loadAppConfig, AppConfig } from "../orchestrator/config-loader";
 import { createRecord, updateRecord, addCase, getRecord, appendLog, appendActivity, listRecords } from "./history";
 import { recordIncident } from "./maintainer";
 import { testDataNamespace } from "../qa/test-data";
-import { RunMode, TestTarget, TriggerSource, QaCase, engineStatus } from "../types";
+import { RunMode, TestTarget, TriggerSource, QaCase, QaRunResult, engineStatus } from "../types";
 import { activityRouter } from "../integrations/opencode-client";
 import { redactError } from "../util/redact";
 import { isInfraError } from "../errors";
 import { logJson } from "../integrations/logger";
 import type { RunEventStore } from "./run-events";
 import type { RunEventBody } from "../contract/events";
+import { Sha } from "@kernel/sha";
+import { selectEngine } from "@contexts/qa-run-orchestration/composition/pipeline-engine-flag";
+import type { RunPipelinePort, RunInput } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 
 type RunStepEvent = Extract<RunEventBody, { type: "step.changed" }>;
 type RunStep = RunStepEvent["step"];
@@ -59,6 +62,57 @@ export interface RunnerDeps {
   pipeline?: PipelineDeps; // defaults to the real deps, built per run
   loadApp?: (name: string) => AppConfig; // defaults to the real config loader
   runEvents?: RunEventStore;
+  // PIPELINE_ENGINE dispatch seam (Task E.3, Plan 6). ABSENT by default — this keeps the legacy
+  // runPipeline path byte-identical to today (the flag is consulted, but with no factory supplied
+  // the runner fails safe to legacy even if PIPELINE_ENGINE=rewritten; see the queue callback
+  // below). When present, it is invoked ONLY after selectEngine(process.env) resolves to
+  // "rewritten" — building the full RewrittenOrchestratorAdapter wiring (a real
+  // qa-engine CompositionConfig: SandboxedBinaryRunner, Stryker/coverage collectors, the real
+  // GitHub client, the agent runtime, …) is deliberately NOT this file's job — that heavy
+  // assembly belongs to the caller (an operator script per Slice F.2), keeping this hot-path
+  // dispatch free of qa-engine's leaf-IO imports.
+  engineFactory?: (appConfig: AppConfig) => RunPipelinePort;
+}
+
+// Maps a RunRequest + record id into the strangler seam's RunInput and drives the injected
+// RunPipelinePort, surfacing its RunOutcome as a QaRunResult so the rest of the queue callback
+// (RunEvents publish, updateRecord, logging) is UNCHANGED regardless of which engine ran.
+//
+// Mapping gap (documented, not fabricated): RunOutcome carries gateSignals (coverage/value/
+// reviewer signals) but no per-case QaCase[] and no PR/Issue "outcome" string at this port
+// boundary — those stay `[]`/`""`/undefined here rather than invented. Full per-case + outcome
+// fidelity is the shadow-comparison harness's job (Slice F.1), not this dispatch seam.
+//
+// Cancellation gap (DORMANT — surfaced by the dual judgment-day review of this diff): the queue
+// callback's AbortSignal is deliberately NOT threaded here, because RunPipelinePort.run(input)
+// carries no signal in its shape. On the opt-in rewritten path, cancelTrackedRun would finalize the
+// record as cancelled while port.run keeps running headless — and its late resolution could then
+// overwrite the finalized record with a stale verdict. This is UNREACHABLE in production today (no
+// caller supplies engineFactory — cli.ts/index.ts stay legacy) and stays dormant through Slice F.2
+// (operator-invoked shadow runs only, where the operator controls the process). BEFORE the cutover
+// (Plan 7) wires the rewritten engine as a production default, RunPipelinePort.run MUST be widened
+// to accept an AbortSignal threaded into RunQaUseCase so cancellation propagates — do NOT ship the
+// port production-live without it. A local Promise.race here was rejected as the fix: it would leave
+// port.run running headless anyway and risks double-finalizing against cancelTrackedRun; the correct
+// fix is at the port, designed and tested holistically when the port goes live.
+async function runViaRewrittenEngine(port: RunPipelinePort, req: RunRequest, runId: string): Promise<QaRunResult> {
+  const input: RunInput = {
+    app: req.app,
+    sha: Sha.of(req.sha),
+    source: req.source ?? "webhook",
+    mode: req.mode,
+    target: req.target,
+    runId,
+    ...(req.guidance ? { guidance: req.guidance } : {}),
+  };
+  const outcome = await port.run(input);
+  return {
+    sha: outcome.sha,
+    verdict: outcome.verdict,
+    passed: outcome.verdict === "pass",
+    cases: [],
+    logs: "",
+  };
 }
 
 // Creates the tracked RunRecord and enqueues the pipeline on the shared queue.
@@ -117,74 +171,82 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
           if (text) deps.runEvents?.publish(record.id, { type: "log.line", level: logLevelFor(text), text });
         }
       };
-      const run = await runPipeline(
-        appConfig,
-        req.sha,
-        {
-          ...pipeline,
-          log: emitLog,
-          // During generation, emit a heartbeat every 15s so the TUI and chat
-          // have live feedback while the agent is working (blocking prompt call).
-          // FORWARD onUsage (4th arg): the runner keeps its OWN progress callback for live
-          // heartbeats, but must pass the usage sink through or the generator's token spend is
-          // never captured in the webhook path (only the reviewer's would be).
-          generate: async (input, signal, _onProgress, onUsage) => {
-            const onProgress = emitLog;
-            return pipeline.generate({ ...input, runId: record.id }, signal, (msg) => {
-              // Enrich heartbeat messages with live agent context.
-              const m = msg.match(/agent is working... \((\d+)s elapsed\)/);
-              if (m) {
-                const ctx = activityRouter.contextForRun(record.id);
-                const parts = [`agent active (${m[1]}s)`];
-                if (ctx) parts.push(`— ${ctx}`);
-                onProgress(`[qa] ${parts.join(" ")}`);
-                return;
-              }
-              onProgress(msg);
-            }, onUsage);
-          },
-        },
-        req.source ?? "webhook",
-        { mode: req.mode, target: req.target, guidance: req.guidance, fixCases: req.fixCases, parentRunId: req.parentRunId, triggerRepo: req.triggerRepo, previousNamespace, runId: record.id, commits: req.commits, baseSha: req.baseSha },
-        (step, detail) => {
-          updateRecord(record.id, { step, stepDetail: detail, retrying: step === "retry" });
-          const normalized = step === "publish" ? "decide" : step;
-          if (isRunStep(normalized)) {
-            deps.runEvents?.publish(record.id, { type: "step.changed", step: normalized, detail });
-          }
-        },
-        // A test finished → persist the case (live bar/history) AND mark its activity
-        // todo completed so it stops being the "running" focus.
-        (c) => {
-          addCase(record.id, c);
-          appendActivity(record.id, { kind: "todo", text: c.name, status: "completed" });
-          deps.runEvents?.publish(record.id, c.status === "pass"
-            ? { type: "test.passed", name: c.name, durationMs: c.durationMs ?? 0 }
-            : c.status === "fail"
-              ? { type: "test.failed", name: c.name, detail: c.detail, ...(c.durationMs !== undefined ? { durationMs: c.durationMs } : {}) }
-              : { type: "test.flaky", name: c.name, attempts: 2 });
-        },
-        (specs) => updateRecord(record.id, { specs }),
-        signal,
-        // A test started → it becomes the in-progress focus card during execute.
-        (title) => {
-          appendActivity(record.id, { kind: "todo", text: title, status: "in_progress" });
-          deps.runEvents?.publish(record.id, { type: "test.started", name: title });
-        },
-        // The independent reviewer's verdict → the live ReviewerCard (reasons are the
-        // actionable corrections on a rejection).
-        (approved, reasons) => {
-          deps.runEvents?.publish(record.id, { type: "reviewer.verdict", approved, reasons });
-        },
-        // Change-coverage result → the live coverage component (the value keystone).
-        (changedLines, coveredLines) => {
-          deps.runEvents?.publish(record.id, { type: "coverage.computed", changedLines, coveredLines });
-        },
-        // Each test the runner discovered up front → the live "next" preview.
-        (name, file) => {
-          deps.runEvents?.publish(record.id, { type: "test.discovered", name, ...(file ? { file } : {}) });
-        },
-      );
+      // PIPELINE_ENGINE dispatch (Task E.3): the ONLY place src/ consults the flag. Absent/"legacy"
+      // (or "rewritten" with no engineFactory supplied — fail-safe) takes the EXACT legacy branch
+      // below, byte-identical to before this task. "rewritten" WITH a supplied engineFactory routes
+      // through RunPipelinePort instead — runPipeline is NEVER called on that branch.
+      const engine = selectEngine(process.env);
+      const run: QaRunResult =
+        engine === "rewritten" && deps.engineFactory
+          ? await runViaRewrittenEngine(deps.engineFactory(appConfig), req, record.id)
+          : await runPipeline(
+              appConfig,
+              req.sha,
+              {
+                ...pipeline,
+                log: emitLog,
+                // During generation, emit a heartbeat every 15s so the TUI and chat
+                // have live feedback while the agent is working (blocking prompt call).
+                // FORWARD onUsage (4th arg): the runner keeps its OWN progress callback for live
+                // heartbeats, but must pass the usage sink through or the generator's token spend is
+                // never captured in the webhook path (only the reviewer's would be).
+                generate: async (input, signal, _onProgress, onUsage) => {
+                  const onProgress = emitLog;
+                  return pipeline.generate({ ...input, runId: record.id }, signal, (msg) => {
+                    // Enrich heartbeat messages with live agent context.
+                    const m = msg.match(/agent is working... \((\d+)s elapsed\)/);
+                    if (m) {
+                      const ctx = activityRouter.contextForRun(record.id);
+                      const parts = [`agent active (${m[1]}s)`];
+                      if (ctx) parts.push(`— ${ctx}`);
+                      onProgress(`[qa] ${parts.join(" ")}`);
+                      return;
+                    }
+                    onProgress(msg);
+                  }, onUsage);
+                },
+              },
+              req.source ?? "webhook",
+              { mode: req.mode, target: req.target, guidance: req.guidance, fixCases: req.fixCases, parentRunId: req.parentRunId, triggerRepo: req.triggerRepo, previousNamespace, runId: record.id, commits: req.commits, baseSha: req.baseSha },
+              (step, detail) => {
+                updateRecord(record.id, { step, stepDetail: detail, retrying: step === "retry" });
+                const normalized = step === "publish" ? "decide" : step;
+                if (isRunStep(normalized)) {
+                  deps.runEvents?.publish(record.id, { type: "step.changed", step: normalized, detail });
+                }
+              },
+              // A test finished → persist the case (live bar/history) AND mark its activity
+              // todo completed so it stops being the "running" focus.
+              (c) => {
+                addCase(record.id, c);
+                appendActivity(record.id, { kind: "todo", text: c.name, status: "completed" });
+                deps.runEvents?.publish(record.id, c.status === "pass"
+                  ? { type: "test.passed", name: c.name, durationMs: c.durationMs ?? 0 }
+                  : c.status === "fail"
+                    ? { type: "test.failed", name: c.name, detail: c.detail, ...(c.durationMs !== undefined ? { durationMs: c.durationMs } : {}) }
+                    : { type: "test.flaky", name: c.name, attempts: 2 });
+              },
+              (specs) => updateRecord(record.id, { specs }),
+              signal,
+              // A test started → it becomes the in-progress focus card during execute.
+              (title) => {
+                appendActivity(record.id, { kind: "todo", text: title, status: "in_progress" });
+                deps.runEvents?.publish(record.id, { type: "test.started", name: title });
+              },
+              // The independent reviewer's verdict → the live ReviewerCard (reasons are the
+              // actionable corrections on a rejection).
+              (approved, reasons) => {
+                deps.runEvents?.publish(record.id, { type: "reviewer.verdict", approved, reasons });
+              },
+              // Change-coverage result → the live coverage component (the value keystone).
+              (changedLines, coveredLines) => {
+                deps.runEvents?.publish(record.id, { type: "coverage.computed", changedLines, coveredLines });
+              },
+              // Each test the runner discovered up front → the live "next" preview.
+              (name, file) => {
+                deps.runEvents?.publish(record.id, { type: "test.discovered", name, ...(file ? { file } : {}) });
+              },
+            );
       deps.runEvents?.publish(record.id, {
         type: "run.verdict",
         verdict: run.verdict,

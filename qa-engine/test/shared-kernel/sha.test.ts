@@ -10,14 +10,16 @@ test("Sha: accepts a full 40-char hex sha and exposes value + short", () => {
   assert.equal(String(s), "a".repeat(40));
 });
 
-test("Sha: accepts an abbreviated hex sha (>= 7 chars)", () => {
-  assert.equal(Sha.of("abc1234").value, "abc1234");
+test("Sha: accepts abbreviated shas across the git object-name range (4..40)", () => {
+  assert.equal(Sha.of("abc1234").value, "abc1234"); // 7 — git conventional short sha
+  assert.equal(Sha.of("abc123").value, "abc123");   // 6 — the characterization fixture
+  assert.equal(Sha.of("abcd").value, "abcd");        // 4 — git's minimum abbreviation (core.abbrev)
 });
 
-test("Sha: rejects empty, non-hex, and too-short input", () => {
+test("Sha: rejects empty, non-hex, and below-minimum input", () => {
   assert.throws(() => Sha.of(""), /Sha/);
-  assert.throws(() => Sha.of("xyz1234"), /Sha/);
-  assert.throws(() => Sha.of("abc"), /Sha/); // < 7
+  assert.throws(() => Sha.of("xyz1234"), /Sha/);     // non-hex characters
+  assert.throws(() => Sha.of("abc"), /Sha/);          // 3 — below git's 4-char minimum
 });
 
 test("Sha: equals compares by value", () => {

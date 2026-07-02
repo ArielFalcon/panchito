@@ -20,6 +20,14 @@ export interface ComparableOutcome {
     reviewerRationale?: string;
     flaky: boolean;
     retries: number;
+    // Pillar 2 catalog gate honest-coverage telemetry (pipeline.ts:1018-1020, set on every
+    // persistOutcome call). Comparator-blind until the Plan 6 addendum's G2 fix (2026-07-01):
+    // absent from every committed golden (they predate this instrumentation), so both sides
+    // default to 0 via the ?? 0 normalization below — the semantic "gate did not fire" value,
+    // not a spurious null-vs-number mismatch on stale fixtures.
+    catalogGateInWindow?: number;
+    catalogGateAdvisory?: number;
+    catalogGateFailClosed?: number;
   };
   at: string;
 }
@@ -40,6 +48,9 @@ function behavioralProjection(o: ComparableOutcome): Record<string, unknown> {
     reviewerApproved: o.gateSignals.reviewerApproved ?? null,
     flaky: o.gateSignals.flaky,
     retries: o.gateSignals.retries,
+    catalogGateInWindow: o.gateSignals.catalogGateInWindow ?? 0,
+    catalogGateAdvisory: o.gateSignals.catalogGateAdvisory ?? 0,
+    catalogGateFailClosed: o.gateSignals.catalogGateFailClosed ?? 0,
   };
 }
 

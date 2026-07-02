@@ -20,6 +20,7 @@
     }
   },
   "include": [
-    "test/contexts/generation/application/ports/generation-ports-parity.test.ts"
+    "test/contexts/generation/application/ports/generation-ports-parity.test.ts",
+    "test/characterization/shadow-run.operator.ts"
   ]
 }

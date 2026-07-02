@@ -6,6 +6,9 @@
 // (not a frozen subset) so the user's growing deterministic-signal fields flow through unchanged.
 import type { TestTarget, RunMode } from "@kernel/run-mode.ts";
 import type { QaCase } from "@kernel/qa-case.ts";
+// §6.6 Option B: cross-repo link types from the service-topology bounded context.
+// Imported here so OpencodeRunInput.serviceLinks / .contractDrift are strongly typed.
+import type { ServiceLink, ContractDrift } from "@contexts/service-topology/domain/index.ts";
 
 // Supporting authoring-context types. NOT yet kernel-resident (CommitIntent lives in src/qa/commit-classify.ts,
 // ArchitectureContext in src/qa/context.ts, ExplorationBrief in src/qa/exploration-brief.ts). Declared here as
@@ -143,6 +146,14 @@ export interface OpencodeRunInput {
   existingSpecFiles?: string[];
   service?: { repo: string; mirrorDir: string; openapi?: string | string[] }; // cross-repo: the triggering microservice (read-only working copy)
   services?: Array<{ repo: string; mirrorDir: string; openapi?: string | string[] }>; // context mode: every declared service, mirrored read-only
+  // Level 3 / §6.6 Option B: deterministic cross-repo FE↔BE links produced by ServiceBoundaryResolverPort.
+  // Threaded through so the resolver's output has a typed home on the run input and reaches
+  // renderMain intact (GenerateTestsUseCase passes the full input through). NO production
+  // renderMain implementation renders a "CROSS-REPO LINKS" prompt section from it YET — that
+  // rendering is deferred to the runtime-wiring step. Optional: absent today in every real run.
+  serviceLinks?: ServiceLink[];
+  // Optional contract-drift findings (undeclared endpoints): surfaced as advisory context for the generator.
+  contractDrift?: ContractDrift[];
 }
 
 // The reviewer input. FULL current field set copied from src/integrations/opencode-client.ts (comments preserved).

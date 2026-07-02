@@ -25,6 +25,7 @@
   "exclude": [
     "test/characterization/scenarios.ts",
     "test/characterization/capture-goldens.ts",
+    "test/characterization/capture-goldens-b2.ts",
     "src/shared-kernel/contract/index.ts",
     "test/shared-kernel/run-outcome.test.ts",
     "test/shared-kernel/diff-parser/diff-parser-parity.test.ts",
@@ -49,6 +50,18 @@
     "test/contexts/generation/infrastructure/verdict-parser.adapter-parity.test.ts",
     "test/contexts/generation/infrastructure/plan-parser.adapter-parity.test.ts",
     "test/contexts/test-execution/infrastructure/static-gate-validate-parity.test.ts",
-    "test/contexts/generation/application/generate-tests.characterization.test.ts"
+    "test/contexts/generation/application/generate-tests.characterization.test.ts",
+    "test/contexts/qa-run-orchestration/infrastructure/legacy-pipeline.adapter.test.ts",
+    "test/characterization/golden-parity.test.ts",
+    "test/characterization/side-effects.ts",
+    "test/characterization/golden-outcome.harness.ts",
+    "test/contexts/qa-run-orchestration/domain/helpers/derive-cycle-backstop-parity.test.ts",
+    "test/contexts/qa-run-orchestration/domain/helpers/should-distill-learning-parity.test.ts",
+    "test/contexts/qa-run-orchestration/domain/run-decision-g4-parity.test.ts",
+    "test/contexts/qa-run-orchestration/domain/adjudicate-parity.test.ts",
+    "test/contexts/qa-run-orchestration/domain/helpers/progress-gate-parity.test.ts",
+    "test/contexts/qa-run-orchestration/domain/helpers/selector-check-parity.test.ts",
+    "test/contexts/qa-run-orchestration/domain/helpers/error-class-parity.test.ts",
+    "test/characterization/shadow-run.operator.ts"
   ]
 }

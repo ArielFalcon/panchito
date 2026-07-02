@@ -37,8 +37,20 @@ export interface ChangeAnalysisPort {
 export interface GenerationPort {
   generate(objectives: readonly Objective[], specDir: string): Promise<{ specs: string[]; approved: boolean; note?: string }>;
 }
+// ReviewPort is the authoritative publish gate's seam. blockingCount distinguishes blocking
+// corrections (must regenerate) from advisory ones (may approve when only advisory remain);
+// parsed is FALSE only on a parse miss (no verdict JSON could be parsed) — NOT a real rejection —
+// so the FixLoop re-prompts once instead of burning a fix round. Both are carried from the legacy
+// ReviewResult (src/integrations/opencode-client.ts) so the domain drops no behavior (the #1
+// fail-closed invariant: parsed).
 export interface ReviewPort {
-  review(specDir: string, cases: readonly QaCase[]): Promise<{ approved: boolean; corrections: string[]; rationale?: string }>;
+  review(specDir: string, cases: readonly QaCase[]): Promise<{
+    approved: boolean;
+    corrections: string[];
+    rationale?: string;
+    blockingCount?: number;
+    parsed?: boolean;
+  }>;
 }
 export interface ValidationPort {
   validate(specDir: string): Promise<{ ok: boolean; errors: string[]; infra?: boolean }>; // infra optional: mirrors src/qa/validate.ts CheckResult
@@ -47,7 +59,12 @@ export interface ExecutionPort {
   execute(specDir: string): Promise<{ verdict: RunVerdict; cases: QaCase[]; logs: string }>;
 }
 export interface ObjectiveSignalPort {
-  measure(br: BlastRadius, specDir: string): Promise<{ status: "pass" | "fail" | "unknown"; ratio: number | null }>;
+  // valueScore: the value-oracle (mutation-testing) result the legacy persists alongside
+  // coverageRatio in gateSignals.valueScore (src/pipeline.ts:3267's persistOutcome call site;
+  // src/qa/learning/labeler.ts's LabelerInput.valueScore). Optional/nullable so a stub or a
+  // composition root that has not yet wired the mutation-testing oracle (Task E.0) can omit it —
+  // absent is read as "not measured", never a fabricated 0.
+  measure(br: BlastRadius, specDir: string): Promise<{ status: "pass" | "fail" | "unknown"; ratio: number | null; valueScore?: number | null }>;
 }
 export interface PublicationPort {
   publish(decision: { verdict: RunVerdict; cases: readonly QaCase[]; logs: string }): Promise<{ outcome: string }>;
