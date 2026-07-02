@@ -225,6 +225,23 @@ test("F5: buildRewrittenCompositionConfig falls back to 'main' when app.baseBran
   assert.equal(base, "main", "an app with no configured baseBranch must fall back to 'main', mirroring legacy's app.baseBranch ?? \"main\"");
 });
 
+// ── FIX 4 (judgment-day W3, judge A) — config.sanitize wiring was never asserted to be the REAL
+// sanitizeText (only baseBranch/testIdAttribute/etc. had dedicated tests). CLAUDE.md "Sanitize data
+// leaving the system" + this file's own F4 comment (line ~389) claim PublicationPortAdapter's
+// renderBody/renderTitle receive the real src/orchestrator/sanitizer.ts sanitizeText via
+// config.sanitize — this test proves the wiring is genuine, not merely present, by asserting a
+// secret-shaped input is actually redacted. Fixture mirrors sanitizer.test.ts's own canonical
+// "redacts secrets (api key, token)" shape.
+
+test("F4: buildRewrittenCompositionConfig wires config.sanitize to the REAL sanitizeText (redacts a secret-shaped input)", () => {
+  const app = cfg("factory-sanitize");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.equal(typeof config.sanitize, "function", "config.sanitize must be wired — its absence silently falls back to PublicationPortAdapter's identity default, defeating the CLAUDE.md sanitize invariant");
+  const redacted = config.sanitize!("const apiKey = sk-abc123XYZ\ntoken: ghs_supersecretvalue");
+  assert.ok(!redacted.includes("sk-abc123XYZ"), "a real API-key-shaped secret must be redacted, not passed through verbatim");
+  assert.ok(!redacted.includes("ghs_supersecretvalue"), "a real token-shaped secret must be redacted, not passed through verbatim");
+});
+
 // ── createRewrittenEngineFactory — the RunnerDeps.engineFactory seam ──────────────────────────────
 // buildProduction(env, cfg) internally re-checks selectEngine(env) itself (composition-root.ts) —
 // on its "legacy" branch it THROWS unless a legacyRunner is supplied (which this factory never

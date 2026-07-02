@@ -70,8 +70,12 @@ export interface PublicationPortStaticContext {
   e2eChanged: boolean;
 }
 
-function renderTitle(verdict: RunVerdict): string {
-  return `qa-bot: ${verdict} run`;
+// FIX 5 (judgment-day W3, theoretical): sanitize is applied for symmetry with renderBody below.
+// `verdict` is a closed RunVerdict enum (never free-text today), so this is not exploitable yet —
+// but interpolating it unsanitized while every other rendered field IS sanitized is a foot-gun the
+// moment RunVerdict's closed-ness changes; cheap to close now.
+function renderTitle(verdict: RunVerdict, sanitize: (text: string) => string): string {
+  return `qa-bot: ${sanitize(verdict)} run`;
 }
 function renderBody(cases: readonly QaCase[], logs: string, sanitize: (text: string) => string): string {
   const failing = cases
@@ -115,7 +119,7 @@ export class PublicationPortAdapter implements PublicationPort {
     // F4 (CRITICAL security invariant): identity when no sanitizer was wired (backward-compat) —
     // the REAL sanitizeText is injected by the composition root (src/server/rewritten-engine-factory.ts).
     const sanitize = this.deps.sanitize ?? ((text: string) => text);
-    const title = renderTitle(decision.verdict);
+    const title = renderTitle(decision.verdict, sanitize);
     const body = renderBody(decision.cases, decision.logs, sanitize);
     // F3: Issue creation routes to the triggering repo when supplied; PR creation always targets
     // ctx.repo (the primary repo) — never the trigger repo.

@@ -156,7 +156,32 @@ function buildRewrittenObserver(runId: string, runEvents: RunEventStore | undefi
 // port), and RunQaUseCase checks signal?.aborted at every phase boundary, so a cancelled rewritten
 // run actually stops instead of resolving late and overwriting the record cancelTrackedRun already
 // finalized.
-async function runViaRewrittenEngine(port: RunPipelinePort, req: RunRequest, runId: string, signal: AbortSignal): Promise<QaRunResult> {
+//
+// Security fix (judgment-day, WARNING real): mirrors legacy runPipeline's own triggerRepo guard
+// (src/pipeline.ts:1008-1013) — `throw new Error(`trigger repo ${x} is not a declared service of
+// app ${y}`)` when req.triggerRepo is set but does not match app.repo or any app.services[].repo.
+// Since F3 (commit 643818c) routes real GitHub Issues to decision.issueRepo (which defaults to
+// input.triggerRepo), an unvalidated webhook-supplied triggerRepo could file Issues in an
+// arbitrary repo — the legacy branch (runPipeline, below) was always protected by this same
+// check; only the rewritten branch bypassed it (RunQaUseCase has no app.services knowledge). Same
+// error shape/message as legacy so the enclosing try/catch's isInfraError(err) classifies it
+// identically (a plain Error → verdict "infra-error", noted "unexpected internal error").
+function assertTriggerRepoDeclared(appConfig: AppConfig, triggerRepo: string | undefined): void {
+  if (!triggerRepo || triggerRepo === appConfig.repo) return;
+  const declared = appConfig.services?.some((s) => s.repo === triggerRepo);
+  if (!declared) {
+    throw new Error(`trigger repo ${triggerRepo} is not a declared service of app ${appConfig.name}`);
+  }
+}
+
+async function runViaRewrittenEngine(
+  port: RunPipelinePort,
+  req: RunRequest,
+  runId: string,
+  signal: AbortSignal,
+  appConfig: AppConfig,
+): Promise<QaRunResult> {
+  assertTriggerRepoDeclared(appConfig, req.triggerRepo);
   const input: RunInput = {
     app: req.app,
     sha: Sha.of(req.sha),
@@ -261,6 +286,7 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
               req,
               record.id,
               signal,
+              appConfig,
             )
           : await runPipeline(
               appConfig,

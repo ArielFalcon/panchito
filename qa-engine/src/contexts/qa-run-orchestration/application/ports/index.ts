@@ -101,6 +101,16 @@ export interface GenerationEnrichment {
   // way the dynamic diff already is, so diff-mode generation receives the SAME intent the legacy's
   // baseGenInput() forwards on every call (src/pipeline.ts:1678's `intent,`).
   intent?: CommitIntent;
+  // Manifest-enrichment fix: the run's commit sha, needed to stamp OpencodeRunInput.sha so
+  // GenerateTestsUseCase can populate ManifestEntry.changeRef.sha (the real manifest schema
+  // requires changeRef.sha non-empty — src/orchestrator/schemas.ts ManifestEntrySchema). `sha` is
+  // available on EVERY RunQaUseCaseInput regardless of mode (unlike diff/intent, which are
+  // diff-mode-only via classify()) — callers should thread `input.sha.toString()` here on every
+  // generate() call, the same way baseEnrichment already threads `intent`. NOT YET WIRED at the
+  // run-qa.use-case.ts call sites (out of this change's scope — see GenerationPortAdapter.generate's
+  // own comment for the adapter-side half of this fix); until wired, OpencodeRunInput.sha stays ""
+  // and changeRef.sha fails the schema, exactly the live-run evidence this fix responds to.
+  sha?: string;
 }
 export interface GenerationPort {
   // signal: Plan 7.1 (engram #913) — an optional, separate transport arg (mirrors RunPipelinePort's

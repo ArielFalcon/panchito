@@ -110,7 +110,14 @@ export class GenerationPortAdapter implements GenerationPort {
   async generate(_objectives: readonly Objective[], specDir: string, signal?: AbortSignal, diff?: string, enrichment?: GenerationEnrichment): Promise<GenerationPortResult> {
     const input: OpencodeRunInput = {
       repo: this.ctx.repo,
-      sha: "", // provenance only; the use-case never branches on it — the caller's Sha VO owns identity
+      // Manifest-enrichment fix: sha now feeds GenerateTestsUseCase's ManifestEntry.changeRef.sha
+      // (the real manifest schema requires changeRef.sha non-empty — the use-case is no longer
+      // sha-inert). Sourced from enrichment.sha (the run's Sha VO, stringified by the caller) when
+      // supplied; falls back to "" (today's behavior, and the value production hits until
+      // run-qa.use-case.ts's baseEnrichment is widened to thread input.sha.toString() the same way
+      // it already threads intent — see GenerationEnrichment.sha's own comment for why that call
+      // site is out of this change's scope).
+      sha: enrichment?.sha ?? "",
       // "Dynamic diff" fix (engram #936): PREFER the run's real diff (threaded per-call from
       // RunQaUseCase's ChangeAnalysisPort.classify() result) over the STATIC ctx.diff supplied at
       // construction time — the real production engineFactory builds this adapter BEFORE the

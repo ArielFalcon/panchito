@@ -12,7 +12,21 @@ import type { QaCase, SpecMeta } from "@kernel/qa-case.ts";
 // Imported here for use in PromptRenderingPort (GEN-06) and PlanObjectiveView (WRAP-3).
 import type { OpencodeRunInput, ReviewInput, ParallelWorkerInput, ExplorationBrief } from "./generation-ports.ts";
 
-export interface ManifestEntry { id: string; file: string; flow: string; objective: string; }
+// targets/changeRef mirror the legacy ManifestEntry (src/integrations/opencode-client.ts:772-788)
+// and the real manifest schema the static gate validates (src/orchestrator/schemas.ts
+// ManifestEntrySchema: objective/flow/targets non-empty, changeRef required). Optional here so
+// minimal-shape callers (existing tests, the bare specs-only reconcile path) keep compiling —
+// the use-case populates both whenever specMetas + a run sha/intent are available, which is the
+// ONLY path the real static gate accepts (see generate-tests.use-case.ts's rawEntries assembly).
+export interface ManifestEntry {
+  id: string;
+  file: string;
+  flow: string;
+  objective: string;
+  targets?: string[];
+  changeRef?: { sha: string; type: string };
+  sha256?: string;
+}
 export interface ManifestRepositoryPort {
   read(specDir: string): Promise<ManifestEntry[]>;
   reconcile(specDir: string, entries: readonly ManifestEntry[]): Promise<ManifestEntry[]>;

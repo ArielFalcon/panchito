@@ -107,16 +107,39 @@ export class GenerateTestsUseCase {
     const deliverable = verdicts.parseGenerator(generatorOutput);
 
     // ── 5. Reconcile the manifest ─────────────────────────────────────────────
-    // Reconcile uses the spec list from the deliverable. In the use-case the "on-disk
-    // verification" invariant (a parsed spec NAME is a CLAIM, not proof it wrote the file)
-    // is delegated to the ManifestRepositoryPort.reconcile implementation — the use-case
-    // trusts the port to prune phantoms (mirrors the legacy disk-reconcile path).
+    // Ported faithfully from the legacy manifest upsert (src/integrations/opencode-client.ts:
+    // 764-810): entries are built EXCLUSIVELY from `deliverable.specMetas` (flow/objective/targets
+    // per spec, self-reported by the agent's closing verdict JSON), keyed by `flow` — NOT derived
+    // from `deliverable.specs` (the bare file-path list). A spec name that appears in `specs[]`
+    // but has NO matching entry in `specMetas[]` gets NO manifest entry at all; this is legacy's
+    // actual behavior (opencode-client.ts's loop iterates specMetas only, never cross-references
+    // specs[] to synthesize a default entry) — silent, not an error, because the manifest is
+    // best-effort metadata, not proof the spec exists (the spec file itself is what matters for
+    // execution; only its METADATA entry is skipped).
+    //
+    // changeRef {sha, type} is the orchestrator-stamped provenance field the real manifest schema
+    // requires (src/orchestrator/schemas.ts ManifestEntrySchema — objective/flow/targets non-empty,
+    // changeRef.sha/type non-empty). `type` mirrors legacy's `input.intent?.type ?? "unknown"`
+    // (opencode-client.ts:765); `sha` mirrors legacy's `input.sha`. Previously this used
+    // `deliverable.specs.map(...)` with objective:"" and no targets/changeRef — always failing the
+    // schema the static gate (Filter B) validates against once specMetas is the ONLY hydration path
+    // wired here (live-run evidence: verdict=invalid, "entry 0.objective / entry 0.targets /
+    // entry 0.changeRef" all missing).
+    //
+    // On-disk phantom verification (legacy's sha256File check: a specMeta naming a file NOT on disk
+    // is dropped before it reaches the manifest) is NOT yet ported into qa-engine's
+    // ManifestRepositoryPort — reconcile() here still only prunes/merges by id, it does not verify
+    // the file exists on disk first. Tracked as a follow-up gap, not silently claimed as covered.
     const specDir = `${input.mirrorDir}/${input.e2eRelDir}`;
-    const rawEntries: ManifestEntry[] = deliverable.specs.map((spec) => ({
-      id: spec.replace(/^.*\//, "").replace(/\.spec\.ts$/, ""),
-      file: spec,
-      flow: spec.replace(/^flows\//, "").replace(/\.spec\.ts$/, ""),
-      objective: "", // enriched by the manifest repo impl if specMetas are available
+    const changeType = input.intent?.type ?? "unknown";
+    const rawEntries: ManifestEntry[] = (deliverable.specMetas ?? []).map((m) => ({
+      id: m.flow,
+      file: m.file,
+      flow: m.flow,
+      objective: m.objective,
+      targets: m.targets,
+      changeRef: { sha: input.sha, type: changeType },
+      ...(m.sha256 ? { sha256: m.sha256 } : {}),
     }));
     const reconciledEntries = await manifest.reconcile(specDir, rawEntries);
 

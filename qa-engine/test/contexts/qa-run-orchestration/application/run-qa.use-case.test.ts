@@ -1701,6 +1701,143 @@ test("F3: an ordinary (non-cross-repo) run omits issueRepo entirely — the adap
   assert.equal(publishedDecision!.issueRepo, undefined, "an ordinary run (no input.triggerRepo) must NOT fabricate an issueRepo — absent lets the adapter fall back to its own static ctx.repo");
 });
 
+// ── W3 (judgment-day, CRITICAL) — terminalResult() now dispatches publish() ───────────────────
+// terminalResult (the shared helper for the static-gate "invalid" exit and the mid-run
+// "infra-error" exit) computed `decision` but NEVER called this.deps.publication.publish() — a
+// static-gate invalid run with onFailure:"github-issue" never actually opened a GitHub Issue.
+// Legacy parity: pipeline.ts:2313-2325 (static-gate invalid -> report() -> issueOrShadow -> a real
+// Issue "QA could not validate the generated E2E tests at ${sha}"); infra-error correctly stays
+// no-publish (sideEffect "none" via decide() itself, matching report()'s own infra-error branch,
+// pipeline.ts:3353-3355 — never calls issueOrShadow).
+
+test("W3 FIX 1: an invalid verdict with onFailure:'github-issue' dispatches publish() exactly once with sideEffect 'issue'", async () => {
+  let publishCallCount = 0;
+  let publishedDecision: { verdict: string; issueRepo?: string } | undefined;
+  const { ports } = stubPorts({
+    validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }),
+  });
+  ports.publication.publish = async (decision) => {
+    publishCallCount++;
+    publishedDecision = decision;
+    return { outcome: "issue: https://github.com/org/app/issues/42" };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "w3-fix1-invalid-publishes-issue" });
+
+  assert.equal(out.decision.verdict, "invalid");
+  assert.equal(out.decision.sideEffect, "issue");
+  assert.equal(publishCallCount, 1, "terminalResult('invalid', ...) must dispatch to publish() exactly once — previously computed `decision` but never called publish() at all");
+  assert.ok(publishedDecision, "publish() must have been called with a decision payload");
+  assert.equal(publishedDecision!.verdict, "invalid");
+  // The static gate's own validation-errors note is threaded in as terminalResult's `note` param
+  // (see the "NOTE CHAIN" test) — the publish outcome is APPENDED to it, never clobbering it (FIX 1's
+  // own "append to any existing note" requirement; see the dedicated append-not-clobber test below).
+  assert.ok(out.note?.includes("issue: https://github.com/org/app/issues/42"), `the publish outcome must thread into RunQaResult.note — got: ${out.note}`);
+});
+
+test("W3 FIX 1: an invalid verdict with onFailure:'none' resolves to sideEffect 'none' and publish() is NEVER called", async () => {
+  let publishCallCount = 0;
+  const { ports } = stubPorts({
+    validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }),
+  });
+  ports.publication.publish = async () => { publishCallCount++; return { outcome: "issue: should never happen" }; };
+  const useCase = new RunQaUseCase({ ...ports, config: { ...baseConfig, onFailure: "none" } });
+
+  const out = await useCase.run({ ...baseInput, runId: "w3-fix1-invalid-onfailure-none" });
+
+  assert.equal(out.decision.verdict, "invalid");
+  assert.equal(out.decision.sideEffect, "none", "onFailure:'none' must suppress the side effect for an invalid verdict too, matching report()'s own top-guard");
+  assert.equal(publishCallCount, 0, "an onFailure-suppressed invalid decision must NEVER reach the publish port");
+});
+
+test("W3 FIX 1: a shadow-mode invalid verdict dispatches publish() so the shadow-log line is genuinely emitted (shadow-log routing)", async () => {
+  let publishCallCount = 0;
+  const { ports } = stubPorts({
+    validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }),
+  });
+  ports.publication.publish = async () => { publishCallCount++; return { outcome: "shadow: shadow mode — side effects replaced with logs" }; };
+  const useCase = new RunQaUseCase({ ...ports, config: { ...baseConfig, shadow: true } });
+
+  const out = await useCase.run({ ...baseInput, runId: "w3-fix1-invalid-shadow" });
+
+  assert.equal(out.decision.verdict, "invalid");
+  assert.equal(out.decision.sideEffect, "shadow-log");
+  assert.equal(publishCallCount, 1, "a shadow-mode invalid run must still dispatch to publish() — PublicationPortAdapter is what collapses it into a shadow-log line, not this use-case skipping the call");
+  assert.ok(out.note?.includes("shadow: shadow mode — side effects replaced with logs"), `got: ${out.note}`);
+});
+
+test("W3 FIX 1: an infra-error verdict resolves to sideEffect 'none' via decide() itself — publish() is NEVER called, and no special-casing is needed", async () => {
+  let publishCallCount = 0;
+  const { ports } = stubPorts({
+    waitUntilServing: async () => err(new Error("DEV did not respond")),
+  });
+  ports.publication.publish = async () => { publishCallCount++; return { outcome: "issue: should never happen" }; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "w3-fix1-infra-error-no-publish" });
+
+  assert.equal(out.decision.verdict, "infra-error");
+  assert.equal(out.decision.sideEffect, "none", "infra-error must resolve to sideEffect 'none' automatically through the shared decide() call — legacy never opens an Issue for infra-error (report():3353-3355)");
+  assert.equal(publishCallCount, 0, "an infra-error terminal must NEVER dispatch to publish()");
+});
+
+test("W3 FIX 1: the publish outcome is APPENDED to an existing diagnostic note (e.g. the static-gate's validation-errors note), never clobbered", async () => {
+  const { ports } = stubPorts({
+    validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout", "[tsc] Type 'string' is not assignable to type 'number'."] }),
+  });
+  ports.publication.publish = async () => ({ outcome: "issue: https://github.com/org/app/issues/7" });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "w3-fix1-note-append-not-clobber" });
+
+  assert.equal(out.decision.verdict, "invalid");
+  assert.ok(out.note?.includes("no-wait-for-timeout"), `the original validation-errors note must survive — got: ${out.note}`);
+  assert.ok(out.note?.includes("issue: https://github.com/org/app/issues/7"), `the publish outcome must be appended to the existing note, not replace it — got: ${out.note}`);
+});
+
+// ── W3 FIX 2 (judgment-day, judge B) — context-mode invalid now honors onFailure ────────────────
+// Deliberate divergence from legacy: buildContextMap's own invalid branch (src/pipeline.ts:
+// 1377-1404) calls issueOrShadow() DIRECTLY, bypassing report()'s onFailure top-guard entirely —
+// undocumented in the legacy source, reading as an accident rather than a deliberate design choice
+// (see the FIX 2 comment on terminalResult's skipPersist parameter for the full writeup). This
+// composition prefers the CONSISTENT policy: context-mode invalid reaches the SAME terminalResult
+// call as the generic static-gate invalid, so it now honors onFailure exactly like every other
+// verdict — including staying silent when onFailure:"none" (which legacy's bypass would NOT do).
+
+test("W3 FIX 2: a context-mode invalid dispatches publish() when onFailure:'github-issue' (still skips persistence per FIX 2's existing no-persist convention)", async () => {
+  let publishCallCount = 0;
+  let saveCallCount = 0;
+  const { ports } = stubPorts({
+    generate: async () => ({ specs: [".qa/context.json"], approved: true, note: "tried" }),
+    validate: async () => ({ ok: false, errors: ["feBe[0]: route '/ghost' is not declared in 'routes'"] }),
+  });
+  ports.publication.publish = async () => { publishCallCount++; return { outcome: "issue: https://github.com/org/app/issues/11" }; };
+  ports.runHistory.save = async () => { saveCallCount++; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "w3-fix2-context-invalid-publishes", mode: "context" });
+
+  assert.equal(out.decision.verdict, "invalid");
+  assert.equal(publishCallCount, 1, "a context-mode invalid with onFailure:'github-issue' must dispatch publish() through the same shared terminalResult path every other invalid uses");
+  assert.equal(saveCallCount, 0, "context-mode invalid must still NOT persist — publish dispatch and persistence are orthogonal (FIX 2's skipPersist convention is unaffected by FIX 1's publish dispatch)");
+});
+
+test("W3 FIX 2: a context-mode invalid does NOT dispatch publish() when onFailure:'none' — a DELIBERATE divergence from legacy's unconditional issueOrShadow bypass", async () => {
+  let publishCallCount = 0;
+  const { ports } = stubPorts({
+    generate: async () => ({ specs: [".qa/context.json"], approved: true, note: "tried" }),
+    validate: async () => ({ ok: false, errors: ["feBe[0]: route '/ghost' is not declared in 'routes'"] }),
+  });
+  ports.publication.publish = async () => { publishCallCount++; return { outcome: "issue: should never happen" }; };
+  const useCase = new RunQaUseCase({ ...ports, config: { ...baseConfig, onFailure: "none" } });
+
+  const out = await useCase.run({ ...baseInput, runId: "w3-fix2-context-invalid-onfailure-none", mode: "context" });
+
+  assert.equal(out.decision.verdict, "invalid");
+  assert.equal(publishCallCount, 0, "this composition prefers the CONSISTENT onFailure policy over legacy's undocumented direct-issueOrShadow bypass (src/pipeline.ts:1377-1404) — see the terminalResult skipPersist FIX 2 comment for the full rationale");
+});
+
 // ── W2 (generation quality loop, audit-verified cutover blocker) — F2: forward FixLoop context.
 // The FixLoop's own regenerate() call receives FixLoopGenerateInput (fixCases/selectorContradictions/
 // domSnapshot) but the use-case's closure previously discarded it entirely — every retry regenerated

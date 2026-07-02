@@ -246,6 +246,56 @@ test("generate() maps enrichment.reviewCorrections/fixCases/selectorContradictio
   }
 });
 
+// ── Manifest-enrichment fix: enrichment.sha must reach OpencodeRunInput.sha so
+// GenerateTestsUseCase can stamp ManifestEntry.changeRef.sha (previously hardcoded to "" here,
+// which made every manifest entry fail the real schema's changeRef.sha non-empty check).
+
+test("generate() maps enrichment.sha onto OpencodeRunInput.sha", async () => {
+  const ports = fakeGenerationPorts();
+  let capturedInput: OpencodeRunInput | undefined;
+  const originalGenerate = GenerateTestsUseCase.prototype.generate;
+  GenerateTestsUseCase.prototype.generate = async function (input: OpencodeRunInput, opts) {
+    capturedInput = input;
+    return originalGenerate.call(this, input, opts);
+  };
+  try {
+    const useCase = new GenerateTestsUseCase(ports);
+    const adapter = new GenerationPortAdapter(useCase, {
+      repo: "org/app", appName: "app", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e",
+      namespace: "qa-bot-abc1234", needsReview: false, target: "e2e", mode: "diff", diff: "",
+    });
+
+    await adapter.generate([], "/mirrors/org/app/e2e", undefined, "the-diff", { sha: "abc1234def" });
+
+    assert.equal(capturedInput?.sha, "abc1234def");
+  } finally {
+    GenerateTestsUseCase.prototype.generate = originalGenerate;
+  }
+});
+
+test("generate() with no enrichment.sha falls back to empty string (today's behavior, until run-qa.use-case.ts threads it)", async () => {
+  const ports = fakeGenerationPorts();
+  let capturedInput: OpencodeRunInput | undefined;
+  const originalGenerate = GenerateTestsUseCase.prototype.generate;
+  GenerateTestsUseCase.prototype.generate = async function (input: OpencodeRunInput, opts) {
+    capturedInput = input;
+    return originalGenerate.call(this, input, opts);
+  };
+  try {
+    const useCase = new GenerateTestsUseCase(ports);
+    const adapter = new GenerationPortAdapter(useCase, {
+      repo: "org/app", appName: "app", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e",
+      namespace: "qa-bot-abc1234", needsReview: false, target: "e2e", mode: "diff", diff: "",
+    });
+
+    await adapter.generate([], "/mirrors/org/app/e2e");
+
+    assert.equal(capturedInput?.sha, "");
+  } finally {
+    GenerateTestsUseCase.prototype.generate = originalGenerate;
+  }
+});
+
 test("generate() with no enrichment argument omits every enrichment field from OpencodeRunInput (unchanged prompt)", async () => {
   const ports = fakeGenerationPorts();
   let capturedInput: OpencodeRunInput | undefined;

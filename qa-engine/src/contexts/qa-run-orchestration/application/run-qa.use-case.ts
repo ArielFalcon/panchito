@@ -282,11 +282,17 @@ export class RunQaUseCase {
       return this.abortedResult();
     }
 
-    // W2 fix (F5): the base enrichment every generate()/review() call below shares — just the
-    // classification-sourced intent, absent when non-diff mode never classified. Each call site
-    // spreads its OWN additional fields (fixCases/reviewCorrections/etc.) on top of this base,
+    // W2 fix (F5): the base enrichment every generate()/review() call below shares — the run's sha
+    // plus the classification-sourced intent (absent when non-diff mode never classified). sha is
+    // ALWAYS present (manifest-enrichment fix: GenerateTestsUseCase stamps every manifest entry's
+    // changeRef.sha from OpencodeRunInput.sha, which the adapter reads off enrichment.sha — without
+    // it every entry's changeRef would carry an empty sha and fail the manifest schema). Each call
+    // site spreads its OWN additional fields (fixCases/reviewCorrections/etc.) on top of this base,
     // mirroring the legacy's baseGenInput({ intent, ...extra }) pattern (src/pipeline.ts:1666-1712).
-    const baseEnrichment = classificationIntent ? { intent: classificationIntent } : undefined;
+    const baseEnrichment = {
+      sha: input.sha.toString(),
+      ...(classificationIntent ? { intent: classificationIntent } : {}),
+    };
 
     // Phase: generate (GenerationPort).
     this.deps.observer?.onStep("generate");
@@ -1023,6 +1029,25 @@ export class RunQaUseCase {
     // mode's terminalResult("invalid", ...) call correctly persists. Skips BOTH runHistory.save()
     // AND learning.fold() (mirroring FIX 2's own established no-persist convention for the clean
     // context pass, which ALSO skips both calls per src/pipeline.ts:1445-1448's early return).
+    //
+    // Deliberate divergence (judgment-day W3, FIX 2, judge B): legacy's buildContextMap invalid
+    // branch calls issueOrShadow() DIRECTLY (src/pipeline.ts:1377-1404) — bypassing report()'s own
+    // `onFailure !== "github-issue"` top-guard (src/pipeline.ts:3337-3340) entirely, so a
+    // context-mode invalid run files a real Issue even when the app is configured with
+    // onFailure:"none". No comment or test anywhere in the legacy source explains this as
+    // deliberate; it reads as an accident of buildContextMap having been written as its own
+    // self-contained branch before/independent of report()'s onFailure guard, never wired through
+    // report() the way every other verdict-reporting call site (fail/invalid/infra-error/flaky) is.
+    // This composition's context-mode invalid ALSO reaches terminalResult("invalid", ...) (same
+    // call site as the generic static-gate invalid, input.mode === "context" below) — which now
+    // (FIX 1, above) dispatches through the SAME decide()-derived sideEffect every other invalid
+    // verdict uses, i.e. it DOES honor onFailure. This is a deliberate choice to prefer the
+    // consistent, already-ported policy (run-decision.service.ts's reportSideEffect, itself a
+    // faithful port of report()'s guard) over reproducing an undocumented legacy bypass — CLAUDE.md
+    // "root-cause, not app-specific" favors one coherent publish policy over a second, silent
+    // exception carved out for one mode. If this divergence is ever found to be load-bearing
+    // (e.g. a team relies on context-mode Issues firing regardless of onFailure), reproduce the
+    // bypass explicitly here with its own comment — do not let it drift back in silently.
     skipPersist = false,
     // FIX 3 (judgment-day D.7 batch 2): the static-fix loop's own accumulated `retries` (repair
     // rounds consumed before landing on this "invalid" exit — src/pipeline.ts:2265's `retries++`)
@@ -1050,10 +1075,36 @@ export class RunQaUseCase {
     // errorClass (E-STATIC / E-INFRA respectively) via the taxonomy, matching the legacy's
     // errorClassFromVerdict exactly for these two verdict-derived classes.
     const errorClass = this.deriveErrorClass(verdict, null, null);
+    // FIX 1 (judgment-day W3, CRITICAL): dispatch the SAME publish call the mainline handle()/run()
+    // body makes (see the "Phase: publish" block above, ~line 765-809) — this helper previously
+    // computed `decision` (including its derived sideEffect) but NEVER called
+    // this.deps.publication.publish(), so a static-gate "invalid" run (onFailure: "github-issue")
+    // never actually opened a GitHub Issue, and a shadow-mode invalid run never logged. Legacy
+    // parity: pipeline.ts:2313-2325 (static-gate invalid -> report() -> issueOrShadow -> a real
+    // Issue "QA could not validate the generated E2E tests at ${sha}"). "infra-error" resolves to
+    // sideEffect "none" via decide() itself (legacy never opens an Issue for infra-error,
+    // report():3353-3355) — so infra-error call sites stay no-publish AUTOMATICALLY through the
+    // shared decision, without any verdict-specific branching here.
+    let publishOutcome: string | undefined;
+    if (decision.sideEffect !== "none") {
+      const published = await this.deps.publication.publish({
+        verdict,
+        cases: [],
+        logs: note ?? "",
+        reviewerApproved: reviewerApprovedForOutcome,
+        coverageBlocks: false,
+        ...(input.triggerRepo ? { issueRepo: input.triggerRepo } : {}),
+      });
+      publishOutcome = published.outcome;
+    }
+    // Thread the publish outcome into the note (append, never clobber an existing diagnostic note
+    // such as the static-gate's joined validation errors or the health pre-flight's captured
+    // InfraError message) — mirrors the mainline's own publishOutcome-into-note threading.
+    const combinedNote = [note, publishOutcome].filter((part): part is string => Boolean(part)).join("\n\n") || undefined;
     if (!skipPersist) {
       const outcome = this.toRunOutcome(input, decision, [], retries, null, errorClass, {
         reviewerApproved: reviewerApprovedForOutcome,
-        note,
+        note: combinedNote,
       });
       await this.deps.runHistory.save(outcome);
       if (verdict === "invalid") {
@@ -1084,7 +1135,7 @@ export class RunQaUseCase {
         deterministicSelectorBlocks: 0,
       },
       cases: [],
-      ...(!skipPersist && note !== undefined ? { note } : {}),
+      ...(!skipPersist && combinedNote !== undefined ? { note: combinedNote } : {}),
     };
   }
 }

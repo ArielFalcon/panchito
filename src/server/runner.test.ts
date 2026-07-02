@@ -382,15 +382,94 @@ test("PIPELINE_ENGINE=rewritten — the runner threads req.triggerRepo into port
   try {
     const queue = new JobQueue();
     const { port, calls } = fakePort({ verdict: "pass" });
+    // Must be a DECLARED service (assertTriggerRepoDeclared, judgment-day security fix) — an
+    // undeclared triggerRepo now rejects the run before it ever reaches port.run(); see the
+    // dedicated "rejects an undeclared triggerRepo" test group below.
     const id = enqueueTrackedRun(
       queue,
       { app: "runner-trigger-repo", sha: "def5678", target: "e2e", mode: "diff", source: "webhook", triggerRepo: "org/orders-svc" },
-      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port },
+      { pipeline: stubDeps(), loadApp: (name) => ({ ...cfg(name), services: [{ repo: "org/orders-svc" }] }), engineFactory: () => port },
     );
     await queue.drain();
     assert.equal(getRecord(id)!.verdict, "pass");
     assert.equal(calls.length, 1);
     assert.equal(calls[0]!.triggerRepo, "org/orders-svc", "RunInput.triggerRepo must carry req.triggerRepo through to port.run, mirroring legacy's triggerService cross-repo gate");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+// ── triggerRepo validation (judgment-day, WARNING real) ────────────────────────
+// Legacy runPipeline throws `trigger repo ${x} is not a declared service of app ${y}`
+// (src/pipeline.ts:1008-1013) BEFORE the run ever starts — an unvalidated webhook-supplied
+// triggerRepo could otherwise route a real GitHub Issue (decision.issueRepo defaults to
+// input.triggerRepo, F3/643818c) into an arbitrary repo. Only the rewritten branch bypassed this
+// (RunQaUseCase has no app.services knowledge) — assertTriggerRepoDeclared closes that gap at the
+// SAME boundary the legacy branch already protects (runViaRewrittenEngine, mirroring
+// runPipeline's own check). A rejected run finalizes as verdict "infra-error" (a plain Error,
+// same as legacy — isInfraError(err) is false for it, matching the existing "unexpected internal
+// error" classification the queue callback's catch block already applies to non-InfraError throws).
+
+test("PIPELINE_ENGINE=rewritten — rejects an undeclared triggerRepo (finalizes infra-error, never reaches port.run)", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const { port, calls } = fakePort({ verdict: "pass" });
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-trigger-repo-undeclared", sha: "def5678", target: "e2e", mode: "diff", source: "webhook", triggerRepo: "org/evil-repo" },
+      // cfg() declares no services[] at all — org/evil-repo cannot be a declared service.
+      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port },
+    );
+    await queue.drain();
+    const r = getRecord(id)!;
+    assert.equal(r.status, "done");
+    assert.equal(r.verdict, "infra-error", "an undeclared triggerRepo must never reach a real verdict — the run is rejected outright");
+    assert.match(r.note ?? "", /trigger repo org\/evil-repo is not a declared service of app runner-trigger-repo-undeclared/);
+    assert.equal(calls.length, 0, "port.run must NEVER be invoked for an undeclared triggerRepo");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("PIPELINE_ENGINE=rewritten — accepts a DECLARED service triggerRepo", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const { port, calls } = fakePort({ verdict: "pass" });
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-trigger-repo-declared", sha: "def5678", target: "e2e", mode: "diff", source: "webhook", triggerRepo: "org/orders-svc" },
+      { pipeline: stubDeps(), loadApp: (name) => ({ ...cfg(name), services: [{ repo: "org/orders-svc" }] }), engineFactory: () => port },
+    );
+    await queue.drain();
+    assert.equal(getRecord(id)!.verdict, "pass");
+    assert.equal(calls.length, 1, "a declared service triggerRepo must reach port.run normally");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("PIPELINE_ENGINE=rewritten — an app with NO services[] rejects ANY triggerRepo other than its own repo", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const { port, calls } = fakePort({ verdict: "pass" });
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-trigger-repo-no-services", sha: "def5678", target: "e2e", mode: "diff", source: "webhook", triggerRepo: "org/anything" },
+      // cfg() has no `services` key at all — matches legacy's `app.services?.find(...)` on undefined.
+      { pipeline: stubDeps(), loadApp: cfg, engineFactory: () => port },
+    );
+    await queue.drain();
+    assert.equal(getRecord(id)!.verdict, "infra-error");
+    assert.equal(calls.length, 0);
   } finally {
     if (prev === undefined) delete process.env.PIPELINE_ENGINE;
     else process.env.PIPELINE_ENGINE = prev;

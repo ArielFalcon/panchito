@@ -117,6 +117,69 @@ test("reconcileManifest returns [] and writes nothing when given an empty entrie
   }
 });
 
+// ── manifest-enrichment fix: reconcile preserves prior enriched fields on merge ────────────────
+// The use-case's upsert (generate-tests.use-case.ts) now stamps targets/changeRef per entry.
+// reconcileManifest's merge is `{ ...byId.get(e.id), ...e }` — a re-upserted id's NEW fields win,
+// but a re-upsert with a DIFFERENT id must never touch an unrelated id's previously-enriched
+// targets/changeRef. Pins that invariant explicitly for the widened (targets/changeRef) shape.
+test("reconcileManifest preserves an unrelated entry's targets/changeRef when a different id is re-upserted", async () => {
+  const specDir = makeSpecDir();
+  try {
+    mkdirSync(join(specDir, ".qa"), { recursive: true });
+    const seeded = [
+      {
+        id: "login", file: "e2e/login.spec.ts", flow: "login", objective: "given creds, then dashboard",
+        targets: ["AuthService.login"], changeRef: { sha: "sha1", type: "feat" },
+      },
+    ];
+    writeFileSync(manifestPath(specDir), JSON.stringify(seeded, null, 2));
+
+    const out = await reconcileManifest(specDir, [
+      {
+        id: "checkout", file: "e2e/checkout.spec.ts", flow: "checkout", objective: "user can checkout",
+        targets: ["CheckoutService.pay"], changeRef: { sha: "sha2", type: "fix" },
+      },
+    ]);
+
+    const byId = new Map(out.map((e) => [e.id, e]));
+    assert.deepEqual(byId.get("login")?.targets, ["AuthService.login"], "unrelated entry's targets preserved");
+    assert.deepEqual(byId.get("login")?.changeRef, { sha: "sha1", type: "feat" }, "unrelated entry's changeRef preserved");
+    assert.deepEqual(byId.get("checkout")?.targets, ["CheckoutService.pay"]);
+    assert.deepEqual(byId.get("checkout")?.changeRef, { sha: "sha2", type: "fix" });
+  } finally {
+    rmSync(specDir, { recursive: true, force: true });
+  }
+});
+
+// A re-upsert of the SAME id with a NEW changeRef must win (matches the spread-merge order
+// `{ ...byId.get(e.id), ...e }` — the new entry's fields overwrite the old).
+test("reconcileManifest overwrites targets/changeRef when the SAME id is re-upserted with new values", async () => {
+  const specDir = makeSpecDir();
+  try {
+    mkdirSync(join(specDir, ".qa"), { recursive: true });
+    const seeded = [
+      {
+        id: "checkout", file: "e2e/checkout.spec.ts", flow: "checkout", objective: "old objective",
+        targets: ["OldService.old"], changeRef: { sha: "sha-old", type: "chore" },
+      },
+    ];
+    writeFileSync(manifestPath(specDir), JSON.stringify(seeded, null, 2));
+
+    const out = await reconcileManifest(specDir, [
+      {
+        id: "checkout", file: "e2e/checkout.spec.ts", flow: "checkout", objective: "user can checkout",
+        targets: ["CheckoutService.pay"], changeRef: { sha: "sha-new", type: "feat" },
+      },
+    ]);
+
+    assert.equal(out.length, 1);
+    assert.deepEqual(out[0]?.targets, ["CheckoutService.pay"]);
+    assert.deepEqual(out[0]?.changeRef, { sha: "sha-new", type: "feat" });
+  } finally {
+    rmSync(specDir, { recursive: true, force: true });
+  }
+});
+
 test("reconcileManifest rebuilds from the given entries when the existing manifest is corrupt", async () => {
   const specDir = makeSpecDir();
   try {
