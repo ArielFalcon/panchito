@@ -69,3 +69,28 @@ test("preserves a data URI base64 payload (not treated as a leaked secret)", () 
   const { text: out } = sanitizeText(`<img src="${dataUri}">`);
   assert.match(out, /data:image\/png;base64,/);
 });
+
+test("does NOT redact deep repo file paths as base64 secrets — a >=40-char run of letters+slashes IS a real Java package path (redacting it mangled diffs and the blast-radius signal into '[REDACTED_SECRET].java')", () => {
+  const path = "src/main/java/es/name/restaurants/application/service/impl/CourseApplicationServiceImpl.java";
+  const { text: out } = sanitizeText(`+++ b/${path}\n- \`createNewCourse\` (${path})`);
+  assert.match(out, /CourseApplicationServiceImpl\.java/);
+  assert.doesNotMatch(out, /\[REDACTED_SECRET\]/);
+});
+
+test("still redacts genuine long base64 secrets (with +/= chars, or with no path-shaped slashes)", () => {
+  const withPlusEquals = "QWxhZGRpbjpvcGVuIHNlc2FtZQ+abcDEF0123456789ZZ==";
+  const flatNoSlashes = "AbC0123456789dEfGhIjKlMnOpQrStUvWxYz0123456789AA";
+  const { text: out } = sanitizeText(`${withPlusEquals}\n${flatNoSlashes}`);
+  assert.doesNotMatch(out, /QWxhZGRpbjpvcGVu/);
+  assert.doesNotMatch(out, /AbC0123456789dEf/);
+  assert.match(out, /\[REDACTED_SECRET\]/);
+});
+
+test("does NOT redact long Java identifiers or paths with >30-char segments (both are code, not base64)", () => {
+  const identifier = "populateCoursesDescriptionMultilingualUseCase";
+  const longSegPath = "src/main/java/es/name/restaurants/application/service/template/CourseSearcherAlgorithmTemplate.java";
+  const { text: out } = sanitizeText(`- \`${identifier}\` (${longSegPath})`);
+  assert.match(out, /populateCoursesDescriptionMultilingualUseCase/);
+  assert.match(out, /CourseSearcherAlgorithmTemplate\.java/);
+  assert.doesNotMatch(out, /\[REDACTED_SECRET\]/);
+});

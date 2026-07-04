@@ -69,9 +69,30 @@ const NAMED_SECRET_PATTERNS: Array<{ name: string; p: RegExp; skip?: (m: string)
     // model reads. The skip still drops pure-hex runs (git SHAs / digests).
     name: "base64-secret",
     p: /(?<![A-Za-z0-9+/=])(?<!sha1-)(?<!sha256-)(?<!sha384-)(?<!sha512-)[A-Za-z0-9+/=]{40,}(?![A-Za-z0-9+/=])/g,
-    skip: (m) => /^[0-9a-f]+$/i.test(m),
+    skip: (m) => /^[0-9a-f]+$/i.test(m) || isPathLikeRun(m),
   },
 ];
+
+// A >=40-char run of [A-Za-z0-9+/=] is ALSO exactly what real CODE looks like — the base64
+// alphabet contains "/", so `src/main/java/es/.../CourseApplicationServiceImpl` matched
+// base64-secret and was redacted, mangling real paths in diffs sent to the model AND in the
+// structural blast-radius signal ("[REDACTED_SECRET].java"); long Java identifiers
+// (`populateCoursesDescriptionMultilingualUseCase`, 46 letters) matched it too. Two code-shaped
+// escapes, both requiring no "+"/"=" (code never carries them; base64 blobs usually do):
+//   - a PATH: >=3 slashes, every segment 1..80 chars (a genuine base64 blob hits >=3 slashes
+//     only by chance — ~2% at 40 chars);
+//   - a bare IDENTIFIER: pure letters, no digits (a 40-char base64 blob with zero digits is
+//     ~0.02% likely — camelCase class/method names are exactly this shape).
+// Slash-bearing secrets in context stay covered by the env/assignment/key-specific rules above.
+// Twin of qa-engine/src/contexts/generation/infrastructure/sanitize-text.ts's own isPathLikeRun —
+// keep the two in lockstep.
+function isPathLikeRun(m: string): boolean {
+  if (m.includes("+") || m.includes("=")) return false;
+  if (!m.includes("/")) return /^[A-Za-z]+$/.test(m);
+  const segments = m.split("/");
+  if (segments.length < 4) return false;
+  return segments.every((s) => s.length >= 1 && s.length <= 80);
+}
 
 const INTERNAL_HOST_PATTERNS: RegExp[] = [
   // Private IPv4 ranges (10/8, 192.168/16, 172.16/12)
