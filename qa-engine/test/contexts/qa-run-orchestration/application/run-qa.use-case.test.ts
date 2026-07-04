@@ -21,6 +21,7 @@ import type {
   PreGenerationGroundingPort,
   ReviewDomGroundingPort,
   RetrievedRule,
+  StructuralSignalPort,
 } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 import { BlastRadius } from "@kernel/blast-radius.ts";
 import { ok, err } from "@kernel/result.ts";
@@ -3071,4 +3072,143 @@ test("executedRed: DIRECT logic pin — reproduces the override's own condition 
   const passVerdict: "pass" | "fail" | "flaky" = "pass";
   const executedRedOnPass = round === 0 && (passVerdict as string) === "fail";
   assert.equal(executedRedOnPass, false, "a pass verdict must never trigger the override, confirming the condition is verdict-specific, not round-only");
+});
+
+// ── Slice 4b — CodeGraph Phase 4 blast-radius wiring (design §5.3/§5.4, ADR-7, tasks 4b.4/4b.5) ──
+//
+// 4b.4: RunQaUseCase threads an OPTIONAL structuralSignal collaborator into baseEnrichment.staticSignal,
+// byte-identical when absent. 4b.5 (CRITICAL-1): the BlastRadius passed to render() must be the REAL
+// classificationIntent.changedFiles set, never the empty placeholder — a unit test that constructs
+// its own BlastRadius cannot catch this; this suite drives the real diff-mode classify() -> render()
+// path end-to-end.
+
+test("4b.4: a present structuralSignal port is called exactly once before the first generate(), and its result reaches baseEnrichment.staticSignal", async () => {
+  let renderCallCount = 0;
+  const capturedStaticSignals: (string | undefined)[] = [];
+  const { ports } = stubPorts({});
+  const structuralSignal: StructuralSignalPort = {
+    render: async () => { renderCallCount++; return "## Structural blast radius (deterministic — from the code graph, advisory)\nsome content"; },
+  };
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
+    capturedStaticSignals.push(enrichment?.staticSignal);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, structuralSignal, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "4b4-structural-signal-present" });
+
+  assert.equal(renderCallCount, 1, "structuralSignal.render() must be called exactly once per run");
+  assert.ok(capturedStaticSignals.length > 0, "generate() must have been called at least once");
+  for (const captured of capturedStaticSignals) {
+    assert.match(captured ?? "", /Structural blast radius/, "the rendered advisory block must reach baseEnrichment.staticSignal");
+  }
+});
+
+test("4b.4: an ABSENT structuralSignal port leaves baseEnrichment with NO staticSignal key at all (byte-identical to today)", async () => {
+  const capturedEnrichments: (Record<string, unknown> | undefined)[] = [];
+  const { ports } = stubPorts({});
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
+    capturedEnrichments.push(enrichment as Record<string, unknown> | undefined);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  // structuralSignal deliberately OMITTED from deps.
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "4b4-structural-signal-absent" });
+
+  assert.ok(capturedEnrichments.length > 0, "generate() must have been called at least once");
+  for (const captured of capturedEnrichments) {
+    assert.ok(captured && !("staticSignal" in captured), "staticSignal must not exist as a key at all when the collaborator is absent — not merely undefined");
+  }
+});
+
+test("4b.4: an empty render() result (no signal to report) leaves baseEnrichment with NO staticSignal key either", async () => {
+  const capturedEnrichments: (Record<string, unknown> | undefined)[] = [];
+  const { ports } = stubPorts({});
+  const structuralSignal: StructuralSignalPort = { render: async () => "" };
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
+    capturedEnrichments.push(enrichment as Record<string, unknown> | undefined);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, structuralSignal, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "4b4-structural-signal-empty-render" });
+
+  for (const captured of capturedEnrichments) {
+    assert.ok(captured && !("staticSignal" in captured), "an empty rendered string must not add a staticSignal key (conditional spread, matching contextPack's own precedent)");
+  }
+});
+
+test("4b.4: a throwing structuralSignal port degrades to NO staticSignal, never aborts the run (best-effort, mirrors preGenerationGrounding's own posture)", async () => {
+  const { ports } = stubPorts({});
+  const structuralSignal: StructuralSignalPort = { render: async () => { throw new Error("codebase-memory MCP wedged"); } };
+  const capturedEnrichments: (Record<string, unknown> | undefined)[] = [];
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
+    capturedEnrichments.push(enrichment as Record<string, unknown> | undefined);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, structuralSignal, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "4b4-structural-signal-throws" });
+
+  assert.notEqual(out.decision.verdict, "infra-error", "a structuralSignal failure must never abort the run as infra-error");
+  for (const captured of capturedEnrichments) {
+    assert.ok(captured && !("staticSignal" in captured), "a thrown render() must degrade to no staticSignal, never propagate");
+  }
+});
+
+// 4b.4.2 (Scenario H baseline, zero-regression proof): with structuralSignal absent (today's
+// composition default), the verdict/side-effect must be byte-identical to every pre-existing
+// characterization scenario this same suite already pins elsewhere in this file — this is a
+// targeted spot-check, not a re-run of the full golden suite (that lives in
+// qa-engine/test/characterization/ and is re-run separately as part of the slice gate).
+test("4b.4.2 (Scenario H baseline): a clean green run's verdict/sideEffect is unaffected by the structuralSignal wiring being absent", async () => {
+  const { ports } = stubPorts({});
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "4b4-2-golden-baseline-absent" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(out.decision.sideEffect, "pr");
+});
+
+// 4b.5 — CRITICAL-1 (design §5.4/ADR-7): the REAL non-empty BlastRadius reaches the port.
+test("4b.5 CRITICAL-1: a diff-mode run with classificationIntent.changedFiles feeds the SAME (sorted/deduped) files to structuralSignal.render()", async () => {
+  const changedFiles = ["src/main/java/Foo.java", "src/main/java/Bar.java"];
+  let recordedChangedFiles: readonly string[] | undefined;
+  const { ports } = stubPorts({
+    classify: async () => ({
+      action: "generate",
+      reason: "type=feat",
+      diff: "the-diff",
+      intent: { type: "feat", breaking: false, message: "add checkout flow", changedFiles },
+    }),
+  });
+  const structuralSignal: StructuralSignalPort = {
+    render: async (_repoDir, changed) => { recordedChangedFiles = changed.changedFiles; return ""; },
+  };
+  const useCase = new RunQaUseCase({ ...ports, structuralSignal, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "4b5-critical1-real-blast-radius", mode: "diff" });
+
+  assert.ok(recordedChangedFiles, "structuralSignal.render() must have been called");
+  assert.ok(recordedChangedFiles!.length > 0, "the BlastRadius reaching render() must be NON-EMPTY in diff mode with real changedFiles — reaching render() with an EMPTY BlastRadius here is the exact CRITICAL-1 regression this test exists to catch");
+  assert.deepEqual([...recordedChangedFiles!], [...changedFiles].sort(), "render() must receive the SAME changed files classify() surfaced (BlastRadius.of sorts+dedupes, so compare against the sorted shape)");
+});
+
+test("4b.5: a non-diff mode run (classificationIntent never populated) still calls render() with an EMPTY BlastRadius — never fabricated, matches the change-coverage mode gate", async () => {
+  let recordedChangedFiles: readonly string[] | undefined;
+  let renderCallCount = 0;
+  const { ports } = stubPorts({
+    classify: async () => { throw new Error("classify() must never be called outside diff mode"); },
+  });
+  const structuralSignal: StructuralSignalPort = {
+    render: async (_repoDir, changed) => { renderCallCount++; recordedChangedFiles = changed.changedFiles; return ""; },
+  };
+  const useCase = new RunQaUseCase({ ...ports, structuralSignal, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "4b5-non-diff-mode-empty-blast-radius", mode: "complete" });
+
+  assert.equal(renderCallCount, 1, "render() is still invoked once per run regardless of mode (the adapter/port itself short-circuits an empty BlastRadius, not the use-case)");
+  assert.equal(recordedChangedFiles?.length, 0, "outside diff mode, classificationIntent is never populated, so the BlastRadius passed to render() must be empty — this is correct, tested behavior, not a gap");
 });

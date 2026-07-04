@@ -84,6 +84,12 @@ import { assembleChangeCoverage } from "@contexts/objective-signal/domain/assemb
 // (Sub-Plan 7.2 item 1) — no root src/ import needed for these, unlike the collaborators below.
 import { SandboxedBinaryRunnerAdapter } from "../../qa-engine/src/shared-infrastructure/process-sandbox/sandboxed-binary-runner.adapter";
 import { ProcessKillAdapter } from "../../qa-engine/src/shared-infrastructure/process-sandbox/process-kill.adapter";
+// CodebaseMemoryClient (CodeGraph Phase 2a/4b): the raw codebase-memory-mcp CLI spawn client —
+// supplied as CompositionConfig.codebaseMemory so wireBridges() builds the ACTIVE structural
+// blast-radius chain (StructuralSignalPortAdapter over LazyProjectCodeGraphAdapter). Fail-open by
+// construction at every layer: an unindexed mirror resolves to no project -> every query ok([]) ->
+// "" -> no prompt section — so supplying this unconditionally is always safe.
+import { CodebaseMemoryClient } from "../../qa-engine/src/shared-infrastructure/code-graph/codebase-memory-client";
 
 // ── Root src/ collaborators (the REAL production pieces) ─────────────────────────────────────────
 // This module intentionally imports both qa-engine's @contexts/@kernel aliases AND root src/
@@ -454,6 +460,12 @@ export function buildRewrittenCompositionConfig(
     // target check is needed here.
     groundingCollaborators: {},
     reviewDomGroundingCollaborators: {},
+    // CodeGraph Phase 4 (design §5.3/§6, user-confirmed ACTIVE wiring): the raw CLI client for the
+    // structural blast-radius signal. Reuses this factory's own `runner` (the same sandboxed spawn
+    // primitive every other extractor uses). Unconditional by design — an unindexed mirror degrades
+    // to "" (no section) entirely inside the adapter chain, so there is no per-app opt-in to forget;
+    // indexing an app's mirror is the ONLY step needed to light the signal up for that app.
+    codebaseMemory: new CodebaseMemoryClient(runner),
     // contextMap / prChangedFiles: LEFT ABSENT, deliberately. Legacy sources contextMap by reading
     // e2e/.qa/context.json off the REAL per-run mirrorDir (src/pipeline.ts's loadContextMap(),
     // :1308-1320) and prChangedFiles from intent.changedFiles (classifyCommit(message, diff),

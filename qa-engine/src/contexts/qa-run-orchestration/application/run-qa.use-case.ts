@@ -51,6 +51,7 @@ import type {
   PreGenerationGroundingPort,
   ReviewDomGroundingPort,
   RetrievedRule,
+  StructuralSignalPort,
 } from "./ports/index.ts";
 import { decide, type RunEvidence } from "../domain/run-decision.service.ts";
 import { RunDecision } from "../domain/run-decision.ts";
@@ -172,6 +173,16 @@ export interface RunQaUseCaseDeps {
   // legacy's reviewGenerated() memoizes by the sorted spec-name set — see ReviewDomGroundingPort's
   // own header for the full contract, including its fail-open posture.
   reviewDomGrounding?: ReviewDomGroundingPort;
+  // [SWAP] absent -> baseEnrichment.staticSignal is never assembled; the field stays entirely
+  // absent from every generate() call, byte-identical to today (the SAME backward-compatible
+  // posture setup/preGenerationGrounding/reviewDomGrounding already established). CodeGraph Phase 4
+  // (design §5.3/§5.4, ADR-2, ADR-7): when present, invoked ONCE per run, before the first
+  // generate() call, with the run's REAL BlastRadius (built from classificationIntent.changedFiles
+  // — CRITICAL-1; outside diff mode classificationIntent is undefined, so the BlastRadius is empty
+  // and the port's own contract short-circuits to ""). Best-effort: a throw is caught and logged,
+  // degrading to no staticSignal — never aborts the run (mirrors preGenerationGrounding's own
+  // fail-open posture immediately above).
+  structuralSignal?: StructuralSignalPort;
   config?: Partial<RunQaConfig>;
 }
 
@@ -455,6 +466,27 @@ export class RunQaUseCase {
     // to the ABORT path instead of silently continuing into baseEnrichment/generate() below.
     if (signal?.aborted) return this.abortedResult();
 
+    // CodeGraph Phase 4 (design §5.4, ADR-7 — CRITICAL-1): the REAL non-empty BlastRadius, built
+    // from classificationIntent.changedFiles (the diff-mode classify() call above ALREADY derived
+    // this — the SAME source the "dynamic diff"/W2-F5 intent threading above uses). Outside diff
+    // mode classificationIntent stays undefined -> an empty BlastRadius -> the structuralSignal
+    // port's own contract short-circuits to "" (matches every other mode's absent-section
+    // behavior). This is intentionally NOT the empty BlastRadius.of(input.sha, []) placeholder used
+    // elsewhere in this file (the objectiveSignal.measure() call, a DIFFERENT consumer) — that one
+    // stays untouched; this is a SEPARATE, purpose-built BlastRadius for the structural-signal seam.
+    const runBlastRadius = BlastRadius.of(input.sha, classificationIntent?.changedFiles ?? []);
+    // Best-effort by design (mirrors preGenerationGrounding's own fail-open posture immediately
+    // above): a throw from the port is caught and logged, degrading to "" (no staticSignal) —
+    // this seam is advisory-only and must never abort a run.
+    let blastRadiusSignal = "";
+    if (this.deps.structuralSignal) {
+      try {
+        blastRadiusSignal = await this.deps.structuralSignal.render(workspace.specDir, runBlastRadius);
+      } catch (err) {
+        console.error("[qa] WARNING: structural blast-radius signal failed (non-fatal, generation continues without it):", err);
+      }
+    }
+
     // W5 fix (seam-parity FIXME): thread runId into both enrichment bases — the SAME "dynamic"
     // per-run precedent sha/intent above already establish. RunQaInput.runId (this use-case's own
     // input) is available on every run, so it is unconditional (matching sha's own unconditional
@@ -466,6 +498,7 @@ export class RunQaUseCase {
       ...(retrievedRules.length ? { learnedRules: retrievedRules } : {}),
       ...(groundingContextPack ? { contextPack: groundingContextPack } : {}),
       ...(groundingExistingSpecFiles?.length ? { existingSpecFiles: groundingExistingSpecFiles } : {}),
+      ...(blastRadiusSignal ? { staticSignal: blastRadiusSignal } : {}),
     };
     // The reviewer's own enrichment base — SEPARATE from baseEnrichment (generation-shaped) because
     // ReviewEnrichment carries domSnapshot, not contextPack/existingSpecFiles (generation-only

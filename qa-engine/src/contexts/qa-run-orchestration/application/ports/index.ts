@@ -155,6 +155,15 @@ export interface GenerationEnrichment {
   // generator reuse/extend instead of duplicating a flow (mirrors legacy's Seam b,
   // src/pipeline.ts:1845-1872 + OpencodeRunInput.existingSpecFiles's own doc).
   existingSpecFiles?: string[];
+  // CodeGraph Phase 4 (design §5.1, ADR-3): the rendered advisory "structural blast radius" block
+  // (blast-radius-signal.ts's renderBlastRadiusSignal output) — mirrors legacy's OpencodeRunInput.
+  // staticSignal (generation-ports.ts:137), which prompts.ts already renders a section for in
+  // generation mode. Filled by RunQaUseCase from the OPTIONAL StructuralSignalPort collaborator
+  // (below); absent -> no section, byte-identical to today (the field was previously listed in
+  // seam-parity.contract.test.ts's ALLOWLIST as a confirmed drop — this closes that gap). Advisory
+  // ONLY: this string reaches the generation prompt and NOTHING else — no verdict/gate/coverage
+  // path reads it (ADR-2).
+  staticSignal?: string;
 }
 export interface GenerationPort {
   // signal: Plan 7.1 (engram #913) — an optional, separate transport arg (mirrors RunPipelinePort's
@@ -534,5 +543,23 @@ export interface PreGenerationGroundingPort {
 // (dom-snapshot.ts's captureDom already does this internally), and review proceeds ungrounded.
 export interface ReviewDomGroundingPort {
   capture(specDir: string, specs: readonly string[], signal?: AbortSignal): Promise<string | undefined>;
+}
+
+// StructuralSignalPort — CodeGraph Phase 4 (design §5.3, ADR-2, ADR-7): the ADVISORY blast-radius
+// bridge. Composes CodeGraphPort's impactedSymbols/coChangeCoupling/callersOf against the run's REAL
+// changed-file set and renders ONE markdown block for GenerationEnrichment.staticSignal (above).
+// This is a thin ORCHESTRATION-layer port (not the kernel CodeGraphPort itself) so qa-run-orchestration
+// stays free of any direct codebase-memory/CLI dependency — the real adapter
+// (StructuralSignalPortAdapter, infrastructure/bridges/) composes the kernel port + the pure renderer.
+//
+// [SWAP] absent -> RunQaUseCase never assembles staticSignal; baseEnrichment carries no such field,
+// byte-identical to today (the SAME backward-compatible posture setup/preGenerationGrounding/
+// reviewDomGrounding already established). When present, invoked ONCE per run, before the first
+// generate() call, with the run's REAL BlastRadius (built from classificationIntent.changedFiles —
+// CRITICAL-1, design §5.4/ADR-7). A throw here is wrapped best-effort by the caller (mirrors
+// preGenerationGrounding's own fail-open posture) — this port's own contract never surfaces an error
+// past render(); an unavailable/failed query degrades to "" (no section), never a fabricated claim.
+export interface StructuralSignalPort {
+  render(repoDir: string, changed: BlastRadius): Promise<string>;
 }
 

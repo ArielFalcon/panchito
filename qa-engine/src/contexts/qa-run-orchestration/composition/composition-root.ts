@@ -47,6 +47,10 @@ import { SetupPortAdapter, type SetupPortCollaborators } from "../infrastructure
 import { CleanupPortAdapter, type CleanupPortCollaborators } from "../infrastructure/bridges/cleanup-port.adapter.ts";
 import { PreGenerationGroundingPortAdapter, type PreGenerationGroundingCollaborators } from "../infrastructure/bridges/pre-generation-grounding-port.adapter.ts";
 import { ReviewDomGroundingPortAdapter, type ReviewDomGroundingCollaborators } from "../infrastructure/bridges/review-dom-grounding-port.adapter.ts";
+import { StructuralSignalPortAdapter } from "../infrastructure/bridges/structural-signal-port.adapter.ts";
+import { LazyProjectCodeGraphAdapter } from "../../../shared-infrastructure/code-graph/lazy-project-code-graph.adapter.ts";
+import { ProjectNameResolver, type ProjectNameCliClient } from "../../../shared-infrastructure/code-graph/resolve-project-name.ts";
+import type { CodebaseMemoryCliClient } from "../../../shared-infrastructure/code-graph/codebase-memory-code-graph.adapter.ts";
 
 import { GenerateTestsUseCase, type GenerationResult, type GenerateOpts } from "@contexts/generation/application/generate-tests.use-case.ts";
 import type { OpencodeRunInput, ArchitectureContext } from "@contexts/generation/application/ports/generation-ports.ts";
@@ -149,6 +153,16 @@ export interface CompositionConfig {
   // cfg.isCode is true, regardless of whether these collaborators are supplied.
   groundingCollaborators?: PreGenerationGroundingCollaborators;
   reviewDomGroundingCollaborators?: ReviewDomGroundingCollaborators;
+  // StructuralSignalPort collaborator (CodeGraph Phase 4, design §5.3/§6, ADR-2/ADR-4/ADR-7).
+  // OPTIONAL: absent -> RunQaUseCaseDeps.structuralSignal stays undefined, the SAME [SWAP]
+  // posture setup/groundingCollaborators/cleanupCollaborators already established — never a stub
+  // ok([])-shaped fake. When present, wireBridges constructs a StructuralSignalPortAdapter over a
+  // LazyProjectCodeGraphAdapter (which resolves the codebase-memory-mcp project name from repoDir
+  // via ProjectNameResolver, since the name is only knowable per-repoDir at call time — this
+  // composition root itself stays synchronous). An unindexed repoDir degrades every query to
+  // ok([]) inside that adapter, never surfacing here — this collaborator is deliberately just the
+  // raw CLI client, not a pre-resolved project name (a caller does not know the name up front).
+  codebaseMemory?: ProjectNameCliClient & CodebaseMemoryCliClient;
   // The FE<->BE architecture map (context.json), if loaded — feeds the context pack's contract
   // filtering. Absent -> the pack degrades to blast-radius + DOM only (mirrors buildContextPack's
   // own graceful degradation when contextMap is absent).
@@ -362,6 +376,20 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
       )
     : undefined;
 
+  // StructuralSignalPort (CodeGraph Phase 4, design §5.3/§6): OPTIONAL, absent -> undefined (never
+  // a stub), the SAME [SWAP] posture setup/preGenerationGrounding/cleanup already established.
+  // LazyProjectCodeGraphAdapter resolves the indexed project name from repoDir lazily, per call —
+  // this composition root stays synchronous, and an unindexed repo degrades to no section entirely
+  // inside that adapter chain (never surfacing an error here).
+  const structuralSignal = cfg.codebaseMemory
+    ? new StructuralSignalPortAdapter(
+        new LazyProjectCodeGraphAdapter(cfg.codebaseMemory, new ProjectNameResolver(cfg.codebaseMemory)),
+        // The graph is indexed at the repo ROOT — cfg.mirrorDir, not workspace.specDir's e2e
+        // subfolder (see StructuralSignalPortAdapter's own header for the full rationale).
+        cfg.mirrorDir,
+      )
+    : undefined;
+
   const objectiveSignal = new ObjectiveSignalPortAdapter(
     {
       collector: cfg.objectiveSignal.collector as CoverageCollectorPort,
@@ -438,6 +466,7 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
     ...(cleanup ? { cleanup } : {}),
     ...(preGenerationGrounding ? { preGenerationGrounding } : {}),
     ...(reviewDomGrounding ? { reviewDomGrounding } : {}),
+    ...(structuralSignal ? { structuralSignal } : {}),
     ...(cfg.observer ? { observer: cfg.observer } : {}),
     config: {
       needsReview: cfg.needsReview,

@@ -458,6 +458,125 @@ test("buildProduction(rewritten) does NOT wire grounding on the code target, eve
   assert.equal(outcome.verdict, "pass");
 });
 
+// ── CodeGraph Phase 4 (design §5.3/§6, tasks 4b.6): the OPTIONAL structuralSignal collaborator. ──
+// Present -> wireBridges constructs a StructuralSignalPortAdapter over the REAL
+// CodebaseMemoryCodeGraphAdapter, resolving `project` from repoDir via the injected resolver
+// (design §6's list_projects lookup, ADR-4's "no live syncTo" decision unchanged). Absent -> the
+// use-case's own structuralSignal dep stays undefined — NEVER a stub ok([])-shaped fake — matching
+// groundingCollaborators' own [SWAP] precedent exactly.
+
+test("buildProduction(rewritten) wires structuralSignal when a codebaseMemory collaborator is supplied — the rendered advisory block reaches OpencodeRunInput.staticSignal", async () => {
+  const seenStaticSignals: Array<string | undefined> = [];
+  const cfg = fakeConfig({
+    mode: "diff",
+    codebaseMemory: {
+      cli: async (tool: string, jsonArg: string) => {
+        if (tool === "list_projects") return { code: 0, stdout: JSON.stringify({ projects: [{ name: "org-app", root_path: "/mirrors/org/app" }] }), stderr: "" };
+        const parsed = JSON.parse(jsonArg) as { query: string };
+        if (parsed.query.includes("FILE_CHANGES_WITH")) return { code: 0, stdout: JSON.stringify({ columns: ["f_path", "g_path", "coupling_score", "co_changes"], rows: [], total: 0 }), stderr: "" };
+        // impactedSymbols outbound/inbound + callersOf all share the same {columns,rows} shape —
+        // the confidence column is per-hop-named (r1_conf/r2_conf/...), NOT a bare "confidence".
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            columns: ["a_file", "a_name", "b_name", "b_file", "r1_conf"],
+            rows: [["src/x.ts", "handleX", "helperFn", "src/helper.ts", "0.9"]],
+            total: 1,
+          }),
+          stderr: "",
+        };
+      },
+    },
+    vcs: {
+      blastRadius: async (sha) => BlastRadius.of(sha, ["src/x.ts"]),
+      message: async () => "feat: add x",
+      diff: async () => "diff --git a/src/x.ts b/src/x.ts\n+ handleX();",
+    },
+    generationUseCase: {
+      generate: async (input) => {
+        seenStaticSignals.push(input.staticSignal);
+        return { specs: ["a.spec.ts"], approved: true, reviewed: false };
+      },
+    },
+  });
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "e2e",
+    runId: "composition-root-structural-signal-present",
+  });
+
+  assert.ok(seenStaticSignals.length > 0, "generationUseCase.generate must have been invoked");
+  assert.match(seenStaticSignals[0] ?? "", /Structural blast radius/, "the composed advisory block must reach OpencodeRunInput.staticSignal when the collaborator is wired and the repo resolves to an indexed project");
+  assert.equal(outcome.verdict, "pass");
+});
+
+test("buildProduction(rewritten) leaves structuralSignal undefined when codebaseMemory is absent (no section, backward compatible)", async () => {
+  const seenStaticSignals: Array<string | undefined> = [];
+  const cfg = fakeConfig({
+    mode: "diff",
+    generationUseCase: {
+      generate: async (input) => {
+        seenStaticSignals.push(input.staticSignal);
+        return { specs: ["a.spec.ts"], approved: true, reviewed: false };
+      },
+    },
+  }); // fakeConfig()'s base never supplies codebaseMemory
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "e2e",
+    runId: "composition-root-structural-signal-absent",
+  });
+
+  assert.ok(seenStaticSignals.length > 0, "generationUseCase.generate must have been invoked");
+  assert.equal(seenStaticSignals[0], undefined, "staticSignal must stay entirely absent when no codebaseMemory collaborator is wired");
+  assert.equal(outcome.verdict, "pass");
+});
+
+test("buildProduction(rewritten) degrades structuralSignal to no section when the repo does not resolve to any indexed project (unindexed-repo degrade)", async () => {
+  const seenStaticSignals: Array<string | undefined> = [];
+  const cfg = fakeConfig({
+    mode: "diff",
+    codebaseMemory: {
+      // No matching project for this repoDir — mirrors the real `list_projects` response for an
+      // unindexed watched app (verified empirically: ai-pipeline itself returns no match today).
+      cli: async (tool: string) => {
+        if (tool === "list_projects") return { code: 0, stdout: JSON.stringify({ projects: [{ name: "some-other-app", root_path: "/mirrors/some/other" }] }), stderr: "" };
+        return { code: 0, stdout: JSON.stringify({ columns: [], rows: [], total: 0 }), stderr: "" };
+      },
+    },
+    generationUseCase: {
+      generate: async (input) => {
+        seenStaticSignals.push(input.staticSignal);
+        return { specs: ["a.spec.ts"], approved: true, reviewed: false };
+      },
+    },
+  });
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "e2e",
+    runId: "composition-root-structural-signal-unindexed",
+  });
+
+  assert.ok(seenStaticSignals.length > 0, "generationUseCase.generate must have been invoked");
+  assert.equal(seenStaticSignals[0], undefined, "an unindexed repo (no list_projects match) must degrade to no staticSignal, never a fabricated or empty-but-present section");
+  assert.equal(outcome.verdict, "pass");
+});
+
 test("buildProduction(rewritten) runs without groundingCollaborators/reviewDomGroundingCollaborators (absent -> no-op, backward compatible)", async () => {
   const cfg = fakeConfig({ target: "e2e", isCode: false }); // fakeConfig()'s base never supplies either
   const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);

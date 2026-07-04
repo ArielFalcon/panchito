@@ -132,6 +132,13 @@ test("buildRewrittenCompositionConfig leaves testIdAttribute undefined when the 
   assert.equal(config.testIdAttribute, undefined);
 });
 
+test("buildRewrittenCompositionConfig wires codebaseMemory (the raw CLI client) so the structural blast-radius signal is ACTIVE in production — an unindexed mirror degrades to no section inside the adapter chain, so this is always safe to supply", () => {
+  const app = cfg("factory-codebase-memory");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.ok(config.codebaseMemory, "codebaseMemory must be supplied — absent means composition-root never builds StructuralSignalPortAdapter and the agent NEVER receives the blast-radius section, even for an indexed repo");
+  assert.equal(typeof config.codebaseMemory.cli, "function", "the collaborator is the raw CLI client (ProjectNameCliClient & CodebaseMemoryCliClient)");
+});
+
 test("buildRewrittenCompositionConfig sets mode from the passed run param, not a hardcoded 'diff'", () => {
   const app = cfg("factory-mode-manual");
   const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "manual" });

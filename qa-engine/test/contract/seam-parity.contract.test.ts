@@ -85,7 +85,6 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
     explorer: "explorer-pass gating is NOT wired on the rewritten path (no GenerationEnrichment/ctx slot exists for it; grep of ports/index.ts confirms) — FIXME: prompts.ts:647 gates the entire Fase-3 explorer pass on input.explorer, so it silently never fires on the rewritten path.",
     contextBrief: "FIXME: no GenerationEnrichment/ctx slot exists (grep-confirmed) — prompts.ts renders the 'blast radius' plan-brief section from input.contextBrief; the rewritten path's PreGenerationGroundingPort produces a context PACK (enrichment.contextPack) instead, which is a DIFFERENT rendering path (prompts.ts:611) that partially covers this, but the raw ExplorationBrief object itself is never threaded.",
     contextMap: "NOT dropped at this bridge — sourced via a DIFFERENT port (PreGenerationGroundingPort, composition-root.ts:cfg.contextMap), which folds it into enrichment.contextPack before this adapter ever sees it. Correct by design, not a gap.",
-    staticSignal: "FIXME: no GenerationEnrichment/ctx slot exists (grep-confirmed) — prompts.ts:823 renders a deterministic pre-computed static-analysis section from input.staticSignal in generation mode. Dropped means the rewritten path never surfaces the static-signal extractors' output to the generator, even though qa-engine now ports the extractors themselves (Plan 7.3).",
     diffArchetypes: "FIXME: no GenerationEnrichment/ctx slot exists (grep-confirmed) — prompts.ts:829 renders a one-line 'change shape' hint from input.diffArchetypes (detectStructuralPatterns output). Dropped means the rewritten path never prioritises archetype-appropriate tests.",
     failureSourced: "FIXME: no GenerationEnrichment/ctx slot exists (grep-confirmed) — prompts.ts:624,708,922 switches domSnapshot framing to 'GROUND TRUTH AT FAILURE' when true. domSnapshot itself IS threaded (enrichment.domSnapshot); the framing flag that changes how it's presented is not.",
     service: "FIXME: no GenerationEnrichment/ctx/CompositionConfig slot exists (grep-confirmed) — prompts.ts renders cross-repo framing from input.service (the triggering microservice) at 6+ call sites (286-291,433-434,456-457,1246-1251). Cross-repo runs are a documented CLAUDE.md feature (\"Cross-repo runs (microservices)\"); this is a real gap for that feature on the rewritten path.",
@@ -97,7 +96,7 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
       "repo", "sha", "diff", "mirrorDir", "e2eRelDir", "namespace", "needsReview", "target", "mode",
       "appName", "guidance", "baseUrl", "reviewCorrections", "fixCases", "selectorContradictions",
       "domSnapshot", "coverageGap", "intent", "learnedRules", "contextPack", "existingSpecFiles", "runId",
-      "openapi",
+      "openapi", "staticSignal",
     ];
     const allFieldNames = Object.keys(ALL_FIELDS).sort();
     const accountedFor = [...new Set([...mapped, ...Object.keys(ALLOWLIST)])].sort();
@@ -156,6 +155,7 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
       contextPack: S("contextPack"),
       existingSpecFiles: [S("existingSpecFiles")],
       runId: S("runId"),
+      staticSignal: S("staticSignal"),
     });
 
     assert.ok(captured, "renderMain must have been called — the generator session never ran");
@@ -191,6 +191,7 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
     assert.deepEqual(captured!.existingSpecFiles, [S("existingSpecFiles")], `existingSpecFiles dropped at ${dyingLayer}`);
     assert.equal(captured!.runId, S("runId"), `runId dropped at ${dyingLayer} (W5 fix: SSE session descriptor telemetry starved without it)`);
     assert.equal(captured!.openapi, S("openapi"), `openapi dropped at ${dyingLayer} (W5 fix: app-static OpenAPI glob hint)`);
+    assert.equal(captured!.staticSignal, S("staticSignal"), `staticSignal dropped at ${dyingLayer} (Phase 4 blast-radius wiring: the code-graph advisory section never reaches the generator)`);
   });
 });
 
