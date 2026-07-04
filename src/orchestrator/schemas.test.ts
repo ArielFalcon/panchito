@@ -121,3 +121,76 @@ test("qa.specTriage: false parses without error", () => {
   const cfg = AppConfigSchema.parse({ ...base, qa: { ...base.qa, specTriage: false } });
   assert.equal(cfg.qa.specTriage, false);
 });
+
+// ── boundaries[] config (Stitcher → Generation seam, S1.1) ────────────────────
+// Shallow/pass-through validation: field names copied verbatim from
+// YamlBoundaryProfileAdapter's REQUIRED_HTTP_STRING_FIELDS/REQUIRED_EVENT_PATTERN_STRING_FIELDS.
+// Deep validation (catalog-key checks, blank-string rejection) stays owned by that adapter —
+// this schema only stops config-loader stripping the block and gives AppConfig.boundaries a shape.
+
+const httpBoundary = {
+  transport: "http",
+  frontFiles: "**/*.api.ts",
+  frontCallSite: { kind: "receiver-verb-call", receiver: "this.rest" },
+  servicePrefixTemplate: "name-{service}-api",
+  serviceRepoTemplate: "ms-name-{service}",
+  openApiPath: "openapi/openapi.yaml",
+};
+
+const eventBoundary = {
+  transport: "event",
+  files: "**/*.java",
+  eventPattern: {
+    kind: "class-based-domain-events",
+    listenerBaseType: "ListenerMessageDelegate",
+    listenerEventCall: "convertMsgToSpecificType",
+    subscriberBaseType: "DomainEventSubscriber",
+    publishCall: "publishGenericMessage",
+  },
+};
+
+test("boundaries[]: a valid http entry parses, AppConfig.boundaries is a validated array, order preserved", () => {
+  const cfg = AppConfigSchema.parse({ ...base, boundaries: [httpBoundary] });
+  assert.equal(cfg.boundaries?.length, 1);
+  assert.deepEqual(cfg.boundaries?.[0], httpBoundary);
+});
+
+test("boundaries[]: a valid event entry parses, all EventBoundarySchema fields present", () => {
+  const cfg = AppConfigSchema.parse({ ...base, boundaries: [eventBoundary] });
+  assert.equal(cfg.boundaries?.length, 1);
+  assert.deepEqual(cfg.boundaries?.[0], eventBoundary);
+});
+
+test("boundaries[]: http + event entries together parse in the same order given", () => {
+  const cfg = AppConfigSchema.parse({ ...base, boundaries: [httpBoundary, eventBoundary] });
+  assert.equal(cfg.boundaries?.length, 2);
+  assert.deepEqual(cfg.boundaries?.[0], httpBoundary);
+  assert.deepEqual(cfg.boundaries?.[1], eventBoundary);
+});
+
+test("boundaries[]: an http entry missing a required field (no openApiPath) THROWS", () => {
+  const { openApiPath: _drop, ...incomplete } = httpBoundary;
+  assert.throws(() => AppConfigSchema.parse({ ...base, boundaries: [incomplete] }));
+});
+
+test("boundaries[]: an entry with an unknown transport THROWS (discriminated union reject)", () => {
+  assert.throws(() =>
+    AppConfigSchema.parse({ ...base, boundaries: [{ ...httpBoundary, transport: "rpc" }] }),
+  );
+});
+
+test("boundaries[]: no boundaries key at all -> AppConfig.boundaries is undefined (not [], no throw)", () => {
+  const cfg = AppConfigSchema.parse(base);
+  assert.equal(cfg.boundaries, undefined);
+});
+
+test("boundaries[]: code:true app with non-empty boundaries[] THROWS (boundaries are e2e-only)", () => {
+  assert.throws(() =>
+    AppConfigSchema.parse({ ...base, dev: undefined, code: true, boundaries: [httpBoundary] }),
+  );
+});
+
+test("boundaries[]: code:true app with NO boundaries[] still parses (empty/absent never blocked by the refine)", () => {
+  const cfg = AppConfigSchema.parse({ ...base, dev: undefined, code: true });
+  assert.equal(cfg.boundaries, undefined);
+});

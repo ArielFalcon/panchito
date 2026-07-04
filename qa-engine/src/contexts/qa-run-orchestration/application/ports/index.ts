@@ -563,3 +563,45 @@ export interface StructuralSignalPort {
   render(repoDir: string, changed: BlastRadius): Promise<string>;
 }
 
+// ServiceLinksPort — Stitcher→Generation seam (design §3.3). Port-local structural mirrors of
+// service-topology's domain ServiceLink/ContractDrift (this barrel's own "every type
+// kernel-resident, no cross-context import" rule — see CommitIntent's precedent above).
+// service-topology's domain types are plain data, structurally assignable to these at the
+// bridge boundary (a type-level cast, no remapping).
+export interface ServiceSymbolRef {
+  repo: string;
+  file: string;
+  symbol: string;
+}
+export interface ServiceLink {
+  from: ServiceSymbolRef;
+  to: ServiceSymbolRef;
+  transport: "http" | "event" | "rpc";
+  contractRef?: string;
+  confidence: number;
+  source: string;
+}
+export interface ContractDrift {
+  from: ServiceSymbolRef;
+  verb: string;
+  path: string;
+}
+
+// ServiceLinksPort — Stitcher→Generation seam. The ADVISORY cross-repo-links bridge, matching
+// StructuralSignalPort's thin-orchestration-port PATTERN (not its exact signature — service links
+// are app-static per SHA: the boundary profiles, the service list, and the primary mirror are all
+// fixed for the run before generation begins, so there is no per-run BlastRadius-shaped input to
+// thread; resolve() is honestly no-arg rather than fabricating a per-call dependency that does not
+// exist). Composes the service-topology resolver (buildServiceBoundaryResolver +
+// YamlBoundaryProfileAdapter) against the app's mirrors and returns STRUCTURED links/drift —
+// prompts.ts owns rendering (E.3 seam), never this port.
+//
+// [SWAP] absent -> RunQaUseCase never assembles serviceLinks; baseEnrichment carries no such field,
+// byte-identical to today (SAME posture as structuralSignal/setup/grounding). When present, invoked
+// ONCE per run before the first generate() call. NEVER throws: any error (missing mirror, malformed
+// profile, resolver failure) degrades to { links: [], drift: [] } — advisory-only, never a fabricated
+// claim, never a verdict/gate/coverage input (ADR-2 parity with staticSignal).
+export interface ServiceLinksPort {
+  resolve(): Promise<{ links: ServiceLink[]; drift: ContractDrift[] }>;
+}
+

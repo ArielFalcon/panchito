@@ -1,5 +1,40 @@
 import { z } from "zod";
 
+// ── boundaries[] schema (Stitcher → Generation seam) ──────────────────────────
+// SHALLOW by design: deep per-entry validation (catalog keys, blank-string rejection,
+// transport dispatch) is owned by YamlBoundaryProfileAdapter (qa-engine service-topology),
+// which re-reads the YAML itself. This schema exists ONLY to (a) stop config-loader
+// stripping the block, (b) give AppConfig.boundaries a shape the factory gates
+// ACTIVE-supply on. Do NOT re-encode the adapter's field lists here — a divergent
+// schema would drift from the adapter's authoritative rules (two validators for one
+// block is the exact anti-pattern this design forbids). Field names below are copied
+// VERBATIM from YamlBoundaryProfileAdapter's REQUIRED_HTTP_STRING_FIELDS /
+// REQUIRED_EVENT_PATTERN_STRING_FIELDS and its HttpBoundaryProfile/EventBoundaryProfile
+// domain interfaces.
+const HttpBoundarySchema = z.object({
+  transport: z.literal("http"),
+  frontFiles: z.string().min(1),
+  frontCallSite: z.object({ kind: z.string().min(1), receiver: z.string().optional() }),
+  servicePrefixTemplate: z.string().min(1),
+  serviceRepoTemplate: z.string().min(1),
+  openApiPath: z.string().min(1),
+});
+const EventBoundarySchema = z.object({
+  transport: z.literal("event"),
+  files: z.string().min(1),
+  eventPattern: z.object({
+    kind: z.string().min(1),
+    listenerBaseType: z.string().min(1),
+    listenerEventCall: z.string().min(1),
+    subscriberBaseType: z.string().min(1),
+    publishCall: z.string().min(1),
+  }),
+});
+// discriminatedUnion on `transport` mirrors BoundaryProfile's own open-union discrimination
+// (service-topology domain/index.ts) — a future `rpc` transport widens BOTH this union and
+// the adapter's dispatch registry, the same extension seam resolver-factory.ts already uses.
+const BoundarySchema = z.discriminatedUnion("transport", [HttpBoundarySchema, EventBoundarySchema]);
+
 // ── AppConfig schema ──────────────────────────────────────────────────────────
 // Validates YAML config loaded from config/apps/<name>.yaml. Replaces the unsafe
 // `parse(raw) as AppConfig` cast with runtime validation.
@@ -108,6 +143,12 @@ export const AppConfigSchema = z
     // No app-specific names are hardcoded in src/ — the value comes from config only.
     e2e: z.object({ testIdAttribute: z.string().min(1).optional() }).optional(),
     code: z.boolean().optional(),
+    // Stitcher → Generation seam: the app's declared cross-service call conventions
+    // (HTTP boundary or event boundary). Absent -> undefined (no cross-service graph
+    // collaborator is wired). Deep validation (catalog keys, blank strings) is owned by
+    // YamlBoundaryProfileAdapter, which re-reads this same YAML at resolve time — see the
+    // schema block above for the shallow/deep split rationale.
+    boundaries: z.array(BoundarySchema).optional(),
     report: z.object({
       onFailure: z.string().min(1),
     }),
@@ -119,6 +160,10 @@ export const AppConfigSchema = z
   .refine((c) => !(c.code === true && (c.services?.length ?? 0) > 0), {
     error: "services are only valid for e2e apps (code-mode apps have no E2E suite)",
     path: ["services"],
+  })
+  .refine((c) => !(c.code === true && (c.boundaries?.length ?? 0) > 0), {
+    error: "boundaries are only valid for e2e apps (code-mode apps have no cross-service graph)",
+    path: ["boundaries"],
   })
   .refine(
     (c) => {
