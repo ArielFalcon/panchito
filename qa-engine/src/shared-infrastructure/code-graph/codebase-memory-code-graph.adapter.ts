@@ -8,13 +8,13 @@
 // this port has no single owning bounded context (phases 3/4 both spawn the same binary, precedent
 // #947).
 //
-// SLICE SCOPE (4a-i, per the orchestrator's review split of the original slice 4a):
-//   - REAL: impactedSymbols (this file), the safe literal-inlining helpers (inlineList/inlineLiteral),
+// SLICE SCOPE:
+//   - REAL (4a-i): impactedSymbols, the safe literal-inlining helpers (inlineList/inlineLiteral),
 //     shared row parsing (parseRows), the confidence floor.
-//   - REAL (per design §6/R11, independent of 4a-i/4a-ii split): syncTo — spawns index_repository,
-//     maps a whole-index failure to IndexFailed. Implemented+tested here; NEVER called by
-//     RunQaUseCase in this change (design ADR-4).
-//   - INERT ok([]) stubs, IMPLEMENTED IN A LATER SLICE: coChangeCoupling, callersOf (slice 4a-ii).
+//   - REAL (4a-i, per design §6/R11): syncTo — spawns index_repository, maps a whole-index failure to
+//     IndexFailed. Implemented+tested here; NEVER called by RunQaUseCase in this change (ADR-4).
+//   - REAL (4a-ii, this batch): coChangeCoupling (undirected FILE_CHANGES_WITH mapping, §3.2),
+//     callersOf (inbound CALLS anchored on the symbol, §3.3).
 //   - INERT ok([]) stubs, OUT OF SCOPE FOR THIS ENTIRE CHANGE: existingCoverage, structurallyRelated
 //     (spec §2 non-requirements, Scenario K — never promoted to real graph data by this change).
 //
@@ -28,6 +28,14 @@
 // trailing Cypher WHERE — the confidence column is returned as a plain RETURN value and filtered
 // client-side in parse(). The floor on the FIRST (non-optional) hop, attached to the anchor MATCH's
 // own WHERE, executes correctly and is used as written.
+//
+// GROUNDING DEVIATIONS FROM DESIGN §3.2/§11 (confirmed empirically against the real binary, 4a-ii):
+//   - File node property is `file_path`, NOT `path` — design §3.2's literal query text (`f.path`/
+//     `g.path`) is a grounding mismatch. `coChangeCoupling` uses `f.file_path`/`g.file_path`.
+//   - FILE_CHANGES_WITH is stored DIRECTED, exactly one row per pair (not two directed rows). A
+//     directed-only match anchored on the "changed" side alone would silently drop any pair where the
+//     changed file is stored as the edge's TARGET — the match MUST be UNDIRECTED
+//     `(f)-[r:FILE_CHANGES_WITH]-(g)`, deduped by the coupled (non-anchor) file.
 //
 // Confirmed response shape (2a's captured fixture pattern, mirrored here): row-oriented, all-string
 // cells — `{ columns: string[], rows: string[][], total: number }`.
@@ -208,6 +216,121 @@ function mapHopRows(response: GraphQueryResponse, depth: number, minConfidence: 
   return results;
 }
 
+// ---------------------------------------------------------------------------------------------
+// coChangeCoupling — §3.2. One literal query, UNDIRECTED FILE_CHANGES_WITH match anchored by
+// `WHERE f.file_path IN <inlined files>`, mapped to CoupledFile[] deduped by the coupled
+// (non-anchor) file.
+// ---------------------------------------------------------------------------------------------
+
+function buildCoChangeQuery(filesLiteral: string): string {
+  return (
+    `MATCH (f:File)-[r:FILE_CHANGES_WITH]-(g:File)\nWHERE f.file_path IN ${filesLiteral}\n` +
+    `RETURN f.file_path AS f_path, g.file_path AS g_path, r.coupling_score AS coupling_score, ` +
+    `r.co_changes AS co_changes, r.last_co_change AS last_co_change\nORDER BY r.coupling_score DESC\nLIMIT 200`
+  );
+}
+
+// anchorFiles is accepted for documentation/future-proofing (the WHERE clause already guarantees
+// f_path is always one of the queried files) but is not needed to pick the coupled endpoint: the
+// query's own anchor (`WHERE f.file_path IN <files>`) always binds `f` to the matched file, so the
+// coupled (non-anchor) file is always g_path, regardless of which side the underlying storage uses.
+function mapCoChangeRows(response: GraphQueryResponse, _anchorFiles: ReadonlySet<string>): CoupledFile[] {
+  const iFPath = response.columns.indexOf("f_path");
+  const iGPath = response.columns.indexOf("g_path");
+  const iScore = response.columns.indexOf("coupling_score");
+  const iCoChanges = response.columns.indexOf("co_changes");
+  const iLastCoChange = response.columns.indexOf("last_co_change");
+
+  const results: CoupledFile[] = [];
+  const seen = new Set<string>();
+
+  for (const row of response.rows) {
+    const fPath = iFPath >= 0 ? row[iFPath] : undefined;
+    const gPath = iGPath >= 0 ? row[iGPath] : undefined;
+    if (fPath === undefined || gPath === undefined || fPath === "" || gPath === "") continue;
+    if (gPath === fPath) continue; // a self-loop row would otherwise surface the anchor as its own coupling
+
+    const couplingScore = toNumber(iScore >= 0 ? row[iScore] : undefined);
+    const coChanges = toNumber(iCoChanges >= 0 ? row[iCoChanges] : undefined);
+    if (couplingScore === undefined || coChanges === undefined) continue; // missing numeric cell — drop row
+
+    const lastCoChange = iLastCoChange >= 0 ? row[iLastCoChange] : undefined;
+
+    if (seen.has(gPath)) continue;
+    seen.add(gPath);
+
+    results.push({
+      file: gPath,
+      couplingScore,
+      coChanges,
+      ...(lastCoChange !== undefined && lastCoChange !== "" ? { lastCoChange } : {}),
+    });
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------------------------
+// callersOf — §3.3. Inbound CALLS anchored on the symbol (file_path + name via inlineLiteral),
+// explicit unrolled hops to the positional depth (clamped 1..3), confidence floor primarily in the
+// anchor's own WHERE (hop 1) + client-side re-check for every hop (mirrors impactedSymbols).
+// ---------------------------------------------------------------------------------------------
+
+function buildCallersQuery(fileLiteral: string, nameLiteral: string, minConfidence: number, depth: number): string {
+  const anchorClause = `MATCH (a:Method)<-[r1:CALLS]-(b:Method)\nWHERE a.file_path IN ${fileLiteral} AND a.name = ${nameLiteral} AND r1.confidence >= ${minConfidence}`;
+
+  const hopVars = ["a", "b", "c", "d"]; // supports depth up to 3
+  const returnCols: string[] = ["a.file_path AS a_file", "a.name AS a_name"];
+  let query = anchorClause;
+
+  for (let hop = 2; hop <= depth; hop++) {
+    const fromVar = hopVars[hop - 1]!;
+    const toVar = hopVars[hop]!;
+    query += `\nOPTIONAL MATCH (${fromVar})<-[r${hop}:CALLS]-(${toVar}:Method)`;
+  }
+
+  for (let hop = 1; hop <= depth; hop++) {
+    const nodeVar = hopVars[hop]!;
+    returnCols.push(`${nodeVar}.name AS ${nodeVar}_name`, `${nodeVar}.file_path AS ${nodeVar}_file`, `r${hop}.confidence AS r${hop}_conf`);
+  }
+
+  query += `\nRETURN ${returnCols.join(", ")}\nLIMIT 200`;
+  return query;
+}
+
+function mapCallerRows(response: GraphQueryResponse, anchor: LocalSymbolRef, depth: number, minConfidence: number): LocalSymbolRef[] {
+  const idx = (name: string) => response.columns.indexOf(name);
+  const hopVars = ["a", "b", "c", "d"];
+  const anchorKey = refKey(anchor);
+  const results: LocalSymbolRef[] = [];
+  const seen = new Set<string>();
+
+  for (const row of response.rows) {
+    for (let hop = 1; hop <= depth; hop++) {
+      const nodeVar = hopVars[hop]!;
+      const iName = idx(`${nodeVar}_name`);
+      const iFile = idx(`${nodeVar}_file`);
+      const iConf = idx(`r${hop}_conf`);
+
+      const name = iName >= 0 ? row[iName] : undefined;
+      const file = iFile >= 0 ? row[iFile] : undefined;
+      if (name === undefined || file === undefined || name === "" || file === "") continue;
+
+      const conf = toNumber(iConf >= 0 ? row[iConf] : undefined);
+      if (conf === undefined || conf < minConfidence) continue;
+
+      const ref: LocalSymbolRef = { file, symbol: name };
+      const key = refKey(ref);
+      if (key === anchorKey) continue; // never surface the anchor as its own caller (e.g. a hop loop-back)
+      if (seen.has(key)) continue;
+      seen.add(key);
+      results.push(ref);
+    }
+  }
+
+  return results;
+}
+
 export class CodebaseMemoryCodeGraphAdapter implements CodeGraphPort {
   constructor(
     private readonly client: CodebaseMemoryCliClient,
@@ -264,24 +387,54 @@ export class CodebaseMemoryCodeGraphAdapter implements CodeGraphPort {
     return ok(mapHopRows(parsed.value, depth, minConfidence));
   }
 
-  /** INERT in this slice (4a-i) — coChangeCoupling's real implementation lands in slice 4a-ii
-   *  (design §3.2: both-direction FILE_CHANGES_WITH mapping). Never spawns. */
+  /** Real per design §3.2 (corrected grounding, apply-progress): UNDIRECTED FILE_CHANGES_WITH match
+   *  anchored by `WHERE f.file_path IN <inlined files>`, mapped to CoupledFile[] deduped by the
+   *  coupled (non-anchor) file. No confidence floor — co-change is a git fact, not a CALLS edge. */
   async coChangeCoupling(
-    _repoDir: string,
-    _files: string[],
+    repoDir: string,
+    files: string[],
   ): Promise<Result<CoupledFile[], CodeGraphUnavailable>> {
-    return ok([]);
+    if (files.length === 0) return ok([]);
+
+    const filesLiteral = inlineList(files);
+    if (filesLiteral === null) return ok([]); // every file was rejected by the inliner
+
+    const query = buildCoChangeQuery(filesLiteral);
+    const jsonArg = JSON.stringify({ project: this.project, query });
+    const res = await this.client.cli("query_graph", jsonArg, repoDir);
+    if (res.code === null) {
+      return err({ reason: res.stderr || "codebase-memory unavailable" });
+    }
+    const parsed = parseRows(res.stdout);
+    if (!parsed.ok) return parsed;
+    return ok(mapCoChangeRows(parsed.value, new Set(files)));
   }
 
-  /** INERT in this slice (4a-i) — callersOf's real implementation lands in slice 4a-ii
-   *  (design §3.3: inbound CALLS mapping pinned by symbol.file + symbol.symbol). Never spawns. */
+  /** Real per design §3.3: inbound CALLS anchored on `symbol.file` + `symbol.symbol` (both via
+   *  inlineLiteral), explicit unrolled hops to the clamped positional depth, confidence floor
+   *  primarily in the anchor's own WHERE + client-side re-check for every hop. */
   async callersOf(
-    _repoDir: string,
-    _symbol: LocalSymbolRef,
-    _depth: number,
-    _opts?: { minConfidence?: number },
+    repoDir: string,
+    symbol: LocalSymbolRef,
+    depth: number,
+    opts?: { minConfidence?: number },
   ): Promise<Result<LocalSymbolRef[], CodeGraphUnavailable>> {
-    return ok([]);
+    const fileLiteral = inlineList([symbol.file]);
+    const nameLiteral = inlineLiteral(symbol.symbol);
+    if (fileLiteral === null || nameLiteral === null) return ok([]); // symbol cannot be safely inlined
+
+    const minConfidence = opts?.minConfidence ?? DEFAULT_MIN_CONFIDENCE;
+    const clampedDepth = Math.min(Math.max(1, Math.trunc(depth)), MAX_HOP_DEPTH);
+
+    const query = buildCallersQuery(fileLiteral, nameLiteral, minConfidence, clampedDepth);
+    const jsonArg = JSON.stringify({ project: this.project, query });
+    const res = await this.client.cli("query_graph", jsonArg, repoDir);
+    if (res.code === null) {
+      return err({ reason: res.stderr || "codebase-memory unavailable" });
+    }
+    const parsed = parseRows(res.stdout);
+    if (!parsed.ok) return parsed;
+    return ok(mapCallerRows(parsed.value, symbol, clampedDepth, minConfidence));
   }
 
   /** OUT OF SCOPE for this entire change (spec §2 non-requirements, Scenario K): the spike proved
