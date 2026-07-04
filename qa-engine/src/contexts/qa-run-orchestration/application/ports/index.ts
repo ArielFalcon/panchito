@@ -164,6 +164,19 @@ export interface GenerationEnrichment {
   // ONLY: this string reaches the generation prompt and NOTHING else — no verdict/gate/coverage
   // path reads it (ADR-2).
   staticSignal?: string;
+  // Stitcher→Generation seam (design §3.4): the deterministic cross-repo FE→BE links + contract
+  // drift findings ServiceLinksPort.resolve() (below) produced. STRUCTURED, not pre-rendered —
+  // unlike staticSignal above, rendering happens at the src/integrations/prompts.ts boundary (ADR-1:
+  // the field is structured by proposal decree, and prompts.ts already renders every other
+  // cross-repo framing from structured input.service/input.services). Filled by RunQaUseCase from
+  // the OPTIONAL ServiceLinksPort collaborator (below); absent -> no key at all (not an empty
+  // array), byte-identical to today. Advisory ONLY: reaches the generation prompt and NOTHING else
+  // — no verdict/gate/coverage path reads it (ADR-2 parity with staticSignal).
+  serviceLinks?: readonly ServiceLink[];
+  // FE↔BE contract drift (front calls an endpoint the backend contract does not declare) —
+  // independently optional from serviceLinks (a run can have links-but-no-drift or
+  // drift-but-no-links; see ServiceLinksPort.resolve()'s own {links, drift} pairing).
+  contractDrift?: readonly ContractDrift[];
 }
 export interface GenerationPort {
   // signal: Plan 7.1 (engram #913) — an optional, separate transport arg (mirrors RunPipelinePort's

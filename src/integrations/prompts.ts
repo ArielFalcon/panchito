@@ -822,6 +822,31 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
   // SEMI-STABLE: static signal (deterministic pre-computed analysis — stable for this diff).
   const staticSignalContent = input.staticSignal && isGenerationMode ? input.staticSignal : "";
 
+  // Stitcher→Generation seam (design §3.4, S2.4): "Cross-service links (deterministic)" — the
+  // deterministic FE→BE contract links ServiceLinksPort.resolve() produced, plus any contract-drift
+  // WARNINGS. Local sanitize wrapper (this function's own scope — NOT the DIFFERENT s() declared
+  // inside renderArchitectureContext further down this file) so untrusted cross-repo strings (data
+  // leaving/entering the model boundary) are redacted before reaching the prompt.
+  const s = (x: unknown): string => sanitizeText(String(x ?? "")).text;
+  const MAX_LINKS = 40; // advisory noise ceiling — this section's own budget guard.
+  const MAX_DRIFT = 20;
+  const serviceLinksContent =
+    input.serviceLinks?.length && isGenerationMode
+      ? [
+          "## Cross-service links (deterministic — from the stitcher, advisory)",
+          "Structural FE→BE contract links resolved from the code, NOT a gate. Verify against the live app; absent links do NOT imply no dependency.",
+          "",
+          ...input.serviceLinks.slice(0, MAX_LINKS).map((l) =>
+            `- \`${s(l.from.repo)}/${s(l.from.file)}#${s(l.from.symbol)}\` -> ` +
+            `${s(l.to.repo)} ${s(l.contractRef ?? l.to.symbol)} (${s(l.transport)}, confidence ${l.confidence.toFixed(2)})`),
+          ...((input.contractDrift?.length)
+            ? ["", "### Contract drift (WARNINGS — front calls an endpoint the backend contract does not declare):",
+               ...input.contractDrift.slice(0, MAX_DRIFT).map((d) =>
+                 `- WARNING: \`${s(d.from.repo)}/${s(d.from.file)}#${s(d.from.symbol)}\` calls ${s(d.verb)} ${s(d.path)} — not in the contract`)]
+            : []),
+        ].join("\n")
+      : "";
+
   // C1: diff archetypes — a one-line structural hint for the generator ("Change shape
   // (deterministic): auth-flow, data-list — prioritise tests that exercise these").
   // Rendered only when archetypes are present and non-empty; absent = no section.
@@ -856,6 +881,9 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
       return [section("existing-suite-manifest", "semi-stable", manifestContent, { priority: 2 })];
     })(),
     ...(staticSignalContent ? [section("static-signal", "semi-stable", staticSignalContent, { priority: 3 })] : []),
+    // Stitcher→Generation seam (design §3.4): priority 3 alongside static-signal — sheds before
+    // arch-map, after existing-suite-manifest, matching staticSignal's own precedence exactly.
+    ...(serviceLinksContent ? [section("service-links", "semi-stable", serviceLinksContent, { priority: 3 })] : []),
     // C1: diff archetypes one-line hint (tiny semi-stable section, priority 3 alongside static-signal).
     // Absent when no archetypes or non-generation mode — no empty header emitted.
     ...(diffArchetypesContent ? [section("diff-archetypes", "semi-stable", diffArchetypesContent, { priority: 3 })] : []),

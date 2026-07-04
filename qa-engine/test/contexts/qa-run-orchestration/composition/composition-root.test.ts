@@ -20,6 +20,10 @@ import { RewrittenOrchestratorAdapter } from "@contexts/qa-run-orchestration/inf
 import { PIPELINE_ENGINE } from "@contexts/qa-run-orchestration/composition/pipeline-engine-flag.ts";
 import { Sha } from "@kernel/sha.ts";
 import { BlastRadius } from "@kernel/blast-radius.ts";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { BoundaryProfile } from "@contexts/service-topology/domain/index.ts";
 
 // ── A minimal fake CompositionConfig — every collaborator is a lightweight stub, matching the
 // SAME stub shapes rewritten-orchestrator.adapter.test.ts already uses for the 10-scenario parity
@@ -574,6 +578,98 @@ test("buildProduction(rewritten) degrades structuralSignal to no section when th
 
   assert.ok(seenStaticSignals.length > 0, "generationUseCase.generate must have been invoked");
   assert.equal(seenStaticSignals[0], undefined, "an unindexed repo (no list_projects match) must degrade to no staticSignal, never a fabricated or empty-but-present section");
+  assert.equal(outcome.verdict, "pass");
+});
+
+// ── Stitcher→Generation seam (design §3.6, S2.6): the OPTIONAL serviceTopology collaborator. ──
+// Present -> wireBridges constructs a ServiceLinksPortAdapter over a REAL MirrorRegistryAdapter (DI,
+// not a static call) and a real BoundaryProfileProviderPort. Absent -> serviceLinks stays undefined,
+// NEVER a stub — matching structuralSignal/groundingCollaborators' own [SWAP] precedent exactly.
+
+test("buildProduction(rewritten) wires serviceLinks when a serviceTopology collaborator is supplied — the REAL MirrorRegistryAdapter(mirrorRoot) encoding is exercised end-to-end (existsSync sees the SAME '__'-joined dir wireBridges constructs)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "composition-service-links-"));
+  try {
+    // MirrorRegistryAdapter's own formula: join(mirrorRoot, repo.replaceAll("/", "__")) — creating
+    // dirs under exactly that encoding proves wireBridges constructed a REAL MirrorRegistryAdapter
+    // (not a stub/bypass): if it were a static/wrong formula, the adapter's existsSync checks below
+    // would find nothing and short-circuit to {links:[],drift:[]} BEFORE ever calling forApp().
+    mkdirSync(join(root, "org__front"), { recursive: true });
+    mkdirSync(join(root, "org__ms-orders"), { recursive: true });
+
+    const httpProfile: BoundaryProfile = {
+      transport: "http",
+      frontFiles: "*.api.ts",
+      frontCallSite: { kind: "receiver-verb-call", receiver: "this.rest" },
+      servicePrefixTemplate: "name-{service}-api",
+      serviceRepoTemplate: "ms-name-{service}",
+      openApiPath: "openapi.yaml",
+    };
+    let forAppCallCount = 0;
+    let forAppCalledWith: string | undefined;
+    const seenServiceLinks: Array<unknown[] | undefined> = [];
+    const cfg = fakeConfig({
+      mode: "diff",
+      repo: "org/front",
+      serviceTopology: {
+        appName: "app",
+        primaryRepo: "org/front",
+        mirrorRoot: root,
+        services: [{ repo: "org/ms-orders" }],
+        boundaryProfiles: {
+          forApp: async (appName: string) => { forAppCallCount++; forAppCalledWith = appName; return [httpProfile]; },
+        },
+      },
+      generationUseCase: {
+        generate: async (input) => {
+          seenServiceLinks.push(input.serviceLinks);
+          return { specs: ["a.spec.ts"], approved: true, reviewed: false };
+        },
+      },
+    });
+    const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+    const outcome = await port.run({
+      app: "app",
+      sha: Sha.of("abc1234"),
+      source: "manual",
+      mode: "diff",
+      target: "e2e",
+      runId: "composition-root-service-links-present",
+    });
+
+    assert.ok(seenServiceLinks.length > 0, "generationUseCase.generate must have been invoked");
+    assert.equal(forAppCallCount, 1, "boundaryProfiles.forApp() must have been called exactly once — this only happens PAST the existsSync gate, proving the REAL MirrorRegistryAdapter('__'-join) resolved to the SAME dirs this test created on disk");
+    assert.equal(forAppCalledWith, "app", "forApp must be called with the serviceTopology.appName supplied via CompositionConfig");
+    assert.equal(outcome.verdict, "pass");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("buildProduction(rewritten) leaves serviceLinks undefined when serviceTopology is absent (no key, backward compatible)", async () => {
+  const seenEnrichments: Array<Record<string, unknown>> = [];
+  const cfg = fakeConfig({
+    mode: "diff",
+    generationUseCase: {
+      generate: async (input) => {
+        seenEnrichments.push(input as unknown as Record<string, unknown>);
+        return { specs: ["a.spec.ts"], approved: true, reviewed: false };
+      },
+    },
+  }); // fakeConfig()'s base never supplies serviceTopology
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "e2e",
+    runId: "composition-root-service-links-absent",
+  });
+
+  assert.ok(seenEnrichments.length > 0, "generationUseCase.generate must have been invoked");
+  assert.equal(seenEnrichments[0]?.serviceLinks, undefined, "serviceLinks must stay entirely absent when no serviceTopology collaborator is wired");
   assert.equal(outcome.verdict, "pass");
 });
 

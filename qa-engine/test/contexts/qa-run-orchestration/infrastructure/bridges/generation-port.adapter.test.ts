@@ -381,6 +381,119 @@ test("generate() with no enrichment argument omits every enrichment field from O
   }
 });
 
+// ── Stitcher→Generation seam (design §3.4, S2.3): enrichment.serviceLinks/contractDrift must map
+// 1:1 onto OpencodeRunInput.serviceLinks/contractDrift — the SAME conditional-spread precedent
+// staticSignal/contextPack already established (absent/empty -> key OMITTED, not set to []).
+
+test("generate() maps a non-empty enrichment.serviceLinks onto OpencodeRunInput.serviceLinks, same order", async () => {
+  const ports = fakeGenerationPorts();
+  let capturedInput: OpencodeRunInput | undefined;
+  const originalGenerate = GenerateTestsUseCase.prototype.generate;
+  GenerateTestsUseCase.prototype.generate = async function (input: OpencodeRunInput, opts) {
+    capturedInput = input;
+    return originalGenerate.call(this, input, opts);
+  };
+  try {
+    const useCase = new GenerateTestsUseCase(ports);
+    const adapter = new GenerationPortAdapter(useCase, {
+      repo: "org/app", appName: "app", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e",
+      namespace: "qa-bot-abc1234", needsReview: false, target: "e2e", mode: "diff", diff: "",
+    });
+    const links = [
+      {
+        from: { repo: "org/front", file: "src/api.ts", symbol: "getOrder" },
+        to: { repo: "org/orders", file: "src/routes.ts", symbol: "GET /orders/:id" },
+        transport: "http" as const,
+        contractRef: "GET /orders/{id}",
+        confidence: 0.9,
+        source: "openapi",
+      },
+    ];
+
+    await adapter.generate([], "/mirrors/org/app/e2e", undefined, "the-diff", { serviceLinks: links });
+
+    assert.deepEqual(capturedInput?.serviceLinks, links);
+  } finally {
+    GenerateTestsUseCase.prototype.generate = originalGenerate;
+  }
+});
+
+test("generate() with absent/empty enrichment.serviceLinks OMITS the key entirely from OpencodeRunInput", async () => {
+  const ports = fakeGenerationPorts();
+  let capturedInput: OpencodeRunInput | undefined;
+  const originalGenerate = GenerateTestsUseCase.prototype.generate;
+  GenerateTestsUseCase.prototype.generate = async function (input: OpencodeRunInput, opts) {
+    capturedInput = input;
+    return originalGenerate.call(this, input, opts);
+  };
+  try {
+    const useCase = new GenerateTestsUseCase(ports);
+    const adapter = new GenerationPortAdapter(useCase, {
+      repo: "org/app", appName: "app", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e",
+      namespace: "qa-bot-abc1234", needsReview: false, target: "e2e", mode: "diff", diff: "",
+    });
+
+    await adapter.generate([], "/mirrors/org/app/e2e", undefined, "the-diff", { serviceLinks: [] });
+    assert.equal("serviceLinks" in (capturedInput ?? {}), false, "empty serviceLinks must be OMITTED, not set to []");
+
+    await adapter.generate([], "/mirrors/org/app/e2e");
+    assert.equal("serviceLinks" in (capturedInput ?? {}), false, "absent enrichment must OMIT serviceLinks entirely");
+  } finally {
+    GenerateTestsUseCase.prototype.generate = originalGenerate;
+  }
+});
+
+test("generate() maps a non-empty enrichment.contractDrift onto OpencodeRunInput.contractDrift, same order", async () => {
+  const ports = fakeGenerationPorts();
+  let capturedInput: OpencodeRunInput | undefined;
+  const originalGenerate = GenerateTestsUseCase.prototype.generate;
+  GenerateTestsUseCase.prototype.generate = async function (input: OpencodeRunInput, opts) {
+    capturedInput = input;
+    return originalGenerate.call(this, input, opts);
+  };
+  try {
+    const useCase = new GenerateTestsUseCase(ports);
+    const adapter = new GenerationPortAdapter(useCase, {
+      repo: "org/app", appName: "app", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e",
+      namespace: "qa-bot-abc1234", needsReview: false, target: "e2e", mode: "diff", diff: "",
+    });
+    const drift = [
+      { from: { repo: "org/front", file: "src/api.ts", symbol: "getOrder" }, verb: "DELETE", path: "/orders/{id}" },
+    ];
+
+    await adapter.generate([], "/mirrors/org/app/e2e", undefined, "the-diff", { contractDrift: drift });
+
+    assert.deepEqual(capturedInput?.contractDrift, drift);
+  } finally {
+    GenerateTestsUseCase.prototype.generate = originalGenerate;
+  }
+});
+
+test("generate() with absent/empty enrichment.contractDrift OMITS the key entirely from OpencodeRunInput", async () => {
+  const ports = fakeGenerationPorts();
+  let capturedInput: OpencodeRunInput | undefined;
+  const originalGenerate = GenerateTestsUseCase.prototype.generate;
+  GenerateTestsUseCase.prototype.generate = async function (input: OpencodeRunInput, opts) {
+    capturedInput = input;
+    return originalGenerate.call(this, input, opts);
+  };
+  try {
+    const useCase = new GenerateTestsUseCase(ports);
+    const adapter = new GenerationPortAdapter(useCase, {
+      repo: "org/app", appName: "app", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e",
+      namespace: "qa-bot-abc1234", needsReview: false, target: "e2e", mode: "diff", diff: "",
+    });
+
+    await adapter.generate([], "/mirrors/org/app/e2e", undefined, "the-diff", { contractDrift: [] });
+    assert.equal("contractDrift" in (capturedInput ?? {}), false, "empty contractDrift must be OMITTED, not set to []");
+
+    await adapter.generate([], "/mirrors/org/app/e2e");
+    assert.equal("contractDrift" in (capturedInput ?? {}), false, "absent enrichment must OMIT contractDrift entirely");
+  } finally {
+    GenerateTestsUseCase.prototype.generate = originalGenerate;
+  }
+});
+
 // ── W3 F2 (dual-judge round): renderLearnedRules is a FAITHFUL, byte-comparable port of legacy's
 // renderRulesForPrompt (src/qa/learning/learning-rule.ts:237-270) — same section headers, same
 // framing sentences, same proven/experimental split, same per-rule field layout. ──────────────────

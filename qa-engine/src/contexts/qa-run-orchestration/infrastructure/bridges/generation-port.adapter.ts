@@ -239,6 +239,13 @@ export class GenerationPortAdapter implements GenerationPort {
       // OpencodeRunInput.staticSignal field buildPromptAssembled already renders a section for.
       // Absent -> omitted, unchanged prompt (closes the seam-parity ALLOWLIST gap for this field).
       ...(enrichment?.staticSignal ? { staticSignal: enrichment.staticSignal } : {}),
+      // Stitcher→Generation seam (design §3.4, S2.3): 1:1 spread, mirroring staticSignal's own
+      // conditional-spread precedent exactly — mapped onto the SAME OpencodeRunInput.serviceLinks/
+      // contractDrift fields generation-ports.ts already declares (canonical ServiceLink/
+      // ContractDrift import — see design §0's "imports the canonical type, already wired" note).
+      // Absent/empty -> omitted, never set to [] (matches every other array-shaped enrichment field).
+      ...(enrichment?.serviceLinks?.length ? { serviceLinks: [...enrichment.serviceLinks] } : {}),
+      ...(enrichment?.contractDrift?.length ? { contractDrift: [...enrichment.contractDrift] } : {}),
     };
 
     const generated = await this.useCase.generate(input, { ...(signal ? { signal } : {}) });

@@ -53,6 +53,7 @@
 //      straight into prompt assembly).
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import type { AppConfig } from "../orchestrator/config-loader";
 import type { AgentDeps } from "../integrations/opencode-client";
 import type { RunPipelinePort, ObserverPort } from "@contexts/qa-run-orchestration/application/ports/index.ts";
@@ -123,6 +124,8 @@ import { ensureMirror, defaultMirrorDeps, workdirRoot } from "../integrations/re
 import { SqliteRunHistoryAdapter } from "./run-history-sqlite-adapter";
 import { SqliteLearningRepository, type LearningStore } from "@contexts/cross-run-learning/infrastructure/sqlite-learning-repository.adapter";
 import { listLearningRules, upsertLearningRule, incrementRuleUsage } from "./history";
+import { YamlBoundaryProfileAdapter } from "@contexts/service-topology/infrastructure/yaml-boundary-profile.adapter";
+import { expandEnv } from "../orchestrator/config-loader";
 
 // Same role→agent-name mapping the F.2 operator template uses (roleToAgentName) — the
 // AgentRuntimeAdapter needs it to resolve which of the agents container's role configs
@@ -466,6 +469,24 @@ export function buildRewrittenCompositionConfig(
     // to "" (no section) entirely inside the adapter chain, so there is no per-app opt-in to forget;
     // indexing an app's mirror is the ONLY step needed to light the signal up for that app.
     codebaseMemory: new CodebaseMemoryClient(runner),
+    // Stitcher→Generation seam (design §3.6, ADR-6): supply serviceTopology ONLY when the app
+    // declares BOTH services[] (the participating repos) AND boundaries[] (the call convention).
+    // Either absent -> no collaborator -> the phase is inert (fail-open, byte-identical to today).
+    // Unlike codebaseMemory above (supplied unconditionally because an unindexed mirror
+    // self-degrades cheaply), this seam has a cheap, honest config gate: no boundaries[] means
+    // there is literally nothing for the resolver to stitch.
+    ...(app.services?.length && app.boundaries?.length
+      ? {
+          serviceTopology: {
+            appName: app.name,
+            primaryRepo: app.repo,
+            mirrorRoot, // the SAME local already computed above (deps.mirrorRoot ?? workdirRoot())
+            services: app.services.map((s) => ({ repo: s.repo })),
+            boundaryProfiles: new YamlBoundaryProfileAdapter((name) =>
+              expandEnv(readFileSync(join(process.env.AI_PIPELINE_ROOT ?? process.cwd(), "config", "apps", `${name}.yaml`), "utf8"))),
+          },
+        }
+      : {}),
     // contextMap / prChangedFiles: LEFT ABSENT, deliberately. Legacy sources contextMap by reading
     // e2e/.qa/context.json off the REAL per-run mirrorDir (src/pipeline.ts's loadContextMap(),
     // :1308-1320) and prChangedFiles from intent.changedFiles (classifyCommit(message, diff),

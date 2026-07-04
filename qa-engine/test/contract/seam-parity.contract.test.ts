@@ -74,6 +74,7 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
     selectorContradictions: true, learnedRules: true, domSnapshot: true, failureSourced: true,
     runId: true, contextMap: true, explorer: true, contextBrief: true, contextPack: true,
     staticSignal: true, diffArchetypes: true, existingSpecFiles: true, service: true, services: true,
+    serviceLinks: true, contractDrift: true,
   } satisfies Record<keyof OpencodeRunInput, true>;
 
   // Fields the rewritten path deliberately sources OUTSIDE this adapter's ctx+enrichment, or that
@@ -96,7 +97,7 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
       "repo", "sha", "diff", "mirrorDir", "e2eRelDir", "namespace", "needsReview", "target", "mode",
       "appName", "guidance", "baseUrl", "reviewCorrections", "fixCases", "selectorContradictions",
       "domSnapshot", "coverageGap", "intent", "learnedRules", "contextPack", "existingSpecFiles", "runId",
-      "openapi", "staticSignal",
+      "openapi", "staticSignal", "serviceLinks", "contractDrift",
     ];
     const allFieldNames = Object.keys(ALL_FIELDS).sort();
     const accountedFor = [...new Set([...mapped, ...Object.keys(ALLOWLIST)])].sort();
@@ -156,6 +157,14 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
       existingSpecFiles: [S("existingSpecFiles")],
       runId: S("runId"),
       staticSignal: S("staticSignal"),
+      serviceLinks: [{
+        from: { repo: S("l.from.repo"), file: S("l.from.file"), symbol: S("l.from.symbol") },
+        to: { repo: S("l.to.repo"), file: S("l.to.file"), symbol: S("l.to.symbol") },
+        transport: "http", contractRef: S("l.contractRef"), confidence: 1, source: S("l.source"),
+      }],
+      contractDrift: [{
+        from: { repo: S("d.repo"), file: S("d.file"), symbol: S("d.symbol") }, verb: "GET", path: S("d.path"),
+      }],
     });
 
     assert.ok(captured, "renderMain must have been called — the generator session never ran");
@@ -192,6 +201,8 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
     assert.equal(captured!.runId, S("runId"), `runId dropped at ${dyingLayer} (W5 fix: SSE session descriptor telemetry starved without it)`);
     assert.equal(captured!.openapi, S("openapi"), `openapi dropped at ${dyingLayer} (W5 fix: app-static OpenAPI glob hint)`);
     assert.equal(captured!.staticSignal, S("staticSignal"), `staticSignal dropped at ${dyingLayer} (Phase 4 blast-radius wiring: the code-graph advisory section never reaches the generator)`);
+    assert.deepEqual(captured!.serviceLinks?.[0]?.from.repo, S("l.from.repo"), `serviceLinks dropped at ${dyingLayer}`);
+    assert.equal(captured!.contractDrift?.[0]?.path, S("d.path"), `contractDrift dropped at ${dyingLayer}`);
   });
 });
 
@@ -529,6 +540,7 @@ describe("seam-parity: COMPOSITION (CompositionConfig vs buildRewrittenCompositi
     cleanupCollaborators: "IS supplied (e2e only, matching composition-root.ts's own `!cfg.isCode` gate) — asserted below as a present case.",
     groundingCollaborators: "IS supplied ({} — resolves to the real production default per this factory's own header) — asserted below as a present case.",
     reviewDomGroundingCollaborators: "IS supplied ({}) — asserted below as a present case.",
+    serviceTopology: "supplied ONLY when app.services?.length && app.boundaries?.length are both present (asserted below as a present-when-given case, ADR-6) — legitimately absent for single-repo apps or apps that never declared a cross-service boundary profile. Mirrors the 'observer' precedent immediately below: supplied only when the caller/config provides it.",
     contextMap: "DELIBERATELY absent — see this fn's own header: no per-run mirrorDir/diff exists yet at composition-build time to read e2e/.qa/context.json from. Documented graceful degradation, not a drop.",
     prChangedFiles: "DELIBERATELY absent — same reason as contextMap (per-run intent.changedFiles doesn't exist yet at composition-build time).",
     versionUrl: "supplied ONLY when app.dev?.versionUrl is present — legitimately absent for code-mode/static apps (no deploy gate).",

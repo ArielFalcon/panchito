@@ -51,6 +51,9 @@ import { StructuralSignalPortAdapter } from "../infrastructure/bridges/structura
 import { LazyProjectCodeGraphAdapter } from "../../../shared-infrastructure/code-graph/lazy-project-code-graph.adapter.ts";
 import { ProjectNameResolver, type ProjectNameCliClient } from "../../../shared-infrastructure/code-graph/resolve-project-name.ts";
 import type { CodebaseMemoryCliClient } from "../../../shared-infrastructure/code-graph/codebase-memory-code-graph.adapter.ts";
+import { ServiceLinksPortAdapter } from "../infrastructure/bridges/service-links-port.adapter.ts";
+import { MirrorRegistryAdapter } from "@contexts/service-topology/infrastructure/mirror-registry.adapter.ts";
+import type { BoundaryProfileProviderPort } from "@contexts/service-topology/application/ports/index.ts";
 
 import { GenerateTestsUseCase, type GenerationResult, type GenerateOpts } from "@contexts/generation/application/generate-tests.use-case.ts";
 import type { OpencodeRunInput, ArchitectureContext } from "@contexts/generation/application/ports/generation-ports.ts";
@@ -163,6 +166,23 @@ export interface CompositionConfig {
   // ok([]) inside that adapter, never surfacing here — this collaborator is deliberately just the
   // raw CLI client, not a pre-resolved project name (a caller does not know the name up front).
   codebaseMemory?: ProjectNameCliClient & CodebaseMemoryCliClient;
+  // Stitcher→Generation seam (design §3.6): the OPTIONAL serviceTopology collaborator. Mirrors
+  // codebaseMemory's own [SWAP] posture — absent -> RunQaUseCaseDeps.serviceLinks stays undefined,
+  // NEVER a stub ok([])-shaped fake. When present, wireBridges constructs a ServiceLinksPortAdapter
+  // over a REAL MirrorRegistryAdapter(mirrorRoot) (DI, not a static call) and the supplied
+  // BoundaryProfileProviderPort (production: a YamlBoundaryProfileAdapter, constructed by the
+  // caller — src/server/rewritten-engine-factory.ts is the ONE module with the fs access to build
+  // one). Unlike codebaseMemory (ACTIVE unconditionally — an unindexed graph self-degrades cheaply),
+  // this collaborator is gated by the CALLER on `services[] && boundaries[]` both being non-empty
+  // (ADR-6) — this composition root does not re-derive that gate itself, it just wires whatever the
+  // caller decided to supply.
+  serviceTopology?: {
+    appName: string;
+    primaryRepo: string;
+    mirrorRoot: string;
+    services: readonly { repo: string }[];
+    boundaryProfiles: BoundaryProfileProviderPort;
+  };
   // The FE<->BE architecture map (context.json), if loaded — feeds the context pack's contract
   // filtering. Absent -> the pack degrades to blast-radius + DOM only (mirrors buildContextPack's
   // own graceful degradation when contextMap is absent).
@@ -390,6 +410,20 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
       )
     : undefined;
 
+  // Stitcher→Generation seam (design §3.6): OPTIONAL, absent -> undefined (never a stub), the SAME
+  // [SWAP] posture structuralSignal above already established.
+  const serviceLinks = cfg.serviceTopology
+    ? new ServiceLinksPortAdapter(
+        cfg.serviceTopology.boundaryProfiles,
+        new MirrorRegistryAdapter(cfg.serviceTopology.mirrorRoot), // DI: real port impl, not a static call
+        {
+          appName: cfg.serviceTopology.appName,
+          primaryRepo: cfg.serviceTopology.primaryRepo,
+          services: cfg.serviceTopology.services,
+        },
+      )
+    : undefined;
+
   const objectiveSignal = new ObjectiveSignalPortAdapter(
     {
       collector: cfg.objectiveSignal.collector as CoverageCollectorPort,
@@ -467,6 +501,7 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
     ...(preGenerationGrounding ? { preGenerationGrounding } : {}),
     ...(reviewDomGrounding ? { reviewDomGrounding } : {}),
     ...(structuralSignal ? { structuralSignal } : {}),
+    ...(serviceLinks ? { serviceLinks } : {}),
     ...(cfg.observer ? { observer: cfg.observer } : {}),
     config: {
       needsReview: cfg.needsReview,

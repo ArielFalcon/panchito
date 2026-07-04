@@ -22,10 +22,14 @@ import type {
   ReviewDomGroundingPort,
   RetrievedRule,
   StructuralSignalPort,
+  ServiceLinksPort,
 } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 import { BlastRadius } from "@kernel/blast-radius.ts";
 import { ok, err } from "@kernel/result.ts";
 import type { RunOutcome } from "@kernel/run-outcome.ts";
+import { GenerationPortAdapter } from "@contexts/qa-run-orchestration/infrastructure/bridges/generation-port.adapter.ts";
+import { GenerateTestsUseCase, type GenerationPorts } from "@contexts/generation/application/generate-tests.use-case.ts";
+import type { OpencodeRunInput } from "@contexts/generation/application/ports/generation-ports.ts";
 
 // RunQaUseCase (Task D.5 — design §5.3(1)): composes Run, RunDecisionService, FixLoop, and the 11
 // ports through the full lifecycle. NO inline IO, NO prompt strings, NO learning side-effects on
@@ -3211,4 +3215,235 @@ test("4b.5: a non-diff mode run (classificationIntent never populated) still cal
 
   assert.equal(renderCallCount, 1, "render() is still invoked once per run regardless of mode (the adapter/port itself short-circuits an empty BlastRadius, not the use-case)");
   assert.equal(recordedChangedFiles?.length, 0, "outside diff mode, classificationIntent is never populated, so the BlastRadius passed to render() must be empty — this is correct, tested behavior, not a gap");
+});
+
+// ── Stitcher→Generation seam (design §3.5, S2.5): RunQaUseCase's [SWAP] serviceLinks collaborator.
+// Mirrors the 4b.4 structuralSignal precedent EXACTLY, with ONE deliberate structural difference
+// (ADR-7): invoked in EVERY generation mode (not diff-mode-only) because service links are app-static
+// per SHA, not diff-derived — unlike structuralSignal's BlastRadius, which genuinely needs diff mode's
+// classificationIntent.changedFiles.
+
+test("S2.5(1): a present serviceLinks port is called exactly once before the first generate(), and non-empty links reach baseEnrichment.serviceLinks", async () => {
+  let resolveCallCount = 0;
+  const capturedServiceLinks: (readonly unknown[] | undefined)[] = [];
+  const { ports } = stubPorts({});
+  const link = {
+    from: { repo: "org/front", file: "src/api.ts", symbol: "getOrder" },
+    to: { repo: "org/orders", file: "src/routes.ts", symbol: "GET /orders/:id" },
+    transport: "http" as const,
+    confidence: 0.9,
+    source: "openapi",
+  };
+  const serviceLinks: ServiceLinksPort = {
+    resolve: async () => { resolveCallCount++; return { links: [link], drift: [] }; },
+  };
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
+    capturedServiceLinks.push(enrichment?.serviceLinks);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, serviceLinks, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "s2.5-service-links-present" });
+
+  assert.equal(resolveCallCount, 1, "serviceLinks.resolve() must be called exactly once per run");
+  assert.ok(capturedServiceLinks.length > 0, "generate() must have been called at least once");
+  for (const captured of capturedServiceLinks) {
+    assert.deepEqual(captured, [link], "the resolved links must reach baseEnrichment.serviceLinks unchanged");
+  }
+});
+
+test("S2.5(2): a present serviceLinks port is invoked exactly once EVEN in a non-diff generation mode (ADR-7: app-static, not diff-gated)", async () => {
+  let resolveCallCount = 0;
+  const { ports } = stubPorts({
+    classify: async () => { throw new Error("classify() must never be called outside diff mode"); },
+  });
+  const serviceLinks: ServiceLinksPort = {
+    resolve: async () => { resolveCallCount++; return { links: [], drift: [] }; },
+  };
+  const useCase = new RunQaUseCase({ ...ports, serviceLinks, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "s2.5-service-links-non-diff-mode", mode: "complete" });
+
+  assert.equal(resolveCallCount, 1, "resolve() must be invoked once in complete/exhaustive/manual modes too — service links are app-static per SHA, not diff-derived (ADR-7), unlike structuralSignal's diff-only gate");
+});
+
+test("S2.5(3): an ABSENT serviceLinks port leaves baseEnrichment with NO serviceLinks/contractDrift key at all (byte-identical to today)", async () => {
+  const capturedEnrichments: (Record<string, unknown> | undefined)[] = [];
+  const { ports } = stubPorts({});
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
+    capturedEnrichments.push(enrichment as Record<string, unknown> | undefined);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  // serviceLinks deliberately OMITTED from deps.
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "s2.5-service-links-absent" });
+
+  assert.ok(capturedEnrichments.length > 0, "generate() must have been called at least once");
+  for (const captured of capturedEnrichments) {
+    assert.ok(captured && !("serviceLinks" in captured), "serviceLinks must not exist as a key at all when the collaborator is absent");
+    assert.ok(captured && !("contractDrift" in captured), "contractDrift must not exist as a key at all when the collaborator is absent");
+  }
+});
+
+test("S2.5(4): a present serviceLinks port that resolves to empty links+drift leaves baseEnrichment with NO key either (matches structuralSignal's own empty-render precedent)", async () => {
+  const capturedEnrichments: (Record<string, unknown> | undefined)[] = [];
+  const { ports } = stubPorts({});
+  const serviceLinks: ServiceLinksPort = { resolve: async () => ({ links: [], drift: [] }) };
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
+    capturedEnrichments.push(enrichment as Record<string, unknown> | undefined);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, serviceLinks, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "s2.5-service-links-empty-resolve" });
+
+  for (const captured of capturedEnrichments) {
+    assert.ok(captured && !("serviceLinks" in captured), "an empty links array must not add a serviceLinks key (conditional spread)");
+    assert.ok(captured && !("contractDrift" in captured), "an empty drift array must not add a contractDrift key (conditional spread)");
+  }
+});
+
+test("S2.5(5): a throwing serviceLinks port degrades to NO serviceLinks/contractDrift key, never aborts the run (best-effort, mirrors structuralSignal's own fail-open posture)", async () => {
+  const { ports } = stubPorts({});
+  const serviceLinks: ServiceLinksPort = { resolve: async () => { throw new Error("mirror registry unreachable"); } };
+  const capturedEnrichments: (Record<string, unknown> | undefined)[] = [];
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
+    capturedEnrichments.push(enrichment as Record<string, unknown> | undefined);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, serviceLinks, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "s2.5-service-links-throws" });
+
+  assert.notEqual(out.decision.verdict, "infra-error", "a serviceLinks failure must never abort the run as infra-error");
+  for (const captured of capturedEnrichments) {
+    assert.ok(captured && !("serviceLinks" in captured), "a thrown resolve() must degrade to no serviceLinks key, never propagate");
+    assert.ok(captured && !("contractDrift" in captured), "a thrown resolve() must degrade to no contractDrift key, never propagate");
+  }
+});
+
+test("S2.5(6): non-empty links + empty drift populates ONLY baseEnrichment.serviceLinks — contractDrift stays independently absent (not forced to [])", async () => {
+  const capturedEnrichments: (Record<string, unknown> | undefined)[] = [];
+  const { ports } = stubPorts({});
+  const link = {
+    from: { repo: "org/front", file: "src/api.ts", symbol: "getOrder" },
+    to: { repo: "org/orders", file: "src/routes.ts", symbol: "GET /orders/:id" },
+    transport: "http" as const,
+    confidence: 0.9,
+    source: "openapi",
+  };
+  const serviceLinks: ServiceLinksPort = { resolve: async () => ({ links: [link], drift: [] }) };
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
+    capturedEnrichments.push(enrichment as Record<string, unknown> | undefined);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, serviceLinks, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "s2.5-links-only-no-drift" });
+
+  for (const captured of capturedEnrichments) {
+    assert.deepEqual(captured?.serviceLinks, [link], "serviceLinks must be populated");
+    assert.ok(captured && !("contractDrift" in captured), "contractDrift must stay absent, independently of serviceLinks being present");
+  }
+});
+
+test("S2.5(7) (Scenario H baseline): a clean green run's verdict/sideEffect is unaffected by the serviceLinks wiring being absent", async () => {
+  const { ports } = stubPorts({});
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "s2.5-golden-baseline-absent" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(out.decision.sideEffect, "pr");
+});
+
+// ── S2.8: the ANTI-INERT integration test (design §3.8, Requirement 6, Scenario 6.1/6.2). ──────
+// Drives RunQaUseCase.run() end-to-end through the REAL GenerationPortAdapter (not a use-case-level
+// generation stub) with a RECORDING ServiceLinksPort fake, proving the FULL path — port -> enrichment
+// -> adapter -> OpencodeRunInput — not merely that the port was invoked in isolation (which S2.5's
+// tests above already cover at the use-case boundary alone).
+
+function fakeGenerationPortsForAntiInert(capture: { input?: OpencodeRunInput }): GenerationPorts {
+  return {
+    runtime: {
+      openSession: async () => ({
+        prompt: async () => ({ output: JSON.stringify({ specs: [] }) }),
+        dispose: async () => {},
+      }),
+    } as unknown as GenerationPorts["runtime"],
+    rendering: {
+      render: () => "",
+      renderMain: (input) => { capture.input = input; return { text: "", sectionSizes: {} }; },
+      renderWorker: () => ({ text: "", sectionSizes: {} }),
+      renderReviewer: () => ({ text: "", sectionSizes: {} }),
+      renderExplorer: () => "",
+      specFileForFlow: (f: string) => `${f}.spec.ts`,
+    },
+    verdicts: {
+      parseGenerator: () => ({ specs: [] }),
+      parseReview: () => ({ approved: true, corrections: [], parsed: true, valid: true, issues: [] }),
+    },
+    manifest: { read: async () => [], reconcile: async (_d, entries) => [...entries] },
+    budget: { capDiff: (d: string) => d, capText: (t: string) => t, budgetForRole: () => 100_000 },
+  };
+}
+
+test("S2.8(1) anti-inert: RunQaUseCase.run() end-to-end through the REAL GenerationPortAdapter — a recording ServiceLinksPort's non-empty links reach the generation port's OpencodeRunInput.serviceLinks", async () => {
+  const captured: { input?: OpencodeRunInput } = {};
+  const generationPorts = fakeGenerationPortsForAntiInert(captured);
+  const generateTestsUseCase = new GenerateTestsUseCase(generationPorts);
+  const generation = new GenerationPortAdapter(generateTestsUseCase, {
+    repo: "org/front", appName: "app", mirrorDir: "/mirrors/org/front", e2eRelDir: "e2e",
+    namespace: "qa-bot-abc1234", needsReview: false, target: "e2e", mode: "diff", diff: "",
+  });
+
+  const link = {
+    from: { repo: "org/front", file: "src/api.ts", symbol: "getOrder" },
+    to: { repo: "org/orders", file: "src/routes.ts", symbol: "GET /orders/:id" },
+    transport: "http" as const,
+    confidence: 0.9,
+    source: "openapi",
+  };
+  let resolveCallCount = 0;
+  const serviceLinks: ServiceLinksPort = {
+    resolve: async () => { resolveCallCount++; return { links: [link], drift: [] }; },
+  };
+
+  const { ports } = stubPorts({});
+  const useCase = new RunQaUseCase({ ...ports, generation, serviceLinks, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "s2.8-anti-inert-present" });
+
+  assert.equal(resolveCallCount, 1, "serviceLinks.resolve() must have been called exactly once");
+  assert.ok(captured.input, "renderMain must have been called — the generator session never ran through the REAL GenerationPortAdapter");
+  assert.deepEqual(
+    captured.input?.serviceLinks,
+    [link],
+    "the recorded link must reach the REAL GenerationPortAdapter's OpencodeRunInput.serviceLinks — proving the full port -> enrichment -> adapter -> prompt-input path, not just that the port was invoked",
+  );
+  assert.notEqual(out.decision.verdict, "infra-error");
+});
+
+test("S2.8(2) anti-inert companion: with the serviceLinks collaborator OMITTED, the REAL GenerationPortAdapter's OpencodeRunInput carries NO serviceLinks key at all", async () => {
+  const captured: { input?: OpencodeRunInput } = {};
+  const generationPorts = fakeGenerationPortsForAntiInert(captured);
+  const generateTestsUseCase = new GenerateTestsUseCase(generationPorts);
+  const generation = new GenerationPortAdapter(generateTestsUseCase, {
+    repo: "org/front", appName: "app", mirrorDir: "/mirrors/org/front", e2eRelDir: "e2e",
+    namespace: "qa-bot-abc1234", needsReview: false, target: "e2e", mode: "diff", diff: "",
+  });
+
+  const { ports } = stubPorts({});
+  // serviceLinks deliberately OMITTED from deps.
+  const useCase = new RunQaUseCase({ ...ports, generation, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "s2.8-anti-inert-absent" });
+
+  assert.ok(captured.input, "renderMain must have been called");
+  assert.equal(
+    "serviceLinks" in (captured.input ?? {}),
+    false,
+    "OpencodeRunInput.serviceLinks must be entirely ABSENT when the serviceLinks collaborator is omitted — presence/absence of the collaborator is the ONLY variable controlling this field",
+  );
 });

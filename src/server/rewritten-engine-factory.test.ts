@@ -178,6 +178,64 @@ test("buildRewrittenCompositionConfig leaves observer absent when the caller omi
   assert.equal(config.observer, undefined);
 });
 
+// ── Stitcher→Generation seam (design §3.6, S2.8): serviceTopology ACTIVE-gated on
+// app.services?.length && app.boundaries?.length (ADR-6). ─────────────────────────────────────────
+
+test("buildRewrittenCompositionConfig supplies serviceTopology when the app declares BOTH services[] and boundaries[]", () => {
+  const app: AppConfig = {
+    ...cfg("factory-service-topology-active"),
+    services: [{ repo: "org/ms-orders" }],
+    boundaries: [
+      {
+        transport: "http",
+        frontFiles: "*.api.ts",
+        frontCallSite: { kind: "receiver-verb-call" },
+        servicePrefixTemplate: "name-{service}-api",
+        serviceRepoTemplate: "ms-name-{service}",
+        openApiPath: "openapi.yaml",
+      },
+    ],
+  } as AppConfig;
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps, mirrorRoot: "/tmp/mirrors" }, "qa-bot-abc1234-run1", { mode: "diff" });
+
+  assert.ok(config.serviceTopology, "serviceTopology must be supplied when BOTH services[] and boundaries[] are non-empty");
+  assert.equal(config.serviceTopology?.appName, "factory-service-topology-active");
+  assert.equal(config.serviceTopology?.primaryRepo, "org/demo");
+  assert.equal(config.serviceTopology?.mirrorRoot, "/tmp/mirrors", "mirrorRoot must be the SAME local this function already computes (deps.mirrorRoot ?? workdirRoot()) — not re-derived");
+  assert.deepEqual([...(config.serviceTopology?.services ?? [])], [{ repo: "org/ms-orders" }]);
+  assert.equal(typeof config.serviceTopology?.boundaryProfiles.forApp, "function", "boundaryProfiles must be a real BoundaryProfileProviderPort (YamlBoundaryProfileAdapter)");
+});
+
+test("buildRewrittenCompositionConfig omits serviceTopology when services[] is present but boundaries[] is absent/empty (AND-gate, not OR-gate)", () => {
+  const app: AppConfig = { ...cfg("factory-service-topology-services-only"), services: [{ repo: "org/ms-orders" }] } as AppConfig;
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.equal(config.serviceTopology, undefined, "services[] alone must NOT activate serviceTopology — boundaries[] is also required (ADR-6 AND-gate)");
+});
+
+test("buildRewrittenCompositionConfig omits serviceTopology when boundaries[] is present but services[] is absent/empty (AND-gate, not OR-gate)", () => {
+  const app: AppConfig = {
+    ...cfg("factory-service-topology-boundaries-only"),
+    boundaries: [
+      {
+        transport: "http",
+        frontFiles: "*.api.ts",
+        frontCallSite: { kind: "receiver-verb-call" },
+        servicePrefixTemplate: "name-{service}-api",
+        serviceRepoTemplate: "ms-name-{service}",
+        openApiPath: "openapi.yaml",
+      },
+    ],
+  } as AppConfig;
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.equal(config.serviceTopology, undefined, "boundaries[] alone must NOT activate serviceTopology — services[] is also required (ADR-6 AND-gate)");
+});
+
+test("buildRewrittenCompositionConfig omits serviceTopology when neither services[] nor boundaries[] is declared (the common single-repo-app case)", () => {
+  const app = cfg("factory-service-topology-neither");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.equal(config.serviceTopology, undefined);
+});
+
 test("createRewrittenEngineFactory forwards its 4th (observer) argument to buildRewrittenCompositionConfig on every call", () => {
   const app = cfg("factory-observer-e2e");
   // createRewrittenEngineFactory reads PIPELINE_ENGINE via buildProduction internally (env

@@ -812,6 +812,86 @@ test("C2 regression: e2e-mode with staticSignal still renders static-signal sect
   );
 });
 
+// ── Stitcher→Generation seam (design §3.4, S2.4): "Cross-service links (deterministic)" section ──
+
+const link1 = {
+  from: { repo: "org/front", file: "src/api.ts", symbol: "getOrder" },
+  to: { repo: "org/orders", file: "src/routes.ts", symbol: "GET /orders/:id" },
+  transport: "http" as const,
+  contractRef: "GET /orders/{id}",
+  confidence: 0.9,
+  source: "openapi",
+};
+const drift1 = {
+  from: { repo: "org/front", file: "src/api.ts", symbol: "deleteOrder" },
+  verb: "DELETE",
+  path: "/orders/{id}",
+};
+
+test("S2.4(1): non-empty serviceLinks in generation mode renders a 'Cross-service links (deterministic' section with from -> to (transport, confidence)", () => {
+  const text = buildPrompt(mkInput({ serviceLinks: [link1] }));
+  assert.match(text, /Cross-service links \(deterministic/, "must render the section header");
+  assert.match(
+    text,
+    /org\/front\/src\/api\.ts#getOrder.*->.*org\/orders.*GET \/orders\/\{id\}.*http, confidence 0\.90/,
+    "must render the from -> to (transport, confidence) line format",
+  );
+});
+
+test("S2.4(2): contractDrift alongside links renders under a DISTINCT 'Contract drift (WARNINGS' sub-heading, never merged into the link list", () => {
+  const text = buildPrompt(mkInput({ serviceLinks: [link1], contractDrift: [drift1] }));
+  assert.match(text, /Contract drift \(WARNINGS/, "must render the drift sub-heading");
+  assert.match(text, /DELETE \/orders\/\{id\}/, "must render the drift verb+path");
+  const linksIdx = text.indexOf("Cross-service links");
+  const driftIdx = text.indexOf("Contract drift");
+  assert.ok(linksIdx >= 0 && driftIdx > linksIdx, "drift sub-heading must come AFTER the links list, not merged into it");
+});
+
+test("S2.4(3): absent/empty serviceLinks renders NO section at all — byte-identical to a prompt assembled without the field", () => {
+  const withEmpty = buildPrompt(mkInput({ serviceLinks: [] }));
+  const withoutField = buildPrompt(mkInput({}));
+  assert.ok(!withEmpty.includes("Cross-service links"), "empty serviceLinks must render no section");
+  assert.equal(withEmpty, withoutField, "an empty array must be byte-identical to the field being entirely absent");
+});
+
+test("S2.4(4): isGenerationMode false (context mode) suppresses the section even when serviceLinks is present", () => {
+  const text = buildPrompt(mkInput({ mode: "context", serviceLinks: [link1] }));
+  assert.ok(!text.includes("Cross-service links"), "context mode must never render the service-links section, mirroring every other isGenerationMode-gated section");
+});
+
+test("S2.4(5): more than MAX_LINKS (40) links renders only the first 40; more than MAX_DRIFT (20) drift entries renders only the first 20", () => {
+  const manyLinks = Array.from({ length: 45 }, (_, i) => ({
+    from: { repo: "org/front", file: "src/api.ts", symbol: `sym${i}` },
+    to: { repo: "org/orders", file: "src/routes.ts", symbol: `route${i}` },
+    transport: "http" as const,
+    confidence: 0.5,
+    source: "openapi",
+  }));
+  const manyDrift = Array.from({ length: 25 }, (_, i) => ({
+    from: { repo: "org/front", file: "src/api.ts", symbol: `sym${i}` },
+    verb: "GET",
+    path: `/path${i}`,
+  }));
+  const text = buildPrompt(mkInput({ serviceLinks: manyLinks, contractDrift: manyDrift }));
+  assert.ok(text.includes("sym0") && text.includes("sym39"), "the first 40 links must render");
+  assert.ok(!text.includes("sym40") && !text.includes("sym44"), "links beyond the 40-cap must be dropped");
+  assert.ok(text.includes("/path0") && text.includes("/path19"), "the first 20 drift entries must render");
+  assert.ok(!text.includes("/path20") && !text.includes("/path24"), "drift entries beyond the 20-cap must be dropped");
+});
+
+test("S2.4(6): serviceLinks string fields pass through the local s() sanitize wrapper (secrets redacted, never passed through raw)", () => {
+  const dirtyLink = {
+    from: { repo: "org/front", file: "src/api.ts", symbol: "const k = sk-abc123XYZsecretvalue" },
+    to: { repo: "org/orders", file: "src/routes.ts", symbol: "GET /orders/:id" },
+    transport: "http" as const,
+    confidence: 0.9,
+    source: "openapi",
+  };
+  const text = buildPrompt(mkInput({ serviceLinks: [dirtyLink] }));
+  assert.ok(!text.includes("sk-abc123XYZsecretvalue"), "a secret-shaped string in a serviceLinks field must be redacted by the sanitize wrapper, never passed through raw");
+  assert.match(text, /REDACTED_SECRET/, "the sanitize wrapper must have actually redacted the secret pattern");
+});
+
 // ── Audit C4a — two prompt defects (docs/superpowers/plans/2026-07-02-qa-engine-audit-remediation.md) ──
 //
 // Defect 1: buildAttrHint (qa-engine dom-snapshot.ts / legacy src/qa/dom-snapshot.ts) emits a

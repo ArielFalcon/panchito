@@ -52,6 +52,9 @@ import type {
   ReviewDomGroundingPort,
   RetrievedRule,
   StructuralSignalPort,
+  ServiceLinksPort,
+  ServiceLink,
+  ContractDrift,
 } from "./ports/index.ts";
 import { decide, type RunEvidence } from "../domain/run-decision.service.ts";
 import { RunDecision } from "../domain/run-decision.ts";
@@ -183,6 +186,16 @@ export interface RunQaUseCaseDeps {
   // degrading to no staticSignal — never aborts the run (mirrors preGenerationGrounding's own
   // fail-open posture immediately above).
   structuralSignal?: StructuralSignalPort;
+  // [SWAP] absent -> RunQaUseCase never assembles serviceLinks/contractDrift; baseEnrichment carries
+  // no such fields, byte-identical to today (SAME backward-compatible posture structuralSignal/
+  // setup/grounding already established). Stitcher→Generation seam (design §3.5): when present,
+  // invoked ONCE per run before the first generate() call. UNLIKE structuralSignal, this is NOT
+  // gated on diff mode / classificationIntent (ADR-7) — service links are app-static per SHA
+  // (boundary profiles + service list + primary mirror are all fixed for the run before generation
+  // begins), so this collaborator runs for EVERY generation mode (diff/complete/exhaustive/manual).
+  // Best-effort: a throw is caught and logged, degrading to no serviceLinks/contractDrift — never
+  // aborts the run (mirrors structuralSignal's own fail-open posture immediately above).
+  serviceLinks?: ServiceLinksPort;
   config?: Partial<RunQaConfig>;
 }
 
@@ -487,6 +500,25 @@ export class RunQaUseCase {
       }
     }
 
+    // Stitcher→Generation seam (design §3.5, ADR-7): UNLIKE blastRadiusSignal above, this block is
+    // NOT gated on diff mode / classificationIntent — service links are app-static per SHA (the
+    // boundary profiles, service list, and primary mirror are all fixed for the run before
+    // generation begins), so invoke for EVERY generation mode. Best-effort by design (mirrors
+    // structuralSignal's own fail-open posture immediately above): a throw from the port is caught
+    // and logged, degrading to {links:[],drift:[]} — this seam is advisory-only and must never abort
+    // a run.
+    let resolvedServiceLinks: readonly ServiceLink[] = [];
+    let resolvedContractDrift: readonly ContractDrift[] = [];
+    if (this.deps.serviceLinks) {
+      try {
+        const r = await this.deps.serviceLinks.resolve();
+        resolvedServiceLinks = r.links;
+        resolvedContractDrift = r.drift;
+      } catch (err) {
+        console.error("[qa] WARNING: service-links resolution failed (non-fatal, generation continues without it):", err);
+      }
+    }
+
     // W5 fix (seam-parity FIXME): thread runId into both enrichment bases — the SAME "dynamic"
     // per-run precedent sha/intent above already establish. RunQaInput.runId (this use-case's own
     // input) is available on every run, so it is unconditional (matching sha's own unconditional
@@ -499,6 +531,8 @@ export class RunQaUseCase {
       ...(groundingContextPack ? { contextPack: groundingContextPack } : {}),
       ...(groundingExistingSpecFiles?.length ? { existingSpecFiles: groundingExistingSpecFiles } : {}),
       ...(blastRadiusSignal ? { staticSignal: blastRadiusSignal } : {}),
+      ...(resolvedServiceLinks.length ? { serviceLinks: resolvedServiceLinks } : {}),
+      ...(resolvedContractDrift.length ? { contractDrift: resolvedContractDrift } : {}),
     };
     // The reviewer's own enrichment base — SEPARATE from baseEnrichment (generation-shaped) because
     // ReviewEnrichment carries domSnapshot, not contextPack/existingSpecFiles (generation-only

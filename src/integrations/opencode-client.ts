@@ -549,6 +549,37 @@ export interface OpencodeRunInput {
   existingSpecFiles?: string[];
   service?: { repo: string; mirrorDir: string; openapi?: string | string[] }; // cross-repo: the triggering microservice (read-only working copy)
   services?: Array<{ repo: string; mirrorDir: string; openapi?: string | string[] }>; // context mode: every declared service, mirrored read-only
+  // Stitcher→Generation seam (design §0, §3.4 — NET-NEW): this file has no @contexts alias import
+  // (verified against its own import block), so ServiceLink/ContractDrift are structurally MIRRORED
+  // here (copied verbatim, the SAME "copied verbatim from src/" discipline generation-ports.ts
+  // already applies to this whole interface, just mirrored in the other direction) rather than
+  // imported. NOT a fix to a previously-dead field: the qa-engine mirror of OpencodeRunInput
+  // (generation-ports.ts) already declares serviceLinks/contractDrift via a canonical import; this
+  // legacy copy simply never had them until now.
+  serviceLinks?: OcServiceLink[]; // deterministic cross-repo FE→BE links (advisory, from the stitcher)
+  contractDrift?: OcContractDrift[]; // FE↔BE contract drift (advisory warnings)
+}
+
+// Stitcher→Generation seam (design §3.4, NET-NEW structural mirrors): plain data, copied verbatim
+// from service-topology's domain ServiceLink/ContractDrift shape — see OpencodeRunInput's own
+// serviceLinks/contractDrift doc above for why this file mirrors rather than imports.
+export interface OcServiceSymbolRef {
+  repo: string;
+  file: string;
+  symbol: string;
+}
+export interface OcServiceLink {
+  from: OcServiceSymbolRef;
+  to: OcServiceSymbolRef;
+  transport: "http" | "event" | "rpc";
+  contractRef?: string;
+  confidence: number;
+  source: string;
+}
+export interface OcContractDrift {
+  from: OcServiceSymbolRef;
+  verb: string;
+  path: string;
 }
 
 // A single agent prompt/response turn captured at the SDK funnel. Emitted via the
