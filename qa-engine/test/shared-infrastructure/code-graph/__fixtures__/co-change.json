@@ -1,0 +1,22 @@
+{
+  "_provenance": {
+    "tool": "codebase-memory-mcp",
+    "cli_version": "0.8.1",
+    "repo": "/Users/arielyumn/Desktop/TRABAJO/nname/ms-name-restaurants",
+    "project": "Users-arielyumn-Desktop-TRABAJO-nname-ms-name-restaurants",
+    "date": "2026-07-04",
+    "query": "MATCH (f:File)-[r:FILE_CHANGES_WITH]-(g:File) WHERE f.file_path IN ['pom.xml'] RETURN f.file_path AS f_path, g.file_path AS g_path, r.coupling_score AS coupling_score, r.co_changes AS co_changes, r.last_co_change AS last_co_change ORDER BY r.coupling_score DESC LIMIT 200",
+    "note": "Confirms design §3.2/§11's empirical question, PRECISELY: FILE_CHANGES_WITH is stored as EXACTLY ONE DIRECTED ROW per pair (verified with a directed `(f)-[r]->(g)` probe: `CHANGELOG.md -> pom.xml` exists but `pom.xml -> CHANGELOG.md` does NOT -- only 6 total directed rows touch pom.xml, 5 with pom.xml as source and 1 (CHANGELOG.md) with pom.xml as the TARGET). A directed-only query anchored `WHERE f.file_path IN ['pom.xml']` on the SOURCE side alone would SILENTLY MISS the CHANGELOG.md pair -- confirming the design's core concern (dropping roughly half the signal) is real. The undirected `(f)-[r]-(g)` match used in this fixture's query correctly returns all 6 pairs regardless of which stored endpoint is the anchor. Because storage is single-row-per-pair (not duplicated both ways), the mapper's dedupe-by-coupled-file step is a no-op safety net for THIS repo's data shape, not a compensating fix for observed duplicates -- but it remains necessary defensive code since the storage discipline is not a guaranteed invariant of the underlying tool.",
+    "schema_confirmation": "File node properties confirmed via get_graph_schema: 'file_path' exists, 'path' does NOT -- design §3.2's literal query text uses f.path/g.path, which is a GROUNDING MISMATCH against the real schema. The adapter uses f.file_path/g.file_path (the real property name)."
+  },
+  "columns": ["f_path", "g_path", "coupling_score", "co_changes", "last_co_change"],
+  "rows": [
+    ["pom.xml", "src/main/java/es/name/restaurants/application/service/impl/DailyMenuApplicationServiceImpl.java", "0.60", "3", "1772482381"],
+    ["pom.xml", "src/main/java/es/name/restaurants/infraestructure/adapters/web/RestaurantsController.java", "0.38", "3", "1777032966"],
+    ["pom.xml", "src/main/resources/application.yaml", "0.36", "4", "1781106899"],
+    ["pom.xml", "src/main/java/es/name/restaurants/application/port/repository/RestaurantRepositoryPort.java", "0.75", "3", "1778234964"],
+    ["pom.xml", "src/main/java/es/name/restaurants/application/service/impl/RestaurantApplicationServiceImpl.java", "0.71", "5", "1778234964"],
+    ["pom.xml", "CHANGELOG.md", "1.00", "5", "1781045925"]
+  ],
+  "total": 6
+}

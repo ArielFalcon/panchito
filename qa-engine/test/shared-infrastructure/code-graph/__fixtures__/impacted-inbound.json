@@ -1,0 +1,16 @@
+{
+  "_provenance": {
+    "tool": "codebase-memory-mcp",
+    "cli_version": "0.8.1",
+    "repo": "/Users/arielyumn/Desktop/TRABAJO/nname/ms-name-restaurants",
+    "project": "Users-arielyumn-Desktop-TRABAJO-nname-ms-name-restaurants",
+    "date": "2026-07-04",
+    "query": "MATCH (a:Method)<-[r1:CALLS]-(b:Method) WHERE a.file_path IN ['src/main/java/es/name/restaurants/application/port/repository/CourseRepositoryPort.java'] AND a.name = 'save' AND r1.confidence >= 0.55 RETURN a.file_path AS a_file, a.name AS a_name, b.name AS b_name, b.file_path AS b_file, r1.confidence AS r1_conf LIMIT 200",
+    "note": "Callers-side (inbound) anchor pinned by the INTERFACE file (CourseRepositoryPort.java) + name ('save') per R5/design §4.2's callers-side resolution clause: the anchor file_path here is the BODYLESS interface's own file, and the query still yields the real caller (createNewCourse, in the impl file) because CALLS edges attach to the interface-owned Method node for inbound resolution -- this is the documented non-anchor-hop asymmetry (the impl-anchoring concern in §4.2 is specifically about resolving OUTBOUND traversal to the impl node; inbound (callersOf) is unaffected because the caller always calls the interface-declared method signature)."
+  },
+  "columns": ["a_file", "a_name", "b_name", "b_file", "r1_conf"],
+  "rows": [
+    ["src/main/java/es/name/restaurants/application/port/repository/CourseRepositoryPort.java", "save", "createNewCourse", "src/main/java/es/name/restaurants/application/service/impl/CourseApplicationServiceImpl.java", "0.85"]
+  ],
+  "total": 1
+}
