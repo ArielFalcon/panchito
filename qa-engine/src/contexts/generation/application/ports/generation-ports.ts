@@ -154,6 +154,13 @@ export interface OpencodeRunInput {
   serviceLinks?: ServiceLink[];
   // Optional contract-drift findings (undeclared endpoints): surfaced as advisory context for the generator.
   contractDrift?: ContractDrift[];
+  // Slice C (structural-signals-expansion, design §3.7): the advisory cross-repo impact narrowing
+  // CrossRepoImpactPort.resolve() produced. Structured (not pre-rendered) — mirrors serviceLinks'
+  // own "prompts.ts owns rendering" precedent: prompts.ts extends the EXISTING "Cross-service
+  // links" section with inline [IMPACTED:<tier>] markers, never a new subsection. Absent -> no key
+  // at all, byte-identical to today. Advisory ONLY: reaches the generation prompt and NOTHING else
+  // — no verdict/gate/coverage path reads it.
+  crossRepoImpact?: { impactedLinks: Array<{ link: ServiceLink; tier: string }> };
 }
 
 // The reviewer input. FULL current field set copied from src/integrations/opencode-client.ts (comments preserved).

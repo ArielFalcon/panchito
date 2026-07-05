@@ -912,6 +912,62 @@ test("S2.4(6): serviceLinks string fields pass through the local s() sanitize wr
   assert.match(text, /REDACTED_SECRET/, "the sanitize wrapper must have actually redacted the secret pattern");
 });
 
+// ── Slice C (structural-signals-expansion, design §3.6/C-R6): inline "[IMPACTED:<tier>]" markers on
+// the EXISTING "Cross-service links" section bullets — NOT a new/duplicate subsection. Byte-identical
+// when crossRepoImpact is absent (empty lookup, tierFor always undefined, prefix always ""). ────────
+
+test("C-R6(1): a matched link's EXISTING bullet gets the '[IMPACTED:<tier>]' prefix", () => {
+  const text = buildPrompt(mkInput({
+    serviceLinks: [link1],
+    crossRepoImpact: { impactedLinks: [{ link: link1, tier: "contract-file" }] },
+  }));
+  assert.match(text, /\[IMPACTED:contract-file\]/, "the matched link's bullet must carry the inline tier marker");
+  assert.match(
+    text,
+    /\[IMPACTED:contract-file\] `org\/front\/src\/api\.ts#getOrder`/,
+    "the marker must prefix the SAME existing bullet line, not a separate entry",
+  );
+});
+
+test("C-R6(2): no duplicate '### Impacted by this change' (or similarly named) subsection is ever rendered", () => {
+  const text = buildPrompt(mkInput({
+    serviceLinks: [link1],
+    crossRepoImpact: { impactedLinks: [{ link: link1, tier: "contract-file" }] },
+  }));
+  assert.ok(!/impacted by this change/i.test(text), "no separate 'Impacted by this change' subsection must ever be rendered — the design corrects an earlier duplicate-subsection revision");
+  // The existing "Cross-service links" section header must still appear exactly once.
+  const occurrences = text.split("Cross-service links").length - 1;
+  assert.equal(occurrences, 1, "the Cross-service links section header must render exactly once, never duplicated for the impacted subset");
+});
+
+test("C-R6(3): an empty crossRepoImpact.impactedLinks is byte-identical to the field being entirely absent", () => {
+  const withEmpty = buildPrompt(mkInput({ serviceLinks: [link1], crossRepoImpact: { impactedLinks: [] } }));
+  const withoutField = buildPrompt(mkInput({ serviceLinks: [link1] }));
+  assert.equal(withEmpty, withoutField, "an empty impacted set must render byte-identical to the field being entirely absent");
+  assert.ok(!withoutField.includes("[IMPACTED:"), "no inline marker may render when crossRepoImpact is absent");
+});
+
+test("C-R6(4): a link present in serviceLinks but NOT in crossRepoImpact.impactedLinks renders with NO marker prefix", () => {
+  const unmatchedLink = {
+    from: { repo: "org/front", file: "src/other.ts", symbol: "getOther" },
+    to: { repo: "org/other", file: "src/routes.ts", symbol: "GET /other" },
+    transport: "http" as const,
+    contractRef: "GET /other",
+    confidence: 0.9,
+    source: "openapi",
+  };
+  const text = buildPrompt(mkInput({
+    serviceLinks: [link1, unmatchedLink],
+    crossRepoImpact: { impactedLinks: [{ link: link1, tier: "impacted-symbol" }] },
+  }));
+  assert.match(text, /\[IMPACTED:impacted-symbol\] `org\/front\/src\/api\.ts#getOrder`/, "the matched link must carry the marker");
+  assert.doesNotMatch(
+    text.split("\n").find((l) => l.includes("getOther")) ?? "",
+    /\[IMPACTED:/,
+    "an unmatched link's bullet must render with NO [IMPACTED:...] prefix",
+  );
+});
+
 // ── Audit C4a — two prompt defects (docs/superpowers/plans/2026-07-02-qa-engine-audit-remediation.md) ──
 //
 // Defect 1: buildAttrHint (qa-engine dom-snapshot.ts / legacy src/qa/dom-snapshot.ts) emits a

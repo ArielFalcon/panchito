@@ -56,6 +56,11 @@ export interface RunOutcome {
     structuralSignalBytes?: number;
     serviceLinksCount?: number;
     contractDriftCount?: number;
+    // Slice C (structural-signals-expansion, design §3.8): the fourth advisory telemetry field,
+    // same "never ran" undefined-preserving discipline as the three Slice B fields above —
+    // undefined = same-repo run or no matched link (the collaborator never ran), never a
+    // fabricated 0. Persist-only — never read by decide/verdict/gate/publish.
+    crossRepoImpactedCount?: number;
   };
   rulesRetrieved: string[];
   // Wide: the real type is cross-run-learning's StructuredReflection; `unknown` for the same reason.

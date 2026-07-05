@@ -498,6 +498,14 @@ export function buildRewrittenCompositionConfig(
           },
         }
       : {}),
+    // Slice C (structural-signals-expansion, design §3.8, ADR-C6): SAME gate as serviceTopology
+    // above (structuralSignalsOn && services[] && boundaries[]) — the advisory cross-repo impact
+    // composition has nothing to stitch without a declared service/boundary set either. Reuses
+    // this factory's own `runner` (the SAME sandboxed spawn primitive every other extractor uses)
+    // for the C.4 step-1.5 mirror-freshness fetch — no new process-spawning surface.
+    ...(structuralSignalsOn && app.services?.length && app.boundaries?.length
+      ? { crossRepoImpact: { mirrorRoot, codebaseMemory: new CodebaseMemoryClient(runner), runner } }
+      : {}),
     // contextMap / prChangedFiles: LEFT ABSENT, deliberately. Legacy sources contextMap by reading
     // e2e/.qa/context.json off the REAL per-run mirrorDir (src/pipeline.ts's loadContextMap(),
     // :1308-1320) and prChangedFiles from intent.changedFiles (classifyCommit(message, diff),

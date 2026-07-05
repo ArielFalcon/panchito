@@ -13,6 +13,11 @@
 // trivially passes now (no file references a name that doesn't exist yet) and continues to hold as
 // a permanent guard once B-G3/B-G4 introduce the names — a future change that starts branching a
 // decide/verdict/gate/publish path on one of these fields will fail this test immediately.
+//
+// Slice C (structural-signals-expansion, design §3/spec scenario "Zero verdict/gate/publish
+// coupling"): crossRepoImpact/impactedLinks/crossRepoImpactedCount extend the SAME guard (C-R8) —
+// advisory-only, fail-open, never a decision input. Cross-repo change-coverage must independently
+// stay "unknown" (never derived from this seam) — see the dedicated assertion below.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -41,6 +46,10 @@ const DECISION_PATH_FILES = [
 
 const STRUCTURAL_SIGNAL_TELEMETRY_FIELDS = ["structuralSignalBytes", "serviceLinksCount", "contractDriftCount"];
 
+// Slice C (C-R8): crossRepoImpact/impactedLinks/crossRepoImpactedCount must ALSO be blind to every
+// decision path — same static guard, same file list, extended field set.
+const CROSS_REPO_IMPACT_FIELDS = ["crossRepoImpact", "impactedLinks", "crossRepoImpactedCount"];
+
 test("no decide/verdict/gate/publish source file references structuralSignalBytes/serviceLinksCount/contractDriftCount — persist-only telemetry, never a decision input", () => {
   for (const relPath of DECISION_PATH_FILES) {
     const content = readFileSync(join(qaEngineRoot, relPath), "utf8");
@@ -51,4 +60,24 @@ test("no decide/verdict/gate/publish source file references structuralSignalByte
       );
     }
   }
+});
+
+test("no decide/verdict/gate/publish source file references crossRepoImpact/impactedLinks/crossRepoImpactedCount — advisory-only, fail-open, never a decision input (Slice C, C-R8)", () => {
+  for (const relPath of DECISION_PATH_FILES) {
+    const content = readFileSync(join(qaEngineRoot, relPath), "utf8");
+    for (const field of CROSS_REPO_IMPACT_FIELDS) {
+      assert.ok(
+        !content.includes(field),
+        `${relPath} references '${field}' — CrossRepoImpactPort's composition is advisory-only (design §3/spec "Zero verdict/gate/publish coupling") and must NEVER be read by a decide/verdict/gate/publish path`,
+      );
+    }
+  }
+});
+
+test("cross-repo change-coverage semantics stay 'unknown' — decide-coverage.service.ts never derives status from a cross-repo/triggerRepo signal", () => {
+  const content = readFileSync(join(qaEngineRoot, "src/contexts/objective-signal/domain/decide-coverage.service.ts"), "utf8");
+  assert.ok(
+    !/triggerRepo|crossRepo/.test(content),
+    "decide-coverage.service.ts must never branch on triggerRepo/crossRepo signals — cross-repo runs stay 'unknown' by construction (browser coverage cannot map service-repo lines), independent of CrossRepoImpactPort's own advisory result",
+  );
 });

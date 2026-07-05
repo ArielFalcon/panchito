@@ -863,6 +863,17 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
   const MAX_DRIFT = 20;
   const hasServiceLinks = Boolean(input.serviceLinks?.length);
   const hasContractDrift = Boolean(input.contractDrift?.length);
+  // Slice C (structural-signals-expansion, design §3.6): extends this SAME section with inline
+  // "[IMPACTED:<tier>]" markers on matched bullets — NOT a new/duplicate subsection. The lookup key
+  // matches the bullet's own from/to identity exactly; built ONCE, byte-identical when
+  // crossRepoImpact is absent (empty map -> tierFor always undefined -> prefix always "").
+  const linkKey = (l: { from: { repo: string; file: string; symbol: string }; to: { repo: string } }): string =>
+    `${l.from.repo}/${l.from.file}#${l.from.symbol}->${l.to.repo}`;
+  const impactedTierByKey = new Map(
+    (input.crossRepoImpact?.impactedLinks ?? []).map(({ link, tier }) => [linkKey(link), tier] as const),
+  );
+  const tierFor = (l: { from: { repo: string; file: string; symbol: string }; to: { repo: string } }): string | undefined =>
+    impactedTierByKey.get(linkKey(l));
   const serviceLinksContent =
     (hasServiceLinks || hasContractDrift) && isGenerationMode
       ? [
@@ -870,9 +881,11 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
           "Structural FE→BE contract links resolved from the code, NOT a gate. Verify against the live app; absent links do NOT imply no dependency.",
           "",
           ...(hasServiceLinks
-            ? input.serviceLinks!.slice(0, MAX_LINKS).map((l) =>
-                `- \`${s(l.from.repo)}/${s(l.from.file)}#${s(l.from.symbol)}\` -> ` +
-                `${s(l.to.repo)} ${s(l.contractRef ?? l.to.symbol)} (${s(l.transport)}, confidence ${l.confidence.toFixed(2)})`)
+            ? input.serviceLinks!.slice(0, MAX_LINKS).map((l) => {
+                const tier = tierFor(l);
+                return `- ${tier ? `[IMPACTED:${s(tier)}] ` : ""}\`${s(l.from.repo)}/${s(l.from.file)}#${s(l.from.symbol)}\` -> ` +
+                  `${s(l.to.repo)} ${s(l.contractRef ?? l.to.symbol)} (${s(l.transport)}, confidence ${l.confidence.toFixed(2)})`;
+              })
             : []),
           ...(hasContractDrift
             ? ["", "### Contract drift (WARNINGS — front calls an endpoint the backend contract does not declare):",

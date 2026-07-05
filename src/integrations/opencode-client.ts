@@ -558,6 +558,11 @@ export interface OpencodeRunInput {
   // legacy copy simply never had them until now.
   serviceLinks?: OcServiceLink[]; // deterministic cross-repo FE→BE links (advisory, from the stitcher)
   contractDrift?: OcContractDrift[]; // FE↔BE contract drift (advisory warnings)
+  // Slice C (structural-signals-expansion, design §3.7): the advisory cross-repo impact narrowing —
+  // mirrors serviceLinks/contractDrift's own "structurally mirrored, not imported" discipline
+  // immediately above. Structured, not pre-rendered: prompts.ts extends the EXISTING
+  // "Cross-service links" section with inline [IMPACTED:<tier>] markers, never a new subsection.
+  crossRepoImpact?: { impactedLinks: Array<{ link: OcServiceLink; tier: string }> };
 }
 
 // Stitcher→Generation seam (design §3.4, NET-NEW structural mirrors): plain data, copied verbatim

@@ -177,6 +177,12 @@ export interface GenerationEnrichment {
   // independently optional from serviceLinks (a run can have links-but-no-drift or
   // drift-but-no-links; see ServiceLinksPort.resolve()'s own {links, drift} pairing).
   contractDrift?: readonly ContractDrift[];
+  // Slice C (structural-signals-expansion, design §3.8): the advisory cross-repo impact narrowing
+  // CrossRepoImpactPort.resolve() (below) produced. Structured, not pre-rendered — mirrors
+  // serviceLinks' own "prompts.ts owns rendering" precedent. Filled from the OPTIONAL
+  // CrossRepoImpactPort collaborator; absent -> no key at all, byte-identical to today. Advisory
+  // ONLY: reaches the generation prompt and NOTHING else — no verdict/gate/coverage path reads it.
+  crossRepoImpact?: { impactedLinks: readonly ImpactedLink[] };
 }
 export interface GenerationPort {
   // signal: Plan 7.1 (engram #913) — an optional, separate transport arg (mirrors RunPipelinePort's
@@ -616,5 +622,30 @@ export interface ContractDrift {
 // claim, never a verdict/gate/coverage input (ADR-2 parity with staticSignal).
 export interface ServiceLinksPort {
   resolve(): Promise<{ links: ServiceLink[]; drift: ContractDrift[] }>;
+}
+
+// CrossRepoImpactPort — advisory cross-repo IMPACTED-links seam (Slice C, structural-signals-
+// expansion design §3.1, ADR-C6). Port-local structural mirrors of service-topology's domain
+// CrossRepoImpact/ImpactedLink/MatchTier — this barrel's OWN "every type kernel-resident, no
+// cross-context import" rule, honored verbatim by CommitIntent/RouteTree/ServiceLinksPort above.
+// The real domain VO lives in service-topology/domain/cross-repo-impact.ts; the ADAPTER performs
+// the structural cast (the SAME cast ServiceLinksPortAdapter performs for ServiceLink/ContractDrift).
+//
+// Fires ONLY on cross-repo runs (input.triggerRepo present AND a resolvedServiceLinks entry targets
+// it). Self-sources the triggering service's OWN diff from ITS OWN mirror. NEVER throws: any failure
+// degrades to null -> whole-link rendering falls back, byte-identical to today.
+// tier "contract-file": the OpenAPI contract file itself changed (deterministic).
+// tier "impacted-symbol": a graph-impacted symbol name matches the link's operationId (heuristic).
+export type MatchTier = "contract-file" | "impacted-symbol";
+export interface ImpactedLink {
+  link: ServiceLink; // the barrel's OWN ServiceLink (above), not service-topology's
+  tier: MatchTier;
+}
+export interface CrossRepoImpact {
+  impactedLinks: ImpactedLink[];
+  serviceImpacted?: ServiceSymbolRef[]; // deferred tier-3 front expansion (design C.5) — never populated in v1
+}
+export interface CrossRepoImpactPort {
+  resolve(triggerRepo: string, triggerSha: string, resolvedLinks: readonly ServiceLink[]): Promise<CrossRepoImpact | null>;
 }
 

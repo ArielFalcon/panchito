@@ -23,6 +23,8 @@ import type {
   RetrievedRule,
   StructuralSignalPort,
   ServiceLinksPort,
+  ServiceLink,
+  CrossRepoImpactPort,
 } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 import { BlastRadius } from "@kernel/blast-radius.ts";
 import { ok, err } from "@kernel/result.ts";
@@ -3529,4 +3531,107 @@ test("S2.8(2) anti-inert companion: with the serviceLinks collaborator OMITTED, 
     false,
     "OpencodeRunInput.serviceLinks must be entirely ABSENT when the serviceLinks collaborator is omitted — presence/absence of the collaborator is the ONLY variable controlling this field",
   );
+});
+
+// ── Slice C (structural-signals-expansion, design §3.8, C-R5/C-R7): RunQaUseCase's [SWAP]
+// crossRepoImpact collaborator. Case A: triggerRepo present + a matching resolvedServiceLinks entry
+// + deps.crossRepoImpact wired -> resolve() is invoked, the result flows into
+// baseEnrichment.crossRepoImpact and gateSignals.crossRepoImpactedCount. Case B: a same-repo run
+// (no input.triggerRepo) -> the port is NEVER invoked at all (spec scenario "Same-repo run never
+// triggers the composition"). ──────────────────────────────────────────────────────────────────
+
+test("C-R5(A): a wired crossRepoImpact port is invoked when triggerRepo is present and a resolvedServiceLinks entry matches it; result reaches baseEnrichment + telemetry", async () => {
+  const link: ServiceLink = {
+    from: { repo: "org/front", file: "src/api.ts", symbol: "getOrder" },
+    to: { repo: "org/orders-svc", file: "src/routes.ts", symbol: "getOrder" },
+    transport: "http",
+    confidence: 1,
+    source: "openapi",
+  };
+  let resolveCallCount = 0;
+  let resolveArgs: [string, string, readonly ServiceLink[]] | undefined;
+  const crossRepoImpact: CrossRepoImpactPort = {
+    resolve: async (triggerRepo, triggerSha, resolvedLinks) => {
+      resolveCallCount++;
+      resolveArgs = [triggerRepo, triggerSha, resolvedLinks];
+      return { impactedLinks: [{ link, tier: "contract-file" }] };
+    },
+  };
+  const serviceLinks: ServiceLinksPort = { resolve: async () => ({ links: [link], drift: [] }) };
+
+  const captured: Parameters<GenerationPort["generate"]>[4][] = [];
+  const { ports } = stubPorts({
+    generate: async (_a, _b, _c, _d, enrichment) => {
+      captured.push(enrichment);
+      return { specs: ["a.spec.ts"], approved: true };
+    },
+  });
+  const useCase = new RunQaUseCase({ ...ports, serviceLinks, crossRepoImpact, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "c-r5-a-wired", triggerRepo: "org/orders-svc" });
+
+  assert.equal(resolveCallCount, 1, "crossRepoImpact.resolve() must be called exactly once");
+  assert.deepEqual(resolveArgs?.[0], "org/orders-svc");
+  assert.deepEqual(resolveArgs?.[2], [link]);
+  assert.ok(captured.length > 0);
+  for (const enrichment of captured) {
+    assert.deepEqual(enrichment?.crossRepoImpact, { impactedLinks: [{ link, tier: "contract-file" }] }, "the resolved impact must reach baseEnrichment.crossRepoImpact");
+  }
+  assert.equal(out.outcome?.gateSignals.crossRepoImpactedCount, 1, "crossRepoImpactedCount telemetry must reflect impactedLinks.length");
+});
+
+test("C-R7 companion (C-R5(B)): a same-repo run (no input.triggerRepo) never invokes the crossRepoImpact port at all", async () => {
+  let resolveCallCount = 0;
+  const crossRepoImpact: CrossRepoImpactPort = {
+    resolve: async () => { resolveCallCount++; return null; },
+  };
+  const link: ServiceLink = {
+    from: { repo: "org/front", file: "src/api.ts", symbol: "getOrder" },
+    to: { repo: "org/orders-svc", file: "src/routes.ts", symbol: "getOrder" },
+    transport: "http",
+    confidence: 1,
+    source: "openapi",
+  };
+  const serviceLinks: ServiceLinksPort = { resolve: async () => ({ links: [link], drift: [] }) };
+
+  const { ports } = stubPorts({});
+  const useCase = new RunQaUseCase({ ...ports, serviceLinks, crossRepoImpact, config: baseConfig });
+
+  // no triggerRepo — a same-repo (monorepo) run.
+  await useCase.run({ ...baseInput, runId: "c-r5-b-same-repo" });
+
+  assert.equal(resolveCallCount, 0, "crossRepoImpact.resolve() must never be invoked for a same-repo run — input.triggerRepo absence is the guard");
+});
+
+// ── C-R7: the ANTI-INERT integration proof (design §3.8, spec scenario "Anti-inert integration
+// proof") — a recording fake replacing the CrossRepoImpactPort collaborator, driven through the REAL
+// RunQaUseCase.run(), proving actual invocation end-to-end (not isolated unit coverage only). ────
+
+test("C-R7: anti-inert integration proof — a recording CrossRepoImpactPort fake observes an actual invocation through the real RunQaUseCase.run()", async () => {
+  const link: ServiceLink = {
+    from: { repo: "org/front", file: "src/api.ts", symbol: "getRestaurants" },
+    to: { repo: "org/restaurants-svc", file: "api-definition.yaml", symbol: "getRestaurants" },
+    transport: "http",
+    confidence: 1,
+    source: "openapi",
+  };
+  const invocations: Array<{ triggerRepo: string; triggerSha: string; links: readonly ServiceLink[] }> = [];
+  const crossRepoImpact: CrossRepoImpactPort = {
+    resolve: async (triggerRepo, triggerSha, resolvedLinks) => {
+      invocations.push({ triggerRepo, triggerSha, links: resolvedLinks });
+      return { impactedLinks: [{ link, tier: "impacted-symbol" }] };
+    },
+  };
+  const serviceLinks: ServiceLinksPort = { resolve: async () => ({ links: [link], drift: [] }) };
+
+  const { ports } = stubPorts({});
+  const useCase = new RunQaUseCase({ ...ports, serviceLinks, crossRepoImpact, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "c-r7-anti-inert", triggerRepo: "org/restaurants-svc", sha: Sha.of("def5678") });
+
+  assert.equal(invocations.length, 1, "the recording fake must have observed exactly one real invocation through RunQaUseCase.run()");
+  assert.equal(invocations[0]?.triggerRepo, "org/restaurants-svc");
+  assert.equal(invocations[0]?.triggerSha, "def5678");
+  assert.deepEqual(invocations[0]?.links, [link]);
+  assert.notEqual(out.decision.verdict, "infra-error", "a wired crossRepoImpact collaborator must never destabilize the run");
 });

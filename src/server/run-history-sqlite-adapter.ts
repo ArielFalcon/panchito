@@ -84,6 +84,9 @@ export function toLegacyRunOutcome(outcome: KernelRunOutcome): LegacyRunOutcome 
       ...(outcome.gateSignals.structuralSignalBytes !== undefined ? { structuralSignalBytes: outcome.gateSignals.structuralSignalBytes } : {}),
       ...(outcome.gateSignals.serviceLinksCount !== undefined ? { serviceLinksCount: outcome.gateSignals.serviceLinksCount } : {}),
       ...(outcome.gateSignals.contractDriftCount !== undefined ? { contractDriftCount: outcome.gateSignals.contractDriftCount } : {}),
+      // Slice C (structural-signals-expansion, design §3.8): the fourth field, same conditional-
+      // spread discipline as the three Slice B fields above — undefined stays undefined.
+      ...(outcome.gateSignals.crossRepoImpactedCount !== undefined ? { crossRepoImpactedCount: outcome.gateSignals.crossRepoImpactedCount } : {}),
     },
     rulesRetrieved: outcome.rulesRetrieved,
     ...(outcome.reflection !== undefined ? { reflection: outcome.reflection as LegacyRunOutcome["reflection"] } : {}),

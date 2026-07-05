@@ -246,6 +246,13 @@ export class GenerationPortAdapter implements GenerationPort {
       // Absent/empty -> omitted, never set to [] (matches every other array-shaped enrichment field).
       ...(enrichment?.serviceLinks?.length ? { serviceLinks: [...enrichment.serviceLinks] } : {}),
       ...(enrichment?.contractDrift?.length ? { contractDrift: [...enrichment.contractDrift] } : {}),
+      // Slice C (structural-signals-expansion, design §3.7): 1:1 spread, mirroring serviceLinks'
+      // own conditional-spread precedent immediately above — mapped onto the SAME
+      // OpencodeRunInput.crossRepoImpact field generation-ports.ts already declares.
+      // Absent/empty -> omitted, never set to an empty-impactedLinks object.
+      ...(enrichment?.crossRepoImpact?.impactedLinks.length
+        ? { crossRepoImpact: { impactedLinks: enrichment.crossRepoImpact.impactedLinks.map((x) => ({ ...x })) } }
+        : {}),
     };
 
     const generated = await this.useCase.generate(input, { ...(signal ? { signal } : {}) });

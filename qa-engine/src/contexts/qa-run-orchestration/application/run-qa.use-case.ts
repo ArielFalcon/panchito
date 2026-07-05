@@ -55,6 +55,8 @@ import type {
   ServiceLinksPort,
   ServiceLink,
   ContractDrift,
+  CrossRepoImpactPort,
+  CrossRepoImpact,
 } from "./ports/index.ts";
 import { decide, type RunEvidence } from "../domain/run-decision.service.ts";
 import { RunDecision } from "../domain/run-decision.ts";
@@ -196,6 +198,15 @@ export interface RunQaUseCaseDeps {
   // Best-effort: a throw is caught and logged, degrading to no serviceLinks/contractDrift — never
   // aborts the run (mirrors structuralSignal's own fail-open posture immediately above).
   serviceLinks?: ServiceLinksPort;
+  // [SWAP] absent -> RunQaUseCase never invokes crossRepoImpact; baseEnrichment carries no such
+  // field, byte-identical to today (SAME backward-compatible posture serviceLinks/structuralSignal
+  // already established). Slice C (structural-signals-expansion, design §3.8): when present,
+  // invoked AT MOST once per run — gated on input.triggerRepo being set AND at least one
+  // resolvedServiceLinks entry targeting it (the cheap pre-filter, belt-and-braces with the port's
+  // OWN identical guard). Same-repo runs (no triggerRepo) NEVER invoke this collaborator at all.
+  // Best-effort: a throw is caught and logged, degrading to no crossRepoImpact — never aborts the
+  // run (mirrors serviceLinks'/structuralSignal's own fail-open posture).
+  crossRepoImpact?: CrossRepoImpactPort;
   config?: Partial<RunQaConfig>;
 }
 
@@ -519,6 +530,26 @@ export class RunQaUseCase {
       }
     }
 
+    // Slice C (structural-signals-expansion, design §3.8): the advisory cross-repo impact
+    // composition — fires ONLY on cross-repo runs. The cheap pre-filter (`.some(...)` below) is a
+    // PERFORMANCE addition on top of the port's OWN identical guard (design C.4 step 0):
+    // input.triggerRepo presence already means "cross-repo" (runner.ts validates it), so this skips
+    // even the await hop for the common no-match case rather than paying it to discover "no match"
+    // inside the port. Best-effort: a throw is caught and logged, never aborts the run.
+    let crossRepoImpact: CrossRepoImpact | null = null;
+    if (
+      this.deps.crossRepoImpact &&
+      input.triggerRepo &&
+      resolvedServiceLinks.length &&
+      resolvedServiceLinks.some((l) => l.to.repo === input.triggerRepo)
+    ) {
+      try {
+        crossRepoImpact = await this.deps.crossRepoImpact.resolve(input.triggerRepo, input.sha.toString(), resolvedServiceLinks);
+      } catch (err) {
+        console.error("[qa] WARNING: cross-repo impact resolution failed (non-fatal, generation continues without it):", err);
+      }
+    }
+
     // W5 fix (seam-parity FIXME): thread runId into both enrichment bases — the SAME "dynamic"
     // per-run precedent sha/intent above already establish. RunQaInput.runId (this use-case's own
     // input) is available on every run, so it is unconditional (matching sha's own unconditional
@@ -533,6 +564,9 @@ export class RunQaUseCase {
       ...(blastRadiusSignal ? { staticSignal: blastRadiusSignal } : {}),
       ...(resolvedServiceLinks.length ? { serviceLinks: resolvedServiceLinks } : {}),
       ...(resolvedContractDrift.length ? { contractDrift: resolvedContractDrift } : {}),
+      // Slice C (structural-signals-expansion, design §3.8): mirrors serviceLinks' own conditional-
+      // spread precedent — absent/empty crossRepoImpact never adds the key at all.
+      ...(crossRepoImpact?.impactedLinks.length ? { crossRepoImpact: { impactedLinks: crossRepoImpact.impactedLinks } } : {}),
     };
     // The reviewer's own enrichment base — SEPARATE from baseEnrichment (generation-shaped) because
     // ReviewEnrichment carries domSnapshot, not contextPack/existingSpecFiles (generation-only
@@ -1348,6 +1382,13 @@ export class RunQaUseCase {
         ...(this.deps.serviceLinks
           ? { serviceLinksCount: resolvedServiceLinks.length, contractDriftCount: resolvedContractDrift.length }
           : {}),
+        // Slice C (structural-signals-expansion, design §3.8): the fourth telemetry field, added by
+        // THIS slice's own commit. Same "gated on the collaborator's PRESENCE, not a truthy count"
+        // discipline Slice B established — but crossRepoImpact only ever RUNS on a cross-repo run
+        // with a matching link (the cheap pre-filter above), so gating on the RESULT (not the
+        // collaborator's presence) is correct here: a same-repo run must stay undefined (the
+        // collaborator never ran), not report a fabricated 0.
+        ...(crossRepoImpact ? { crossRepoImpactedCount: crossRepoImpact.impactedLinks.length } : {}),
         // W3 F3: the execution logs ExecutionPort.execute() already returned — reaches the
         // persisted RunOutcome the SAME way cases does (see toRunOutcome's own cases doc).
         logs: run.logs,
@@ -1475,6 +1516,10 @@ export class RunQaUseCase {
       structuralSignalBytes?: number;
       serviceLinksCount?: number;
       contractDriftCount?: number;
+      // Slice C (structural-signals-expansion, design §3.8): the fourth telemetry field, added by
+      // THIS slice's own commit — same "never ran" asymmetry at the TYPE level, same DELIBERATE
+      // conditional-spread departure at the construction site below.
+      crossRepoImpactedCount?: number;
       // W3 F3: the execution logs, same optional-override precedent as note/rulesRetrieved above —
       // only the mainline caller (post-execute) has real logs to thread.
       logs?: string;
@@ -1518,6 +1563,9 @@ export class RunQaUseCase {
         ...(extra?.structuralSignalBytes !== undefined ? { structuralSignalBytes: extra.structuralSignalBytes } : {}),
         ...(extra?.serviceLinksCount !== undefined ? { serviceLinksCount: extra.serviceLinksCount } : {}),
         ...(extra?.contractDriftCount !== undefined ? { contractDriftCount: extra.contractDriftCount } : {}),
+        // Slice C (structural-signals-expansion, design §3.8): the fourth telemetry field, THIS
+        // slice's own commit — same conditional-spread discipline as the three Slice B fields above.
+        ...(extra?.crossRepoImpactedCount !== undefined ? { crossRepoImpactedCount: extra.crossRepoImpactedCount } : {}),
       },
       rulesRetrieved: extra?.rulesRetrieved ?? [],
       ...(extra?.note !== undefined ? { note: extra.note } : {}),

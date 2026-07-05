@@ -275,6 +275,9 @@ export interface RunOutcome {
     structuralSignalBytes?: number;
     serviceLinksCount?: number;
     contractDriftCount?: number;
+    // Slice C (structural-signals-expansion, design §3.8): the fourth advisory telemetry field,
+    // same "never ran" undefined-preserving discipline as the three Slice B fields above.
+    crossRepoImpactedCount?: number;
   };
   rulesRetrieved: string[];
   reflection?: StructuredReflection;

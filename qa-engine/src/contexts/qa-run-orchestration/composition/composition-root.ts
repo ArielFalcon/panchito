@@ -54,6 +54,9 @@ import type { CodebaseMemoryCliClient } from "../../../shared-infrastructure/cod
 import { ServiceLinksPortAdapter } from "../infrastructure/bridges/service-links-port.adapter.ts";
 import { MirrorRegistryAdapter } from "@contexts/service-topology/infrastructure/mirror-registry.adapter.ts";
 import type { BoundaryProfileProviderPort } from "@contexts/service-topology/application/ports/index.ts";
+import { CrossRepoImpactPortAdapter } from "../infrastructure/bridges/cross-repo-impact-port.adapter.ts";
+import { GitMirrorReadAdapter } from "@contexts/change-analysis/infrastructure/git-mirror-read.adapter.ts";
+import type { SandboxedBinaryRunner } from "../../../shared-infrastructure/process-sandbox/sandboxed-binary-runner.ts";
 
 import { GenerateTestsUseCase, type GenerationResult, type GenerateOpts } from "@contexts/generation/application/generate-tests.use-case.ts";
 import type { OpencodeRunInput, ArchitectureContext } from "@contexts/generation/application/ports/generation-ports.ts";
@@ -182,6 +185,20 @@ export interface CompositionConfig {
     mirrorRoot: string;
     services: readonly { repo: string }[];
     boundaryProfiles: BoundaryProfileProviderPort;
+  };
+  // Slice C (structural-signals-expansion, design §3.8): the OPTIONAL crossRepoImpact
+  // collaborator. Mirrors serviceTopology's own [SWAP] posture — absent -> RunQaUseCaseDeps.
+  // crossRepoImpact stays undefined, NEVER a stub null-shaped fake. When present, wireBridges
+  // constructs a CrossRepoImpactPortAdapter over a REAL MirrorRegistryAdapter(mirrorRoot), a
+  // per-service GitMirrorReadAdapter factory, a LazyProjectCodeGraphAdapter (reusing the SAME
+  // codebaseMemory client the structural-signal collaborator uses), and the SAME shared
+  // SandboxedBinaryRunner instance (reused for the C.4 step-1.5 mirror-freshness fetch — no new
+  // process-spawning surface is introduced). Gated by the CALLER on the SAME
+  // structuralSignalsOn && services[] && boundaries[] condition serviceTopology uses (design C.8).
+  crossRepoImpact?: {
+    mirrorRoot: string;
+    codebaseMemory: ProjectNameCliClient & CodebaseMemoryCliClient;
+    runner: SandboxedBinaryRunner;
   };
   // The FE<->BE architecture map (context.json), if loaded — feeds the context pack's contract
   // filtering. Absent -> the pack degrades to blast-radius + DOM only (mirrors buildContextPack's
@@ -424,6 +441,20 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
       )
     : undefined;
 
+  // Slice C (structural-signals-expansion, design §3.8): OPTIONAL, absent -> undefined (never a
+  // stub), the SAME [SWAP] posture serviceLinks above already established. Each per-triggerRepo
+  // resolve() call builds a FRESH GitMirrorReadAdapter over whatever repoDir the adapter resolves
+  // internally (the triggering service, a DIFFERENT repo per run) — unlike serviceLinks'
+  // static-per-run posture, there is no single repoDir to pin at construction time here.
+  const crossRepoImpact = cfg.crossRepoImpact
+    ? new CrossRepoImpactPortAdapter({
+        mirrors: new MirrorRegistryAdapter(cfg.crossRepoImpact.mirrorRoot),
+        makeVcs: (repoDir) => new GitMirrorReadAdapter(repoDir, cfg.crossRepoImpact!.runner),
+        codeGraph: new LazyProjectCodeGraphAdapter(cfg.crossRepoImpact.codebaseMemory, new ProjectNameResolver(cfg.crossRepoImpact.codebaseMemory)),
+        runner: cfg.crossRepoImpact.runner, // reused for the C.4 step-1.5 fetch — no new spawn surface
+      })
+    : undefined;
+
   const objectiveSignal = new ObjectiveSignalPortAdapter(
     {
       collector: cfg.objectiveSignal.collector as CoverageCollectorPort,
@@ -502,6 +533,7 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
     ...(reviewDomGrounding ? { reviewDomGrounding } : {}),
     ...(structuralSignal ? { structuralSignal } : {}),
     ...(serviceLinks ? { serviceLinks } : {}),
+    ...(crossRepoImpact ? { crossRepoImpact } : {}),
     ...(cfg.observer ? { observer: cfg.observer } : {}),
     config: {
       needsReview: cfg.needsReview,
