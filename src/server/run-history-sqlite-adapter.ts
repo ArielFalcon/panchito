@@ -79,6 +79,11 @@ export function toLegacyRunOutcome(outcome: KernelRunOutcome): LegacyRunOutcome 
       ...(outcome.gateSignals.catalogGateInWindow !== undefined ? { catalogGateInWindow: outcome.gateSignals.catalogGateInWindow } : {}),
       ...(outcome.gateSignals.catalogGateAdvisory !== undefined ? { catalogGateAdvisory: outcome.gateSignals.catalogGateAdvisory } : {}),
       ...(outcome.gateSignals.catalogGateFailClosed !== undefined ? { catalogGateFailClosed: outcome.gateSignals.catalogGateFailClosed } : {}),
+      // Slice B (structural-signals-expansion, design §2/ADR-B): same conditional-spread pattern —
+      // undefined stays undefined, never fabricated.
+      ...(outcome.gateSignals.structuralSignalBytes !== undefined ? { structuralSignalBytes: outcome.gateSignals.structuralSignalBytes } : {}),
+      ...(outcome.gateSignals.serviceLinksCount !== undefined ? { serviceLinksCount: outcome.gateSignals.serviceLinksCount } : {}),
+      ...(outcome.gateSignals.contractDriftCount !== undefined ? { contractDriftCount: outcome.gateSignals.contractDriftCount } : {}),
     },
     rulesRetrieved: outcome.rulesRetrieved,
     ...(outcome.reflection !== undefined ? { reflection: outcome.reflection as LegacyRunOutcome["reflection"] } : {}),

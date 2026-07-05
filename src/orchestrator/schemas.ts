@@ -98,6 +98,10 @@ export const AppConfigSchema = z
       // green suite with corrupted responses and record the catch-rate. NEVER blocks publish, and
       // it DOUBLES the DEV run — so it is opt-in.
       valueOracle: z.enum(["off", "signal"]).optional(),
+      // Advisory structural-signal calibration. off = disable BOTH advisory collaborators
+      // (codebaseMemory + serviceTopology) at the factory; signal (default) = today's behavior
+      // byte-for-byte. NO `enforce`: advisory signals have no block semantics.
+      structuralSignals: z.object({ mode: z.enum(["off", "signal"]) }).optional(),
       // Per-spec-file triage and dual publish (quality-filtered-dual-publish). Default OFF.
       // When true the decide step classifies each spec file into PR / ISSUE / DROP and can
       // simultaneously open a PR for the green subset and an Issue for the real-bug subset.

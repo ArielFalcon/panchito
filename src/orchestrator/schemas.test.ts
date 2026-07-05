@@ -61,6 +61,47 @@ test("qa.parallelDiff parses and defaults to undefined", () => {
   assert.equal(off.qa.parallelDiff, undefined);
 });
 
+// ── qa.structuralSignals (advisory calibration gate, Slice B) ─────────────────
+
+test("qa.structuralSignals absent leaves the field undefined (factory defaults to 'signal')", () => {
+  const cfg = AppConfigSchema.parse(base);
+  assert.equal(cfg.qa.structuralSignals, undefined);
+});
+
+test("qa.structuralSignals mode 'off' parses", () => {
+  const cfg = AppConfigSchema.parse({
+    ...base,
+    qa: { ...base.qa, structuralSignals: { mode: "off" } },
+  });
+  assert.equal(cfg.qa.structuralSignals?.mode, "off");
+});
+
+test("qa.structuralSignals mode 'signal' parses", () => {
+  const cfg = AppConfigSchema.parse({
+    ...base,
+    qa: { ...base.qa, structuralSignals: { mode: "signal" } },
+  });
+  assert.equal(cfg.qa.structuralSignals?.mode, "signal");
+});
+
+test("qa.structuralSignals mode 'enforce' fails loudly (advisory signals have no block semantics)", () => {
+  assert.throws(() =>
+    AppConfigSchema.parse({
+      ...base,
+      qa: { ...base.qa, structuralSignals: { mode: "enforce" } },
+    }),
+  );
+});
+
+test("qa.structuralSignals rejects any mode outside off|signal", () => {
+  assert.throws(() =>
+    AppConfigSchema.parse({
+      ...base,
+      qa: { ...base.qa, structuralSignals: { mode: "bogus" } },
+    }),
+  );
+});
+
 // ── manifest entry: write↔read alignment (post-ADR-001, Phase 3.1) ─────────────
 
 const manifestEntry = {

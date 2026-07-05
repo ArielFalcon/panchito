@@ -106,6 +106,40 @@ test("toLegacyRunOutcome forwards every present optional gateSignals field faith
   assert.equal(out.gateSignals.catalogGateFailClosed, 0);
 });
 
+// ── Slice B (structural-signals-expansion, design §2/ADR-B): structuralSignalBytes/
+// serviceLinksCount/contractDriftCount round-trip through toLegacyRunOutcome's conditional-spread
+// pattern — undefined MUST stay undefined (never a fabricated 0), matching the catalogGate*
+// precedent's persistence-mapping half exactly (this design deliberately diverges only at the
+// CONSTRUCTION site, not here). ────────────────────────────────────────────────────────────────
+
+test("toLegacyRunOutcome omits structuralSignalBytes/serviceLinksCount/contractDriftCount when absent on the kernel outcome (never fabricates a 0)", () => {
+  const out = toLegacyRunOutcome(kernelOutcome());
+  assert.equal("structuralSignalBytes" in out.gateSignals, false);
+  assert.equal("serviceLinksCount" in out.gateSignals, false);
+  assert.equal("contractDriftCount" in out.gateSignals, false);
+});
+
+test("toLegacyRunOutcome forwards structuralSignalBytes/serviceLinksCount/contractDriftCount faithfully when present, including a genuine 0 (ran, found none)", () => {
+  const out = toLegacyRunOutcome(
+    kernelOutcome({
+      gateSignals: {
+        static: true,
+        coverageRatio: 0.7,
+        valueScore: 0.4,
+        reviewerCorrections: [],
+        flaky: false,
+        retries: 0,
+        structuralSignalBytes: 512,
+        serviceLinksCount: 3,
+        contractDriftCount: 0,
+      },
+    }),
+  );
+  assert.equal(out.gateSignals.structuralSignalBytes, 512);
+  assert.equal(out.gateSignals.serviceLinksCount, 3);
+  assert.equal(out.gateSignals.contractDriftCount, 0, "a genuine 0 (resolver ran, found none) must round-trip as 0, not be dropped or coerced to undefined");
+});
+
 test("toLegacyRunOutcome forwards rulesRetrieved (W3 F2) and reflection when present", () => {
   const out = toLegacyRunOutcome(
     kernelOutcome({

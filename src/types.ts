@@ -267,6 +267,14 @@ export interface RunOutcome {
     catalogGateInWindow?: number;
     catalogGateAdvisory?: number;
     catalogGateFailClosed?: number;
+    // Slice B (structural-signals-expansion, design §2/ADR-B): advisory structural-signal
+    // calibration telemetry — undefined = the signal never ran (mode:off, non-diff, unindexed, no
+    // resolver wired) — never a fabricated 0. DELIBERATE DEPARTURE from catalogGate*'s `?? 0`
+    // construction-site default (the kernel side of this same field set). Persist-only — never
+    // read by decide/verdict/gate/publish.
+    structuralSignalBytes?: number;
+    serviceLinksCount?: number;
+    contractDriftCount?: number;
   };
   rulesRetrieved: string[];
   reflection?: StructuredReflection;

@@ -47,6 +47,15 @@ export interface RunOutcome {
     catalogGateInWindow?: number;
     catalogGateAdvisory?: number;
     catalogGateFailClosed?: number;
+    // Slice B (structural-signals-expansion, design §2/ADR-B): advisory structural-signal
+    // calibration telemetry — undefined = the signal never ran (mode:off, non-diff, unindexed, no
+    // resolver wired) — never a fabricated 0. DELIBERATE DEPARTURE from catalogGate*'s `?? 0`
+    // construction-site default: a fabricated 0 here would be indistinguishable from "ran and found
+    // zero", destroying the "never ran" semantics Phase-7 calibration needs. Persist-only — never
+    // read by decide/verdict/gate/publish (structural-signals-decision-blindness.contract.test.ts).
+    structuralSignalBytes?: number;
+    serviceLinksCount?: number;
+    contractDriftCount?: number;
   };
   rulesRetrieved: string[];
   // Wide: the real type is cross-run-learning's StructuredReflection; `unknown` for the same reason.

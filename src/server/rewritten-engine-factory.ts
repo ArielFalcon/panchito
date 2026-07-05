@@ -312,6 +312,13 @@ export function buildRewrittenCompositionConfig(
   const runner = new SandboxedBinaryRunnerAdapter({ processKill: new ProcessKillAdapter() });
   const vcs = new GitMirrorReadAdapter(mirrorDir, runner);
 
+  // Advisory structural-signal calibration gate (Slice B, design §2/ADR-B2). mode "off" disables
+  // BOTH advisory collaborators (codebaseMemory + serviceTopology) below — a HALF-GATE (disabling
+  // only one) is the named hazard this design guards against. Default (absent/"signal") is today's
+  // behavior byte-for-byte: both collaborators keep their own pre-existing supply conditions.
+  const structuralSignalsMode = app.qa.structuralSignals?.mode ?? "signal";
+  const structuralSignalsOn = structuralSignalsMode !== "off";
+
   // Reuses the host's already-built AgentDeps (see this module's header, difference #1) — never a
   // second AgentRuntimeManager. onUsage/onTurn are deliberately not forwarded, matching the operator
   // template exactly (AgentRuntimeAdapter's LegacyAgentDeps types them against the kernel
@@ -468,14 +475,18 @@ export function buildRewrittenCompositionConfig(
     // primitive every other extractor uses). Unconditional by design — an unindexed mirror degrades
     // to "" (no section) entirely inside the adapter chain, so there is no per-app opt-in to forget;
     // indexing an app's mirror is the ONLY step needed to light the signal up for that app.
-    codebaseMemory: new CodebaseMemoryClient(runner),
+    // Gated on structuralSignalsOn (Slice B): mode:"off" omits this collaborator entirely.
+    ...(structuralSignalsOn ? { codebaseMemory: new CodebaseMemoryClient(runner) } : {}),
     // Stitcher→Generation seam (design §3.6, ADR-6): supply serviceTopology ONLY when the app
     // declares BOTH services[] (the participating repos) AND boundaries[] (the call convention).
     // Either absent -> no collaborator -> the phase is inert (fail-open, byte-identical to today).
     // Unlike codebaseMemory above (supplied unconditionally because an unindexed mirror
     // self-degrades cheaply), this seam has a cheap, honest config gate: no boundaries[] means
     // there is literally nothing for the resolver to stitch.
-    ...(app.services?.length && app.boundaries?.length
+    // ALSO gated on structuralSignalsOn (Slice B, ADR-B2): mode:"off" must omit this collaborator
+    // too, even when services[]+boundaries[] are both declared — the half-gate hazard this design
+    // explicitly guards against (disabling codebaseMemory alone while leaving this one active).
+    ...(structuralSignalsOn && app.services?.length && app.boundaries?.length
       ? {
           serviceTopology: {
             appName: app.name,

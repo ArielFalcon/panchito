@@ -236,6 +236,66 @@ test("buildRewrittenCompositionConfig omits serviceTopology when neither service
   assert.equal(config.serviceTopology, undefined);
 });
 
+// ── qa.structuralSignals calibration gate (Slice B, design §2/ADR-B2) — mode "off" must omit
+// BOTH advisory collaborators (codebaseMemory + serviceTopology), never just one (the named
+// half-gate hazard). Default (absent/"signal") stays byte-identical to today's behavior. ─────────
+
+test("qa.structuralSignals mode 'off' omits BOTH codebaseMemory and serviceTopology (the half-gate hazard — asserting both, not just one)", () => {
+  const app: AppConfig = {
+    ...cfg("factory-structural-signals-off"),
+    qa: { ...cfg("factory-structural-signals-off").qa, structuralSignals: { mode: "off" } },
+    services: [{ repo: "org/ms-orders" }],
+    boundaries: [
+      {
+        transport: "http",
+        frontFiles: "*.api.ts",
+        frontCallSite: { kind: "receiver-verb-call" },
+        servicePrefixTemplate: "name-{service}-api",
+        serviceRepoTemplate: "ms-name-{service}",
+        openApiPath: "openapi.yaml",
+      },
+    ],
+  } as AppConfig;
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.equal(config.codebaseMemory, undefined, "mode:off must omit codebaseMemory");
+  assert.equal(config.serviceTopology, undefined, "mode:off must omit serviceTopology even though services[]+boundaries[] are both declared");
+});
+
+test("qa.structuralSignals absent supplies codebaseMemory unconditionally (byte-identical to pre-change behavior)", () => {
+  const app = cfg("factory-structural-signals-absent");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.ok(config.codebaseMemory, "absent config must keep supplying codebaseMemory — no behavior change");
+});
+
+test("qa.structuralSignals mode 'signal' supplies codebaseMemory unconditionally (explicit default, same as absent)", () => {
+  const app: AppConfig = {
+    ...cfg("factory-structural-signals-signal"),
+    qa: { ...cfg("factory-structural-signals-signal").qa, structuralSignals: { mode: "signal" } },
+  };
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.ok(config.codebaseMemory, "mode:signal must keep supplying codebaseMemory — same as absent");
+});
+
+test("qa.structuralSignals mode 'signal' still supplies serviceTopology when services[]+boundaries[] are both declared (AND-gate unaffected)", () => {
+  const app: AppConfig = {
+    ...cfg("factory-structural-signals-signal-topology"),
+    qa: { ...cfg("factory-structural-signals-signal-topology").qa, structuralSignals: { mode: "signal" } },
+    services: [{ repo: "org/ms-orders" }],
+    boundaries: [
+      {
+        transport: "http",
+        frontFiles: "*.api.ts",
+        frontCallSite: { kind: "receiver-verb-call" },
+        servicePrefixTemplate: "name-{service}-api",
+        serviceRepoTemplate: "ms-name-{service}",
+        openApiPath: "openapi.yaml",
+      },
+    ],
+  } as AppConfig;
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps, mirrorRoot: "/tmp/mirrors" }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.ok(config.serviceTopology, "mode:signal must not disturb the pre-existing services[]+boundaries[] AND-gate");
+});
+
 test("createRewrittenEngineFactory forwards its 4th (observer) argument to buildRewrittenCompositionConfig on every call", () => {
   const app = cfg("factory-observer-e2e");
   // createRewrittenEngineFactory reads PIPELINE_ENGINE via buildProduction internally (env

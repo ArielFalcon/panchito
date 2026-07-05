@@ -400,6 +400,7 @@ describe("seam-parity: PERSISTENCE (kernel RunOutcome vs toLegacyRunOutcome)", (
     reviewerRationale: true, reviewerApproved: true, flaky: true, retries: true, confinement: true,
     usage: true, phaseTimings: true, preExecAmbiguityCatches: true, deterministicSelectorBlocks: true,
     catalogGateInWindow: true, catalogGateAdvisory: true, catalogGateFailClosed: true,
+    structuralSignalBytes: true, serviceLinksCount: true, contractDriftCount: true,
   } satisfies Record<keyof KernelRunOutcome["gateSignals"], true>;
 
   const ALLOWLIST: Record<string, string> = {
@@ -436,6 +437,7 @@ describe("seam-parity: PERSISTENCE (kernel RunOutcome vs toLegacyRunOutcome)", (
       "reviewerApproved", "flaky", "retries", "confinement", "usage", "phaseTimings",
       "preExecAmbiguityCatches", "deterministicSelectorBlocks", "catalogGateInWindow",
       "catalogGateAdvisory", "catalogGateFailClosed",
+      "structuralSignalBytes", "serviceLinksCount", "contractDriftCount",
     ];
     assert.deepEqual(mapped.sort(), Object.keys(ALL_GATE_SIGNAL_FIELDS).sort(), "every gateSignals field must be mapped — toLegacyRunOutcome's own header claims 100% pass-through for this nested object");
   });
@@ -466,6 +468,9 @@ describe("seam-parity: PERSISTENCE (kernel RunOutcome vs toLegacyRunOutcome)", (
         catalogGateInWindow: 5,
         catalogGateAdvisory: 4,
         catalogGateFailClosed: 0,
+        structuralSignalBytes: 512,
+        serviceLinksCount: 3,
+        contractDriftCount: 0,
       },
       rulesRetrieved: [S("rulesRetrieved")],
       reflection: { rootCause: S("reflection.rootCause") },
@@ -504,6 +509,9 @@ describe("seam-parity: PERSISTENCE (kernel RunOutcome vs toLegacyRunOutcome)", (
     assert.equal(gs.catalogGateInWindow, 5, `gateSignals.catalogGateInWindow dropped at ${dyingLayer}`);
     assert.equal(gs.catalogGateAdvisory, 4, `gateSignals.catalogGateAdvisory dropped at ${dyingLayer}`);
     assert.equal(gs.catalogGateFailClosed, 0, `gateSignals.catalogGateFailClosed dropped at ${dyingLayer}`);
+    assert.equal(gs.structuralSignalBytes, 512, `gateSignals.structuralSignalBytes dropped at ${dyingLayer}`);
+    assert.equal(gs.serviceLinksCount, 3, `gateSignals.serviceLinksCount dropped at ${dyingLayer}`);
+    assert.equal(gs.contractDriftCount, 0, `gateSignals.contractDriftCount dropped at ${dyingLayer}`);
 
     assert.equal("note" in out, false, `note IS in the allowlist as CORRECT BY DESIGN (re-classified, W5) — LegacyRunOutcome genuinely has no note field, see the allowlist entry's own evidence trail; if this starts failing because LegacyRunOutcome gains a note field, update the allowlist entry above instead of patching the assertion`);
   });

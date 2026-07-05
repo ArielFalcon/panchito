@@ -2812,6 +2812,89 @@ test("W3 F2: an early-exit terminal (static-gate invalid) persists rulesRetrieve
   assert.deepEqual(savedRulesRetrieved, [], "legacy's persistOutcome() only threads retrievedRuleIds at its OWN mainline call site — every other exit gets []");
 });
 
+// ── Slice B (structural-signals-expansion, design §2/ADR-B): structuralSignalBytes/
+// serviceLinksCount/contractDriftCount telemetry must survive from the mainline `extra?` bag into
+// the RETURNED gateSignals literal `toRunOutcome` constructs — this is the exact gap a prior
+// design revision left as dead code (fields typed+mapped for persistence, but the construction
+// literal itself never read them back out of `extra`). undefined-preserving, NEVER a fabricated 0
+// (a DELIBERATE departure from catalogGate*'s `?? 0` default — ADR-B). ───────────────────────────
+
+test("Slice B: structuralSignalBytes/serviceLinksCount/contractDriftCount survive into the persisted RunOutcome.gateSignals when the structural/serviceLinks collaborators are wired and populated", async () => {
+  let savedGateSignals: RunOutcome["gateSignals"] | undefined;
+  const { ports } = stubPorts({});
+  ports.runHistory.save = async (outcome) => { savedGateSignals = outcome.gateSignals; };
+  const structuralSignal: StructuralSignalPort = {
+    render: async () => "## Structural blast radius (deterministic — from the code graph, advisory)\nsome content",
+  };
+  const link = {
+    from: { repo: "org/front", file: "src/api.ts", symbol: "getOrder" },
+    to: { repo: "org/orders", file: "src/routes.ts", symbol: "GET /orders/:id" },
+    transport: "http" as const,
+    confidence: 0.9,
+    source: "openapi",
+  };
+  const drift = {
+    from: { repo: "org/front", file: "src/api.ts", symbol: "getOrder" },
+    verb: "GET",
+    path: "/orders/:id/history",
+  };
+  const serviceLinks: ServiceLinksPort = {
+    resolve: async () => ({ links: [link], drift: [drift] }),
+  };
+  const useCase = new RunQaUseCase({ ...ports, structuralSignal, serviceLinks, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "slice-b-telemetry-populated" });
+
+  assert.ok(savedGateSignals, "runHistory.save must have been called on the mainline exit");
+  assert.equal(typeof savedGateSignals!.structuralSignalBytes, "number", "structuralSignalBytes must be a real number when structuralSignal produced a non-empty render");
+  assert.ok(savedGateSignals!.structuralSignalBytes! > 0, "structuralSignalBytes must reflect the actual byte length of the rendered signal, not a placeholder");
+  assert.equal(savedGateSignals!.serviceLinksCount, 1, "serviceLinksCount must reflect resolvedServiceLinks.length");
+  assert.equal(savedGateSignals!.contractDriftCount, 1, "contractDriftCount must reflect resolvedContractDrift.length");
+});
+
+test("Slice B: serviceLinksCount/contractDriftCount are 0 (not undefined) when the serviceLinks resolver is wired but finds nothing — 'ran, found none' must be distinguishable from 'never ran'", async () => {
+  let savedGateSignals: RunOutcome["gateSignals"] | undefined;
+  const { ports } = stubPorts({});
+  ports.runHistory.save = async (outcome) => { savedGateSignals = outcome.gateSignals; };
+  const serviceLinks: ServiceLinksPort = { resolve: async () => ({ links: [], drift: [] }) };
+  const useCase = new RunQaUseCase({ ...ports, serviceLinks, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "slice-b-telemetry-resolver-found-none" });
+
+  assert.equal(savedGateSignals!.serviceLinksCount, 0, "0 means the resolver ran and found nothing — must NOT be undefined");
+  assert.equal(savedGateSignals!.contractDriftCount, 0, "0 means the resolver ran and found nothing — must NOT be undefined");
+});
+
+test("Slice B: structuralSignalBytes/serviceLinksCount/contractDriftCount stay undefined (never a fabricated 0) when neither collaborator is wired — 'never ran' semantics", async () => {
+  let savedGateSignals: RunOutcome["gateSignals"] | undefined;
+  const { ports } = stubPorts({});
+  ports.runHistory.save = async (outcome) => { savedGateSignals = outcome.gateSignals; };
+  // structuralSignal and serviceLinks deliberately OMITTED from deps.
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "slice-b-telemetry-absent-collaborators" });
+
+  assert.equal(savedGateSignals!.structuralSignalBytes, undefined, "absent collaborator must leave structuralSignalBytes undefined, never a fabricated 0");
+  assert.equal(savedGateSignals!.serviceLinksCount, undefined, "absent collaborator must leave serviceLinksCount undefined, never a fabricated 0");
+  assert.equal(savedGateSignals!.contractDriftCount, undefined, "absent collaborator must leave contractDriftCount undefined, never a fabricated 0");
+});
+
+test("Slice B: an early-exit terminal (static-gate invalid) never reaches the mainline telemetry wiring — the three fields stay undefined even with both collaborators wired", async () => {
+  let savedGateSignals: RunOutcome["gateSignals"] | undefined;
+  const { ports } = stubPorts({ validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }) });
+  ports.runHistory.save = async (outcome) => { savedGateSignals = outcome.gateSignals; };
+  const structuralSignal: StructuralSignalPort = { render: async () => "some content" };
+  const serviceLinks: ServiceLinksPort = { resolve: async () => ({ links: [{ from: { repo: "a", file: "b", symbol: "c" }, to: { repo: "d", file: "e", symbol: "f" }, transport: "http" as const, confidence: 1, source: "openapi" }], drift: [] }) };
+  const useCase = new RunQaUseCase({ ...ports, structuralSignal, serviceLinks, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "slice-b-telemetry-invalid-exit" });
+
+  assert.equal(out.decision.verdict, "invalid");
+  assert.equal(savedGateSignals!.structuralSignalBytes, undefined, "the invalid-exit path never reaches the mainline extra? wiring — telemetry stays undefined, matching the mainline-only precedent catalogGate*/rulesRetrieved already established");
+  assert.equal(savedGateSignals!.serviceLinksCount, undefined);
+  assert.equal(savedGateSignals!.contractDriftCount, undefined);
+});
+
 // ── W3 F3 (HIGH cutover blocker): the returned RunQaResult carries the real per-case results +
 // execution logs, and the persisted RunOutcome mirrors them — RunHistoryPort.save receives the
 // SAME cases/logs the caller sees, closing the "passed=0/failed=0 with empty logs" gap. ─────────

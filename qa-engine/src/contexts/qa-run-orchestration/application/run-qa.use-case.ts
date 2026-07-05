@@ -1338,6 +1338,16 @@ export class RunQaUseCase {
         catalogGateInWindow,
         catalogGateAdvisory,
         catalogGateFailClosed,
+        // Slice B (structural-signals-expansion, design §2/ADR-B): advisory structural-signal
+        // calibration telemetry. structuralSignalBytes is gated on blastRadiusSignal itself being
+        // non-empty (mirrors the section's own render-gating — an empty render means nothing to
+        // report, not "0 bytes of something"). serviceLinksCount/contractDriftCount are gated on
+        // this.deps.serviceLinks's PRESENCE (the resolver being wired), not a truthy count — so 0
+        // honestly means "resolver ran, found none", distinguishable from "no resolver wired".
+        ...(blastRadiusSignal ? { structuralSignalBytes: Buffer.byteLength(blastRadiusSignal, "utf8") } : {}),
+        ...(this.deps.serviceLinks
+          ? { serviceLinksCount: resolvedServiceLinks.length, contractDriftCount: resolvedContractDrift.length }
+          : {}),
         // W3 F3: the execution logs ExecutionPort.execute() already returned — reaches the
         // persisted RunOutcome the SAME way cases does (see toRunOutcome's own cases doc).
         logs: run.logs,
@@ -1458,6 +1468,13 @@ export class RunQaUseCase {
       catalogGateInWindow?: number;
       catalogGateAdvisory?: number;
       catalogGateFailClosed?: number;
+      // Slice B (structural-signals-expansion, design §2/ADR-B): advisory structural-signal
+      // calibration telemetry. Optional, same "never ran" asymmetry as catalogGate* above at the
+      // TYPE level — but see the gateSignals literal below for the DELIBERATE departure at the
+      // construction site (conditional-spread, not `?? 0`).
+      structuralSignalBytes?: number;
+      serviceLinksCount?: number;
+      contractDriftCount?: number;
       // W3 F3: the execution logs, same optional-override precedent as note/rulesRetrieved above —
       // only the mainline caller (post-execute) has real logs to thread.
       logs?: string;
@@ -1492,6 +1509,15 @@ export class RunQaUseCase {
         catalogGateInWindow: extra?.catalogGateInWindow ?? 0,
         catalogGateAdvisory: extra?.catalogGateAdvisory ?? 0,
         catalogGateFailClosed: extra?.catalogGateFailClosed ?? 0,
+        // Slice B (structural-signals-expansion, design §2/ADR-B): conditional-spread (NOT `?? 0`,
+        // deliberately) — true undefined survives when extra? never carried the field, so "never
+        // ran" stays distinguishable from "ran and found zero". This is the exact construction-site
+        // fix a prior design revision was missing: the fields were typed+mapped for persistence but
+        // never read back out of extra? into this literal, so they never reached a returned/
+        // persisted RunOutcome at all.
+        ...(extra?.structuralSignalBytes !== undefined ? { structuralSignalBytes: extra.structuralSignalBytes } : {}),
+        ...(extra?.serviceLinksCount !== undefined ? { serviceLinksCount: extra.serviceLinksCount } : {}),
+        ...(extra?.contractDriftCount !== undefined ? { contractDriftCount: extra.contractDriftCount } : {}),
       },
       rulesRetrieved: extra?.rulesRetrieved ?? [],
       ...(extra?.note !== undefined ? { note: extra.note } : {}),
