@@ -968,6 +968,26 @@ test("C-R6(4): a link present in serviceLinks but NOT in crossRepoImpact.impacte
   );
 });
 
+test("C-R6(5): an impacted link past the MAX_LINKS cut still renders WITH its marker — impacted links survive truncation", () => {
+  const filler = Array.from({ length: 44 }, (_, i) => ({
+    from: { repo: "org/front", file: `src/f${i}.ts`, symbol: `call${i}` },
+    to: { repo: "org/other", file: "src/routes.ts", symbol: `GET /f${i}` },
+    transport: "http" as const,
+    contractRef: `GET /f${i}`,
+    confidence: 0.9,
+    source: "openapi",
+  }));
+  const text = buildPrompt(mkInput({
+    serviceLinks: [...filler, link1], // the impacted link sits at index 44 — past the 40-link ceiling
+    crossRepoImpact: { impactedLinks: [{ link: link1, tier: "contract-file" }] },
+  }));
+  assert.match(
+    text,
+    /\[IMPACTED:contract-file\] `org\/front\/src\/api\.ts#getOrder`/,
+    "the impacted link must survive the MAX_LINKS truncation with its marker — discovery order must not silently drop the one annotated link",
+  );
+});
+
 // ── Audit C4a — two prompt defects (docs/superpowers/plans/2026-07-02-qa-engine-audit-remediation.md) ──
 //
 // Defect 1: buildAttrHint (qa-engine dom-snapshot.ts / legacy src/qa/dom-snapshot.ts) emits a

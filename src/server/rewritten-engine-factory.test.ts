@@ -259,6 +259,36 @@ test("qa.structuralSignals mode 'off' omits BOTH codebaseMemory and serviceTopol
   const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
   assert.equal(config.codebaseMemory, undefined, "mode:off must omit codebaseMemory");
   assert.equal(config.serviceTopology, undefined, "mode:off must omit serviceTopology even though services[]+boundaries[] are both declared");
+  assert.equal(config.crossRepoImpact, undefined, "mode:off must omit crossRepoImpact too — all three structural collaborators share the one gate");
+});
+
+test("buildRewrittenCompositionConfig supplies crossRepoImpact under the SAME gate as serviceTopology (signal + services[] + boundaries[])", () => {
+  const app: AppConfig = {
+    ...cfg("factory-cross-repo-impact-active"),
+    services: [{ repo: "org/ms-orders" }],
+    boundaries: [
+      {
+        transport: "http",
+        frontFiles: "*.api.ts",
+        frontCallSite: { kind: "receiver-verb-call" },
+        servicePrefixTemplate: "name-{service}-api",
+        serviceRepoTemplate: "ms-name-{service}",
+        openApiPath: "openapi.yaml",
+      },
+    ],
+  } as AppConfig;
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.ok(config.crossRepoImpact, "crossRepoImpact must be supplied when structuralSignals is not off and BOTH services[] and boundaries[] are declared");
+  assert.equal(typeof config.crossRepoImpact?.mirrorRoot, "string", "crossRepoImpact must carry the mirrorRoot the factory already computes");
+  assert.ok(config.crossRepoImpact?.runner, "crossRepoImpact must reuse a real runner instance for the fetch step");
+
+  const noServices = buildRewrittenCompositionConfig(
+    cfg("factory-cross-repo-impact-inactive"),
+    { getAgentDeps: stubAgentDeps },
+    "qa-bot-abc1234-run1",
+    { mode: "diff" },
+  );
+  assert.equal(noServices.crossRepoImpact, undefined, "no services[]/boundaries[] declared must leave crossRepoImpact undefined");
 });
 
 test("qa.structuralSignals absent supplies codebaseMemory unconditionally (byte-identical to pre-change behavior)", () => {

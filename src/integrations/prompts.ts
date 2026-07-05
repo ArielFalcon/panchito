@@ -874,6 +874,17 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
   );
   const tierFor = (l: { from: { repo: string; file: string; symbol: string }; to: { repo: string } }): string | undefined =>
     impactedTierByKey.get(linkKey(l));
+  // A link's [IMPACTED:tier] marker must survive the MAX_LINKS ceiling: the resolver returns links
+  // in discovery order, so on a >MAX_LINKS app the one impacted link can sit past the cut and lose
+  // the exact annotation this run exists to surface. Impacted links render first (stable order
+  // inside each partition); an empty impacted set skips the reorder — byte-identical when absent.
+  const orderedLinks =
+    impactedTierByKey.size > 0 && hasServiceLinks
+      ? [
+          ...input.serviceLinks!.filter((l) => tierFor(l) !== undefined),
+          ...input.serviceLinks!.filter((l) => tierFor(l) === undefined),
+        ]
+      : input.serviceLinks ?? [];
   const serviceLinksContent =
     (hasServiceLinks || hasContractDrift) && isGenerationMode
       ? [
@@ -881,7 +892,7 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
           "Structural FE→BE contract links resolved from the code, NOT a gate. Verify against the live app; absent links do NOT imply no dependency.",
           "",
           ...(hasServiceLinks
-            ? input.serviceLinks!.slice(0, MAX_LINKS).map((l) => {
+            ? orderedLinks.slice(0, MAX_LINKS).map((l) => {
                 const tier = tierFor(l);
                 return `- ${tier ? `[IMPACTED:${s(tier)}] ` : ""}\`${s(l.from.repo)}/${s(l.from.file)}#${s(l.from.symbol)}\` -> ` +
                   `${s(l.to.repo)} ${s(l.contractRef ?? l.to.symbol)} (${s(l.transport)}, confidence ${l.confidence.toFixed(2)})`;
