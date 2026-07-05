@@ -1199,6 +1199,12 @@ export interface ParallelWorkerInput {
   domSnapshot?: string; // live DEV a11y tree of this flow's routes — the worker transcribes, not guesses
   runId?: string; // set on fan-out so the worker's live activity routes + carries a workerId
   staticSignal?: string; // deterministic pre-computed analysis (signal-only, fail-open)
+  // parity-for-the-future: no live fan-out on qa-engine today (GenerateTestsUseCase is single-session;
+  // nothing constructs ParallelWorkerInput on the rewritten engine). Threaded so the worker seam
+  // carries the two structural signals the day generateParallel is ported; the NEW key-drift
+  // gate (not the round-trip, which tolerates one-sided optionals) guards them from then on.
+  serviceLinks?: OcServiceLink[];
+  contractDrift?: OcContractDrift[];
 }
 
 // Dispatch each worker objective to a SEPARATE qa-worker session, bounded concurrency.
@@ -1485,8 +1491,10 @@ export async function runOpencodeParallel(
     runId: input.runId,
     // INTENTIONALLY replicated to every parallel-diff worker: each worker benefits from the full
     // blast-radius signal, and the N× token cost of duplicating it per worker is accepted.
-    // serviceLinks worker-parity is deliberately deferred (not yet threaded here).
     staticSignal: input.staticSignal,
+    // parity-for-the-future: dormant — this map only executes on the legacy generateParallel path.
+    ...(input.serviceLinks?.length ? { serviceLinks: input.serviceLinks } : {}),
+    ...(input.contractDrift?.length ? { contractDrift: input.contractDrift } : {}),
   }));
 
   // Dispatch grounded objectives to lite workers in parallel.

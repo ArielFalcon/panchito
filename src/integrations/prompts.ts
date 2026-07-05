@@ -156,6 +156,34 @@ export function buildWorkerPromptAssembled(w: ParallelWorkerInput): AssembledPro
     ? [`## Lessons learned from past runs (avoid repeating these)`, w.learnedRules].join("\n")
     : "";
 
+  // Stitcher→Generation seam (design §3.4/A.3, Slice A — structural-signals-expansion): worker-scoped
+  // mirror of the single-agent S2.4 "Cross-service links" section. Same local s() sanitizer / caps /
+  // gating discipline; the worker builder has NO isGenerationMode gate (workers always generate), so
+  // that guard is dropped here. Dormant today — nothing constructs a worker with these fields yet.
+  const s = (x: unknown): string => sanitizeText(String(x ?? "")).text;
+  const MAX_LINKS = 40;
+  const MAX_DRIFT = 20;
+  const hasLinks = Boolean(w.serviceLinks?.length);
+  const hasDrift = Boolean(w.contractDrift?.length);
+  const workerServiceLinksContent =
+    hasLinks || hasDrift
+      ? [
+          "## Cross-service links (deterministic — from the stitcher, advisory)",
+          "Structural FE→BE contract links resolved from the code, NOT a gate. Verify against the live app; absent links do NOT imply no dependency.",
+          "",
+          ...(hasLinks
+            ? w.serviceLinks!.slice(0, MAX_LINKS).map((l) =>
+                `- \`${s(l.from.repo)}/${s(l.from.file)}#${s(l.from.symbol)}\` -> ` +
+                `${s(l.to.repo)} ${s(l.contractRef ?? l.to.symbol)} (${s(l.transport)}, confidence ${l.confidence.toFixed(2)})`)
+            : []),
+          ...(hasDrift
+            ? ["", "### Contract drift (WARNINGS — front calls an endpoint the backend contract does not declare):",
+               ...w.contractDrift!.slice(0, MAX_DRIFT).map((d) =>
+                 `- WARNING: \`${s(d.from.repo)}/${s(d.from.file)}#${s(d.from.symbol)}\` calls ${s(d.verb)} ${s(d.path)} — not in the contract`)]
+            : []),
+        ].join("\n")
+      : "";
+
   return assemble([
     // STABLE prefix: procedural rules (deterministic given the worker role + needsUi).
     section("worker-rules", "stable-prefix", rulesBlock, { priority: 1, cacheable: true }),
@@ -163,6 +191,9 @@ export function buildWorkerPromptAssembled(w: ParallelWorkerInput): AssembledPro
     section("worker-context", "semi-stable", contextLines, { priority: 1 }),
     // SEMI-STABLE: static signal — same priority/role as the single-agent path (priority 3).
     ...(w.staticSignal ? [section("static-signal", "semi-stable", w.staticSignal, { priority: 3 })] : []),
+    // Stitcher→Generation seam (design §3.4/A.3): priority 3 alongside static-signal, matching the
+    // single-agent S2.4 precedent exactly.
+    ...(workerServiceLinksContent ? [section("worker-service-links", "semi-stable", workerServiceLinksContent, { priority: 3 })] : []),
     // VOLATILE: injected DOM (changes per captured route snapshot).
     ...(domContent ? [section("worker-dom", "volatile", domContent, { priority: 1 })] : []),
     // VOLATILE: learned rules (changes as the learning layer accumulates knowledge).

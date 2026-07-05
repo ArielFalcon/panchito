@@ -42,3 +42,20 @@ test("PARITY: ParallelWorkerInput is structurally equivalent both directions (no
   assert.equal(typeof toCanonical, "function");
   assert.equal(typeof toLegacy, "function");
 });
+
+// GATE (structural, key-set): the round-trip above proves REQUIRED-field lockstep and value-mapping
+// correctness, but a one-sided OPTIONAL field passes BOTH the round-trip AND full `npm run typecheck`
+// unnoticed — structural assignability never requires an optional property to exist on both sides of
+// an identity-cast round-trip. This gate closes that gap: the symmetric key DIFFERENCE between the two
+// mirrors' `keyof` sets must be `never`, in BOTH directions. `AssertNever` forces a type error the
+// moment either side adds a key the other lacks; the error NAMES the drifted key (e.g. Type
+// '"contractDrift"' does not satisfy the constraint 'never'). A chained-satisfies gate (re-`satisfies`ing
+// an already-typed variable against the other side's type) does NOT catch this — re-satisfying a
+// TYPED variable never runs excess-property checking (fresh-literal-only), so it silently passes a
+// one-sided key addition. This gate compares the two `keyof` sets directly instead.
+type AssertNever<T extends never> = T;
+type ParallelWorkerInputKeyDrift =
+  | Exclude<keyof CanonicalWorker, keyof LegacyWorker>
+  | Exclude<keyof LegacyWorker, keyof CanonicalWorker>;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _ParallelWorkerInputKeyGate = AssertNever<ParallelWorkerInputKeyDrift>;

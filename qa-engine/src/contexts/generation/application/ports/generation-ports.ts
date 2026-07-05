@@ -215,4 +215,10 @@ export interface ParallelWorkerInput {
   domSnapshot?: string; // live DEV a11y tree of this flow's routes — the worker transcribes, not guesses
   runId?: string; // set on fan-out so the worker's live activity routes + carries a workerId
   staticSignal?: string; // deterministic pre-computed analysis (signal-only, fail-open)
+  // parity-for-the-future: no live fan-out on qa-engine today (GenerateTestsUseCase is single-session;
+  // nothing constructs ParallelWorkerInput on the rewritten engine). Threaded so the worker seam
+  // carries the two structural signals the day generateParallel is ported; the NEW key-drift
+  // gate (not the round-trip, which tolerates one-sided optionals) guards them from then on.
+  serviceLinks?: ServiceLink[];
+  contractDrift?: ContractDrift[];
 }

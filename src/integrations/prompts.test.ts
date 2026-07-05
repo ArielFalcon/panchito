@@ -990,3 +990,68 @@ test("C4a defect 2: GROUND-TRUTH-AT-FAILURE fallback offers getByText only, not 
     "the fallback must NOT offer a CSS/data-testid locator — that invites fabricating an unverified value",
   );
 });
+
+// ── Slice A (structural-signals-expansion): worker-prompt "Cross-service links" section ──
+// Mirrors the single-agent S2.4 discipline exactly (local s() sanitizer, MAX_LINKS/MAX_DRIFT caps,
+// (hasLinks||hasDrift)-gated content) but with NO isGenerationMode gate — the worker builder has no
+// such mode switch (workers always generate).
+
+test("A-R3(1): worker prompt with populated serviceLinks renders the 'Cross-service links' section with from -> to (transport, confidence)", () => {
+  const text = buildWorkerPrompt(mkWorkerInput({ serviceLinks: [link1] }));
+  assert.match(text, /Cross-service links \(deterministic/, "worker prompt must render the section header when serviceLinks is populated");
+  assert.match(
+    text,
+    /org\/front\/src\/api\.ts#getOrder.*->.*org\/orders.*GET \/orders\/\{id\}.*http, confidence 0\.90/,
+    "worker prompt must render the from -> to (transport, confidence) line format",
+  );
+});
+
+test("A-R3(2): worker prompt with contractDrift renders the 'Contract drift (WARNINGS' sub-heading", () => {
+  const text = buildWorkerPrompt(mkWorkerInput({ serviceLinks: [link1], contractDrift: [drift1] }));
+  assert.match(text, /Contract drift \(WARNINGS/, "worker prompt must render the drift sub-heading");
+  assert.match(text, /DELETE \/orders\/\{id\}/, "worker prompt must render the drift verb+path");
+});
+
+test("A-R3(3): worker prompt with absent serviceLinks/contractDrift renders NO 'Cross-service links' section", () => {
+  const text = buildWorkerPrompt(mkWorkerInput({}));
+  assert.ok(!text.includes("Cross-service links"), "worker prompt without serviceLinks/contractDrift must render no section");
+});
+
+test("A-R3(4): worker prompt with empty serviceLinks array is byte-identical to the field being entirely absent", () => {
+  const withEmpty = buildWorkerPrompt(mkWorkerInput({ serviceLinks: [] }));
+  const withoutField = buildWorkerPrompt(mkWorkerInput({}));
+  assert.equal(withEmpty, withoutField, "an empty serviceLinks array must be byte-identical to the field being entirely absent");
+});
+
+test("A-R3(5): worker prompt caps serviceLinks at MAX_LINKS (40) and contractDrift at MAX_DRIFT (20)", () => {
+  const manyLinks = Array.from({ length: 45 }, (_, i) => ({
+    from: { repo: "org/front", file: "src/api.ts", symbol: `sym${i}` },
+    to: { repo: "org/orders", file: "src/routes.ts", symbol: `route${i}` },
+    transport: "http" as const,
+    confidence: 0.5,
+    source: "openapi",
+  }));
+  const manyDrift = Array.from({ length: 25 }, (_, i) => ({
+    from: { repo: "org/front", file: "src/api.ts", symbol: `sym${i}` },
+    verb: "GET",
+    path: `/path${i}`,
+  }));
+  const text = buildWorkerPrompt(mkWorkerInput({ serviceLinks: manyLinks, contractDrift: manyDrift }));
+  assert.ok(text.includes("sym0") && text.includes("sym39"), "the first 40 links must render");
+  assert.ok(!text.includes("sym40") && !text.includes("sym44"), "links beyond the 40-cap must be dropped");
+  assert.ok(text.includes("/path0") && text.includes("/path19"), "the first 20 drift entries must render");
+  assert.ok(!text.includes("/path20") && !text.includes("/path24"), "drift entries beyond the 20-cap must be dropped");
+});
+
+test("A-R3(6): worker prompt serviceLinks string fields pass through the local s() sanitize wrapper", () => {
+  const dirtyLink = {
+    from: { repo: "org/front", file: "src/api.ts", symbol: "const k = sk-abc123XYZsecretvalue" },
+    to: { repo: "org/orders", file: "src/routes.ts", symbol: "GET /orders/:id" },
+    transport: "http" as const,
+    confidence: 0.9,
+    source: "openapi",
+  };
+  const text = buildWorkerPrompt(mkWorkerInput({ serviceLinks: [dirtyLink] }));
+  assert.ok(!text.includes("sk-abc123XYZsecretvalue"), "a secret-shaped string in a worker serviceLinks field must be redacted, never passed through raw");
+  assert.match(text, /REDACTED_SECRET/, "the sanitize wrapper must have actually redacted the secret pattern");
+});
