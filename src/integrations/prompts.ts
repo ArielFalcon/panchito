@@ -830,18 +830,22 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
   const s = (x: unknown): string => sanitizeText(String(x ?? "")).text;
   const MAX_LINKS = 40; // advisory noise ceiling — this section's own budget guard.
   const MAX_DRIFT = 20;
+  const hasServiceLinks = Boolean(input.serviceLinks?.length);
+  const hasContractDrift = Boolean(input.contractDrift?.length);
   const serviceLinksContent =
-    input.serviceLinks?.length && isGenerationMode
+    (hasServiceLinks || hasContractDrift) && isGenerationMode
       ? [
           "## Cross-service links (deterministic — from the stitcher, advisory)",
           "Structural FE→BE contract links resolved from the code, NOT a gate. Verify against the live app; absent links do NOT imply no dependency.",
           "",
-          ...input.serviceLinks.slice(0, MAX_LINKS).map((l) =>
-            `- \`${s(l.from.repo)}/${s(l.from.file)}#${s(l.from.symbol)}\` -> ` +
-            `${s(l.to.repo)} ${s(l.contractRef ?? l.to.symbol)} (${s(l.transport)}, confidence ${l.confidence.toFixed(2)})`),
-          ...((input.contractDrift?.length)
+          ...(hasServiceLinks
+            ? input.serviceLinks!.slice(0, MAX_LINKS).map((l) =>
+                `- \`${s(l.from.repo)}/${s(l.from.file)}#${s(l.from.symbol)}\` -> ` +
+                `${s(l.to.repo)} ${s(l.contractRef ?? l.to.symbol)} (${s(l.transport)}, confidence ${l.confidence.toFixed(2)})`)
+            : []),
+          ...(hasContractDrift
             ? ["", "### Contract drift (WARNINGS — front calls an endpoint the backend contract does not declare):",
-               ...input.contractDrift.slice(0, MAX_DRIFT).map((d) =>
+               ...input.contractDrift!.slice(0, MAX_DRIFT).map((d) =>
                  `- WARNING: \`${s(d.from.repo)}/${s(d.from.file)}#${s(d.from.symbol)}\` calls ${s(d.verb)} ${s(d.path)} — not in the contract`)]
             : []),
         ].join("\n")

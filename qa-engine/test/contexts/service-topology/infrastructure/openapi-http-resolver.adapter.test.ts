@@ -54,6 +54,25 @@ test("resolveLinks: matched call produces a ServiceLink with correct operationId
   assert.equal(link.source, "openapi-http");
 });
 
+// ---- JD FIX 4: walk() must SKIP vendor/build directories (node_modules, .git, dist, build,
+// target, .next, .cache) — an unbounded recursive walk previously extracted call-sites from
+// node_modules too, producing spurious links/drift/unresolved entries sourced from a dependency,
+// not the app's own code.
+test("JD-FIX4: a call-site inside node_modules is NOT extracted, while a normal src call-site still is", async () => {
+  const nodeModulesFrontend: RepoRef = {
+    repo: "ArielFalcon/name-webapp",
+    mirrorDir: join(FIXTURES, "frontend-node-modules-skip"),
+  };
+  const resolver = new OpenApiHttpResolver(NNAME_PROFILE);
+  const result = await resolver.resolveLinks([backendRepo], nodeModulesFrontend);
+
+  const realLink = result.links.find((l: ServiceLink) => l.contractRef === "listOrders" && l.from.file.includes("src/app"));
+  assert.ok(realLink, "expected the normal src/app call-site to still be extracted");
+
+  const fromNodeModules = result.links.some((l: ServiceLink) => l.from.file.includes("node_modules"));
+  assert.ok(!fromNodeModules, "no link must be sourced from a file under node_modules");
+});
+
 // ---- (b) drift: front calls endpoint the contract does not declare ----
 test("resolveLinks: drift finding appears in result.drift when front calls undeclared endpoint", async () => {
   const resolver = new OpenApiHttpResolver(NNAME_PROFILE);

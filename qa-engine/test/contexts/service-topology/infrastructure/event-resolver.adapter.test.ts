@@ -90,6 +90,21 @@ test("EventResolver.resolveLinks: exactly two links are produced from the fixtur
   );
 });
 
+// ---- JD FIX 4 (mirrored from openapi-http-resolver.adapter.test.ts): walk() must SKIP
+// vendor/build directories (node_modules, .git, dist, build, target, .next, .cache). The
+// service-a fixture pool has a poison listener under node_modules/ (EvilFooCreatedListenerNats)
+// that would otherwise resolve into a SECOND FooCreatedEvent link.
+test("JD-FIX4: a listener under node_modules is NOT extracted — no phantom extra link for FooCreatedEvent", async () => {
+  const resolver = new EventResolver(PROFILE);
+  const result = await resolver.resolveLinks([serviceA, serviceB], serviceA);
+  const fooLinks = result.links.filter((l: ServiceLink) => l.contractRef === "FooCreatedEvent");
+  assert.equal(fooLinks.length, 1, "exactly one FooCreatedEvent link expected — the node_modules poison listener must be skipped");
+  assert.ok(
+    !fooLinks.some((l) => l.to.symbol === "EvilFooCreatedListenerNats"),
+    "the node_modules listener must never be selected as the link target",
+  );
+});
+
 test("EventResolver.resolveLinks: fail-open — an unreadable/nonexistent repo dir does not throw, resolves to empty for that repo", async () => {
   const resolver = new EventResolver(PROFILE);
   const missing: RepoRef = { repo: "org/nonexistent", mirrorDir: "/nonexistent/path/xyz" };

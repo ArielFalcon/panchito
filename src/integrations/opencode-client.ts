@@ -1483,6 +1483,9 @@ export async function runOpencodeParallel(
     learnedRules: input.learnedRules,
     ...(dom ? { domSnapshot: dom } : {}),
     runId: input.runId,
+    // INTENTIONALLY replicated to every parallel-diff worker: each worker benefits from the full
+    // blast-radius signal, and the N× token cost of duplicating it per worker is accepted.
+    // serviceLinks worker-parity is deliberately deferred (not yet threaded here).
     staticSignal: input.staticSignal,
   }));
 

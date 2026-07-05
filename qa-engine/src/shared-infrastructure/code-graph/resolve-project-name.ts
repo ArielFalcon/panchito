@@ -57,11 +57,11 @@ export async function resolveProjectName(client: ProjectNameCliClient, repoDir: 
   return resolveUncached(client, repoDir);
 }
 
-/** Memoizes resolveProjectName per repoDir for the lifetime of THIS instance — the composition root
- *  constructs ONE resolver per process (mirrors CodebaseMemoryClient's own single-instance
- *  construction pattern), so repeated calls for the SAME repoDir across runs never re-spawn
- *  `list_projects`. A fresh instance (e.g. one per test) starts with an empty cache — no
- *  cross-test/cross-process leakage. */
+/** Memoizes resolveProjectName per repoDir for the lifetime of THIS instance. The composition root
+ *  is rebuilt PER RUN (not once per process), so this memoization amortizes repeated calls for the
+ *  SAME repoDir WITHIN one run, not across runs — a fresh instance is constructed each run and
+ *  starts with an empty cache. Mirrors CodebaseMemoryClient's own single-instance-per-composition
+ *  construction pattern; no cross-run or cross-test/cross-process leakage. */
 export class ProjectNameResolver {
   private readonly cache = new Map<string, string | undefined>();
 

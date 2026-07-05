@@ -37,6 +37,11 @@ const ADVISORY_DEPTH = 3;
 // The renderer separately caps rendered items; this caps the SPAWNS.
 const MAX_CALLER_ANCHORS = 25;
 
+// Bounds CONCURRENCY, not just count: an unbounded Promise.all over up to MAX_CALLER_ANCHORS
+// anchors still launches that many process spawns at once. Draining in small batches keeps the
+// spawn storm proportionate on the orchestrator host while the total call count stays capped.
+const CALLER_CONCURRENCY = 5;
+
 async function safeImpacted(codeGraph: CodeGraphPort, repoDir: string, changed: BlastRadius): Promise<LocalSymbolRef[]> {
   try {
     const result = await codeGraph.impactedSymbols(repoDir, changed, { depth: ADVISORY_DEPTH });
@@ -88,9 +93,12 @@ export class StructuralSignalPortAdapter implements StructuralSignalPort {
     // results. Bounding this to the impacted set (rather than every changed file) keeps the query
     // count proportional to what impactedSymbols already found interesting, matching the design's
     // own "callersOf on the changed anchors" framing (§5.2).
-    const callerResults = await Promise.all(
-      impacted.slice(0, MAX_CALLER_ANCHORS).map((symbol) => safeCallers(this.codeGraph, repoDir, symbol)),
-    );
+    const anchors = impacted.slice(0, MAX_CALLER_ANCHORS);
+    const callerResults: LocalSymbolRef[][] = [];
+    for (let i = 0; i < anchors.length; i += CALLER_CONCURRENCY) {
+      const batch = anchors.slice(i, i + CALLER_CONCURRENCY);
+      callerResults.push(...await Promise.all(batch.map((symbol) => safeCallers(this.codeGraph, repoDir, symbol))));
+    }
     const seen = new Set<string>();
     const callers: ScoredSymbolRef[] = [];
     for (const ref of callerResults.flat()) {

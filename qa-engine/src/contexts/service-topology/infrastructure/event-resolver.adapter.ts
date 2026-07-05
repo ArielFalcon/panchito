@@ -32,6 +32,10 @@ import { compileFileGlob } from "./glob-suffix.ts";
 const EXACT_MATCH_CONFIDENCE = 1.0;
 const STEM_MATCH_CONFIDENCE = 0.7;
 
+// Vendor/build directories to SKIP during the recursive walk — not app code, never a genuine
+// event occurrence. Twin of openapi-http-resolver.adapter.ts's own SKIP_DIRS — keep in lockstep.
+const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", "target", ".next", ".cache"]);
+
 /** Recursively walk a directory, collecting files matching the predicate.
  *  Mirrors openapi-http-resolver.adapter.ts's `walk()` helper — same recursive-readdir shape,
  *  adapted here for the profile's `files` glob (`.java` in nname's real usage, but generic).
@@ -51,8 +55,10 @@ function walk(dir: string, predicate: (name: string) => boolean, out: string[] =
     const full = join(dir, entry);
     let st;
     try { st = statSync(full); } catch { continue; }
-    if (st.isDirectory()) walk(full, predicate, out);
-    else if (predicate(entry)) out.push(full);
+    if (st.isDirectory()) {
+      if (SKIP_DIRS.has(entry)) continue; // vendor/build directory — never a genuine occurrence
+      walk(full, predicate, out);
+    } else if (predicate(entry)) out.push(full);
   }
   return out;
 }

@@ -34,6 +34,10 @@ const VERBS = new Set(["get", "post", "put", "patch", "delete"]);
 // Matches: const NAME = 'value' or export const NAME = 'value' (for const resolution)
 const CONST_RE = /(?:export\s+)?const\s+([A-Za-z0-9_]+)\s*=\s*(['"`])((?:\\.|(?!\2).)*)\2/g;
 
+// Vendor/build directories to SKIP during the recursive walk — not app code, never a genuine
+// call-site. Twin of event-resolver.adapter.ts's own SKIP_DIRS — keep the two in lockstep.
+const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", "target", ".next", ".cache"]);
+
 // ---- Segment helpers ----
 function segs(p: string): string[] {
   return String(p).replace(/^\/+/, "").replace(/\/+$/, "").split("/").filter(Boolean);
@@ -110,8 +114,10 @@ function walk(dir: string, predicate: (name: string) => boolean, out: string[] =
     const full = join(dir, entry);
     let st;
     try { st = statSync(full); } catch { continue; }
-    if (st.isDirectory()) walk(full, predicate, out);
-    else if (predicate(entry)) out.push(full);
+    if (st.isDirectory()) {
+      if (SKIP_DIRS.has(entry)) continue; // vendor/build directory — never a genuine call-site
+      walk(full, predicate, out);
+    } else if (predicate(entry)) out.push(full);
   }
   return out;
 }

@@ -105,6 +105,33 @@ test("callersOf fan-out is CAPPED: a large impacted set spawns at most MAX_CALLE
   assert.ok(callersOfCalls > 0, "the cap must not silence callersOf entirely");
 });
 
+test("JD-FIX3: callersOf fan-out is CONCURRENCY-bounded, not just count-bounded — at most CALLER_CONCURRENCY (5) in-flight at once, even though up to MAX_CALLER_ANCHORS (25) total calls happen", async () => {
+  const bigImpacted = Array.from({ length: 30 }, (_, i) => ({ file: `src/F${i}.java`, symbol: `m${i}` }));
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let totalCalls = 0;
+  const codeGraph = fakeCodeGraph({
+    impactedSymbols: async () => ok(bigImpacted),
+    callersOf: async () => {
+      totalCalls += 1;
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight -= 1;
+      return ok([]);
+    },
+  });
+
+  const adapter = new StructuralSignalPortAdapter(codeGraph, "/repo");
+  await adapter.render("/repo", changed);
+
+  assert.ok(totalCalls <= 25, `total callersOf calls must stay capped at 25, got ${totalCalls}`);
+  assert.ok(
+    maxInFlight <= 5,
+    `at most 5 callersOf calls must be concurrently in-flight at once, observed max ${maxInFlight}`,
+  );
+});
+
 test("every method returning err(CodeGraphUnavailable) degrades to an empty string, never throws", async () => {
   const codeGraph = fakeCodeGraph({
     impactedSymbols: async () => err({ reason: "graph unavailable" }),

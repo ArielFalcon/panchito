@@ -879,6 +879,26 @@ test("S2.4(5): more than MAX_LINKS (40) links renders only the first 40; more th
   assert.ok(!text.includes("/path20") && !text.includes("/path24"), "drift entries beyond the 20-cap must be dropped");
 });
 
+test("S2.4(7): contractDrift present with serviceLinks ABSENT/empty still renders the section header and the drift WARNING (pure-drift scenario)", () => {
+  const withoutLinks = buildPrompt(mkInput({ contractDrift: [drift1] }));
+  assert.match(withoutLinks, /Cross-service links \(deterministic/, "must still render the section header when drift-only");
+  assert.match(withoutLinks, /Contract drift \(WARNINGS/, "must render the drift sub-heading");
+  assert.match(withoutLinks, /DELETE \/orders\/\{id\}/, "must render the drift verb+path");
+
+  const withEmptyLinks = buildPrompt(mkInput({ serviceLinks: [], contractDrift: [drift1] }));
+  assert.match(withEmptyLinks, /Contract drift \(WARNINGS/, "empty serviceLinks array + drift must still render drift");
+
+  assert.ok(
+    !/-.*->.*\(http|grpc|event/.test(withoutLinks.split("Contract drift")[0] ?? ""),
+    "the links sub-list itself must not render an empty/placeholder entry when serviceLinks is absent",
+  );
+});
+
+test("S2.4(8): links-only (no drift) still renders exactly as before — no empty 'Contract drift' heading", () => {
+  const text = buildPrompt(mkInput({ serviceLinks: [link1] }));
+  assert.ok(!text.includes("Contract drift"), "links-only must not render a drift heading at all");
+});
+
 test("S2.4(6): serviceLinks string fields pass through the local s() sanitize wrapper (secrets redacted, never passed through raw)", () => {
   const dirtyLink = {
     from: { repo: "org/front", file: "src/api.ts", symbol: "const k = sk-abc123XYZsecretvalue" },

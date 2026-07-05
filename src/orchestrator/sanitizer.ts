@@ -77,18 +77,36 @@ const NAMED_SECRET_PATTERNS: Array<{ name: string; p: RegExp; skip?: (m: string)
 // alphabet contains "/", so `src/main/java/es/.../CourseApplicationServiceImpl` matched
 // base64-secret and was redacted, mangling real paths in diffs sent to the model AND in the
 // structural blast-radius signal ("[REDACTED_SECRET].java"); long Java identifiers
-// (`populateCoursesDescriptionMultilingualUseCase`, 46 letters) matched it too. Two code-shaped
+// (`populateCoursesDescriptionMultilingualUseCase`, 45 letters) matched it too. Two code-shaped
 // escapes, both requiring no "+"/"=" (code never carries them; base64 blobs usually do):
 //   - a PATH: >=3 slashes, every segment 1..80 chars (a genuine base64 blob hits >=3 slashes
 //     only by chance — ~2% at 40 chars);
-//   - a bare IDENTIFIER: pure letters, no digits (a 40-char base64 blob with zero digits is
-//     ~0.02% likely — camelCase class/method names are exactly this shape).
+//   - a bare IDENTIFIER: a REAL camelCase/PascalCase shape, capped at 64 chars — NOT any
+//     pure-letter run. A genuine identifier is made of real word segments (each >=2 chars, and at
+//     least ONE >=3); a uniform-case run (no case transition) has no words at all. A base64 blob
+//     with BOTH cases usually yields a 1-char segment at some flip — but NOT always: judgment-day
+//     Monte Carlo (2M trials) measured ~3.8% of random pure-letter case-flip strings passing a
+//     >=2-only rule, and a PERFECT 2-char alternation (AbCdEf...) passes it deterministically.
+//     Hence the additional "some segment >=3" requirement: perfect alternation fails outright,
+//     the random escape rate drops to near zero, and every real camelCase/PascalCase identifier
+//     still passes (real names always carry a word of >=3 letters — populate/Courses/Description).
 // Slash-bearing secrets in context stay covered by the env/assignment/key-specific rules above.
 // Twin of qa-engine/src/contexts/generation/infrastructure/sanitize-text.ts's own isPathLikeRun —
 // keep the two in lockstep.
+const MAX_IDENTIFIER_LEN = 64;
+const CASE_TRANSITION_RE = /[a-z][A-Z]/;
+const WORD_SEGMENT_RE = /[A-Z]?[a-z]+|[A-Z]+(?![a-z])/g;
+function isIdentifierShape(m: string): boolean {
+  if (m.length > MAX_IDENTIFIER_LEN) return false;
+  if (/[0-9]/.test(m)) return false; // digits present — a random secret blob commonly carries them;
+  // this narrow escape only needs to cover the pure-letter camelCase/PascalCase shape.
+  if (!CASE_TRANSITION_RE.test(m)) return false; // uniform case run — no words, not an identifier
+  const segments = m.match(WORD_SEGMENT_RE) ?? [];
+  return segments.length > 0 && segments.every((s) => s.length >= 2) && segments.some((s) => s.length >= 3);
+}
 function isPathLikeRun(m: string): boolean {
   if (m.includes("+") || m.includes("=")) return false;
-  if (!m.includes("/")) return /^[A-Za-z]+$/.test(m);
+  if (!m.includes("/")) return isIdentifierShape(m);
   const segments = m.split("/");
   if (segments.length < 4) return false;
   return segments.every((s) => s.length >= 1 && s.length <= 80);

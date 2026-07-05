@@ -25,3 +25,8 @@ qa-engine/.tsbuild/
 *.tsbuildinfo
 # tsc --build emits .d.ts declarations next to source files when noEmit is ignored in build mode
 src/**/*.d.ts
+
+# Test fixtures deliberately named node_modules (walk() skip-set poison fixtures) must be tracked —
+# without this exception a plain `git add` silently drops them and the JD-FIX4 tests break on fresh clones.
+!qa-engine/test/**/fixtures/**/node_modules/
+!qa-engine/test/**/fixtures/**/node_modules/**
