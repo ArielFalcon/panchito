@@ -68,6 +68,11 @@ import { CycleBudget } from "../domain/cycle-budget.ts";
 import { WallClockBudget } from "../domain/wall-clock-budget.ts";
 import { renderCoverageGap } from "@contexts/objective-signal/domain/render-coverage-gap.ts";
 import { checkPreExecGrounding, checkPersistingAmbiguity } from "../domain/pre-exec-grounding.service.ts";
+// reflector-rewire (design ADR-5): ReflectorPort/ReflectionInput are declared in cross-run-learning
+// (co-located with StructuredReflection/LearningRepositoryPort), not in this context's own ports
+// barrel — same cross-context import precedent as LearningRepositoryPort (composition-root.ts /
+// learning-port.adapter.ts already import from @contexts/cross-run-learning/application/ports).
+import type { ReflectorPort, ReflectionInput } from "@contexts/cross-run-learning/application/ports/index.ts";
 
 // FIX B (judgment-day, HIGH)'s own value: the change-coverage minRatio default (src/qa/
 // change-coverage.ts's DEFAULT_COVERAGE_POLICY.minRatio) — needed here too so the FIX 4 errorClass
@@ -209,6 +214,16 @@ export interface RunQaUseCaseDeps {
   // Best-effort: a throw is caught and logged, degrading to no crossRepoImpact — never aborts the
   // run (mirrors serviceLinks'/structuralSignal's own fail-open posture).
   crossRepoImpact?: CrossRepoImpactPort;
+  // [SWAP] absent -> reflect is skipped entirely at both fold sites; learning.fold() is UNAFFECTED
+  // (dormant, pre-cutover-equivalent — the SAME backward-compatible posture crossRepoImpact/
+  // serviceLinks/structuralSignal already establish). reflector-rewire design (ADR-1): when present,
+  // invoked AFTER learning.fold() at each fold site, gated STRICTER than the fold gate itself —
+  // shouldDistillLearning(...) AND verdict !== "flaky" AND errorClass not in {E-INFRA, E-FLAKY} (see
+  // this use-case's own toReflectionInput/reflect call sites for the exact gate). Fault-isolated by
+  // the adapter (crash/timeout/malformed JSON never propagate here) — this use-case awaits reflect()
+  // with no extra try/catch of its own, trusting the adapter's own documented fault-isolation
+  // contract (ReflectorPortAdapter's header).
+  reflector?: ReflectorPort;
   config?: Partial<RunQaConfig>;
 }
 
@@ -1479,6 +1494,24 @@ export class RunQaUseCase {
       if (shouldDistillLearning(cfg.isCode, decision.verdict, mainlineOutcome.adjudication?.class)) {
         await this.deps.learning.fold(mainlineOutcome);
       }
+
+      // reflector-rewire (design ADR-1): the reflect gate ANDs a SECOND, STRICTER condition on top
+      // of the SAME shouldDistillLearning(...) boolean the fold above just used (reused, never
+      // re-derived) — verdict !== "flaky" AND errorClass not in {E-INFRA, E-FLAKY}. This is a
+      // DELIBERATE fold-vs-reflect asymmetry (legacy parity, explore #1082): a flaky/E-INFRA/E-FLAKY
+      // run is allowed to feed the deterministic governance fold (unchanged above) but must NEVER
+      // author an LLM reflection rule from environmental noise (Goodhart). [SWAP]-optional: absent
+      // `deps.reflector` is a no-op, zero behavior change (mirrors every other optional collaborator
+      // in this use-case). Fault-isolated by the adapter itself — no extra try/catch here.
+      if (
+        this.deps.reflector &&
+        shouldDistillLearning(cfg.isCode, decision.verdict, mainlineOutcome.adjudication?.class) &&
+        decision.verdict !== "flaky" &&
+        mainlineOutcome.errorClass !== "E-INFRA" &&
+        mainlineOutcome.errorClass !== "E-FLAKY"
+      ) {
+        await this.deps.reflector.reflect(this.toReflectionInput(mainlineOutcome));
+      }
     }
 
     this.deps.observer?.onStep("done");
@@ -1545,6 +1578,38 @@ export class RunQaUseCase {
       reviewerCorrections: [],
       valueScore,
     });
+  }
+
+  // reflector-rewire (design ADR-4): builds the NARROW ReflectionInput projection SOLELY from an
+  // already-computed, already-persisted RunOutcome — no repo reads, no additional derivation. This
+  // is the ONLY place a RunOutcome is narrowed for the reflector; RunOutcome.logs/note are
+  // STRUCTURALLY unreachable from the result (ReflectionInput has no such fields), so a reflection
+  // prompt can never leak raw execution logs or diagnostic notes even if the adapter's own prompt
+  // builder were later widened.
+  private toReflectionInput(outcome: RunOutcome): ReflectionInput {
+    return {
+      runId: outcome.runId,
+      app: outcome.app,
+      sha: outcome.sha,
+      mode: outcome.mode,
+      verdict: outcome.verdict,
+      // ReflectionInput.errorClass is the narrow (non-null) ErrorClass alias — outcome.errorClass is
+      // the kernel's WIDE `string | null`. A null errorClass here would mean "healthy green, no
+      // taxonomy label" (see error-class.ts's own errorClassFromVerdict), which never reaches this
+      // projection: both call sites only invoke toReflectionInput() after the stricter reflect gate
+      // (verdict !== "flaky" AND errorClass not in {E-INFRA,E-FLAKY}) has already passed, and every
+      // reachable verdict on that path (invalid, fail, pass-with-coverage-gap) yields a non-null
+      // class. Coalesce to "" defensively rather than widen the port's own declared type.
+      errorClass: outcome.errorClass ?? "",
+      gateSignals: {
+        static: outcome.gateSignals.static,
+        coverageRatio: outcome.gateSignals.coverageRatio,
+        valueScore: outcome.gateSignals.valueScore,
+        reviewerCorrections: outcome.gateSignals.reviewerCorrections,
+        flaky: outcome.gateSignals.flaky,
+        retries: outcome.gateSignals.retries,
+      },
+    };
   }
 
   private toRunOutcome(
@@ -1872,6 +1937,24 @@ export class RunQaUseCase {
       // adjudicated outcome through this terminal path can never silently bypass the suppression.
       if (verdict === "invalid" && shouldDistillLearning(cfg.isCode, verdict, terminalOutcome.adjudication?.class)) {
         await this.deps.learning.fold(terminalOutcome);
+      }
+
+      // reflector-rewire (design ADR-1): mirrors the mainline site's identical stricter reflect gate
+      // — reused verbatim, not re-derived. The `verdict === "invalid"` guard above already excludes
+      // "flaky" structurally (TS narrows `verdict` to the literal "invalid" here, so a redundant
+      // `verdict !== "flaky"` check would be a compile error, not just dead code) AND excludes
+      // infra-error from ever reaching this block (infra-error stays fold-free AND reflect-free,
+      // unchanged) — so the errorClass!=="E-INFRA" check below is a structural belt-and-braces guard
+      // (defensive parity with the mainline site's identical condition), not a currently-reachable
+      // branch on this path today.
+      if (
+        this.deps.reflector &&
+        verdict === "invalid" &&
+        shouldDistillLearning(cfg.isCode, verdict, terminalOutcome.adjudication?.class) &&
+        terminalOutcome.errorClass !== "E-INFRA" &&
+        terminalOutcome.errorClass !== "E-FLAKY"
+      ) {
+        await this.deps.reflector.reflect(this.toReflectionInput(terminalOutcome));
       }
     }
     this.deps.observer?.onStep("done");

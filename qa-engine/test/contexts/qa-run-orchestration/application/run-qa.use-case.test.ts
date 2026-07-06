@@ -26,6 +26,11 @@ import type {
   ServiceLink,
   CrossRepoImpactPort,
 } from "@contexts/qa-run-orchestration/application/ports/index.ts";
+// reflector-rewire (design ADR-1/ADR-4/ADR-5): ReflectorPort/ReflectionInput are declared in
+// cross-run-learning (co-located with StructuredReflection/LearningRepositoryPort), NOT in this
+// context's own ports barrel — same cross-context import precedent as LearningRepositoryPort
+// (composition-root.ts / learning-port.adapter.ts).
+import type { ReflectorPort, ReflectionInput } from "@contexts/cross-run-learning/application/ports/index.ts";
 import { BlastRadius } from "@kernel/blast-radius.ts";
 import { ok, err } from "@kernel/result.ts";
 import type { RunOutcome } from "@kernel/run-outcome.ts";
@@ -1344,6 +1349,135 @@ test("P3: terminal-invalid fold site carries the SAME app_defect guard (structur
   assert.equal(out.decision.verdict, "invalid");
   assert.equal(savedAdjudication, undefined, "the static-gate invalid path never reaches the FixLoop, so terminalOutcome.adjudication stays undefined today");
   assert.equal(foldCallCount, 1, "the terminal-invalid fold must still fire — the app_defect guard is structurally a no-op on this path today (regression pin: a future reorder that routes an adjudicated outcome here must not silently bypass the guard)");
+});
+
+// ── reflector-rewire (design ADR-1, suppression matrix): the reflect call site adds a SECOND
+// ANDed condition on top of shouldDistillLearning(...) — reflect fires only when
+// shouldDistillLearning(...) AND verdict !== "flaky" AND errorClass not in {E-INFRA, E-FLAKY}.
+// The fold gate is UNCHANGED (still fires on flaky) — this is a deliberate fold-vs-reflect gate
+// asymmetry (legacy parity, recovered in explore #1082). reflector is [SWAP]-optional: absent ->
+// zero behavior change, reflect is silently skipped, fold behavior is untouched. ────────────────
+
+function makeFakeReflector(onReflect: (input: ReflectionInput) => void): ReflectorPort {
+  return {
+    reflect: async (input) => { onReflect(input); },
+  };
+}
+
+test("reflector-rewire: flaky verdict — learning.fold() IS called (fold gate unchanged), reflector.reflect() is NOT called (stricter reflect gate)", async () => {
+  let foldCallCount = 0;
+  let reflectCallCount = 0;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "flaky", cases: [{ name: "checkout", status: "flaky" as const }], logs: "" }),
+  });
+  ports.learning.fold = async () => { foldCallCount++; };
+  const reflector = makeFakeReflector(() => { reflectCallCount++; });
+  const useCase = new RunQaUseCase({ ...ports, reflector, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "reflector-flaky-fold-yes-reflect-no" });
+
+  assert.equal(out.decision.verdict, "flaky");
+  assert.equal(foldCallCount, 1, "learning.fold() must still be called on a flaky verdict — the fold gate is unchanged (flaky is allowed to feed the deterministic governance fold)");
+  assert.equal(reflectCallCount, 0, "reflector.reflect() must NOT be called on a flaky verdict — the reflect gate is STRICTER than the fold gate (ADR-1)");
+});
+
+test("reflector-rewire: app_defect adjudication — NEITHER learning.fold() NOR reflector.reflect() is called", async () => {
+  let foldCallCount = 0;
+  let reflectCallCount = 0;
+  const { ports } = stubPorts({
+    // Same fixture as the P3 app_defect test above: an attributed 5xx on a failing case routes the
+    // adjudicator to app_defect, suppressing shouldDistillLearning (and therefore BOTH gates, since
+    // the reflect gate ANDs on top of the same boolean).
+    execute: async () => ({
+      verdict: "fail" as const,
+      cases: [{ name: "checkout", status: "fail" as const, detail: "server error", httpStatus: 500 }],
+      logs: "x",
+    }),
+  });
+  ports.learning.fold = async () => { foldCallCount++; };
+  const reflector = makeFakeReflector(() => { reflectCallCount++; });
+  const useCase = new RunQaUseCase({ ...ports, reflector, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "reflector-app-defect-neither-called" });
+
+  assert.equal(out.decision.verdict, "fail");
+  assert.equal(foldCallCount, 0, "learning.fold() must NOT be called when adjudication.class is app_defect");
+  assert.equal(reflectCallCount, 0, "reflector.reflect() must NOT be called when adjudication.class is app_defect (shouldDistillLearning is false, which the reflect gate ANDs on top of)");
+});
+
+test("reflector-rewire: code-mode fail (isCode && verdict===\"fail\") — NEITHER learning.fold() NOR reflector.reflect() is called", async () => {
+  let foldCallCount = 0;
+  let reflectCallCount = 0;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "fail" as const, cases: [{ name: "unit-test", status: "fail" as const }], logs: "x" }),
+  });
+  ports.learning.fold = async () => { foldCallCount++; };
+  const reflector = makeFakeReflector(() => { reflectCallCount++; });
+  const useCase = new RunQaUseCase({ ...ports, reflector, config: { ...baseConfig, isCode: true } });
+
+  const out = await useCase.run({ ...baseInput, runId: "reflector-code-fail-neither-called" });
+
+  assert.equal(out.decision.verdict, "fail");
+  assert.equal(foldCallCount, 0, "learning.fold() must NOT be called on a code-mode fail (shouldDistillLearning's isCode+fail rule)");
+  assert.equal(reflectCallCount, 0, "reflector.reflect() must NOT be called on a code-mode fail either");
+});
+
+test("reflector-rewire: static-gate invalid (errorClass=E-STATIC) — learning.fold() AND reflector.reflect() are BOTH called, with the narrow ReflectionInput", async () => {
+  let foldCallCount = 0;
+  let capturedInput: ReflectionInput | undefined;
+  const { ports } = stubPorts({ validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }) });
+  ports.learning.fold = async () => { foldCallCount++; };
+  const reflector = makeFakeReflector((input) => { capturedInput = input; });
+  const useCase = new RunQaUseCase({ ...ports, reflector, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "reflector-static-invalid-both-called" });
+
+  assert.equal(out.decision.verdict, "invalid");
+  assert.equal(out.errorClass, "E-STATIC");
+  assert.equal(foldCallCount, 1, "learning.fold() must be called on a static-gate invalid");
+  assert.ok(capturedInput, "reflector.reflect() must be called on a static-gate invalid (errorClass E-STATIC is not in the suppressed {E-INFRA, E-FLAKY} set)");
+  assert.equal(capturedInput?.verdict, "invalid");
+  assert.equal(capturedInput?.errorClass, "E-STATIC");
+  assert.equal(capturedInput?.runId, "reflector-static-invalid-both-called");
+  assert.equal(capturedInput?.app, baseInput.app);
+  assert.equal(capturedInput?.sha, baseInput.sha.value);
+  assert.equal(capturedInput?.mode, "diff");
+  // ADR-4: the narrow projection must carry ONLY the declared gateSignals sub-fields — no logs/note
+  // ever reach the reflector (structurally unreachable: ReflectionInput has no such keys).
+  assert.deepEqual(Object.keys(capturedInput?.gateSignals ?? {}).sort(), ["coverageRatio", "flaky", "retries", "reviewerCorrections", "static", "valueScore"].sort());
+});
+
+test("reflector-rewire: reflector dep ABSENT ([SWAP]-optional) — a gate-true outcome still runs fold, reflect is skipped without error", async () => {
+  let foldCallCount = 0;
+  const { ports } = stubPorts({ validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }) });
+  ports.learning.fold = async () => { foldCallCount++; };
+  // No `reflector` key at all — mirrors every pre-existing composition that has not wired one yet.
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "reflector-absent-no-behavior-change" });
+
+  assert.equal(out.decision.verdict, "invalid");
+  assert.equal(foldCallCount, 1, "learning.fold() must still run when reflector is unwired — dormant, pre-cutover-equivalent behavior");
+});
+
+test("reflector-rewire: RunOutcome.reflection stays undefined on the use-case's own persisted outcome — back-fill is host-side (ADR-2), not this use-case's concern", async () => {
+  let savedReflection: unknown;
+  const { ports } = stubPorts({ validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }) });
+  ports.runHistory.save = async (outcome) => { savedReflection = outcome.reflection; };
+  let reflectCallCount = 0;
+  const reflector = makeFakeReflector(() => { reflectCallCount++; });
+  const useCase = new RunQaUseCase({ ...ports, reflector, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "reflector-reflection-backfill-is-hostside" });
+
+  // The use-case awaits reflector.reflect(input) AFTER runHistory.save() already persisted
+  // terminalOutcome — reflect() returns void by contract (ReflectorPort), so the use-case has no
+  // return value to thread back into the already-saved RunOutcome even if it wanted to. Back-fill
+  // (updateRunOutcomeReflection) is exclusively the adapter's own host-side concern (ADR-2),
+  // injected as a `backfill` dep at factory construction — covered by the adapter's own unit
+  // tests (reflector-port.adapter.test.ts), not re-tested here.
+  assert.equal(reflectCallCount, 1, "reflector.reflect() must have been called (static-gate invalid is gate-true)");
+  assert.equal(savedReflection, undefined, "RunOutcome.reflection is NOT populated by this use-case's own save() call — back-fill happens host-side via updateRunOutcomeReflection (ADR-2), never inside RunQaUseCase");
 });
 
 // ── SETUP phase (CLAUDE.md run-flow step 3): "bootstrap the config/e2e seed into e2e/, then npm ci;
