@@ -1,7 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { JobQueue } from "./queue";
-import { enqueueTrackedRun, cancelTrackedRun } from "./runner";
+import {
+  enqueueTrackedRun,
+  cancelTrackedRun,
+  ONBOARDING_WAIT_MAX_MS,
+  ONBOARDING_MIRROR_CEILING_MS,
+  ONBOARDING_JOB_CEILING_MS,
+  ONBOARDING_INDEXING_CEILING_MS,
+  ONBOARDING_WAIT_MARGIN_MS,
+} from "./runner";
 import { getRecord, createRecord, updateRecord } from "./history";
 import { AppConfig } from "../orchestrator/config-loader";
 import { createRunEventStore } from "./run-events";
@@ -1377,6 +1385,22 @@ test("PIPELINE_ENGINE=rewritten — no reviewer.verdict event when outcome.gateS
 // caller (or test) that omits it gets () => false, so the guard is a byte-identical no-op on the
 // idle path. onboardingPollMs/onboardingWaitMaxMs/sleep are also injectable so tests never wait
 // out real timers.
+
+// S1.14a (onboarding-auto-index, design §4.1): the post-confirm indexing phase extends the
+// mirror-race guard's busy window (§2.6) — the defensive breakout ceiling must be widened by the
+// indexing budget or the breakout could fire mid-index, the exact torn-index race §2.6 exists to
+// prevent. Pins the SUMMED derivation so the indexing budget can never be silently dropped.
+test("ONBOARDING_WAIT_MAX_MS is the sum of the named per-phase ceilings, including the NEW indexing budget (40 min total)", () => {
+  assert.equal(ONBOARDING_MIRROR_CEILING_MS, 5 * 60 * 1000);
+  assert.equal(ONBOARDING_JOB_CEILING_MS, 20 * 60 * 1000);
+  assert.equal(ONBOARDING_INDEXING_CEILING_MS, 10 * 60 * 1000);
+  assert.equal(ONBOARDING_WAIT_MARGIN_MS, 5 * 60 * 1000);
+  assert.equal(
+    ONBOARDING_WAIT_MAX_MS,
+    ONBOARDING_MIRROR_CEILING_MS + ONBOARDING_JOB_CEILING_MS + ONBOARDING_INDEXING_CEILING_MS + ONBOARDING_WAIT_MARGIN_MS,
+  );
+  assert.equal(ONBOARDING_WAIT_MAX_MS, 40 * 60 * 1000);
+});
 
 test("defer-while-active: mirror work (engineFactory) is deferred until isOnboardingActive clears, then the run completes normally", async () => {
   const queue = new JobQueue();

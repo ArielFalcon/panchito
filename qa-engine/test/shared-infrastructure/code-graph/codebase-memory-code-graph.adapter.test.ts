@@ -100,6 +100,18 @@ test("syncTo resolves ok({nodeCount}) on a successful index_repository response"
   assert.equal(result.value.nodeCount, 42);
 });
 
+// Probe fact #2 (apply-progress, onboarding-auto-index): index_repository REQUIRES repo_path in
+// EVERY call — the jsonArg literal previously omitted it (latent bug, never caught because syncTo
+// is never invoked live, ADR-4). Strengthened to assert the fake client actually receives it.
+test("syncTo's jsonArg includes repo_path (probe fact #2 — index_repository requires it in every call)", async () => {
+  const client = new FakeClient(async () => ({ code: 0, stdout: JSON.stringify({ node_count: 7 }), stderr: "" }));
+  const adapter = new CodebaseMemoryCodeGraphAdapter(client);
+  await adapter.syncTo("/repo/dir", ["a.java"]);
+  assert.equal(client.calls.length, 1);
+  const parsed = JSON.parse(client.calls[0]!.jsonArg) as { repo_path?: string };
+  assert.equal(parsed.repo_path, "/repo/dir");
+});
+
 // ---------------------------------------------------------------------------------------------
 // 4a.2 — safe literal inlining (inlineList / inlineLiteral) — net-new, §3.0
 // ---------------------------------------------------------------------------------------------

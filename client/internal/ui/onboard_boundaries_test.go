@@ -272,3 +272,71 @@ func TestBoundaryProposeAllowsConfirmWhenAppMatches(t *testing.T) {
 		t.Fatal("a status belonging to the SAME app must still be a confirmable winner")
 	}
 }
+
+// ── Indexing phase (onboarding-auto-index, Slice 1, design §2.8) ───────────────
+
+func indexingStatus() contract.OnboardingJobStatus {
+	outcome := contract.Winner
+	profile := winnerProfile()
+	ok := contract.OnboardingJobStatusIndexProgressStatusOk
+	failed := contract.OnboardingJobStatusIndexProgressStatusFailed
+	nodeCount := float32(120)
+	errMsg := "indexing org/shop-svc timed out"
+	progress := []struct {
+		Error     *string                                         `json:"error,omitempty"`
+		NodeCount *float32                                        `json:"nodeCount,omitempty"`
+		Repo      string                                          `json:"repo"`
+		Status    contract.OnboardingJobStatusIndexProgressStatus `json:"status"`
+	}{
+		{Repo: "org/shop", Status: ok, NodeCount: &nodeCount},
+		{Repo: "org/shop-svc", Status: failed, Error: &errMsg},
+	}
+	return contract.OnboardingJobStatus{
+		State: contract.OnboardingJobStatusStateIndexing, App: strPtr("shop"), Round: 3, Ceiling: 3,
+		CandidatesScored: 6, Outcome: &outcome, ResolvedProfile: &profile, IndexProgress: &progress,
+	}
+}
+
+// badgeLabelAndStyle must render a distinguishable "indexing" badge — the ticker relies on the
+// indexing state NOT rendering as one of the existing (terminal-adjacent) badges.
+func TestBoundaryProposeRendersIndexingBadgeAndPerRepoProgress(t *testing.T) {
+	m := newBoundaryProposeModel(nil, "shop")
+	m.width, m.height = 100, 30
+	m, _ = m.Update(boundaryStatusMsg{status: indexingStatus()})
+	out := strings.ToLower(m.View())
+	for _, want := range []string{"indexing", "org/shop", "org/shop-svc", "ok", "failed"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("View() missing %q for an indexing status:\n%s", want, out)
+		}
+	}
+}
+
+// The indexing state is non-terminal (design §2.8) — isTerminalOnboardState needs NO change (it is
+// already false-by-omission), but this pins that fact so a future edit cannot silently make
+// "indexing" terminal and stall the poll loop.
+func TestIndexingStateIsNotTerminal(t *testing.T) {
+	if isTerminalOnboardState(contract.OnboardingJobStatusStateIndexing) {
+		t.Fatal("indexing must be non-terminal — the ticker must keep polling through it")
+	}
+}
+
+// Folding an indexing status must reschedule the tick, exactly like any other non-terminal state.
+func TestBoundaryProposeKeepsTickingThroughIndexing(t *testing.T) {
+	m := newBoundaryProposeModel(nil, "shop")
+	m.width, m.height = 100, 30
+	_, cmd := m.Update(boundaryStatusMsg{status: indexingStatus()})
+	if cmd == nil {
+		t.Fatal("an indexing status must reschedule the next tick")
+	}
+}
+
+// confirmBoundariesCmd's on-success message must NOT force navigation back to the board while the
+// server is still indexing — the propose screen has to stay alive and resume polling until the job
+// reaches a terminal state, or the human never sees indexing progress (design §2.8, the screen-
+// lifecycle root cause: confirmBoundariesCmd used to navigate back unconditionally on success).
+func TestConfirmedBoundariesMsgCarriesStatusStateSoTheScreenCanDecideWhetherToStay(t *testing.T) {
+	msg := confirmedBoundariesMsg{status: "boundaries confirmed for shop", jobState: contract.OnboardingJobStatusStateIndexing}
+	if msg.jobState != contract.OnboardingJobStatusStateIndexing {
+		t.Fatalf("confirmedBoundariesMsg must carry the job's state so the caller can avoid navigating away mid-index: %+v", msg)
+	}
+}

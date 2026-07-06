@@ -2230,6 +2230,7 @@
               "resolvingMirrors",
               "proposing",
               "scoring",
+              "indexing",
               "done",
               "failed"
             ]
@@ -2363,6 +2364,35 @@
           },
           "finishedAt": {
             "type": "string"
+          },
+          "indexProgress": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "repo": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "ok",
+                    "failed"
+                  ]
+                },
+                "nodeCount": {
+                  "type": "number"
+                },
+                "error": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "repo",
+                "status"
+              ],
+              "additionalProperties": false
+            }
           }
         },
         "required": [

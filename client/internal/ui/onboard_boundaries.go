@@ -49,11 +49,15 @@ type boundaryStatusMsg struct{ status contract.OnboardingJobStatus }
 type boundaryTickMsg struct{}
 
 // confirmedBoundariesMsg acknowledges a successful confirm — the boundary block was spliced
-// into config/apps/<name>.yaml. The caller (model.go) treats this like any other app-changed
-// event and returns to the board.
+// into config/apps/<name>.yaml. jobState carries the server's OWN state at confirm time (design
+// §2.8): when it is a non-terminal state (e.g. "indexing"), the caller (model.go) must NOT
+// navigate back to the board yet — the propose screen stays alive and resumes polling until the
+// job reaches a terminal state, so the human can see per-repo indexing progress instead of the
+// screen vanishing the instant confirm succeeds.
 type confirmedBoundariesMsg struct {
-	apps   []contract.AppView
-	status string
+	apps     []contract.AppView
+	status   string
+	jobState contract.OnboardingJobStatusState
 }
 
 func boundaryTickCmd() tea.Cmd {
@@ -109,13 +113,22 @@ func confirmBoundariesCmd(c *api.Client, app string, status contract.OnboardingJ
 			return errMsg{fmt.Errorf("%s", msg)}
 		}
 		note := "boundaries confirmed for " + app
+		// The confirm endpoint's own response has no job-state field (it only acks the splice) —
+		// re-poll status right after a successful confirm to learn whether the server kicked off
+		// the post-confirm indexing phase (design §2.8). A best-effort re-poll: if it fails, fall
+		// back to treating the confirm as terminal (today's behavior) rather than blocking the
+		// confirmation note on a second network call's success.
+		jobState := contract.OnboardingJobStatusStateDone
+		if polled, statusErr := c.GetBoundaryStatus(ctx, app); statusErr == nil {
+			jobState = polled.State
+		}
 		apps, err := c.ListApps(ctx)
 		if err != nil {
 			// The write succeeded even though the follow-up refresh failed — surface the note
 			// without a stale app list rather than dropping the confirmation.
-			return confirmedBoundariesMsg{status: note}
+			return confirmedBoundariesMsg{status: note, jobState: jobState}
 		}
-		return confirmedBoundariesMsg{apps: apps, status: note}
+		return confirmedBoundariesMsg{apps: apps, status: note, jobState: jobState}
 	}
 }
 
@@ -190,6 +203,8 @@ func (m boundaryProposeModel) View() string {
 		b.WriteString(m.renderAppMismatch())
 	case m.status.State == contract.OnboardingJobStatusStateFailed:
 		b.WriteString(m.renderFailed())
+	case m.status.State == contract.OnboardingJobStatusStateIndexing:
+		b.WriteString(m.renderIndexing())
 	case m.isConfirmableWinner():
 		b.WriteString(m.renderWinnerCard())
 	case m.status.State == contract.OnboardingJobStatusStateDone && m.status.Outcome != nil && *m.status.Outcome == contract.NoProfile:
@@ -216,6 +231,8 @@ func (m boundaryProposeModel) badgeLabelAndStyle() (string, lipgloss.Style) {
 		return fmt.Sprintf("proposing round %d/%d", int(m.status.Round), int(m.status.Ceiling)), infoStyle
 	case contract.OnboardingJobStatusStateScoring:
 		return "scoring", infoStyle
+	case contract.OnboardingJobStatusStateIndexing:
+		return "indexing", infoStyle
 	case contract.OnboardingJobStatusStateDone:
 		if m.status.Outcome != nil && *m.status.Outcome == contract.Winner {
 			return "resolved", okStyle
@@ -249,6 +266,33 @@ func (m boundaryProposeModel) renderFailed() string {
 
 func (m boundaryProposeModel) renderNoProfile() string {
 	return hintStyle.Render("completed — no boundary profile found (the app may not fit the http/event templates)") + "\n"
+}
+
+// renderIndexing lists each RepoIndexOutcome the server has reported so far (design §2.8) — the
+// per-repo advisory-index phase that runs after a successful confirm. Front + every service repo
+// appear in the order the server indexed them; a repo not yet in the list simply has not started.
+func (m boundaryProposeModel) renderIndexing() string {
+	if m.status.IndexProgress == nil || len(*m.status.IndexProgress) == 0 {
+		return hintStyle.Render("indexing repositories for structural analysis…") + "\n"
+	}
+	var b strings.Builder
+	b.WriteString(hintStyle.Render("indexing repositories for structural analysis…") + "\n")
+	for _, outcome := range *m.status.IndexProgress {
+		line := labelStyle.Render(outcome.Repo + " ")
+		switch outcome.Status {
+		case contract.OnboardingJobStatusIndexProgressStatusOk:
+			line += okStyle.Render("ok")
+		case contract.OnboardingJobStatusIndexProgressStatusFailed:
+			line += errorStyle.Render("failed")
+			if outcome.Error != nil {
+				line += hintStyle.Render(" (" + *outcome.Error + ")")
+			}
+		default:
+			line += hintStyle.Render(string(outcome.Status))
+		}
+		b.WriteString(line + "\n")
+	}
+	return b.String()
 }
 
 // renderAppMismatch reports that the polled status belongs to a different app than this screen —

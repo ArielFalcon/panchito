@@ -29,12 +29,23 @@ type RunStep = RunStepEvent["step"];
 const ONBOARDING_POLL_MS = 5_000;
 // Defensive upper bound on the wait, set MODESTLY ABOVE onboarding's own end-to-end ceiling so this
 // can only fire if the advisory flag genuinely wedges (onboarding's own timeouts guarantee its
-// `busy` mutex is always cleared in a finally — see onboarding-job.ts). Derivation (live values read
-// from src/server/onboarding/onboarding-job.ts at apply time): DEFAULT_MIRROR_TIMEOUT_MS (5 min,
-// the mirror-provisioning phase) + DEFAULT_JOB_TIMEOUT_MS (20 min, the round-budget phase that starts
-// AFTER mirrors resolve) = 25 min worst-case onboarding ceiling, plus a 5 min margin for scheduling
-// jitter and the guard's own poll granularity = 30 min.
-const ONBOARDING_WAIT_MAX_MS = 30 * 60 * 1000;
+// `busy` mutex is always cleared in a finally — see onboarding-job.ts). Decomposed into named
+// per-phase constants (onboarding-auto-index, design §4.1) so the derivation stays auditable as
+// the job grows new phases — each summand mirrors a live default in onboarding-job.ts:
+//   - ONBOARDING_MIRROR_CEILING_MS: DEFAULT_MIRROR_TIMEOUT_MS (mirror-provisioning phase).
+//   - ONBOARDING_JOB_CEILING_MS: DEFAULT_JOB_TIMEOUT_MS (round-budget phase, starts AFTER mirrors).
+//   - ONBOARDING_INDEXING_CEILING_MS: the post-confirm advisory-index phase (design §2.6 — the
+//     mutex STAYS HELD through indexing, so this guard's wait window must cover it too, or the
+//     breakout below could fire mid-index — the exact torn-index race §2.6 exists to prevent).
+//     Conservative bound: DEFAULT_INDEX_TIMEOUT_MS (5 min per repo) x 2 repos.
+//   - ONBOARDING_WAIT_MARGIN_MS: scheduling jitter + this guard's own poll granularity.
+// Sum = 40 min (was 30 min before the indexing phase existed).
+export const ONBOARDING_MIRROR_CEILING_MS = 5 * 60 * 1000;
+export const ONBOARDING_JOB_CEILING_MS = 20 * 60 * 1000;
+export const ONBOARDING_INDEXING_CEILING_MS = 10 * 60 * 1000;
+export const ONBOARDING_WAIT_MARGIN_MS = 5 * 60 * 1000;
+export const ONBOARDING_WAIT_MAX_MS =
+  ONBOARDING_MIRROR_CEILING_MS + ONBOARDING_JOB_CEILING_MS + ONBOARDING_INDEXING_CEILING_MS + ONBOARDING_WAIT_MARGIN_MS;
 
 export interface RunRequest {
   app: string;

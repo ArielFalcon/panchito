@@ -11,6 +11,7 @@ import {
   createOnboardingJob,
   type OnboardingJobDeps,
   type OnboardingJobStatus,
+  type RepoIndexOutcome,
 } from "./onboarding-job";
 import type { ProfileProposerPort } from "@contexts/service-topology/application/ports/index.ts";
 import type { BoundaryProfile, HttpBoundaryProfile } from "@contexts/service-topology/domain/index.ts";
@@ -91,7 +92,10 @@ function buildDeps(overrides: Partial<OnboardingJobDeps> = {}): OnboardingJobDep
 // ── State machine + status DTO (spec E1, E2, E6) ────────────────────────────────
 
 test("ONBOARD_STATE is a const-object, not a raw string union (typescript SKILL convention)", () => {
-  assert.deepEqual(Object.values(ONBOARD_STATE).sort(), ["done", "failed", "idle", "proposing", "resolvingMirrors", "scoring"].sort());
+  assert.deepEqual(
+    Object.values(ONBOARD_STATE).sort(),
+    ["done", "failed", "idle", "indexing", "proposing", "resolvingMirrors", "scoring"].sort(),
+  );
 });
 
 test("job status starts idle before propose() is ever called", () => {
@@ -451,4 +455,132 @@ test("zero-arg status() and confirm() keep working exactly as before (backwards-
   const result = job.confirm();
   assert.equal(result.ok, true);
   assert.ok(written, "zero-arg confirm() must still write against the current job");
+});
+
+// ── Post-confirm indexing phase (onboarding-auto-index, Slice 1) ────────────────
+// Design §2.1-§2.6, ADR-2 through ADR-5. confirm() keeps its SYNCHRONOUS validation+splice
+// contract (boundaries are written before indexing ever starts), then fire-and-forgets an
+// indexing phase mirroring propose()'s own contract. A job WITHOUT deps.indexRepo behaves
+// byte-identical to today (S1.4, additive-optional dep, ADR-4) — every test above this comment
+// omits indexRepo and therefore never exercises the new phase.
+
+function buildIndexedDeps(overrides: Partial<OnboardingJobDeps> = {}) {
+  return buildDeps({
+    readConfig: () => 'name: "nname"\nrepo: "org/nname"\n',
+    writeConfig: () => {},
+    ...overrides,
+  });
+}
+
+test("S1.1: successful confirm() writes boundaries THEN transitions indexing->done with indexProgress populated, one entry per repo in order", async () => {
+  const indexed: string[] = [];
+  const job = createOnboardingJob(buildIndexedDeps({
+    indexRepo: async (repo: string, _mirrorDir: string): Promise<RepoIndexOutcome> => {
+      indexed.push(repo);
+      return { repo, status: "ok", nodeCount: 10 };
+    },
+  }));
+  await job.propose({ app: "nname", repo: "ArielFalcon/nname-gateway", services: ["ArielFalcon/ms-name-orders"] });
+
+  const result = job.confirm();
+  assert.equal(result.ok, true, "confirm() must still return synchronously once boundaries are spliced");
+
+  await job.settled();
+
+  const status = job.status();
+  assert.equal(status.state, ONBOARD_STATE.done);
+  assert.equal(status.outcome, "winner", "outcome stays winner — indexing is a post-step, not a verdict (ADR-3)");
+  assert.deepEqual(indexed, ["ArielFalcon/nname-gateway", "ArielFalcon/ms-name-orders"], "front indexed before services, in order");
+  assert.deepEqual(status.indexProgress, [
+    { repo: "ArielFalcon/nname-gateway", status: "ok", nodeCount: 10 },
+    { repo: "ArielFalcon/ms-name-orders", status: "ok", nodeCount: 10 },
+  ]);
+});
+
+test("S1.2: fail-open — indexRepo rejects for one repo, records failed, continues to the next, phase still ends done/winner", async () => {
+  const job = createOnboardingJob(buildIndexedDeps({
+    ensureMirrorAtBranch: async (repo: string) => `/mirrors/${repo.replaceAll("/", "__")}`,
+    indexRepo: async (repo: string): Promise<RepoIndexOutcome> => {
+      if (repo.endsWith("B")) throw new Error("boom");
+      return { repo, status: "ok", nodeCount: 5 };
+    },
+  }));
+  await job.propose({
+    app: "nname",
+    repo: "ArielFalcon/nname-gateway",
+    services: ["ArielFalcon/svc-B", "ArielFalcon/svc-C"],
+  });
+  job.confirm();
+  await job.settled();
+
+  const status = job.status();
+  assert.equal(status.state, ONBOARD_STATE.done);
+  assert.equal(status.outcome, "winner", "an advisory indexing failure must never fail the durable onboarding outcome");
+  const byRepo = new Map((status.indexProgress ?? []).map((o) => [o.repo, o]));
+  assert.equal(byRepo.get("ArielFalcon/svc-B")?.status, "failed");
+  assert.equal(byRepo.get("ArielFalcon/svc-C")?.status, "ok", "must continue to C after B fails");
+  assert.equal(byRepo.get("ArielFalcon/nname-gateway")?.status, "ok");
+});
+
+test("S1.3: a never-resolving indexRepo is bounded by indexTimeoutMs, degrades that repo to failed, and the phase continues", async () => {
+  const job = createOnboardingJob(buildIndexedDeps({
+    ensureMirrorAtBranch: async (repo: string) => `/mirrors/${repo.replaceAll("/", "__")}`,
+    indexTimeoutMs: 20,
+    indexRepo: async (repo: string): Promise<RepoIndexOutcome> => {
+      if (repo.endsWith("slow")) {
+        return new Promise(() => {
+          // never resolves — the per-repo timeout must be what ends this, not this promise.
+        });
+      }
+      return { repo, status: "ok", nodeCount: 3 };
+    },
+  }));
+  await job.propose({
+    app: "nname",
+    repo: "ArielFalcon/nname-gateway",
+    services: ["ArielFalcon/svc-slow", "ArielFalcon/svc-fast"],
+  });
+  job.confirm();
+  await job.settled();
+
+  const status = job.status();
+  assert.equal(status.state, ONBOARD_STATE.done);
+  const byRepo = new Map((status.indexProgress ?? []).map((o) => [o.repo, o]));
+  assert.equal(byRepo.get("ArielFalcon/svc-slow")?.status, "failed");
+  assert.equal(byRepo.get("ArielFalcon/svc-fast")?.status, "ok", "the phase continues past a timed-out repo");
+});
+
+test("S1.4: a job with NO indexRepo dep behaves byte-identical to today — confirm() stays synchronous, no indexing phase, no indexProgress", async () => {
+  let written: { path: string; content: string } | undefined;
+  const job = createOnboardingJob(buildDeps({
+    readConfig: () => 'name: "nname"\nrepo: "org/nname"\n',
+    writeConfig: (path, content) => { written = { path, content }; },
+  }));
+  await job.propose({ app: "nname", repo: "ArielFalcon/nname-gateway", services: [] });
+
+  const result = job.confirm();
+  assert.equal(result.ok, true);
+  assert.ok(written, "the deferred (no indexRepo) path must still write synchronously on confirm");
+
+  const status = job.status();
+  assert.equal(status.state, ONBOARD_STATE.done, "must stay done — no indexing phase without the dep");
+  assert.equal(status.indexProgress, undefined);
+});
+
+test("S1.5: isActive() (the mutex) is true DURING indexing and false only once indexing completes", async () => {
+  let resolveIndex!: (o: RepoIndexOutcome) => void;
+  const job = createOnboardingJob(buildIndexedDeps({
+    indexRepo: (repo: string) => new Promise<RepoIndexOutcome>((resolve) => { resolveIndex = resolve; void repo; }),
+  }));
+  await job.propose({ app: "nname", repo: "ArielFalcon/nname-gateway", services: [] });
+  assert.equal(job.isActive(), false, "mutex is released after propose()'s own run() completes, before confirm()");
+
+  const result = job.confirm();
+  assert.equal(result.ok, true);
+  await new Promise((r) => setImmediate(r)); // let the fire-and-forget runIndexing() re-acquire the mutex
+
+  assert.equal(job.isActive(), true, "the mutex must be re-held while indexing runs (§2.6 torn-index rationale)");
+  resolveIndex({ repo: "ArielFalcon/nname-gateway", status: "ok", nodeCount: 1 });
+  await job.settled();
+  assert.equal(job.isActive(), false, "the mutex is released again once indexing's finally clears it");
 });

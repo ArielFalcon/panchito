@@ -267,8 +267,19 @@ export const EventBoundaryProfileSchema = z.object({
 
 export const BoundaryProfileSchema = z.discriminatedUnion("transport", [HttpBoundaryProfileSchema, EventBoundaryProfileSchema]);
 
-export const OnboardStateSchema = z.enum(["idle", "resolvingMirrors", "proposing", "scoring", "done", "failed"]);
+export const OnboardStateSchema = z.enum(["idle", "resolvingMirrors", "proposing", "scoring", "indexing", "done", "failed"]);
 export const OnboardOutcomeSchema = z.enum(["winner", "no-profile"]);
+
+// Per-repo advisory-index outcome (onboarding-auto-index, Slice 1, design §2.2). Flat schema — no
+// inline nested object (typescript SKILL convention).
+export const RepoIndexStatusSchema = z.enum(["ok", "failed"]);
+
+export const RepoIndexOutcomeSchema = z.object({
+  repo: z.string(),
+  status: RepoIndexStatusSchema,
+  nodeCount: z.number().optional(),
+  error: z.string().optional(),
+});
 
 export const OnboardingJobStatusSchema = z.object({
   state: OnboardStateSchema,
@@ -282,6 +293,10 @@ export const OnboardingJobStatusSchema = z.object({
   error: z.string().optional(),
   startedAt: z.string().optional(),
   finishedAt: z.string().optional(),
+  // Per-repo advisory-index progress, populated once the post-confirm indexing phase starts
+  // (design §2.1-§2.2). Absent for a job whose deps never supply indexRepo (additive-optional,
+  // ADR-4) — never present on a pre-indexing job either.
+  indexProgress: z.array(RepoIndexOutcomeSchema).optional(),
 });
 
 export const ProposeBoundariesInputSchema = z.object({

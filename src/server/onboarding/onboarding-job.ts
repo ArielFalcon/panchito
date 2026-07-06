@@ -26,11 +26,33 @@ export const ONBOARD_STATE = {
   resolvingMirrors: "resolvingMirrors",
   proposing: "proposing",
   scoring: "scoring",
+  // Post-confirm advisory-index phase (onboarding-auto-index, design §2.1, ADR-3). NOT terminal:
+  // outcome is still "winner" from the round that already completed; this is a post-step, not a
+  // verdict. The phase always transitions back to "done" (never a new terminal state) so the Go
+  // TUI's isTerminalOnboardState (Done||Failed) stays correct without any change there.
+  indexing: "indexing",
   done: "done",
   failed: "failed",
 } as const;
 
 export type OnboardState = (typeof ONBOARD_STATE)[keyof typeof ONBOARD_STATE];
+
+/** const-object-then-type pattern (typescript SKILL) — never a raw string union. */
+export const REPO_INDEX_STATUS = {
+  ok: "ok",
+  failed: "failed",
+} as const;
+
+export type RepoIndexStatus = (typeof REPO_INDEX_STATUS)[keyof typeof REPO_INDEX_STATUS];
+
+/** Flat interface (typescript SKILL) — one per-repo advisory-index outcome. Mirrored field-for-
+ *  field by RepoIndexOutcomeSchema in qa-engine/src/shared-kernel/contract/commands.ts. */
+export interface RepoIndexOutcome {
+  repo: string;
+  status: RepoIndexStatus;
+  nodeCount?: number;
+  error?: string;
+}
 
 export const ONBOARD_OUTCOME = {
   winner: "winner",
@@ -54,6 +76,10 @@ export interface OnboardingJobStatus {
   error?: string;
   startedAt?: string;
   finishedAt?: string;
+  /** Per-repo advisory-index progress, populated once the post-confirm indexing phase starts
+   *  (design §2.1-§2.2). Absent for a job whose deps never supply indexRepo (additive-optional,
+   *  ADR-4), and absent before indexing starts. */
+  indexProgress?: RepoIndexOutcome[];
 }
 
 export interface ProposeBoundariesRequest {
@@ -90,10 +116,24 @@ export interface OnboardingJobDeps {
   configPath?(app: string): string;
   mirrorTimeoutMs?: number;
   jobTimeoutMs?: number;
+  /** OPTIONAL, additive (design §2.3, ADR-4): the post-confirm advisory-index collaborator. A job
+   *  built WITHOUT this dep skips the indexing phase entirely — confirm() stays byte-identical to
+   *  today (S1.4). NEVER throws/rejects the phase itself: the real composition (src/index.ts) maps
+   *  every failure (adapter Result err, unresolvable mirror, spawn timeout) to a `failed` outcome —
+   *  this dep signature intentionally allows a rejection too (the job's own per-repo wrapper treats
+   *  a thrown/rejected call identically to a resolved `failed` outcome, fail-open at the call site,
+   *  design §2.5). Called with the SAME mirrorDir the job's own ensureMirrorAtBranch resolved during
+   *  this round (path-identity guarantee, design §1).
+   */
+  indexRepo?(repo: string, mirrorDir: string): Promise<RepoIndexOutcome>;
+  /** Per-repo bound on indexRepo (design §2.4). Default 5 min — conservative, a full first index is
+   *  unmeasured. A timeout degrades that repo to `failed` and the phase continues. */
+  indexTimeoutMs?: number;
 }
 
 const DEFAULT_MIRROR_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_JOB_TIMEOUT_MS = 20 * 60 * 1000;
+const DEFAULT_INDEX_TIMEOUT_MS = 5 * 60 * 1000;
 
 function defaultConfigPath(app: string): string {
   return `config/apps/${app}.yaml`;
@@ -151,9 +191,58 @@ export function createOnboardingJob(deps: OnboardingJobDeps): OnboardingJob {
   // called and run()'s first `await`.
   let busy = false;
   let inFlight: Promise<void> | null = null;
+  // The front + every service RepoRef this round's mirror phase resolved (design §1: path-identity
+  // guarantee — indexing MUST run at the SAME mirrorDir a later query resolves). Set at the end of
+  // resolvingMirrors, read only by confirm()'s indexing kickoff. Cleared on a fresh propose() so a
+  // stale round's mirrors can never be indexed under a NEW round's (possibly different) profile.
+  let lastRepoRefs: RepoRef[] = [];
 
   function fail(error: string): void {
     status = { ...status, state: ONBOARD_STATE.failed, error, finishedAt: new Date().toISOString() };
+  }
+
+  /** Wraps one repo's indexRepo call with the per-repo bounded timeout (design §2.4) and fail-open
+   *  mapping (design §2.5): a rejection, a thrown error, or a timeout all degrade to a `failed`
+   *  outcome — this function itself NEVER throws/rejects, so the sequential loop in runIndexing()
+   *  can always continue to the next repo unconditionally. */
+  async function indexOneRepo(repo: string, mirrorDir: string, indexTimeoutMs: number): Promise<RepoIndexOutcome> {
+    try {
+      return await raceTimeout(
+        deps.indexRepo!(repo, mirrorDir),
+        indexTimeoutMs,
+        () => {},
+        `indexing ${repo} timed out`,
+      );
+    } catch (err) {
+      return { repo, status: REPO_INDEX_STATUS.failed, error: redactError(err) };
+    }
+  }
+
+  /** The post-confirm advisory-index phase (design §2.1, §2.4-§2.6). Sequential (front, then every
+   *  service, in order) — a single local codebase-memory process contending on disk + shared cache
+   *  DB makes parallel spawns unsafe, and onboarding is rare enough that wall-clock is not a
+   *  concern (design §2.4). Re-acquires `busy` for its own duration (§2.6: a QA checkout mid-index
+   *  would tear the index) and ALWAYS transitions back to done/winner — an indexing failure is
+   *  advisory and must never flip the durable onboarding outcome (§2.5). Never rethrows. */
+  async function runIndexing(repoRefs: RepoRef[], indexTimeoutMs: number): Promise<void> {
+    busy = true;
+    status = { ...status, state: ONBOARD_STATE.indexing, indexProgress: [] };
+    try {
+      const progress: RepoIndexOutcome[] = [];
+      for (const ref of repoRefs) {
+        const outcome = await indexOneRepo(ref.repo, ref.mirrorDir, indexTimeoutMs);
+        progress.push(outcome);
+        status = { ...status, indexProgress: [...progress] };
+      }
+      status = { ...status, state: ONBOARD_STATE.done, indexProgress: progress, finishedAt: new Date().toISOString() };
+    } catch (err) {
+      // Defensive-only: indexOneRepo never throws, so this is a belt-and-suspenders guard against
+      // an unforeseen synchronous failure in the loop itself. The phase still ends done/winner —
+      // indexing is advisory (§2.5) — just without further per-repo progress.
+      status = { ...status, state: ONBOARD_STATE.done, error: redactError(err), finishedAt: new Date().toISOString() };
+    } finally {
+      busy = false;
+    }
   }
 
   async function run(req: ProposeBoundariesRequest): Promise<void> {
@@ -161,6 +250,7 @@ export function createOnboardingJob(deps: OnboardingJobDeps): OnboardingJob {
     const jobTimeoutMs = deps.jobTimeoutMs ?? DEFAULT_JOB_TIMEOUT_MS;
     const startedAt = new Date().toISOString();
     status = { state: ONBOARD_STATE.resolvingMirrors, app: req.app, round: 0, ceiling: 3, candidatesScored: 0, startedAt };
+    lastRepoRefs = []; // fresh round — never index a stale round's mirrors under this round's profile
 
     try {
       // Env-guard (both branches) — BEFORE the runner-busy guard and BEFORE resolvingMirrors, per
@@ -202,6 +292,7 @@ export function createOnboardingJob(deps: OnboardingJobDeps): OnboardingJob {
       const [frontMirrorDir, ...serviceMirrorDirs] = mirrorDirs;
       const front: RepoRef = { repo: req.repo, mirrorDir: frontMirrorDir! };
       const system: RepoRef[] = req.services.map((repo, i) => ({ repo, mirrorDir: serviceMirrorDirs[i]! }));
+      lastRepoRefs = [front, ...system]; // available to confirm()'s indexing kickoff (design §1)
 
       // proposing/scoring, wrapped in the round-budget race with an owned AbortController. The
       // AbortSignal cancels the PROPOSER leg (deps.buildProposer's ctx.signal, threaded into
@@ -299,6 +390,16 @@ export function createOnboardingJob(deps: OnboardingJobDeps): OnboardingJob {
         deps.writeConfig(path, spliced);
       } catch (err) {
         return { ok: false, error: redactError(err) };
+      }
+      // Boundaries are WRITTEN at this point — onboarding has durably succeeded regardless of
+      // what indexing does next (design §2.1, §2.5). Indexing is fire-and-forget, mirroring
+      // propose()'s own contract: confirm() returns synchronously; the HTTP handler does not await
+      // the indexing tail. Additive-optional (ADR-4) — a job built without deps.indexRepo skips
+      // this entirely and confirm() stays byte-identical to today (S1.4).
+      if (deps.indexRepo && lastRepoRefs.length > 0) {
+        const indexTimeoutMs = deps.indexTimeoutMs ?? DEFAULT_INDEX_TIMEOUT_MS;
+        const indexingPromise = runIndexing(lastRepoRefs, indexTimeoutMs);
+        inFlight = indexingPromise;
       }
       return { ok: true };
     },

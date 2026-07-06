@@ -463,7 +463,12 @@ export class CodebaseMemoryCodeGraphAdapter implements CodeGraphPort {
     changedFiles: string[],
     opts?: { semantic?: boolean },
   ): Promise<Result<{ nodeCount: number }, IndexFailed>> {
-    const jsonArg = JSON.stringify({ project: this.project, changed_files: changedFiles, semantic: opts?.semantic ?? false });
+    const jsonArg = JSON.stringify({
+      project: this.project,
+      repo_path: repoDir,
+      changed_files: changedFiles,
+      semantic: opts?.semantic ?? false,
+    });
     const res = await this.client.cli("index_repository", jsonArg, repoDir);
     if (res.code === null) {
       return err({ reason: res.stderr || "codebase-memory index_repository unavailable" });

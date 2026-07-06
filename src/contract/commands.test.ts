@@ -11,6 +11,9 @@ import {
   QueueStatusSchema,
   RepoListResponseSchema,
   UpdateAppInputSchema,
+  OnboardStateSchema,
+  OnboardingJobStatusSchema,
+  RepoIndexOutcomeSchema,
   type RunRecord as ContractRunRecord,
   type QaCase as ContractQaCase,
 } from "./commands";
@@ -69,6 +72,46 @@ test("app onboarding command schemas parse create/update/delete/repo list payloa
   assert.doesNotThrow(() => RepoListResponseSchema.parse({
     repos: [{ fullName: "org/shop", private: true, description: null }],
     hasMore: false,
+  }));
+});
+
+// ── Indexing phase (onboarding-auto-index, Slice 1, design §2.2, §2.7.1) ────────
+
+test("OnboardStateSchema accepts the new 'indexing' member alongside every existing state", () => {
+  for (const state of ["idle", "resolvingMirrors", "proposing", "scoring", "indexing", "done", "failed"]) {
+    assert.doesNotThrow(() => OnboardStateSchema.parse(state));
+  }
+  assert.throws(() => OnboardStateSchema.parse("indexingXYZ"));
+});
+
+test("RepoIndexOutcomeSchema accepts ok/failed outcomes and rejects an invalid status", () => {
+  assert.doesNotThrow(() => RepoIndexOutcomeSchema.parse({ repo: "org/shop", status: "ok", nodeCount: 42 }));
+  assert.doesNotThrow(() => RepoIndexOutcomeSchema.parse({ repo: "org/shop-svc", status: "failed", error: "timed out" }));
+  assert.throws(() => RepoIndexOutcomeSchema.parse({ repo: "org/shop", status: "pending" }));
+});
+
+test("OnboardingJobStatusSchema accepts state:'indexing' with a valid indexProgress array", () => {
+  assert.doesNotThrow(() => OnboardingJobStatusSchema.parse({
+    state: "indexing",
+    app: "shop",
+    round: 3,
+    ceiling: 3,
+    candidatesScored: 6,
+    outcome: "winner",
+    indexProgress: [
+      { repo: "org/shop", status: "ok", nodeCount: 120 },
+      { repo: "org/shop-svc", status: "failed", error: "timed out" },
+    ],
+  }));
+});
+
+test("OnboardingJobStatusSchema rejects an indexProgress entry with an invalid RepoIndexOutcome status", () => {
+  assert.throws(() => OnboardingJobStatusSchema.parse({
+    state: "indexing",
+    round: 3,
+    ceiling: 3,
+    candidatesScored: 6,
+    indexProgress: [{ repo: "org/shop", status: "pending" }],
   }));
 });
 

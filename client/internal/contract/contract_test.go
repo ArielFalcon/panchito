@@ -153,3 +153,50 @@ func TestOnboardingJobStatusDecodesNoProfileFromServerJSON(t *testing.T) {
 		t.Fatalf("resolvedProfile should be absent for a no-profile outcome, got %+v", s.ResolvedProfile)
 	}
 }
+
+// Decoding a payload in the NEW "indexing" state (onboarding-auto-index, Slice 1, design §2.1-§2.2)
+// WITH a per-repo indexProgress array — the same no-drift guarantee as the winner/no-profile tests
+// above, now for the post-confirm advisory-index phase. Mirrors the L52-148 pattern.
+func TestOnboardingJobStatusDecodesIndexingStateFromServerJSON(t *testing.T) {
+	const payload = `{
+		"state":"indexing","app":"shop","round":3,"ceiling":3,"candidatesScored":6,
+		"outcome":"winner",
+		"resolvedProfile":{
+			"transport":"http","frontFiles":"src/api/shop.ts",
+			"frontCallSite":{"kind":"fetch"},
+			"servicePrefixTemplate":"/api/shop","serviceRepoTemplate":"org/shop-svc",
+			"openApiPath":"openapi/shop.yaml"
+		},
+		"indexProgress":[
+			{"repo":"org/shop","status":"ok","nodeCount":120},
+			{"repo":"org/shop-svc","status":"failed","error":"indexing org/shop-svc timed out"}
+		],
+		"startedAt":"2026-07-06T00:00:00.000Z"
+	}`
+	var s OnboardingJobStatus
+	if err := json.Unmarshal([]byte(payload), &s); err != nil {
+		t.Fatalf("decode OnboardingJobStatus (indexing): %v", err)
+	}
+	if s.State != OnboardingJobStatusStateIndexing {
+		t.Fatalf("state not decoded: %v", s.State)
+	}
+	if s.Outcome == nil || *s.Outcome != Winner {
+		t.Fatalf("outcome must stay winner during indexing (ADR-3 — indexing is a post-step, not a verdict): %v", s.Outcome)
+	}
+	if s.IndexProgress == nil || len(*s.IndexProgress) != 2 {
+		t.Fatalf("indexProgress not decoded: %+v", s.IndexProgress)
+	}
+	progress := *s.IndexProgress
+	if progress[0].Repo != "org/shop" || progress[0].Status != OnboardingJobStatusIndexProgressStatusOk {
+		t.Fatalf("first repo outcome not decoded: %+v", progress[0])
+	}
+	if progress[0].NodeCount == nil || *progress[0].NodeCount != 120 {
+		t.Fatalf("nodeCount not decoded: %+v", progress[0])
+	}
+	if progress[1].Repo != "org/shop-svc" || progress[1].Status != OnboardingJobStatusIndexProgressStatusFailed {
+		t.Fatalf("second repo outcome not decoded: %+v", progress[1])
+	}
+	if progress[1].Error == nil || *progress[1].Error != "indexing org/shop-svc timed out" {
+		t.Fatalf("error not decoded: %+v", progress[1])
+	}
+}

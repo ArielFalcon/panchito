@@ -35,9 +35,16 @@ import { createApp as adminCreateApp, updateApp as adminUpdateApp, deleteApp as 
 import { writeConfig, configExists } from "./server/onboard";
 import { applyEnvVars, defaultEnvStoreFs } from "./server/env-store";
 import { logJson } from "./integrations/logger";
-import { createOnboardingJob } from "./server/onboarding/onboarding-job";
+import { createOnboardingJob, type RepoIndexOutcome } from "./server/onboarding/onboarding-job";
 import { LlmProfileProposerAdapter, PROPOSER_MODEL } from "./server/onboarding/llm-profile-proposer.adapter";
 import { OnboardingService } from "@contexts/service-topology/application/onboarding-service";
+// Onboarding-auto-index (Slice 1, design §2.3, probe fact #3): the post-confirm advisory-index
+// closure spawns index_repository DIRECTLY via CodebaseMemoryClient — NOT the adapter's syncTo
+// (that method's contract is incremental changed_files, per its own header). The probe confirmed
+// {"repo_path": mirrorDir} alone performs the initial FULL index (project name derived from the
+// path server-side, no `project` key needed).
+import { CodebaseMemoryClient } from "../qa-engine/src/shared-infrastructure/code-graph/codebase-memory-client";
+import { redactError } from "./util/redact";
 
 const SELF_REPO = process.env.AI_PIPELINE_REPO ?? "ArielFalcon/ai-pipeline";
 const ROOT = process.env.AI_PIPELINE_ROOT ?? process.cwd();
@@ -409,6 +416,49 @@ async function hasProposerAgentConfigured(): Promise<boolean> {
   }
 }
 
+// Onboarding-auto-index (Slice 1, design §2.3, §1). The SAME CodebaseMemoryClient construction
+// rewritten-engine-factory.ts uses (default runner) — this closure is process-wide (composed once
+// at boot), not per-run, since the onboarding job itself is process-wide (design §1). Fail-open by
+// construction: {code:null} degrades map to a `failed` outcome, never a throw past this function —
+// runIndexing()'s own per-repo wrapper is a second, defensive layer on top of this one.
+const onboardingIndexClient = new CodebaseMemoryClient();
+
+// The client's own spawn timeout defaults to 60s — far below a first-time FULL index of a large
+// repo. Without an explicit override here, the job's per-repo indexTimeoutMs budget (5 min,
+// onboarding-job.ts DEFAULT_INDEX_TIMEOUT_MS) is a dead ceiling: the inner spawn gives up first
+// and a healthy slow index reads as failed. Kept a hair under the job budget so the SPAWN dies
+// (and reports its stderr) before the outer race masks it.
+const ONBOARDING_INDEX_SPAWN_TIMEOUT_MS = 4.5 * 60 * 1000;
+
+async function indexRepoForOnboarding(repo: string, mirrorDir: string): Promise<RepoIndexOutcome> {
+  try {
+    // Probe fact #3: {"repo_path": mirrorDir} ALONE performs the initial FULL index — no
+    // `changed_files` walk needed, no `project` key needed (server derives it from the path).
+    const jsonArg = JSON.stringify({ repo_path: mirrorDir });
+    const res = await onboardingIndexClient.cli("index_repository", jsonArg, mirrorDir, ONBOARDING_INDEX_SPAWN_TIMEOUT_MS);
+    if (res.code === null) {
+      return { repo, status: "failed", error: res.stderr || "codebase-memory-mcp unavailable" };
+    }
+    let payload: unknown;
+    try {
+      payload = JSON.parse(res.stdout);
+    } catch (e) {
+      return { repo, status: "failed", error: e instanceof Error ? e.message : String(e) };
+    }
+    const rawNodeCount =
+      typeof payload === "object" && payload !== null && "node_count" in payload
+        ? (payload as { node_count: unknown }).node_count
+        : undefined;
+    const nodeCount = typeof rawNodeCount === "number" && Number.isFinite(rawNodeCount) ? rawNodeCount : undefined;
+    if (nodeCount === undefined) {
+      return { repo, status: "failed", error: "index_repository response missing node_count" };
+    }
+    return { repo, status: "ok", nodeCount };
+  } catch (err) {
+    return { repo, status: "failed", error: redactError(err) };
+  }
+}
+
 const onboardingJob = createOnboardingJob({
   isRunnerBusy: () => {
     const running = currentRun();
@@ -423,6 +473,7 @@ const onboardingJob = createOnboardingJob({
   readConfig: (path) => readFileSync(path, "utf8"),
   writeConfig: (path, content) => writeFileSync(path, content, "utf8"),
   configPath: (app) => join(ROOT, "config", "apps", `${app}.yaml`),
+  indexRepo: (repo, mirrorDir) => indexRepoForOnboarding(repo, mirrorDir),
 });
 
 const apiDeps: ApiDeps = {
