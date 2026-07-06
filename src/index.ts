@@ -445,13 +445,14 @@ async function indexRepoForOnboarding(repo: string, mirrorDir: string): Promise<
     } catch (e) {
       return { repo, status: "failed", error: e instanceof Error ? e.message : String(e) };
     }
-    const rawNodeCount =
-      typeof payload === "object" && payload !== null && "node_count" in payload
-        ? (payload as { node_count: unknown }).node_count
-        : undefined;
+    // The live CLI (v0.8.1, probe + smoke verified) reports `nodes`; `node_count` is kept as a
+    // fallback for older/newer response shapes. Requiring the wrong single name marked every
+    // SUCCESSFUL live index as failed while the .db landed fine.
+    const shape = typeof payload === "object" && payload !== null ? (payload as { nodes?: unknown; node_count?: unknown }) : {};
+    const rawNodeCount = shape.nodes ?? shape.node_count;
     const nodeCount = typeof rawNodeCount === "number" && Number.isFinite(rawNodeCount) ? rawNodeCount : undefined;
     if (nodeCount === undefined) {
-      return { repo, status: "failed", error: "index_repository response missing node_count" };
+      return { repo, status: "failed", error: "index_repository response missing nodes/node_count" };
     }
     return { repo, status: "ok", nodeCount };
   } catch (err) {

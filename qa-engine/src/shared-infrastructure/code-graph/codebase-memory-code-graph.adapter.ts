@@ -479,13 +479,14 @@ export class CodebaseMemoryCodeGraphAdapter implements CodeGraphPort {
     } catch (e) {
       return err({ reason: e instanceof Error ? e.message : String(e) });
     }
-    const nodeCount = toNumber(
-      typeof payload === "object" && payload !== null && "node_count" in payload
-        ? String((payload as { node_count: unknown }).node_count)
-        : undefined,
-    );
+    // The live CLI (v0.8.1, probe + smoke verified) reports `nodes`; `node_count` is kept as a
+    // fallback for other response shapes — requiring the wrong single name marked successful
+    // indexes as failed.
+    const shape = typeof payload === "object" && payload !== null ? (payload as { nodes?: unknown; node_count?: unknown }) : {};
+    const rawCount = shape.nodes ?? shape.node_count;
+    const nodeCount = toNumber(rawCount === undefined ? undefined : String(rawCount));
     if (nodeCount === undefined) {
-      return err({ reason: "codebase-memory index_repository response missing node_count" });
+      return err({ reason: "codebase-memory index_repository response missing nodes/node_count" });
     }
     return ok({ nodeCount });
   }

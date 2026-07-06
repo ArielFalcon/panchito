@@ -1071,3 +1071,14 @@ test("every cli() call this adapter makes for coChangeCoupling/callersOf passes 
     assert.equal(parsed["cypher"], undefined, "must never use a `cypher` key");
   }
 });
+
+// The LIVE CLI (v0.8.1) reports `nodes` — probe + live-smoke verified; `node_count` above is the
+// legacy/fallback shape. This pin exists because requiring the wrong single name marked every
+// successful live index as failed while the .db landed fine (onboarding-auto-index smoke).
+test("syncTo accepts the live CLI response shape ({nodes: N})", async () => {
+  const client = new FakeClient(async () => ({ code: 0, stdout: JSON.stringify({ project: "p", status: "indexed", nodes: 745, edges: 1348 }), stderr: "" }));
+  const adapter = new CodebaseMemoryCodeGraphAdapter(client, "proj");
+  const res = await adapter.syncTo("/repo/dir", ["src/a.ts"]);
+  assert.equal(res.ok, true);
+  if (res.ok) assert.equal(res.value.nodeCount, 745);
+});
