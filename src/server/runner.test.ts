@@ -1371,3 +1371,190 @@ test("PIPELINE_ENGINE=rewritten — no reviewer.verdict event when outcome.gateS
     else process.env.PIPELINE_ENGINE = prev;
   }
 });
+
+// ── Mirror-race guard: bounded poll loop deferring to an in-flight onboarding job ──────────────
+// (onboarding-hardening, Slice 1). RunnerDeps.isOnboardingActive is OPTIONAL and ADDITIVE — a
+// caller (or test) that omits it gets () => false, so the guard is a byte-identical no-op on the
+// idle path. onboardingPollMs/onboardingWaitMaxMs/sleep are also injectable so tests never wait
+// out real timers.
+
+test("defer-while-active: mirror work (engineFactory) is deferred until isOnboardingActive clears, then the run completes normally", async () => {
+  const queue = new JobQueue();
+  const { port, calls } = fakePort({ verdict: "pass" });
+  let pollsRemaining = 3;
+  let sleepCalls = 0;
+  const id = enqueueTrackedRun(
+    queue,
+    { app: "runner-onboarding-defer", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
+    {
+      loadApp: cfg,
+      engineFactory: () => port,
+      isOnboardingActive: () => {
+        if (pollsRemaining <= 0) return false;
+        pollsRemaining -= 1;
+        return true;
+      },
+      onboardingPollMs: 1,
+      onboardingWaitMaxMs: 10_000,
+      sleep: async () => { sleepCalls += 1; },
+    },
+  );
+  await queue.drain();
+  const r = getRecord(id)!;
+  assert.equal(r.status, "done");
+  assert.equal(r.verdict, "pass");
+  assert.equal(calls.length, 1, "engineFactory's port must be invoked exactly once, only after onboarding cleared");
+  assert.equal(sleepCalls, 3, "the loop must poll (sleep) once per true reading before onboarding clears");
+});
+
+test("breakout path: isOnboardingActive stuck true past onboardingWaitMaxMs — a single loud warning is logged and the run PROCEEDS anyway", async () => {
+  const queue = new JobQueue();
+  const { port, calls } = fakePort({ verdict: "pass" });
+  const originalWarn = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...args: unknown[]) => { warnings.push(String(args[0])); };
+  try {
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-onboarding-breakout", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
+      {
+        loadApp: cfg,
+        engineFactory: () => port,
+        isOnboardingActive: () => true, // stuck forever
+        onboardingPollMs: 1,
+        onboardingWaitMaxMs: 5, // tiny test bound — real Date.now() trips it within a couple polls
+        sleep: async () => { await new Promise((r) => setTimeout(r, 2)); },
+      },
+    );
+    await queue.drain();
+    const r = getRecord(id)!;
+    assert.equal(r.status, "done");
+    assert.equal(r.verdict, "pass", "the run must PROCEED — QA is the product, a wedged advisory flag never permanently starves the pipeline");
+    assert.equal(calls.length, 1, "engineFactory must still be called on breakout");
+    assert.equal(warnings.length, 1, "exactly one loud warning, not one per poll");
+    assert.match(warnings[0] ?? "", /onboarding/i);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("abort-during-wait: cancelling mid-poll resolves promptly (signal-aware sleep) and engineFactory is never called", async () => {
+  const queue = new JobQueue();
+  const { port, calls } = fakePort({ verdict: "pass" });
+  let sawSignal: AbortSignal | undefined;
+  const id = enqueueTrackedRun(
+    queue,
+    { app: "runner-onboarding-abort", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
+    {
+      loadApp: cfg,
+      engineFactory: () => port,
+      isOnboardingActive: () => true, // stuck — only the abort ends the wait
+      onboardingPollMs: 100,
+      onboardingWaitMaxMs: 10_000,
+      sleep: async (_ms: number, opts?: { signal?: AbortSignal }) => {
+        sawSignal = opts?.signal;
+        // Simulate a signal-aware sleep: resolve immediately once the signal aborts, otherwise
+        // hang so the ONLY way this test completes is via the abort short-circuiting it.
+        await new Promise<void>((resolve) => {
+          if (opts?.signal?.aborted) return resolve();
+          opts?.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+      },
+    },
+  );
+  await new Promise((r) => setImmediate(r)); // let the job claim the queue controller and enter the poll loop
+  assert.equal(cancelTrackedRun(queue, id), true, "a run waiting in the poll loop must still be cancellable");
+  await queue.drain();
+  assert.ok(sawSignal, "the poll loop's sleep must receive the queue's own AbortSignal");
+  assert.equal(calls.length, 0, "engineFactory must never be reached once the wait was aborted");
+  const r = getRecord(id)!;
+  assert.equal(r.status, "done");
+  assert.equal(r.verdict, "infra-error", "matches cancelTrackedRun's own aborted-terminal mapping");
+});
+
+test("idle path (isOnboardingActive omitted): behavior is byte-identical to before — zero sleep calls, engineFactory called exactly as today", async () => {
+  const queue = new JobQueue();
+  const { port, calls } = fakePort({ verdict: "pass" });
+  let sleepCalls = 0;
+  const id = enqueueTrackedRun(
+    queue,
+    { app: "runner-onboarding-idle", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
+    {
+      loadApp: cfg,
+      engineFactory: () => port,
+      // isOnboardingActive intentionally OMITTED — must default to () => false.
+      sleep: async () => { sleepCalls += 1; },
+    },
+  );
+  await queue.drain();
+  const r = getRecord(id)!;
+  assert.equal(r.status, "done");
+  assert.equal(r.verdict, "pass");
+  assert.equal(calls.length, 1);
+  assert.equal(sleepCalls, 0, "the poll loop body must never execute when isOnboardingActive is not supplied (the honest idle-path proof)");
+});
+
+test("idle path with isOnboardingActive explicitly () => false: same zero-sleep proof", async () => {
+  const queue = new JobQueue();
+  const { port, calls } = fakePort({ verdict: "pass" });
+  let sleepCalls = 0;
+  const id = enqueueTrackedRun(
+    queue,
+    { app: "runner-onboarding-idle-explicit", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" },
+    {
+      loadApp: cfg,
+      engineFactory: () => port,
+      isOnboardingActive: () => false,
+      sleep: async () => { sleepCalls += 1; },
+    },
+  );
+  await queue.drain();
+  const r = getRecord(id)!;
+  assert.equal(r.status, "done");
+  assert.equal(calls.length, 1);
+  assert.equal(sleepCalls, 0);
+});
+
+test("multi-run FIFO during onboarding: several runs enqueued while onboarding is active drain in arrival order once it clears, no reorder/drop", async () => {
+  const queue = new JobQueue();
+  const order: string[] = [];
+  let pollsRemaining = 2;
+  const isOnboardingActive = (): boolean => {
+    if (pollsRemaining <= 0) return false;
+    pollsRemaining -= 1;
+    return true;
+  };
+  const makePort = (name: string): RunPipelinePort => ({
+    async run(input) {
+      order.push(name);
+      return {
+        runId: input.runId,
+        app: input.app,
+        sha: input.sha.value,
+        mode: input.mode,
+        target: input.target,
+        verdict: "pass",
+        errorClass: null,
+        gateSignals: { static: true, coverageRatio: null, valueScore: null, reviewerCorrections: [], flaky: false, retries: 0 },
+        rulesRetrieved: [],
+        at: new Date().toISOString(),
+      };
+    },
+  });
+  const deps = {
+    loadApp: cfg,
+    isOnboardingActive,
+    onboardingPollMs: 1,
+    onboardingWaitMaxMs: 10_000,
+    sleep: async () => {},
+  };
+  const idA = enqueueTrackedRun(queue, { app: "runner-fifo-a", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" }, { ...deps, engineFactory: () => makePort("a") });
+  const idB = enqueueTrackedRun(queue, { app: "runner-fifo-b", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" }, { ...deps, engineFactory: () => makePort("b") });
+  const idC = enqueueTrackedRun(queue, { app: "runner-fifo-c", sha: "abc1234", target: "e2e", mode: "diff", source: "manual" }, { ...deps, engineFactory: () => makePort("c") });
+  await queue.drain();
+  assert.deepEqual(order, ["a", "b", "c"], "runs enqueued during an onboarding window must drain in arrival (FIFO) order — no reorder");
+  for (const id of [idA, idB, idC]) {
+    assert.equal(getRecord(id)!.status, "done");
+    assert.equal(getRecord(id)!.verdict, "pass");
+  }
+});

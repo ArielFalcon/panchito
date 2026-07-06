@@ -54,9 +54,14 @@ export function authHeaderArgs(): string[] {
 
 // Brings the mirror up to date with origin: tokenless clone when missing, fetch when
 // present. On the existing-dir path it first self-heals two failure modes:
-//   1. A stale `.git/index.lock` — the queue is strictly sequential and only the
-//      orchestrator performs git writes, so any lock present here was left by an
-//      abruptly-interrupted run and would otherwise poison every later run.
+//   1. A stale `.git/index.lock` — BOTH the QA runner and the onboarding job
+//      (src/server/onboarding/onboarding-job.ts) provision mirrors against this same shared
+//      working tree, so a stale lock can originate from either side's abruptly-interrupted
+//      provisioning. The onboarding-hardening mirror-race guard (RunnerDeps.isOnboardingActive,
+//      src/server/runner.ts) is what serializes the two in the normal case — it makes onboarding
+//      and QA runs never provision the same mirror concurrently — but does not by itself prevent a
+//      lock left behind by a genuinely interrupted run (process crash, forced kill) on either side;
+//      this self-heal remains the backstop for that case.
 //   2. A token embedded in origin's URL — mirrors cloned before the tokenless-URL
 //      policy persist the credential in .git/config; `remote set-url` (idempotent,
 //      cheap) scrubs it on the next run.

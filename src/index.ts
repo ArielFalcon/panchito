@@ -203,7 +203,10 @@ function enqueueApiRun(app: string, sha: string, target: string, mode: RunMode, 
   }
   // Orphan-data cleanup is reconstructed inside enqueueTrackedRun (the single funnel), so
   // every trigger gets it — not just this webhook path.
-  return enqueueTrackedRun(queue, { app, sha, target: target as TestTarget, mode, guidance, shadow, commits, source: "webhook", triggerRepo, baseSha }, { runEvents, engineFactory });
+  // isOnboardingActive (onboarding-hardening, Slice 1): the mirror-race guard's real wiring —
+  // onboardingJob.isActive() reads the job's own busy mutex, so the runner defers mirror work
+  // while onboarding is provisioning mirrors against the same shared working tree.
+  return enqueueTrackedRun(queue, { app, sha, target: target as TestTarget, mode, guidance, shadow, commits, source: "webhook", triggerRepo, baseSha }, { runEvents, engineFactory, isOnboardingActive: () => onboardingJob.isActive() });
 }
 
 // Orphan-session sweep threshold. Must always exceed the longest possible agent
@@ -541,7 +544,7 @@ const apiDeps: ApiDeps = {
       source: "manual",
       // Honor the active agent runtime (Codex/dual) on continuations, exactly like the
       // webhook path above.
-    }, { runEvents, engineFactory });
+    }, { runEvents, engineFactory, isOnboardingActive: () => onboardingJob.isActive() });
   },
 };
 

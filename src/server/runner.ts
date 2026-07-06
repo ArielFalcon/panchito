@@ -12,6 +12,7 @@ import { recordIncident } from "./maintainer";
 import { testDataNamespace } from "../qa/test-data";
 import { RunMode, TestTarget, TriggerSource, QaCase, QaRunResult, engineStatus } from "../types";
 import { redactError } from "../util/redact";
+import { sleep as sleepWithAbort } from "../util/sleep";
 import { isInfraError } from "../errors";
 import type { RunEventStore } from "./run-events";
 import type { RunEventBody } from "../contract/events";
@@ -21,6 +22,19 @@ import type { RunPipelinePort, RunInput, ObserverPort } from "@contexts/qa-run-o
 
 type RunStepEvent = Extract<RunEventBody, { type: "step.changed" }>;
 type RunStep = RunStepEvent["step"];
+
+// Mirror-race guard (onboarding-hardening, Slice 1) — poll granularity while an onboarding job is
+// in flight. Onboarding is minutes-long, so a 5s granularity adds negligible latency and near-zero
+// CPU while waiting.
+const ONBOARDING_POLL_MS = 5_000;
+// Defensive upper bound on the wait, set MODESTLY ABOVE onboarding's own end-to-end ceiling so this
+// can only fire if the advisory flag genuinely wedges (onboarding's own timeouts guarantee its
+// `busy` mutex is always cleared in a finally — see onboarding-job.ts). Derivation (live values read
+// from src/server/onboarding/onboarding-job.ts at apply time): DEFAULT_MIRROR_TIMEOUT_MS (5 min,
+// the mirror-provisioning phase) + DEFAULT_JOB_TIMEOUT_MS (20 min, the round-budget phase that starts
+// AFTER mirrors resolve) = 25 min worst-case onboarding ceiling, plus a 5 min margin for scheduling
+// jitter and the guard's own poll granularity = 30 min.
+const ONBOARDING_WAIT_MAX_MS = 30 * 60 * 1000;
 
 export interface RunRequest {
   app: string;
@@ -98,6 +112,22 @@ export interface RunnerDeps {
     observer?: ObserverPort,
     previousNamespace?: string,
   ) => RunPipelinePort;
+
+  // Mirror-race guard (onboarding-hardening, Slice 1): true while an onboarding job (src/server/
+  // onboarding/onboarding-job.ts) is provisioning mirrors, so the queue callback below WAITS
+  // (bounded poll loop) instead of starting its own mirror work against the same shared working
+  // tree. OPTIONAL, defaulting to () => false — same additive-seam precedent as engineFactory's own
+  // trailing optional args: a caller (or test) that omits this behaves exactly as before this fix
+  // (byte-identical idle path, proven by the existing behavioral suite + the explicit zero-sleep
+  // test). Only src/index.ts's real composition supplies it, backed by onboardingJob.isActive().
+  isOnboardingActive?: () => boolean;
+  // Test/ops seam: override the poll granularity and defensive upper bound (module defaults
+  // ONBOARDING_POLL_MS / ONBOARDING_WAIT_MAX_MS above). Production never overrides these.
+  onboardingPollMs?: number;
+  onboardingWaitMaxMs?: number;
+  // Test seam: override the signal-aware sleep the poll loop awaits (module default is the real
+  // util/sleep.ts implementation). Production never overrides this.
+  sleep?: (ms: number, opts?: { signal?: AbortSignal }) => Promise<void>;
 }
 
 // Bug fix: rewritten-engine runs left their RunRecord/RunEvents frozen — record.step never
@@ -343,7 +373,49 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
         console.log(`[qa] skipping ${req.app}@${req.sha} — cancelled before it started`);
         return;
       }
+
+      // Marked "running" BEFORE the mirror-race poll loop below (not after it): the queue slot is
+      // genuinely held from this point on, and cancelTrackedRun's abort branch is gated on
+      // record.status === "running" — moving this earlier is what makes cancellation during the
+      // poll wait actually reach queue.cancel()/this callback's own AbortSignal, instead of falling
+      // into the "still enqueued" finalize-without-abort branch.
       updateRecord(record.id, { status: "running" });
+
+      // Mirror-race guard (onboarding-hardening, Slice 1): defer mirror work while an onboarding
+      // job is in flight. NO-OP on the idle path (the overwhelming common case — onboarding is
+      // rare) because the `while` condition is false on first evaluation and the loop body never
+      // runs, so `sleep` is never called. Holding the queue's single slot while polling means later
+      // enqueued runs wait behind this one — the EXISTING sequential-queue property, unchanged; the
+      // wait is bounded and FIFO order is preserved.
+      const isOnboardingActive = deps.isOnboardingActive ?? (() => false);
+      const onboardingPollMs = deps.onboardingPollMs ?? ONBOARDING_POLL_MS;
+      const onboardingWaitMaxMs = deps.onboardingWaitMaxMs ?? ONBOARDING_WAIT_MAX_MS;
+      const waitForOnboarding = deps.sleep ?? sleepWithAbort;
+      const waitStart = Date.now();
+      let parkLogged = false;
+      while (isOnboardingActive()) {
+        // Park visibility: without this line an operator sees status "running" with no progress
+        // and no run.started event for up to the wait ceiling — say WHY, once.
+        if (!parkLogged) {
+          parkLogged = true;
+          console.log(`[qa] run parked: onboarding job active — waiting before mirror work (${req.app}@${req.sha})`);
+        }
+        if (signal.aborted) break; // an operator cancel during the wait — handled below
+        if (Date.now() - waitStart > onboardingWaitMaxMs) {
+          console.warn(
+            `[qa] onboarding still active after ${onboardingWaitMaxMs}ms — proceeding anyway to avoid starving the QA pipeline (${req.app}@${req.sha})`,
+          );
+          break;
+        }
+        await waitForOnboarding(onboardingPollMs, { signal });
+      }
+      if (signal.aborted) {
+        // cancelTrackedRun already finalized the record (status "done", verdict "infra-error") the
+        // moment it aborted this signal — this is a NO-OP guard, not a second finalize.
+        console.log(`[qa] skipping ${req.app}@${req.sha} — cancelled while waiting for onboarding to clear`);
+        return;
+      }
+
       const appConfig = loadApp(req.app);
       deps.runEvents?.publish(record.id, { type: "run.started", app: req.app, sha: req.sha, mode: req.mode, target: req.target });
       // Runtime shadow override from the TUI/API takes precedence over the YAML config.

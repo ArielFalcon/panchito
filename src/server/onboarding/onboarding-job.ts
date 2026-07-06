@@ -134,6 +134,11 @@ export interface OnboardingJob {
   confirm(app?: string): ConfirmResult;
   /** Test/ops seam: resolves once the current (or most recent) propose() round has fully settled. */
   settled(): Promise<void>;
+  /** True while a job is non-terminal in flight (from propose() until run()'s finally clears the
+   *  mutex) — the mirror-race guard the QA runner polls (src/server/runner.ts's
+   *  RunnerDeps.isOnboardingActive) to defer mirror provisioning while onboarding is running. A
+   *  direct read of the module-private `busy` flag; no new state. */
+  isActive(): boolean;
 }
 
 /** Builds a fresh in-memory OnboardingJob. One job instance = one mutex; composition-root code
@@ -300,6 +305,10 @@ export function createOnboardingJob(deps: OnboardingJobDeps): OnboardingJob {
 
     async settled(): Promise<void> {
       if (inFlight) await inFlight;
+    },
+
+    isActive(): boolean {
+      return busy;
     },
   };
 }

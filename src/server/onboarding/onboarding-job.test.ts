@@ -100,6 +100,36 @@ test("job status starts idle before propose() is ever called", () => {
   assert.equal(status.state, ONBOARD_STATE.idle);
 });
 
+// ── isActive() mirror-race guard seam (Slice 1, onboarding-hardening) ──────────
+// Backs RunnerDeps.isOnboardingActive (src/server/runner.ts): the QA runner polls this to defer
+// mirror work while an onboarding job is in flight. isActive() mirrors the module-private `busy`
+// mutex flag exactly — no new state, just a read.
+
+test("isActive() is false before any propose() call", () => {
+  const job = createOnboardingJob(buildDeps());
+  assert.equal(job.isActive(), false);
+});
+
+test("isActive() is true while a job is in flight (mid-run, before its finally releases the mutex)", async () => {
+  let resolveProposer!: (profiles: BoundaryProfile[]) => void;
+  const slowProposer = stubProposer(() => new Promise<BoundaryProfile[]>((resolve) => { resolveProposer = resolve; }));
+  const job = createOnboardingJob(buildDeps({ buildProposer: () => slowProposer }));
+
+  const kickoff = job.propose({ app: "nname", repo: "ArielFalcon/nname-gateway", services: [] });
+  await new Promise((r) => setImmediate(r)); // let run() past its own synchronous awaits into the proposer call
+  assert.equal(job.isActive(), true, "busy is set true in propose(), before run()'s finally clears it");
+
+  resolveProposer([CORRECT_PROFILE]);
+  await kickoff;
+});
+
+test("isActive() is false again after settled() resolves (run()'s finally cleared the mutex)", async () => {
+  const job = createOnboardingJob(buildDeps());
+  await job.propose({ app: "nname", repo: "ArielFalcon/nname-gateway", services: [] });
+  await job.settled();
+  assert.equal(job.isActive(), false);
+});
+
 test("propose(): transitions resolvingMirrors -> proposing/scoring -> done with outcome winner", async () => {
   const job = createOnboardingJob(buildDeps());
   await job.propose({ app: "nname", repo: "ArielFalcon/nname-gateway", services: ["ArielFalcon/ms-name-orders"] });
