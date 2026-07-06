@@ -1,4 +1,4 @@
-// scripts/yaml/write-boundaries.test.ts
+// src/server/onboarding/write-boundaries.test.ts
 // TDD (strict): write failing tests first, then implement.
 // serializeBoundary() is the exact hand-built inverse of the REAL read-side parser
 // (yaml-boundary-profile.adapter.ts) — the round-trip tests below drive that REAL parser
@@ -7,9 +7,9 @@
 // `${VAR}` placeholder or comment elsewhere in the document (spec C1, C4).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { YamlBoundaryProfileAdapter } from "../../qa-engine/src/contexts/service-topology/infrastructure/yaml-boundary-profile.adapter.ts";
-import type { HttpBoundaryProfile, EventBoundaryProfile } from "../../qa-engine/src/contexts/service-topology/domain/index.ts";
-import { serializeBoundary, spliceBoundariesBlock } from "./write-boundaries.ts";
+import { YamlBoundaryProfileAdapter } from "@contexts/service-topology/infrastructure/yaml-boundary-profile.adapter";
+import type { HttpBoundaryProfile, EventBoundaryProfile } from "@contexts/service-topology/domain/index.ts";
+import { serializeBoundary, spliceBoundariesBlock } from "./write-boundaries";
 
 const HTTP_PROFILE: HttpBoundaryProfile = {
   transport: "http",

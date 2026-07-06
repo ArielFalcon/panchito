@@ -1,27 +1,32 @@
-// scripts/adapters/llm-profile-proposer.adapter.ts
-// LLM-backed ProfileProposerPort adapter for the onboarding CLI. Lives in scripts/, NOT
-// qa-engine/ (qa-engine-first directive: qa-engine must never import scripts/) — this is the
-// ONLY module that calls the agent runtime (src/) to hypothesize an app's cross-service
-// boundary convention. The deterministic profile-scorer (qa-engine) is the objective oracle
-// that grades each candidate this adapter proposes; the adapter itself never self-grades.
+// src/server/onboarding/llm-profile-proposer.adapter.ts
+// LLM-backed ProfileProposerPort adapter for the onboarding CLI + the server-side onboarding job.
+// Lives under src/server/onboarding/ (re-homed from scripts/adapters/ in Slice 5a — see design
+// delta §A) — this is the ONLY module that calls the agent runtime (src/) to hypothesize an app's
+// cross-service boundary convention. The deterministic profile-scorer (qa-engine) is the objective
+// oracle that grades each candidate this adapter proposes; the adapter itself never self-grades.
 //
 // Read-only end to end: the "qa-proposer" role has canWrite:false (agent-runtime/types.ts) and
-// this adapter never calls any write-capable API. It only returns data to the caller (the
-// onboarding CLI performs the only write, to config/apps/<app>.yaml — never a watched repo).
+// this adapter never calls any write-capable API. It only returns data to the caller (the CLI or
+// the server job perform the only write, to config/apps/<app>.yaml — never a watched repo).
 //
 // Facade bypass (deliberate): SingleAgentFacade/DualAgentFacade always clobber opts.model with
 // the role's assigned model (facades.ts `{...opts, model}` / `{...opts, model: assignment.model}`),
 // and assignmentForRole has no branch for "proposer" (falls through to primary) — see design §A.4.
 // So this adapter calls defaultAgentDeps() DIRECTLY, pinning its own model at the open() call-site,
 // never routing through either facade.
-import type { AgentDeps } from "../../src/integrations/opencode-client";
-import { defaultAgentDeps } from "../../src/integrations/opencode-client";
-import type { BoundaryProfile, RepoRef } from "../../qa-engine/src/contexts/service-topology/domain/index.ts";
+//
+// Import-specifier rule (TS5097, design delta §A): under the root tsconfig (no
+// allowImportingTsExtensions), a VALUE import with a literal .ts suffix fails TS5097. VALUE
+// imports below are therefore extensionless; type-only imports use the @contexts alias (already
+// resolvable from src/, matching this file's src/server neighbors).
+import type { AgentDeps } from "../../integrations/opencode-client";
+import { defaultAgentDeps } from "../../integrations/opencode-client";
+import type { BoundaryProfile, RepoRef } from "@contexts/service-topology/domain/index.ts";
 import type {
   ProfileProposerPort,
   ProposerFeedback,
-} from "../../qa-engine/src/contexts/service-topology/application/ports/index.ts";
-import { ProposerVerdictSchema, UNPARSEABLE_SENTINEL, type SchemaCandidate } from "../schemas/proposer-verdict.schema.ts";
+} from "@contexts/service-topology/application/ports/index.ts";
+import { ProposerVerdictSchema, UNPARSEABLE_SENTINEL, type SchemaCandidate } from "./proposer-verdict.schema";
 
 /** Model pinned for every proposer session, bypassing the facade/roster model entirely (see
  *  module doc above). Chip: keep in sync with agents/opencode.json's qa-proposer.model entry —
@@ -113,7 +118,11 @@ export class LlmProfileProposerAdapter implements ProfileProposerPort {
   constructor(
     private readonly depsFactory: () => Promise<AgentDeps> = defaultAgentDeps,
     private readonly model: string = PROPOSER_MODEL,
-    private readonly ctx: { app: string; timeoutMs?: number },
+    // `signal` (Slice 5a, design delta §C): threaded straight through to deps.open's opts.signal so
+    // the server-side onboarding job's round-budget AbortController can cancel an in-flight
+    // proposer session on timeout, not merely resolve its own Promise.race (the session-leak fix).
+    // AgentDeps.open's opts already accepts signal?: AbortSignal — no opencode-client.ts edit needed.
+    private readonly ctx: { app: string; timeoutMs?: number; signal?: AbortSignal },
   ) {}
 
   async propose(system: RepoRef[], front: RepoRef, feedback?: ProposerFeedback): Promise<BoundaryProfile[]> {
@@ -122,6 +131,7 @@ export class LlmProfileProposerAdapter implements ProfileProposerPort {
       const session = await deps.open("qa-proposer", front.mirrorDir, {
         model: this.model,
         timeoutMs: this.ctx.timeoutMs ?? DEFAULT_PROPOSER_TIMEOUT_MS,
+        signal: this.ctx.signal,
       });
       try {
         const text = await session.prompt(assemblePrompt(system, front, this.ctx.app, feedback));

@@ -48,6 +48,16 @@ export interface OnboardingResult {
   rounds: number;
 }
 
+/** Per-round progress snapshot, emitted (optionally) after each round's scoring completes — the
+ *  seam a server-side onboarding job (src/server/onboarding/onboarding-job.ts) maps into its own
+ *  in-memory status for live TUI polling. Local to this context: no transport concerns leak in. */
+export interface OnboardingRoundProgress {
+  round: number;
+  proposed: number;
+  scored: number;
+  bestResolvedScore: number;
+}
+
 /** Drives the deterministic onboarding loop. Fail-open by construction: a proposer that returns
  *  an empty array OR throws costs the loop one round, never a crash (mirrors ProfileProposerPort's
  *  own fail-open contract). */
@@ -55,6 +65,11 @@ export class OnboardingService {
   constructor(
     private readonly proposer: ProfileProposerPort,
     private readonly ceiling = 3,
+    // Optional, backwards-compatible: every existing caller (the CLI, every test predating this
+    // seam) passes nothing and behaves byte-identically. Wrapped in try/catch at the call-site
+    // below so a throwing observer never crashes onboard() — it only costs the observer its own
+    // notification, never the round itself.
+    private readonly onRound?: (p: OnboardingRoundProgress) => void,
   ) {}
 
   async onboard(system: RepoRef[], front: RepoRef): Promise<OnboardingResult> {
@@ -75,6 +90,17 @@ export class OnboardingService {
       }
 
       const best = selectBestProfile(candidates);
+      try {
+        this.onRound?.({
+          round: rounds,
+          proposed: proposed.length,
+          scored: candidates.length,
+          bestResolvedScore: best?.score.resolvedScore ?? 0,
+        });
+      } catch {
+        // A throwing observer must never crash the onboarding loop — see ctor doc.
+      }
+
       if (best !== null && best.score.resolvedScore > 0) {
         return { profile: best.profile, candidates, rounds };
       }

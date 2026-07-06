@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { BoundaryProfile } from "@contexts/service-topology/domain/index.ts";
 
 // ── ProposerVerdictSchema — scripts/-resident LLM-text parser ──────────────────
-// Lives in scripts/, NOT qa-engine/, NOT src/orchestrator/ (qa-engine-first directive: qa-engine
+// Lives in src/server/onboarding/, NOT qa-engine/, NOT src/orchestrator/ (qa-engine-first directive: qa-engine
 // must never import scripts/; this module carries the only LLM-text Zod parsing for the proposer
 // flow). Structurally mirrors the domain BoundaryProfile union WITHOUT a runtime cross-tree
 // import — parity is enforced by the type-level gates below, not by importing

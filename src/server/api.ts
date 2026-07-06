@@ -37,6 +37,9 @@ import {
   QueueStatusSchema,
   RepoListResponseSchema,
   RunRecordSchema,
+  OnboardingJobStatusSchema,
+  ProposeBoundariesInputSchema,
+  ConfirmBoundariesInputSchema,
   IntelligenceViewSchema,
   SignalsViewSchema,
   TrendsViewSchema,
@@ -99,6 +102,13 @@ export interface ApiDeps {
   deleteApp?: (name: string, purge: boolean) => { removed: string[] };
   listRepos?: (owner: string, page: number) => Promise<{ repos: Array<{ fullName: string; private: boolean; description: string | null }>; hasMore: boolean }>;
   runEvents?: RunEventStore;
+  // Slice 5a: server-side boundary-profile onboarding job (TUI-integrated, design delta §C).
+  // One in-memory job per server instance; absent ⇒ the three /boundaries routes return 501.
+  boundaries?: {
+    propose(app: string, input: z.infer<typeof ProposeBoundariesInputSchema>): { ok: true } | { ok: false; error: string } | Promise<{ ok: true } | { ok: false; error: string }>;
+    status(app: string): z.infer<typeof OnboardingJobStatusSchema>;
+    confirm(app: string): { ok: true } | { ok: false; error: string };
+  };
   // Phase 0b: returns persisted agent_turns rows for a run (all roles, chronological).
   // Absent ⇒ the /api/runs/:id/turns route returns 501.
   getAgentTurns?: (runId: string) => AgentTurnRecord[];
@@ -206,6 +216,19 @@ export async function handleApi(
   }
   if (req.method === "GET" && appMatch) {
     return handleGetApp(res, deps, appMatch[1]!);
+  }
+
+  const boundaryProposeMatch = path.match(/^\/api\/apps\/([^/]+)\/boundaries\/propose$/);
+  if (req.method === "POST" && boundaryProposeMatch) {
+    return await handleProposeBoundaries(req, res, deps, boundaryProposeMatch[1]!);
+  }
+  const boundaryStatusMatch = path.match(/^\/api\/apps\/([^/]+)\/boundaries\/propose\/status$/);
+  if (req.method === "GET" && boundaryStatusMatch) {
+    return handleBoundaryStatus(res, deps, boundaryStatusMatch[1]!);
+  }
+  const boundaryConfirmMatch = path.match(/^\/api\/apps\/([^/]+)\/boundaries\/confirm$/);
+  if (req.method === "POST" && boundaryConfirmMatch) {
+    return await handleConfirmBoundaries(req, res, deps, boundaryConfirmMatch[1]!);
   }
 
   const intelMatch = path.match(/^\/api\/apps\/([^/]+)\/intelligence$/);
@@ -1141,6 +1164,75 @@ function handleDeleteApp(res: ServerResponse, deps: ApiDeps, name: string, purge
     const msg = redactError(err);
     json(res, msg.includes("not found") ? 404 : 500, { error: msg });
   }
+  return true;
+}
+
+// Slice 5a: server-side boundary-profile onboarding job (design delta §C). propose() is
+// fire-and-forget — the handler does NOT await the job's returned promise (202 without blocking,
+// spec E1); status() is a plain poll; confirm() is the ONLY write step (spec E3).
+async function handleProposeBoundaries(req: IncomingMessage, res: ServerResponse, deps: ApiDeps, name: string): Promise<boolean> {
+  if (!deps.boundaries) {
+    json(res, 501, { error: "boundary-profile onboarding is not available" });
+    return true;
+  }
+  let body: Record<string, unknown> = {};
+  try {
+    const raw = await readBody(req);
+    if (raw.trim()) body = JSON.parse(raw);
+  } catch {
+    json(res, 400, { error: "invalid JSON" });
+    return true;
+  }
+  const parsed = ProposeBoundariesInputSchema.safeParse(body);
+  if (!parsed.success) {
+    json(res, 400, { error: "invalid propose-boundaries input", issues: parsed.error.issues });
+    return true;
+  }
+  // propose() rejects the mutex SYNCHRONOUSLY (a plain {ok:false} object, not a promise) — see
+  // onboarding-job.ts's own contract. Only that synchronous shape can be inspected here; an
+  // ACCEPTED kickoff returns a Promise the handler deliberately never awaits (fire-and-forget,
+  // spec E1) — any error surfacing later only shows up on the next status() poll.
+  const result = deps.boundaries.propose(name, parsed.data);
+  if (!(result instanceof Promise) && !result.ok) {
+    json(res, 409, { error: result.error });
+    return true;
+  }
+  contractJson(res, 202, OnboardingJobStatusSchema, deps.boundaries.status(name));
+  return true;
+}
+
+function handleBoundaryStatus(res: ServerResponse, deps: ApiDeps, name: string): boolean {
+  if (!deps.boundaries) {
+    json(res, 501, { error: "boundary-profile onboarding is not available" });
+    return true;
+  }
+  contractJson(res, 200, OnboardingJobStatusSchema, deps.boundaries.status(name));
+  return true;
+}
+
+async function handleConfirmBoundaries(req: IncomingMessage, res: ServerResponse, deps: ApiDeps, name: string): Promise<boolean> {
+  if (!deps.boundaries) {
+    json(res, 501, { error: "boundary-profile onboarding is not available" });
+    return true;
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(await readBody(req));
+  } catch {
+    json(res, 400, { error: "invalid JSON" });
+    return true;
+  }
+  const parsed = ConfirmBoundariesInputSchema.safeParse(body);
+  if (!parsed.success) {
+    json(res, 400, { error: "invalid confirm-boundaries input", issues: parsed.error.issues });
+    return true;
+  }
+  const result = deps.boundaries.confirm(name);
+  if (!result.ok) {
+    json(res, 422, { error: result.error });
+    return true;
+  }
+  contractJson(res, 200, CreateAppResultSchema, { ok: true });
   return true;
 }
 

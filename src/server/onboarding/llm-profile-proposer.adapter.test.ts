@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { AgentDeps, AgentSession } from "../../src/integrations/opencode-client";
-import type { RepoRef } from "../../qa-engine/src/contexts/service-topology/domain/index.ts";
-import type { ProposerFeedback } from "../../qa-engine/src/contexts/service-topology/application/ports/index.ts";
-import { LlmProfileProposerAdapter, PROPOSER_MODEL } from "./llm-profile-proposer.adapter.ts";
+import type { AgentDeps, AgentSession } from "../../integrations/opencode-client";
+import type { RepoRef } from "@contexts/service-topology/domain/index.ts";
+import type { ProposerFeedback } from "@contexts/service-topology/application/ports/index.ts";
+import { LlmProfileProposerAdapter, PROPOSER_MODEL } from "./llm-profile-proposer.adapter";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -169,6 +169,52 @@ test("propose(): calls depsFactory() DIRECTLY and pins the adapter's model on op
   assert.equal(opens[0]?.cwd, FRONT.mirrorDir);
   assert.equal(opens[0]?.model, PROPOSER_MODEL, "adapter must pin its own model, not fall through a facade");
   assert.equal(opens[0]?.timeoutMs, 12345);
+});
+
+// ── AbortSignal thread-through (Slice 5a, design delta §C session-leak fix) ────────────────────
+// The server-side onboarding job wraps onboard() in a round-budget Promise.race and owns an
+// AbortController whose signal must reach the underlying agent session so a job timeout actually
+// CANCELS the in-flight proposer session, not merely resolves the race. This proves the pass-through
+// end to end: ctx.signal -> deps.open's opts.signal.
+
+test("propose(): ctx.signal is threaded straight through to deps.open's opts.signal (job-timeout cancellation)", async () => {
+  const opens: Array<{ signal?: AbortSignal }> = [];
+  const depsFactory: () => Promise<AgentDeps> = async () => ({
+    open: async (_agent: string, _cwd: string, opts?: { signal?: AbortSignal }) => {
+      opens.push({ signal: opts?.signal });
+      return {
+        id: "fake-session",
+        prompt: async () => fencedJson(VALID_VERDICT_JSON),
+        dispose: async () => {},
+      };
+    },
+  });
+  const controller = new AbortController();
+  const adapter = new LlmProfileProposerAdapter(depsFactory, PROPOSER_MODEL, { app: "nname", signal: controller.signal });
+
+  await adapter.propose(SYSTEM, FRONT);
+
+  assert.equal(opens.length, 1);
+  assert.equal(opens[0]?.signal, controller.signal, "ctx.signal must be forwarded verbatim to deps.open's opts.signal");
+});
+
+test("propose(): omitting ctx.signal leaves deps.open's opts.signal undefined (no signal fabricated)", async () => {
+  const opens: Array<{ signal?: AbortSignal }> = [];
+  const depsFactory: () => Promise<AgentDeps> = async () => ({
+    open: async (_agent: string, _cwd: string, opts?: { signal?: AbortSignal }) => {
+      opens.push({ signal: opts?.signal });
+      return {
+        id: "fake-session",
+        prompt: async () => fencedJson(VALID_VERDICT_JSON),
+        dispose: async () => {},
+      };
+    },
+  });
+  const adapter = new LlmProfileProposerAdapter(depsFactory, PROPOSER_MODEL, { app: "nname" });
+
+  await adapter.propose(SYSTEM, FRONT);
+
+  assert.equal(opens[0]?.signal, undefined);
 });
 
 test("propose(): when feedback.priorCandidates is non-empty, the prompt text references the prior round", async () => {

@@ -36,6 +36,27 @@ test("the OpenAPI document exposes app onboarding verbs for codegen clients", ()
   assert.ok(repos.get, "missing GET /api/v1/repos");
 });
 
+test("the OpenAPI document exposes the boundary-onboarding endpoints and their schemas (Slice 5a)", () => {
+  const doc = buildOpenApiDocument() as Doc;
+  for (const p of [
+    "/api/v1/apps/{name}/boundaries/propose",
+    "/api/v1/apps/{name}/boundaries/propose/status",
+    "/api/v1/apps/{name}/boundaries/confirm",
+  ]) {
+    assert.ok(doc.paths[p], `missing path ${p}`);
+  }
+  const propose = doc.paths["/api/v1/apps/{name}/boundaries/propose"] as Record<string, unknown>;
+  const status = doc.paths["/api/v1/apps/{name}/boundaries/propose/status"] as Record<string, unknown>;
+  const confirm = doc.paths["/api/v1/apps/{name}/boundaries/confirm"] as Record<string, unknown>;
+  assert.ok(propose.post, "missing POST .../boundaries/propose");
+  assert.ok(status.get, "missing GET .../boundaries/propose/status");
+  assert.ok(confirm.post, "missing POST .../boundaries/confirm");
+
+  for (const c of ["OnboardingJobStatus", "ProposeBoundariesInput", "ConfirmBoundariesInput"]) {
+    assert.ok(doc.components.schemas[c], `missing component ${c}`);
+  }
+});
+
 test("nested entities are $ref'd, not inlined (codegen-friendly)", () => {
   const doc = buildOpenApiDocument() as Doc;
   const cases = doc.components.schemas.RunRecord?.properties?.cases;

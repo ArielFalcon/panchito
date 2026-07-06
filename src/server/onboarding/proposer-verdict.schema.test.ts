@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ProposerVerdictSchema, UNPARSEABLE_SENTINEL } from "./proposer-verdict.schema.ts";
+import { ProposerVerdictSchema, UNPARSEABLE_SENTINEL } from "./proposer-verdict.schema";
 
 // ── behavior tests — spec Requirement B (B1-B3) ────────────────────────────────
 

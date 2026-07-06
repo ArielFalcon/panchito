@@ -463,6 +463,119 @@
         }
       }
     },
+    "/api/v1/apps/{name}/boundaries/propose": {
+      "post": {
+        "operationId": "proposeBoundaries",
+        "summary": "Start a boundary-profile onboarding job (read-only propose; mirrors provisioned server-side)",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProposeBoundariesInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "job kicked off (fire-and-forget)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnboardingJobStatus"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "an onboarding job is already running"
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{name}/boundaries/propose/status": {
+      "get": {
+        "operationId": "getBoundaryStatus",
+        "summary": "Poll the current (or most recent) onboarding job status for this app",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "onboarding job status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnboardingJobStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{name}/boundaries/confirm": {
+      "post": {
+        "operationId": "confirmBoundaries",
+        "summary": "Confirm a winning boundary profile — the ONLY write step (splices config/apps/<name>.yaml)",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmBoundariesInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "boundaries: block written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateAppResult"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "no confirmable boundary profile for this app"
+          },
+          "422": {
+            "description": "no confirmable boundary profile for this app"
+          }
+        }
+      }
+    },
     "/api/v1/apps/{name}/intelligence": {
       "get": {
         "operationId": "getAppIntelligence",
@@ -2104,6 +2217,189 @@
         "required": [
           "repos",
           "hasMore"
+        ],
+        "additionalProperties": false
+      },
+      "OnboardingJobStatus": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "resolvingMirrors",
+              "proposing",
+              "scoring",
+              "done",
+              "failed"
+            ]
+          },
+          "app": {
+            "type": "string"
+          },
+          "round": {
+            "type": "number"
+          },
+          "ceiling": {
+            "type": "number"
+          },
+          "candidatesScored": {
+            "type": "number"
+          },
+          "lastResolvedScore": {
+            "type": "number"
+          },
+          "resolvedProfile": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "transport": {
+                    "type": "string",
+                    "enum": [
+                      "http"
+                    ]
+                  },
+                  "frontFiles": {
+                    "type": "string"
+                  },
+                  "frontCallSite": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string"
+                      },
+                      "receiver": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "servicePrefixTemplate": {
+                    "type": "string"
+                  },
+                  "serviceRepoTemplate": {
+                    "type": "string"
+                  },
+                  "openApiPath": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "transport",
+                  "frontFiles",
+                  "frontCallSite",
+                  "servicePrefixTemplate",
+                  "serviceRepoTemplate",
+                  "openApiPath"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "transport": {
+                    "type": "string",
+                    "enum": [
+                      "event"
+                    ]
+                  },
+                  "files": {
+                    "type": "string"
+                  },
+                  "eventPattern": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string"
+                      },
+                      "listenerBaseType": {
+                        "type": "string"
+                      },
+                      "listenerEventCall": {
+                        "type": "string"
+                      },
+                      "subscriberBaseType": {
+                        "type": "string"
+                      },
+                      "publishCall": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "listenerBaseType",
+                      "listenerEventCall",
+                      "subscriberBaseType",
+                      "publishCall"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "transport",
+                  "files",
+                  "eventPattern"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "winner",
+              "no-profile"
+            ]
+          },
+          "error": {
+            "type": "string"
+          },
+          "startedAt": {
+            "type": "string"
+          },
+          "finishedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "round",
+          "ceiling",
+          "candidatesScored"
+        ],
+        "additionalProperties": false
+      },
+      "ProposeBoundariesInput": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string"
+          },
+          "services": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConfirmBoundariesInput": {
+        "type": "object",
+        "properties": {
+          "confirm": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        },
+        "required": [
+          "confirm"
         ],
         "additionalProperties": false
       },

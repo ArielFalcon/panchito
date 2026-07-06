@@ -238,6 +238,61 @@ export const RepoListResponseSchema = z.object({
   hasMore: z.boolean(),
 });
 
+// ── Boundary-onboarding DTOs (Slice 5a: TUI-integrated boundary-profile onboarding) ──────────────
+// Wire representation of service-topology's BoundaryProfile domain union (http | event, discrim.
+// by `transport`). shared-kernel MUST NOT import qa-engine/src/contexts/* (layering invariant), so
+// this schema structurally mirrors the domain type independently — same technique as the proposer's
+// own scripts-resident ProposerVerdictSchema, field names copied verbatim from
+// service-topology/domain/index.ts (HttpBoundaryProfile/EventBoundaryProfile).
+export const HttpBoundaryProfileSchema = z.object({
+  transport: z.literal("http"),
+  frontFiles: z.string(),
+  frontCallSite: z.object({ kind: z.string(), receiver: z.string().optional() }),
+  servicePrefixTemplate: z.string(),
+  serviceRepoTemplate: z.string(),
+  openApiPath: z.string(),
+});
+
+export const EventBoundaryProfileSchema = z.object({
+  transport: z.literal("event"),
+  files: z.string(),
+  eventPattern: z.object({
+    kind: z.string(),
+    listenerBaseType: z.string(),
+    listenerEventCall: z.string(),
+    subscriberBaseType: z.string(),
+    publishCall: z.string(),
+  }),
+});
+
+export const BoundaryProfileSchema = z.discriminatedUnion("transport", [HttpBoundaryProfileSchema, EventBoundaryProfileSchema]);
+
+export const OnboardStateSchema = z.enum(["idle", "resolvingMirrors", "proposing", "scoring", "done", "failed"]);
+export const OnboardOutcomeSchema = z.enum(["winner", "no-profile"]);
+
+export const OnboardingJobStatusSchema = z.object({
+  state: OnboardStateSchema,
+  app: z.string().optional(),
+  round: z.number(),
+  ceiling: z.number(),
+  candidatesScored: z.number(),
+  lastResolvedScore: z.number().optional(),
+  resolvedProfile: BoundaryProfileSchema.optional(),
+  outcome: OnboardOutcomeSchema.optional(),
+  error: z.string().optional(),
+  startedAt: z.string().optional(),
+  finishedAt: z.string().optional(),
+});
+
+export const ProposeBoundariesInputSchema = z.object({
+  repo: z.string().optional(),
+  services: z.array(z.string()).optional(),
+});
+
+export const ConfirmBoundariesInputSchema = z.object({
+  confirm: z.literal(true),
+});
+
 // ── Agent runtime DTOs ───────────────────────────────────────────────────────
 export const AgentProviderSchema = z.enum(["opencode", "codex"]);
 export const AgentModeSchema = z.enum(["single", "dual"]);
@@ -350,6 +405,10 @@ export type CreateAppResult = z.infer<typeof CreateAppResultSchema>;
 export type DeleteAppResult = z.infer<typeof DeleteAppResultSchema>;
 export type RepoListItem = z.infer<typeof RepoListItemSchema>;
 export type RepoListResponse = z.infer<typeof RepoListResponseSchema>;
+export type BoundaryProfileWire = z.infer<typeof BoundaryProfileSchema>;
+export type OnboardingJobStatus = z.infer<typeof OnboardingJobStatusSchema>;
+export type ProposeBoundariesInput = z.infer<typeof ProposeBoundariesInputSchema>;
+export type ConfirmBoundariesInput = z.infer<typeof ConfirmBoundariesInputSchema>;
 export type AgentProvider = z.infer<typeof AgentProviderSchema>;
 export type AgentMode = z.infer<typeof AgentModeSchema>;
 export type AgentRole = z.infer<typeof AgentRoleSchema>;

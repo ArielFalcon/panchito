@@ -19,6 +19,7 @@ import {
   CreateAppInputSchema, UpdateAppInputSchema, CreateAppResultSchema,
   DeleteAppResultSchema, RepoInfoSchema, OnboardServiceInputSchema,
   RepoListItemSchema, RepoListResponseSchema,
+  OnboardingJobStatusSchema, ProposeBoundariesInputSchema, ConfirmBoundariesInputSchema,
   PublicAgentConfigSchema, AgentConfigUpdateSchema, AgentConfigApplyResultSchema,
   AgentModelsResponseSchema, AgentRestartRequestSchema, AgentRestartResponseSchema,
   AgentProviderHealthSchema, AgentModelInfoSchema, RoleAssignmentSchema,
@@ -60,6 +61,9 @@ const NAMED_SCHEMAS = {
   DeleteAppResult: DeleteAppResultSchema,
   RepoListItem: RepoListItemSchema,
   RepoListResponse: RepoListResponseSchema,
+  OnboardingJobStatus: OnboardingJobStatusSchema,
+  ProposeBoundariesInput: ProposeBoundariesInputSchema,
+  ConfirmBoundariesInput: ConfirmBoundariesInputSchema,
   PublicAgentConfig: PublicAgentConfigSchema,
   AgentConfigUpdate: AgentConfigUpdateSchema,
   AgentConfigApplyResult: AgentConfigApplyResultSchema,
@@ -207,6 +211,39 @@ function paths(): Record<string, unknown> {
         operationId: "deleteApp",
         parameters: [nameParam, { name: "purge", in: "query", schema: { type: "boolean" } }],
         responses: { "200": { description: "deleted app config", content: jsonBody("DeleteAppResult") } },
+      },
+    },
+    "/api/v1/apps/{name}/boundaries/propose": {
+      post: {
+        operationId: "proposeBoundaries",
+        summary: "Start a boundary-profile onboarding job (read-only propose; mirrors provisioned server-side)",
+        parameters: [nameParam],
+        requestBody: { required: false, content: jsonBody("ProposeBoundariesInput") },
+        responses: {
+          "202": { description: "job kicked off (fire-and-forget)", content: jsonBody("OnboardingJobStatus") },
+          "409": { description: "an onboarding job is already running" },
+        },
+      },
+    },
+    "/api/v1/apps/{name}/boundaries/propose/status": {
+      get: {
+        operationId: "getBoundaryStatus",
+        summary: "Poll the current (or most recent) onboarding job status for this app",
+        parameters: [nameParam],
+        responses: { "200": { description: "onboarding job status", content: jsonBody("OnboardingJobStatus") } },
+      },
+    },
+    "/api/v1/apps/{name}/boundaries/confirm": {
+      post: {
+        operationId: "confirmBoundaries",
+        summary: "Confirm a winning boundary profile — the ONLY write step (splices config/apps/<name>.yaml)",
+        parameters: [nameParam],
+        requestBody: { required: true, content: jsonBody("ConfirmBoundariesInput") },
+        responses: {
+          "200": { description: "boundaries: block written", content: jsonBody("CreateAppResult") },
+          "409": { description: "no confirmable boundary profile for this app" },
+          "422": { description: "no confirmable boundary profile for this app" },
+        },
       },
     },
     "/api/v1/apps/{name}/intelligence": {

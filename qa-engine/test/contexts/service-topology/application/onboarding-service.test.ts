@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { OnboardingService } from "@contexts/service-topology/application/onboarding-service.ts";
+import { OnboardingService, type OnboardingRoundProgress } from "@contexts/service-topology/application/onboarding-service.ts";
 import type { ProfileProposerPort, ProposerFeedback } from "@contexts/service-topology/application/ports/index.ts";
 import type { RepoRef, HttpBoundaryProfile, BoundaryProfile } from "@contexts/service-topology/domain/index.ts";
 
@@ -166,4 +166,57 @@ test("onboard: passes accumulated candidates as feedback to the proposer on subs
   assert.equal(feedbackLog.length, 2, "proposer is called once per round up to the ceiling");
   assert.equal(feedbackLog[0]?.priorCandidates.length, 0, "round 1 has no prior candidates yet");
   assert.equal(feedbackLog[1]?.priorCandidates.length, 1, "round 2 receives round 1's scored candidate as feedback");
+});
+
+// ---- onRound observer (Slice 5a, design delta §B) — optional, backwards-compatible seam ----
+
+// Case 7: constructing WITHOUT the optional 3rd ctor arg behaves byte-identical to today. This is
+// the regression guard: every existing test above passes only (proposer, ceiling) and must keep
+// behaving exactly as it did before onRound existed.
+test("onboard: constructing without onRound behaves byte-identical to today (regression guard)", async () => {
+  const service = new OnboardingService(fixedProposer([CORRECT_PROFILE], []), 3);
+  const result = await service.onboard([backendRepo], frontendRepo);
+
+  assert.notEqual(result.profile, null);
+  assert.deepEqual(result.profile, CORRECT_PROFILE);
+  assert.equal(result.rounds, 1);
+});
+
+// Case 8: onRound fires once per round, AFTER selectBestProfile, with the correct progress shape.
+test("onboard: onRound fires once per round with round/proposed/scored/bestResolvedScore", async () => {
+  const progress: OnboardingRoundProgress[] = [];
+  const service = new OnboardingService(
+    byRoundProposer({ 1: [WRONG_RECEIVER_PROFILE], 2: [CORRECT_PROFILE] }),
+    3,
+    (p) => progress.push(p),
+  );
+  const result = await service.onboard([backendRepo], frontendRepo);
+
+  assert.deepEqual(result.profile, CORRECT_PROFILE);
+  assert.equal(progress.length, 2, "onRound fires once per round actually run (2, since round 2 resolves)");
+  assert.deepEqual(progress[0], { round: 1, proposed: 1, scored: 1, bestResolvedScore: 0 });
+  assert.equal(progress[1]?.round, 2);
+  assert.equal(progress[1]?.proposed, 1);
+  assert.equal(progress[1]?.scored, 2, "scored accumulates across rounds (round 1's candidate + round 2's)");
+  assert.ok(progress[1] !== undefined && progress[1].bestResolvedScore > 0, "round 2's bestResolvedScore reflects the winning candidate");
+});
+
+// Case 9: a THROWING onRound callback does not crash onboard() — the round completes normally and
+// the loop still advances (proves the try { this.onRound?.(...) } catch {} wrap).
+test("onboard: a throwing onRound callback does not crash onboard() — the round completes and the loop advances", async () => {
+  let calls = 0;
+  const throwingOnRound = (): void => {
+    calls += 1;
+    throw new Error("onRound boom");
+  };
+  const service = new OnboardingService(
+    byRoundProposer({ 1: [WRONG_RECEIVER_PROFILE], 2: [CORRECT_PROFILE] }),
+    3,
+    throwingOnRound,
+  );
+  const result = await service.onboard([backendRepo], frontendRepo);
+
+  assert.equal(calls, 2, "onRound was invoked both rounds despite throwing every time");
+  assert.deepEqual(result.profile, CORRECT_PROFILE, "the loop completed normally and resolved the winner");
+  assert.equal(result.rounds, 2);
 });

@@ -1,9 +1,11 @@
-// scripts/yaml/write-boundaries.ts
+// src/server/onboarding/write-boundaries.ts
 // Hand-built writer for an app's `boundaries:` block in config/apps/<app>.yaml — the exact
 // inverse of the READ side (yaml-boundary-profile.adapter.ts's REQUIRED_HTTP_STRING_FIELDS /
-// REQUIRED_EVENT_PATTERN_STRING_FIELDS). Deliberately does NOT run `yaml.stringify` on the whole
-// document: that would drop comments and re-flow unrelated `${VAR}` placeholders, churning the
-// diff for a human reviewer (design §D). Instead this module:
+// REQUIRED_EVENT_PATTERN_STRING_FIELDS). Re-homed under src/server/onboarding/ in Slice 5a (design
+// delta §A) — pure string splice, no I/O, no import changes needed beyond relocation. Deliberately
+// does NOT run `yaml.stringify` on the whole document: that would drop comments and re-flow
+// unrelated `${VAR}` placeholders, churning the diff for a human reviewer (design §D). Instead
+// this module:
 //   1. serializeBoundary(profile) — hand-builds the lines for ONE profile, mirroring
 //      config/apps/example.yaml's boundaries[] format verbatim.
 //   2. spliceBoundariesBlock(doc, lines) — detects an existing top-level `boundaries:` key (plus
@@ -11,7 +13,7 @@
 //      appends a new block when absent. Every other line in the document — comments, other
 //      `${VAR}` placeholders — survives byte-identical, because only the `boundaries:` span is
 //      ever touched.
-import type { BoundaryProfile } from "../../qa-engine/src/contexts/service-topology/domain/index.ts";
+import type { BoundaryProfile } from "@contexts/service-topology/domain/index.ts";
 
 const INDENT = "  ";
 

@@ -1,7 +1,7 @@
 import { createServer, IncomingMessage } from "node:http";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { writeFileSync, readFileSync, chmodSync, rmSync, unlinkSync } from "node:fs";
+import { writeFileSync, readFileSync, chmodSync, rmSync, unlinkSync, existsSync } from "node:fs";
 import { JobQueue } from "./server/queue";
 import { handleWebhook } from "./server/webhook";
 import { loadAppConfig, loadAppConfigsByRepo, listAppConfigs } from "./orchestrator/config-loader";
@@ -24,8 +24,8 @@ import { pruneMirrors, defaultMirrorPruneDeps, getDirectorySize } from "./server
 import { buildArtifactBytesMetrics, type ArtifactSizeCache } from "./server/metrics";
 import { createMaintainerRuntime } from "./server/maintainer-runtime";
 import { installHttpDispatcher } from "./util/net";
-import { resolveRef, defaultMirrorDeps } from "./integrations/repo-mirror";
-import { askAssistant, AgentDeps, getOpenSessionCount } from "./integrations/opencode-client";
+import { resolveRef, defaultMirrorDeps, ensureMirrorAtBranch } from "./integrations/repo-mirror";
+import { askAssistant, AgentDeps, getOpenSessionCount, defaultAgentDeps } from "./integrations/opencode-client";
 import { createAgentRuntimeManager } from "./server/agent-runtime";
 import { CodexRuntimeStrategy, OpenCodeRuntimeStrategy } from "./agent-runtime";
 import { appendLog, appendActivity, deleteAppHistory, runVerdictCounts } from "./server/history";
@@ -35,6 +35,9 @@ import { createApp as adminCreateApp, updateApp as adminUpdateApp, deleteApp as 
 import { writeConfig, configExists } from "./server/onboard";
 import { applyEnvVars, defaultEnvStoreFs } from "./server/env-store";
 import { logJson } from "./integrations/logger";
+import { createOnboardingJob } from "./server/onboarding/onboarding-job";
+import { LlmProfileProposerAdapter, PROPOSER_MODEL } from "./server/onboarding/llm-profile-proposer.adapter";
+import { OnboardingService } from "@contexts/service-topology/application/onboarding-service";
 
 const SELF_REPO = process.env.AI_PIPELINE_REPO ?? "ArielFalcon/ai-pipeline";
 const ROOT = process.env.AI_PIPELINE_ROOT ?? process.cwd();
@@ -379,6 +382,46 @@ const appAdminDeps: AppAdminDeps = {
 const buildTrends = (app: string, window?: number) =>
   toTrendsView({ app, outcomes: listRunOutcomes(app, 100), records: listRecords(app, 100), now: new Date().toISOString(), window });
 
+// Slice 5a: server-side boundary-profile onboarding job (design delta §C). ONE in-memory job for
+// the whole process — independent of the QA run queue (its own mutex), gated by a runner-busy
+// fail-fast guard so it never provisions mirrors while a QA run is active against the same mirrors
+// (the symmetric mirror-clobber risk, design §C).
+function opencodeConfigPath(): string {
+  return process.env.OPENCODE_CONFIG ?? join(ROOT, "agents", "opencode.json");
+}
+
+// Env-guard part 2 (design §C, spec E5): the qa-proposer agent must be DECLARED on the target
+// opencode config before a session is ever opened — a missing agent otherwise yields an opaque
+// UnknownError deep inside session.prompt (engram #1075). A static config read is a cheap,
+// deterministic pre-flight; the adapter's own fail-open catch remains the runtime backstop for
+// anything this check cannot see (e.g. the server process not actually running the declared agent).
+async function hasProposerAgentConfigured(): Promise<boolean> {
+  try {
+    const path = opencodeConfigPath();
+    if (!existsSync(path)) return false;
+    const raw = JSON.parse(readFileSync(path, "utf8")) as { agent?: Record<string, unknown> };
+    return Boolean(raw.agent?.["qa-proposer"]);
+  } catch {
+    return false;
+  }
+}
+
+const onboardingJob = createOnboardingJob({
+  isRunnerBusy: () => {
+    const running = currentRun();
+    return queue.size > 0 || (running !== undefined && running.status === "running");
+  },
+  ensureMirrorAtBranch: (repo, baseBranch) =>
+    ensureMirrorAtBranch(repo, baseBranch, defaultMirrorDeps),
+  hasOpencodeApiKey: () => Boolean(process.env.OPENCODE_API_KEY),
+  hasProposerAgent: () => hasProposerAgentConfigured(),
+  buildProposer: (ctx) => new LlmProfileProposerAdapter(defaultAgentDeps, PROPOSER_MODEL, ctx),
+  buildOnboardingService: (proposer, onRound) => new OnboardingService(proposer, 3, onRound),
+  readConfig: (path) => readFileSync(path, "utf8"),
+  writeConfig: (path, content) => writeFileSync(path, content, "utf8"),
+  configPath: (app) => join(ROOT, "config", "apps", `${app}.yaml`),
+});
+
 const apiDeps: ApiDeps = {
   queue,
   enqueue: enqueueApiRun,
@@ -389,6 +432,24 @@ const apiDeps: ApiDeps = {
   deleteApp: (name, purge) => adminDeleteApp(name, purge, appAdminDeps),
   listRepos: (owner, page) => github.listRepos(owner, page),
   runEvents,
+  // Slice 5a: boundary-profile onboarding job — one process-wide job (createOnboardingJob's own
+  // mutex), independent of the QA run queue. `repo`/`services` default to the app's OWN config
+  // when the request body omits them (design §C).
+  boundaries: {
+    propose: (name, input) => {
+      let app;
+      try {
+        app = loadAppConfig(name);
+      } catch {
+        return { ok: false, error: `app not found: '${name}'` };
+      }
+      const repo = input.repo ?? app.repo;
+      const services = input.services ?? app.services?.map((s) => s.repo) ?? [];
+      return onboardingJob.propose({ app: name, repo, services, baseBranch: app.baseBranch });
+    },
+    status: () => onboardingJob.status(),
+    confirm: () => onboardingJob.confirm(),
+  },
   // Phase 0b: expose agent_turns for the /api/runs/:id/turns endpoint.
   getAgentTurns: (runId) => getAgentTurns(runId),
   // Phase 8: holistic telemetry analysis for /api/apps/:app/telemetry.

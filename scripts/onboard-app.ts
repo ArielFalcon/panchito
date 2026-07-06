@@ -25,9 +25,9 @@ import { join } from "node:path";
 import { MirrorRegistryAdapter } from "../qa-engine/src/contexts/service-topology/infrastructure/mirror-registry.adapter.ts";
 import { OnboardingService, type OnboardingResult } from "../qa-engine/src/contexts/service-topology/application/onboarding-service.ts";
 import type { RepoRef } from "../qa-engine/src/contexts/service-topology/domain/index.ts";
-import { LlmProfileProposerAdapter, PROPOSER_MODEL } from "./adapters/llm-profile-proposer.adapter.ts";
+import { LlmProfileProposerAdapter, PROPOSER_MODEL } from "../src/server/onboarding/llm-profile-proposer.adapter.ts";
 import { defaultAgentDeps } from "../src/integrations/opencode-client";
-import { serializeBoundary, spliceBoundariesBlock } from "./yaml/write-boundaries.ts";
+import { serializeBoundary, spliceBoundariesBlock } from "../src/server/onboarding/write-boundaries.ts";
 
 const EXIT = {
   RESOLVED: 0,
