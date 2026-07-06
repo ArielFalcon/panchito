@@ -67,7 +67,7 @@ func TestHealthDots(t *testing.T) {
 	s.agent.Health = &struct {
 		Codex    *contract.AgentProviderHealth `json:"codex,omitempty"`
 		Opencode *contract.AgentProviderHealth `json:"opencode,omitempty"`
-	}{Opencode: &contract.AgentProviderHealth{Status: contract.Healthy}}
+	}{Opencode: &contract.AgentProviderHealth{Status: contract.AgentProviderHealthStatusHealthy}}
 	if dots := healthDots(s); !strings.Contains(dots, "●") {
 		t.Fatalf("expected a health dot, got %q", dots)
 	}
@@ -137,10 +137,10 @@ func TestSystemLoadedUpdatesShell(t *testing.T) {
 }
 
 func TestHealthDotStoppedVsHealthy(t *testing.T) {
-	if got := healthDot(contract.Stopped); !strings.Contains(got, "○") {
+	if got := healthDot(contract.AgentProviderHealthStatusStopped); !strings.Contains(got, "○") {
 		t.Fatalf("stopped health = %q, want a hollow ○ (distinct from active)", got)
 	}
-	if got := healthDot(contract.Healthy); !strings.Contains(got, "●") {
+	if got := healthDot(contract.AgentProviderHealthStatusHealthy); !strings.Contains(got, "●") {
 		t.Fatalf("healthy health = %q, want a filled ●", got)
 	}
 }

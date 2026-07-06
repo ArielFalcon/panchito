@@ -144,7 +144,7 @@ func TestAgentRuntimeMethodsUseContractPaths(t *testing.T) {
 	if models, err := c.ListAgentModels(context.Background(), "codex"); err != nil || models.Models[0].Id != "gpt-5.4" {
 		t.Fatalf("ListAgentModels = %+v, %v", models, err)
 	}
-	if restart, err := c.RestartAgentProvider(context.Background(), "opencode"); err != nil || restart.Health.Status != contract.Healthy {
+	if restart, err := c.RestartAgentProvider(context.Background(), "opencode"); err != nil || restart.Health.Status != contract.AgentProviderHealthStatusHealthy {
 		t.Fatalf("RestartAgentProvider = %+v, %v", restart, err)
 	}
 
@@ -227,3 +227,56 @@ func TestAppOnboardingMethodsUseContractPaths(t *testing.T) {
 	assertReq(3, http.MethodDelete, "/api/v1/apps/shop", "purge=1")
 	assertReq(4, http.MethodGet, "/api/v1/repos", "owner=org&page=2")
 }
+
+// TestBoundaryOnboardingMethodsUseContractPaths pins the 3 boundary-onboarding verbs
+// (propose/status/confirm) to the paths the server registers (design §D.1): same
+// c.do(...) shape as every other verb, so auth header + error mapping are already
+// covered by the shared do() tests above — this only proves method/path/body wiring.
+func TestBoundaryOnboardingMethodsUseContractPaths(t *testing.T) {
+	type seenRequest struct {
+		method string
+		path   string
+		body   string
+	}
+	var seen []seenRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		seen = append(seen, seenRequest{method: r.Method, path: r.URL.Path, body: string(data)})
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/apps/shop/boundaries/propose":
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"state":"resolvingMirrors","app":"shop","round":0,"ceiling":3,"candidatesScored":0,"startedAt":"2026-07-06T00:00:00.000Z"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/apps/shop/boundaries/propose/status":
+			_, _ = w.Write([]byte(`{"state":"proposing","app":"shop","round":1,"ceiling":3,"candidatesScored":2,"startedAt":"2026-07-06T00:00:00.000Z"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/apps/shop/boundaries/confirm":
+			_, _ = w.Write([]byte(`{"ok":true,"name":"shop"}`))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "")
+	if status, err := c.ProposeBoundaries(context.Background(), "shop", contract.ProposeBoundariesInput{Repo: strPtr("org/shop")}); err != nil || status.State != contract.OnboardingJobStatusStateResolvingMirrors {
+		t.Fatalf("ProposeBoundaries = %+v, %v", status, err)
+	}
+	if status, err := c.GetBoundaryStatus(context.Background(), "shop"); err != nil || status.State != contract.OnboardingJobStatusStateProposing || status.Round != 1 {
+		t.Fatalf("GetBoundaryStatus = %+v, %v", status, err)
+	}
+	if res, err := c.ConfirmBoundaries(context.Background(), "shop", contract.ConfirmBoundariesInput{Confirm: true}); err != nil || res.Name == nil || *res.Name != "shop" {
+		t.Fatalf("ConfirmBoundaries = %+v, %v", res, err)
+	}
+
+	if seen[0].method != http.MethodPost || seen[0].path != "/api/v1/apps/shop/boundaries/propose" || !strings.Contains(seen[0].body, `"repo":"org/shop"`) {
+		t.Fatalf("propose request: %+v", seen[0])
+	}
+	if seen[1].method != http.MethodGet || seen[1].path != "/api/v1/apps/shop/boundaries/propose/status" {
+		t.Fatalf("status request: %+v", seen[1])
+	}
+	if seen[2].method != http.MethodPost || seen[2].path != "/api/v1/apps/shop/boundaries/confirm" || !strings.Contains(seen[2].body, `"confirm":true`) {
+		t.Fatalf("confirm request: %+v", seen[2])
+	}
+}
+
+func strPtr(s string) *string { return &s }

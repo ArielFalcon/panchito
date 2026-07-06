@@ -78,13 +78,13 @@ func healthDots(sys systemState) string {
 func healthDot(status contract.AgentProviderHealthStatus) string {
 	col, glyph := colFaint, "●"
 	switch status {
-	case contract.Healthy:
+	case contract.AgentProviderHealthStatusHealthy:
 		col = colPass
-	case contract.Degraded, contract.Starting:
+	case contract.AgentProviderHealthStatusDegraded, contract.AgentProviderHealthStatusStarting:
 		col = colFlaky
-	case contract.Failed, contract.NeedsConfig:
+	case contract.AgentProviderHealthStatusFailed, contract.AgentProviderHealthStatusNeedsConfig:
 		col = colFail
-	case contract.Stopped:
+	case contract.AgentProviderHealthStatusStopped:
 		col, glyph = colFaint, "○" // intentionally not running — hollow + dim, distinct from a configured provider
 	}
 	return lipgloss.NewStyle().Foreground(col).Render(glyph)

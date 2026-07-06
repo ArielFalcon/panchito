@@ -26,25 +26,27 @@ const (
 	screenHelp
 	screenIntelligence
 	screenReport
+	screenBoundaryPropose
 )
 
 type Model struct {
-	screen        screen
-	client        *api.Client
-	serverVersion string // from the connect handshake; shown in the persistent status bar
-	width         int
-	height        int
-	connect       connectModel
-	dashboard     dashboardModel
-	launcher      launcherModel
-	live          liveModel
-	history       historyModel
-	agent         agentModel
-	appAdmin      appAdminModel
-	help          helpModel
-	intelligence  intelligenceModel
-	report        reportModel
-	reportOrigin  screen // the screen the report was opened from, to return there on esc
+	screen          screen
+	client          *api.Client
+	serverVersion   string // from the connect handshake; shown in the persistent status bar
+	width           int
+	height          int
+	connect         connectModel
+	dashboard       dashboardModel
+	launcher        launcherModel
+	live            liveModel
+	history         historyModel
+	agent           agentModel
+	appAdmin        appAdminModel
+	help            helpModel
+	intelligence    intelligenceModel
+	report          reportModel
+	reportOrigin    screen // the screen the report was opened from, to return there on esc
+	boundaryPropose boundaryProposeModel
 
 	// sys is the ambient control-plane snapshot the shell polls in the background;
 	// the persistent status bar (and the dashboard) read from it.
@@ -217,6 +219,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appAdmin.width = m.width
 		m.screen = screenAppAdmin
 		return m, m.appAdmin.Init()
+	case onboardBoundariesMsg:
+		m.boundaryPropose = newBoundaryProposeModel(m.client, msg.app)
+		m.boundaryPropose.width = m.width
+		m.boundaryPropose.height = m.bodyHeight()
+		m.screen = screenBoundaryPropose
+		return m, m.boundaryPropose.Init()
+	case confirmedBoundariesMsg:
+		if len(msg.apps) > 0 {
+			m.sys.apps = msg.apps
+		}
+		m.dashboard = newDashboardModel(m.client)
+		m.dashboard.width = m.width
+		m.dashboard.sys = m.sys
+		m.dashboard.status = msg.status
+		m.screen = screenDashboard
+		return m, m.dashboard.Init()
 	case appsChangedMsg:
 		m.sys.apps = msg.apps
 		m.dashboard = newDashboardModel(m.client)
@@ -256,6 +274,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.intelligence, cmd = m.intelligence.Update(msg)
 	case screenReport:
 		m.report, cmd = m.report.Update(msg)
+	case screenBoundaryPropose:
+		m.boundaryPropose, cmd = m.boundaryPropose.Update(msg)
 	}
 	return m, cmd
 }
@@ -309,6 +329,8 @@ func (m Model) screenView() string {
 		return m.intelligence.View()
 	case screenReport:
 		return m.report.View()
+	case screenBoundaryPropose:
+		return m.boundaryPropose.View()
 	default:
 		return m.connect.View()
 	}

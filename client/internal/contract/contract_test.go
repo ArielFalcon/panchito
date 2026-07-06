@@ -43,3 +43,67 @@ func TestCreateRunResultCarriesTarget(t *testing.T) {
 		t.Fatalf("target not decoded: %q", res.Target)
 	}
 }
+
+// Decoding the orchestrator's real GET /api/v1/apps/:name/boundaries/propose/status
+// payload (see src/server/onboarding/onboarding-job.ts → OnboardingJobStatusSchema)
+// into the codegen'd struct — the same no-drift guarantee as RunRecord above, now for
+// the boundary-onboarding job's poll DTO. Two shapes: a winner (outcome + resolvedProfile
+// set) and a no-profile completion (outcome set, resolvedProfile absent).
+func TestOnboardingJobStatusDecodesWinnerFromServerJSON(t *testing.T) {
+	const payload = `{
+		"state":"done","app":"shop","round":2,"ceiling":3,"candidatesScored":5,
+		"lastResolvedScore":0.92,
+		"resolvedProfile":{
+			"transport":"http","frontFiles":"src/api/shop.ts",
+			"frontCallSite":{"kind":"fetch","receiver":"shopClient"},
+			"servicePrefixTemplate":"/api/shop","serviceRepoTemplate":"org/shop-svc",
+			"openApiPath":"openapi/shop.yaml"
+		},
+		"outcome":"winner",
+		"startedAt":"2026-07-06T00:00:00.000Z","finishedAt":"2026-07-06T00:02:00.000Z"
+	}`
+	var s OnboardingJobStatus
+	if err := json.Unmarshal([]byte(payload), &s); err != nil {
+		t.Fatalf("decode OnboardingJobStatus (winner): %v", err)
+	}
+	if s.State != OnboardingJobStatusStateDone || s.App == nil || *s.App != "shop" || s.Round != 2 || s.Ceiling != 3 || s.CandidatesScored != 5 {
+		t.Fatalf("unexpected header fields: %+v", s)
+	}
+	if s.Outcome == nil || *s.Outcome != Winner {
+		t.Fatalf("outcome not decoded: %v", s.Outcome)
+	}
+	if s.ResolvedProfile == nil {
+		t.Fatalf("resolvedProfile not decoded")
+	}
+	profile, err := s.ResolvedProfile.AsOnboardingJobStatusResolvedProfile0()
+	if err != nil {
+		t.Fatalf("resolvedProfile did not decode as the http variant: %v", err)
+	}
+	if profile.Transport != Http || profile.FrontFiles != "src/api/shop.ts" || profile.ServiceRepoTemplate != "org/shop-svc" {
+		t.Fatalf("http profile fields: %+v", profile)
+	}
+	if profile.FrontCallSite.Receiver == nil || *profile.FrontCallSite.Receiver != "shopClient" {
+		t.Fatalf("frontCallSite.receiver not decoded: %+v", profile.FrontCallSite)
+	}
+}
+
+func TestOnboardingJobStatusDecodesNoProfileFromServerJSON(t *testing.T) {
+	const payload = `{
+		"state":"done","app":"shop","round":3,"ceiling":3,"candidatesScored":6,
+		"outcome":"no-profile",
+		"startedAt":"2026-07-06T00:00:00.000Z","finishedAt":"2026-07-06T00:02:30.000Z"
+	}`
+	var s OnboardingJobStatus
+	if err := json.Unmarshal([]byte(payload), &s); err != nil {
+		t.Fatalf("decode OnboardingJobStatus (no-profile): %v", err)
+	}
+	if s.State != OnboardingJobStatusStateDone {
+		t.Fatalf("state not decoded: %v", s.State)
+	}
+	if s.Outcome == nil || *s.Outcome != NoProfile {
+		t.Fatalf("outcome not decoded: %v", s.Outcome)
+	}
+	if s.ResolvedProfile != nil {
+		t.Fatalf("resolvedProfile should be absent for a no-profile outcome, got %+v", s.ResolvedProfile)
+	}
+}

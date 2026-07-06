@@ -728,12 +728,12 @@ func (m *liveModel) seedFromRecord(rec contract.RunRecord) {
 	if rec.Activity != nil && m.lastFile == "" && m.lastCmd == "" {
 		for _, a := range *rec.Activity {
 			switch a.Kind {
-			case contract.File:
+			case contract.AgentActivityKindFile:
 				if a.Text != "" {
 					m.lastFile = a.Text
 					m.wroteAll = appendUnique(m.wroteAll, a.Text)
 				}
-			case contract.Command:
+			case contract.AgentActivityKindCommand:
 				if a.Text != "" {
 					m.lastCmd = a.Text
 					m.ranAll = appendUnique(m.ranAll, a.Text)

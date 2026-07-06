@@ -218,6 +218,33 @@ func (c *Client) DeleteApp(ctx context.Context, name string, purge bool) (contra
 	return out, err
 }
 
+// ── Boundary-profile onboarding (propose/status/confirm) ──────────────────────
+
+// ProposeBoundaries starts a boundary-profile onboarding job for app (or resumes polling
+// its already-running job — the server enforces the one-job mutex, see APIError 409). The
+// server provisions mirrors and proposes read-only; nothing is written until Confirm.
+func (c *Client) ProposeBoundaries(ctx context.Context, name string, in contract.ProposeBoundariesInput) (contract.OnboardingJobStatus, error) {
+	var out contract.OnboardingJobStatus
+	err := c.do(ctx, http.MethodPost, "/api/v1/apps/"+url.PathEscape(name)+"/boundaries/propose", in, &out)
+	return out, err
+}
+
+// GetBoundaryStatus polls the current (or most recent) onboarding job status for app.
+func (c *Client) GetBoundaryStatus(ctx context.Context, name string) (contract.OnboardingJobStatus, error) {
+	var out contract.OnboardingJobStatus
+	err := c.do(ctx, http.MethodGet, "/api/v1/apps/"+url.PathEscape(name)+"/boundaries/propose/status", nil, &out)
+	return out, err
+}
+
+// ConfirmBoundaries writes the job's winning boundary profile into config/apps/<name>.yaml —
+// the only write step in the onboarding flow. The server rejects (409/422) a confirm against a
+// non-winner job (no-profile, failed, or still in progress).
+func (c *Client) ConfirmBoundaries(ctx context.Context, name string, in contract.ConfirmBoundariesInput) (contract.CreateAppResult, error) {
+	var out contract.CreateAppResult
+	err := c.do(ctx, http.MethodPost, "/api/v1/apps/"+url.PathEscape(name)+"/boundaries/confirm", in, &out)
+	return out, err
+}
+
 func (c *Client) ListRepos(ctx context.Context, owner string, page int) (contract.RepoListResponse, error) {
 	q := url.Values{}
 	q.Set("owner", owner)

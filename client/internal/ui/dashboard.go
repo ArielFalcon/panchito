@@ -398,6 +398,10 @@ func (m dashboardModel) handleFleetKey(k tea.KeyMsg) (dashboardModel, tea.Cmd) {
 		if a, ok := m.selectedApp(); ok {
 			return m, func() tea.Msg { return deleteAppMsg{app: a} }
 		}
+	case "b":
+		if a, ok := m.selectedApp(); ok {
+			return m, func() tea.Msg { return onboardBoundariesMsg{app: a.Name} }
+		}
 	}
 	return m, nil
 }
@@ -938,7 +942,7 @@ func (m dashboardModel) renderFleet(w int) string {
 		if selected && focused {
 			actions := "h history · i intel"
 			if _, _, running := m.runningPhase(a.Name); !running {
-				actions += " · e edit · d delete"
+				actions += " · e edit · d delete · b boundaries"
 			}
 			b.WriteString("     " + hintStyle.Render(actions) + "\n")
 		}

@@ -42,7 +42,7 @@ func TestLiveSeedDoesNotRegressStreamFocusCard(t *testing.T) {
 
 	rec := contract.RunRecord{
 		Id: "r", App: "app", Status: "running",
-		Activity: &[]contract.AgentActivity{{Kind: contract.File, Text: "stale.spec.ts"}},
+		Activity: &[]contract.AgentActivity{{Kind: contract.AgentActivityKindFile, Text: "stale.spec.ts"}},
 	}
 	m, _ = m.Update(runSnapshotMsg{rec: rec})
 

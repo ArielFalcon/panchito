@@ -549,6 +549,7 @@ func (m appAdminModel) renderDelete() string {
 type onboardSelectedMsg struct{}
 type editAppMsg struct{ app contract.AppView }
 type deleteAppMsg struct{ app contract.AppView }
+type onboardBoundariesMsg struct{ app string }
 type reposLoadedMsg struct{ repos []contract.RepoListItem }
 type appsChangedMsg struct {
 	apps   []contract.AppView
