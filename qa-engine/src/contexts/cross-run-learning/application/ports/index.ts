@@ -3,7 +3,10 @@
 // the two-way SQLite coupling (history.ts imports applyOutcome; distiller/retrieval import history)
 // into one port, making RuleGovernance the single source of ranking truth.
 // ErrorClass stays in THIS context (no kernel leak) — modeled as a local string-literal union.
-// ReflectorPort and ProcessAuditPort are re-added co-located with their impls in Plan 6.
+// ReflectorPort is declared here (ADR-5, reflector-rewire design): its collaborators
+// (StructuredReflection, distiller, LearningRepositoryPort) all live in this context, so the port is
+// co-located with them rather than in qa-run-orchestration. ProcessAuditPort remains re-added
+// alongside its own impl in a later plan.
 
 import type { Sha } from "@kernel/sha.ts";
 import type { RunOutcome } from "@kernel/run-outcome.ts";
@@ -73,4 +76,36 @@ export interface StructuredReflection {
   evidence: string;
   rootCause: string;
   preventiveRule: { trigger: string; action: string };
+}
+
+// ADR-4 (reflector-rewire design): a NARROW projection of RunOutcome, not the wide kernel type.
+// RunOutcome.logs?/note? are STRUCTURALLY unreachable here — they are simply not fields on this
+// type — so a reflection prompt can never leak raw execution logs or diagnostic notes even if
+// buildReflectionPrompt were later widened. The use-case constructs this projection at the fold
+// call site (toReflectionInput); the adapter never reads RunOutcome directly.
+export interface ReflectionInput {
+  runId: string;
+  app: string;
+  sha: string;
+  mode: string;
+  verdict: string;
+  errorClass: ErrorClass;
+  gateSignals: {
+    static: boolean;
+    coverageRatio: number | null;
+    valueScore: number | null;
+    reviewerCorrections: string[];
+    flaky: boolean;
+    retries: number;
+  };
+}
+
+// ADR-1 (reflector-rewire design): the reflect gate is STRICTER than the fold gate at the call
+// site (shouldDistillLearning(...) AND verdict!=="flaky" AND errorClass not in E-INFRA/E-FLAKY) —
+// this port itself carries no gating logic, it only accepts whatever narrow input the use-case
+// decided to send. reflect() is fire-isolated by the adapter (ADR-2/fault isolation): a crash,
+// timeout, or malformed-JSON response must never throw past this method — see
+// ReflectorPortAdapter's own header for the full fault-isolation contract.
+export interface ReflectorPort {
+  reflect(input: ReflectionInput): Promise<void>;
 }
