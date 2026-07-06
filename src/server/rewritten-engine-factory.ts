@@ -123,8 +123,9 @@ import { shaMatches } from "../env/deploy-gate";
 import { ensureMirror, ensureMirrorAtBranch, defaultMirrorDeps, workdirRoot } from "../integrations/repo-mirror";
 import { SqliteRunHistoryAdapter } from "./run-history-sqlite-adapter";
 import { SqliteLearningRepository, type LearningStore } from "@contexts/cross-run-learning/infrastructure/sqlite-learning-repository.adapter";
-import { listLearningRules, upsertLearningRule, incrementRuleUsage, recordRuleOutcome } from "./history";
+import { listLearningRules, upsertLearningRule, incrementRuleUsage, recordRuleOutcome, updateRunOutcomeReflection } from "./history";
 import { preventionOutcome } from "@contexts/cross-run-learning/domain/rule-fold";
+import { ReflectorPortAdapter, REFLECT_TIMEOUT_MS } from "@contexts/cross-run-learning/infrastructure/reflector-port.adapter";
 import { YamlBoundaryProfileAdapter } from "@contexts/service-topology/infrastructure/yaml-boundary-profile.adapter";
 import { expandEnv } from "../orchestrator/config-loader";
 
@@ -501,6 +502,14 @@ export function buildRewrittenCompositionConfig(
     return mirror.ensureMirror(app.repo, checkoutSha.value, defaultMirrorDeps);
   };
 
+  // W3 F2 / reflector-rewire (Unit 5): ONE SqliteLearningRepository instance per composed run,
+  // wrapping the SAME learning_rules SQLite table src/server/history.ts already owns
+  // (historyLearningStore(), this module's own bridge, above). Reused for BOTH `learningRepo`
+  // (composition-root.ts's wireBridges() -> LearningPortAdapter) and the ReflectorPortAdapter's
+  // own `repo` dep below — a single source of truth, never two independently-constructed
+  // repositories racing over the same table.
+  const learningRepo = new SqliteLearningRepository(historyLearningStore(app.name));
+
   return {
     repo: app.repo,
     appName: app.name,
@@ -726,7 +735,34 @@ export function buildRewrittenCompositionConfig(
     // production had ZERO real constructors of SqliteLearningRepository anywhere — retrieval and
     // the outcome fold were both provable no-ops end-to-end, regardless of what history.ts's own
     // SQLite table held.
-    learningRepo: new SqliteLearningRepository(historyLearningStore(app.name)),
+    learningRepo,
+    // reflector-rewire (design ADR-2/ADR-5, Unit 5): this factory is the ONE module permitted to
+    // import both qa-engine's @contexts aliases AND root src/, so it is the ONLY place that can
+    // construct a real ReflectorPortAdapter — runtime (the SAME runtimeAdapter reviewRuntime.runtime
+    // above reuses, never a second AgentRuntimeManager), repo (the SAME learningRepo instance just
+    // above — one SqliteLearningRepository per app, not two independent ones), and backfill
+    // (updateRunOutcomeReflection, src/server/history.ts:750 — the host-side back-fill ADR-2
+    // documents; the use-case itself never calls this directly). REFLECTOR_TIMEOUT_MS resolves the
+    // env-name deferred at task 2.4: parsed here with the SAME `Number(process.env.X) || default`
+    // convention src/integrations/opencode-client.ts's OPENCODE_*_TIMEOUT_MS constants use (deps.env
+    // mirrors that module's own injectable-env seam, defaulting to process.env), falling back to
+    // the adapter's own REFLECT_TIMEOUT_MS (60_000) when unset/non-numeric.
+    reflectorPort: new ReflectorPortAdapter({
+      runtime: runtimeAdapter,
+      repo: learningRepo,
+      // qa-engine's ReflectionInput/StructuredReflection widen errorClass to `string` (the port's
+      // own documented kernel-widening convention — see cross-run-learning/application/ports/
+      // index.ts's ErrorClass alias); updateRunOutcomeReflection expects legacy's narrow
+      // ErrorClass string-literal union. Safe to cast here for the SAME reason
+      // historyLearningStore's own upsert() cast is safe (this module's W3 fix F3b comment,
+      // above): the ONLY genuine producer of this errorClass value is the re-ported labeler
+      // taxonomy (qa-engine's domain/helpers/error-class.ts, a verbatim port of
+      // src/qa/learning/taxonomy.ts) every RunOutcome.errorClass already derives from.
+      backfill: (runId, refl) => updateRunOutcomeReflection(runId, refl as import("../types").StructuredReflection),
+      cwd: mirrorDir,
+      app: app.name,
+      timeoutMs: Number((deps.env ?? process.env).REFLECTOR_TIMEOUT_MS) || REFLECT_TIMEOUT_MS,
+    }),
     ...(observer ? { observer } : {}),
   };
 }

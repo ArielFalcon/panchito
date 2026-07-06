@@ -71,7 +71,7 @@ import type { CoverageCollectorPort, ValueOraclePort } from "@contexts/objective
 import { PublishDecisionService } from "@contexts/workspace-and-publication/domain/publish-decision.service.ts";
 import { ShadowLogAdapter } from "@contexts/workspace-and-publication/infrastructure/shadow-log.adapter.ts";
 import type { VcsReadPort } from "@contexts/change-analysis/application/ports/index.ts";
-import type { LearningRepositoryPort } from "@contexts/cross-run-learning/application/ports/index.ts";
+import type { LearningRepositoryPort, ReflectorPort } from "@contexts/cross-run-learning/application/ports/index.ts";
 import { StubLearningRepository } from "@contexts/cross-run-learning/infrastructure/stub-learning-repository.adapter.ts";
 
 // The static per-run + collaborator surface every bridge needs. Real construction of each
@@ -249,6 +249,16 @@ export interface CompositionConfig {
 
   // LearningPort collaborator. v1 default: StubLearningRepository (a provable no-op) when absent.
   learningRepo?: LearningRepositoryPort;
+
+  // reflector-rewire (design ADR-1/ADR-5): [SWAP]-optional, mirrors learningRepo's own "absent -> a
+  // provable no-op" precedent immediately above — absent means RunQaUseCase never invokes reflect()
+  // at either fold site (dormant, pre-cutover-equivalent). Unlike learningRepo, there is no stub
+  // default constructed here: the production factory (src/server/rewritten-engine-factory.ts, the
+  // ONE module permitted to import both qa-engine's aliases AND root src/) is the ONLY place that
+  // constructs a real ReflectorPortAdapter (it needs the agent runtime + the host-side
+  // updateRunOutcomeReflection backfill, both src/-only collaborators this composition root must
+  // never import). Threaded straight through to RunQaUseCaseDeps.reflector — no default, no wrapping.
+  reflectorPort?: ReflectorPort;
 
   // WorkspacePort collaborator — resolves a Sha to its working-copy mirrorDir. Cross-repo routing
   // stays OPAQUE inside this fn (the bridge's own documented scope for Plan 6).
@@ -562,6 +572,11 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
     ...(serviceLinks ? { serviceLinks } : {}),
     ...(crossRepoImpact ? { crossRepoImpact } : {}),
     ...(cfg.observer ? { observer: cfg.observer } : {}),
+    // reflector-rewire (design ADR-1/ADR-5): mirrors observer's own conditional-spread precedent
+    // immediately above — absent cfg.reflectorPort means RunQaUseCaseDeps.reflector is omitted
+    // entirely (never a fabricated no-op stub), matching the [SWAP]-optional contract this port
+    // documents at its own declaration site above.
+    ...(cfg.reflectorPort ? { reflector: cfg.reflectorPort } : {}),
     config: {
       needsReview: cfg.needsReview,
       shadow: cfg.shadow,

@@ -305,3 +305,8 @@ The agent runtime is **provider-agnostic** (`src/agent-runtime/`): OpenCode and 
 in `single` or `dual` mode, behind one facade (the `agents` container's supervisor
 fronts both). Change-coverage is implemented and defaults to `signal` (measured, not
 yet blocking) — see [The value/trust risk](#the-valuetrust-risk-read-before-adding-quality-logic).
+The cross-run LLM failure-reflection flywheel (`qa-reflector` role) is live — a
+`ReflectorPort` runs a fault-isolated, timeout-capped reflect pass after each
+qualifying fold, distilling `candidate`/`low`-confidence rules only (never
+active), gated stricter than the deterministic learning fold (flaky/infra-class
+verdicts are excluded).

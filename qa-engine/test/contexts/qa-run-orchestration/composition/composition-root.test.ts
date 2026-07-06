@@ -116,6 +116,50 @@ test("buildProduction(rewritten) drives a full run end-to-end through the 11 wir
   assert.equal(outcome.verdict, "pass");
 });
 
+// ── reflector-rewire (design ADR-5, task 4.3 smoke test): confirms the composition root actually
+// threads cfg.reflectorPort through to RunQaUseCaseDeps.reflector — not just that the config TYPE
+// accepts the field. wireBridges() is not exported, so this drives a real run through the public
+// buildProduction() entry point and observes the fake reflector's own call count, exactly the same
+// black-box style the "shadow-log publication" test above uses for githubPr/githubIssue. ───────
+
+test("buildProduction wires cfg.reflectorPort through to RunQaUseCase — a static-gate invalid run reaches reflector.reflect()", async () => {
+  let reflectCallCount = 0;
+  const cfg = fakeConfig({
+    staticGate: { validateAll: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"], infra: false }) },
+    reflectorPort: {
+      reflect: async () => { reflectCallCount++; },
+    },
+  });
+
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "e2e",
+    runId: "composition-root-reflector-smoke",
+  });
+
+  assert.equal(outcome.verdict, "invalid");
+  assert.equal(reflectCallCount, 1, "cfg.reflectorPort must be wired through to RunQaUseCaseDeps.reflector — a static-gate invalid is gate-true (errorClass E-STATIC is not in the suppressed {E-INFRA, E-FLAKY} set)");
+});
+
+test("buildProduction omits reflector entirely when cfg.reflectorPort is absent — no behavior change on a green pass", async () => {
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, fakeConfig());
+
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "e2e",
+    runId: "composition-root-reflector-absent-smoke",
+  });
+
+  assert.equal(outcome.verdict, "pass");
+});
+
 // ── buildShadow: always rewritten, shadow-log publication, no side effects ────────────────────
 
 test("buildShadow always returns a RewrittenOrchestratorAdapter regardless of PIPELINE_ENGINE", () => {
@@ -552,7 +596,7 @@ test("buildProduction(rewritten) degrades structuralSignal to no section when th
     mode: "diff",
     codebaseMemory: {
       // No matching project for this repoDir — mirrors the real `list_projects` response for an
-      // unindexed watched app (verified empirically: ai-pipeline itself returns no match today).
+      // unindexed watched app (verified empirically: panchito itself returns no match today).
       cli: async (tool: string) => {
         if (tool === "list_projects") return { code: 0, stdout: JSON.stringify({ projects: [{ name: "some-other-app", root_path: "/mirrors/some/other" }] }), stderr: "" };
         return { code: 0, stdout: JSON.stringify({ columns: [], rows: [], total: 0 }), stderr: "" };
@@ -670,6 +714,139 @@ test("buildProduction(rewritten) leaves serviceLinks undefined when serviceTopol
 
   assert.ok(seenEnrichments.length > 0, "generationUseCase.generate must have been invoked");
   assert.equal(seenEnrichments[0]?.serviceLinks, undefined, "serviceLinks must stay entirely absent when no serviceTopology collaborator is wired");
+  assert.equal(outcome.verdict, "pass");
+});
+
+// ── Cross-repo generation-prompt parity (legacy pipeline.ts:1909, restored by d8e7106's own
+// triggerService threading): CompositionConfig.triggerService is the ONE new optional field this
+// gap closes — advisory, prompt-context only (reaches GenerationPortAdapter's ctx.service ->
+// OpencodeRunInput.service and NOTHING else: no verdict/gate/coverage/publish path reads it).
+// Present -> the generation input carries {repo, mirrorDir(, openapi)} for the TRIGGERING service.
+// Absent (the common same-repo case) -> the key is omitted entirely, matching serviceLinks/
+// crossRepoImpact's own [SWAP] precedent immediately above.
+
+test("buildProduction(rewritten) threads cfg.triggerService into OpencodeRunInput.service when the run is cross-repo", async () => {
+  const seenServices: Array<unknown> = [];
+  const cfg = fakeConfig({
+    mode: "diff",
+    repo: "org/front",
+    triggerService: { repo: "org/orders-svc", mirrorDir: "/mirrors/org__orders-svc", openapi: "openapi.yaml" },
+    generationUseCase: {
+      generate: async (input) => {
+        seenServices.push(input.service);
+        return { specs: ["a.spec.ts"], approved: true, reviewed: false };
+      },
+    },
+  });
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "e2e",
+    runId: "composition-root-trigger-service-present",
+  });
+
+  assert.ok(seenServices.length > 0, "generationUseCase.generate must have been invoked");
+  assert.deepEqual(seenServices[0], { repo: "org/orders-svc", mirrorDir: "/mirrors/org__orders-svc", openapi: "openapi.yaml" });
+  assert.equal(outcome.verdict, "pass");
+});
+
+test("buildProduction(rewritten) leaves OpencodeRunInput.service entirely absent when cfg.triggerService is not supplied (same-repo run)", async () => {
+  const seenInputs: Array<Record<string, unknown>> = [];
+  const cfg = fakeConfig({
+    mode: "diff",
+    generationUseCase: {
+      generate: async (input) => {
+        seenInputs.push(input as unknown as Record<string, unknown>);
+        return { specs: ["a.spec.ts"], approved: true, reviewed: false };
+      },
+    },
+  }); // fakeConfig()'s base never supplies triggerService
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "e2e",
+    runId: "composition-root-trigger-service-absent",
+  });
+
+  assert.ok(seenInputs.length > 0, "generationUseCase.generate must have been invoked");
+  assert.equal("service" in (seenInputs[0] ?? {}), false, "no cfg.triggerService (the common same-repo case) must OMIT the key, not set it to undefined");
+  assert.equal(outcome.verdict, "pass");
+});
+
+// ── Context-mode multi-service parity (legacy pipeline.ts:1330-1355 buildContextMap, restored by
+// this fix): CompositionConfig.services is the ONE new optional field this gap closes — advisory,
+// prompt-context ONLY (reaches GenerationPortAdapter's ctx.services -> OpencodeRunInput.services and
+// NOTHING else: no verdict/gate/coverage/publish path reads it). Present -> every declared service ref
+// reaches the generation input. Absent/empty -> the key is omitted entirely, matching triggerService's
+// own [SWAP] precedent immediately above.
+
+test("buildProduction(rewritten) threads cfg.services into OpencodeRunInput.services for a context-mode run", async () => {
+  const seenServicesList: Array<unknown> = [];
+  const cfg = fakeConfig({
+    mode: "context",
+    repo: "org/front",
+    services: [
+      { repo: "org/orders-svc", mirrorDir: "/mirrors/org__orders-svc", openapi: "openapi/orders.yaml" },
+      { repo: "org/payments-svc", mirrorDir: "/mirrors/org__payments-svc" },
+    ],
+    generationUseCase: {
+      generate: async (input) => {
+        seenServicesList.push(input.services);
+        return { specs: ["a.spec.ts"], approved: true, reviewed: false };
+      },
+    },
+  });
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "context",
+    target: "e2e",
+    runId: "composition-root-services-present",
+  });
+
+  assert.ok(seenServicesList.length > 0, "generationUseCase.generate must have been invoked");
+  assert.deepEqual(seenServicesList[0], [
+    { repo: "org/orders-svc", mirrorDir: "/mirrors/org__orders-svc", openapi: "openapi/orders.yaml" },
+    { repo: "org/payments-svc", mirrorDir: "/mirrors/org__payments-svc" },
+  ]);
+  assert.equal(outcome.verdict, "pass");
+});
+
+test("buildProduction(rewritten) leaves OpencodeRunInput.services entirely absent when cfg.services is not supplied", async () => {
+  const seenInputs: Array<Record<string, unknown>> = [];
+  const cfg = fakeConfig({
+    mode: "diff",
+    generationUseCase: {
+      generate: async (input) => {
+        seenInputs.push(input as unknown as Record<string, unknown>);
+        return { specs: ["a.spec.ts"], approved: true, reviewed: false };
+      },
+    },
+  }); // fakeConfig()'s base never supplies services
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "e2e",
+    runId: "composition-root-services-absent",
+  });
+
+  assert.ok(seenInputs.length > 0, "generationUseCase.generate must have been invoked");
+  assert.equal("services" in (seenInputs[0] ?? {}), false, "no cfg.services (the common case) must OMIT the key, not set it to undefined or an empty array");
   assert.equal(outcome.verdict, "pass");
 });
 
