@@ -1155,11 +1155,17 @@ export class RunQaUseCase {
             });
             if (regenRun.verdict === "pass") {
               const regenBaselineCases = regenRun.cases.filter((c) => c.status === "pass").map((c) => c.name);
+              // GATE FIX (coordinator review): the re-measure MUST read the regen's OWN coverage
+              // dumps — the SAME regenNamespace its own execute() call above just wrote them
+              // under — never the composition-time namespace the FIRST measure() implicitly used.
+              // Omitting this override silently re-reads the first run's stale dumps whenever the
+              // regen produced genuinely new specs, making signal2/blocksPublish measure nothing new.
               const signal2 = await this.deps.objectiveSignal.measure(
                 BlastRadius.of(input.sha, []),
                 workspace.specDir,
                 classificationDiff,
                 regenBaselineCases,
+                { namespace: regenNamespace },
               );
               // Second measure wins — comparator-visible coverageRatio now reflects the regen's own
               // signal, never a stale first-run value.

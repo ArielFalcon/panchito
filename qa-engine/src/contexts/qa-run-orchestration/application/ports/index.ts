@@ -342,7 +342,17 @@ export interface ObjectiveSignalPort {
   // previously dropped it. Optional/absent-safe: only populated when the adapter actually assembled
   // a ChangeCoverage this call (willAssemble); every pre-existing caller/stub reading only
   // {status, ratio, valueScore} keeps compiling and behaving identically — never fabricated as [].
-  measure(br: BlastRadius, specDir: string, diff?: string, baselineCases?: string[]): Promise<{ status: "pass" | "fail" | "unknown"; ratio: number | null; valueScore?: number | null; uncovered?: { file: string; lines: number[] }[] }>;
+  //
+  // opts.namespace: P2c GATE FIX (post-cutover-remediation, coordinator review) — the SAME per-call
+  // namespace override precedent as ExecutionOpts.namespace (Constraint 2) above. The adapter's dump
+  // namespace was previously fixed at COMPOSITION time (ObjectiveSignalPortStaticContext.namespace,
+  // `this.ctx.namespace`) with no per-call escape hatch — so the enforce-mode regen's re-measure
+  // silently re-read the FIRST run's dumps under the composition-time namespace, never the regen's
+  // own `${runId}-coverage-regen` dumps that its own namespace-overridden execute() call actually
+  // wrote. Optional + absent-safe: every pre-existing caller/stub that omits opts keeps reading
+  // ctx.namespace unchanged (backward compatible) — only the regen's SECOND measure() call supplies
+  // the override; the FIRST measurement is untouched.
+  measure(br: BlastRadius, specDir: string, diff?: string, baselineCases?: string[], opts?: { namespace?: string }): Promise<{ status: "pass" | "fail" | "unknown"; ratio: number | null; valueScore?: number | null; uncovered?: { file: string; lines: number[] }[] }>;
   // blocks: P2b (post-cutover-remediation) Constraint 3 — the SINGLE source of truth for whether a
   // measured status blocks publish. Delegates to DecideCoverageService.blocks() VERBATIM (the
   // keystone: only "enforce" + "fail" blocks; "unknown" never blocks regardless of mode). Exposing

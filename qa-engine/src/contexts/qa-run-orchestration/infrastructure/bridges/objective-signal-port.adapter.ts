@@ -45,7 +45,7 @@ export class ObjectiveSignalPortAdapter implements ObjectiveSignalPort {
     private readonly ctx: ObjectiveSignalPortStaticContext,
   ) {}
 
-  async measure(br: BlastRadius, specDir: string, diff?: string, baselineCases?: string[]): Promise<{ status: "pass" | "fail" | "unknown"; ratio: number | null; valueScore?: number | null; uncovered?: { file: string; lines: number[] }[] }> {
+  async measure(br: BlastRadius, specDir: string, diff?: string, baselineCases?: string[], opts?: { namespace?: string }): Promise<{ status: "pass" | "fail" | "unknown"; ratio: number | null; valueScore?: number | null; uncovered?: { file: string; lines: number[] }[] }> {
     // NAMESPACE FIX: the run's coverage dumps (V8 browser dumps AND the Playwright PW_NAMESPACE env
     // that names their directory — config/e2e/fixtures.ts, `.qa/coverage/<namespace>/`) are written
     // under the SAME namespace ExecutionPortAdapter passes to the execution strategies — which is
@@ -56,7 +56,14 @@ export class ObjectiveSignalPortAdapter implements ObjectiveSignalPort {
     // real one either). Use this.ctx.repoDir's sibling namespace context instead: the adapter's own
     // static ctx carries no namespace field, so the caller (composition-root.ts) must supply the SAME
     // cfg.branch used for execution — see ObjectiveSignalPortStaticContext.namespace below.
-    const namespace = this.ctx.namespace ?? br.sha.toString();
+    //
+    // P2c GATE FIX (post-cutover-remediation, coordinator review): opts?.namespace takes PRECEDENCE
+    // over the composition-time this.ctx.namespace, mirroring ExecutionOpts.namespace's own
+    // `o.namespace ?? this.ctx.namespace` precedent (execution-port.adapter.ts). Without this, the
+    // enforce-mode regen's re-measure() silently re-read the FIRST run's dumps under the
+    // composition-time namespace — the SAME collector call it always made — instead of the regen's
+    // own `${runId}-coverage-regen` dumps its namespace-overridden execute() call actually wrote.
+    const namespace = opts?.namespace ?? this.ctx.namespace ?? br.sha.toString();
     // CHANGED-FILES THREADING: derive the run's real changed files from the diff (reusing the
     // already-ported parseDiffHunks — no new domain logic) and pass them PER-CALL to the collector.
     // This is what lets V8BrowserCoverageAdapter/JacocoCoverageAdapter's URL/package->repo-file

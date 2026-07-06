@@ -1090,13 +1090,27 @@ test("P2c: signal mode — first measure fails, NO regen fires, NO second measur
   assert.equal(genCallCount, 1, "signal mode's regen branch must not call generate() a second time");
 });
 
-test("P2c: the regen's execute() AND its re-measure() both use the ${runId}-coverage-regen namespace", async () => {
+test("P2c: the regen's execute() AND its re-measure() both use the ${runId}-coverage-regen namespace (GATE FIX: measure-side dump attribution)", async () => {
   const capturedExecuteNamespaces: (string | undefined)[] = [];
+  const capturedMeasureNamespaces: (string | undefined)[] = [];
   let measureCallCount = 0;
   const { ports } = stubPorts({
-    measure: async () => { measureCallCount++; return { status: "fail" as const, ratio: 0.2, uncovered: [{ file: "src/a.ts", lines: [1] }] }; },
     blocks: (status) => status === "fail",
   });
+  // GATE FIX: the coordinator's review found the ORIGINAL version of this test only observed
+  // execute()'s opts.namespace — nothing asserted what the SECOND measure() call actually reads
+  // from. ObjectiveSignalPort.measure() previously had NO per-call namespace override at all (its
+  // adapter's dump namespace is fixed at composition time, this.ctx.namespace) — so the regen's
+  // re-measure silently re-read the FIRST run's dumps under the composition-time namespace, never
+  // the regen's own `${runId}-coverage-regen` dumps, whenever the regen produced genuinely new
+  // specs. This override captures the namespace threaded into EACH measure() call (via the widened
+  // opts param, mirroring unit 2's ExecutionOpts.namespace? idiom) so the fix is provably observed
+  // at the measure side, not just the execute side.
+  ports.objectiveSignal.measure = async (_br, _specDir, _diff, _baselineCases, opts) => {
+    measureCallCount++;
+    capturedMeasureNamespaces.push(opts?.namespace);
+    return { status: "fail" as const, ratio: 0.2, uncovered: [{ file: "src/a.ts", lines: [1] }] };
+  };
   ports.execution.execute = async (_specDir, opts) => {
     capturedExecuteNamespaces.push((opts as { namespace?: string } | undefined)?.namespace);
     return { verdict: "pass" as const, cases: [], logs: "" };
@@ -1111,6 +1125,12 @@ test("P2c: the regen's execute() AND its re-measure() both use the ${runId}-cove
   assert.equal(measureCallCount, 2, "the regen must have re-measured once");
   const regenExecuteCall = capturedExecuteNamespaces.find((ns) => ns?.endsWith("-coverage-regen"));
   assert.equal(regenExecuteCall, "p2c-regen-namespace-attribution-coverage-regen", "the regen's execute() must use the ${runId}-coverage-regen namespace so collect/read hit the regen's own dumps, never the first run's");
+
+  // First measure() call: no override (reads the composition-time namespace, unchanged).
+  assert.equal(capturedMeasureNamespaces[0], undefined, "the FIRST measurement must NOT carry a namespace override — unchanged behavior");
+  // Second measure() call: MUST carry the regen's own namespace override, or it silently re-reads
+  // the first run's stale dumps.
+  assert.equal(capturedMeasureNamespaces[1], "p2c-regen-namespace-attribution-coverage-regen", "the regen's re-measure() must override the namespace to the SAME ${runId}-coverage-regen namespace its own execute() wrote dumps under — otherwise signal2/blocksPublish are measured against STALE (first-run) coverage data");
 });
 
 test("FIX C: context mode NEVER calls execute() (context.json is not a Playwright spec)", async () => {

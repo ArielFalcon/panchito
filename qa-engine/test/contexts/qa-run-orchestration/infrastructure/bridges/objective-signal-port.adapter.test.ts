@@ -206,6 +206,44 @@ test("measure() falls back to br.sha.toString() when ctx.namespace is absent (ba
   assert.deepEqual(seenNamespaces, ["abc1234"]);
 });
 
+// P2c GATE FIX (post-cutover-remediation, coordinator review): opts.namespace is a PER-CALL override
+// that must take precedence over the composition-time ctx.namespace — mirrors ExecutionOpts.namespace's
+// own `o.namespace ?? this.ctx.namespace` precedent (execution-port.adapter.ts, Constraint 2). Without
+// this override, the enforce-mode regen's re-measure() call has no way to read its OWN
+// `${runId}-coverage-regen` dumps — it silently falls back to reading the composition-time namespace
+// (the FIRST run's dumps), even though its own execute() call wrote fresh dumps elsewhere.
+test("measure() opts.namespace overrides ctx.namespace for the collector call (per-call regen escape hatch)", async () => {
+  const seenNamespaces: string[] = [];
+  const collector = fakeCollector({ covered: [] }, (_specDir, namespace) => seenNamespaces.push(namespace));
+  const decide = new DecideCoverageService();
+  const oracle = fakeOracle({ valueScore: null, mutantCount: 0, killedCount: 0, details: "" });
+  const adapter = new ObjectiveSignalPortAdapter(
+    { collector, decide, oracle },
+    { policy: { mode: "signal", minRatio: 0.7 }, repoDir: "/mirrors/org/app", namespace: "qa-bot-abc1234", assembleChangeCoverage },
+  );
+
+  const br = BlastRadius.of(Sha.of("abc1234"), []);
+  await adapter.measure(br, "/mirrors/org/app/e2e", SAMPLE_DIFF, undefined, { namespace: "qa-bot-abc1234-coverage-regen" });
+
+  assert.deepEqual(seenNamespaces, ["qa-bot-abc1234-coverage-regen"], "opts.namespace must override ctx.namespace so the regen's re-measure reads its OWN coverage dumps, never the first run's");
+});
+
+test("measure() falls back to ctx.namespace when opts.namespace is absent (backward compatible — every pre-existing caller unaffected)", async () => {
+  const seenNamespaces: string[] = [];
+  const collector = fakeCollector({ covered: [] }, (_specDir, namespace) => seenNamespaces.push(namespace));
+  const decide = new DecideCoverageService();
+  const oracle = fakeOracle({ valueScore: null, mutantCount: 0, killedCount: 0, details: "" });
+  const adapter = new ObjectiveSignalPortAdapter(
+    { collector, decide, oracle },
+    { policy: { mode: "signal", minRatio: 0.7 }, repoDir: "/mirrors/org/app", namespace: "qa-bot-abc1234", assembleChangeCoverage },
+  );
+
+  const br = BlastRadius.of(Sha.of("abc1234"), []);
+  await adapter.measure(br, "/mirrors/org/app/e2e", SAMPLE_DIFF, undefined, {});
+
+  assert.deepEqual(seenNamespaces, ["qa-bot-abc1234"], "an opts bag with no namespace field must fall back to ctx.namespace unchanged");
+});
+
 // ── CHANGED-FILES THREADING ───────────────────────────────────────────────────────────────────
 
 test("measure() derives changedFiles from the diff and threads them into collect()'s optional trailing arg", async () => {
