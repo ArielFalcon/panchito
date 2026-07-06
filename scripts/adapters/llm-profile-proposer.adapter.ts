@@ -67,6 +67,17 @@ function transportShapesDoc(): string {
     "event transport:",
     '  { "transport": "event", "files": string, "eventPattern": { "kind": string, "listenerBaseType": string,',
     '    "listenerEventCall": string, "subscriberBaseType": string, "publishCall": string } }',
+    "",
+    "Field dialect — a candidate violating these scores ZERO no matter how plausible it looks:",
+    '- "frontFiles"/"files": FILENAME-SUFFIX globs only — "**/*.<suffix>" or "*.<suffix>" (e.g. "**/*.api.ts").',
+    "  Path-anchored globs (any path segment before the *) are unsupported and match NO files;",
+    "  encode the convention in the filename suffix, never in directories.",
+    '- "frontCallSite.kind": must be "receiver-verb-call" (calls shaped this.<receiver>.<verb>(...);',
+    '  put the injected client field name in "receiver").',
+    '- "eventPattern.kind": must be "class-based-domain-events".',
+    '- "openApiPath": a LITERAL repo-relative file path inside each service repo (never a glob),',
+    '  e.g. "src/main/resources/openapi/api-definition.yaml".',
+    '- Templates use {service}: e.g. "servicePrefixTemplate": "svc-{service}-api" -> "serviceRepoTemplate": "ms-{service}".',
   ].join("\n");
 }
 

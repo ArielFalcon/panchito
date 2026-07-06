@@ -13,6 +13,7 @@
   ],
   "scripts": {
     "qa": "tsx src/cli.ts",
+    "onboard": "tsx scripts/onboard-app.ts",
     "contract:gen": "tsx scripts/gen-openapi.ts",
     "sdk:gen": "openapi-typescript contract/openapi.json -o packages/sdk/src/types.gen.ts",
     "sdk:typecheck": "tsc -p packages/sdk",

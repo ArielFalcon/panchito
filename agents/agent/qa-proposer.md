@@ -27,18 +27,33 @@ create, edit or run anything, and never write a spec or any file.
 ## Transport shapes (BoundaryProfile)
 
 Every candidate is discriminated by `transport`. Use the exact field names below — the scorer parses
-them structurally.
+them structurally, and several fields accept ONLY a closed dialect. A candidate violating the dialect
+scores zero no matter how plausible it looks:
+
+- **File globs** (`frontFiles`, `files`): FILENAME-SUFFIX globs only — `**/*.<suffix>` or `*.<suffix>`
+  (e.g. `**/*.api.ts` matches every file ending `.api.ts` at any depth). Path-anchored globs like
+  `src/app/features/*/api/*.api.ts` are UNSUPPORTED and match no files at all. Encode the directory
+  convention in the filename suffix, never in path segments.
+- **`frontCallSite.kind`**: must be a supported extractor kind. Supported today: `"receiver-verb-call"`
+  — calls shaped `this.<receiver>.<verb>(...)` where `receiver` names the injected client field
+  (put that field name in `receiver`).
+- **`eventPattern.kind`**: must be a supported extractor kind. Supported today:
+  `"class-based-domain-events"` — listeners/subscribers detected by base type + call shape.
+- **`openApiPath`**: a LITERAL repo-relative file path inside each service repo (e.g.
+  `src/main/resources/openapi/api-definition.yaml`) — never a glob.
+- **Templates** (`servicePrefixTemplate`, `serviceRepoTemplate`): use `{service}` as the placeholder
+  (e.g. prefix `svc-{service}-api` → repo `ms-{service}`).
 
 ### `http`
 
 ```json
 {
   "transport": "http",
-  "frontFiles": "<glob for the frontend files that make the call, e.g. src/app/**/*.service.ts>",
-  "frontCallSite": { "kind": "<how the call is made, e.g. httpClient.get>", "receiver": "<optional: the injected client/base URL symbol>" },
-  "servicePrefixTemplate": "<URL prefix template that names the target service, e.g. /api/{service}>",
+  "frontFiles": "<filename-suffix glob for the frontend files that make the call, e.g. **/*.api.ts>",
+  "frontCallSite": { "kind": "receiver-verb-call", "receiver": "<the injected client field, e.g. rest>" },
+  "servicePrefixTemplate": "<URL/client prefix template naming the target service, e.g. svc-{service}-api>",
   "serviceRepoTemplate": "<repo-name template the prefix maps to, e.g. ms-{service}>",
-  "openApiPath": "<glob/path to the OpenAPI/Swagger spec the service exposes>"
+  "openApiPath": "<literal path to the service's OpenAPI file, e.g. src/main/resources/openapi/api-definition.yaml>"
 }
 ```
 
@@ -47,13 +62,13 @@ them structurally.
 ```json
 {
   "transport": "event",
-  "files": "<glob for the files that publish or subscribe to events>",
+  "files": "<filename-suffix glob for the files that publish or subscribe to events, e.g. **/*.java>",
   "eventPattern": {
-    "kind": "<the messaging convention, e.g. spring-application-event>",
+    "kind": "class-based-domain-events",
     "listenerBaseType": "<the base type/interface a listener implements>",
-    "listenerEventCall": "<the method/annotation that marks a listener, e.g. @EventListener>",
+    "listenerEventCall": "<the method that marks a listener>",
     "subscriberBaseType": "<the base type/interface a subscriber extends>",
-    "publishCall": "<the call site that publishes an event, e.g. eventPublisher.publishEvent>"
+    "publishCall": "<the call site that publishes an event, e.g. eventPublisher.publish>"
   }
 }
 ```
@@ -63,5 +78,5 @@ them structurally.
 End with ONLY this JSON (no prose after it):
 
 ```json
-{"candidates":[{"transport":"http","frontFiles":"src/app/**/*.service.ts","frontCallSite":{"kind":"httpClient.get","receiver":"HttpClient"},"servicePrefixTemplate":"/services/{service}/api","serviceRepoTemplate":"ms-{service}","openApiPath":"**/v3/api-docs/**"}]}
+{"candidates":[{"transport":"http","frontFiles":"**/*.api.ts","frontCallSite":{"kind":"receiver-verb-call","receiver":"rest"},"servicePrefixTemplate":"svc-{service}-api","serviceRepoTemplate":"ms-{service}","openApiPath":"src/main/resources/openapi/api-definition.yaml"}]}
 ```
