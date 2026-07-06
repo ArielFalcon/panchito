@@ -179,10 +179,28 @@ export function hardenGitArgs(args: readonly string[]): string[] {
   return ["-c", "core.hooksPath=/dev/null", "-c", "safe.directory=*", ...args];
 }
 
+// A failing spawn's Error carries the FULL command line (node includes argv in err.message and
+// err.cmd) — including the -c url.insteadOf config that embeds the inline token. That error
+// propagates into logs (the maintainer's session-failed handler once logged a real PAT in
+// plaintext), so every credential span is redacted HERE, at the spawn boundary, before the error
+// can escape. Pattern-based (any x-access-token:...@) plus the live token value itself, so a
+// message that embeds the credential in an unexpected shape is still covered.
+function scrubGitError(err: Error & { cmd?: string }): Error {
+  const scrub = (text: string): string => {
+    let out = text.replace(/x-access-token:[^@\s]+@/g, "x-access-token:[REDACTED]@");
+    const token = process.env.GITHUB_TOKEN;
+    if (token) out = out.split(token).join("[REDACTED]");
+    return out;
+  };
+  err.message = scrub(err.message);
+  if (typeof err.cmd === "string") err.cmd = scrub(err.cmd);
+  return err;
+}
+
 export const realGit: Git = (args, cwd) =>
   new Promise((resolve, reject) => {
     execFile("git", hardenGitArgs(args), { cwd, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }, (err, stdout) =>
-      err ? reject(err) : resolve(stdout.toString()),
+      err ? reject(scrubGitError(err)) : resolve(stdout.toString()),
     );
   });
 

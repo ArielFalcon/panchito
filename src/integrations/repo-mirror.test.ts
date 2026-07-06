@@ -430,3 +430,22 @@ test("getRangeDiff rejects a non-hex head sha", async () => {
   const d = gitStub(() => "");
   await assert.rejects(() => getRangeDiff("/dir", "aaaa1111", "not-a-sha", d), /invalid commit sha/);
 });
+
+// Security: a failing git spawn's error message includes the FULL command line — including the
+// -c url.insteadOf config that carries the inline token. That error propagates to logs (the
+// maintainer's session-failed handler logged a real PAT in plaintext). realGit must scrub any
+// inline credential from the error before it escapes the spawn boundary.
+test("realGit scrubs inline x-access-token credentials from a failing spawn's error message", async () => {
+  const { realGit } = await import("./repo-mirror");
+  const fakeToken = "ghp_FAKEsecret1234567890abcdefghijklmnop";
+  await assert.rejects(
+    // A guaranteed-to-fail git invocation whose argv carries the credential exactly like
+    // authHeaderArgs() builds it (insteadOf rewrite with the token inline).
+    realGit(["-c", `url.https://x-access-token:${fakeToken}@github.com/.insteadOf=https://github.com/`, "clone", "file:///nonexistent/definitely-missing.git", "/tmp/qa-scrub-probe-target"], undefined),
+    (err: Error) => {
+      assert.ok(!err.message.includes(fakeToken), "the token must NOT appear in the error message");
+      assert.match(err.message, /x-access-token:\[REDACTED\]@/, "the credential span must be redacted, not dropped (the command shape stays diagnosable)");
+      return true;
+    },
+  );
+});
