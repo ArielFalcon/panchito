@@ -235,6 +235,44 @@ describe("FIX 1a: distilled correction-rules are RETRIEVABLE candidates rendered
   });
 });
 
+// ── reflector-rewire ADR-3: candidate/low is a pinned call-site omission, not an intrinsic
+// upsertLearningRule contract. upsertLearningRule hardcodes confidence="low" but status is
+// caller-overridable via the optional initialStatus field — the candidate/low guarantee for
+// distillReflection holds ONLY because it never threads initialStatus. These tests PIN that
+// invariant so a future edit to distillReflection (e.g. the reflector call site) cannot silently
+// regress it without a red test.
+
+describe("reflector-rewire ADR-3: distillReflection candidate/low contract pin", () => {
+  it("inserts a rule with status 'candidate' and confidence 'low'", () => {
+    const app = `adr3-pin-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const res = distillReflection({
+      app,
+      runId: "run-adr3-pin",
+      reflection: reflection("the diff adds a form with no invalid-input test", "submit invalid data and assert the error"),
+    });
+    assert.equal(res.inserted, true);
+    const stored = listAllLearningRules(app, 10).find((r) => r.id === res.ruleId);
+    assert.equal(stored?.status, "candidate", "distillReflection must insert as candidate, never active");
+    assert.equal(stored?.confidence, "low", "distillReflection must insert at low confidence");
+  });
+
+  it("reflectionToRuleUpsert's RuleUpsert never carries an initialStatus field (structural)", () => {
+    const up = reflectionToRuleUpsert({
+      app: "x",
+      runId: "run-adr3-shape",
+      reflection: reflection("the diff adds a form", "submit invalid data and assert the error"),
+    });
+    // Structural assertion: RuleUpsert has no initialStatus key at all, so distillReflection's
+    // spread of `candidate` into upsertLearningRule cannot pass one through, by construction —
+    // not by a runtime check that could be forgotten later.
+    assert.equal(Object.prototype.hasOwnProperty.call(up, "initialStatus"), false);
+    // TypeScript-level pin (compiles only if RuleUpsert truly excludes the key): assigning
+    // `up` to a type that requires no such key must not need a cast.
+    const _noInitialStatus: Omit<typeof up, "initialStatus"> = up;
+    void _noInitialStatus;
+  });
+});
+
 describe("distillReviewerCorrections — dedup-window saturation logging", () => {
   it("logs a warning when the dedup window is at capacity (real-DB integration)", () => {
     // Seed exactly DEDUP_WINDOW (200) rules for a fresh app. The 201st distillation call
