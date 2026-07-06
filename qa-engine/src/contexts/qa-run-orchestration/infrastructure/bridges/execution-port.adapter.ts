@@ -16,6 +16,11 @@
 // (test-execution/infrastructure/e2e-execution.strategy.ts). Backward compat: a bare AbortSignal
 // (the pre-existing 2nd positional arg shape) is normalized to `{ signal }` first — every caller
 // written against `execute(specDir, signal?)` keeps compiling and behaving identically.
+//
+// P2 (post-cutover-remediation) Constraint 2: opts.namespace, when present, OVERRIDES the static
+// ctx.namespace in BOTH the code and e2e branches — the enforce-mode coverage regen executes+
+// re-measures under a dedicated `${runId}-coverage-regen` namespace so its dumps never collide
+// with the first run's. Absent -> falls back to ctx.namespace (unchanged, backward compatible).
 import type { ExecutionPort, ExecutionOpts } from "../../application/ports/index.ts";
 import type { E2eExecutionStrategy } from "@contexts/test-execution/infrastructure/e2e-execution.strategy.ts";
 import type { CodeExecutionStrategy } from "@contexts/test-execution/infrastructure/code-execution.strategy.ts";
@@ -58,13 +63,13 @@ export class ExecutionPortAdapter implements ExecutionPort {
       // concept (ExecutionRequest.changedFiles — which files CHANGED, not which specs FAILED).
       return this.strategies.code.run({
         specDir,
-        namespace: this.ctx.namespace,
+        namespace: o.namespace ?? this.ctx.namespace,
         ...(o.signal ? { signal: o.signal } : {}),
       });
     }
     return this.strategies.e2e.run({
       specDir,
-      namespace: this.ctx.namespace,
+      namespace: o.namespace ?? this.ctx.namespace,
       ...(this.ctx.baseUrl ? { baseUrl: this.ctx.baseUrl } : {}),
       ...(o.signal ? { signal: o.signal } : {}),
       ...(this.ctx.testIdAttribute !== undefined ? { testIdAttribute: this.ctx.testIdAttribute } : {}),

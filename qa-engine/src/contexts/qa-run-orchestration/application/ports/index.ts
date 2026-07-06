@@ -293,6 +293,13 @@ export interface ExecutionOpts {
   onCase?: (c: QaCase) => void;
   onRunning?: (title: string) => void;
   onDiscovered?: (title: string, file?: string) => void;
+  // namespace: P2 (post-cutover-remediation) Constraint 2 — the enforce-mode one-shot coverage
+  // regen must execute+re-measure under a DEDICATED namespace (`${runId}-coverage-regen`) so its
+  // coverage dumps never collide with / shadow the first run's dumps under the SAME ctx.namespace
+  // (execution-port.adapter.ts previously hardcoded ctx.namespace with no override seam). Optional
+  // -> every pre-existing caller/stub keeps compiling and behaving identically (falls back to
+  // ctx.namespace, unchanged).
+  namespace?: string;
 }
 export interface ExecutionPort {
   // signal: Plan 7.1 (engram #913) — see GenerationPort's own signal note; wraps runE2E's existing
@@ -329,7 +336,13 @@ export interface ObjectiveSignalPort {
   // above: an OPTIONAL trailing arg, threaded from RunQaUseCase's own just-executed `run.cases` at
   // the measure() call site. Absent -> the adapter falls back to its static ctx.baselineCases
   // (backward compatible with every pre-existing caller/stub/test).
-  measure(br: BlastRadius, specDir: string, diff?: string, baselineCases?: string[]): Promise<{ status: "pass" | "fail" | "unknown"; ratio: number | null; valueScore?: number | null }>;
+  // uncovered: P2 (post-cutover-remediation) — the enforce-mode one-shot coverage regen needs to
+  // know WHICH lines went unmeasured so it can target regeneration there (renderCoverageGap). The
+  // adapter already computes this INSIDE assembleChangeCoverage's ChangeCoverage.uncovered and
+  // previously dropped it. Optional/absent-safe: only populated when the adapter actually assembled
+  // a ChangeCoverage this call (willAssemble); every pre-existing caller/stub reading only
+  // {status, ratio, valueScore} keeps compiling and behaving identically — never fabricated as [].
+  measure(br: BlastRadius, specDir: string, diff?: string, baselineCases?: string[]): Promise<{ status: "pass" | "fail" | "unknown"; ratio: number | null; valueScore?: number | null; uncovered?: { file: string; lines: number[] }[] }>;
 }
 export interface PublicationPort {
   // reviewerApproved/coverageBlocks/e2eChanged (audit fix, judgment-day): the REAL per-run values

@@ -211,3 +211,52 @@ test("execute() does NOT forward specFiles to the code strategy (E2E-only concep
   assert.equal((capturedOpts as { changedFiles?: string[] }).changedFiles, undefined);
   assert.equal((capturedOpts as { specFiles?: string[] }).specFiles, undefined);
 });
+
+// ── P2 (post-cutover-remediation) Constraint 2: namespace override ────────────────────────────
+// The enforce-mode coverage regen re-executes under a DEDICATED namespace (`${runId}-coverage-regen`)
+// so its coverage dumps never collide with / get shadowed by the first run's dumps. Without an
+// override every call falls back to ctx.namespace (the static per-run value), which is what the
+// regen must escape from.
+
+test("execute() forwards opts.namespace to the e2e strategy, overriding ctx.namespace", async () => {
+  let capturedOpts: unknown;
+  const e2e = new E2eExecutionStrategy(async (_specDir, opts) => {
+    capturedOpts = opts;
+    return { verdict: "pass", cases: [], logs: "" };
+  });
+  const code = new CodeExecutionStrategy(async () => ({ verdict: "pass", cases: [], logs: "" }));
+  const adapter = new ExecutionPortAdapter({ e2e, code }, { target: "e2e", baseUrl: "https://dev.example.com", namespace: "qa-bot-abc1234" });
+
+  await adapter.execute("/mirrors/org/app/e2e", { namespace: "qa-bot-abc1234-coverage-regen" });
+
+  assert.equal((capturedOpts as { namespace: string }).namespace, "qa-bot-abc1234-coverage-regen", "opts.namespace must override ctx.namespace for the e2e strategy");
+});
+
+test("execute() forwards opts.namespace to the code strategy, overriding ctx.namespace", async () => {
+  let capturedOpts: unknown;
+  const e2e = new E2eExecutionStrategy(async () => ({ verdict: "pass", cases: [], logs: "" }));
+  const code = new CodeExecutionStrategy(async (_repoDir, opts) => {
+    capturedOpts = opts;
+    return { verdict: "pass", cases: [], logs: "" };
+  });
+  const adapter = new ExecutionPortAdapter({ e2e, code }, { target: "code", namespace: "qa-bot-def5678" });
+
+  await adapter.execute("/mirrors/org/app", { namespace: "qa-bot-def5678-coverage-regen" });
+
+  assert.equal((capturedOpts as { namespace: string }).namespace, "qa-bot-def5678-coverage-regen", "opts.namespace must override ctx.namespace for the code strategy");
+});
+
+test("execute() falls back to ctx.namespace when opts.namespace is absent (backward compatible, both branches)", async () => {
+  let e2eOpts: unknown;
+  let codeOpts: unknown;
+  const e2e = new E2eExecutionStrategy(async (_specDir, opts) => { e2eOpts = opts; return { verdict: "pass", cases: [], logs: "" }; });
+  const code = new CodeExecutionStrategy(async (_repoDir, opts) => { codeOpts = opts; return { verdict: "pass", cases: [], logs: "" }; });
+
+  const e2eAdapter = new ExecutionPortAdapter({ e2e, code }, { target: "e2e", baseUrl: "https://dev.example.com", namespace: "qa-bot-abc1234" });
+  await e2eAdapter.execute("/mirrors/org/app/e2e");
+  assert.equal((e2eOpts as { namespace: string }).namespace, "qa-bot-abc1234");
+
+  const codeAdapter = new ExecutionPortAdapter({ e2e, code }, { target: "code", namespace: "qa-bot-def5678" });
+  await codeAdapter.execute("/mirrors/org/app");
+  assert.equal((codeOpts as { namespace: string }).namespace, "qa-bot-def5678");
+});

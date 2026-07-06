@@ -115,6 +115,46 @@ test("measure() delegates to the injected ChangeCoverageAssembler + DecideCovera
   assert.equal(result.ratio, 1);
 });
 
+test("measure() surfaces uncovered from the assembled ChangeCoverage when willAssemble is true", async () => {
+  // SAMPLE_DIFF adds src/checkout.ts lines 1-2; the collector reports NOTHING covered there, so
+  // both diff lines are uncovered — assembleChangeCoverage's real output threads through measure().
+  const collector = fakeCollector({ covered: [] });
+  const decide = new DecideCoverageService();
+  const oracle = fakeOracle({ valueScore: null, mutantCount: 0, killedCount: 0, details: "" });
+  const adapter = new ObjectiveSignalPortAdapter(
+    { collector, decide, oracle },
+    { policy: { mode: "enforce", minRatio: 0.7 }, repoDir: "/mirrors/org/app", assembleChangeCoverage },
+  );
+
+  const br = BlastRadius.of(Sha.of("abc1234"), ["src/checkout.ts"]);
+  const result = await adapter.measure(br, "/mirrors/org/app/e2e", SAMPLE_DIFF);
+
+  assert.deepEqual(result.uncovered, [{ file: "src/checkout.ts", lines: [1, 2] }], "uncovered lines from the assembled ChangeCoverage must surface on the measure() result");
+});
+
+test("measure() omits uncovered (undefined, never []) when willAssemble is false — no assembler, or assembler present but diff absent", async () => {
+  const collector = fakeCollector({ covered: [] });
+  const decide = new DecideCoverageService();
+  const oracle = fakeOracle({ valueScore: null, mutantCount: 0, killedCount: 0, details: "" });
+  const br = BlastRadius.of(Sha.of("abc1234"), ["src/checkout.ts"]);
+
+  // No assembler wired at all.
+  const withoutAssembler = new ObjectiveSignalPortAdapter(
+    { collector, decide, oracle },
+    { policy: { mode: "signal", minRatio: 0.7 }, repoDir: "/mirrors/org/app" },
+  );
+  const resultNoAssembler = await withoutAssembler.measure(br, "/mirrors/org/app/e2e", SAMPLE_DIFF);
+  assert.equal(resultNoAssembler.uncovered, undefined, "no assembler -> uncovered must be absent, never fabricated as []");
+
+  // Assembler wired but diff absent (non-diff modes).
+  const withAssembler = new ObjectiveSignalPortAdapter(
+    { collector, decide, oracle },
+    { policy: { mode: "enforce", minRatio: 0.7 }, repoDir: "/mirrors/org/app", assembleChangeCoverage },
+  );
+  const resultNoDiff = await withAssembler.measure(br, "/mirrors/org/app/e2e");
+  assert.equal(resultNoDiff.uncovered, undefined, "assembler present but diff absent -> uncovered must be absent");
+});
+
 test("measure() surfaces valueScore from the injected ValueOraclePort (the mutation-testing keystone companion)", async () => {
   const collector = fakeCollector({ covered: [] });
   const decide = new DecideCoverageService();

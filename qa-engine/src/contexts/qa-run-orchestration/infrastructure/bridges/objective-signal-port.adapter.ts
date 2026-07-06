@@ -45,7 +45,7 @@ export class ObjectiveSignalPortAdapter implements ObjectiveSignalPort {
     private readonly ctx: ObjectiveSignalPortStaticContext,
   ) {}
 
-  async measure(br: BlastRadius, specDir: string, diff?: string, baselineCases?: string[]): Promise<{ status: "pass" | "fail" | "unknown"; ratio: number | null; valueScore?: number | null }> {
+  async measure(br: BlastRadius, specDir: string, diff?: string, baselineCases?: string[]): Promise<{ status: "pass" | "fail" | "unknown"; ratio: number | null; valueScore?: number | null; uncovered?: { file: string; lines: number[] }[] }> {
     // NAMESPACE FIX: the run's coverage dumps (V8 browser dumps AND the Playwright PW_NAMESPACE env
     // that names their directory — config/e2e/fixtures.ts, `.qa/coverage/<namespace>/`) are written
     // under the SAME namespace ExecutionPortAdapter passes to the execution strategies — which is
@@ -90,6 +90,6 @@ export class ObjectiveSignalPortAdapter implements ObjectiveSignalPort {
     // compatible with every pre-existing composition/test.
     const oracleResult = await this.deps.oracle.measure(br, this.ctx.repoDir, namespace, baselineCases ?? this.ctx.baselineCases);
 
-    return { status, ratio, valueScore: oracleResult.valueScore };
+    return { status, ratio, valueScore: oracleResult.valueScore, ...(willAssemble && cc?.uncovered ? { uncovered: cc.uncovered } : {}) };
   }
 }
