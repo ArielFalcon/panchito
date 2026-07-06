@@ -83,7 +83,7 @@ function harness(opts: { root: string; autonomous: boolean; promptReturn: string
     getAgentDeps: () => agentDeps(opts.promptReturn),
     setShuttingDown: () => {},
     root: opts.root,
-    selfRepo: "Org/ai-pipeline",
+    selfRepo: "Org/panchito",
     autonomous: opts.autonomous,
     port: 9999,
   };
@@ -155,4 +155,139 @@ test("recoverRollbackRecord folds a boot-guard rollback bridge into failure memo
     getIncidents().some((i) => i.severity === "critical" && /crash-looped/.test(i.summary)),
     "a critical incident is recorded for the crash-loop",
   );
+});
+
+// Security (Slice 2, onboarding-hardening): the session-failed catch (maintainer-runtime.ts:362)
+// interpolates the caught error's raw .message into a console.error log. If the underlying error
+// carries a secret-shaped value (e.g. the mirror git call embeds a token before repo-mirror's own
+// scrub applies — or a future non-git error reaches this path), that log line must NOT leak it.
+// The fix routes it through redactError so this site is self-safe regardless of the error's origin.
+test("triggerMaintainer redacts a secret-shaped error before logging the session-failed line", async () => {
+  const root = freshRoot();
+  recordIncident({ source: "health-check", severity: "critical", summary: "session failure case" });
+  const secret = "ghp_SECRETvalue1234567890abcdefghijklmno";
+  // An agent whose prompt() rejects with a secret-shaped error propagates up through the inner
+  // try/finally into the outer catch (err) at maintainer-runtime.ts:362.
+  const failingAgentDeps: AgentDeps = {
+    open: async () => ({
+      id: "s1",
+      prompt: async () => {
+        throw new Error(`upstream call failed: token=${secret}`);
+      },
+      dispose: async () => {},
+    }),
+  };
+  const fx: MaintainerSideEffects = {
+    github: {
+      createPullRequest: async () => ({ url: "https://gh/pr/1", number: 1, nodeId: "n1" }),
+      mergePullRequest: async () => {},
+      enableAutoMerge: async () => {},
+      getPrStatus: async () => ({ merged: true, state: "open", checks: "success" }),
+    } as unknown as MaintainerSideEffects["github"],
+    performSwap: () => {},
+    confirmSwapHealthy: () => {},
+    rollback: () => false,
+    realSwapFs: { readMarker: () => null } as unknown as MaintainerSideEffects["realSwapFs"],
+    mirrorDeps: { exists: () => true, git: async () => "" } as unknown as MaintainerSideEffects["mirrorDeps"],
+    exec: () => {},
+    exit: (() => {}) as unknown as MaintainerSideEffects["exit"],
+    fetchHealth: async () => ({ ok: true }),
+  };
+  const cfg: MaintainerConfig = {
+    queue: { drain: async () => {} },
+    getAgentDeps: () => failingAgentDeps,
+    setShuttingDown: () => {},
+    root,
+    selfRepo: "Org/panchito",
+    autonomous: true,
+    port: 9999,
+  };
+  const rt = createMaintainerRuntime(cfg, fx);
+
+  const originalError = console.error;
+  const logged: string[] = [];
+  console.error = (msg?: unknown) => {
+    logged.push(String(msg));
+  };
+  try {
+    await rt.triggerMaintainer();
+
+    assert.ok(logged.length > 0, "the session-failed line was logged");
+    const line = logged.join("\n");
+    assert.ok(!line.includes(secret), "the raw secret must not appear in the logged line");
+    assert.match(line, /\[REDACTED_CREDENTIAL\]/, "the logged line carries the shared redaction placeholder");
+  } finally {
+    console.error = originalError;
+  }
+});
+
+// Security (Slice 2, onboarding-hardening): the post-swap npm-install-failed catch
+// (maintainer-runtime.ts:350) interpolates the caught error's raw .message. npm output CAN echo
+// .npmrc / private-registry tokens on a failing install, so this site must be redacted too — it was
+// missed by the original (too-narrow) audit because the caught variable is named `installErr`, not
+// `err`.
+test("triggerMaintainer redacts a token-shaped error before logging the post-swap npm-install-failed line", async () => {
+  const root = freshRoot();
+  recordIncident({ source: "health-check", severity: "critical", summary: "post-swap install failure case" });
+  const secret = "npm_REGISTRYtoken1234567890abcdefghijk";
+  let execCalls = 0;
+  const fx: MaintainerSideEffects = {
+    github: {
+      createPullRequest: async () => ({ url: "https://gh/pr/9", number: 9, nodeId: "n9" }),
+      mergePullRequest: async () => {},
+      enableAutoMerge: async () => {},
+      getPrStatus: async () => ({ merged: true, state: "open", checks: "success" }),
+    } as unknown as MaintainerSideEffects["github"],
+    performSwap: () => {},
+    confirmSwapHealthy: () => {},
+    rollback: () => false,
+    realSwapFs: { readMarker: () => null } as unknown as MaintainerSideEffects["realSwapFs"],
+    mirrorDeps: {
+      exists: () => true,
+      git: async (args: string[]) => {
+        if (args[0] === "status" && args[1] === "--porcelain") return " M src/foo.ts\n";
+        if (args[0] === "diff" && args[1] === "--numstat") return "1\t0\tsrc/foo.ts\n";
+        return "";
+      },
+    } as unknown as MaintainerSideEffects["mirrorDeps"],
+    exec: () => {
+      execCalls++;
+      // Calls 1-3 are the pre-deploy gate (install/typecheck/test on the fix branch) — succeed.
+      // Call 4 is the post-swap npm install (maintainer-runtime.ts:348) — fail with a token-shaped
+      // message to drive the :350 log site.
+      if (execCalls === 4) {
+        throw new Error(`npm install failed: Authorization: Bearer ${secret}`);
+      }
+    },
+    exit: (() => {
+      // Swallow the exit so the test can observe the logged line instead of terminating.
+    }) as unknown as MaintainerSideEffects["exit"],
+    fetchHealth: async () => ({ ok: true }),
+  };
+  const cfg: MaintainerConfig = {
+    queue: { drain: async () => {} },
+    getAgentDeps: () => agentDeps(fixReply()),
+    setShuttingDown: () => {},
+    root,
+    selfRepo: "Org/panchito",
+    autonomous: true,
+    port: 9999,
+  };
+  const rt = createMaintainerRuntime(cfg, fx);
+
+  const originalError = console.error;
+  const logged: string[] = [];
+  console.error = (msg?: unknown) => {
+    logged.push(String(msg));
+  };
+  try {
+    await rt.triggerMaintainer();
+
+    const line = logged.join("\n");
+    assert.ok(line.includes("post-swap npm install failed"), "the post-swap install failure line was logged");
+    assert.ok(!line.includes(secret), "the raw token must not appear in the logged line");
+    assert.match(line, /\[REDACTED_CREDENTIAL\]/, "the logged line carries the shared redaction placeholder");
+  } finally {
+    console.error = originalError;
+  }
 });

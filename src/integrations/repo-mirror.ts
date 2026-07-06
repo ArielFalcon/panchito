@@ -7,6 +7,7 @@
 import { execFile } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { redactSecrets } from "../util/redact";
 
 export type Git = (args: string[], cwd?: string) => Promise<string>;
 
@@ -188,17 +189,14 @@ export function hardenGitArgs(args: readonly string[]): string[] {
 // err.cmd) — including the -c url.insteadOf config that embeds the inline token. That error
 // propagates into logs (the maintainer's session-failed handler once logged a real PAT in
 // plaintext), so every credential span is redacted HERE, at the spawn boundary, before the error
-// can escape. Pattern-based (any x-access-token:...@) plus the live token value itself, so a
-// message that embeds the credential in an unexpected shape is still covered.
+// can escape. Stays module-private (the spawn boundary owns it) and keeps mutating the Error in
+// place — including err.cmd, which redactError alone does not touch. Delegates the actual pattern
+// matching to redact.ts's redactSecrets (onboarding-hardening Slice 2: one shared pattern source
+// for both the x-access-token:...@ shape and the live token-value split, instead of a duplicated
+// module-local copy).
 function scrubGitError(err: Error & { cmd?: string }): Error {
-  const scrub = (text: string): string => {
-    let out = text.replace(/x-access-token:[^@\s]+@/g, "x-access-token:[REDACTED]@");
-    const token = process.env.GITHUB_TOKEN;
-    if (token) out = out.split(token).join("[REDACTED]");
-    return out;
-  };
-  err.message = scrub(err.message);
-  if (typeof err.cmd === "string") err.cmd = scrub(err.cmd);
+  err.message = redactSecrets(err.message);
+  if (typeof err.cmd === "string") err.cmd = redactSecrets(err.cmd);
   return err;
 }
 

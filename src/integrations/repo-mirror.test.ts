@@ -444,8 +444,40 @@ test("realGit scrubs inline x-access-token credentials from a failing spawn's er
     realGit(["-c", `url.https://x-access-token:${fakeToken}@github.com/.insteadOf=https://github.com/`, "clone", "file:///nonexistent/definitely-missing.git", "/tmp/qa-scrub-probe-target"], undefined),
     (err: Error) => {
       assert.ok(!err.message.includes(fakeToken), "the token must NOT appear in the error message");
-      assert.match(err.message, /x-access-token:\[REDACTED\]@/, "the credential span must be redacted, not dropped (the command shape stays diagnosable)");
+      // onboarding-hardening Slice 2: scrubGitError now delegates to redact.ts's redactSecrets,
+      // which replaces the whole x-access-token:TOKEN@ span with the SHARED placeholder
+      // ([REDACTED_CREDENTIAL]), not the old module-local "[REDACTED]" literal. This is an
+      // intentional, documented consequence of consolidating on one pattern source, not a
+      // regression — the diagnostic-shape goal (command stays readable, credential span gone)
+      // is preserved.
+      assert.match(err.message, /\[REDACTED_CREDENTIAL\]/, "the credential span must be redacted, not dropped (the command shape stays diagnosable)");
       return true;
     },
   );
+});
+
+// onboarding-hardening Slice 2 (T2.3): the live GITHUB_TOKEN value itself — no x-access-token
+// prefix — must also be scrubbed. This is the secondary branch scrubGitError has always covered
+// (the literal token-value split) but that was, until now, untested; delegating to redactSecrets
+// must not silently drop it.
+test("realGit scrubs the raw GITHUB_TOKEN value (no x-access-token prefix) from a failing spawn's error message", async () => {
+  const { realGit } = await import("./repo-mirror");
+  const rawToken = "ghp_BareTokenNoPrefix9876543210abcdefgh";
+  const previousToken = process.env.GITHUB_TOKEN;
+  process.env.GITHUB_TOKEN = rawToken;
+  try {
+    await assert.rejects(
+      // Embed the bare token value directly in a failing command's argv (e.g. as a URL query
+      // param) — no x-access-token: prefix, so only the live-value branch can catch it.
+      realGit(["clone", `file:///nonexistent/definitely-missing.git?token=${rawToken}`, "/tmp/qa-scrub-probe-target-2"], undefined),
+      (err: Error) => {
+        assert.ok(!err.message.includes(rawToken), "the raw token value must NOT appear in the error message");
+        assert.match(err.message, /\[REDACTED_CREDENTIAL\]/, "the shared redaction placeholder must appear in its place");
+        return true;
+      },
+    );
+  } finally {
+    if (previousToken === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = previousToken;
+  }
 });
