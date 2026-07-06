@@ -361,6 +361,30 @@ test("buildRewrittenCompositionConfig honors coveragePolicy from app.qa.changeCo
   assert.equal(config.coveragePolicy.minRatio, 0.85);
 });
 
+// ── P2b (post-cutover-remediation) Constraint 3: single-source derivation ─────────────────────
+// Before this fix, coveragePolicyMode and coveragePolicy.mode were TWO INDEPENDENT reads of
+// `app.qa.changeCoverage?.mode ?? "signal"` at different points in the same object literal — a
+// duplicate-source bug that (if either read site drifted) could silently desynchronize the two
+// fields. This test pins config.coveragePolicyMode === config.coveragePolicy.mode ACROSS EVERY
+// mode value (not just "enforce", which the test above already covers) — coveragePolicyMode must
+// be DERIVED from coveragePolicy.mode, not independently computed.
+for (const mode of ["off", "signal", "enforce"] as const) {
+  test(`buildRewrittenCompositionConfig derives coveragePolicyMode FROM coveragePolicy.mode (single source) — mode:${mode}`, () => {
+    const app: AppConfig = { ...cfg(`factory-single-source-${mode}`), qa: { ...cfg(`factory-single-source-${mode}`).qa, changeCoverage: { mode, minRatio: 0.7 } } };
+    const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, `qa-bot-src${mode}-run`, { mode: "diff" });
+    assert.equal(config.coveragePolicyMode, config.coveragePolicy.mode, "coveragePolicyMode must equal coveragePolicy.mode — single source, never independently derived");
+    assert.equal(config.coveragePolicyMode, mode);
+  });
+}
+
+test("buildRewrittenCompositionConfig: coveragePolicyMode defaults to \"signal\" when app.qa.changeCoverage is absent, matching coveragePolicy.mode", () => {
+  const app: AppConfig = cfg("factory-no-coverage-config");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-nocov-run", { mode: "diff" });
+  assert.equal(config.coveragePolicyMode, "signal");
+  assert.equal(config.coveragePolicy.mode, "signal");
+  assert.equal(config.coveragePolicyMode, config.coveragePolicy.mode);
+});
+
 // ── CRITICAL fix (judgment-day) — branch/namespace MUST be per-run, not a static literal ─────────
 // Legacy computes a per-run namespace via testDataNamespace(prefix, sha, runId) (src/qa/test-data.ts,
 // called at src/pipeline.ts:1222) and that namespace flows into BOTH GenerationPort and

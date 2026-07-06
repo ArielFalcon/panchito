@@ -92,4 +92,11 @@ export class ObjectiveSignalPortAdapter implements ObjectiveSignalPort {
 
     return { status, ratio, valueScore: oracleResult.valueScore, ...(willAssemble && cc?.uncovered ? { uncovered: cc.uncovered } : {}) };
   }
+
+  // P2b Constraint 3: single-source blocksPublish. Delegates VERBATIM to DecideCoverageService's
+  // own blocks(status, policy) — the adapter already holds both this.deps.decide and this.ctx.policy,
+  // so the use-case never needs to re-read a duplicated mode string to make this decision.
+  blocks(status: "pass" | "fail" | "unknown"): boolean {
+    return this.deps.decide.blocks(status, this.ctx.policy);
+  }
 }

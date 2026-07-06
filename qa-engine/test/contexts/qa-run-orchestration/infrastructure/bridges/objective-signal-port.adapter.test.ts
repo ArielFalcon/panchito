@@ -289,3 +289,44 @@ test("measure() passes undefined to the oracle when NEITHER a per-call arg NOR c
 
   assert.deepEqual(seenBaselineCases, [undefined]);
 });
+
+// ── P2b (post-cutover-remediation) Constraint 3: blocks(status) — single-source blocksPublish ────
+// ObjectiveSignalPort.blocks() delegates to DecideCoverageService.blocks() VERBATIM (the keystone —
+// "enforce" + "fail" is the ONLY combination that blocks; every other combination must NOT). This
+// lets the use-case ask the port for the decision instead of re-reading a duplicated mode string.
+
+test("blocks() delegates to DecideCoverageService.blocks() verbatim: enforce+fail -> true", () => {
+  const collector = fakeCollector({ covered: [] });
+  const decide = new DecideCoverageService();
+  const oracle = fakeOracle({ valueScore: null, mutantCount: 0, killedCount: 0, details: "" });
+  const adapter = new ObjectiveSignalPortAdapter({ collector, decide, oracle }, { policy: { mode: "enforce", minRatio: 0.7 }, repoDir: "/mirrors/org/app" });
+
+  assert.equal(adapter.blocks("fail"), true, "enforce mode + fail status must block");
+});
+
+test("blocks(): signal+fail -> false (signal mode never blocks, regardless of status)", () => {
+  const collector = fakeCollector({ covered: [] });
+  const decide = new DecideCoverageService();
+  const oracle = fakeOracle({ valueScore: null, mutantCount: 0, killedCount: 0, details: "" });
+  const adapter = new ObjectiveSignalPortAdapter({ collector, decide, oracle }, { policy: { mode: "signal", minRatio: 0.7 }, repoDir: "/mirrors/org/app" });
+
+  assert.equal(adapter.blocks("fail"), false, "signal mode must never block, even on fail");
+});
+
+test("blocks(): enforce+unknown -> false (the keystone invariant — unknown NEVER blocks)", () => {
+  const collector = fakeCollector({ covered: [] });
+  const decide = new DecideCoverageService();
+  const oracle = fakeOracle({ valueScore: null, mutantCount: 0, killedCount: 0, details: "" });
+  const adapter = new ObjectiveSignalPortAdapter({ collector, decide, oracle }, { policy: { mode: "enforce", minRatio: 0.7 }, repoDir: "/mirrors/org/app" });
+
+  assert.equal(adapter.blocks("unknown"), false, "unknown must never block even in enforce mode");
+});
+
+test("blocks(): enforce+pass -> false", () => {
+  const collector = fakeCollector({ covered: [] });
+  const decide = new DecideCoverageService();
+  const oracle = fakeOracle({ valueScore: null, mutantCount: 0, killedCount: 0, details: "" });
+  const adapter = new ObjectiveSignalPortAdapter({ collector, decide, oracle }, { policy: { mode: "enforce", minRatio: 0.7 }, repoDir: "/mirrors/org/app" });
+
+  assert.equal(adapter.blocks("pass"), false, "a pass status must never block");
+});

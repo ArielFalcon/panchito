@@ -41,6 +41,7 @@ function stubPorts(overrides: Partial<{
   validate: ValidationPort["validate"];
   execute: ExecutionPort["execute"];
   measure: ObjectiveSignalPort["measure"];
+  blocks: ObjectiveSignalPort["blocks"];
   publish: PublicationPort["publish"];
   fold: LearningPort["fold"];
   retrieve: LearningPort["retrieve"];
@@ -69,6 +70,8 @@ function stubPorts(overrides: Partial<{
   };
   const objectiveSignal: ObjectiveSignalPort = {
     measure: overrides.measure ?? (async () => ({ status: "unknown", ratio: null })),
+    // Default mirrors this suite's own baseline scenario (no coverage config -> never blocks).
+    blocks: overrides.blocks ?? (() => false),
   };
   const publication: PublicationPort = {
     publish: overrides.publish ?? (async () => ({ outcome: "pr" })),

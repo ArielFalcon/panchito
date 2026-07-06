@@ -343,6 +343,12 @@ export interface ObjectiveSignalPort {
   // a ChangeCoverage this call (willAssemble); every pre-existing caller/stub reading only
   // {status, ratio, valueScore} keeps compiling and behaving identically — never fabricated as [].
   measure(br: BlastRadius, specDir: string, diff?: string, baselineCases?: string[]): Promise<{ status: "pass" | "fail" | "unknown"; ratio: number | null; valueScore?: number | null; uncovered?: { file: string; lines: number[] }[] }>;
+  // blocks: P2b (post-cutover-remediation) Constraint 3 — the SINGLE source of truth for whether a
+  // measured status blocks publish. Delegates to DecideCoverageService.blocks() VERBATIM (the
+  // keystone: only "enforce" + "fail" blocks; "unknown" never blocks regardless of mode). Exposing
+  // this through the port lets the use-case ask the port for the decision instead of re-reading a
+  // duplicated coveragePolicyMode string at each call site (the duplicate-source bug this closes).
+  blocks(status: "pass" | "fail" | "unknown"): boolean;
 }
 export interface PublicationPort {
   // reviewerApproved/coverageBlocks/e2eChanged (audit fix, judgment-day): the REAL per-run values

@@ -306,6 +306,12 @@ export function buildRewrittenCompositionConfig(
   const isCode = app.code === true;
   const target: "e2e" | "code" = isCode ? "code" : "e2e";
   const e2eRelDir = "e2e";
+  // P2b (post-cutover-remediation) Constraint 3: SINGLE source for the coverage policy. Previously
+  // `coveragePolicyMode` (below) and `coveragePolicy` (further down, feeding DecideCoverageService)
+  // independently re-read `app.qa.changeCoverage?.mode ?? "signal"` — two copies of the same value
+  // that could silently desynchronize if either read site drifted. Compute it ONCE here;
+  // `coveragePolicyMode` is DERIVED from `coveragePolicy.mode`, never re-read from app config.
+  const coveragePolicy = { mode: app.qa.changeCoverage?.mode ?? "signal", minRatio: app.qa.changeCoverage?.minRatio ?? 0.7 } as const;
   // Single shared source for the mirror root (Warning fix, judgment-day): reuse repo-mirror.ts's own
   // workdirRoot() instead of re-deriving the formula here, so this factory's `vcs`/mirrorDir can
   // never silently diverge from where ensureMirror/checkout actually write. deps.mirrorRoot remains
@@ -475,7 +481,9 @@ export function buildRewrittenCompositionConfig(
     onFailure: app.report.onFailure,
     maxRetries: app.qa.fixLoop?.maxRetries ?? 2,
     isCode,
-    coveragePolicyMode: app.qa.changeCoverage?.mode ?? "signal",
+    // Derived from coveragePolicy.mode (computed once, above) — single source, see this fn's own
+    // header comment near `const coveragePolicy = ...`.
+    coveragePolicyMode: coveragePolicy.mode,
     // The dynamic-diff fix (engram #939): GenerationPortAdapter/ReviewPortAdapter both prefer the
     // REAL per-run diff sourced from ChangeAnalysisPort.classify() over this static field, which is
     // deliberately left empty here — there is no per-run commit diff known at composition-build
@@ -606,7 +614,7 @@ export function buildRewrittenCompositionConfig(
     // optional field in this object.
     ...(app.e2e?.testIdAttribute !== undefined ? { testIdAttribute: app.e2e.testIdAttribute } : {}),
     objectiveSignal: { collector, oracle },
-    coveragePolicy: { mode: app.qa.changeCoverage?.mode ?? "signal", minRatio: app.qa.changeCoverage?.minRatio ?? 0.7 },
+    coveragePolicy,
     // THE VALUE KEYSTONE (CLAUDE.md "The value/trust risk"): turns the collector's raw CoverageReport
     // + the run's real per-run diff (threaded dynamically by ObjectiveSignalPortAdapter.measure(), the
     // SAME "dynamic diff" precedent as generationUseCase/reviewRuntime above) into the ChangeCoverage
