@@ -120,7 +120,7 @@ import { sanitizeText } from "../orchestrator/sanitizer";
 import { runMutationOracle, realMutationDeps } from "../qa/learning/mutation-code";
 import { runFaultInjectionOracle, defaultFaultInjectionDeps } from "../qa/learning/fault-injection-e2e";
 import { shaMatches } from "../env/deploy-gate";
-import { ensureMirror, defaultMirrorDeps, workdirRoot } from "../integrations/repo-mirror";
+import { ensureMirror, ensureMirrorAtBranch, defaultMirrorDeps, workdirRoot } from "../integrations/repo-mirror";
 import { SqliteRunHistoryAdapter } from "./run-history-sqlite-adapter";
 import { SqliteLearningRepository, type LearningStore } from "@contexts/cross-run-learning/infrastructure/sqlite-learning-repository.adapter";
 import { listLearningRules, upsertLearningRule, incrementRuleUsage } from "./history";
@@ -255,6 +255,14 @@ export interface RewrittenEngineFactoryDeps {
   historyFilePath?: string;
   env?: Record<string, string | undefined>;
   mirrorRoot?: string;
+  // Testability seam (cross-repo composition fix): lets a test inject spies for the two mirror
+  // primitives this factory's checkout/vcs wiring depends on, instead of touching real git/disk.
+  // Mirrors the pre-existing deps.mirrorRoot precedent — an explicit test/override seam, defaulting
+  // to the real ensureMirror/ensureMirrorAtBranch (src/integrations/repo-mirror.ts) in production.
+  mirror?: {
+    ensureMirror: typeof ensureMirror;
+    ensureMirrorAtBranch: typeof ensureMirrorAtBranch;
+  };
 }
 
 // Assembles a REAL CompositionConfig for the given AppConfig, mirroring
@@ -274,11 +282,19 @@ export interface RewrittenEngineFactoryDeps {
 // GenerationPortAdapter's/ReviewPortAdapter's own prompt assembly (composition-root.ts:187,199), so
 // a hardcoded "diff" here silently mis-prompted every non-diff run (complete/exhaustive/manual/
 // context) as if it were a diff run.
+//
+// `run.triggerRepo` (bug fix — cross-repo composition threading): the SAME per-run value the
+// runner already threads onto RunInput.triggerRepo for coverage-unknown/issue-routing/
+// CrossRepoImpact — see runner.ts's own doc. This factory previously never received it at all, so
+// vcs/checkout/the deploy gate stayed hardwired to the PRIMARY repo even on a genuine cross-repo
+// (deploy-event) run, which crashed `git checkout -f <serviceSha>` inside the primary mirror. When
+// `run.triggerRepo` names a declared `app.services[]` entry (and differs from app.repo), THIS
+// function additionally routes vcs/checkout/gate to the service — see `triggerService` below.
 export function buildRewrittenCompositionConfig(
   app: AppConfig,
   deps: RewrittenEngineFactoryDeps,
   namespace: string,
-  run: { mode: RunMode; guidance?: string },
+  run: { mode: RunMode; guidance?: string; triggerRepo?: string },
   // Bug fix: the PER-RUN ObserverPort (src/server/runner.ts's buildRewrittenObserver) — threaded
   // straight into CompositionConfig.observer so wireBridges() wires it into RunQaUseCaseDeps.
   // Optional: a caller that omits it (e.g. a unit test building a config directly) keeps every
@@ -302,6 +318,36 @@ export function buildRewrittenCompositionConfig(
   // guarantees for exactly this class of gap).
   const mirrorDir = join(mirrorRoot, app.repo.replaceAll("/", "__"));
   const e2eDir = join(mirrorDir, e2eRelDir);
+
+  // Cross-repo composition (bug fix): resolve the declared service this run was triggered from, if
+  // any. `run.triggerRepo === app.repo` is deliberately NOT cross-repo (the same-repo path) — this
+  // mirrors runner.ts's own assertTriggerRepoDeclared, which also treats an equal triggerRepo as a
+  // no-op guard. Defense in depth (matches legacy pipeline.ts:1012-1020's own two guards): runner.ts's
+  // assertTriggerRepoDeclared already rejects an undeclared triggerRepo BEFORE this factory is ever
+  // called, but this factory can also be exercised directly (as this file's own tests do), so it must
+  // not silently trust an unvalidated triggerRepo either — nor skip the sibling context-mode guard
+  // immediately below (both restored verbatim from legacy pipeline.ts).
+  const triggerService =
+    run.triggerRepo && run.triggerRepo !== app.repo
+      ? app.services?.find((s) => s.repo === run.triggerRepo)
+      : undefined;
+  if (run.triggerRepo && run.triggerRepo !== app.repo && !triggerService) {
+    throw new Error(`trigger repo ${run.triggerRepo} is not a declared service of app ${app.name}`);
+  }
+  // Sibling guard restored (matches legacy pipeline.ts:1017-1020 exactly): context mode is a whole-repo
+  // maintenance task driven from the primary repo; running it against a service trigger would pass the
+  // service diff to the architecture-map builder and contaminate the prompt with irrelevant signal.
+  if (triggerService && run.mode === "context") {
+    throw new Error(`context mode cannot be triggered by a service repo (${triggerService.repo}); run it from the primary repo ${app.repo}`);
+  }
+  // deps.mirror is a computation/test seam only: the REAL checkout below always calls
+  // ensureMirror/ensureMirrorAtBranch with `defaultMirrorDeps` (whose own root resolves through the
+  // same workdirRoot() fallback as this factory's `mirrorRoot` above), never with a caller-supplied
+  // MirrorDeps — if a future caller sets deps.mirrorRoot in production expecting checkout's real root
+  // to follow it, it will NOT; only the mirror ROOT PATH is overridable here, not the underlying
+  // MirrorDeps used to run the actual git commands.
+  const mirror = deps.mirror ?? { ensureMirror, ensureMirrorAtBranch };
+
   // CRITICAL fix (judgment-day): branch/namespace must be PER-RUN, not a static literal. A static
   // "qa-bot/rewritten" collided every run of every app on the same live-DEV test-data namespace the
   // moment PIPELINE_ENGINE=rewritten is flipped (shadow:true only suppresses PR/Issue — it still
@@ -310,7 +356,12 @@ export function buildRewrittenCompositionConfig(
   const branch = namespace;
 
   const runner = new SandboxedBinaryRunnerAdapter({ processKill: new ProcessKillAdapter() });
-  const vcs = new GitMirrorReadAdapter(mirrorDir, runner);
+  // Cross-repo composition (bug fix): the diff/classify SOURCE is the SERVICE mirror at the event
+  // sha for a cross-repo run — never the primary. Same dir formula as mirrorDir above
+  // (mirrorRoot + repo.replaceAll("/", "__")), reused verbatim so this can never silently diverge
+  // from where ensureMirror actually writes (the SAME rationale mirrorDir's own comment gives).
+  const vcsDir = triggerService ? join(mirrorRoot, triggerService.repo.replaceAll("/", "__")) : mirrorDir;
+  const vcs = new GitMirrorReadAdapter(vcsDir, runner);
 
   // Advisory structural-signal calibration gate (Slice B, design §2/ADR-B2). mode "off" disables
   // BOTH advisory collaborators (codebaseMemory + serviceTopology) below — a HALF-GATE (disabling
@@ -363,6 +414,9 @@ export function buildRewrittenCompositionConfig(
   // REAL per-run changedFiles from the dynamic diff and threads them into collect()'s optional
   // trailing arg (the "dynamic diff" precedent), so this placeholder only matters for a caller that
   // never supplies a diff (i.e. never a real production diff-mode run).
+  // repoDir/e2eDir intentionally stay PRIMARY-bound even under `triggerService`: browser coverage
+  // cannot map service-repo lines back onto the primary suite, so cross-repo coverage is "unknown"
+  // by design (never blocks publish — see CLAUDE.md's change-coverage `unknown` NEVER blocks note).
   const rawCollector = makeTargetCoverageCollector({ target, repoDir: mirrorDir, e2eDir, changedFiles: [] });
   // Code-mode coverage trigger (legacy parity: src/pipeline.ts:487 `if (input.target === "code")
   // await runCodeCoverage(input.repoDir).catch(() => {})`, BEFORE the lcov/Istanbul readers run —
@@ -387,9 +441,20 @@ export function buildRewrittenCompositionConfig(
         app.dev?.baseUrl ?? "",
       );
 
-  // WorkspacePort's checkout(sha) resolves the REAL per-run mirrorDir — the same ensureMirror the
-  // legacy runPipeline's `prepare` step calls, so both engines checkout identically.
-  const checkout = async (checkoutSha: Sha): Promise<string> => ensureMirror(app.repo, checkoutSha.value, defaultMirrorDeps);
+  // WorkspacePort's checkout(sha) resolves the REAL per-run mirrorDir. Same-repo: the single
+  // ensureMirror the legacy runPipeline's `prepare` step calls, so both engines checkout identically.
+  // Cross-repo (bug fix): the legacy contract restored — the SERVICE mirror is brought to the event
+  // sha FIRST (the diff/classify source ChangeAnalysis reads right after this resolves), THEN the
+  // PRIMARY mirror is brought to baseBranch HEAD and its dir is what the suite (setup/validate/
+  // execute/publish) actually operates on. Order matters: the service mirror must already be at the
+  // event sha before ChangeAnalysis.classify() runs.
+  const checkout = async (checkoutSha: Sha): Promise<string> => {
+    if (triggerService) {
+      await mirror.ensureMirror(triggerService.repo, checkoutSha.value, defaultMirrorDeps);
+      return mirror.ensureMirrorAtBranch(app.repo, app.baseBranch ?? "main", defaultMirrorDeps);
+    }
+    return mirror.ensureMirror(app.repo, checkoutSha.value, defaultMirrorDeps);
+  };
 
   return {
     repo: app.repo,
@@ -577,17 +642,30 @@ export function buildRewrittenCompositionConfig(
     sanitize: (text: string) => sanitizeText(text).text,
 
     checkout,
-    versionUrl: app.dev?.versionUrl,
+    // Cross-repo composition (bug fix): a cross-repo run gates on the SERVICE's own versionUrl —
+    // NEVER falls back to the primary's app.dev?.versionUrl, which would poll the primary's /version
+    // endpoint for a sha that never appears there (the event sha belongs to the service repo). A
+    // service that declares no versionUrl at all leaves this undefined on purpose: composition-root's
+    // own `cfg.versionUrl ? new DeployGatePortAdapter(...) : new NullDeployGateAdapter()` branch
+    // (the gate's single decision point) then skips the gate entirely — trust the deploy event,
+    // matching the legacy contract's "NO versionUrl on the service -> gate skipped entirely" rule.
+    versionUrl: triggerService ? triggerService.versionUrl : app.dev?.versionUrl,
     // Single-shot probe (see fetchVersion's own header) — DeployGatePortAdapter.waitUntilServing
     // is the ONLY poll loop; this fn is called once per its interval, never loops itself.
-    versionPoll: app.dev?.versionUrl
+    versionPoll: (triggerService ? triggerService.versionUrl : app.dev?.versionUrl)
       ? async (versionUrl: string, sha) => {
           const v = await fetchVersion(versionUrl);
           return { serving: shaMatches(v?.sha, sha.value) && v?.healthy === true };
         }
       : undefined,
-    deployGateIntervalMs: app.dev?.pollIntervalMs ?? 2000,
-    deployGateTimeoutMs: app.dev?.deployTimeoutMs ?? 60000,
+    // Service-level defaults (10_000/600_000) are deliberately DIFFERENT from the primary's
+    // (2000/60000) — the legacy contract's own service-level defaults, restored verbatim.
+    deployGateIntervalMs: triggerService
+      ? (triggerService.pollIntervalMs ?? 10_000)
+      : (app.dev?.pollIntervalMs ?? 2000),
+    deployGateTimeoutMs: triggerService
+      ? (triggerService.deployTimeoutMs ?? 600_000)
+      : (app.dev?.deployTimeoutMs ?? 60000),
 
     // W3 F1 (CRITICAL cutover blocker): the REAL durable RunHistoryPort by default — takes
     // precedence over historyFilePath in composition-root.ts's wireBridges(). historyFilePath stays
@@ -635,16 +713,20 @@ export function buildRewrittenCompositionConfig(
 // parity with RunnerDeps.engineFactory (src/server/runner.ts), which now threads it as a 5th
 // argument. NOT forwarded into CompositionConfig — RunQaUseCase reads previousNamespace directly
 // off RunInput/RunQaInput (set by runner.ts's runViaRewrittenEngine at the port.run(input) call
-// site, the SAME per-run seam triggerRepo/guidance already use), not off a composition-time
-// config — see CompositionConfig.cleanupCollaborators' own doc (composition-root.ts) for why this
-// field is deliberately NOT duplicated onto CompositionConfig. Accepting (and ignoring) it here
-// keeps this factory's own call signature aligned with the caller's, rather than silently
-// swallowing an argument the caller now always passes.
+// site), not off a composition-time config — see CompositionConfig.cleanupCollaborators' own doc
+// (composition-root.ts) for why this field is deliberately NOT duplicated onto CompositionConfig.
+// Accepting (and ignoring) it here keeps this factory's own call signature aligned with the
+// caller's, rather than silently swallowing an argument the caller now always passes.
+//
+// `run.triggerRepo` (bug fix — cross-repo composition threading), by contrast, IS forwarded into
+// buildRewrittenCompositionConfig — unlike previousNamespace, it now ALSO shapes composition itself
+// (vcs/checkout/the deploy gate route to the declared service, not just the primary), not merely a
+// RunInput-only seam. See buildRewrittenCompositionConfig's own header for the full contract.
 export function createRewrittenEngineFactory(
   deps: RewrittenEngineFactoryDeps,
-): (appConfig: AppConfig, namespace: string, run: { mode: RunMode; guidance?: string }, observer?: ObserverPort, previousNamespace?: string) => RunPipelinePort {
+): (appConfig: AppConfig, namespace: string, run: { mode: RunMode; guidance?: string; triggerRepo?: string }, observer?: ObserverPort, previousNamespace?: string) => RunPipelinePort {
   const env = deps.env ?? process.env;
-  return (appConfig: AppConfig, namespace: string, run: { mode: RunMode; guidance?: string }, observer?: ObserverPort): RunPipelinePort => {
+  return (appConfig: AppConfig, namespace: string, run: { mode: RunMode; guidance?: string; triggerRepo?: string }, observer?: ObserverPort): RunPipelinePort => {
     const cfg = buildRewrittenCompositionConfig(appConfig, deps, namespace, run, observer);
     return buildProduction(env, cfg);
   };

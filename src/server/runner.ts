@@ -82,10 +82,19 @@ export interface RunnerDeps {
   // rewritten-engine-factory.ts. Left optional at the type level ONLY so a caller that truly wants
   // the loud boot-time error (see enqueueTrackedRun below) can still omit it in a test; production
   // code paths must never omit it.
+  //
+  // `run.triggerRepo` (bug fix — cross-repo composition threading): mirrors the namespace/mode/
+  // guidance precedent above — a PER-RUN value (req.triggerRepo below) the queue callback now
+  // threads into the `run` object alongside mode/guidance. Previously this seam carried only
+  // { mode, guidance }, so the factory (src/server/rewritten-engine-factory.ts) had no way to know a
+  // run was cross-repo at all — its vcs/checkout/deploy-gate wiring stayed hardwired to the PRIMARY
+  // repo even when req.triggerRepo named a declared service, which crashed a real cross-repo run's
+  // `git checkout -f <serviceSha>` inside the primary mirror. OPTIONAL, same additive-seam pattern as
+  // guidance: a factory that ignores it keeps behaving exactly as before this fix (same-repo only).
   engineFactory?: (
     appConfig: AppConfig,
     namespace: string,
-    run: { mode: RunMode; guidance?: string },
+    run: { mode: RunMode; guidance?: string; triggerRepo?: string },
     observer?: ObserverPort,
     previousNamespace?: string,
   ) => RunPipelinePort;
@@ -373,7 +382,18 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
         // Audit fix (judgment-day): thread the REQUESTED mode/guidance into the rewritten
         // engineFactory. Previously the factory hardcoded mode:"diff" internally, silently
         // mis-prompting every non-diff run.
-        deps.engineFactory(appConfig, runNamespace, { mode: req.mode, ...(req.guidance ? { guidance: req.guidance } : {}) }, observer, previousNamespace),
+        // Bug fix (cross-repo composition threading): ALSO thread req.triggerRepo — previously this
+        // seam carried only mode/guidance, so the factory's vcs/checkout/deploy-gate wiring never
+        // learned a run was cross-repo and stayed hardwired to the PRIMARY repo (see
+        // rewritten-engine-factory.ts's own header for the crash this caused). Same conditional-spread
+        // style as guidance: absent on an ordinary run, never fabricated.
+        deps.engineFactory(
+          appConfig,
+          runNamespace,
+          { mode: req.mode, ...(req.guidance ? { guidance: req.guidance } : {}), ...(req.triggerRepo ? { triggerRepo: req.triggerRepo } : {}) },
+          observer,
+          previousNamespace,
+        ),
         req,
         record.id,
         signal,

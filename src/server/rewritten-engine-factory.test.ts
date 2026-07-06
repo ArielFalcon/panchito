@@ -6,8 +6,10 @@ import { JobQueue } from "./queue";
 import { enqueueTrackedRun } from "./runner";
 import { getRecord } from "./history";
 import type { AgentDeps } from "../integrations/opencode-client";
+import { defaultMirrorDeps, type MirrorDeps } from "../integrations/repo-mirror";
 import { SqliteRunHistoryAdapter } from "./run-history-sqlite-adapter";
 import { SqliteLearningRepository } from "@contexts/cross-run-learning/infrastructure/sqlite-learning-repository.adapter";
+import { Sha } from "@kernel/sha";
 
 const cfg = (name: string): AppConfig => ({
   name,
@@ -684,6 +686,256 @@ test("createRewrittenEngineFactory's produced CompositionConfig carries the SAME
     // and cli.ts actually call) produces a real RunPipelinePort without throwing during construction.
     const app = cfg("factory-dispatch-real-history");
     assert.doesNotThrow(() => factory(app, "qa-bot-abc1234-run1", { mode: "diff" }), "constructing the port must not eagerly touch the DB or throw");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+// ── Cross-repo composition threading (bug fix) ────────────────────────────────────────────────────
+// CLAUDE.md: "diff/classify/gate come from the service mirror at the event SHA; the suite runs from
+// the primary mirror at baseBranch HEAD." Prior to this fix, run.triggerRepo never reached the
+// factory at all — vcs/checkout/gate were hardwired to the PRIMARY repo unconditionally, so a real
+// cross-repo run tried `git checkout -f <serviceSha>` inside the PRIMARY mirror and crashed.
+//
+// Testability seam: RewrittenEngineFactoryDeps.mirror lets tests inject spies for
+// ensureMirror/ensureMirrorAtBranch instead of touching real git/disk — mirrors the existing
+// deps.mirrorRoot precedent (an explicit test/override seam, defaulting to the real functions).
+function spyMirrorDeps() {
+  // WARNING fix (judgment-day): capture the 3rd `deps: MirrorDeps` argument too — previously
+  // discarded, so no test here could catch production dropping/corrupting `defaultMirrorDeps` on
+  // either call. Callers assert `deps` is the module's own `defaultMirrorDeps` export (identity).
+  const ensureMirrorCalls: Array<{ repo: string; sha: string; deps: MirrorDeps }> = [];
+  const ensureMirrorAtBranchCalls: Array<{ repo: string; branch: string; deps: MirrorDeps }> = [];
+  const mirror = {
+    ensureMirror: async (repo: string, sha: string, deps: MirrorDeps) => {
+      ensureMirrorCalls.push({ repo, sha, deps });
+      return `/mirrors/${repo.replaceAll("/", "__")}`;
+    },
+    ensureMirrorAtBranch: async (repo: string, branch: string, deps: MirrorDeps) => {
+      ensureMirrorAtBranchCalls.push({ repo, branch, deps });
+      return `/mirrors/${repo.replaceAll("/", "__")}`;
+    },
+  };
+  return { mirror, ensureMirrorCalls, ensureMirrorAtBranchCalls };
+}
+
+// 1. GUARD — pin same-repo behavior BEFORE touching anything: no triggerRepo must never take the
+// cross-repo branch, checkout(sha) must ensure only the PRIMARY repo at the event sha (never call
+// ensureMirrorAtBranch), and the deploy gate must read app.dev?.versionUrl exactly as before.
+
+test("GUARD: no triggerRepo — checkout(sha) ensures the PRIMARY repo at sha only, never ensureMirrorAtBranch", async () => {
+  const app = cfg("factory-guard-same-repo");
+  const { mirror, ensureMirrorCalls, ensureMirrorAtBranchCalls } = spyMirrorDeps();
+  const config = buildRewrittenCompositionConfig(
+    app,
+    { getAgentDeps: stubAgentDeps, mirror },
+    "qa-bot-abc1234-run1",
+    { mode: "diff" },
+  );
+  await config.checkout(Sha.of("abc1234567"));
+  assert.deepEqual(ensureMirrorCalls, [{ repo: "org/demo", sha: "abc1234567", deps: defaultMirrorDeps }], "same-repo checkout must ensure the PRIMARY repo at the event sha");
+  assert.deepEqual(ensureMirrorAtBranchCalls, [], "same-repo checkout must NEVER call ensureMirrorAtBranch");
+  assert.strictEqual(ensureMirrorCalls[0]?.deps, defaultMirrorDeps, "checkout must pass the module's own defaultMirrorDeps, not a substitute or corrupted copy");
+});
+
+test("GUARD: triggerRepo: '' (empty string) behaves identically to absent — same-repo path, no ensureMirrorAtBranch", async () => {
+  const app: AppConfig = { ...cfg("factory-guard-empty-triggerrepo"), dev: { baseUrl: "https://dev", versionUrl: "https://dev/version" } };
+  const { mirror, ensureMirrorCalls, ensureMirrorAtBranchCalls } = spyMirrorDeps();
+  const config = buildRewrittenCompositionConfig(
+    app,
+    { getAgentDeps: stubAgentDeps, mirror },
+    "qa-bot-abc1234-run1",
+    { mode: "diff", triggerRepo: "" },
+  );
+  await config.checkout(Sha.of("abc1234567"));
+  assert.deepEqual(ensureMirrorCalls, [{ repo: "org/demo", sha: "abc1234567", deps: defaultMirrorDeps }], "empty-string triggerRepo must ensure the PRIMARY repo at the event sha, same as no triggerRepo at all");
+  assert.deepEqual(ensureMirrorAtBranchCalls, [], "empty-string triggerRepo must NEVER call ensureMirrorAtBranch");
+  assert.equal(config.versionUrl, "https://dev/version", "gate must read app.dev.versionUrl, not a service's");
+});
+
+test("GUARD: no triggerRepo — versionUrl is app.dev?.versionUrl exactly as before", () => {
+  const app: AppConfig = { ...cfg("factory-guard-versionurl"), dev: { baseUrl: "https://dev", versionUrl: "https://dev/version" } };
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.equal(config.versionUrl, "https://dev/version");
+  assert.equal(config.deployGateIntervalMs, 2000, "primary defaults are unchanged (2000/60000)");
+  assert.equal(config.deployGateTimeoutMs, 60000);
+});
+
+test("GUARD: no triggerRepo — vcs reads the PRIMARY mirror dir", () => {
+  const app = cfg("factory-guard-vcs");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps, mirrorRoot: "/tmp/mirrors" }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.equal((config.vcs as unknown as { repoDir: string }).repoDir, "/tmp/mirrors/org__demo");
+});
+
+// 2. RED — triggerRepo = declared service: checkout(sha) must ensure the SERVICE repo at the event
+// sha FIRST (diff/classify source), then return the PRIMARY repo's dir at baseBranch HEAD (suite
+// workspace) — order matters because classify() runs after workspace.prepare() in RunQaUseCase.
+
+test("cross-repo: checkout(sha) ensures the SERVICE repo at the event sha, then returns the PRIMARY dir at baseBranch HEAD", async () => {
+  const app: AppConfig = { ...cfg("factory-crossrepo-checkout"), services: [{ repo: "org/orders-svc" }] };
+  const { mirror, ensureMirrorCalls, ensureMirrorAtBranchCalls } = spyMirrorDeps();
+  const config = buildRewrittenCompositionConfig(
+    app,
+    { getAgentDeps: stubAgentDeps, mirror },
+    "qa-bot-abc1234-run1",
+    { mode: "diff", triggerRepo: "org/orders-svc" },
+  );
+  const dir = await config.checkout(Sha.of("def5678901"));
+  assert.deepEqual(ensureMirrorCalls, [{ repo: "org/orders-svc", sha: "def5678901", deps: defaultMirrorDeps }], "the SERVICE repo must be ensured at the event sha — the diff/classify source");
+  assert.deepEqual(ensureMirrorAtBranchCalls, [{ repo: "org/demo", branch: "main", deps: defaultMirrorDeps }], "the PRIMARY repo must be ensured at baseBranch HEAD (default 'main') — the suite workspace");
+  assert.equal(dir, "/mirrors/org__demo", "checkout must return the PRIMARY dir, not the service dir");
+  assert.strictEqual(ensureMirrorCalls[0]?.deps, defaultMirrorDeps, "the SERVICE ensureMirror call must pass the module's own defaultMirrorDeps");
+  assert.strictEqual(ensureMirrorAtBranchCalls[0]?.deps, defaultMirrorDeps, "the PRIMARY ensureMirrorAtBranch call must pass the module's own defaultMirrorDeps");
+});
+
+test("cross-repo: checkout(sha) honors the app's configured baseBranch (not always 'main')", async () => {
+  const app: AppConfig = { ...cfg("factory-crossrepo-basebranch"), baseBranch: "develop", services: [{ repo: "org/orders-svc" }] };
+  const { mirror, ensureMirrorAtBranchCalls } = spyMirrorDeps();
+  const config = buildRewrittenCompositionConfig(
+    app,
+    { getAgentDeps: stubAgentDeps, mirror },
+    "qa-bot-abc1234-run1",
+    { mode: "diff", triggerRepo: "org/orders-svc" },
+  );
+  await config.checkout(Sha.of("def5678901"));
+  assert.deepEqual(ensureMirrorAtBranchCalls, [{ repo: "org/demo", branch: "develop", deps: defaultMirrorDeps }]);
+  assert.strictEqual(ensureMirrorAtBranchCalls[0]?.deps, defaultMirrorDeps);
+});
+
+// 3. RED — cfg.vcs must be bound to the SERVICE mirror dir (the classify/diff source), not the
+// primary. Asserted via GitMirrorReadAdapter's public repoDir (rename-safe, honest read-back).
+
+test("cross-repo: cfg.vcs is bound to the SERVICE mirror dir (classify source), not the primary", () => {
+  const app: AppConfig = { ...cfg("factory-crossrepo-vcs"), services: [{ repo: "org/orders-svc" }] };
+  const config = buildRewrittenCompositionConfig(
+    app,
+    { getAgentDeps: stubAgentDeps, mirrorRoot: "/tmp/mirrors" },
+    "qa-bot-abc1234-run1",
+    { mode: "diff", triggerRepo: "org/orders-svc" },
+  );
+  assert.equal((config.vcs as unknown as { repoDir: string }).repoDir, "/tmp/mirrors/org__orders-svc", "vcs must read the SERVICE mirror dir, not the primary's");
+});
+
+// 4. RED — gate: a service WITH versionUrl gates on the SERVICE's own versionUrl/intervals (service
+// defaults 10_000/600_000, distinct from the primary's 2000/60000); a service WITHOUT versionUrl
+// must leave cfg.versionUrl undefined even when app.dev.versionUrl IS set (never gate the primary's
+// /version endpoint for a service sha that never appears there).
+
+test("cross-repo: gate uses the SERVICE's own versionUrl + service-level interval/timeout defaults (10_000/600_000)", () => {
+  const app: AppConfig = {
+    ...cfg("factory-crossrepo-gate"),
+    services: [{ repo: "org/orders-svc", versionUrl: "https://orders-svc/version" }],
+  };
+  const config = buildRewrittenCompositionConfig(
+    app,
+    { getAgentDeps: stubAgentDeps },
+    "qa-bot-abc1234-run1",
+    { mode: "diff", triggerRepo: "org/orders-svc" },
+  );
+  assert.equal(config.versionUrl, "https://orders-svc/version", "must gate on the SERVICE's own versionUrl, never the primary's");
+  assert.equal(config.deployGateIntervalMs, 10_000, "service-level default interval (distinct from the primary's 2000)");
+  assert.equal(config.deployGateTimeoutMs, 600_000, "service-level default timeout (distinct from the primary's 60000)");
+  assert.equal(typeof config.versionPoll, "function");
+});
+
+test("cross-repo: gate honors explicit service pollIntervalMs/deployTimeoutMs overrides", () => {
+  const app: AppConfig = {
+    ...cfg("factory-crossrepo-gate-overrides"),
+    services: [{ repo: "org/orders-svc", versionUrl: "https://orders-svc/version", pollIntervalMs: 3000, deployTimeoutMs: 90_000 }],
+  };
+  const config = buildRewrittenCompositionConfig(
+    app,
+    { getAgentDeps: stubAgentDeps },
+    "qa-bot-abc1234-run1",
+    { mode: "diff", triggerRepo: "org/orders-svc" },
+  );
+  assert.equal(config.deployGateIntervalMs, 3000);
+  assert.equal(config.deployGateTimeoutMs, 90_000);
+});
+
+test("cross-repo: a service WITHOUT versionUrl leaves cfg.versionUrl undefined even when app.dev.versionUrl IS set", () => {
+  const app: AppConfig = {
+    ...cfg("factory-crossrepo-gate-skip"),
+    dev: { baseUrl: "https://dev", versionUrl: "https://dev/version" },
+    services: [{ repo: "org/orders-svc" }], // no versionUrl declared
+  };
+  const config = buildRewrittenCompositionConfig(
+    app,
+    { getAgentDeps: stubAgentDeps },
+    "qa-bot-abc1234-run1",
+    { mode: "diff", triggerRepo: "org/orders-svc" },
+  );
+  assert.equal(config.versionUrl, undefined, "must NEVER fall back to the primary's dev.versionUrl for a cross-repo run — trust the deploy event and skip the gate");
+  assert.equal(config.versionPoll, undefined);
+});
+
+// 5. RED — declared-service defense in depth + triggerRepo === app.repo takes the same-repo path.
+
+test("cross-repo: an UNDECLARED triggerRepo throws (defense in depth, matches runner.ts's own assertTriggerRepoDeclared)", () => {
+  const app = cfg("factory-crossrepo-undeclared"); // no services[] declared at all
+  assert.throws(
+    () =>
+      buildRewrittenCompositionConfig(
+        app,
+        { getAgentDeps: stubAgentDeps },
+        "qa-bot-abc1234-run1",
+        { mode: "diff", triggerRepo: "org/evil-repo" },
+      ),
+    /trigger repo org\/evil-repo is not a declared service of app factory-crossrepo-undeclared/,
+  );
+});
+
+test("cross-repo: mode 'context' triggered by a declared service throws (legacy pipeline.ts:1017-1020 sibling guard)", () => {
+  const app: AppConfig = { ...cfg("factory-crossrepo-context-service"), services: [{ repo: "org/orders-svc" }] };
+  assert.throws(
+    () =>
+      buildRewrittenCompositionConfig(
+        app,
+        { getAgentDeps: stubAgentDeps },
+        "qa-bot-abc1234-run1",
+        { mode: "context", triggerRepo: "org/orders-svc" },
+      ),
+    /context mode cannot be triggered by a service repo \(org\/orders-svc\); run it from the primary repo org\/demo/,
+  );
+});
+
+test("cross-repo: mode 'context' WITHOUT a triggerRepo does not throw (same-repo context runs stay legal)", () => {
+  const app: AppConfig = { ...cfg("factory-crossrepo-context-same-repo"), services: [{ repo: "org/orders-svc" }] };
+  assert.doesNotThrow(() =>
+    buildRewrittenCompositionConfig(
+      app,
+      { getAgentDeps: stubAgentDeps },
+      "qa-bot-abc1234-run1",
+      { mode: "context" },
+    ),
+  );
+});
+
+test("cross-repo: triggerRepo === app.repo takes the same-repo path (no service branch, no throw)", async () => {
+  const app: AppConfig = { ...cfg("factory-crossrepo-selfrepo"), services: [{ repo: "org/orders-svc" }] };
+  const { mirror, ensureMirrorCalls, ensureMirrorAtBranchCalls } = spyMirrorDeps();
+  const config = buildRewrittenCompositionConfig(
+    app,
+    { getAgentDeps: stubAgentDeps, mirror },
+    "qa-bot-abc1234-run1",
+    { mode: "diff", triggerRepo: "org/demo" },
+  );
+  await config.checkout(Sha.of("abc1234567"));
+  assert.deepEqual(ensureMirrorCalls, [{ repo: "org/demo", sha: "abc1234567", deps: defaultMirrorDeps }]);
+  assert.deepEqual(ensureMirrorAtBranchCalls, [], "triggerRepo === app.repo must behave exactly like the same-repo (no triggerRepo) path");
+  assert.strictEqual(ensureMirrorCalls[0]?.deps, defaultMirrorDeps);
+});
+
+// 6. createRewrittenEngineFactory forwards triggerRepo through to buildRewrittenCompositionConfig.
+
+test("createRewrittenEngineFactory's returned closure accepts and threads a run.triggerRepo argument without throwing", () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const factory = createRewrittenEngineFactory({ getAgentDeps: stubAgentDeps });
+    const app: AppConfig = { ...cfg("factory-crossrepo-closure"), services: [{ repo: "org/orders-svc" }] };
+    assert.doesNotThrow(() => factory(app, "qa-bot-abc1234-run1", { mode: "diff", triggerRepo: "org/orders-svc" }));
   } finally {
     if (prev === undefined) delete process.env.PIPELINE_ENGINE;
     else process.env.PIPELINE_ENGINE = prev;

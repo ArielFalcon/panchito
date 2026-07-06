@@ -415,6 +415,66 @@ test("PIPELINE_ENGINE=rewritten — RunInput.triggerRepo is absent (not fabricat
   }
 });
 
+// ── Bug fix (cross-repo composition threading) — engineFactory's `run` param must ALSO carry
+// triggerRepo, not just mode/guidance. Prior to this fix, req.triggerRepo reached RunInput (pinned
+// above) but never reached the engineFactory's `run` object, so rewritten-engine-factory.ts had no
+// way to route vcs/checkout/the deploy gate to the declared service — this is the seam that closes
+// that gap. Mirrors this file's own "engineFactory's run.guidance is absent..." precedent exactly.
+
+test("PIPELINE_ENGINE=rewritten — engineFactory's run param carries req.triggerRepo when present", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const { port } = fakePort({ verdict: "pass" });
+    let receivedRun: { mode: string; guidance?: string; triggerRepo?: string } | undefined;
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-engfactory-triggerrepo", sha: "def5678", target: "e2e", mode: "diff", source: "webhook", triggerRepo: "org/orders-svc" },
+      {
+        loadApp: (name) => ({ ...cfg(name), services: [{ repo: "org/orders-svc" }] }),
+        engineFactory: (_appConfig, _namespace, run) => {
+          receivedRun = run;
+          return port;
+        },
+      },
+    );
+    await queue.drain();
+    assert.equal(getRecord(id)!.verdict, "pass");
+    assert.equal(receivedRun?.triggerRepo, "org/orders-svc", "engineFactory's run param must carry req.triggerRepo so the factory can route vcs/checkout/gate to the declared service");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("PIPELINE_ENGINE=rewritten — engineFactory's run.triggerRepo is absent (not fabricated) when req.triggerRepo is omitted", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const { port } = fakePort({ verdict: "pass" });
+    let receivedRun: { mode: string; guidance?: string; triggerRepo?: string } | undefined;
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-engfactory-triggerrepo-absent", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
+      {
+        loadApp: cfg,
+        engineFactory: (_appConfig, _namespace, run) => {
+          receivedRun = run;
+          return port;
+        },
+      },
+    );
+    await queue.drain();
+    assert.equal(getRecord(id)!.verdict, "pass");
+    assert.equal(receivedRun?.triggerRepo, undefined, "an ordinary (non-cross-repo) run must never fabricate a triggerRepo on the engineFactory's run param either");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
 test("the rewritten path finalizes the record + publishes run.verdict RunEvents from the port's RunOutcome", async () => {
   const prev = process.env.PIPELINE_ENGINE;
   process.env.PIPELINE_ENGINE = "rewritten";
