@@ -8,6 +8,14 @@ import type { BoundaryProfile } from "@contexts/service-topology/domain/index.ts
 // import — parity is enforced by the type-level gates below, not by importing
 // src/orchestrator/schemas.ts's BoundarySchema. Field names are copied VERBATIM from
 // qa-engine's service-topology domain/index.ts (HttpBoundaryProfile/EventBoundaryProfile).
+//
+// Deliberately stricter than the domain: every string field below uses `.min(1)`, while the
+// domain BoundaryProfile types them as plain `string` (allowing ""). This is intentional — an
+// empty frontFiles glob, openApiPath, or eventPattern field is never a usable candidate (a ""
+// glob matches nothing, a "" path resolves to no file), so rejecting it here, at the untrusted
+// LLM-text parse boundary, fails a bad candidate fast instead of passing an unscoreable empty
+// through to the deterministic scorer. Do NOT relax `.min(1)` to match the domain's looser
+// typing — the stricter parse is deliberate input-hardening at this seam, not an oversight.
 const HttpProfileSchema = z.object({
   transport: z.literal("http"),
   frontFiles: z.string().min(1),

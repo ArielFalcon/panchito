@@ -87,6 +87,52 @@ func TestOnboardingJobStatusDecodesWinnerFromServerJSON(t *testing.T) {
 	}
 }
 
+// Decoding the event-variant resolvedProfile — the transport:"event" shape a service-to-service
+// (class-based-domain-events) winner carries, as opposed to the http shape covered above. This
+// exercises AsOnboardingJobStatusResolvedProfile1(), which the winner-http test above never touches.
+func TestOnboardingJobStatusDecodesEventWinnerFromServerJSON(t *testing.T) {
+	const payload = `{
+		"state":"done","app":"shop","round":1,"ceiling":3,"candidatesScored":4,
+		"lastResolvedScore":0.88,
+		"resolvedProfile":{
+			"transport":"event","files":"src/events/ShopEventListener.java",
+			"eventPattern":{
+				"kind":"class-based-domain-events",
+				"listenerBaseType":"DomainEventListener",
+				"listenerEventCall":"onEvent",
+				"subscriberBaseType":"DomainEventSubscriber",
+				"publishCall":"eventPublisher.publish"
+			}
+		},
+		"outcome":"winner",
+		"startedAt":"2026-07-06T00:00:00.000Z","finishedAt":"2026-07-06T00:01:30.000Z"
+	}`
+	var s OnboardingJobStatus
+	if err := json.Unmarshal([]byte(payload), &s); err != nil {
+		t.Fatalf("decode OnboardingJobStatus (event winner): %v", err)
+	}
+	if s.Outcome == nil || *s.Outcome != Winner {
+		t.Fatalf("outcome not decoded: %v", s.Outcome)
+	}
+	if s.ResolvedProfile == nil {
+		t.Fatalf("resolvedProfile not decoded")
+	}
+	profile, err := s.ResolvedProfile.AsOnboardingJobStatusResolvedProfile1()
+	if err != nil {
+		t.Fatalf("resolvedProfile did not decode as the event variant: %v", err)
+	}
+	if profile.Transport != Event || profile.Files != "src/events/ShopEventListener.java" {
+		t.Fatalf("event profile fields: %+v", profile)
+	}
+	if profile.EventPattern.Kind != "class-based-domain-events" ||
+		profile.EventPattern.ListenerBaseType != "DomainEventListener" ||
+		profile.EventPattern.ListenerEventCall != "onEvent" ||
+		profile.EventPattern.SubscriberBaseType != "DomainEventSubscriber" ||
+		profile.EventPattern.PublishCall != "eventPublisher.publish" {
+		t.Fatalf("eventPattern fields not decoded: %+v", profile.EventPattern)
+	}
+}
+
 func TestOnboardingJobStatusDecodesNoProfileFromServerJSON(t *testing.T) {
 	const payload = `{
 		"state":"done","app":"shop","round":3,"ceiling":3,"candidatesScored":6,

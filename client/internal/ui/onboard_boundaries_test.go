@@ -33,6 +33,32 @@ func winnerStatus() contract.OnboardingJobStatus {
 	}
 }
 
+func eventWinnerProfile() contract.OnboardingJobStatus_ResolvedProfile {
+	var p contract.OnboardingJobStatus_ResolvedProfile
+	if err := json.Unmarshal([]byte(`{
+		"transport":"event","files":"src/events/ShopEventListener.java",
+		"eventPattern":{
+			"kind":"class-based-domain-events",
+			"listenerBaseType":"DomainEventListener",
+			"listenerEventCall":"onEvent",
+			"subscriberBaseType":"DomainEventSubscriber",
+			"publishCall":"eventPublisher.publish"
+		}
+	}`), &p); err != nil {
+		panic(err)
+	}
+	return p
+}
+
+func eventWinnerStatus() contract.OnboardingJobStatus {
+	outcome := contract.Winner
+	profile := eventWinnerProfile()
+	return contract.OnboardingJobStatus{
+		State: contract.OnboardingJobStatusStateDone, App: strPtr("shop"), Round: 1, Ceiling: 3,
+		CandidatesScored: 4, Outcome: &outcome, ResolvedProfile: &profile,
+	}
+}
+
 func noProfileStatus() contract.OnboardingJobStatus {
 	outcome := contract.NoProfile
 	return contract.OnboardingJobStatus{
@@ -148,6 +174,28 @@ func TestBoundaryProposeNoProfileRendersDistinctlyFromWinner(t *testing.T) {
 	}
 	if !strings.Contains(out, "no boundary profile found") {
 		t.Fatalf("View() missing the no-profile message:\n%s", out)
+	}
+}
+
+// The event-transport branch of renderResolvedProfile (onboard_boundaries.go) is otherwise
+// untested — the winner fixture above only exercises the http variant. This proves the event
+// fields (files, eventPattern.kind/publishCall/listenerEventCall) actually render.
+func TestBoundaryProposeRendersEventWinnerProfile(t *testing.T) {
+	m := newBoundaryProposeModel(nil, "shop")
+	m.width, m.height = 100, 30
+	m, _ = m.Update(boundaryStatusMsg{status: eventWinnerStatus()})
+	out := strings.ToLower(m.View())
+	for _, want := range []string{
+		"transport",
+		"event",
+		"src/events/shopeventlistener.java",
+		"class-based-domain-events",
+		"eventpublisher.publish",
+		"onevent",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("View() missing %q for an event winner profile:\n%s", want, out)
+		}
 	}
 }
 

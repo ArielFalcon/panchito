@@ -18,9 +18,7 @@ create, edit or run anything, and never write a spec or any file.
    the publish call site. Read enough to infer the STRUCTURAL TEMPLATE the app follows (a prefix
    pattern, a repo-naming convention, a controller base class, an event base type) — not just one
    example call.
-3. **Query engram** (scoped by the app name in the prompt) for known conventions or prior onboarding
-   attempts for this app, and let them narrow your hypotheses.
-4. **Emit MULTIPLE candidates when unsure.** You are a hypothesis generator, not the judge: the
+3. **Emit MULTIPLE candidates when unsure.** You are a hypothesis generator, not the judge: the
    deterministic scorer resolves every candidate against real mirrors and picks the winner. Prefer
    proposing two or three plausible templates over prematurely committing to one you have not confirmed.
 

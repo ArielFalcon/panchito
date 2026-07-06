@@ -35,7 +35,7 @@
       "temperature": 0.1
     },
     "qa-maintainer": {
-      "description": "Self-maintenance agent for ai-pipeline itself. Diagnoses and fixes incidents; never touches watched app repos.",
+      "description": "Self-maintenance agent for panchito itself. Diagnoses and fixes incidents; never touches watched app repos.",
       "mode": "primary",
       "model": "opencode-go/kimi-k2.7-code",
       "prompt": "{file:./agent/qa-maintainer.md}",
@@ -99,7 +99,7 @@
       "model": "opencode-go/deepseek-v4-pro",
       "prompt": "{file:./agent/qa-proposer.md}",
       "tools": { "write": false, "edit": false, "read": true, "bash": false },
-      "mcp": ["serena", "engram"],
+      "mcp": ["serena"],
       "steps": 25,
       "temperature": 0.2
     }
