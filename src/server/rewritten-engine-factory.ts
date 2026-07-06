@@ -131,7 +131,7 @@ import { expandEnv } from "../orchestrator/config-loader";
 // Same role→agent-name mapping the F.2 operator template uses (roleToAgentName) — the
 // AgentRuntimeAdapter needs it to resolve which of the agents container's role configs
 // (qa-generator/qa-reviewer/qa-worker/…) an AgentRole maps to.
-// CHIP: reflector/explorer misroute to qa-generator — diverges from ROLE_TO_OPENCODE_AGENT/rolePromptName; tracked separately, out of scope
+// CHIP: explorer misroutes to qa-generator — diverges from ROLE_TO_OPENCODE_AGENT/rolePromptName; tracked separately, out of scope
 export function roleToAgentName(role: AgentRole): string {
   const map: Record<AgentRole, string> = {
     primary: "qa-generator",
@@ -140,7 +140,7 @@ export function roleToAgentName(role: AgentRole): string {
     worker: "qa-worker",
     workerCode: "qa-worker-code",
     maintainer: "qa-maintainer",
-    reflector: "qa-generator",
+    reflector: "qa-reflector",
     explorer: "qa-generator",
     proposer: "qa-proposer",
   };

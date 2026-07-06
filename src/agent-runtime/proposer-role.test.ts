@@ -22,6 +22,10 @@ test("roleToAgentName maps the kernel proposer role to the qa-proposer agent", (
   assert.equal(roleToAgentName("proposer"), "qa-proposer");
 });
 
+test("roleToAgentName maps the kernel reflector role to the qa-reflector agent, not qa-generator", () => {
+  assert.equal(roleToAgentName("reflector"), "qa-reflector");
+});
+
 // ---------------------------------------------------------------------------
 // Kernel/runtime AgentRole union parity gate.
 //
