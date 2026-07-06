@@ -123,7 +123,8 @@ import { shaMatches } from "../env/deploy-gate";
 import { ensureMirror, ensureMirrorAtBranch, defaultMirrorDeps, workdirRoot } from "../integrations/repo-mirror";
 import { SqliteRunHistoryAdapter } from "./run-history-sqlite-adapter";
 import { SqliteLearningRepository, type LearningStore } from "@contexts/cross-run-learning/infrastructure/sqlite-learning-repository.adapter";
-import { listLearningRules, upsertLearningRule, incrementRuleUsage } from "./history";
+import { listLearningRules, upsertLearningRule, incrementRuleUsage, recordRuleOutcome } from "./history";
+import { preventionOutcome } from "@contexts/cross-run-learning/domain/rule-fold";
 import { YamlBoundaryProfileAdapter } from "@contexts/service-topology/infrastructure/yaml-boundary-profile.adapter";
 import { expandEnv } from "../orchestrator/config-loader";
 
@@ -223,13 +224,49 @@ export function historyLearningStore(appName: string): LearningStore {
         source: rule.source,
       }),
     recordOutcome: (outcome) => {
-      // Off-path fold (LearningPort.fold -> LearningRepositoryPort.applyOutcome -> here): the
-      // legacy's own recordRuleOutcome operates per-RULE (ruleId, score), not per-run — folding a
-      // RunOutcome into individual rules' running statistics requires the retrievedRuleIds ↔
-      // valueScore mapping the distiller/reflection layer computes (not yet ported to qa-engine;
-      // this package's scope is RETRIEVAL — see W3 F2's own header). No-op until that lands; never
-      // gates publish either way (LearningPort.fold's own off-path contract).
-      void outcome;
+      // P4a (post-cutover-remediation, unit 6): off-path fold (LearningPort.fold ->
+      // LearningRepositoryPort.applyOutcome -> here). Folds a RunOutcome into EACH retrieved rule's
+      // running statistics via the SAME legacy recordRuleOutcome(ruleId, score, ...) this store's
+      // upsert()/incrementUsage() already bridge onto. Never gates publish either way
+      // (LearningPort.fold's own off-path contract) — wrapped in try/catch below so a fold failure
+      // can never surface as a run failure.
+      //
+      // P3's suppression guard (shouldDistillLearning, app_defect) lives in the USE-CASE, before
+      // learning.fold() is even called — this function trusts the caller already gated it and does
+      // NOT re-check outcome.adjudication itself (single guard-owner, per design).
+      try {
+        const { rulesRetrieved, gateSignals, errorClass } = outcome;
+        if (rulesRetrieved.length === 0) return; // nothing retrieved -> nothing to fold
+        const { valueScore, coverageRatio } = gateSignals;
+        const coverageMeasured = coverageRatio !== null;
+        const coverageCreditConfirmed = coverageMeasured ? coverageRatio > 0 : null;
+
+        if (valueScore !== null) {
+          // Oracle path: a real value-oracle score is available — fold it onto every retrieved id
+          // independently (each rule's running mean advances on its own).
+          for (const id of rulesRetrieved) {
+            recordRuleOutcome(id, valueScore, coverageCreditConfirmed);
+          }
+        } else {
+          // Prevention path: no oracle score for this run — derive a weaker, conservative signal
+          // from the run's OWN errorClass via preventionOutcome(rule.errorClass, outcome.errorClass).
+          // listLearningRules(appName, 200) is the SAME lookup already used above (line ~192) to
+          // build the retrieval id->rule map, reused here for the per-rule errorClass lookup.
+          const rules = listLearningRules(appName, 200);
+          const byId = new Map(rules.map((r) => [r.id, r]));
+          for (const id of rulesRetrieved) {
+            const rule = byId.get(id);
+            if (!rule) continue; // RESIDUAL EDGE: a rule deprecated between retrieval and fold is
+            // excluded from listLearningRules' active/candidate filter — inert, acceptable (a
+            // deprecated rule earning no signal is inert anyway).
+            const score = preventionOutcome(rule.errorClass, errorClass);
+            if (score !== null) recordRuleOutcome(id, score, coverageCreditConfirmed);
+          }
+        }
+      } catch {
+        // Off-path swallow, matching LearningPort.fold's existing off-path contract: a fold failure
+        // must never gate or fail the run it is trying to learn from.
+      }
     },
     // W3 fix (F3a, dual-judge round): bridges LearningRepositoryPort.incrementUsage (called by
     // LearningPortAdapter.retrieve() on every real retrieval) onto legacy's OWN incrementRuleUsage

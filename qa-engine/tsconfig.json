@@ -55,6 +55,7 @@
     "test/contexts/generation/infrastructure/context-pack-parity.test.ts",
     "test/contexts/generation/infrastructure/selector-catalog-window-parity.test.ts",
     "test/contexts/generation/infrastructure/catalog-gate-parity.test.ts",
+    "test/contexts/cross-run-learning/domain/rule-fold-parity.test.ts",
     "test/contract/seam-parity.contract.test.ts"
   ]
 }

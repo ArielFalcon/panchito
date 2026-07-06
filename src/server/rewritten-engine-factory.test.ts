@@ -700,6 +700,116 @@ test("historyLearningStore(appName).incrementUsage() bridges onto history.ts's i
   assert.equal(rows[0]?.usageCount, 1, "usageCount must advance from 0 to 1 after incrementUsage");
 });
 
+// P4a (post-cutover-remediation, unit 6): historyLearningStore(appName).recordOutcome() was a
+// `void outcome;` no-op — folding a RunOutcome into individual rules' running statistics via the
+// SAME learning_rules SQLite table upsert()/incrementUsage() already bridge onto. Real-DB
+// integration tests, same convention as the upsert()/incrementUsage() tests above: a unique app
+// name per run avoids collisions with other tests' rows.
+test("historyLearningStore(appName).recordOutcome() — oracle path folds valueScore into every retrieved rule", async () => {
+  const { historyLearningStore } = await import("./rewritten-engine-factory");
+  const { listLearningRules } = await import("./history");
+  const app = `factory-learning-oracle-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const ruleId1 = `rule-oracle-1-${app}`;
+  const ruleId2 = `rule-oracle-2-${app}`;
+
+  const store = historyLearningStore(app);
+  for (const id of [ruleId1, ruleId2]) {
+    store.upsert({
+      id, trigger: "t", action: "a", errorClass: "E-EXEC-FAIL", archetype: null,
+      status: "candidate", confidence: "low", usageCount: 0, outcomeCount: 0,
+      successRate: null, lastVerified: null, source: "test", at: new Date().toISOString(),
+    });
+  }
+
+  store.recordOutcome({
+    runId: "run-1", app, sha: "abc1234567", mode: "diff", target: "e2e", verdict: "pass",
+    errorClass: null,
+    gateSignals: { static: true, coverageRatio: 0.9, valueScore: 0.8, reviewerCorrections: [], flaky: false, retries: 0 },
+    rulesRetrieved: [ruleId1, ruleId2],
+    at: new Date().toISOString(),
+  } as never);
+
+  const rows = listLearningRules(app, 10);
+  const r1 = rows.find((r) => r.id === ruleId1);
+  const r2 = rows.find((r) => r.id === ruleId2);
+  assert.equal(r1?.outcomeCount, 1, "rule 1 must fold exactly once");
+  assert.equal(r1?.successRate, 0.8, "rule 1's successRate must equal the folded valueScore (first outcome)");
+  assert.equal(r2?.outcomeCount, 1, "rule 2 must fold independently of rule 1");
+  assert.equal(r2?.successRate, 0.8);
+});
+
+test("historyLearningStore(appName).recordOutcome() — empty rulesRetrieved is a safe no-op", async () => {
+  const { historyLearningStore } = await import("./rewritten-engine-factory");
+  const { listLearningRules } = await import("./history");
+  const app = `factory-learning-empty-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const ruleId = `rule-empty-${app}`;
+
+  const store = historyLearningStore(app);
+  store.upsert({
+    id: ruleId, trigger: "t", action: "a", errorClass: "E-EXEC-FAIL", archetype: null,
+    status: "candidate", confidence: "low", usageCount: 0, outcomeCount: 0,
+    successRate: null, lastVerified: null, source: "test", at: new Date().toISOString(),
+  });
+
+  store.recordOutcome({
+    runId: "run-2", app, sha: "abc1234567", mode: "diff", target: "e2e", verdict: "pass",
+    errorClass: null,
+    gateSignals: { static: true, coverageRatio: null, valueScore: 0.5, reviewerCorrections: [], flaky: false, retries: 0 },
+    rulesRetrieved: [],
+    at: new Date().toISOString(),
+  } as never);
+
+  const rows = listLearningRules(app, 10);
+  const r = rows.find((row) => row.id === ruleId);
+  assert.equal(r?.outcomeCount, 0, "no rulesRetrieved means no recordRuleOutcome call at all — ledger untouched");
+});
+
+test("historyLearningStore(appName).recordOutcome() — prevention path scores via preventionOutcome(rule.errorClass, outcome.errorClass) when valueScore is null", async () => {
+  const { historyLearningStore } = await import("./rewritten-engine-factory");
+  const { listLearningRules } = await import("./history");
+  const app = `factory-learning-prevention-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const heldRuleId = `rule-prevention-held-${app}`;
+  const failedRuleId = `rule-prevention-failed-${app}`;
+  const noisyRuleId = `rule-prevention-noisy-${app}`;
+
+  const store = historyLearningStore(app);
+  store.upsert({
+    id: heldRuleId, trigger: "t", action: "a", errorClass: "E-FRAGILE-SELECTOR", archetype: null,
+    status: "candidate", confidence: "low", usageCount: 0, outcomeCount: 0,
+    successRate: null, lastVerified: null, source: "test", at: new Date().toISOString(),
+  });
+  store.upsert({
+    id: failedRuleId, trigger: "t2", action: "a2", errorClass: "E-EXEC-FAIL", archetype: null,
+    status: "candidate", confidence: "low", usageCount: 0, outcomeCount: 0,
+    successRate: null, lastVerified: null, source: "test", at: new Date().toISOString(),
+  });
+  store.upsert({
+    id: noisyRuleId, trigger: "t3", action: "a3", errorClass: "E-FRAGILE-SELECTOR", archetype: null,
+    status: "candidate", confidence: "low", usageCount: 0, outcomeCount: 0,
+    successRate: null, lastVerified: null, source: "test", at: new Date().toISOString(),
+  });
+
+  // A clean run (errorClass: null): heldRuleId's own class ("E-FRAGILE-SELECTOR") did NOT recur ->
+  // preventionOutcome(rule.errorClass, null) = PREVENTION_HELD_SCORE (weak positive, held).
+  // failedRuleId's own class ("E-EXEC-FAIL") also did not recur on this clean run -> also held.
+  store.recordOutcome({
+    runId: "run-3", app, sha: "abc1234567", mode: "diff", target: "e2e", verdict: "pass",
+    errorClass: null,
+    gateSignals: { static: true, coverageRatio: null, valueScore: null, reviewerCorrections: [], flaky: false, retries: 0 },
+    rulesRetrieved: [heldRuleId, failedRuleId],
+    at: new Date().toISOString(),
+  } as never);
+
+  const rows = listLearningRules(app, 10);
+  const held = rows.find((r) => r.id === heldRuleId);
+  const failed = rows.find((r) => r.id === failedRuleId);
+  const noisy = rows.find((r) => r.id === noisyRuleId);
+  assert.equal(held?.outcomeCount, 1, "held rule must fold via the prevention path (weak positive)");
+  assert.equal(held?.successRate, 0.6, "PREVENTION_HELD_SCORE for a clean run");
+  assert.equal(failed?.outcomeCount, 1, "unrelated rule on a clean run also holds (weak positive)");
+  assert.equal(noisy?.outcomeCount, 0, "a rule NOT in rulesRetrieved must never fold");
+});
+
 test("createRewrittenEngineFactory's produced CompositionConfig carries the SAME real runHistory/learningRepo wiring", () => {
   const prev = process.env.PIPELINE_ENGINE;
   process.env.PIPELINE_ENGINE = "rewritten";
@@ -843,6 +953,61 @@ test("cross-repo: cfg.vcs is bound to the SERVICE mirror dir (classify source), 
   assert.equal((config.vcs as unknown as { repoDir: string }).repoDir, "/tmp/mirrors/org__orders-svc", "vcs must read the SERVICE mirror dir, not the primary's");
 });
 
+// 3b. RED — generation-prompt parity (legacy pipeline.ts:1909): triggerService must reach
+// CompositionConfig.triggerService as {repo, mirrorDir, openapi?} — the SERVICE's own mirror dir
+// (the SAME vcsDir formula the vcs test above already pins), never the primary's mirrorDir. This is
+// the ONE new field this gap closes: composition-root.ts's wireBridges() threads it into
+// GenerationPortAdapter's ctx.service -> OpencodeRunInput.service, advisory prompt-context ONLY.
+
+test("cross-repo: composes CompositionConfig.triggerService = {repo, mirrorDir} for the SERVICE mirror (not the primary), when the service declares no openapi hint", () => {
+  const app: AppConfig = { ...cfg("factory-crossrepo-triggerservice"), services: [{ repo: "org/orders-svc" }] };
+  const config = buildRewrittenCompositionConfig(
+    app,
+    { getAgentDeps: stubAgentDeps, mirrorRoot: "/tmp/mirrors" },
+    "qa-bot-abc1234-run1",
+    { mode: "diff", triggerRepo: "org/orders-svc" },
+  );
+  assert.deepEqual(config.triggerService, { repo: "org/orders-svc", mirrorDir: "/tmp/mirrors/org__orders-svc" }, "triggerService must carry the SERVICE's own repo + mirror dir, matching vcsDir's own formula — no openapi key when the service declares none");
+});
+
+test("cross-repo: composes CompositionConfig.triggerService with openapi when the declared service carries an openapi hint", () => {
+  const app: AppConfig = {
+    ...cfg("factory-crossrepo-triggerservice-openapi"),
+    services: [{ repo: "org/orders-svc", openapi: "openapi/orders.yaml" }],
+  };
+  const config = buildRewrittenCompositionConfig(
+    app,
+    { getAgentDeps: stubAgentDeps, mirrorRoot: "/tmp/mirrors" },
+    "qa-bot-abc1234-run1",
+    { mode: "diff", triggerRepo: "org/orders-svc" },
+  );
+  assert.deepEqual(config.triggerService, { repo: "org/orders-svc", mirrorDir: "/tmp/mirrors/org__orders-svc", openapi: "openapi/orders.yaml" });
+});
+
+test("cross-repo: composes CompositionConfig.triggerService with an array openapi hint, preserved as-is (openapi is string | string[])", () => {
+  const app: AppConfig = {
+    ...cfg("factory-crossrepo-triggerservice-openapi-array"),
+    services: [{ repo: "org/orders-svc", openapi: ["openapi/orders.yaml", "openapi/payments.yaml"] }],
+  };
+  const config = buildRewrittenCompositionConfig(
+    app,
+    { getAgentDeps: stubAgentDeps, mirrorRoot: "/tmp/mirrors" },
+    "qa-bot-abc1234-run1",
+    { mode: "diff", triggerRepo: "org/orders-svc" },
+  );
+  assert.deepEqual(config.triggerService, {
+    repo: "org/orders-svc",
+    mirrorDir: "/tmp/mirrors/org__orders-svc",
+    openapi: ["openapi/orders.yaml", "openapi/payments.yaml"],
+  });
+});
+
+test("GUARD: no triggerRepo (same-repo run) leaves CompositionConfig.triggerService entirely absent — no key, not undefined-valued", () => {
+  const app = cfg("factory-guard-triggerservice-absent");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.equal("triggerService" in config, false, "same-repo runs (the common case) must OMIT triggerService entirely, matching versionUrl's own absent-by-default precedent for this class of field");
+});
+
 // 4. RED — gate: a service WITH versionUrl gates on the SERVICE's own versionUrl/intervals (service
 // defaults 10_000/600_000, distinct from the primary's 2000/60000); a service WITHOUT versionUrl
 // must leave cfg.versionUrl undefined even when app.dev.versionUrl IS set (never gate the primary's
@@ -982,4 +1147,107 @@ test("createRewrittenEngineFactory's returned closure propagates the undeclared-
     if (prev === undefined) delete process.env.PIPELINE_ENGINE;
     else process.env.PIPELINE_ENGINE = prev;
   }
+});
+
+// ── Context-mode multi-service parity (legacy pipeline.ts:1330-1355 buildContextMap, restored by
+// this fix): a context-mode run mirrors EVERY declared app.services[] entry (read-only, each at its
+// OWN svc.baseBranch ?? "main") and threads them onto CompositionConfig.services so
+// GenerationPortAdapter's ctx.services -> OpencodeRunInput.services carries the full set for the FE<->BE
+// architecture-map builder (buildContextTask's "## Microservice repos" section, prompts.ts:1181).
+// Mirrors triggerService's OWN conditional-spread precedent above hop-for-hop — the ONE difference is
+// cardinality (every declared service, not just the triggering one) and applicability (context mode
+// ONLY; triggerService and services are mutually exclusive by the sibling guard at line 342/954).
+
+test("context mode: composes CompositionConfig.services = every declared service at its OWN join-formula mirrorDir, string openapi preserved", () => {
+  const app: AppConfig = {
+    ...cfg("factory-context-services"),
+    services: [
+      { repo: "org/orders-svc", openapi: "openapi/orders.yaml" },
+      { repo: "org/payments-svc", baseBranch: "develop" },
+    ],
+  };
+  const config = buildRewrittenCompositionConfig(
+    app,
+    { getAgentDeps: stubAgentDeps, mirrorRoot: "/tmp/mirrors" },
+    "qa-bot-abc1234-run1",
+    { mode: "context" },
+  );
+  assert.deepEqual(config.services, [
+    { repo: "org/orders-svc", mirrorDir: "/tmp/mirrors/org__orders-svc", openapi: "openapi/orders.yaml" },
+    { repo: "org/payments-svc", mirrorDir: "/tmp/mirrors/org__payments-svc" },
+  ], "each service ref must carry the SAME join(mirrorRoot, repo.replaceAll('/','__')) formula vcsDir/triggerService already use — no openapi key when a service declares none");
+});
+
+test("context mode: composes CompositionConfig.services with an array openapi hint, preserved as-is (openapi is string | string[])", () => {
+  const app: AppConfig = {
+    ...cfg("factory-context-services-array-openapi"),
+    services: [{ repo: "org/orders-svc", openapi: ["openapi/orders.yaml", "openapi/payments.yaml"] }],
+  };
+  const config = buildRewrittenCompositionConfig(
+    app,
+    { getAgentDeps: stubAgentDeps, mirrorRoot: "/tmp/mirrors" },
+    "qa-bot-abc1234-run1",
+    { mode: "context" },
+  );
+  assert.deepEqual(config.services, [
+    { repo: "org/orders-svc", mirrorDir: "/tmp/mirrors/org__orders-svc", openapi: ["openapi/orders.yaml", "openapi/payments.yaml"] },
+  ]);
+});
+
+test("diff mode with declared services: CompositionConfig.services key is entirely absent (only context mode populates it)", () => {
+  const app: AppConfig = { ...cfg("factory-diff-mode-services-absent"), services: [{ repo: "org/orders-svc" }] };
+  const config = buildRewrittenCompositionConfig(
+    app,
+    { getAgentDeps: stubAgentDeps, mirrorRoot: "/tmp/mirrors" },
+    "qa-bot-abc1234-run1",
+    { mode: "diff" },
+  );
+  assert.equal("services" in config, false, "non-context modes must OMIT services entirely, matching triggerService's own absence-vs-present discipline");
+});
+
+test("context mode with NO declared services: CompositionConfig.services key is entirely absent", () => {
+  const app = cfg("factory-context-no-services");
+  const config = buildRewrittenCompositionConfig(
+    app,
+    { getAgentDeps: stubAgentDeps, mirrorRoot: "/tmp/mirrors" },
+    "qa-bot-abc1234-run1",
+    { mode: "context" },
+  );
+  assert.equal("services" in config, false, "no app.services[] declared must OMIT the key, not an empty array");
+});
+
+test("context mode: checkout(sha) materializes every declared service via ensureMirrorAtBranch at svc.baseBranch ?? 'main', alongside the primary checkout", async () => {
+  const app: AppConfig = {
+    ...cfg("factory-context-checkout-materialize"),
+    services: [
+      { repo: "org/orders-svc" },
+      { repo: "org/payments-svc", baseBranch: "develop" },
+    ],
+  };
+  const { mirror, ensureMirrorCalls, ensureMirrorAtBranchCalls } = spyMirrorDeps();
+  const config = buildRewrittenCompositionConfig(
+    app,
+    { getAgentDeps: stubAgentDeps, mirror },
+    "qa-bot-abc1234-run1",
+    { mode: "context" },
+  );
+  await config.checkout(Sha.of("abc1234567"));
+  assert.deepEqual(ensureMirrorCalls, [{ repo: "org/demo", sha: "abc1234567", deps: defaultMirrorDeps }], "the primary repo must still be ensured at the event sha, exactly as the same-repo path already does");
+  assert.deepEqual(ensureMirrorAtBranchCalls, [
+    { repo: "org/orders-svc", branch: "main", deps: defaultMirrorDeps },
+    { repo: "org/payments-svc", branch: "develop", deps: defaultMirrorDeps },
+  ], "every declared service must be mirrored read-only at its OWN svc.baseBranch ?? 'main', sequentially like legacy's buildContextMap loop");
+});
+
+test("non-context mode: checkout(sha) never materializes declared services, even when app.services[] is set", async () => {
+  const app: AppConfig = { ...cfg("factory-diff-mode-no-service-checkout"), services: [{ repo: "org/orders-svc" }] };
+  const { mirror, ensureMirrorAtBranchCalls } = spyMirrorDeps();
+  const config = buildRewrittenCompositionConfig(
+    app,
+    { getAgentDeps: stubAgentDeps, mirror },
+    "qa-bot-abc1234-run1",
+    { mode: "diff" },
+  );
+  await config.checkout(Sha.of("abc1234567"));
+  assert.deepEqual(ensureMirrorAtBranchCalls, [], "a diff-mode run must never mirror declared services — that materialization is context-mode only");
 });
