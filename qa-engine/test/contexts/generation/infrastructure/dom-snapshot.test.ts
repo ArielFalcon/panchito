@@ -1270,11 +1270,14 @@ test("buildCaptureScript scopes httpCredentials to baseUrl's origin (creds must 
   assert.match(script, /origin:\s*new URL\(baseUrl\)\.origin/, "httpCredentials must be scoped via origin: new URL(baseUrl).origin");
 });
 
-test("buildCaptureScript only sets httpCredentials when both user and pass are present", () => {
+test("buildCaptureScript sets httpCredentials when DEV_ENV_USER alone is present (username-only parity with playwright.config.ts)", () => {
   const script = buildCaptureScript();
-  // The generated script must guard on BOTH user and pass before building httpCredentials — an
-  // absent pair (e.g. only DEV_ENV_USER set) must not construct a broken/partial credentials object.
-  assert.match(script, /user\s*&&\s*pass/, "must guard on user && pass before wiring httpCredentials");
+  // Matches config/e2e/playwright.config.ts's gate: `DEV_ENV_USER ? { username, password: DEV_ENV_PASS ?? "", origin } : undefined`.
+  // Gating on `user && pass` silently drops credentials whenever only DEV_ENV_USER is set — a real
+  // deployment gap this test pins closed. The gate is `user` alone; password defaults to "".
+  assert.match(script, /\buser\s*\?/, "must gate httpCredentials on user alone, not user && pass");
+  assert.doesNotMatch(script, /user\s*&&\s*pass/, "must NOT require both user and pass to be truthy");
+  assert.match(script, /pass\s*\?\?\s*["']["']/, "password must default to \"\" when DEV_ENV_PASS is unset");
 });
 
 // ── Fix 2 (audit leak 5): capture pageerror/console + degrade empty or redirected routes ──

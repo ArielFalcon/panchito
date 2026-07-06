@@ -736,11 +736,14 @@ const testIdAttr = process.env.PW_TEST_ID_ATTRIBUTE || "data-testid";
     // Fix 1 (audit leak 4): DEV_ENV_USER/DEV_ENV_PASS were scrubbed through to the child's env
     // (scrubEnv(/^DEV_/)) but never wired into newContext() — gated routes rendered on the login/401
     // page. Mirrors config/e2e/playwright.config.ts's httpCredentials idiom, scoped to baseUrl's
-    // origin so creds never leak to a different-origin auth provider (e.g. Keycloak).
+    // origin so creds never leak to a different-origin auth provider (e.g. Keycloak). Gate is
+    // DEV_ENV_USER alone — password defaults to "" — matching playwright.config.ts's
+    // \`DEV_ENV_USER ? { username, password: DEV_ENV_PASS ?? "", origin } : undefined\` parity;
+    // the previous both-required guard silently dropped credentials whenever only DEV_ENV_USER was set.
     const user = process.env.DEV_ENV_USER;
     const pass = process.env.DEV_ENV_PASS;
-    const context = await browser.newContext(user && pass
-      ? { httpCredentials: { username: user, password: pass, origin: new URL(baseUrl).origin } }
+    const context = await browser.newContext(user
+      ? { httpCredentials: { username: user, password: pass ?? "", origin: new URL(baseUrl).origin } }
       : {});
     const page = await context.newPage();
     // Fix 2 (audit leak 5): per-route runtime-error accumulator. Registered ONCE, reset per route
