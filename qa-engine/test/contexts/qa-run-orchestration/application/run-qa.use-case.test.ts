@@ -1088,6 +1088,92 @@ test("FIX E: invalid calls BOTH runHistory.save() AND learning.fold()", async ()
   assert.equal(foldCallCount, 1, "invalid must call learning.fold() exactly once (matches foldRunLearning at pipeline.ts:2321)");
 });
 
+// ── post-cutover-remediation P3 (unit 4): the FixLoop's own adjudicator verdict threads into the
+// persisted RunOutcome.adjudication, and shouldDistillLearning's app_defect rule is wired at BOTH
+// fold call sites (mainline :1400, terminal-invalid :1776). adjudicate.service.ts's Rule 2.5 (an
+// attributed 5xx on a failing case) is the reachable app_defect vector through this use-case's real
+// FixLoop wiring today — Rule 3 (isLikelyRealBug/selector-uniqueness) is NOT reachable end-to-end
+// because the use-case never threads FixLoopGenerateResult.specSources back into the FixLoop (a
+// pre-existing, separate gap, out of scope here — see apply-progress deviation note). ─────────────
+
+test("P3: mainline fold — app_defect (via an attributed 5xx) suppresses learning.fold(); ledger untouched", async () => {
+  let foldCallCount = 0;
+  let savedAdjudicationClass: string | undefined;
+  const { ports } = stubPorts({
+    // Every execute() call (initial + every FixLoop retry) fails with a case carrying an attributed
+    // 5xx — adjudicate.service.ts Rule 2.5 fires on the FIRST fix-loop round (isCode:false), routing
+    // to app_defect/break-issue: realBugDetected=true, run.verdict stays "fail".
+    execute: async () => ({
+      verdict: "fail" as const,
+      cases: [{ name: "checkout", status: "fail" as const, detail: "server error", httpStatus: 500 }],
+      logs: "x",
+    }),
+  });
+  ports.runHistory.save = async (outcome) => { savedAdjudicationClass = outcome.adjudication?.class; };
+  ports.learning.fold = async () => { foldCallCount++; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "p3-app-defect-suppresses-fold" });
+
+  assert.equal(out.decision.verdict, "fail");
+  assert.equal(savedAdjudicationClass, "app_defect", "the persisted RunOutcome must carry the adjudicator's app_defect classification");
+  assert.equal(foldCallCount, 0, "learning.fold() must NOT be called when the mainline outcome's adjudication.class is app_defect");
+});
+
+test("P3: mainline fold — generated_test_defect (the default fallthrough) still folds; ledger updated", async () => {
+  let foldCallCount = 0;
+  let savedAdjudicationClass: string | undefined;
+  const { ports } = stubPorts({
+    // A generic, non-infra, non-value-mismatch failure detail never matches any adjudicate.service.ts
+    // rule above the default fallthrough — every fix-loop round classifies generated_test_defect/
+    // continue, exhausting maxRetries with verdict still "fail".
+    execute: async () => ({
+      verdict: "fail" as const,
+      cases: [{ name: "checkout", status: "fail" as const, detail: "timed out waiting for selector" }],
+      logs: "x",
+    }),
+  });
+  ports.runHistory.save = async (outcome) => { savedAdjudicationClass = outcome.adjudication?.class; };
+  ports.learning.fold = async (outcome) => { foldCallCount++; savedAdjudicationClass = outcome.adjudication?.class; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "p3-generated-test-defect-still-folds" });
+
+  assert.equal(out.decision.verdict, "fail");
+  assert.equal(savedAdjudicationClass, "generated_test_defect", "the persisted RunOutcome must carry the adjudicator's generated_test_defect classification");
+  assert.equal(foldCallCount, 1, "learning.fold() must still be called when adjudication.class is generated_test_defect (only app_defect suppresses)");
+});
+
+test("P3: a run whose FixLoop never invoked the adjudicator (passed first try) persists adjudication:undefined and still folds", async () => {
+  let foldCallCount = 0;
+  let savedOutcome: { adjudication?: { class: string } } | undefined;
+  const { ports } = stubPorts();
+  ports.runHistory.save = async (outcome) => { savedOutcome = outcome; };
+  ports.learning.fold = async () => { foldCallCount++; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "p3-no-adjudication-on-clean-pass" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(savedOutcome?.adjudication, undefined, "a clean pass never engages the FixLoop, so adjudication must be absent — never fabricated");
+  assert.equal(foldCallCount, 1, "a clean pass with no adjudication must still fold (unaffected by the P3 guard)");
+});
+
+test("P3: terminal-invalid fold site carries the SAME app_defect guard (structurally a no-op today — no FixLoop runs before a static-gate invalid)", async () => {
+  let foldCallCount = 0;
+  let savedAdjudication: unknown;
+  const { ports } = stubPorts({ validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }) });
+  ports.runHistory.save = async (outcome) => { savedAdjudication = outcome.adjudication; };
+  ports.learning.fold = async () => { foldCallCount++; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "p3-terminal-invalid-guard-noop-today" });
+
+  assert.equal(out.decision.verdict, "invalid");
+  assert.equal(savedAdjudication, undefined, "the static-gate invalid path never reaches the FixLoop, so terminalOutcome.adjudication stays undefined today");
+  assert.equal(foldCallCount, 1, "the terminal-invalid fold must still fire — the app_defect guard is structurally a no-op on this path today (regression pin: a future reorder that routes an adjudicated outcome here must not silently bypass the guard)");
+});
+
 // ── SETUP phase (CLAUDE.md run-flow step 3): "bootstrap the config/e2e seed into e2e/, then npm ci;
 // runs BEFORE generation so the agent has the fixtures/config". Missing from this rewrite until now
 // — src/pipeline.ts:1299 calls deps.setupE2e/setupCode AFTER classify resolves to generate/

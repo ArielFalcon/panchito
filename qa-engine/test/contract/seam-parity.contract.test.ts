@@ -404,7 +404,7 @@ describe("seam-parity: PERSISTENCE (kernel RunOutcome vs toLegacyRunOutcome)", (
   const ALL_TOP_FIELDS = {
     runId: true, app: true, sha: true, mode: true, target: true, verdict: true, errorClass: true,
     gateSignals: true, rulesRetrieved: true, reflection: true, at: true, note: true, cases: true,
-    logs: true,
+    logs: true, adjudication: true,
   } satisfies Record<keyof KernelRunOutcome, true>;
 
   const ALL_GATE_SIGNAL_FIELDS = {
@@ -435,6 +435,7 @@ describe("seam-parity: PERSISTENCE (kernel RunOutcome vs toLegacyRunOutcome)", (
     note: "CORRECT BY DESIGN (not a drop): toLegacyRunOutcome never carries outcome.note through because LegacyRunOutcome (src/types.ts's RunOutcome interface) has NO note field to carry it TO — grep/read-confirmed against the full interface. The kernel RunOutcome.note reaches the run record through a SEPARATE seam (QaRunResult.note -> RunRecord.note, src/server/runner.ts's own W3 F3 header), never through this mapping fn's run_outcomes row. Diagnostic-only either way (never gates verdict/publish).",
     cases: "DELIBERATELY not persisted via toLegacyRunOutcome — LegacyRunOutcome (src/types.ts) has NO cases field at all (grep-confirmed); this field exists on the kernel RunOutcome ONLY for a DIFFERENT driving-side consumer (src/server/runner.ts's runViaRewrittenEngine threads it into history.addCase() calls directly, per this file's own W3 F3 header comment), not for the run_outcomes row this adapter writes. Comparator-blind by the kernel type's own documented construction.",
     logs: "DELIBERATELY not persisted via toLegacyRunOutcome — same reason as cases above: LegacyRunOutcome has no logs field (grep-confirmed), and the kernel RunOutcome's own header says this is 'the same one-shot... string legacy's own QaRunResult.logs carries', a different sink than the run_outcomes row.",
+    adjudication: "CORRECT BY DESIGN (not a drop): post-cutover-remediation P3 — LegacyRunOutcome (src/types.ts) has NO adjudication field at all (the legacy pipeline never threaded FixLoop's lastAdjudicatorVerdict into a persisted RunOutcome). This is a REWRITTEN-ONLY field: the kernel type carries it (wide, optional — see run-outcome.ts's own header) so shouldDistillLearning's fold guard can read it in run-qa.use-case.ts, but toLegacyRunOutcome has no legacy counterpart shape to map it into. Diagnostic/gating-only within the rewritten path; never reaches the legacy run_outcomes row.",
   };
 
   test("kernel RunOutcome's own top-level field list matches the allowlist + the mapping fn's carried set exactly", () => {

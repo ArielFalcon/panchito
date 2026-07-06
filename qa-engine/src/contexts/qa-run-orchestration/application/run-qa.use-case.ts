@@ -63,6 +63,7 @@ import { RunDecision } from "../domain/run-decision.ts";
 import { FixLoop, type FixLoopExecutionPort, type FixLoopGenerationPort, type FixLoopSelectorCheckPort } from "../domain/fix-loop.aggregate.ts";
 import { checkSpecSelectors } from "../domain/helpers/selector-check.ts";
 import { resolveErrorClass } from "../domain/helpers/error-class.ts";
+import { shouldDistillLearning } from "../domain/helpers/should-distill-learning.ts";
 import { CycleBudget } from "../domain/cycle-budget.ts";
 import { WallClockBudget } from "../domain/wall-clock-budget.ts";
 import { checkPreExecGrounding, checkPersistingAmbiguity } from "../domain/pre-exec-grounding.service.ts";
@@ -625,6 +626,12 @@ export class RunQaUseCase {
     // pipeline.ts:2265's `retries++` in the static-fix loop, and the FixLoop's own retries++ per
     // verdictual round). Declared here (not reassigned to a fresh 0 at the FixLoop section below).
     let retries = 0;
+    // post-cutover-remediation P3 (unit 4): the FixLoop's own adjudicator verdict class
+    // (FixLoopResult.lastAdjudicatorVerdict), hoisted to the SAME method-level scope as `retries`
+    // above — captured inside the FixLoop branch below, read at the mainline toRunOutcome call much
+    // further down. Stays undefined for every run whose FixLoop never engaged (context mode's
+    // synthetic pass, or a first-try pass) — never fabricated.
+    let lastAdjudicatorVerdictClass: string | undefined;
 
     // Phase: pre-exec grounding gate (Plan 7-R B5). [SWAP] absent PreExecGroundingPort -> the whole
     // phase (W1 below + the W2 re-check further down) is a no-op; the counters stay the literal 0
@@ -1026,6 +1033,11 @@ export class RunQaUseCase {
       // SAME running total, never reset between them. A plain `retries = fixLoopResult.retries`
       // would silently DISCARD any repair rounds the static-fix loop already consumed above.
       retries += fixLoopResult.retries;
+      // post-cutover-remediation P3 (unit 4): capture the FixLoop's own adjudicator verdict class —
+      // undefined when the loop never reached the adjudicate() decision point (e.g. maxRetries:0, or
+      // the loop condition never engaged at all), matching lastAdjudicatorVerdictClass's own
+      // "never fabricated" contract above.
+      lastAdjudicatorVerdictClass = fixLoopResult.lastAdjudicatorVerdict?.class;
     }
 
     // executedRed override (task #42): captured here, BEFORE the `if (run.verdict === "pass")`
@@ -1392,12 +1404,21 @@ export class RunQaUseCase {
         // W3 F3: the execution logs ExecutionPort.execute() already returned — reaches the
         // persisted RunOutcome the SAME way cases does (see toRunOutcome's own cases doc).
         logs: run.logs,
+        // post-cutover-remediation P3 (unit 4): the FixLoop's own adjudicator verdict class, captured
+        // above when the loop engaged — undefined for a clean first-try pass.
+        adjudicationClass: lastAdjudicatorVerdictClass,
       });
       await this.deps.runHistory.save(mainlineOutcome);
 
       // Phase: fold (LearningPort) — off-path by contract: never gates the verdict, failures are
-      // swallowed at the port's own boundary (not this use-case's concern to catch).
-      await this.deps.learning.fold(mainlineOutcome);
+      // swallowed at the port's own boundary (not this use-case's concern to catch). post-cutover-
+      // remediation P3 (unit 4): gated on shouldDistillLearning, now ALSO reading the persisted
+      // outcome's own adjudication class — app_defect (the adjudicator attributing the failure to
+      // the app, not the generated test) suppresses the fold so the flywheel never learns to weaken
+      // a test that correctly caught a real bug.
+      if (shouldDistillLearning(cfg.isCode, decision.verdict, mainlineOutcome.adjudication?.class)) {
+        await this.deps.learning.fold(mainlineOutcome);
+      }
     }
 
     this.deps.observer?.onStep("done");
@@ -1523,6 +1544,11 @@ export class RunQaUseCase {
       // W3 F3: the execution logs, same optional-override precedent as note/rulesRetrieved above —
       // only the mainline caller (post-execute) has real logs to thread.
       logs?: string;
+      // post-cutover-remediation P3 (unit 4): the FixLoop's own adjudicator verdict class — only the
+      // mainline caller (post-FixLoop) has a real value to thread; every other toRunOutcome() call
+      // site (skipped/invalid/infra-error, all pre-FixLoop) omits it and gets undefined, matching
+      // this field's own kernel-level "never fabricated" contract.
+      adjudicationClass?: string;
     },
   ) {
     const gateCoverageRatio = coverageRatio;
@@ -1578,6 +1604,9 @@ export class RunQaUseCase {
       // when a real execute() happened (mainline path); every other caller passes [] (unchanged).
       cases,
       ...(extra?.logs !== undefined ? { logs: extra.logs } : {}),
+      // post-cutover-remediation P3 (unit 4): conditional-spread (never a fabricated placeholder) —
+      // only threaded when the caller's FixLoop genuinely produced a verdict class.
+      ...(extra?.adjudicationClass !== undefined ? { adjudication: { class: extra.adjudicationClass } } : {}),
     };
   }
 
@@ -1772,7 +1801,16 @@ export class RunQaUseCase {
         ...groundingSignals,
       });
       await this.deps.runHistory.save(terminalOutcome);
-      if (verdict === "invalid") {
+      // post-cutover-remediation P3 (unit 4): the SAME shouldDistillLearning guard as the mainline
+      // fold site, applied here too for symmetry — this helper serves the static-gate invalid and
+      // health-preflight infra-error exits, BOTH of which run BEFORE the FixLoop ever engages (the
+      // FixLoop only runs after a real execute() inside the mainline body), so
+      // `terminalOutcome.adjudication` is ALWAYS undefined on this path today, making this guard a
+      // structural no-op (shouldDistillLearning(cfg.isCode, "invalid", undefined) === true whenever
+      // cfg.isCode is false, or whenever isCode+invalid — never suppressed by the app_defect clause,
+      // since adjudication is never set here). Kept anyway so a FUTURE reorder that routes an
+      // adjudicated outcome through this terminal path can never silently bypass the suppression.
+      if (verdict === "invalid" && shouldDistillLearning(cfg.isCode, verdict, terminalOutcome.adjudication?.class)) {
         await this.deps.learning.fold(terminalOutcome);
       }
     }

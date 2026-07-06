@@ -92,4 +92,15 @@ export interface RunOutcome {
   // the same one-shot "whatever ExecutionPort.execute() already returned" string legacy's own
   // QaRunResult.logs carries for a completed run.
   logs?: string;
+  // post-cutover-remediation P3: the FixLoop's own adjudicator verdict (fix-loop.aggregate.ts's
+  // FixLoopResult.lastAdjudicatorVerdict), threaded into the persisted outcome so a run's app-vs-
+  // test fault attribution is diagnosable from the run record alone, and so shouldDistillLearning
+  // can gate the learning fold on it (app_defect must never teach the flywheel to weaken a test that
+  // correctly caught a real bug). WIDE and OPTIONAL by kernel convention (mirrors errorClass/usage/
+  // reflection above): `class` is `string`, NOT the domain's narrow `AdjudicatorClass` literal union
+  // (adjudicate.service.ts's ADJ_CLASS — currently app_defect/generated_test_defect/runner_infra/
+  // dev_infra/objective_gap) — the kernel MUST NOT import that type, so the domain can add/change
+  // classes without a kernel edit. Absent means the FixLoop never ran the adjudicator for this run
+  // (e.g. it passed on the first try) — never a fabricated verdict.
+  adjudication?: { class: string; confidence?: string; action?: string; reason?: string };
 }
