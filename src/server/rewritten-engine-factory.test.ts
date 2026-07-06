@@ -752,6 +752,8 @@ test("GUARD: triggerRepo: '' (empty string) behaves identically to absent — sa
   assert.deepEqual(ensureMirrorCalls, [{ repo: "org/demo", sha: "abc1234567", deps: defaultMirrorDeps }], "empty-string triggerRepo must ensure the PRIMARY repo at the event sha, same as no triggerRepo at all");
   assert.deepEqual(ensureMirrorAtBranchCalls, [], "empty-string triggerRepo must NEVER call ensureMirrorAtBranch");
   assert.equal(config.versionUrl, "https://dev/version", "gate must read app.dev.versionUrl, not a service's");
+  assert.equal(config.deployGateIntervalMs, 2000, "empty-string triggerRepo must keep the primary gate defaults (2000/60000), never the service-level 10_000/600_000");
+  assert.equal(config.deployGateTimeoutMs, 60000);
 });
 
 test("GUARD: no triggerRepo — versionUrl is app.dev?.versionUrl exactly as before", () => {
@@ -936,6 +938,22 @@ test("createRewrittenEngineFactory's returned closure accepts and threads a run.
     const factory = createRewrittenEngineFactory({ getAgentDeps: stubAgentDeps });
     const app: AppConfig = { ...cfg("factory-crossrepo-closure"), services: [{ repo: "org/orders-svc" }] };
     assert.doesNotThrow(() => factory(app, "qa-bot-abc1234-run1", { mode: "diff", triggerRepo: "org/orders-svc" }));
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("createRewrittenEngineFactory's returned closure propagates the undeclared-triggerRepo throw (guard reachable at the closure seam, not just via buildRewrittenCompositionConfig directly)", () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const factory = createRewrittenEngineFactory({ getAgentDeps: stubAgentDeps });
+    const app: AppConfig = { ...cfg("factory-crossrepo-closure-throw"), services: [{ repo: "org/orders-svc" }] };
+    assert.throws(
+      () => factory(app, "qa-bot-abc1234-run1", { mode: "diff", triggerRepo: "org/evil-repo" }),
+      /trigger repo org\/evil-repo is not a declared service of app factory-crossrepo-closure-throw/,
+    );
   } finally {
     if (prev === undefined) delete process.env.PIPELINE_ENGINE;
     else process.env.PIPELINE_ENGINE = prev;
