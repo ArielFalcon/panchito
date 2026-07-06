@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { OpenCodeRuntimeStrategy } from "./opencode-strategy";
+import { OpenCodeRuntimeStrategy, ROLE_TO_OPENCODE_AGENT } from "./opencode-strategy";
 import { CodexExecTransport, CodexRuntimeStrategy, SupervisorExecTransport, codexExecArgs, codexExecEnv, defaultCodexTransport } from "./codex-strategy";
 import { capabilitiesForRole, roleForLegacyAgent } from "./types";
 import { getAgentTurns } from "../server/history";
@@ -74,6 +74,39 @@ test("OpenCodeRuntimeStrategy maps the explorer role to the qa-explorer agent", 
   const strategy = new OpenCodeRuntimeStrategy({ env: { OPENCODE_API_KEY: "k" }, depsFactory: async () => deps });
   await strategy.openSession("explorer", "/repo");
   assert.deepEqual(calls, ["qa-explorer"]);
+});
+
+// ── Slice 1: the read-only boundary-hypothesis proposer role (both runtimes) ─
+
+test("capabilitiesForRole: the proposer is read-only (it hypothesizes candidates, never writes)", () => {
+  assert.equal(capabilitiesForRole("proposer").canWrite, false);
+});
+
+test("roleForLegacyAgent maps qa-proposer to the read-only proposer role", () => {
+  assert.equal(roleForLegacyAgent("qa-proposer"), "proposer");
+});
+
+test("codexExecArgs sandboxes the proposer read-only on Codex", () => {
+  const args = codexExecArgs({ role: "proposer", cwd: "/repo" });
+  assert.ok(args.includes("read-only"), "proposer must run --sandbox read-only");
+  assert.ok(!args.includes("workspace-write"), "proposer must NOT get workspace-write");
+});
+
+test("ROLE_TO_OPENCODE_AGENT maps proposer to the qa-proposer agent", () => {
+  assert.equal(ROLE_TO_OPENCODE_AGENT.proposer, "qa-proposer");
+});
+
+test("OpenCodeRuntimeStrategy maps the proposer role to the qa-proposer agent", async () => {
+  const calls: string[] = [];
+  const deps: AgentDeps = {
+    open: async (agent) => {
+      calls.push(agent);
+      return { id: "s", prompt: async () => "ok", dispose: async () => {} };
+    },
+  };
+  const strategy = new OpenCodeRuntimeStrategy({ env: { OPENCODE_API_KEY: "k" }, depsFactory: async () => deps });
+  await strategy.openSession("proposer", "/repo");
+  assert.deepEqual(calls, ["qa-proposer"]);
 });
 
 test("OpenCodeRuntimeStrategy maps roles to legacy OpenCode agents and forwards model overrides", async () => {

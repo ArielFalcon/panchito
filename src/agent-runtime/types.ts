@@ -5,7 +5,7 @@ import type { RunEventBody } from "../contract/events";
 
 export type AgentProvider = "opencode" | "codex";
 export type AgentMode = "single" | "dual";
-export type AgentRole = "primary" | "reviewer" | "chat" | "worker" | "workerCode" | "maintainer" | "reflector" | "explorer";
+export type AgentRole = "primary" | "reviewer" | "chat" | "worker" | "workerCode" | "maintainer" | "reflector" | "explorer" | "proposer";
 
 // What a role is structurally allowed to do, independent of the runtime provider — the single,
 // provider-agnostic capability policy. Each AgentRuntimeStrategy translates it to its own mechanism
@@ -17,7 +17,7 @@ export interface RoleCapabilities {
   canWrite: boolean;
 }
 
-const READ_ONLY_ROLES: ReadonlySet<AgentRole> = new Set<AgentRole>(["reviewer", "chat", "reflector", "explorer"]);
+const READ_ONLY_ROLES: ReadonlySet<AgentRole> = new Set<AgentRole>(["reviewer", "chat", "reflector", "explorer", "proposer"]);
 
 export function capabilitiesForRole(role: AgentRole): RoleCapabilities {
   return { canWrite: !READ_ONLY_ROLES.has(role) };
@@ -110,6 +110,7 @@ const LEGACY_AGENT_TO_ROLE: Record<string, AgentRole> = {
   "qa-maintainer": "maintainer",
   "qa-reflector": "reflector",
   "qa-explorer": "explorer",
+  "qa-proposer": "proposer",
 };
 
 export function roleForLegacyAgent(agent: string): AgentRole {

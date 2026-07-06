@@ -92,6 +92,16 @@
       "mcp": ["serena", "engram"],
       "steps": 25,
       "temperature": 0.2
+    },
+    "qa-proposer": {
+      "description": "Read-only cross-service boundary proposer. Hypothesizes the app's HTTP/event convention as candidate BoundaryProfiles for a deterministic scorer to grade against real repos. Writes nothing; emits only the verdict.",
+      "mode": "primary",
+      "model": "opencode-go/deepseek-v4-pro",
+      "prompt": "{file:./agent/qa-proposer.md}",
+      "tools": { "write": false, "edit": false, "read": true, "bash": false },
+      "mcp": ["serena", "engram"],
+      "steps": 25,
+      "temperature": 0.2
     }
   },
   "mcp": {

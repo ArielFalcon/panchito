@@ -493,7 +493,7 @@ function withCodexRolePreamble(role: AgentRole, text: string, promptRoot: string
   ].join("\n");
 }
 
-function rolePromptName(role: AgentRole): string {
+export function rolePromptName(role: AgentRole): string {
   if (role === "primary") return "qa-generator";
   if (role === "reviewer") return "qa-reviewer";
   if (role === "chat") return "qa-assistant";
@@ -501,6 +501,7 @@ function rolePromptName(role: AgentRole): string {
   if (role === "workerCode") return "qa-worker";
   if (role === "reflector") return "qa-reflector";
   if (role === "explorer") return "qa-explorer";
+  if (role === "proposer") return "qa-proposer";
   return "qa-maintainer";
 }
 

@@ -9,6 +9,7 @@ import { AgentUnavailableError } from "../errors";
 import {
   codexErrorToInfra,
   extractCodexLastMessage,
+  rolePromptName,
   CodexRuntimeStrategy,
   CodexExecTransport,
   CODEX_USAGE_AVAILABLE,
@@ -334,6 +335,22 @@ describe("CodexExecTransport timeout/SIGTERM path (T-P2-3 / AC2.3.1-2)", () => {
 // ---------------------------------------------------------------------------
 // T-P2-1: extractCodexLastMessage unit tests (AC2.1.1-3)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Slice 1: rolePromptName must route "proposer" through its own explicit
+// branch, not the "qa-maintainer" fallthrough.
+// ---------------------------------------------------------------------------
+
+describe("rolePromptName (Slice 1 — proposer role)", () => {
+  it("routes proposer to qa-proposer via an explicit branch, not the qa-maintainer fallthrough", () => {
+    assert.equal(rolePromptName("proposer"), "qa-proposer");
+    assert.notEqual(
+      rolePromptName("proposer"),
+      rolePromptName("maintainer"),
+      "proposer must not silently fall through to the maintainer branch",
+    );
+  });
+});
 
 // ---------------------------------------------------------------------------
 // T-P2-1: extractCodexLastMessage unit tests (AC2.1.1-3)

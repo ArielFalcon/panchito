@@ -40,6 +40,7 @@ export const ROLE_TO_OPENCODE_AGENT: Record<AgentRole, string> = {
   maintainer: "qa-maintainer",
   reflector: "qa-reflector",
   explorer: "qa-explorer",
+  proposer: "qa-proposer",
 };
 
 // Used ONLY when opencode.json is missing/unreadable (otherwise the live agent catalog wins). Kept
