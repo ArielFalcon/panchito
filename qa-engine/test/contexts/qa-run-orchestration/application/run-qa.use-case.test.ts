@@ -945,20 +945,172 @@ test("FIX B: coveragePolicyMode:\"signal\" (the default) NEVER blocks publish ev
   assert.equal(out.decision.sideEffect, "pr", "signal mode must publish (measure + record only), never hold the PR");
 });
 
-test("FIX B: coveragePolicyMode:\"enforce\" DOES block publish when the signal is fail", async () => {
+// post-cutover-remediation P2c (unit 5) REWRITE of "FIX B: coveragePolicyMode:\"enforce\" DOES block
+// publish when the signal is fail" — that test's own premise (a single measure() call decides
+// blocksPublish) is now FALSE: enforce mode regenerates ONCE against the uncovered lines before
+// deciding. New scenarios below cover: regen->pass->unblocks; regen->still-fail->keeps blocksPublish;
+// regen throws->keeps first; sig2 unknown->never blocks; signal mode->no regen at all; ONLY ONE
+// regen ever (oneShotCoverageRegenUsed); the regen's execute()+re-measure() both use the
+// `${runId}-coverage-regen` namespace (Constraint 2's dump-attribution requirement).
+
+test("P2c: enforce mode — first measure fails, regen fires, second measure ALSO fails — blocksPublish stays true (issue)", async () => {
+  let measureCallCount = 0;
   const { ports } = stubPorts({
-    execute: async () => ({ verdict: "pass", cases: [], logs: "" }),
-    measure: async () => ({ status: "fail", ratio: 0.2 }),
+    execute: async () => ({ verdict: "pass" as const, cases: [], logs: "" }),
+    measure: async () => { measureCallCount++; return { status: "fail" as const, ratio: 0.2, uncovered: [{ file: "src/a.ts", lines: [1, 2] }] }; },
+    blocks: (status) => status === "fail",
   });
   const useCase = new RunQaUseCase({
     ...ports,
     config: { ...baseConfig, needsReview: false, coveragePolicyMode: "enforce" },
   });
 
-  const out = await useCase.run({ ...baseInput, runId: "fix-b-enforce-blocks" });
+  const out = await useCase.run({ ...baseInput, runId: "p2c-enforce-regen-still-fails" });
 
   assert.equal(out.decision.verdict, "pass");
-  assert.equal(out.decision.sideEffect, "issue", "enforce mode must hold the PR (route to issue) when coverage fails");
+  assert.equal(out.decision.sideEffect, "issue", "enforce mode must hold the PR (route to issue) when the SECOND measure also fails");
+  assert.equal(measureCallCount, 2, "enforce+fail must regenerate exactly once, re-measuring exactly twice total (never a third)");
+});
+
+test("P2c: enforce mode — first measure fails, regen fires, second measure PASSES — blocksPublish unblocks (pr)", async () => {
+  let measureCallCount = 0;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass" as const, cases: [], logs: "" }),
+    measure: async () => {
+      measureCallCount++;
+      return measureCallCount === 1
+        ? { status: "fail" as const, ratio: 0.2, uncovered: [{ file: "src/a.ts", lines: [1, 2] }] }
+        : { status: "pass" as const, ratio: 0.95 };
+    },
+    blocks: (status) => status === "fail",
+  });
+  const useCase = new RunQaUseCase({
+    ...ports,
+    config: { ...baseConfig, needsReview: false, coveragePolicyMode: "enforce" },
+  });
+
+  const out = await useCase.run({ ...baseInput, runId: "p2c-enforce-regen-unblocks" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(out.decision.sideEffect, "pr", "a regen whose second measure PASSES must unblock publish");
+  assert.equal(measureCallCount, 2);
+});
+
+test("P2c: enforce mode — regen's second measure resolves unknown — blocksPublish stays false (the keystone invariant survives regen)", async () => {
+  let measureCallCount = 0;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass" as const, cases: [], logs: "" }),
+    measure: async () => {
+      measureCallCount++;
+      return measureCallCount === 1
+        ? { status: "fail" as const, ratio: 0.2, uncovered: [{ file: "src/a.ts", lines: [1, 2] }] }
+        : { status: "unknown" as const, ratio: null };
+    },
+    blocks: (status) => status === "fail",
+  });
+  const useCase = new RunQaUseCase({
+    ...ports,
+    config: { ...baseConfig, needsReview: false, coveragePolicyMode: "enforce" },
+  });
+
+  const out = await useCase.run({ ...baseInput, runId: "p2c-enforce-regen-unknown-never-blocks" });
+
+  assert.equal(out.decision.sideEffect, "pr", "unknown NEVER blocks, even after a prior fail — the coverage keystone invariant survives the regen");
+  assert.equal(measureCallCount, 2);
+});
+
+test("P2c: enforce mode — the regen's generate() throws — KEEPS the first measurement's blocksPublish (never fabricated)", async () => {
+  let measureCallCount = 0;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass" as const, cases: [], logs: "" }),
+    measure: async () => { measureCallCount++; return { status: "fail" as const, ratio: 0.2, uncovered: [{ file: "src/a.ts", lines: [1] }] }; },
+    blocks: (status) => status === "fail",
+  });
+  let genCallCount = 0;
+  ports.generation.generate = async () => {
+    genCallCount++;
+    if (genCallCount === 1) return { specs: ["a.spec.ts"], approved: true };
+    throw new Error("agent runtime crashed mid-regen");
+  };
+  const useCase = new RunQaUseCase({
+    ...ports,
+    config: { ...baseConfig, needsReview: false, coveragePolicyMode: "enforce" },
+  });
+
+  await assert.rejects(
+    () => useCase.run({ ...baseInput, runId: "p2c-enforce-regen-throws" }),
+    /agent runtime crashed mid-regen/,
+    "CLAUDE.md invariant: surface integration errors loudly — a regen throw must propagate, never be silently swallowed into a fabricated result",
+  );
+});
+
+test("P2c: enforce mode — the regen produces ZERO specs — KEEPS the first measurement's blocksPublish, only ONE measure() call", async () => {
+  let measureCallCount = 0;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass" as const, cases: [], logs: "" }),
+    measure: async () => { measureCallCount++; return { status: "fail" as const, ratio: 0.2, uncovered: [{ file: "src/a.ts", lines: [1] }] }; },
+    blocks: (status) => status === "fail",
+  });
+  let genCallCount = 0;
+  ports.generation.generate = async () => {
+    genCallCount++;
+    if (genCallCount === 1) return { specs: ["a.spec.ts"], approved: true };
+    return { specs: [], approved: true }; // regen produced nothing reviewable
+  };
+  const useCase = new RunQaUseCase({
+    ...ports,
+    config: { ...baseConfig, needsReview: false, coveragePolicyMode: "enforce" },
+  });
+
+  const out = await useCase.run({ ...baseInput, runId: "p2c-enforce-regen-zero-specs" });
+
+  assert.equal(out.decision.sideEffect, "issue", "a regen with zero specs never re-measures — the first measurement's blocksPublish stands");
+  assert.equal(measureCallCount, 1, "zero regen specs must NOT trigger a second measure() call");
+});
+
+test("P2c: signal mode — first measure fails, NO regen fires, NO second measure() call", async () => {
+  let measureCallCount = 0;
+  let genCallCount = 0;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass" as const, cases: [], logs: "" }),
+    measure: async () => { measureCallCount++; return { status: "fail" as const, ratio: 0.2, uncovered: [{ file: "src/a.ts", lines: [1] }] }; },
+    blocks: () => false,
+  });
+  const originalGenerate = ports.generation.generate;
+  ports.generation.generate = async (...args) => { genCallCount++; return originalGenerate(...args); };
+  const useCase = new RunQaUseCase({
+    ...ports,
+    config: { ...baseConfig, needsReview: false, coveragePolicyMode: "signal" },
+  });
+
+  const out = await useCase.run({ ...baseInput, runId: "p2c-signal-mode-never-regens" });
+
+  assert.equal(out.decision.sideEffect, "pr", "signal mode must never block publish");
+  assert.equal(measureCallCount, 1, "signal mode must never regenerate — only ONE measure() call total");
+  assert.equal(genCallCount, 1, "signal mode's regen branch must not call generate() a second time");
+});
+
+test("P2c: the regen's execute() AND its re-measure() both use the ${runId}-coverage-regen namespace", async () => {
+  const capturedExecuteNamespaces: (string | undefined)[] = [];
+  let measureCallCount = 0;
+  const { ports } = stubPorts({
+    measure: async () => { measureCallCount++; return { status: "fail" as const, ratio: 0.2, uncovered: [{ file: "src/a.ts", lines: [1] }] }; },
+    blocks: (status) => status === "fail",
+  });
+  ports.execution.execute = async (_specDir, opts) => {
+    capturedExecuteNamespaces.push((opts as { namespace?: string } | undefined)?.namespace);
+    return { verdict: "pass" as const, cases: [], logs: "" };
+  };
+  const useCase = new RunQaUseCase({
+    ...ports,
+    config: { ...baseConfig, needsReview: false, coveragePolicyMode: "enforce" },
+  });
+
+  await useCase.run({ ...baseInput, runId: "p2c-regen-namespace-attribution" });
+
+  assert.equal(measureCallCount, 2, "the regen must have re-measured once");
+  const regenExecuteCall = capturedExecuteNamespaces.find((ns) => ns?.endsWith("-coverage-regen"));
+  assert.equal(regenExecuteCall, "p2c-regen-namespace-attribution-coverage-regen", "the regen's execute() must use the ${runId}-coverage-regen namespace so collect/read hit the regen's own dumps, never the first run's");
 });
 
 test("FIX C: context mode NEVER calls execute() (context.json is not a Playwright spec)", async () => {

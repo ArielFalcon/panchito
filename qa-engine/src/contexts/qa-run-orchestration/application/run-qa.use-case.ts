@@ -66,6 +66,7 @@ import { resolveErrorClass } from "../domain/helpers/error-class.ts";
 import { shouldDistillLearning } from "../domain/helpers/should-distill-learning.ts";
 import { CycleBudget } from "../domain/cycle-budget.ts";
 import { WallClockBudget } from "../domain/wall-clock-budget.ts";
+import { renderCoverageGap } from "@contexts/objective-signal/domain/render-coverage-gap.ts";
 import { checkPreExecGrounding, checkPersistingAmbiguity } from "../domain/pre-exec-grounding.service.ts";
 
 // FIX B (judgment-day, HIGH)'s own value: the change-coverage minRatio default (src/qa/
@@ -1114,7 +1115,60 @@ export class RunQaUseCase {
       // never block either side of the mode, and "fail" blocks ONLY in "enforce" (src/qa/
       // change-coverage.ts:179-181's blocksPublish()). Unconditionally blocking on "fail" wrongly
       // held the PR in the default "signal" mode, contradicting CLAUDE.md's keystone contract.
-      blocksPublish = cfg.coveragePolicyMode === "enforce" && signal.status === "fail";
+      // post-cutover-remediation Constraint 3 (unit 5, task 5.5): consolidated onto
+      // ObjectiveSignalPort.blocks() (unit 3) — the SAME DecideCoverageService.blocks() the adapter
+      // already delegates to, never a second, independently re-implemented mode check.
+      blocksPublish = this.deps.objectiveSignal.blocks(signal.status);
+
+      // Phase: P2c (post-cutover-remediation, unit 5) — enforce-mode one-shot coverage regeneration.
+      // Fires ONLY when: the first measure blocked publish, this is a diff-mode run whose changed
+      // lines live in THIS repo (never a cross-repo trigger — browser coverage cannot map service-
+      // repo lines, CLAUDE.md). Bounded by its OWN one-shot boolean slice (never the FixLoop's
+      // cycleBudget/wallClockBudget — those gate FixLoop regeneration rounds, a DIFFERENT budget for
+      // a DIFFERENT phase; reusing them here would let a FixLoop that already spent its budget
+      // silently borrow more via this branch, or vice versa). `oneShotCoverageRegenUsed` is
+      // structurally redundant TODAY (this whole "pass" branch runs at most once per run() call, with
+      // no enclosing loop) — kept anyway, matching the design's explicit one-shot contract, so a
+      // future refactor that loops this phase can never accidentally regenerate more than once. Any
+      // regen throw propagates (CLAUDE.md: "surface integration errors loudly" — never swallowed into
+      // a fabricated result); a validate-fail, non-pass rerun, or 0-spec regen all KEEP the first
+      // measurement's blocksPublish untouched (never fabricated).
+      let oneShotCoverageRegenUsed = false;
+      if (blocksPublish && input.mode === "diff" && !input.triggerRepo && !oneShotCoverageRegenUsed) {
+        oneShotCoverageRegenUsed = true;
+        const gap = renderCoverageGap(signal.uncovered ?? []);
+        // NOTE: the method's own abort AbortSignal parameter is shadowed within this block by the
+        // `signal` local above (the ObjectiveSignalPort.measure() result) — this call omits it
+        // (undefined, the port's own documented "backward compatible" default) rather than
+        // introduce a renamed alias across this block's many existing `signal.*` reads.
+        const regen = await this.deps.generation.generate([], workspace.specDir, undefined, classificationDiff, {
+          ...baseEnrichment,
+          coverageGap: gap,
+        });
+        if (regen.specs.length > 0) {
+          const regenValidation = await this.deps.validation.validate(workspace.specDir);
+          if (regenValidation.ok) {
+            const regenNamespace = `${input.runId}-coverage-regen`;
+            const regenRun = await this.deps.execution.execute(workspace.specDir, {
+              ...liveExecutionOpts,
+              namespace: regenNamespace,
+            });
+            if (regenRun.verdict === "pass") {
+              const regenBaselineCases = regenRun.cases.filter((c) => c.status === "pass").map((c) => c.name);
+              const signal2 = await this.deps.objectiveSignal.measure(
+                BlastRadius.of(input.sha, []),
+                workspace.specDir,
+                classificationDiff,
+                regenBaselineCases,
+              );
+              // Second measure wins — comparator-visible coverageRatio now reflects the regen's own
+              // signal, never a stale first-run value.
+              coverageRatio = signal2.ratio;
+              blocksPublish = this.deps.objectiveSignal.blocks(signal2.status);
+            }
+          }
+        }
+      }
     }
 
     // Phase: review (ReviewPort).

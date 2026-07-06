@@ -261,21 +261,33 @@ The quality loop is **circular**: one LLM generates, another LLM reviews, and th
 green/red harness checks a test *runs*, not that it is *meaningful*. Left alone the
 system optimizes a proxy and drifts into a large suite that never catches anything
 (Goodhart). The objective signal that breaks the circularity is **change-coverage**
-(does executing the test actually cover the lines the diff changed?) — and it is now
-**implemented**, in `src/qa/change-coverage.ts`, wired into the pipeline's decide step:
+(does executing the test actually cover the lines the diff changed?) — implemented
+in `qa-engine/src/contexts/objective-signal/domain/` (`assemble-change-coverage.ts`,
+`decide-coverage.service.ts`, `render-coverage-gap.ts`) and consumed by
+`RunQaUseCase` (`qa-engine/src/contexts/qa-run-orchestration/application/
+run-qa.use-case.ts`):
 
-- Three policy modes (`qa.changeCoverage.mode`, default `signal`): `off` (skip),
+- Three policy modes (`qa.coveragePolicy.mode`, default `signal`): `off` (skip),
   `signal` (measure + record only), `enforce` (gate). `minRatio` default `0.7`.
-- `decideCoverage` → `pass | fail | unknown`. **`unknown` NEVER blocks** (no usable
-  coverage, or cross-repo runs where browser coverage can't map service lines) —
-  determinism over zeal.
-- In `enforce`, a `fail` triggers **one** targeted regeneration at the uncovered
-  lines, then a re-run; still `fail` ⇒ `blocksPublish` holds the PR.
+- `DecideCoverageService.decide` → `pass | fail | unknown`; `.blocks(status)` is the
+  SINGLE source of truth for whether a measured status blocks publish. **`unknown`
+  NEVER blocks** (no usable coverage, or cross-repo runs where browser coverage
+  can't map service lines) — determinism over zeal, and this invariant holds even
+  after a regeneration attempt (below).
+- In `enforce`, a `fail` triggers **exactly one** targeted regeneration against the
+  uncovered lines (`renderCoverageGap`), executed and re-measured under a
+  `${runId}-coverage-regen` namespace so the second measurement reads its own
+  coverage dumps, never the first run's. The regen's own second `measure()` is the
+  ONLY input to the final `blocksPublish` decision — a regen that throws, fails
+  validation, doesn't re-pass, or produces zero specs KEEPS the first measurement's
+  result untouched (never fabricated). This is genuinely a ONE-SHOT regeneration,
+  never a second attempt within the same run.
 
-So the keystone exists — the remaining work is *strengthening* it (better line
-mapping, raising apps from `signal` to `enforce` as they earn trust), **not more
-prompt tuning**. Keep this front of mind before expanding the agent or the reviewer:
-new "quality" logic should lean on the coverage signal, not add another LLM proxy.
+So the keystone exists and enforce-mode regeneration is implemented — the remaining
+work is *strengthening* it (better line mapping, raising apps from `signal` to
+`enforce` as they earn trust), **not more prompt tuning**. Keep this front of mind
+before expanding the agent or the reviewer: new "quality" logic should lean on the
+coverage signal, not add another LLM proxy.
 
 ## Current state
 
