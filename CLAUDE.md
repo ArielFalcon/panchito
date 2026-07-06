@@ -122,9 +122,10 @@ map service-repo lines).
 
 - **diff** — the flow above: test the blast radius of one commit. The **only** mode
   that runs `classifyCommit` (skip/regression/generate); the others always generate.
-  With `qa.parallelDiff: true`, a diff run plans the blast radius into objectives and
-  fans out parallel workers (≥2 objectives; falls back to single-agent otherwise).
-  Re-generation passes (fix/review/coverage) are always single-agent.
+  Execution is single-agent: the run-event schema carries an optional `workerId?`
+  field reserved for a future multi-worker view, but nothing in qa-engine drives or
+  consumes it today — there is no parallel fan-out. Re-generation passes
+  (fix/review/coverage) are also single-agent.
 - **complete** — analyze the whole repo + existing suite, persist a coverage/
   importance map to `e2e/.qa/analysis.json`, generate tests for important UNCOVERED flows.
 - **exhaustive** — like complete, but re-evaluate every existing test and regenerate
