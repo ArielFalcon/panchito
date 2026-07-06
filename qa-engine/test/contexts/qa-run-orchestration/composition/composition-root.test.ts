@@ -20,7 +20,7 @@ import { RewrittenOrchestratorAdapter } from "@contexts/qa-run-orchestration/inf
 import { PIPELINE_ENGINE } from "@contexts/qa-run-orchestration/composition/pipeline-engine-flag.ts";
 import { Sha } from "@kernel/sha.ts";
 import { BlastRadius } from "@kernel/blast-radius.ts";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BoundaryProfile } from "@contexts/service-topology/domain/index.ts";
@@ -687,4 +687,156 @@ test("buildProduction(rewritten) runs without groundingCollaborators/reviewDomGr
   });
 
   assert.equal(outcome.verdict, "pass", "the run must complete normally with no grounding collaborators wired");
+});
+
+// ── Plan 7-R B5.3 (audit CRITICAL): PreExecGroundingPort — the W1/W2 pre-execution gate is a NO-OP
+// on every production run today because wireBridges() never constructs the adapter. Mirrors the
+// preGenerationGrounding/reviewDomGrounding [SWAP] precedent immediately above: OPTIONAL on
+// CompositionConfig, absent -> the use-case's whole W1/W2 phase stays a no-op (preExecAmbiguityCatches
+// stays the literal 0 it was before), and gated `!cfg.isCode` (isCode has no DOM/routes to ground).
+
+test("buildProduction(rewritten) wires preExecGrounding into the run when target is 'e2e' and a captureRouteTrees-shaped collaborator is supplied", async () => {
+  // A REAL specDir with at least one on-disk *.spec.ts — the adapter enumerates + reads specs off
+  // disk itself (the "adapter resolves its own paths" precedent), so an unpopulated fakeConfig()
+  // mirrorDir (never a real directory) would short-circuit BEFORE ever calling captureRouteTrees.
+  const mirrorDir = mkdtempSync(join(tmpdir(), "qa-preexec-wired-"));
+  try {
+    mkdirSync(join(mirrorDir, "e2e"), { recursive: true });
+    writeFileSync(join(mirrorDir, "e2e", "home.spec.ts"), "test('home', async ({ page }) => { await page.goto('/home'); });");
+
+    let captureCalled = false;
+    const cfg = fakeConfig({
+      target: "e2e",
+      isCode: false,
+      baseUrl: "https://dev.example.com",
+      checkout: async () => mirrorDir,
+      preExecGroundingCollaborators: {
+        captureRouteTrees: async () => {
+          captureCalled = true;
+          return [{ route: "/home", nodes: ["heading: Home"] }];
+        },
+      },
+    });
+    const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+    const outcome = await port.run({
+      app: "app",
+      sha: Sha.of("abc1234"),
+      source: "manual",
+      mode: "diff",
+      target: "e2e",
+      runId: "composition-root-preexec-grounding-wired",
+    });
+
+    assert.equal(captureCalled, true, "the injected captureRouteTrees collaborator must have run (W1's pre-exec grounding check)");
+    assert.equal(outcome.verdict, "pass");
+  } finally {
+    rmSync(mirrorDir, { recursive: true, force: true });
+  }
+});
+
+test("buildProduction(rewritten) does NOT wire preExecGrounding on the code target, even when preExecGroundingCollaborators is supplied (isCode has no DOM/routes to ground)", async () => {
+  let captureCalled = false;
+  const cfg = fakeConfig({
+    target: "code",
+    isCode: true,
+    preExecGroundingCollaborators: {
+      captureRouteTrees: async () => { captureCalled = true; return []; },
+    },
+    setupCollaborators: { e2e: async () => {}, code: async () => {} },
+  });
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "code",
+    runId: "composition-root-preexec-grounding-code-skip",
+  });
+
+  assert.equal(captureCalled, false, "preExecGroundingCollaborators must never be invoked on the code target");
+  assert.equal(outcome.verdict, "pass");
+});
+
+test("buildProduction(rewritten) runs without preExecGroundingCollaborators (absent -> no-op, backward compatible)", async () => {
+  const cfg = fakeConfig({ target: "e2e", isCode: false }); // fakeConfig()'s base never supplies it
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "e2e",
+    runId: "composition-root-preexec-grounding-absent",
+  });
+
+  assert.equal(outcome.verdict, "pass", "the run must complete normally with no preExecGrounding collaborators wired");
+});
+
+// ── Plan 7-R B5.3, end-to-end proof: the gate must actually FIRE through the real composition path,
+// not just receive a call. A stubbed capture returning a route with a DUPLICATE page-rooted node
+// (two "button: Submit" lines) against a spec whose generation output emits
+// `page.getByRole('button', { name: 'Submit' })` must drive W1's checkPreExecGrounding to a
+// preExecAmbiguityCatches > 0 result — proving the counters are no longer structurally zero once
+// wireBridges is fixed. Before the adapter exists, this run's gateSignals.preExecAmbiguityCatches
+// stays the literal 0 the port's own [SWAP]-absent doc describes.
+test("buildProduction(rewritten) end-to-end: a duplicate page-rooted selector in the captured route trips the W1 pre-exec ambiguity gate (preExecAmbiguityCatches > 0)", async () => {
+  // A REAL specDir (mirrorDir/e2eRelDir) — the adapter under test resolves its own paths off disk
+  // (the "adapter resolves its own paths" precedent SetupPort/ExecutionPort/ReviewDomGroundingPort
+  // already use), so this is exercised against real fs, not a readSpecSource passthrough.
+  const mirrorDir = mkdtempSync(join(tmpdir(), "qa-preexec-e2e-"));
+  try {
+    mkdirSync(join(mirrorDir, "e2e"), { recursive: true });
+    // Page-rooted, undisambiguated getByRole — the ONE shape unscopedMultipleContradictions keeps
+    // (selector-check.ts): rooted directly on `page`, no trailing .first()/.nth()/.filter().
+    writeFileSync(
+      join(mirrorDir, "e2e", "ambiguous.spec.ts"),
+      "test('checkout', async ({ page }) => { await page.goto('/checkout'); await page.getByRole('button', { name: 'Submit' }).click(); });",
+    );
+
+    const cfg = fakeConfig({
+      target: "e2e",
+      isCode: false,
+      baseUrl: "https://dev.example.com",
+      checkout: async () => mirrorDir,
+      generationUseCase: {
+        generate: async () => ({
+          specs: ["ambiguous.spec.ts"],
+          approved: true,
+          reviewed: false,
+        }),
+      },
+      preExecGroundingCollaborators: {
+        // Stubs the render seam only — captureRouteTrees' own route-extraction/filtering logic still
+        // runs for real; this collaborator plays the role of CaptureDomDeps.render, returning a
+        // route with a DUPLICATE page-rooted node ("button: Submit" twice) so selectorUnique's
+        // count > 1 fires a MULTIPLE contradiction for the spec's page.getByRole('button', {name:
+        // 'Submit'}) call.
+        captureRouteTrees: async () => [
+          { route: "/checkout", nodes: ["button: Submit", "button: Submit"] },
+        ],
+      },
+    });
+    const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+    const outcome = await port.run({
+      app: "app",
+      sha: Sha.of("abc1234"),
+      source: "manual",
+      mode: "diff",
+      target: "e2e",
+      runId: "composition-root-preexec-grounding-fires",
+    });
+
+    const preExecAmbiguityCatches = outcome.gateSignals.preExecAmbiguityCatches ?? 0;
+    assert.ok(
+      preExecAmbiguityCatches > 0,
+      `expected the W1 pre-exec ambiguity gate to fire (preExecAmbiguityCatches > 0), got ${preExecAmbiguityCatches}`,
+    );
+  } finally {
+    rmSync(mirrorDir, { recursive: true, force: true });
+  }
 });

@@ -47,6 +47,7 @@ import { SetupPortAdapter, type SetupPortCollaborators } from "../infrastructure
 import { CleanupPortAdapter, type CleanupPortCollaborators } from "../infrastructure/bridges/cleanup-port.adapter.ts";
 import { PreGenerationGroundingPortAdapter, type PreGenerationGroundingCollaborators } from "../infrastructure/bridges/pre-generation-grounding-port.adapter.ts";
 import { ReviewDomGroundingPortAdapter, type ReviewDomGroundingCollaborators } from "../infrastructure/bridges/review-dom-grounding-port.adapter.ts";
+import { PreExecGroundingPortAdapter, type PreExecGroundingCollaborators } from "../infrastructure/bridges/pre-exec-grounding-port.adapter.ts";
 import { StructuralSignalPortAdapter } from "../infrastructure/bridges/structural-signal-port.adapter.ts";
 import { LazyProjectCodeGraphAdapter } from "../../../shared-infrastructure/code-graph/lazy-project-code-graph.adapter.ts";
 import { ProjectNameResolver, type ProjectNameCliClient } from "../../../shared-infrastructure/code-graph/resolve-project-name.ts";
@@ -159,6 +160,13 @@ export interface CompositionConfig {
   // cfg.isCode is true, regardless of whether these collaborators are supplied.
   groundingCollaborators?: PreGenerationGroundingCollaborators;
   reviewDomGroundingCollaborators?: ReviewDomGroundingCollaborators;
+  // PreExecGroundingPort collaborator (Plan 7-R B5.3): the W1/W2 pre-execution corrective/
+  // deterministic-block gate. OPTIONAL, mirroring groundingCollaborators' own "[SWAP] absent -> the
+  // phase is a no-op" precedent EXACTLY. isCode has no DOM/routes to ground (the SAME `!isCode`
+  // gating groundingCollaborators/reviewDomGroundingCollaborators already use below) — wireBridges()
+  // skips wiring this port entirely on the code target, regardless of whether this collaborator is
+  // supplied.
+  preExecGroundingCollaborators?: PreExecGroundingCollaborators;
   // StructuralSignalPort collaborator (CodeGraph Phase 4, design §5.3/§6, ADR-2/ADR-4/ADR-7).
   // OPTIONAL: absent -> RunQaUseCaseDeps.structuralSignal stays undefined, the SAME [SWAP]
   // posture setup/groundingCollaborators/cleanupCollaborators already established — never a stub
@@ -413,6 +421,24 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
       )
     : undefined;
 
+  // Plan 7-R B5.3 (audit CRITICAL): the pre-execution grounding gate (W1 corrective regen + W2
+  // deterministic block) — isCode has no DOM/routes to ground (the SAME `!isCode` guard
+  // preGenerationGrounding/reviewDomGrounding above already apply), so wire NEITHER this port on the
+  // code target regardless of what collaborators cfg supplies. OPTIONAL otherwise: absent ->
+  // preExecGrounding stays undefined and RunQaUseCaseDeps.preExecGrounding (also optional) makes the
+  // whole W1/W2 phase a no-op — every composition built before this field existed keeps running
+  // exactly as before.
+  const preExecGrounding = !cfg.isCode
+    ? new PreExecGroundingPortAdapter(
+        {
+          e2eDir: join(cfg.mirrorDir, cfg.e2eRelDir),
+          baseUrl: cfg.baseUrl,
+          testIdAttribute: cfg.testIdAttribute,
+        },
+        cfg.preExecGroundingCollaborators ?? {},
+      )
+    : undefined;
+
   // StructuralSignalPort (CodeGraph Phase 4, design §5.3/§6): OPTIONAL, absent -> undefined (never
   // a stub), the SAME [SWAP] posture setup/preGenerationGrounding/cleanup already established.
   // LazyProjectCodeGraphAdapter resolves the indexed project name from repoDir lazily, per call —
@@ -531,6 +557,7 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
     ...(cleanup ? { cleanup } : {}),
     ...(preGenerationGrounding ? { preGenerationGrounding } : {}),
     ...(reviewDomGrounding ? { reviewDomGrounding } : {}),
+    ...(preExecGrounding ? { preExecGrounding } : {}),
     ...(structuralSignal ? { structuralSignal } : {}),
     ...(serviceLinks ? { serviceLinks } : {}),
     ...(crossRepoImpact ? { crossRepoImpact } : {}),
