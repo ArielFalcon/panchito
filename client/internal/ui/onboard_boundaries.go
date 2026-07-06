@@ -160,12 +160,23 @@ func isTerminalOnboardState(state contract.OnboardingJobStatusState) bool {
 }
 
 // isConfirmableWinner reports whether the current status is a completed job with a winning,
-// resolved profile — the ONLY state in which enter should dispatch a confirm. This mirrors the
-// server's own 409/422 guard (design §C) as defense in depth on the client side too.
+// resolved profile FOR THIS SCREEN'S OWN APP — the ONLY state in which enter should dispatch a
+// confirm. This mirrors the server's own per-app scoping guard (judgment-day C1: the per-app REST
+// surface is a facade over one process-wide job) as defense in depth on the client side too — even
+// though the server now returns a scoped idle response on an app mismatch, the client must still
+// never treat a status payload for a DIFFERENT app as its own confirmable winner.
 func (m boundaryProposeModel) isConfirmableWinner() bool {
-	return m.status.State == contract.OnboardingJobStatusStateDone &&
+	return !m.isAppMismatch() &&
+		m.status.State == contract.OnboardingJobStatusStateDone &&
 		m.status.Outcome != nil && *m.status.Outcome == contract.Winner &&
 		m.status.ResolvedProfile != nil
+}
+
+// isAppMismatch reports whether the most recently received status belongs to a different app
+// than this screen's own app. `status.App` is nil only before the very first status arrives, in
+// which case there is nothing to mismatch against.
+func (m boundaryProposeModel) isAppMismatch() bool {
+	return m.status.App != nil && *m.status.App != m.app
 }
 
 func (m boundaryProposeModel) View() string {
@@ -175,6 +186,8 @@ func (m boundaryProposeModel) View() string {
 	b.WriteString(m.roundLine() + "\n\n")
 
 	switch {
+	case m.isAppMismatch():
+		b.WriteString(m.renderAppMismatch())
 	case m.status.State == contract.OnboardingJobStatusStateFailed:
 		b.WriteString(m.renderFailed())
 	case m.isConfirmableWinner():
@@ -236,6 +249,17 @@ func (m boundaryProposeModel) renderFailed() string {
 
 func (m boundaryProposeModel) renderNoProfile() string {
 	return hintStyle.Render("completed — no boundary profile found (the app may not fit the http/event templates)") + "\n"
+}
+
+// renderAppMismatch reports that the polled status belongs to a different app than this screen —
+// only possible if another onboarding run started for a different app concurrently. There is
+// nothing actionable here except going back; no confirm affordance is ever offered.
+func (m boundaryProposeModel) renderAppMismatch() string {
+	other := ""
+	if m.status.App != nil {
+		other = *m.status.App
+	}
+	return errorStyle.Render(fmt.Sprintf("another app's onboarding job is active: %s", other)) + "\n"
 }
 
 // renderWinnerCard shows the serialized boundary block before it lands — the human sees the

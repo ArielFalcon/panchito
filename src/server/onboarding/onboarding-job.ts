@@ -116,12 +116,22 @@ function raceTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => void, 
 }
 
 export interface OnboardingJob {
-  status(): OnboardingJobStatus;
+  /** With no argument (or an app matching the current/last job), returns the current job's status
+   *  as-is. With an app that DIFFERS from the current job's app, returns a scoped idle response
+   *  for the REQUESTED app instead — this process holds exactly one job at a time, and a caller
+   *  polling a different app's URL must never see another app's in-flight or completed job (the
+   *  per-app REST surface is a facade over one process-wide job; see src/index.ts's composition
+   *  wiring for the app-identity thread-through this depends on). */
+  status(app?: string): OnboardingJobStatus;
   /** Synchronous rejection ({ok:false}) when a job is already non-terminal (the mutex); otherwise a
    *  Promise<ProposeResult> that settles once the round finishes. The HTTP handler (5a.8) must NOT
    *  await this promise on the response path — that is what makes propose() "fire-and-forget". */
   propose(req: ProposeBoundariesRequest): ProposeResult | Promise<ProposeResult>;
-  confirm(): ConfirmResult;
+  /** With no argument (or an app matching the current job), behaves exactly as before. With an app
+   *  that DIFFERS from the current job's app, rejects WITHOUT performing any write — confirming
+   *  against the wrong app's URL must never splice another app's resolved profile into this app's
+   *  config. */
+  confirm(app?: string): ConfirmResult;
   /** Test/ops seam: resolves once the current (or most recent) propose() round has fully settled. */
   settled(): Promise<void>;
 }
@@ -188,8 +198,14 @@ export function createOnboardingJob(deps: OnboardingJobDeps): OnboardingJob {
       const front: RepoRef = { repo: req.repo, mirrorDir: frontMirrorDir! };
       const system: RepoRef[] = req.services.map((repo, i) => ({ repo, mirrorDir: serviceMirrorDirs[i]! }));
 
-      // proposing/scoring, wrapped in the round-budget race with an owned AbortController so a
-      // timeout actually CANCELS the in-flight proposer session (session-leak fix, design §C).
+      // proposing/scoring, wrapped in the round-budget race with an owned AbortController. The
+      // AbortSignal cancels the PROPOSER leg (deps.buildProposer's ctx.signal, threaded into
+      // deps.open/session) — a timeout that lands while a proposer call is in flight actually stops
+      // it. A timeout that lands during the SCORING leg does NOT cancel anything: the resolver work
+      // already in progress runs to completion unobserved and its result is simply discarded when
+      // raceTimeout rejects first. This is an accepted, documented gap (not a session leak fix in
+      // that case) tracked separately — the job still fails deterministically either way, it just
+      // does not abort scoring work that was already running.
       status = { ...status, state: ONBOARD_STATE.proposing };
       const controller = new AbortController();
       const proposer = deps.buildProposer({ app: req.app, signal: controller.signal });
@@ -229,8 +245,21 @@ export function createOnboardingJob(deps: OnboardingJobDeps): OnboardingJob {
     }
   }
 
+  // True when `app` is provided and differs from the current/last job's app — i.e. the caller is
+  // polling or confirming a URL for an app this process is NOT currently (or was never) running an
+  // onboarding job for. `status.app` is undefined only at the very first idle state (before any
+  // propose() call ever ran), in which case there is nothing to mismatch against.
+  function isOtherApp(app: string | undefined): boolean {
+    return app !== undefined && status.app !== undefined && app !== status.app;
+  }
+
   return {
-    status(): OnboardingJobStatus {
+    status(app?: string): OnboardingJobStatus {
+      if (isOtherApp(app)) {
+        // Scoped idle response for the REQUESTED app — never the other app's job data. Same shape
+        // as the process's own initial idle state, just labeled with the caller's app.
+        return { state: ONBOARD_STATE.idle, app, round: 0, ceiling: 3, candidatesScored: 0 };
+      }
       return status;
     },
 
@@ -244,12 +273,15 @@ export function createOnboardingJob(deps: OnboardingJobDeps): OnboardingJob {
       return promise;
     },
 
-    confirm(): ConfirmResult {
+    confirm(app?: string): ConfirmResult {
+      if (isOtherApp(app)) {
+        return { ok: false, error: `no confirmable job for app '${app}' (current job belongs to '${status.app}')` };
+      }
       if (status.state !== ONBOARD_STATE.done || status.outcome !== ONBOARD_OUTCOME.winner || !status.resolvedProfile) {
         return { ok: false, error: "no confirmable boundary profile for this app" };
       }
-      const app = status.app ?? "";
-      const path = (deps.configPath ?? defaultConfigPath)(app);
+      const resolvedApp = status.app ?? "";
+      const path = (deps.configPath ?? defaultConfigPath)(resolvedApp);
       const lines = serializeBoundary(status.resolvedProfile);
       let existing: string;
       try {

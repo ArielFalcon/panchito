@@ -447,8 +447,8 @@ const apiDeps: ApiDeps = {
       const services = input.services ?? app.services?.map((s) => s.repo) ?? [];
       return onboardingJob.propose({ app: name, repo, services, baseBranch: app.baseBranch });
     },
-    status: () => onboardingJob.status(),
-    confirm: () => onboardingJob.confirm(),
+    status: (name) => onboardingJob.status(name),
+    confirm: (name) => onboardingJob.confirm(name),
   },
   // Phase 0b: expose agent_turns for the /api/runs/:id/turns endpoint.
   getAgentTurns: (runId) => getAgentTurns(runId),

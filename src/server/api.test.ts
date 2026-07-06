@@ -1092,3 +1092,67 @@ test("phase-0b: GET /api/runs/:id/turns returns an empty array when no turns exi
   const body = JSON.parse(res.body);
   assert.deepEqual(body, []);
 });
+
+// judgment-day C1: the per-app boundary-onboarding routes are a facade over ONE process-wide job.
+// These tests prove the HANDLER LAYER (api.ts) forwards the route's :name param into
+// deps.boundaries.status()/confirm() — the seam the composition wiring in src/index.ts was
+// truncating to a zero-arg lambda, silently discarding app identity across a status poll or a
+// confirm write. A capturing fake on deps.boundaries records exactly what name each call received.
+function captureBoundariesFake() {
+  const calls: { propose: string[]; status: string[]; confirm: string[] } = { propose: [], status: [], confirm: [] };
+  const boundaries = {
+    propose: (name: string) => {
+      calls.propose.push(name);
+      return { ok: true as const };
+    },
+    status: (name: string) => {
+      calls.status.push(name);
+      return { state: "idle" as const, round: 0, ceiling: 3, candidatesScored: 0, app: name };
+    },
+    confirm: (name: string) => {
+      calls.confirm.push(name);
+      return { ok: true as const };
+    },
+  };
+  return { calls, boundaries };
+}
+
+test("POST /api/apps/:name/boundaries/propose forwards :name into deps.boundaries.propose AND the immediately-following status() poll", async () => {
+  const { calls, boundaries } = captureBoundariesFake();
+  const res = mkRes();
+  await handleApi(mkReq("POST", "/api/apps/shop/boundaries/propose", "{}"), res, deps({ boundaries }));
+  assert.equal(res.status, 202);
+  assert.deepEqual(calls.propose, ["shop"]);
+  // The 202 response body comes from a status() call the handler makes right after propose() —
+  // this must be scoped to the SAME app the caller just posted to, not any other app.
+  assert.deepEqual(calls.status, ["shop"]);
+});
+
+test("GET /api/apps/:name/boundaries/propose/status forwards :name into deps.boundaries.status — proves the handler-to-deps contract is name-scoped, not a shared zero-arg poll", async () => {
+  const { calls, boundaries } = captureBoundariesFake();
+  const res = mkRes();
+  await handleApi(mkReq("GET", "/api/apps/shop/boundaries/propose/status"), res, deps({ boundaries }));
+  assert.equal(res.status, 200);
+  assert.deepEqual(calls.status, ["shop"]);
+  const body = JSON.parse(res.body);
+  assert.equal(body.app, "shop", "the status response must be scoped to the requested app, never another app's job");
+});
+
+test("GET /api/apps/:otherName/boundaries/propose/status with a DIFFERENT app name forwards THAT name, not a stale one from a prior call", async () => {
+  const { calls, boundaries } = captureBoundariesFake();
+  const first = mkRes();
+  await handleApi(mkReq("GET", "/api/apps/shop/boundaries/propose/status"), first, deps({ boundaries }));
+  const second = mkRes();
+  await handleApi(mkReq("GET", "/api/apps/checkout/boundaries/propose/status"), second, deps({ boundaries }));
+
+  assert.deepEqual(calls.status, ["shop", "checkout"]);
+  assert.equal(JSON.parse(second.body).app, "checkout");
+});
+
+test("POST /api/apps/:name/boundaries/confirm forwards :name into deps.boundaries.confirm — the write step must be scoped to the app in the URL", async () => {
+  const { calls, boundaries } = captureBoundariesFake();
+  const res = mkRes();
+  await handleApi(mkReq("POST", "/api/apps/shop/boundaries/confirm", JSON.stringify({ confirm: true })), res, deps({ boundaries }));
+  assert.equal(res.status, 200);
+  assert.deepEqual(calls.confirm, ["shop"]);
+});

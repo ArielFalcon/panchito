@@ -181,3 +181,46 @@ func TestBoundaryProposeStopsTickingOnTerminalState(t *testing.T) {
 		t.Fatal("a non-terminal status must reschedule the next tick")
 	}
 }
+
+// judgment-day C1 (defense in depth, client side): a status payload whose App differs from the
+// model's own app must never render the confirm affordance or the winner card, even if the
+// server's own scoping guard were somehow bypassed. The client must render a clear mismatch
+// notice instead of silently treating another app's winner as its own.
+func TestBoundaryProposeSuppressesConfirmOnAppMismatch(t *testing.T) {
+	mismatched := winnerStatus()
+	mismatched.App = strPtr("other-app") // model is for "shop"; status belongs to a different app
+
+	m := newBoundaryProposeModel(nil, "shop")
+	m.width, m.height = 100, 30
+	m, _ = m.Update(boundaryStatusMsg{status: mismatched})
+
+	if m.isConfirmableWinner() {
+		t.Fatal("a status belonging to a different app must never be treated as a confirmable winner")
+	}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatalf("enter on a mismatched-app status must NOT dispatch a confirm command; got %#v", cmd())
+	}
+
+	out := strings.ToLower(m.View())
+	if strings.Contains(out, "confirm") {
+		t.Fatalf("a mismatched-app status must not render a confirm card:\n%s", out)
+	}
+	if !strings.Contains(out, "other-app") {
+		t.Fatalf("View() must render a clear mismatch notice naming the other app:\n%s", out)
+	}
+}
+
+// The matching-app case (App == model.app) is unaffected — same-app winners still confirm.
+func TestBoundaryProposeAllowsConfirmWhenAppMatches(t *testing.T) {
+	m := newBoundaryProposeModel(nil, "shop")
+	m.width, m.height = 100, 30
+	matching := winnerStatus()
+	matching.App = strPtr("shop")
+	m, _ = m.Update(boundaryStatusMsg{status: matching})
+
+	if !m.isConfirmableWinner() {
+		t.Fatal("a status belonging to the SAME app must still be a confirmable winner")
+	}
+}

@@ -356,3 +356,69 @@ test("status() returns an OnboardingJobStatus-shaped object for every state, inc
   assert.ok(doneStatus.startedAt);
   assert.ok(doneStatus.finishedAt);
 });
+
+// ── Per-app scoping (judgment-day C1): status()/confirm() must not leak another app's job ──
+
+test("status(otherApp) while a job for app-x is done+winner returns a SCOPED idle response naming otherApp, not app-x's data", async () => {
+  const job = createOnboardingJob(buildDeps());
+  await job.propose({ app: "app-x", repo: "ArielFalcon/app-x-gateway", services: [] });
+  assert.equal(job.status().state, ONBOARD_STATE.done);
+
+  const scoped = job.status("other-app");
+  assert.equal(scoped.state, ONBOARD_STATE.idle);
+  assert.equal(scoped.app, "other-app");
+  assert.equal(scoped.round, 0);
+  assert.equal(scoped.candidatesScored, 0);
+  assert.equal(scoped.resolvedProfile, undefined, "must never leak app-x's resolved profile onto other-app's status");
+  assert.equal(scoped.outcome, undefined);
+});
+
+test("confirm(otherApp) while a job for app-x is done+winner rejects with both app names and performs ZERO reads or writes", async () => {
+  let writeCalls = 0;
+  let readCalls = 0;
+  const job = createOnboardingJob(buildDeps({ writeConfig: () => { writeCalls += 1; }, readConfig: () => { readCalls += 1; return ""; } }));
+  await job.propose({ app: "app-x", repo: "ArielFalcon/app-x-gateway", services: [] });
+  assert.equal(job.status().state, ONBOARD_STATE.done);
+
+  const result = job.confirm("other-app");
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.match(result.error, /other-app/);
+    assert.match(result.error, /app-x/);
+  }
+  assert.equal(readCalls, 0, "confirm on a mismatched app must return before ever reading the config");
+  assert.equal(writeCalls, 0, "confirm on a mismatched app must never write app-x's profile under another app's identity");
+});
+
+test("status(app-x) and confirm(app-x) — the SAME app as the current job — behave exactly as the zero-arg calls (regression guard)", async () => {
+  let written: { path: string; content: string } | undefined;
+  const job = createOnboardingJob(buildDeps({
+    readConfig: () => 'name: "app-x"\nrepo: "org/app-x"\n',
+    writeConfig: (path, content) => { written = { path, content }; },
+  }));
+  await job.propose({ app: "app-x", repo: "ArielFalcon/app-x-gateway", services: [] });
+
+  const scoped = job.status("app-x");
+  assert.deepEqual(scoped, job.status());
+
+  const result = job.confirm("app-x");
+  assert.equal(result.ok, true);
+  assert.ok(written, "confirm(app-x) matching the current job's app must still write");
+});
+
+test("zero-arg status() and confirm() keep working exactly as before (backwards-compat regression guard)", async () => {
+  let written: { path: string; content: string } | undefined;
+  const job = createOnboardingJob(buildDeps({
+    readConfig: () => 'name: "app-x"\nrepo: "org/app-x"\n',
+    writeConfig: (path, content) => { written = { path, content }; },
+  }));
+  await job.propose({ app: "app-x", repo: "ArielFalcon/app-x-gateway", services: [] });
+
+  const status = job.status();
+  assert.equal(status.state, ONBOARD_STATE.done);
+  assert.equal(status.outcome, "winner");
+
+  const result = job.confirm();
+  assert.equal(result.ok, true);
+  assert.ok(written, "zero-arg confirm() must still write against the current job");
+});
