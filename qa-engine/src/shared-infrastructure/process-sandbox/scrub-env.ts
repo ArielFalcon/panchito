@@ -18,6 +18,10 @@ const ALLOWED_ENV_EXACT = new Set([
   // Playwright's browsers are baked at a NON-default path in the orchestrator image; without
   // forwarding it the child loses the path and every e2e run fails with "Executable doesn't exist".
   "PLAYWRIGHT_BROWSERS_PATH",
+  // codebase-memory's graph-store location. The docker volume mounts exactly here; dropping the
+  // var would silently point the CLI at an unmounted container-FS default and kill persistence.
+  // A cache path, not a secret — same forwarding rationale as PLAYWRIGHT_BROWSERS_PATH.
+  "CBM_CACHE_DIR",
 ]);
 
 // Allowed var FAMILIES (prefix match — npm/cargo/gradle/maven/locale config the toolchain needs).

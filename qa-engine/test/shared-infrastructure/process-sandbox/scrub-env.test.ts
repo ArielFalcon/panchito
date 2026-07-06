@@ -47,3 +47,16 @@ test("scrubEnv honors an extra allow prefix for non-secret vars (e2e DEV_*)", ()
     if (savedVal === undefined) delete process.env[key]; else process.env[key] = savedVal;
   }
 });
+
+// onboarding-auto-index (Slice 2): the codebase-memory CLI reads its graph-store location from
+// CBM_CACHE_DIR. The docker volume mounts at that path — if the scrub drops the var, the CLI
+// silently falls back to an unmounted container-FS default and persistence is dead on arrival.
+test("CBM_CACHE_DIR survives the scrub (cache path, not a secret — the graph volume depends on it)", () => {
+  process.env.CBM_CACHE_DIR = "/app/.codebase-memory";
+  try {
+    const env = scrubEnv();
+    assert.equal(env.CBM_CACHE_DIR, "/app/.codebase-memory");
+  } finally {
+    delete process.env.CBM_CACHE_DIR;
+  }
+});

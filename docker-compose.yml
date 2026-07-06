@@ -50,6 +50,10 @@ services:
       OPENCODE_SERVE_URL: http://agents:4096
       AGENT_SUPERVISOR_URL: http://agents:4097
       MIRROR_DIR: /app/.mirrors
+      # codebase-memory's graph store (one SQLite db per indexed project). Explicit so the volume
+      # mount below and the CLI agree on the path — the CLI's default (~/.cache/codebase-memory-mcp)
+      # would land inside the container FS and be wiped on every rebuild.
+      CBM_CACHE_DIR: /app/.codebase-memory
       # noble drift: the image's `sandbox` user is uid 1002 (pwuser took 1001 on Ubuntu 24.04) — keep
       # code-runner.ts (CODE_SANDBOX_UID ?? 1001) in sync with the Dockerfile so privilege-drop resolves.
       CODE_SANDBOX_UID: "1002"
@@ -60,6 +64,10 @@ services:
       # override re-adds them for live editing. The E2E suite is NOT in a volume: it lives in git.
       - mirrors:/app/.mirrors # local working copies (shared with the agents container); the harness runs over <repo>/e2e here
       - qa-data:/app/data # run history + maintainer state (markers/ledger/failure memory) — persists across restarts
+      # The code graph indexed at onboarding (onboarding-auto-index). Regenerable cache — losing it
+      # only degrades the advisory structural signal until a re-index — but persisting it avoids
+      # silently starting every boot blind. Orchestrator-only: agents/ has no codebase-memory CLI.
+      - codebase-memory:/app/.codebase-memory
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
       interval: 30s
@@ -139,6 +147,7 @@ services:
 volumes:
   mirrors:
   qa-data:
+  codebase-memory: # graph store indexed at onboarding (regenerable; persisted to avoid blind boots)
   serena-cache:
   engram-data:
   opencode-data:
