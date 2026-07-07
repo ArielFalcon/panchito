@@ -337,11 +337,11 @@ export class FixLoop {
       }
 
       if (input.isCode) {
-        // Code mode: re-run the repo's own test suite (this aggregate's scope is the e2e retry path
-        // per the characterization goldens; code-mode compile-gate re-validation is threaded through
-        // deps.revalidate the same way e2e's is below — the execution port itself owns the
-        // re-compile+re-run sequencing for code mode, matching the design's single-execute-per-round
-        // contract).
+        // Code mode: re-run the repo's own test suite directly — this branch never calls
+        // deps.revalidate (that seam is e2e-only, below). Code-mode pre-execution compile
+        // validation lives in the pipeline's validation phase (CodeValidationStrategy), not
+        // per-retry here; a code retry's compile failure surfaces through the execute() run
+        // itself (exit-code classification).
         const codeRun = await this.deps.execution.execute({ namespace: input.namespace });
         run = codeRun;
       } else {

@@ -68,6 +68,61 @@ test("B.3.1: renders → opens session → parses deliverable → reconciles man
   assert.deepEqual(out.specs, ["flows/login.spec.ts"]);
 });
 
+test("code target skips manifest reconciliation entirely (legacy opencode-client.ts:800 parity) and passes specMetas through raw", async () => {
+  const calls: string[] = [];
+  const ports: GenerationPorts = {
+    runtime: {
+      openSession: async () => ({
+        prompt: async () => ({ output: '{"specs":["src/foo.test.ts"]}' }),
+        dispose: () => {},
+      }),
+    },
+    rendering: {
+      render: () => "",
+      renderMain: () => ({ text: "PROMPT", sectionSizes: {} }),
+      renderWorker: () => ({ text: "", sectionSizes: {} }),
+      renderReviewer: () => ({ text: "", sectionSizes: {} }),
+      renderExplorer: () => "",
+      specFileForFlow: (flow) => `flows/${flow}.spec.ts`,
+    },
+    verdicts: {
+      parseGenerator: () => ({
+        specs: ["src/foo.test.ts"],
+        specMetas: [{ flow: "foo", file: "src/foo.test.ts", objective: "cover foo", targets: ["src/foo.ts"] }],
+        parsed: true,
+      }),
+      parseReview: () => ({ approved: true, corrections: [], valid: true, issues: [] }),
+    },
+    manifest: {
+      read: async () => [],
+      reconcile: async (_d, e) => { calls.push("reconcile"); return [...e] as ManifestEntry[]; },
+    },
+    budget: {
+      capDiff: (d) => d,
+      capText: (t) => t,
+      budgetForRole: () => 0,
+    },
+  };
+
+  const out = await new GenerateTestsUseCase(ports).generate({
+    repo: "org/demo",
+    sha: "abc",
+    diff: "d",
+    mirrorDir: "/m",
+    e2eRelDir: "e2e",
+    namespace: "ns",
+    needsReview: false,
+    target: "code",
+    mode: "diff",
+    appName: "a",
+  });
+
+  // NOTE: the needsReview:false bail-early return deliberately carries no specMetas (pre-existing
+  // contract) — the load-bearing assertion here is that the e2e manifest is never touched for code.
+  assert.ok(!calls.includes("reconcile"), "code target must never touch the e2e manifest (no e2e/ dir exists for code apps)");
+  assert.deepEqual(out.specs, ["src/foo.test.ts"]);
+});
+
 // ── B.3.2 — bounded generator repair ─────────────────────────────────────────
 test("B.3.2: fires exactly ONE bounded repair when checkGenerator returns valid:false", async () => {
   const promptTexts: string[] = [];

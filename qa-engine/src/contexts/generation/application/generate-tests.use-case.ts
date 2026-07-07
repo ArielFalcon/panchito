@@ -168,7 +168,11 @@ export class GenerateTestsUseCase {
       changeRef: { sha: input.sha, type: changeType },
       ...(m.sha256 ? { sha256: m.sha256 } : {}),
     }));
-    const reconciledEntries = await manifest.reconcile(specDir, rawEntries);
+    // The e2e manifest does not exist for the code target (tests live in the repo's own framework,
+    // there is no e2e/.qa/ dir to reconcile against — and specDir above composes the e2e folder).
+    // Legacy parity: opencode-client.ts:800 gates reconciliation on `input.target !== "code"`;
+    // raw specMetas pass through untouched so downstream consumers keep the agent's metadata.
+    const reconciledEntries = input.target === "code" ? rawEntries : await manifest.reconcile(specDir, rawEntries);
 
     // Bail early if review is not requested (e.g. target:code or disabled config).
     if (!input.needsReview) {
