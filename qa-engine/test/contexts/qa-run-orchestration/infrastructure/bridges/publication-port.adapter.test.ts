@@ -22,13 +22,19 @@ function fakePr(): GitHubPrAdapter {
 function fakeIssue(): GitHubIssueAdapter {
   return new GitHubIssueAdapter(async () => ({ url: "https://github.com/org/app/issues/5" }));
 }
+// WS5.4b — sanitize is now a REQUIRED collaborator (fail-closed default): every construction site in
+// this file wires an explicit identity sanitizer unless it is specifically testing a REAL sanitizer's
+// effect. This is NOT the same as the old default-to-identity behavior — the constructor now THROWS
+// if sanitize is omitted (see the dedicated test below); every other test in this file passes this
+// helper explicitly so it keeps exercising routing/rendering behavior, not the fail-closed gate itself.
+const identitySanitize = (text: string) => text;
 
 test("publish() routes to GitHubPrAdapter when the decision resolves to 'pr' (green+approved+covered+e2eChanged)", async () => {
   const decide = new PublishDecisionService();
   const pr = fakePr();
   const issue = fakeIssue();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -42,7 +48,7 @@ test("publish() routes to GitHubIssueAdapter when the decision resolves to 'issu
   const pr = fakePr();
   const issue = fakeIssue();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -57,7 +63,7 @@ test("publish() routes to ShadowLogAdapter when shadow:true, regardless of verdi
   const issue = fakeIssue();
   let logged: string | undefined;
   const shadowLog = new ShadowLogAdapter((msg) => { logged = msg; });
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: true, e2eChanged: true,
   });
 
@@ -72,7 +78,7 @@ test("publish() produces a noop outcome with no side effect when verdict is skip
   const pr = fakePr();
   const issue = fakeIssue();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: false,
   });
 
@@ -96,7 +102,7 @@ test("publish() prefers decision.reviewerApproved (dynamic) over ctx.reviewerApp
   const shadowLog = new ShadowLogAdapter(() => {});
   // ctx says reviewerApproved:true (the OLD static default), but the decision's dynamic value says
   // the reviewer actually rejected this run — the dynamic value must win, routing to "issue" not "pr".
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -110,7 +116,7 @@ test("publish() falls back to ctx.reviewerApproved (static) when the decision om
   const pr = fakePr();
   const issue = fakeIssue();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -126,7 +132,7 @@ test("publish() prefers decision.coverageBlocks (dynamic) over ctx.coverageBlock
   const shadowLog = new ShadowLogAdapter(() => {});
   // ctx says coverageBlocks:false (the OLD static default), but the dynamic value says an
   // enforce-mode coverage-fail must hold the PR — the dynamic value must win.
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -142,7 +148,7 @@ test("publish() prefers decision.e2eChanged (dynamic) over ctx.e2eChanged (stati
   const shadowLog = new ShadowLogAdapter(() => {});
   // ctx says e2eChanged:true (the OLD static default), but the dynamic value says no e2e/ files
   // actually changed this run — publish() should reflect the REAL signal when supplied.
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -160,7 +166,7 @@ test("F3: publish() routes Issue creation to decision.issueRepo (the triggering 
   const issue = { open: async (repo: string) => { issueRepoSeen = repo; return { url: "https://github.com/org/orders-svc/issues/9", number: 9 }; } };
   const pr = fakePr();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -176,7 +182,7 @@ test("F3: publish() still targets ctx.repo for a PR even when issueRepo is suppl
   const pr = { openWithAutoMerge: async (repo: string) => { prRepoSeen = repo; return { url: "https://github.com/org/app/pull/1", number: 1 }; } };
   const issue = fakeIssue();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -192,7 +198,7 @@ test("F3: publish() falls back to ctx.repo for an Issue when issueRepo is absent
   const issue = { open: async (repo: string) => { issueRepoSeen = repo; return { url: "https://github.com/org/app/issues/2", number: 2 }; } };
   const pr = fakePr();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -245,20 +251,42 @@ test("F4: publish() applies the injected sanitize() to each failing case's name 
   assert.ok(!bodySeen.includes("sk-ghi789RST"), `the case detail's secret must be sanitized — got: ${bodySeen}`);
 });
 
-test("F4: publish() falls back to identity when no sanitizer is wired (backward-compat)", async () => {
+// WS5.4b (fail-closed publication default) — sanitize is now REQUIRED, not defaulted to identity.
+// A future composition that forgets to inject the real sanitizer must fail LOUDLY at construction
+// time, never silently publish unsanitized Issue/PR bodies. Replaces the old "falls back to identity
+// when no sanitizer is wired" test, whose entire premise (an absent sanitizer is a valid, silent
+// default) is exactly the latent fail-open this fix closes.
+test("WS5.4b: constructor THROWS when sanitize is omitted (fail-closed, not identity default)", () => {
+  const decide = new PublishDecisionService();
+  const pr = fakePr();
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  assert.throws(
+    () =>
+      new PublicationPortAdapter(
+        // @ts-expect-error — sanitize is intentionally omitted to prove the fail-closed constructor guard
+        { decide, pr, issue, shadowLog },
+        { repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true },
+      ),
+    /sanitize/i,
+    "the constructor must throw naming the missing sanitize collaborator, never silently default to identity",
+  );
+});
+
+test("WS5.4b: an explicitly-injected identity sanitize is still a VALID, deliberate choice", async () => {
   const decide = new PublishDecisionService();
   let bodySeen = "";
   const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/5", number: 5 }; } };
   const pr = fakePr();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
   const result = await adapter.publish({ verdict: "fail", cases: [], logs: "plain text, no secrets" });
 
   assert.match(result.outcome, /issue/);
-  assert.ok(bodySeen.includes("plain text, no secrets"), "with no sanitizer wired, the body must pass through unchanged (identity default)");
+  assert.ok(bodySeen.includes("plain text, no secrets"), "an explicitly-injected identity sanitizer passes text through unchanged — this is a deliberate opt-in, not a silent default");
 });
 
 // ── SHADOW FIDELITY (live-monitoring find) ─────────────────────────────────────────────────────
@@ -273,7 +301,7 @@ test("shadow fidelity: a FAIL run's shadow preview logs the would-be ISSUE, not 
   const issue = fakeIssue();
   const logs: string[] = [];
   const shadowLog = new ShadowLogAdapter((msg) => { logs.push(msg); });
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: true, e2eChanged: true,
   });
 
@@ -291,7 +319,7 @@ test("shadow fidelity: a PASS run's shadow preview still logs the would-be PR", 
   const issue = fakeIssue();
   const logs: string[] = [];
   const shadowLog = new ShadowLogAdapter((msg) => { logs.push(msg); });
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: true, e2eChanged: true,
   });
 
@@ -314,7 +342,7 @@ test("WS3.1: publish() renders an 'Engine adjudication' section in the Issue bod
   const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/6", number: 6 }; } };
   const pr = fakePr();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -338,7 +366,7 @@ test("WS3.1: publish() omits the 'Engine adjudication' section entirely when adj
   const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/7", number: 7 }; } };
   const pr = fakePr();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -354,7 +382,7 @@ test("WS3.1: publish() words a low-confidence adjudication as an engine guess (h
   const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/8", number: 8 }; } };
   const pr = fakePr();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 

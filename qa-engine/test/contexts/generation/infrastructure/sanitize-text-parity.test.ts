@@ -44,3 +44,27 @@ test("PARITY: git SHA (pure hex) is not mistaken for a base64 secret, identicall
   const input = `commit a1b2c3d4e5f60718293a4b5c6d7e8f9012345678 landed`;
   assert.deepEqual(ported(input), legacy(input));
 });
+
+// WS5.4a — extend byte-parity to the "model" mode (both twins must apply the SAME narrowed
+// api-key-assignment pattern; the two-tier policy exists as a mode flag on ONE shared pattern
+// set, not a divergence between the ported and legacy modules).
+test("PARITY: model mode — type annotation NOT redacted, identically in both twins", () => {
+  const input = "password: string;";
+  assert.deepEqual(ported(input, "model"), legacy(input, "model"));
+});
+
+test("PARITY: model mode — bare call expression NOT redacted, identically in both twins", () => {
+  const input = "const token = getToken();";
+  assert.deepEqual(ported(input, "model"), legacy(input, "model"));
+});
+
+test("PARITY: model mode — quoted literal STILL redacted, identically in both twins", () => {
+  const input = 'const password = "hunter2";';
+  assert.deepEqual(ported(input, "model"), legacy(input, "model"));
+});
+
+test("PARITY: issue mode (default) unchanged, identically in both twins", () => {
+  const input = "password: string; token = getToken();";
+  assert.deepEqual(ported(input), legacy(input));
+  assert.deepEqual(ported(input, "issue"), legacy(input, "issue"));
+});

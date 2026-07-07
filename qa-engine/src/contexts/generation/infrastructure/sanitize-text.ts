@@ -19,10 +19,47 @@ export interface SecretDetection {
   count: number; // total redactions across all patterns
 }
 
+// WS5.4a — two-tier sanitizer policy (PORT, verbatim behavior, of src/orchestrator/sanitizer.ts's own
+// mode flag — see that file's header for the full rationale). "issue" (default) is byte-identical to
+// this module's behavior before the split; "model" narrows ONLY the api-key-assignment pattern to
+// require a quoted literal or a high-entropy bare token, so a diff→model prompt keeps code shapes
+// like `password: string` / `token = getToken()` intact instead of redacting them as if they were
+// real secret assignments.
+export type SanitizeMode = "issue" | "model";
+
+const CODE_KEYWORDS = new Set([
+  "string", "number", "boolean", "undefined", "null", "any", "unknown", "never", "void", "object",
+  "true", "false",
+]);
+function looksLikeCallExpression(value: string): boolean {
+  return /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*\(.*\)$/.test(value);
+}
+function isHighEntropyBareToken(value: string): boolean {
+  const trimmed = value.replace(/[;,)]+$/, ""); // strip trailing statement/call punctuation
+  if (trimmed.length < 12) return false;
+  if (CODE_KEYWORDS.has(trimmed.toLowerCase())) return false;
+  if (looksLikeCallExpression(trimmed)) return false;
+  if (!/^[A-Za-z0-9_-]+$/.test(trimmed)) return false; // not a bare identifier/token shape at all
+  const hasDigit = /[0-9]/.test(trimmed);
+  const hasUpper = /[A-Z]/.test(trimmed);
+  const hasLower = /[a-z]/.test(trimmed);
+  return hasDigit && hasUpper && hasLower;
+}
+const ASSIGNMENT_VALUE_RE = /[\"']?\s*[:=]\s*(\S+)$/;
+function isModelModeSecretValue(match: string): boolean {
+  const m = ASSIGNMENT_VALUE_RE.exec(match);
+  const value = m?.[1] ?? "";
+  if (!value) return false;
+  if (/^["'`]/.test(value)) return true; // a quoted literal is the deliberate secret shape
+  return isHighEntropyBareToken(value);
+}
+
 // Named secret patterns — the regex + a short stable identifier for the audit trail. Order matters:
 // more specific patterns run first to avoid subsumption (e.g. Slack webhook URLs are more specific
 // than the generic credential pattern). Ported verbatim from sanitizer.ts.
-const NAMED_SECRET_PATTERNS: Array<{ name: string; p: RegExp; skip?: (m: string) => boolean }> = [
+// `modelSkip` (WS5.4a): an ADDITIONAL skip predicate applied ONLY in "model" mode, on top of any
+// unconditional `skip` — the two-tier policy's entire surface area.
+const NAMED_SECRET_PATTERNS: Array<{ name: string; p: RegExp; skip?: (m: string) => boolean; modelSkip?: (m: string) => boolean }> = [
   // Slack webhook URLs — very specific; match before generic URL patterns
   { name: "slack-webhook", p: /https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/]+/g },
   // Stripe keys: sk_/pk_ prefixed, test or live
@@ -62,7 +99,8 @@ const NAMED_SECRET_PATTERNS: Array<{ name: string; p: RegExp; skip?: (m: string)
   { name: "env-credential", p: /\b[A-Z][A-Z0-9_]*(?:PASS|PASSWORD|SECRET|TOKEN|KEY|PWD|CRED|CREDENTIAL)[A-Z0-9_]*[\"']?\s*[:=]\s*\S+/g },
   // api_key/token/secret/password assignments — catch‑all; keep LAST among
   // assignment patterns so the more specific ones fire first.
-  { name: "api-key-assignment", p: /(?:api[_-]?key|token|secret|password|passwd|pwd)[\"']?\s*[:=]\s*\S+/gi },
+  // modelSkip (WS5.4a): see this file's own header — twin of sanitizer.ts's own modelSkip.
+  { name: "api-key-assignment", p: /(?:api[_-]?key|token|secret|password|passwd|pwd)[\"']?\s*[:=]\s*\S+/gi, modelSkip: (m) => !isModelModeSecretValue(m) },
   // base64‑encoded secrets (>40 chars of base64 chars), with data‑URI filter.
   // skip: a run of pure hex is a git SHA / digest (commit ids, lockfile hashes), NOT a
   // secret — redacting it turned the run header's SHA into "[REDACT" (the launcher omits
@@ -123,7 +161,8 @@ const INTERNAL_HOST_PATTERNS: RegExp[] = [
 // false positives; an email is distinctive enough to redact safely.
 const PII_PATTERNS: RegExp[] = [/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g];
 
-export function sanitizeText(input: string): { text: string; detection: SecretDetection } {
+// mode (WS5.4a): see this file's own header — twin of sanitizer.ts's own mode parameter.
+export function sanitizeText(input: string, mode: SanitizeMode = "issue"): { text: string; detection: SecretDetection } {
   if (!input) return { text: input, detection: { redacted: false, patterns: [], count: 0 } };
 
   let out = input;
@@ -139,10 +178,11 @@ export function sanitizeText(input: string): { text: string; detection: SecretDe
   });
 
   // secret patterns
-  for (const { name, p, skip } of NAMED_SECRET_PATTERNS) {
+  for (const { name, p, skip, modelSkip } of NAMED_SECRET_PATTERNS) {
     let redactions = 0;
     out = out.replace(p, (m) => {
       if (skip?.(m)) return m; // a recognised non-secret (e.g. a git SHA) — leave it intact
+      if (mode === "model" && modelSkip?.(m)) return m; // model-mode-only: not a real secret shape
       redactions++;
       return "[REDACTED_SECRET]";
     });

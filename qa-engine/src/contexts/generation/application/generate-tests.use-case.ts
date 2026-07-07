@@ -34,6 +34,23 @@ export interface GenerationPorts {
   rendering: PromptRenderingPort;
   verdicts: VerdictParserPort;
   manifest: ManifestRepositoryPort;
+  // DEPRECATED (WS5.1, full-flow remediation plan): this port is declared here and constructed at
+  // composition time (src/server/rewritten-engine-factory.ts's `budget: new PromptBudgetAdapter(...)`,
+  // ~line 495) but NEVER CALLED anywhere in this class's generate() method — dead wiring. The prompt-
+  // budget concern (capDiff/capText) is now owned by the RENDER layer instead: buildDiffSection,
+  // buildCodeTask, and buildExplorerPrompt in src/integrations/prompts.ts all call capDiff directly
+  // (see those functions' own WS5.1 comments) — the diff has non-prompt consumers (coverage assembler,
+  // adjudication) that need it whole, so capping at the use-case/source layer would corrupt them; the
+  // render boundary is the only place "too big for a prompt" is the right concept.
+  // NOT removed in this slice: removing this field requires deleting the `budget:` construction line
+  // in rewritten-engine-factory.ts, which is OWNED BY A CONCURRENT WORK UNIT in this delivery and is
+  // out of this slice's file-touch boundary. Handoff: the next slice that owns that file should (a)
+  // delete `budget: new PromptBudgetAdapter(...)` from the GenerateTestsUseCase construction, (b)
+  // remove this field + the PromptBudgetPort import, and (c) drop `budget` from every test fixture
+  // that constructs GenerationPorts (qa-engine/test/contexts/generation/application/generate-tests.
+  // use-case.test.ts, qa-engine/test/contexts/qa-run-orchestration/**, qa-engine/test/contract/
+  // seam-parity.contract.test.ts, qa-engine/test/contexts/service-topology/infrastructure/
+  // level3-wiring.test.ts) — a wider blast radius than this slice's file-touch boundary allows.
   budget: PromptBudgetPort;
   repair?: RepairPort; // absent → no generator contract check; reviewer repair falls back to parse-miss only
 }

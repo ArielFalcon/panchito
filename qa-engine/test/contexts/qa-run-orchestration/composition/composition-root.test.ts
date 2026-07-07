@@ -81,6 +81,13 @@ function fakeConfig(overrides: Partial<CompositionConfig> = {}): CompositionConf
     githubPr: { openWithAutoMerge: async () => ({ url: "https://github.com/org/app/pull/1", number: 1 }) },
     githubIssue: { open: async () => ({ url: "https://github.com/org/app/issues/1", number: 1 }) },
     historyFilePath: "/tmp/qa-run-history.jsonl",
+    // WS5.4b (full-flow remediation): PublicationPortAdapter's sanitize collaborator is now REQUIRED
+    // (constructor throws if absent — fail-closed publication default). This fake config's ONE base
+    // object feeds every buildProduction/buildShadow call in this file, so wiring an identity
+    // sanitizer here once satisfies the constructor guard everywhere without touching the 68 call
+    // sites individually — this suite's own job (composition wiring) does not exercise sanitization
+    // content, so identity is the correct fake here.
+    sanitize: (text: string) => text,
   };
   return { ...base, ...overrides };
 }

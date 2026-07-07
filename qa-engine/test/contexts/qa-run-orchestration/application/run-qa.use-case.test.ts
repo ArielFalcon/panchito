@@ -3819,6 +3819,37 @@ test("executedRed: DIRECT logic pin — reproduces the override's own condition 
   assert.equal(executedRedOnPass, false, "a pass verdict must never trigger the override, confirming the condition is verdict-specific, not round-only");
 });
 
+// ── WS5.3 (full-flow remediation, option c) — the run's real diff reaches PreGenerationGroundingPort
+// .ground()'s new third arg, so the adapter can derive deterministic [CHANGED] markers from it. ──
+
+test("WS5.3: a diff-mode run threads classificationDiff into preGenerationGrounding.ground()'s third arg", async () => {
+  let capturedDiff: string | undefined;
+  const REAL_DIFF = "diff --git a/src/checkout.ts b/src/checkout.ts\n+export function pay() {}\n";
+  const { ports } = stubPorts({
+    classify: async () => ({ action: "generate", reason: "diff touches src/checkout.ts", diff: REAL_DIFF }),
+    ground: async (_specDir, _signal, diff) => { capturedDiff = diff; return {}; },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "ws5-3-diff-threading" });
+
+  assert.equal(capturedDiff, REAL_DIFF, "ground() must receive the SAME real diff classify() derived, not a placeholder");
+});
+
+test("WS5.3: a non-diff mode run leaves ground()'s diff arg absent (classificationDiff never populated outside diff mode)", async () => {
+  let capturedDiff: string | undefined = "sentinel-never-overwritten";
+  let groundCalled = false;
+  const { ports } = stubPorts({
+    ground: async (_specDir, _signal, diff) => { groundCalled = true; capturedDiff = diff; return {}; },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, mode: "complete", runId: "ws5-3-non-diff-mode" });
+
+  assert.ok(groundCalled, "ground() must still be called in non-diff mode (grounding is not diff-gated)");
+  assert.equal(capturedDiff, undefined, "non-diff modes never classify, so the diff arg must stay absent, never fabricated");
+});
+
 // ── Slice 4b — CodeGraph Phase 4 blast-radius wiring (design §5.3/§5.4, ADR-7, tasks 4b.4/4b.5) ──
 //
 // 4b.4: RunQaUseCase threads an OPTIONAL structuralSignal collaborator into baseEnrichment.staticSignal,

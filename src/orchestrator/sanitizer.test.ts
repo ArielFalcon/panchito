@@ -8,6 +8,44 @@ test("redacts secrets (api key, token)", () => {
   assert.doesNotMatch(out, /sk-abc123XYZ/);
 });
 
+// WS5.4a — two-tier sanitizer policy: the "issue" mode (default, aggressive) is the Issue-bound
+// public surface; "model" mode is the diff→model path, where the SAME api-key-assignment catch-all
+// was redacting code shapes that carry no secret at all (a type annotation, a bare call expression).
+// Testing the change SITE, not the constant redaction of a real secret (already covered above).
+test("model mode: does NOT redact a type annotation shaped like a credential field", () => {
+  const { text: out } = sanitizeText("password: string;", "model");
+  assert.doesNotMatch(out, /REDACTED_SECRET/, "a type annotation carries no secret value");
+  assert.match(out, /password: string;/);
+});
+
+test("model mode: does NOT redact a bare call expression assigned to a credential-named variable", () => {
+  const { text: out } = sanitizeText("const token = getToken();", "model");
+  assert.doesNotMatch(out, /REDACTED_SECRET/, "a call expression carries no literal secret value");
+  assert.match(out, /getToken\(\)/);
+});
+
+test("model mode: STILL redacts a quoted string literal assigned to a credential field", () => {
+  const { text: out } = sanitizeText('const password = "hunter2";', "model");
+  assert.match(out, /REDACTED_SECRET/, "a quoted literal is the real secret shape and must still redact");
+  assert.doesNotMatch(out, /hunter2/);
+});
+
+test("model mode: STILL redacts a high-entropy bare token value", () => {
+  const { text: out } = sanitizeText("token = aZ9kP2mQ7xR4tL6vB8nH1cJ3s", "model");
+  assert.match(out, /REDACTED_SECRET/, "a high-entropy bare token is still a real secret shape");
+});
+
+test("issue mode (default, unchanged): a type annotation is STILL redacted — aggressive public-surface policy", () => {
+  const { text: out } = sanitizeText("password: string;");
+  assert.match(out, /REDACTED_SECRET/, "the default (Issue-bound) mode keeps the aggressive pattern");
+});
+
+test("issue mode (explicit): identical to default — aggressive public-surface policy", () => {
+  const withDefault = sanitizeText("token = getToken();");
+  const withExplicit = sanitizeText("token = getToken();", "issue");
+  assert.deepEqual(withExplicit, withDefault);
+});
+
 test("capText passes short prose through unchanged", () => {
   assert.equal(capText("a short commit body", MAX_PROMPT_BODY_CHARS), "a short commit body");
 });

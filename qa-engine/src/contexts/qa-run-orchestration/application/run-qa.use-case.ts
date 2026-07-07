@@ -530,7 +530,11 @@ export class RunQaUseCase {
     if (this.deps.preGenerationGrounding) {
       this.deps.observer?.onStep("generate", "pre-generation grounding");
       try {
-        const grounding = await this.deps.preGenerationGrounding.ground(workspace.specDir, signal);
+        // WS5.3 (full-flow remediation, option c): thread the SAME real per-run classificationDiff
+        // every other diff-mode enrichment already reuses (the "dynamic diff" fix precedent) — the
+        // adapter derives deterministic [CHANGED] markers from it (no LLM). Absent outside diff mode
+        // (classificationDiff stays undefined there), matching every other diff-mode-only field.
+        const grounding = await this.deps.preGenerationGrounding.ground(workspace.specDir, signal, classificationDiff);
         groundingContextPack = grounding.contextPack;
         groundingExistingSpecFiles = grounding.existingSpecFiles;
       } catch (err) {

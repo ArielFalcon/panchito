@@ -12,6 +12,37 @@ test("redacts secrets (api key, token)", () => {
   assert.doesNotMatch(out, /sk-abc123XYZ/);
 });
 
+// WS5.4a — two-tier sanitizer policy twin (see src/orchestrator/sanitizer.test.ts's own header for
+// the full rationale): "issue" (default) keeps the aggressive pattern; "model" narrows the
+// api-key-assignment catch-all to quoted literals / high-entropy bare tokens only.
+test("model mode: does NOT redact a type annotation shaped like a credential field", () => {
+  const { text: out } = sanitizeText("password: string;", "model");
+  assert.doesNotMatch(out, /REDACTED_SECRET/, "a type annotation carries no secret value");
+  assert.match(out, /password: string;/);
+});
+
+test("model mode: does NOT redact a bare call expression assigned to a credential-named variable", () => {
+  const { text: out } = sanitizeText("const token = getToken();", "model");
+  assert.doesNotMatch(out, /REDACTED_SECRET/, "a call expression carries no literal secret value");
+  assert.match(out, /getToken\(\)/);
+});
+
+test("model mode: STILL redacts a quoted string literal assigned to a credential field", () => {
+  const { text: out } = sanitizeText('const password = "hunter2";', "model");
+  assert.match(out, /REDACTED_SECRET/, "a quoted literal is the real secret shape and must still redact");
+  assert.doesNotMatch(out, /hunter2/);
+});
+
+test("model mode: STILL redacts a high-entropy bare token value", () => {
+  const { text: out } = sanitizeText("token = aZ9kP2mQ7xR4tL6vB8nH1cJ3s", "model");
+  assert.match(out, /REDACTED_SECRET/, "a high-entropy bare token is still a real secret shape");
+});
+
+test("issue mode (default, unchanged): a type annotation is STILL redacted — aggressive public-surface policy", () => {
+  const { text: out } = sanitizeText("password: string;");
+  assert.match(out, /REDACTED_SECRET/, "the default (Issue-bound) mode keeps the aggressive pattern");
+});
+
 test("redacts a bare LLM provider key (sk-...) with no adjacent keyword", () => {
   const key = "sk-proj-abcDEF0123456789ghijKLMNopqrstuvWX";
   const { text: out } = sanitizeText(`const k = "${key}"; // committed by mistake`);

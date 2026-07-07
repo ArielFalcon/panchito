@@ -58,12 +58,16 @@ export interface PublicationPortCollaborators {
   pr: GitHubPrCollaborator;
   issue: GitHubIssueCollaborator;
   shadowLog: ShadowLogCollaborator;
-  // F4 (audit fix, judgment-day): CLAUDE.md "Sanitize data leaving the system — execution logs ->
-  // Issue... pass through src/orchestrator/sanitizer.ts". OPTIONAL — absent defaults to identity
-  // (backward-compat for every pre-existing test/composition that never wired one). The composition
+  // WS5.4b (full-flow remediation, fail-closed publication default): CLAUDE.md "Sanitize data
+  // leaving the system — execution logs -> Issue... pass through src/orchestrator/sanitizer.ts".
+  // REQUIRED (was optional, defaulting to identity) — a default-to-identity sanitizer is a latent
+  // fail-open on the system's most public output: a future composition that simply forgets to wire
+  // the real sanitizer would silently publish unsanitized Issue/PR bodies with no error anywhere.
+  // The constructor now THROWS when this is absent (see PublicationPortAdapter's constructor) so the
+  // gap is caught at composition time, not discovered live in a leaked-secret Issue. The composition
   // root (src/server/rewritten-engine-factory.ts, which already imports src/) wires the REAL
   // sanitizeText here; qa-engine/src stays src/-free — the sanitizer is injected, never imported.
-  sanitize?: (text: string) => string;
+  sanitize: (text: string) => string;
 }
 
 export interface PublicationPortStaticContext {
@@ -123,7 +127,19 @@ export class PublicationPortAdapter implements PublicationPort {
   constructor(
     private readonly deps: PublicationPortCollaborators,
     private readonly ctx: PublicationPortStaticContext,
-  ) {}
+  ) {
+    // WS5.4b: fail-closed at construction time — see PublicationPortCollaborators.sanitize's own doc.
+    // A runtime object literal can still omit a required TS field (composition roots are not always
+    // fully type-checked against every collaborator at the call site, and a `as any`/loose object can
+    // slip through) — this explicit guard makes the omission an immediate, loud throw instead of a
+    // silent identity pass-through discovered only when a real secret leaks into a public Issue body.
+    if (typeof this.deps.sanitize !== "function") {
+      throw new Error(
+        "PublicationPortAdapter: 'sanitize' is a REQUIRED collaborator (fail-closed publication default, WS5.4b) — " +
+          "the composition root must inject the real sanitizeText; refusing to default to identity.",
+      );
+    }
+  }
 
   async publish(decision: {
     verdict: RunVerdict;
@@ -155,9 +171,10 @@ export class PublicationPortAdapter implements PublicationPort {
       e2eChanged: decision.e2eChanged ?? this.ctx.e2eChanged,
     });
 
-    // F4 (CRITICAL security invariant): identity when no sanitizer was wired (backward-compat) —
-    // the REAL sanitizeText is injected by the composition root (src/server/rewritten-engine-factory.ts).
-    const sanitize = this.deps.sanitize ?? ((text: string) => text);
+    // F4 / WS5.4b (CRITICAL security invariant): sanitize is now a REQUIRED collaborator (the
+    // constructor already threw if it were absent) — the REAL sanitizeText is injected by the
+    // composition root (src/server/rewritten-engine-factory.ts).
+    const sanitize = this.deps.sanitize;
     const title = renderTitle(decision.verdict, sanitize);
     const body = renderBody(decision.cases, decision.logs, sanitize, decision.adjudication);
     // F3: Issue creation routes to the triggering repo when supplied; PR creation always targets

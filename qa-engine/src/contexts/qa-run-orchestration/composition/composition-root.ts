@@ -584,13 +584,29 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
   // ShadowLogAdapter is ALSO wired here (not just in buildShadow) because PublishDecisionService's
   // own decide() can independently route to "shadow" when cfg.shadow is true — the production path
   // must honor a shadow-mode APP's config too, not only buildShadow()'s own forced override.
+  // WS5.4b (full-flow remediation, fail-closed publication default): PublicationPortAdapter's
+  // sanitize collaborator is now REQUIRED (its constructor throws if absent — see that file's own
+  // WS5.4b doc). cfg.sanitize stays OPTIONAL on CompositionConfig (documented in the seam-parity
+  // contract test's OPTIONAL_ALLOWLIST, which also asserts the REAL composition — buildRewritten
+  // CompositionConfig in rewritten-engine-factory.ts — always supplies it): a composition built
+  // WITHOUT cfg.sanitize is exactly the fail-open gap 5.4b closes, so it must throw HERE, loudly and
+  // by name, rather than fall back to identity — the same invariant the adapter's own constructor
+  // enforces, surfaced one call earlier with a composition-specific message. Every test composition
+  // built through THIS file's own fakeConfig() helper now wires an identity sanitizer explicitly
+  // (see that helper's own WS5.4b comment), so this throw is unreachable in any real test run.
+  if (!cfg.sanitize) {
+    throw new Error(
+      "composition-root.ts: cfg.sanitize is required to wire PublicationPortAdapter (fail-closed publication default, WS5.4b) — " +
+        "the composition (rewritten-engine-factory.ts's buildRewrittenCompositionConfig, or the test fixture) must supply the real sanitizeText.",
+    );
+  }
   const publication = new PublicationPortAdapter(
     {
       decide: new PublishDecisionService(),
       pr: cfg.githubPr,
       issue: cfg.githubIssue,
       shadowLog: new ShadowLogAdapter(),
-      ...(cfg.sanitize ? { sanitize: cfg.sanitize } : {}),
+      sanitize: cfg.sanitize,
     },
     {
       repo: cfg.repo,

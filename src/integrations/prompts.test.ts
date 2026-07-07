@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPrompt, buildPromptAssembled, buildPlanPromptAssembled, buildFollowupPrompt, buildWorkerPrompt } from "./prompts";
+import { buildPrompt, buildPromptAssembled, buildPlanPromptAssembled, buildFollowupPrompt, buildWorkerPrompt, buildReviewerPrompt, buildExplorerPrompt } from "./prompts";
 import { assemble as caAssemble, section as caSection } from "./context-assembler";
 import type { OpencodeRunInput } from "./opencode-client";
-import type { ParallelWorkerInput } from "@contexts/generation/application/ports/generation-ports.ts";
+import type { ParallelWorkerInput, ReviewInput } from "@contexts/generation/application/ports/generation-ports.ts";
 import type { QaCase } from "../types";
 
 // RE-1 — the orchestrator's regeneration prompts must NOT command the agent to re-navigate /
@@ -230,6 +230,43 @@ test("JD-R2: the failure-sourced fix branch carries the anti-blinding escape too
     text.includes("you MUST still browser_navigate that specific route"),
     "even a failure-sourced fix must navigate a route absent from the captured failure tree",
   );
+});
+
+// ── WS5.4c: raw DOM embeds must be sanitized like every other model-bound section ──────────────
+// domSnapshot is captured live from DEV — the rendered page can legitimately contain a leaked
+// secret-shaped string (e.g. an admin panel echoing an API key in a debug banner, or a stray
+// data-testid that happens to look like a credential assignment). Every OTHER text section in this
+// file (diff, commit message, guidance) is already routed through sanitizeText; the DOM embeds were
+// the one inconsistent gap (context-pack.ts's own DOM section has the SAME gap, fixed alongside).
+const secretShapedDom = 'button: Submit\ntextbox: apiKey: "sk-liveSECRETVALUE123456"';
+
+test("WS5.4c: the generator's live-DOM section sanitizes a secret-shaped DOM string", () => {
+  const text = buildPrompt(mkInput({ domSnapshot: secretShapedDom }));
+  assert.ok(!text.includes("sk-liveSECRETVALUE123456"), "a secret-shaped string in the captured DOM must not reach the model raw");
+});
+
+test("WS5.4c: the failure-sourced 'GROUND TRUTH AT FAILURE' DOM section sanitizes a secret-shaped string", () => {
+  const text = buildPrompt(mkInput({ fixCases: [failingCase], domSnapshot: secretShapedDom, failureSourced: true }));
+  assert.ok(!text.includes("sk-liveSECRETVALUE123456"), "the failure-point DOM capture must be sanitized too");
+});
+
+test("WS5.4c: buildFollowupPrompt's injected failure DOM sanitizes a secret-shaped string", () => {
+  const followup = buildFollowupPrompt(mkInput({ fixCases: [failingCase], domSnapshot: secretShapedDom, failureSourced: true }));
+  assert.ok(!followup.includes("sk-liveSECRETVALUE123456"), "the follow-up's re-injected failure DOM must be sanitized too");
+});
+
+test("WS5.4c: buildReviewerPrompt's live-DOM section sanitizes a secret-shaped string", () => {
+  const reviewInput: ReviewInput = {
+    diff: "diff --git a/src/foo.ts b/src/foo.ts\n+export function foo() {}\n",
+    specs: ["flows/checkout.spec.ts"],
+    mirrorDir: "/mirrors/org__app",
+    e2eRelDir: "e2e",
+    appName: "testapp",
+    mode: "diff",
+    domSnapshot: secretShapedDom,
+  };
+  const text = buildReviewerPrompt(reviewInput);
+  assert.ok(!text.includes("sk-liveSECRETVALUE123456"), "the reviewer's captured DOM must be sanitized too");
 });
 
 // ── C1: fix-cases evidence rendering (httpStatus/finalUrl/runtimeErrors) ─────
@@ -604,19 +641,21 @@ test("seam-d: plan-lessons (p2) survives budget pressure when plan-arch-map (p2,
 
 // PINNING: generator path (prompts.ts line ~828). Calls buildPromptAssembled with large
 // learnedRules + coverageGap content so the role budget (192k for kimi-k2.7-code) forces shedding.
-// Asserts that learned-rules SURVIVES while coverage-gap is shed — proving learned-rules is at
-// priority 2, not priority 6.
-// This test FAILS if prompts.ts line ~828 is reverted to `priority: 6`:
-//   with p6 > p5, learned-rules sheds BEFORE coverage-gap, so LEARNED_MARKER is absent.
-test("seam-d PINNING: learned-rules (real prompts.ts p2) survives budget pressure that sheds coverage-gap (p5)", () => {
+//
+// WS5.2 (full-flow remediation) SUPERSEDES this pinning's original premise: coverage-gap is now
+// rendered with shedAs:"critical-recap" (least-shedable — it is the ENTIRE payload of an enforce-
+// mode coverage regen, and losing it silently degrades the one-shot regen into a blind repeat of
+// the original prompt). So the assertion FLIPS from the pre-WS5.2 state: coverage-gap now SURVIVES
+// budget pressure and learned-rules (still p2, unchanged) is the one that sheds instead — proving
+// the shedAs promotion actually took effect, not merely that learned-rules kept its own priority.
+test("seam-d PINNING (post-WS5.2): coverage-gap (shedAs critical-recap) survives budget pressure that sheds learned-rules (p2)", () => {
   const LEARNED_MARKER = "PINNING_LEARNED_RULES_MARKER";
   const GAP_MARKER = "PINNING_COVERAGE_GAP_MARKER";
 
-  // Each section ~100k bytes. Together ~200k — exceeds the 192k role budget (kimi-k2.7-code:
-  // 64k tokens × 0.75 safety × 4 bytes/token = 192k). At least one volatile section must shed.
-  // Shed order in volatile band: highest priority number first.
-  // With p2 (learned-rules) vs p5 (coverage-gap): p5 > p2 → coverage-gap sheds first.
-  // With p6 (reverted): p6 > p5 → learned-rules sheds first. Assertion fails → RED.
+  // Each section ~100k bytes. Together ~200k — exceeds the 192k role budget (deepseek-v4-pro:
+  // 64k tokens × 0.75 safety × 4 bytes/token = 192k). At least one section must shed.
+  // coverage-gap is promoted to the critical-recap shed band (WS5.2) — it no longer competes with
+  // learned-rules in the volatile shed band at all, so learned-rules (still volatile p2) sheds first.
   const learnedContent = padTo(LEARNED_MARKER, 100_000);
   const gapContent = padTo(GAP_MARKER, 100_000);
 
@@ -627,9 +666,14 @@ test("seam-d PINNING: learned-rules (real prompts.ts p2) survives budget pressur
   }));
 
   assert.ok(
-    result.text.includes(LEARNED_MARKER),
-    `learned-rules (prompts.ts priority 2) must survive budget pressure — coverage-gap (p5) must shed first. ` +
-    `If this fails, prompts.ts line ~828 may have been reverted to priority 6. ` +
+    result.text.includes(GAP_MARKER),
+    `coverage-gap (shedAs critical-recap, WS5.2) must survive budget pressure — it is the entire payload ` +
+    `of its own regen turn. sectionSizes: ${JSON.stringify(result.sectionSizes)}`,
+  );
+  assert.ok(
+    !result.text.includes(LEARNED_MARKER),
+    `learned-rules (volatile p2, unchanged) is expected to shed here so the budget math actually forces ` +
+    `a real choice between the two — otherwise this test would pass trivially if both fit. ` +
     `sectionSizes: ${JSON.stringify(result.sectionSizes)}`,
   );
 });
@@ -877,6 +921,45 @@ test("S2.4(5): more than MAX_LINKS (40) links renders only the first 40; more th
   assert.ok(!text.includes("sym40") && !text.includes("sym44"), "links beyond the 40-cap must be dropped");
   assert.ok(text.includes("/path0") && text.includes("/path19"), "the first 20 drift entries must render");
   assert.ok(!text.includes("/path20") && !text.includes("/path24"), "drift entries beyond the 20-cap must be dropped");
+});
+
+// WS5.5(a): unimpacted service links beyond MAX_LINKS were silently dropped with no trace — the
+// generator (and any human reading a captured prompt) had no way to know MORE links existed past the
+// cut. Append an observability marker naming how many were omitted.
+test("WS5.5a: more than MAX_LINKS (40) links appends a '...and N more links' marker (single-agent prompt)", () => {
+  const manyLinks = Array.from({ length: 45 }, (_, i) => ({
+    from: { repo: "org/front", file: "src/api.ts", symbol: `sym${i}` },
+    to: { repo: "org/orders", file: "src/routes.ts", symbol: `route${i}` },
+    transport: "http" as const,
+    confidence: 0.5,
+    source: "openapi",
+  }));
+  const text = buildPrompt(mkInput({ serviceLinks: manyLinks }));
+  assert.match(text, /\.\.\.and 5 more links?/i, "45 links - 40 rendered = 5 must be named in the marker");
+});
+
+test("WS5.5a: exactly MAX_LINKS (40) links does NOT append the marker (nothing was actually omitted)", () => {
+  const exactLinks = Array.from({ length: 40 }, (_, i) => ({
+    from: { repo: "org/front", file: "src/api.ts", symbol: `sym${i}` },
+    to: { repo: "org/orders", file: "src/routes.ts", symbol: `route${i}` },
+    transport: "http" as const,
+    confidence: 0.5,
+    source: "openapi",
+  }));
+  const text = buildPrompt(mkInput({ serviceLinks: exactLinks }));
+  assert.doesNotMatch(text, /\.\.\.and \d+ more links?/i, "no marker when every link was actually rendered");
+});
+
+test("WS5.5a: more than MAX_LINKS (40) links appends the '...and N more links' marker in the worker prompt too", () => {
+  const manyLinks = Array.from({ length: 42 }, (_, i) => ({
+    from: { repo: "org/front", file: "src/api.ts", symbol: `sym${i}` },
+    to: { repo: "org/orders", file: "src/routes.ts", symbol: `route${i}` },
+    transport: "http" as const,
+    confidence: 0.5,
+    source: "openapi",
+  }));
+  const text = buildWorkerPrompt(mkWorkerInput({ serviceLinks: manyLinks }));
+  assert.match(text, /\.\.\.and 2 more links?/i, "42 links - 40 rendered = 2 must be named in the worker prompt marker too");
 });
 
 test("S2.4(7): contractDrift present with serviceLinks ABSENT/empty still renders the section header and the drift WARNING (pure-drift scenario)", () => {
@@ -1206,4 +1289,142 @@ test("A-R3(6): worker prompt serviceLinks string fields pass through the local s
   const text = buildWorkerPrompt(mkWorkerInput({ serviceLinks: [dirtyLink] }));
   assert.ok(!text.includes("sk-abc123XYZsecretvalue"), "a secret-shaped string in a worker serviceLinks field must be redacted, never passed through raw");
   assert.match(text, /REDACTED_SECRET/, "the sanitize wrapper must have actually redacted the secret pattern");
+});
+
+// ── WS5.1: capDiff is wired at every render boundary that embeds the raw diff ───────────────────
+// PromptBudgetPort's capDiff existed but was never called — buildDiffSection (the e2e task-band diff
+// section), buildCodeTask (code-mode diff), and buildExplorerPrompt (the explorer's diff embed) all
+// interpolated `sanitizeText(input.diff).text` UNCAPPED. A giant commit (huge autogenerated file,
+// vendored dependency, wide refactor) could blow the per-role prompt budget on the diff ALONE before
+// the assembler's own shedding logic ever runs. capDiff keeps whole per-file sections in relevance
+// order and appends a truncation marker naming the omitted files + how to read the full diff.
+
+// Build a diff comfortably over MAX_PROMPT_DIFF_CHARS (50,000) so capDiff's truncation branch fires.
+function bigDiff(fileCount = 5, linesPerFile = 3000): string {
+  const parts: string[] = [];
+  for (let i = 0; i < fileCount; i++) {
+    parts.push(`diff --git a/src/big-file-${i}.ts b/src/big-file-${i}.ts`);
+    parts.push(`--- a/src/big-file-${i}.ts`);
+    parts.push(`+++ b/src/big-file-${i}.ts`);
+    parts.push(`@@ -1,1 +1,${linesPerFile} @@`);
+    for (let l = 0; l < linesPerFile; l++) parts.push(`+const line${i}_${l} = "padding to blow the prompt budget";`);
+  }
+  return parts.join("\n");
+}
+
+test("WS5.1: buildDiffSection (e2e diff-mode task-band section) caps a giant diff instead of embedding it whole", () => {
+  const huge = bigDiff();
+  const text = buildPrompt(mkInput({ diff: huge, mode: "diff" }));
+  assert.ok(text.length < huge.length, "the assembled prompt must be smaller than the raw uncapped diff");
+  assert.match(text, /diff truncated/i, "a visible truncation marker must be present");
+  assert.match(text, /git show/, "the marker must point the agent at `git show <sha>` for the full diff");
+});
+
+test("WS5.1: buildCodeTask (code-mode diff task) caps a giant diff instead of embedding it whole", () => {
+  const huge = bigDiff();
+  const text = buildPrompt(mkInput({ diff: huge, mode: "diff", target: "code" }));
+  assert.ok(text.length < huge.length, "the code-mode task must not embed the raw uncapped diff");
+  assert.match(text, /diff truncated/i, "a visible truncation marker must be present in code mode too");
+});
+
+test("WS5.1: buildExplorerPrompt caps a giant diff instead of embedding it whole", () => {
+  const huge = bigDiff();
+  const text = buildExplorerPrompt(mkInput({ diff: huge, mode: "diff" }));
+  assert.ok(text.length < huge.length, "the explorer prompt must not embed the raw uncapped diff");
+  assert.match(text, /diff truncated/i, "a visible truncation marker must be present in the explorer prompt too");
+});
+
+test("WS5.1: a small diff (under the cap) passes through buildDiffSection unmodified (no spurious truncation)", () => {
+  const small = "diff --git a/src/foo.ts b/src/foo.ts\n+export function foo() {}\n";
+  const text = buildPrompt(mkInput({ diff: small, mode: "diff" }));
+  assert.ok(text.includes("export function foo()"), "a small diff must render in full");
+  assert.doesNotMatch(text, /diff truncated/i, "a small diff must not trigger the truncation marker");
+});
+
+// ── WS5.2: coverage-gap must survive its own regen prompt ────────────────────────────────────────
+// The coverage-gap section was rendered at VOLATILE priority 5 — the HIGHEST priority number in the
+// volatile band, which the assembler sheds FIRST under budget pressure (see context-assembler.ts's
+// own SHED_ROLE_ORDER + "higher priority number → shed first" comment). On an enforce-mode coverage
+// regen, coverage-gap is the ENTIRE PAYLOAD of the turn — a shed here silently converts the one-shot
+// regen into a blind repeat of the original prompt (the diff is also empty on regens). Promote it to
+// shedAs:"critical-recap" (the pack's own precedent for unrecoverable-this-turn content) so it
+// survives everything else in the volatile band.
+test("WS5.2: coverage-gap survives when other volatile content is large enough to force shedding", () => {
+  // qa-generator's real budget is deepseek-v4-pro's window (64,000 tokens x 0.75 safety margin x 4
+  // bytes/token = 192,000 bytes) — the payload below must genuinely exceed that so the assembler's
+  // global-budget pass actually sheds something, not merely construct a payload that already fits.
+  // learnedRules (volatile priority 2, sheds AFTER coverage-gap under the OLD priority-5 ordering)
+  // plus a large domSnapshot (volatile priority 1, sheds even later) together blow the real budget;
+  // if coverage-gap is not promoted to the critical-recap shed band, it sheds FIRST and is lost.
+  const bigLearnedRules = "## Lessons\n" + "x".repeat(120_000);
+  const bigDom = "button: Submit\n" + "row: item ".repeat(15_000);
+  const coverageGapText = "## COVERAGE_GAP_UNIQUE_MARKER\nsrc/checkout.ts:42-58 not exercised by the green run.";
+  const text = buildPrompt(mkInput({
+    coverageGap: coverageGapText,
+    learnedRules: bigLearnedRules,
+    domSnapshot: bigDom,
+  }));
+  assert.ok(text.includes("COVERAGE_GAP_UNIQUE_MARKER"), "the coverage-gap section must survive assembly even under real budget pressure");
+});
+
+// ── WS5.5(b): "Cross-check against the diff" must be conditional on the diff actually rendering ──
+// buildTask's e2e diff branch always rendered "Cross-check against the diff", but the diff ITSELF
+// lives in a separate section (buildDiffSection) that returns "" on any regen pass (fixCases /
+// reviewCorrections / coverageGap) — so a regen prompt commanded the agent to cross-check evidence
+// that was never in the prompt at all.
+test("WS5.5b: a first-pass (non-regen) e2e prompt renders 'Cross-check against the diff' alongside the diff", () => {
+  const text = buildPrompt(mkInput({ mode: "diff" }));
+  assert.match(text, /Cross-check against the diff/, "first pass: the diff renders, so the instruction is valid");
+  assert.match(text, /## Commit diff/, "first pass: the diff section itself must be present");
+});
+
+test("WS5.5b: a fixCases regen prompt does NOT render 'Cross-check against the diff' (the diff section is empty on regen)", () => {
+  const text = buildPrompt(mkInput({ mode: "diff", fixCases: [failingCase] }));
+  assert.doesNotMatch(text, /Cross-check against the diff/, "regen: no diff section exists, so the instruction must not appear either");
+});
+
+test("WS5.5b: a reviewCorrections regen prompt does NOT render 'Cross-check against the diff'", () => {
+  const text = buildPrompt(mkInput({ mode: "diff", reviewCorrections: ["[fragile-selector] tighten the locator"] }));
+  assert.doesNotMatch(text, /Cross-check against the diff/, "reviewer-corrections regen: no diff section, instruction must not appear");
+});
+
+test("WS5.5b: a coverageGap regen prompt does NOT render 'Cross-check against the diff'", () => {
+  const text = buildPrompt(mkInput({ mode: "diff", coverageGap: "src/checkout.ts:42-58" }));
+  assert.doesNotMatch(text, /Cross-check against the diff/, "coverage-gap regen: no diff section, instruction must not appear");
+});
+
+// ── WS5.5(d): static-gate fixCases framing ────────────────────────────────────────────────────
+// WS4.3 threads the static-gate (Filter B: tsc/eslint) validation errors as a synthetic fixCases
+// entry named "static-gate" so the repair round has the actual error text. But the fixCases section
+// unconditionally frames EVERY entry as "tests FAILED during execution against DEV" — misleading
+// for a compile/lint failure, since nothing was ever executed. Gate the framing on the case name.
+const staticGateCase: QaCase = { name: "static-gate", status: "fail", detail: "TS2322: Type 'string' is not assignable to type 'number'." };
+
+test("WS5.5d: a static-gate fixCases entry renders under a 'failing gate' framing, not 'FAILED during execution against DEV'", () => {
+  const text = buildPrompt(mkInput({ fixCases: [staticGateCase] }));
+  assert.doesNotMatch(text, /FAILED during execution against DEV/, "a compile/lint failure never executed against DEV — the execution framing is misleading here");
+  assert.match(text, /failing gate/i, "the static-gate case must render under a distinct 'failing gate' framing");
+  assert.match(text, /TS2322/, "the actual validation error text must still be present");
+});
+
+test("WS5.5d: an ordinary (non-static-gate) fixCases entry keeps the original 'FAILED during execution against DEV' framing", () => {
+  const text = buildPrompt(mkInput({ fixCases: [failingCase] }));
+  assert.match(text, /FAILED during execution against DEV/, "a real Playwright execution failure keeps its original framing");
+});
+
+test("WS5.2: the assembled coverage-gap section survives a tiny budget that sheds a lower-priority-number volatile section instead", () => {
+  // Direct structural check against the ACTUAL section descriptor buildPromptAssembled constructs
+  // for coverage-gap (priority 5, shedAs "critical-recap") vs. a lower-priority-number volatile
+  // section (dom-snapshot, priority 1 — sheds SECOND under the old per-priority-number ordering,
+  // but FIRST once coverage-gap is promoted to the critical-recap shed band).
+  const coverageText = "## Cover the change (HIGH priority)\n\nCOVERAGE_GAP_UNIQUE_MARKER";
+  const domText = "## Live DEV accessibility tree\n" + "x".repeat(5000);
+  const budgetBytes = Buffer.byteLength(coverageText, "utf8") + 50; // room for coverage-gap alone, not both
+  const assembled = caAssemble([
+    caSection("dom-snapshot", "volatile", domText, { priority: 1 }),
+    caSection("coverage-gap", "volatile", coverageText, { priority: 5, shedAs: "critical-recap" }),
+  ], { budgetBytes });
+  assert.ok(assembled.text.includes("COVERAGE_GAP_UNIQUE_MARKER"), "coverage-gap (shedAs critical-recap) must survive the tiny budget");
+  assert.ok(assembled.sectionSizes["coverage-gap"] !== undefined, "coverage-gap must be present in sectionSizes (not shed)");
+  assert.ok(assembled.sectionSizes["dom-snapshot"] === undefined, "dom-snapshot (shedAs volatile, its own default band) must be the one shed instead");
 });

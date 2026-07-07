@@ -75,6 +75,17 @@ export interface ContextPackInput {
   // to captureDomForRoutes so the DOM capture queries the right attribute and the agent transcribes
   // real test-ids instead of guessing. Absent → capture defaults to "data-testid".
   testIdAttribute?: string;
+
+  // WS5.3 (full-flow remediation, option c — CONFIRMED required precondition, judgment-day): a thin,
+  // deterministic list of candidate route paths, populated by the CALLER with NO LLM involvement
+  // (the grounding adapter derives this from the app's own context.json / ArchitectureContext.routes
+  // — the same deterministic route-catalog capture the pre-exec/review grounding already uses, config
+  // baseUrl + no re-derivation). Before this field, candidateRoutes was populated ONLY from a brief
+  // (briefRoutePaths / contextMapRoutes gated on brief.feBe) — with the explorer pass unwired by
+  // design in production, there was NO brief-less route path at all, so the pack was structurally
+  // empty on every real run. Merged with brief routes when both are present (brief first — code-
+  // derived precision outranks the coarse route list); absent → byte-identical to today.
+  routes?: string[];
 }
 
 export interface ContextPackAssembly {
@@ -244,13 +255,26 @@ export async function buildContextPack(
       if (briefOps.has(link.operationId) && link.route) contextMapRoutes.add(link.route);
     }
   }
-  // Merge: brief routes first (more precise, code-derived), then contextMap routes.
-  const candidateRoutes = [...briefRoutePaths, ...contextMapRoutes].filter(Boolean);
+  // WS5.3: the deterministic `routes` input (option c) — populated by the caller with NO LLM
+  // involvement (see ContextPackInput.routes' own doc). Merged LAST (lowest precision: a bare route
+  // list has no code/objective correlation, unlike brief routes or the feBe-overlap-filtered
+  // contextMap routes above) so it only fills in candidates when the higher-precision sources are
+  // thin or absent — exactly the brief-less production case this field exists to close.
+  const deterministicRoutes = new Set<string>(input.routes ?? []);
+  // Merge: brief routes first (most precise, code-derived), then feBe-filtered contextMap routes,
+  // then the deterministic routes input (least precise, but the ONLY source when no brief exists).
+  const candidateRoutes = [...briefRoutePaths, ...contextMapRoutes, ...deterministicRoutes].filter(Boolean);
   // Cap to DOM_ROUTE_CAP most relevant routes (briefRoutes first = highest relevance).
   const briefRoutes = candidateRoutes.slice(0, DOM_ROUTE_CAP);
   if (briefRoutes.length > 0 && input.e2eDir && input.baseUrl) {
     try {
-      const raw = await deps.captureDomForRoutes(briefRoutes, { e2eDir: input.e2eDir, baseUrl: input.baseUrl, testIdAttribute: input.testIdAttribute }, deps.domDeps, input.changedElements);
+      const rawCaptured = await deps.captureDomForRoutes(briefRoutes, { e2eDir: input.e2eDir, baseUrl: input.baseUrl, testIdAttribute: input.testIdAttribute }, deps.domDeps, input.changedElements);
+      // WS5.4c: the captured DOM is rendered by the actual DEV page — it can legitimately contain a
+      // leaked secret-shaped string (an admin debug banner echoing a key, an attribute that reads
+      // like a credential assignment). renderBlastRadius/renderContracts already sanitize through the
+      // local s() wrapper; the DOM text was the one inconsistent gap. "model" mode (WS5.4a) is
+      // correct here: the pack is diff→model-shaped context, never an Issue body.
+      const raw = rawCaptured ? sanitizeText(rawCaptured, "model").text : rawCaptured;
       if (raw) {
         // Budget the DOM: split into lines, apply capDomLines (table/list priority), then
         // reconstruct. This replaces the fixed 4×60 cap with a byte-budget-aware slice.

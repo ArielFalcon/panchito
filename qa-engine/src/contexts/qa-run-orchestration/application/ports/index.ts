@@ -601,7 +601,14 @@ export interface GroundingResult {
   existingSpecFiles?: string[];
 }
 export interface PreGenerationGroundingPort {
-  ground(specDir: string, signal?: AbortSignal): Promise<GroundingResult>;
+  // WS5.3 (full-flow remediation, option c — deterministic Context Pack feed): `diff` is an OPTIONAL
+  // third arg carrying the run's ACTUAL commit diff (diff mode only — mirrors the "dynamic diff" fix
+  // precedent GenerationEnrichment/ReviewEnrichment already established for classificationDiff). The
+  // adapter derives [CHANGED] markers from it deterministically (no LLM) and forwards them to
+  // buildContextPack. Absent (non-diff modes, or a caller that omits it) -> unchanged, byte-identical
+  // to before this field existed — the SAME backward-compatible precedent every other optional arg on
+  // this port's siblings (GenerationPort.diff, etc.) already follows.
+  ground(specDir: string, signal?: AbortSignal, diff?: string): Promise<GroundingResult>;
 }
 
 // ReviewDomGroundingPort — Plan 7-R W4: the reviewer's live-DEV-DOM grounding, mirroring legacy's

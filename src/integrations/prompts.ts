@@ -13,7 +13,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { sanitizeText, capText } from "../orchestrator/sanitizer";
+import { sanitizeText, capText, capDiff } from "../orchestrator/sanitizer";
 import type { ArchitectureContext } from "../qa/context";
 import type { CommitIntent } from "../qa/commit-classify";
 import type { QaCase } from "../types";
@@ -188,6 +188,8 @@ export function buildWorkerPromptAssembled(w: ParallelWorkerInput): AssembledPro
           ...w.serviceLinks!.filter((l) => tierFor(l) === undefined),
         ]
       : w.serviceLinks ?? [];
+  // WS5.5(a): mirrors the single-agent path's own omitted-links marker exactly (see buildPromptAssembled).
+  const workerOmittedLinkCount = hasLinks ? Math.max(0, orderedLinks.length - MAX_LINKS) : 0;
   const workerServiceLinksContent =
     hasLinks || hasDrift
       ? [
@@ -201,6 +203,7 @@ export function buildWorkerPromptAssembled(w: ParallelWorkerInput): AssembledPro
                   `${s(l.to.repo)} ${s(l.contractRef ?? l.to.symbol)} (${s(l.transport)}, confidence ${l.confidence.toFixed(2)})`;
               })
             : []),
+          ...(workerOmittedLinkCount > 0 ? [`...and ${workerOmittedLinkCount} more link${workerOmittedLinkCount === 1 ? "" : "s"} (truncated at MAX_LINKS=${MAX_LINKS})`] : []),
           ...(hasDrift
             ? ["", "### Contract drift (WARNINGS — front calls an endpoint the backend contract does not declare):",
                ...w.contractDrift!.slice(0, MAX_DRIFT).map((d) =>
@@ -506,7 +509,11 @@ export function buildExplorerPrompt(input: OpencodeRunInput): string {
     ``,
     `## Commit diff`,
     "```diff",
-    sanitizeText(input.diff).text,
+    // WS5.1: capDiff runs on the raw diff BEFORE sanitizeText — see buildDiffSection's own note.
+    // The explorer prompt carried NO budget at all before this fix (unlike buildPromptAssembled's
+    // assembler-enforced budget, this is a plain string builder with no shedding), so a giant diff
+    // here was strictly unbounded.
+    sanitizeText(capDiff(input.diff)).text,
     "```",
     ...(input.baseUrl ? [``, `Route context only — you do NOT navigate; selectors stay unverified. LIVE DEV URL: ${input.baseUrl}`] : []),
     ...(input.service
@@ -672,11 +679,18 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
       ].join("\n")
     : "";
 
+  // WS5.4c: the live DOM capture is rendered by the actual DEV page — it can legitimately contain a
+  // leaked secret-shaped string (an admin debug banner echoing a key, a stray attribute value that
+  // reads like a credential assignment). Every OTHER model-bound text in this file already goes
+  // through sanitizeText; the raw DOM embeds were the one inconsistent gap. "model" mode (WS5.4a)
+  // is correct here: this text is diff→model-shaped (never an Issue body).
+  const sanitizedDomSnapshot = input.domSnapshot ? sanitizeText(input.domSnapshot, "model").text : undefined;
+
   // VOLATILE: Live DEV accessibility tree of the target routes — the DETERMINISTIC ground truth for
   // selectors. When `failureSourced` is true, the domSnapshot is the captured failure-point tree
   // (not a live pre-write snapshot); the heading switches to "GROUND TRUTH AT FAILURE" and
   // source-framing, counterfactual, and quote-then-assert instructions are prepended (design §6.1).
-  const domContent = input.domSnapshot && isGenerationMode
+  const domContent = sanitizedDomSnapshot && isGenerationMode
     ? input.failureSourced
       ? [
           `## GROUND TRUTH AT FAILURE`,
@@ -696,7 +710,7 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
           `\`getByText\` locator quoted from the SAME tree — text visible in the tree below. NEVER`,
           `invent a CSS selector or data-testid value that is not present in this grounding.`,
           ``,
-          input.domSnapshot,
+          sanitizedDomSnapshot,
           ``,
         ].join("\n")
       : [
@@ -719,7 +733,7 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
           ``,
           `Lines tagged [CHANGED: …] are what THIS change introduced — your objective targets these.`,
           ``,
-          input.domSnapshot,
+          sanitizedDomSnapshot,
           ``,
         ].join("\n")
     : "";
@@ -745,6 +759,13 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
         ].join("\n")
       : "";
 
+  // WS5.5(d): WS4.3 threads the static-gate (Filter B: tsc/eslint) validation errors as a synthetic
+  // fixCases entry named "static-gate" so the repair round sees the actual compile/lint error text.
+  // Nothing was ever EXECUTED for that entry (Filter B runs before Filter C) — the "tests FAILED
+  // during execution against DEV" framing is misleading there. Switch to a "failing gate" framing
+  // when a static-gate entry is present; ordinary execution failures keep the original wording.
+  const hasStaticGateCase = Boolean(input.fixCases?.some((c) => c.name === "static-gate"));
+
   // VOLATILE: Fix instructions for failed test cases. When `failureSourced` is true the fix
   // instructions remove the browser_navigate + browser_snapshot steps — the injected tree IS
   // the ground truth. Positioned after selector contradictions (references the tree above).
@@ -752,8 +773,15 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
     ? [
         `## Fix failing tests`,
         ``,
-        `The following tests FAILED during execution against DEV. Fix ONLY these`,
-        `tests; do NOT rewrite or touch tests that passed.`,
+        ...(hasStaticGateCase
+          ? [
+              `The following is a failing gate (static analysis — compile/lint), not an executed test`,
+              `failure. Fix the underlying error; do NOT rewrite or touch tests that passed the gate.`,
+            ]
+          : [
+              `The following tests FAILED during execution against DEV. Fix ONLY these`,
+              `tests; do NOT rewrite or touch tests that passed.`,
+            ]),
         ``,
         `Failed cases:`,
         ...input.fixCases.flatMap((c) => [
@@ -910,6 +938,10 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
           ...input.serviceLinks!.filter((l) => tierFor(l) === undefined),
         ]
       : input.serviceLinks ?? [];
+  // WS5.5(a): unimpacted links beyond MAX_LINKS were silently dropped with no trace — neither the
+  // generator nor a human reading a captured prompt could tell more links existed past the cut.
+  // Append an observability marker naming the omitted count (never affects which links render).
+  const omittedLinkCount = hasServiceLinks ? Math.max(0, orderedLinks.length - MAX_LINKS) : 0;
   const serviceLinksContent =
     (hasServiceLinks || hasContractDrift) && isGenerationMode
       ? [
@@ -923,6 +955,7 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
                   `${s(l.to.repo)} ${s(l.contractRef ?? l.to.symbol)} (${s(l.transport)}, confidence ${l.confidence.toFixed(2)})`;
               })
             : []),
+          ...(omittedLinkCount > 0 ? [`...and ${omittedLinkCount} more link${omittedLinkCount === 1 ? "" : "s"} (truncated at MAX_LINKS=${MAX_LINKS})`] : []),
           ...(hasContractDrift
             ? ["", "### Contract drift (WARNINGS — front calls an endpoint the backend contract does not declare):",
                ...input.contractDrift!.slice(0, MAX_DRIFT).map((d) =>
@@ -990,12 +1023,19 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
     ...(fixContent ? [section("fix-cases", "volatile", fixContent, { priority: 3 })] : []),
     // VOLATILE: reviewer corrections (priority 4 — after grounding context is established).
     ...(reviewContent ? [section("reviewer-corrections", "volatile", reviewContent, { priority: 4, maxBytes: 20_000, overflow: "drop" })] : []),
-    // VOLATILE: coverage gap (priority 5).
-    ...(coverageContent ? [section("coverage-gap", "volatile", coverageContent, { priority: 5 })] : []),
+    // VOLATILE: coverage gap (priority 5 for POSITION — renders after reviewer-corrections/fix-cases,
+    // same as before). WS5.2 (full-flow remediation): shedAs "critical-recap" promotes its SHED
+    // precedence to least-shedable — on an enforce-mode coverage regen this section is the ENTIRE
+    // payload of the turn (the diff is also empty on regens), so losing it to budget pressure
+    // silently degrades the one-shot regen into a blind repeat of the original prompt. Mirrors the
+    // context-pack section's own precedent (shedAs:"critical-recap" for unrecoverable-this-turn
+    // content) — bounded at source (≤10 files' worth of gap text), so promoting it is nearly free.
+    ...(coverageContent ? [section("coverage-gap", "volatile", coverageContent, { priority: 5, shedAs: "critical-recap" })] : []),
     // VOLATILE: learned rules — raised to priority 2 (from p6) so the cross-run learning signal
-    // outlasts lower-value volatile sections. Shed order: coverage-gap (p5) → reviewer-corrections
-    // (p4) → fix-cases (p3) → learned-rules (p2) → dom-snapshot (p1). Learned-rules sheds LAST
-    // among volatile content, preserving the anti-pattern memory under budget pressure.
+    // outlasts lower-value volatile sections. Shed order (within the VOLATILE shed band):
+    // reviewer-corrections (p4) → fix-cases (p3) → learned-rules (p2) → dom-snapshot (p1).
+    // coverage-gap no longer sheds in this band at all (see its own shedAs note above) — it now
+    // sheds only alongside context-pack, after every other volatile/semi-stable/task section.
     ...(learnedRulesContent ? [section("learned-rules", "volatile", learnedRulesContent, { priority: 2 })] : []),
     // TASK: the concrete mode-specific objective (criterion before diff — seam e).
     section("task", "task", taskContent, { priority: 1 }),
@@ -1032,13 +1072,15 @@ export function buildFollowupPrompt(input: OpencodeRunInput): string {
     ``,
   ];
   if (input.domSnapshot && input.failureSourced) {
+    // WS5.4c: same model-mode sanitization as buildPromptAssembled's own DOM sections — the captured
+    // failure-point tree can legitimately contain a leaked secret-shaped string.
     parts.push(
       `## GROUND TRUTH AT FAILURE`,
       ``,
       `The tree below is the page AT THE FAILURE POINT — the ONLY source of truth for this fix. Quote the`,
       `exact \`role: name\` line before writing any locator; an unquotable locator MUST be replaced.`,
       ``,
-      input.domSnapshot,
+      sanitizeText(input.domSnapshot, "model").text,
       ``,
     );
   }
@@ -1301,7 +1343,8 @@ function buildCodeTask(input: OpencodeRunInput): string {
     ``,
     `## Commit diff`,
     "```diff",
-    sanitizeText(input.diff).text,
+    // WS5.1: capDiff runs on the raw diff BEFORE sanitizeText — see buildDiffSection's own note.
+    sanitizeText(capDiff(input.diff)).text,
     "```",
     ``,
     `Test the changed logic DIRECTLY (no web, no browser, no Playwright): call the changed functions/`,
@@ -1380,9 +1423,19 @@ function buildTask(input: OpencodeRunInput): string {
     `## Commit message (the author's intent — derive each test's objective from this)`,
     renderCommitMessage(intent, !isReGen),
     ``,
-    `Cross-check against the diff: if the code does more than the message claims, cover what`,
-    `the code actually changes, not just what the message promises.`,
-    ``,
+    // WS5.5(b): "Cross-check against the diff" instructs the agent to compare the message against
+    // the diff — but the diff itself is a SEPARATE section (buildDiffSection) that returns "" on
+    // every regen pass (fixCases/reviewCorrections/coverageGap; see buildDiffSection's own isReGen
+    // gate). Rendering this instruction unconditionally told the agent to cross-check evidence that
+    // was never in the prompt on a regen turn. Gate on the SAME isReGen predicate buildDiffSection
+    // uses, so the instruction only appears when the diff it references is actually present.
+    ...(isReGen
+      ? []
+      : [
+          `Cross-check against the diff: if the code does more than the message claims, cover what`,
+          `the code actually changes, not just what the message promises.`,
+          ``,
+        ]),
     // Seam e: objective/acceptance-criterion now precedes the diff block so the agent reads
     // the GOAL before the evidence. The diff is rendered as a separate task-band section in
     // buildPromptAssembled (with shedAs:"semi-stable") so both orderings are satisfied:
@@ -1432,10 +1485,13 @@ function buildDiffSection(input: OpencodeRunInput): string {
   if (input.mode !== "diff") return "";
   const isReGen = Boolean(input.fixCases?.length || input.reviewCorrections?.length || input.coverageGap);
   if (isReGen) return "";
+  // WS5.1: cap BEFORE sanitizing — capDiff splits on `diff --git` file-header boundaries, so it must
+  // see the raw diff structure; sanitizeText only redacts secret-shaped substrings and never touches
+  // those boundaries, so running it second is safe and matches every other diff render site.
   return [
     `## Commit diff`,
     "```diff",
-    sanitizeText(input.diff).text,
+    sanitizeText(capDiff(input.diff)).text,
     "```",
   ].join("\n");
 }
@@ -1663,13 +1719,15 @@ export function buildReviewerPromptAssembled(input: ReviewInput): AssembledPromp
   // VOLATILE: Live DEV DOM — the ACTUAL roles + accessible names on the routes this spec targets.
   // Captured deterministically by the ORCHESTRATOR (independence holds). Grounds the reviewer's
   // UI-fact claims in reality instead of training memory of "similar apps".
+  // WS5.4c: model-mode sanitization (see buildPromptAssembled's own DOM sections for the rationale) —
+  // the reviewer's captured DOM is diff→model-shaped text, never an Issue body.
   const domContent = input.domSnapshot
     ? [
         `## Live DEV DOM — the ACTUAL roles + accessible names on the routes this spec targets`,
         `Captured by the orchestrator from ${input.baseUrl ?? "DEV"}. Judge EVERY concrete UI fact`,
         `(button/link labels, headings, routes) against THIS, never against prior knowledge of similar apps.`,
         "```",
-        input.domSnapshot,
+        sanitizeText(input.domSnapshot, "model").text,
         "```",
       ].join("\n")
     : "";

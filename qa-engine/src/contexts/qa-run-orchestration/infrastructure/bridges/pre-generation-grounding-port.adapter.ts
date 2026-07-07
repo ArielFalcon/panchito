@@ -22,7 +22,13 @@ import { join } from "node:path";
 import { buildContextPack, defaultContextPackDeps } from "@contexts/generation/infrastructure/context-pack.ts";
 import type { ContextPackDeps } from "@contexts/generation/infrastructure/context-pack.ts";
 import type { ArchitectureContext } from "@contexts/generation/application/ports/generation-ports.ts";
+import { readManifest } from "@contexts/generation/infrastructure/manifest-fs.ts";
+import { DiffParserService } from "@kernel/diff-parser/diff-parser.service.ts";
 import { raceWithAbort, isAbortError } from "./abort-race.ts";
+
+// WS5.3 (full-flow remediation, option c): pure, deterministic, no I/O — a single instance is safe
+// to share across every ground() call (DiffParserService carries no state between calls).
+const diffParser = new DiffParserService();
 
 export interface PreGenerationGroundingStaticContext {
   e2eDir: string; // absolute path to the seeded e2e project (mirrors legacy's own `e2eDir`)
@@ -71,7 +77,13 @@ export class PreGenerationGroundingPortAdapter implements PreGenerationGrounding
     private readonly collaborators: PreGenerationGroundingCollaborators = {},
   ) {}
 
-  async ground(_specDir: string, signal?: AbortSignal): Promise<GroundingResult> {
+  // WS5.3 (full-flow remediation, option c): `diff` is an OPTIONAL third arg — the adapter's static
+  // context is built ONCE at composition time (before any run's diff is known), so the run's ACTUAL
+  // diff must be threaded through this call instead. The use-case has classificationDiff in scope at
+  // the grounding call site (diff mode only — non-diff modes never classify, so this stays absent
+  // there, matching every other diff-mode-only enrichment). Absent -> changedElements stays absent,
+  // byte-identical to before this field existed.
+  async ground(_specDir: string, signal?: AbortSignal, diff?: string): Promise<GroundingResult> {
     // Cheap, exact pre-check (FIX 1a, judgment-day W4 abort-plumbing): an already-aborted signal
     // skips BOTH collaborator calls entirely — no point starting a capture/build the caller has
     // already given up on. Mirrors the use-case's own `if (signal?.aborted) return` posture at
@@ -84,7 +96,28 @@ export class PreGenerationGroundingPortAdapter implements PreGenerationGrounding
     // both run before the first generate() call; order between them is not load-bearing).
     try {
       const found = enumerateExistingSpecFiles(this.ctx.e2eDir);
-      if (found.length > 0) result.existingSpecFiles = found;
+      if (found.length > 0) {
+        // WS5.5(c): enrich each entry with its flow/objective from e2e/.qa/manifest.json when a
+        // matching entry exists — dedup-by-filename-alone invites duplicate flows as the suite
+        // grows; the manifest already carries this metadata (ManifestRepositoryPort.reconcile()
+        // writes it after every generation) and it is already trusted (the static gate validates
+        // against the SAME schema). existingSpecFiles stays a plain string[] (its shape is pinned
+        // by the generation-ports-parity AssertNever gate against the legacy opencode-client.ts
+        // mirror — a new typed field is out of this bridge's reach), so the metadata is folded
+        // INTO the string: "path — flow: X, objective: Y" when a manifest entry's `file` matches,
+        // plain "path" otherwise (no manifest, or no matching entry — never fabricated).
+        let byFile = new Map<string, { flow: string; objective: string }>();
+        try {
+          const entries = await readManifest(this.ctx.e2eDir);
+          byFile = new Map(entries.filter((e) => e.file).map((e) => [e.file, { flow: e.flow, objective: e.objective }]));
+        } catch (err) {
+          console.warn(`[qa] WARNING: manifest read failed (non-blocking, existingSpecFiles stays plain): ${err instanceof Error ? err.message : String(err)}`);
+        }
+        result.existingSpecFiles = found.map((f) => {
+          const meta = byFile.get(f);
+          return meta ? `${f} — flow: ${meta.flow}, objective: ${meta.objective}` : f;
+        });
+      }
     } catch (err) {
       console.warn(`[qa] WARNING: existing-spec enumeration failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -109,6 +142,15 @@ export class PreGenerationGroundingPortAdapter implements PreGenerationGrounding
     try {
       const build = this.collaborators.buildContextPack ?? buildContextPack;
       const deps = this.collaborators.contextPackDeps ?? defaultContextPackDeps;
+      // WS5.3 (option c): deterministic route feed — contextMap.routes is built ONCE by the
+      // context-mode LLM pass and persisted to context.json; every diff-mode run afterward reuses it
+      // here with ZERO further LLM cost. No brief required (the explorer pass stays unwired).
+      const deterministicRoutes = this.ctx.contextMap?.routes?.length
+        ? this.ctx.contextMap.routes.map((r) => r.path).filter(Boolean)
+        : undefined;
+      // WS5.3: [CHANGED] markers — pure, deterministic extraction from the run's actual diff (no
+      // LLM). Absent when no diff was threaded (non-diff modes, or the caller omitted it).
+      const changedElements = diff ? diffParser.changedElements(diff) : undefined;
       const buildPromise = build(
         {
           baseUrl: this.ctx.baseUrl,
@@ -116,6 +158,8 @@ export class PreGenerationGroundingPortAdapter implements PreGenerationGrounding
           contextMap: this.ctx.contextMap,
           prChangedFiles: this.ctx.prChangedFiles,
           testIdAttribute: this.ctx.testIdAttribute,
+          ...(deterministicRoutes?.length ? { routes: deterministicRoutes } : {}),
+          ...(changedElements?.length ? { changedElements } : {}),
         },
         deps,
       );

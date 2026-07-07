@@ -82,6 +82,19 @@ test("buildContextPack includes DOM section when capture succeeds", async () => 
   assert.ok(result.domBytes > 0, "DOM byte count must be positive when DOM was captured");
 });
 
+// WS5.4c — the captured DOM text is rendered by the actual DEV page and can legitimately contain a
+// leaked secret-shaped string (an admin debug banner echoing a key, an attribute value that reads
+// like a credential assignment). blastSection/contractSection already sanitize via the local s()
+// wrapper; the DOM section was the one inconsistent gap.
+test("buildContextPack sanitizes a secret-shaped string in the captured DOM text", async () => {
+  const domContent = 'button: Submit\ntextbox: apiKey: "sk-liveSECRETVALUE123456"';
+  const result = await buildContextPack(
+    { brief: MINIMAL_BRIEF, baseUrl: "http://localhost:3000", e2eDir: "/fake/e2e" },
+    stubContextPackDeps(domContent),
+  );
+  assert.ok(!result.text?.includes("sk-liveSECRETVALUE123456"), "a secret-shaped string in the captured DOM must not reach the pack raw");
+});
+
 test("buildContextPack omits DOM section when capture returns undefined", async () => {
   const result = await buildContextPack(
     { brief: MINIMAL_BRIEF, baseUrl: "http://localhost:3000", e2eDir: "/fake/e2e" },
@@ -117,6 +130,61 @@ test("buildContextPack filters contracts using prChangedFiles", async () => {
   );
   assert.ok(result.text?.includes("createOrder") || result.contractBytes === 0,
     "contracts are either included (path matched) or empty (no brief to match from)");
+});
+
+// ── WS5.3: the deterministic `routes` input (option c — no LLM explorer pass) ──────────────────
+// buildContextPack's candidateRoutes came ONLY from a brief (briefRoutePaths, contextMapRoutes gated
+// on brief.feBe) — with no brief-less route path at all, the pack was structurally empty whenever
+// the explorer pass never ran (which is EVERY production run today — the explorer stays unwired by
+// design). A thin `routes` input lets a caller (the grounding adapter, deterministically, from
+// contextMap.routes — no LLM) populate DOM candidates with NO brief present.
+test("buildContextPack: the `routes` input populates DOM candidates with NO brief present at all", async () => {
+  const domContent = "button: Submit\nheading: Checkout";
+  const result = await buildContextPack(
+    { routes: ["/checkout"], baseUrl: "http://localhost:3000", e2eDir: "/fake/e2e" },
+    stubContextPackDeps(domContent),
+  );
+  assert.ok(result.text?.includes("Live DOM"), "DOM section must be populated from the routes input alone, no brief needed");
+  assert.ok(result.domBytes > 0, "DOM byte count must be positive from the routes-only path");
+});
+
+test("buildContextPack: `routes` input is merged with brief routes when BOTH are present (brief first, higher precision)", async () => {
+  const captured: string[][] = [];
+  const deps: ContextPackDeps = {
+    captureDomForRoutes: async (routes) => { captured.push(routes); return "button: Submit"; },
+    domDeps: stubDomDeps("button: Submit"),
+    log: () => {},
+  };
+  await buildContextPack(
+    { brief: MINIMAL_BRIEF, routes: ["/admin"], baseUrl: "http://localhost:3000", e2eDir: "/fake/e2e" },
+    deps,
+  );
+  assert.ok(captured[0]?.includes("/checkout"), "the brief's own route must still be a candidate");
+  assert.ok(captured[0]?.includes("/admin"), "the routes input's route must ALSO be a candidate");
+  assert.ok(captured[0]!.indexOf("/checkout") < captured[0]!.indexOf("/admin"), "brief routes (higher precision) come first");
+});
+
+test("buildContextPack: `routes` input respects the DOM_ROUTE_CAP (6) alongside brief/contextMap routes", async () => {
+  const captured: string[][] = [];
+  const deps: ContextPackDeps = {
+    captureDomForRoutes: async (routes) => { captured.push(routes); return "button: Submit"; },
+    domDeps: stubDomDeps("button: Submit"),
+    log: () => {},
+  };
+  const manyRoutes = Array.from({ length: 10 }, (_, i) => `/route${i}`);
+  await buildContextPack(
+    { routes: manyRoutes, baseUrl: "http://localhost:3000", e2eDir: "/fake/e2e" },
+    deps,
+  );
+  assert.equal(captured[0]?.length, 6, "the routes input must respect the same DOM_ROUTE_CAP as brief/contextMap routes");
+});
+
+test("buildContextPack: absent `routes` input is byte-identical to today (regression guard)", async () => {
+  const result = await buildContextPack(
+    { brief: MINIMAL_BRIEF, baseUrl: "http://localhost:3000", e2eDir: "/fake/e2e" },
+    stubContextPackDeps("button: Submit"),
+  );
+  assert.ok(result.text?.includes("Live DOM"), "unaffected behavior when routes is absent");
 });
 
 test("buildContextPack degrades gracefully when DOM capture throws", async () => {

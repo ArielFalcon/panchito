@@ -15,10 +15,59 @@ export interface SecretDetection {
   count: number; // total redactions across all patterns
 }
 
+// WS5.4a — two-tier sanitizer policy. Model-bound and public-bound (Issue) surfaces have different
+// threat models: an Issue body is the system's most public output (maximum scrubbing is correct
+// there), but the SAME aggressive `api-key-assignment` catch-all also fires on ordinary CODE shapes
+// that carry no secret at all — a type annotation (`password: string`) or a bare call expression
+// (`token = getToken()`) — on the diff→model path, which is exactly the auth-flow code whose
+// behavior most needs testing. "issue" (default) preserves today's aggressive behavior byte-for-byte
+// (every existing caller is unaffected); "model" narrows ONLY the api-key-assignment pattern to
+// require the value side be a quoted string literal or a high-entropy bare token.
+export type SanitizeMode = "issue" | "model";
+
+// A bare (unquoted) value is "high-entropy" enough to treat as a real secret in "model" mode when it
+// looks nothing like ordinary code: mixed case AND at least one digit, length >= 12, and not one of
+// the common type/literal keywords a type annotation or default value would use. This deliberately
+// does NOT try to be a general-purpose entropy estimator — it only needs to separate "getToken()"/
+// "string"/"undefined" (code) from "aZ9kP2mQ7xR4tL6vB8nH1cJ3s" (a real-looking secret blob).
+const CODE_KEYWORDS = new Set([
+  "string", "number", "boolean", "undefined", "null", "any", "unknown", "never", "void", "object",
+  "true", "false",
+]);
+function looksLikeCallExpression(value: string): boolean {
+  return /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*\(.*\)$/.test(value);
+}
+function isHighEntropyBareToken(value: string): boolean {
+  const trimmed = value.replace(/[;,)]+$/, ""); // strip trailing statement/call punctuation
+  if (trimmed.length < 12) return false;
+  if (CODE_KEYWORDS.has(trimmed.toLowerCase())) return false;
+  if (looksLikeCallExpression(trimmed)) return false;
+  if (!/^[A-Za-z0-9_-]+$/.test(trimmed)) return false; // not a bare identifier/token shape at all
+  const hasDigit = /[0-9]/.test(trimmed);
+  const hasUpper = /[A-Z]/.test(trimmed);
+  const hasLower = /[a-z]/.test(trimmed);
+  return hasDigit && hasUpper && hasLower;
+}
+// The model-mode replacer for the api-key-assignment pattern: only redact when the captured value
+// (everything after the `key`/`token`/`password`=... separator) is a quoted literal or a high-entropy
+// bare token — never a type annotation or a bare call expression. Re-parses the match instead of
+// widening the regex itself, so the aggressive "issue" pattern stays untouched (single shared pattern
+// object below; only the skip/keep decision differs by mode).
+const ASSIGNMENT_VALUE_RE = /[\"']?\s*[:=]\s*(\S+)$/;
+function isModelModeSecretValue(match: string): boolean {
+  const m = ASSIGNMENT_VALUE_RE.exec(match);
+  const value = m?.[1] ?? "";
+  if (!value) return false;
+  if (/^["'`]/.test(value)) return true; // a quoted literal is the deliberate secret shape
+  return isHighEntropyBareToken(value);
+}
+
 // Named secret patterns — the regex + a short stable identifier for the audit
 // trail. Order matters: more specific patterns run first to avoid subsumption
 // (e.g. Slack webhook URLs are more specific than the generic credential pattern).
-const NAMED_SECRET_PATTERNS: Array<{ name: string; p: RegExp; skip?: (m: string) => boolean }> = [
+// `modelSkip`, when present, is an ADDITIONAL skip predicate applied ONLY in "model" mode (on top of
+// any unconditional `skip`) — the two-tier policy's entire surface area.
+const NAMED_SECRET_PATTERNS: Array<{ name: string; p: RegExp; skip?: (m: string) => boolean; modelSkip?: (m: string) => boolean }> = [
   // Slack webhook URLs — very specific; match before generic URL patterns
   { name: "slack-webhook", p: /https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/]+/g },
   // Stripe keys: sk_/pk_ prefixed, test or live
@@ -58,7 +107,10 @@ const NAMED_SECRET_PATTERNS: Array<{ name: string; p: RegExp; skip?: (m: string)
   { name: "env-credential", p: /\b[A-Z][A-Z0-9_]*(?:PASS|PASSWORD|SECRET|TOKEN|KEY|PWD|CRED|CREDENTIAL)[A-Z0-9_]*[\"']?\s*[:=]\s*\S+/g },
   // api_key/token/secret/password assignments — catch‑all; keep LAST among
   // assignment patterns so the more specific ones fire first.
-  { name: "api-key-assignment", p: /(?:api[_-]?key|token|secret|password|passwd|pwd)[\"']?\s*[:=]\s*\S+/gi },
+  // modelSkip (WS5.4a): in "model" mode, skip a match whose value side is NOT a quoted literal or a
+  // high-entropy bare token — e.g. `password: string` (type annotation) or `token = getToken()` (call
+  // expression). In "issue" mode (default) this pattern behaves exactly as before (no modelSkip check).
+  { name: "api-key-assignment", p: /(?:api[_-]?key|token|secret|password|passwd|pwd)[\"']?\s*[:=]\s*\S+/gi, modelSkip: (m) => !isModelModeSecretValue(m) },
   // base64‑encoded secrets (>40 chars of base64 chars), with data‑URI filter.
   // skip: a run of pure hex is a git SHA / digest (commit ids, lockfile hashes), NOT a
   // secret — redacting it turned the run header's SHA into "[REDACT" (the launcher omits
@@ -121,7 +173,11 @@ const INTERNAL_HOST_PATTERNS: RegExp[] = [
 // false positives; an email is distinctive enough to redact safely.
 const PII_PATTERNS: RegExp[] = [/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g];
 
-export function sanitizeText(input: string): { text: string; detection: SecretDetection } {
+// mode (WS5.4a): "issue" (default) is the aggressive, public-surface (Issue-bound) policy — byte-
+// identical to this function's behavior before the two-tier split, so every existing caller (logs →
+// Issue, and every caller that predates this change) is unaffected. "model" is the diff→model path:
+// narrower on api-key-assignment only (see isModelModeSecretValue), unchanged on every other pattern.
+export function sanitizeText(input: string, mode: SanitizeMode = "issue"): { text: string; detection: SecretDetection } {
   if (!input) return { text: input, detection: { redacted: false, patterns: [], count: 0 } };
 
   let out = input;
@@ -137,10 +193,11 @@ export function sanitizeText(input: string): { text: string; detection: SecretDe
   });
 
   // secret patterns
-  for (const { name, p, skip } of NAMED_SECRET_PATTERNS) {
+  for (const { name, p, skip, modelSkip } of NAMED_SECRET_PATTERNS) {
     let redactions = 0;
     out = out.replace(p, (m) => {
       if (skip?.(m)) return m; // a recognised non-secret (e.g. a git SHA) — leave it intact
+      if (mode === "model" && modelSkip?.(m)) return m; // model-mode-only: not a real secret shape
       redactions++;
       return "[REDACTED_SECRET]";
     });
