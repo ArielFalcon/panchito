@@ -27,8 +27,10 @@ const REPO_ROOT = join(import.meta.dirname ?? __dirname, "..", "..");
 
 // Skill file pairs that must be byte-identical (modulo trailing whitespace) across both trees.
 // Full-file parity is stricter than section-level parity: any one-tree edit fails CI immediately.
-// The whole playwright-authoring skill directory is locked (SKILL.md excepted — it carries a known,
-// out-of-scope canonical/Codex divergence) so drift cannot reappear in a sibling file we did not edit.
+// WS9.2: the playwright-authoring SKILL.md and the test-value-review SKILL.md are now BOTH
+// pinned here (previously waived/skipped) — the Codex mirror is now actually consumed (inlined
+// into the Codex role preamble by withCodexRolePreamble in codex-strategy.ts), so a one-tree edit
+// here would silently desync what the two providers' agents read as craft/review guidance.
 const SKILL_FILE_PAIRS: Array<[string, string]> = [
   [
     "agents/skill/playwright-authoring/locators-and-waiting.md",
@@ -45,6 +47,14 @@ const SKILL_FILE_PAIRS: Array<[string, string]> = [
   [
     "agents/skill/playwright-authoring/storage-and-uploads.md",
     "agent/skills/playwright-authoring/storage-and-uploads.md",
+  ],
+  [
+    "agents/skill/playwright-authoring/SKILL.md",
+    "agent/skills/playwright-authoring/SKILL.md",
+  ],
+  [
+    "agents/skill/test-value-review/SKILL.md",
+    "agent/skills/test-value-review/SKILL.md",
   ],
 ];
 
@@ -76,10 +86,14 @@ function parseSections(md: string): Map<string, string> {
 
 // The must-match sections for the reviewer role (by canonical header text).
 // These are the sections that define the shared quality contract between runtimes.
+// "Code-mode review (target: code)" (WS2.4/WS9.2 handoff) is the anti-mock rubric applied when
+// target:code — it must stay identical across both mirrors like every other quality-contract
+// section, so the Codex reviewer is exactly as strict as OpenCode's for code-mode runs.
 const REVIEWER_MUST_MATCH_SECTIONS = [
   "Output format",
   "Anti-pattern catalog (reject on sight)",
   "Dual-review protocol (judgment-day style)",
+  "Code-mode review (target: code)",
 ];
 
 // Must-match sections for the generator role.
@@ -151,6 +165,20 @@ describe("prompt-sync drift guard", () => {
         `prompt-sync DIVERGENCE in section "## ${section}": ` +
           `agent/roles/qa-reviewer.md and agents/agent/qa-reviewer.md differ. ` +
           `The codex mirror must match the canonical OpenCode version.`,
+      );
+    }
+  });
+
+  it("WS2.4/WS9.2: both qa-reviewer.md mirrors carry the code-mode anti-mock rubric", () => {
+    for (const rel of ["agent/roles/qa-reviewer.md", "agents/agent/qa-reviewer.md"]) {
+      const content = readFile(rel);
+      assert.ok(
+        content.includes("Code-mode review (target: code)"),
+        `${rel} is missing the "## Code-mode review (target: code)" section (WS2.4 anti-mock rubric).`,
+      );
+      assert.ok(
+        /mock/i.test(content) && /unit under test/i.test(content),
+        `${rel} must reject tests that mock the unit under test (WS2.4 anti-mock rubric wording).`,
       );
     }
   });
@@ -338,6 +366,19 @@ describe("agent-guidance-runtime-semantics drift guard", () => {
   // The two trees must be byte-identical (modulo trailing whitespace).
   // This assertion PASSES on the current byte-identical files and FAILS on any one-tree edit.
   // ---------------------------------------------------------------------------
+  it("WS2.4/WS9.2: test-value-review/SKILL.md carries the code-mode anti-mock rubric (both mirrors, via SKILL_FILE_PAIRS parity)", () => {
+    const content = readFile("agents/skill/test-value-review/SKILL.md");
+    assert.ok(
+      /mock/i.test(content) && /unit under test/i.test(content),
+      "test-value-review/SKILL.md must reject tests that mock the unit under test (WS2.4 anti-mock rubric), " +
+        "for code-mode reviews.",
+    );
+    assert.ok(
+      /duplicate/i.test(content) && /implementation/i.test(content),
+      "test-value-review/SKILL.md must reject tests that duplicate the implementation as the expectation (WS2.4).",
+    );
+  });
+
   it("playwright-authoring skill file parity: locators-and-waiting.md matches across both trees (Task 1.1)", () => {
     for (const [opencodeRel, codexRel] of SKILL_FILE_PAIRS) {
       const opencodeContent = readFile(opencodeRel);

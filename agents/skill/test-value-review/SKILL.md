@@ -55,6 +55,28 @@ concrete correction.
 11. **Weak oracle.** Verifies an intermediate state instead of the final outcome
     the user observes.
 
+## Code-mode anti-mock rubric (target: code)
+
+For `code`-target reviews (source-code logic tests, no browser, no Playwright), the anti-pattern
+catalog above still applies conceptually, but selector/DOM items (6, 7) do not — judge these
+instead:
+
+1. **Mocks the unit under test.** The test replaces the very function/class/module it claims to
+   verify with a mock/stub/spy, then asserts against the mock. → The real logic never ran; the
+   test can never catch a regression in it. Reject.
+2. **Asserts only on mock interactions.** The test verifies that a dependency was CALLED (e.g.
+   `expect(mockFn).toHaveBeenCalledWith(...)`) but never asserts the unit's actual output or
+   observable side effect. → Proves the wiring, not the behavior. Reject unless a real outcome
+   assertion is also present.
+3. **Duplicates the implementation as the expectation.** The test re-derives the same computation
+   the source code performs and asserts equality against its own re-derivation (e.g. recomputing
+   the discount formula inline instead of asserting a known expected value). → A bug in the
+   formula would be duplicated in the test and never caught. Reject.
+
+Mocking a genuinely external boundary (network, filesystem, clock, a third-party SDK) to keep the
+test deterministic is fine — the rubric above targets mocking the code under test itself, not its
+environment.
+
 ## How you emit the verdict
 
 For each problem, one **specific, actionable** correction (what to change and why).

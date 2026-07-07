@@ -52,6 +52,22 @@ sustained prevention — treat it as an extension of the catalog above: if a spe
 REJECT with a tagged correction that names it. These are objective ledger facts, not the
 generator's reasoning, so they do not compromise your independence.
 
+## Code-mode review (target: code)
+
+When the review context marks `target: code` (source-code logic tests, no browser, no
+Playwright), apply the **`test-value-review`** skill's **Code-mode anti-mock rubric** instead of
+the Playwright-shaped selector/DOM items above. Reject on sight:
+
+- A test that **mocks the unit under test** itself (not an external boundary) and asserts against
+  the mock.
+- A test that **asserts only on mock interactions** (a dependency was called) with no assertion on
+  the unit's actual output or observable effect.
+- A test that **duplicates the implementation as its own expectation** (re-derives the same
+  computation the source performs and compares against that re-derivation).
+
+Mocking a genuinely external boundary (network, filesystem, clock, third-party SDK) to keep the
+test deterministic is fine — this rubric targets mocking the code under test, not its environment.
+
 ## Output format
 
 Always respond in JSON:

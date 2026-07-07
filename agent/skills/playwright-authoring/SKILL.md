@@ -13,12 +13,27 @@ adapted from [TestDino playwright-skill](https://github.com/testdino-hq/playwrig
 > here. In particular: **no network mocks** (we exercise the real DEV), namespaced
 > data, mandatory `cleanup`, role/testid locators.
 
+> **Examples are ILLUSTRATIVE, never literal.** This engine is app-agnostic; the concrete
+> example domains in the reference files (a map/photo app, login forms, etc.) exist only to
+> show a PATTERN. NEVER copy their literal routes (`/map`), labels (`/photo/i`), or selectors
+> into a spec — they almost certainly do not exist in the app under test. Always translate the
+> pattern to the watched app's REAL flows and selectors, verified against the live DOM (or the
+> app's own code) — copied example selectors are a top cause of green-but-meaningless specs.
+
 ## Hard rules (always)
 
 - **Locators**: `getByRole` (preferred), `getByLabel`, `getByTestId`. Never fragile
   CSS/XPath. **Always scope to a section**: locate the section by heading/landmark
   first, then narrow within it — never do `page.getByText(...)` without scope.
   See `locators-and-waiting.md` for the full selector rules.
+- **Selector source — conditional on Context Pack:**
+  - **Pack present with DOM for the route:** TRANSCRIBE from the "Live DOM" section
+    of the Context Pack. Do NOT `browser_navigate`/`browser_snapshot` for routes
+    already covered there — the pack is the orchestrator-pushed ground truth.
+  - **Pack absent or route not covered:** use the Playwright MCP to explore the live
+    page before writing any selector (see `qa-generator.md` step 2, Case B).
+  - Never invent a selector that does not appear in either the pack's DOM or a live
+    snapshot you just took.
 - **Web-first waiting**: use `expect(locator).toBeVisible()` etc. with auto-retry.
   **No `waitForTimeout`** (sleep) and no `networkidle`.
 - **One real assert** on the observable outcome, not just clicks.

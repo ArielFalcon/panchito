@@ -13,6 +13,7 @@ import {
   resetCodexCircuit,
 } from "../integrations/codex-circuit-breaker";
 import type { AgentOpenDescriptor, AgentTurnEvent, LiveActivity } from "../integrations/opencode-client";
+import { extractJsonObjects } from "../integrations/verdict-parse";
 import type { RunEventBody } from "../contract/events";
 import type {
   AgentModelInfo,
@@ -21,6 +22,40 @@ import type {
   AgentRuntimeSession,
   AgentRuntimeStrategy,
 } from "./types";
+
+// WS9.3 — default per-role deadlines. The rewritten (qa-engine) path never sets opts.timeoutMs
+// on openSession, and facades.ts marks every Codex session `selfTimed` (the inactivity stall
+// watchdog explicitly skips it, since exec-per-prompt Codex gives no mid-turn activity signal to
+// watch) — so without a default here, a wedged `codex exec` is unbounded except by external abort.
+//
+// The FALLBACK values mirror opencode-client.ts's OWN fallbacks exactly (5min diff-mode generator
+// budget, 6min reviewer, 240s explorer) so the two providers share one budget policy by
+// construction, not by coincidence. The env var NAMES are also the same
+// (OPENCODE_REVIEWER_TIMEOUT_MS / OPENCODE_EXPLORER_TIMEOUT_MS / OPENCODE_TIMEOUT_MS) so a single
+// operator-set override tunes both providers at once.
+//
+// Read from the STRATEGY's injected `env` (not the frozen opencode-client.ts module constants,
+// which are evaluated once at import time from the real process.env and are not test-overridable)
+// so this stays independently unit-testable without waiting out multi-minute real defaults.
+const DEFAULT_DIFF_GENERATOR_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_REVIEWER_TIMEOUT_MS = 6 * 60 * 1000;
+const DEFAULT_EXPLORER_TIMEOUT_MS = 240 * 1000;
+
+function envNumber(env: Record<string, string | undefined>, key: string, fallback: number): number {
+  return Number(env[key]) || fallback;
+}
+
+// The default deadline for a Codex session that received NO explicit timeoutMs from its caller.
+// Keyed by role, mirroring how opencode-client.ts budgets each role: the reviewer and the explorer
+// get their OWN (smaller) ceilings; every other role (the write-capable primary/maintainer/worker/
+// proposer, plus the read-only chat/reflector which have no dedicated OpenCode-side constant
+// either) falls back to the generator's diff-mode budget — the smallest generator ceiling, and a
+// strictly-bounded floor where today there is none at all.
+export function defaultCodexTimeoutMs(role: AgentRole, env: Record<string, string | undefined>): number {
+  if (role === "reviewer") return envNumber(env, "OPENCODE_REVIEWER_TIMEOUT_MS", DEFAULT_REVIEWER_TIMEOUT_MS);
+  if (role === "explorer") return envNumber(env, "OPENCODE_EXPLORER_TIMEOUT_MS", DEFAULT_EXPLORER_TIMEOUT_MS);
+  return envNumber(env, "OPENCODE_TIMEOUT_MS", DEFAULT_DIFF_GENERATOR_TIMEOUT_MS);
+}
 
 // T-P3-3 — onUsage honesty / PENDING_USAGE_HOOK.
 //
@@ -96,6 +131,13 @@ export interface CodexTransportStartInput {
   model?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
+  // WS9.3: the signal sent to the child when timeoutMs elapses. Defaults to "SIGTERM" (the
+  // existing, pinned behavior for a CALLER-supplied timeoutMs — a caller who set their own budget
+  // gets a graceful-first termination attempt). The strategy passes "SIGKILL" only for its OWN
+  // default deadline (no caller budget at all): Codex is self-timed with no mid-turn activity
+  // signal, so a hard wall-clock kill is the correct mechanism there, not a gentler signal that
+  // assumes the process might still cooperate.
+  killSignal?: NodeJS.Signals;
 }
 
 export interface CodexTransportSession {
@@ -205,7 +247,22 @@ export class CodexRuntimeStrategy implements AgentRuntimeStrategy {
       onTurn?: (t: AgentTurnEvent) => void;
     },
   ): Promise<AgentRuntimeSession> {
-    const session = await this.transport.start({ role, cwd, model: opts?.model, signal: opts?.signal, timeoutMs: opts?.timeoutMs });
+    // WS9.3: an explicit caller timeoutMs always wins (caller intent is never overridden); when
+    // absent (the rewritten qa-engine path's actual shape today), fall back to the per-role
+    // default so a Codex turn is NEVER unbounded on the live path. The default deadline kills with
+    // SIGKILL (a hard wall-clock guarantee — the caller opted into no budget of its own, so a
+    // gentler SIGTERM that assumes a cooperating process is the wrong assumption); a caller-
+    // supplied timeoutMs keeps the existing SIGTERM behavior (caller chose a graceful budget).
+    const usingDefault = opts?.timeoutMs === undefined;
+    const timeoutMs = opts?.timeoutMs ?? defaultCodexTimeoutMs(role, this.env);
+    const session = await this.transport.start({
+      role,
+      cwd,
+      model: opts?.model,
+      signal: opts?.signal,
+      timeoutMs,
+      ...(usingDefault ? { killSignal: "SIGKILL" as const } : {}),
+    });
     // Default turn sink, mirroring defaultAgentDeps.open: persist to agent_turns when a runId is
     // available and no caller-supplied onTurn overrides it. Best-effort — a storage failure must
     // not break the agent session. The OpenCode runtime builds this sink at the SDK funnel; for
@@ -380,7 +437,7 @@ export class CodexExecTransport implements CodexHeadlessTransport {
       let stdout = "";
       let stderr = "";
       const timeout = input.timeoutMs ? setTimeout(() => {
-        child.kill("SIGTERM");
+        child.kill(input.killSignal ?? "SIGTERM");
         reject(new Error(`Codex prompt: timed out after ${input.timeoutMs}ms`));
       }, input.timeoutMs) : undefined;
 
@@ -477,9 +534,42 @@ function stripCodexReasoningWrappers(s: string): string {
   return s.replace(/<(think|thought|reasoning)>[\s\S]*?<\/\1>/gi, "").trim();
 }
 
+// WS9.2 — role → skill names it references. Must stay in sync with the "Consult the `<skill>`
+// skill" callouts in agent/roles/<role>.md (verified against the live prompts at slice time:
+// qa-generator references architecture-mapping, playwright-authoring, test-value-review;
+// qa-reviewer references test-value-review; qa-worker references playwright-authoring). Kept
+// as an explicit map rather than parsing the prompt text for skill-name mentions: the prompts
+// are hand-authored prose, not a machine-readable manifest, so a regex scrape would be exactly
+// the kind of fragile heuristic CLAUDE.md warns against — an explicit, reviewable map is the
+// honest cost of provider parity here. A role with no entry ships no skill content (matches
+// today's OpenCode behavior for roles that reference no skill).
+const ROLE_SKILLS: Partial<Record<AgentRole, readonly string[]>> = {
+  primary: ["architecture-mapping", "playwright-authoring", "test-value-review"],
+  reviewer: ["test-value-review"],
+  worker: ["playwright-authoring"],
+  workerCode: ["playwright-authoring"],
+};
+
 function withCodexRolePreamble(role: AgentRole, text: string, promptRoot: string): string {
   const shared = readPrompt(join(promptRoot, "AGENTS.md"));
   const rolePrompt = readPrompt(join(promptRoot, "roles", `${rolePromptName(role)}.md`));
+  // WS9.2: inline the SKILL.md content for every skill this role references — the same assembly
+  // point that already inlines AGENTS.md and the role prompt. Without this, "Consult the
+  // `playwright-authoring` skill" is a dangling reference on Codex (the agents image ships only
+  // the supervisor, never agent/skills/, into a codex turn). A skill file that fails to resolve
+  // is omitted (readPrompt degrades to ""), matching the fail-open posture of the shared/role
+  // prompt reads above — a missing skill must never crash a turn — but LOUDLY: the warn below
+  // names the missing path so a renamed/moved SKILL.md cannot silently ship an impoverished
+  // preamble run after run.
+  const skillBlocks = (ROLE_SKILLS[role] ?? [])
+    .map((name) => {
+      const path = join(promptRoot, "skills", name, "SKILL.md");
+      const body = readPrompt(path);
+      if (!body) console.warn(`[qa] codex preamble: skill '${name}' referenced by role '${role}' did not resolve at ${path} — inlining without it.`);
+      return { name, body };
+    })
+    .filter(({ body }) => body.length > 0)
+    .map(({ name, body }) => `## Skill: ${name}\n${body}`);
   return [
     `Agent role: ${role}`,
     "",
@@ -488,7 +578,8 @@ function withCodexRolePreamble(role: AgentRole, text: string, promptRoot: string
     "",
     shared ? `## Shared prompt\n${shared}` : "",
     rolePrompt ? `## Role prompt\n${rolePrompt}` : "",
-    shared || rolePrompt ? "## Task" : "",
+    ...skillBlocks,
+    shared || rolePrompt || skillBlocks.length > 0 ? "## Task" : "",
     text,
   ].join("\n");
 }
@@ -513,8 +604,19 @@ function readPrompt(path: string): string {
   }
 }
 
+// WS9.4(a): a verdict-shaped JSON object — reused to detect whether an agent_message CONTAINS a
+// closing verdict block, mirroring the two discriminators the caller-side parsers already use
+// (isClosingVerdict for the generator's specs[]/approved shape; the reviewer's looser "approved
+// in x" check in verdict-validate.ts). A message qualifies if EITHER shape is present anywhere in
+// its text — this function does not know which role's turn it is reading, so it accepts both.
+function containsVerdictBlock(text: string): boolean {
+  return extractJsonObjects(text).some(
+    (o) => o !== null && typeof o === "object" && (Array.isArray((o as Record<string, unknown>).specs) || "approved" in (o as Record<string, unknown>)),
+  );
+}
+
 export function extractCodexLastMessage(jsonl: string): string {
-  let last = "";
+  const messages: string[] = [];
   for (const line of jsonl.split(/\r?\n/)) {
     if (!line.trim()) continue;
     try {
@@ -526,13 +628,24 @@ export function extractCodexLastMessage(jsonl: string): string {
       const message =
         (event.type === "item.completed" && item?.type === "agent_message" ? item.text : undefined) ??
         event.msg ?? event.message ?? event.text ?? event.content;
-      if (typeof message === "string" && message.trim()) last = message;
+      if (typeof message === "string" && message.trim()) messages.push(message);
     } catch {
       // Keep scanning: `codex exec --json` should be JSONL, but stderr-like lines
       // from wrapped launchers should not throw away a completed response.
     }
   }
-  return last;
+  if (messages.length === 0) return "";
+  // WS9.4(a): prefer the LAST message that itself contains a parseable verdict block. A verdict
+  // emitted before a trailing courtesy remark ("Done! Anything else?") must not be lost — OpenCode
+  // never has this problem because its extractText concatenates ALL messages, but Codex's
+  // exec-per-prompt output is read message-by-message here. Scanning in reverse and falling back
+  // to the true last message when none carries a verdict preserves every plain-text/chat case
+  // (no verdict ever expected) exactly as before.
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const candidate = messages[i]!;
+    if (containsVerdictBlock(candidate)) return candidate;
+  }
+  return messages[messages.length - 1]!;
 }
 
 async function supervisorHealth(env: Record<string, string | undefined>, provider: "codex"): Promise<AgentProviderHealth | undefined> {
