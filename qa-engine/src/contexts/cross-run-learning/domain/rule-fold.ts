@@ -35,11 +35,17 @@ export function deriveConfidence(outcomeCount: number, successRate: number | nul
 // This is the non-circular anchor: a rule can only earn `active` when the test that exercised it
 // also covered the diff's changed lines, not just made the reviewer happy. Coverage stays
 // non-blocking where unmeasurable (null), so the flywheel turns for every app.
+//
+// WS1.4(b): oracleOutcomeCount is the SECOND non-circular anchor, alongside coverage. Promotion is
+// objective-signal-only per the project invariant — prevention credit is DERIVED (absence of a
+// failure class), not an objective observation, so three clean prevention-only runs must NEVER by
+// themselves promote a candidate to `active`. Verbatim-ported twin of legacy's identical gate.
 function nextStatus(
   status: RuleStatus,
   outcomeCount: number,
   successRate: number,
   coverageCreditConfirmed: boolean | null = null,
+  oracleOutcomeCount = 0,
 ): RuleStatus {
   // "pending" is a RETIRED legacy status (excluded from retrieval, no live producer). The port's
   // RuleStatus type does not include it, so this branch is unreachable through the port surface —
@@ -53,6 +59,9 @@ function nextStatus(
       // is unmeasurable (null), allow promotion on verdict signal alone so the flywheel turns for
       // every app, not just those with source-mapped DEV environments.
       if (coverageCreditConfirmed === false) return "candidate"; // measured, no credit — hold
+      // WS1.4(b) oracle-evidence anchor: promotion requires AT LEAST ONE oracle-scored outcome.
+      // Prevention-only evidence may raise successRate/confidence but never flips status alone.
+      if (oracleOutcomeCount < 1) return "candidate"; // zero objective evidence — hold
       return "active";
     }
     case "active":
@@ -97,16 +106,28 @@ export function preventionOutcome(ruleErrorClass: string, runErrorClass: string 
 // Fold one objective outcome (a valueScore in [0,1]) into a rule. successRate is a RUNNING
 // MEAN over all outcomes — never an overwrite — so confidence is earned from many results.
 // Pure: no time, no I/O (the caller stamps lastVerified).
-export function applyOutcome(rule: LearningRule, score: number, coverageCreditConfirmed: boolean | null = null): LearningRule {
+//
+// WS1.4(b): isOracleScore tells applyOutcome whether THIS outcome came from the oracle path (a
+// real valueScore) or the prevention path (preventionOutcome's derived signal). Defaults to
+// false — verbatim-ported twin of legacy's identical parameter; see legacy's own header for the
+// full rationale.
+export function applyOutcome(
+  rule: LearningRule,
+  score: number,
+  coverageCreditConfirmed: boolean | null = null,
+  isOracleScore = false,
+): LearningRule {
   const n = (rule.outcomeCount ?? 0) + 1;
+  const oracleOutcomeCount = (rule.oracleOutcomeCount ?? 0) + (isOracleScore ? 1 : 0);
   const prev = rule.successRate;
   const successRate = prev === null || prev === undefined ? score : prev + (score - prev) / n;
   return {
     ...rule,
     outcomeCount: n,
+    oracleOutcomeCount,
     successRate,
     confidence: deriveConfidence(n, successRate),
-    status: nextStatus(rule.status, n, successRate, coverageCreditConfirmed),
+    status: nextStatus(rule.status, n, successRate, coverageCreditConfirmed, oracleOutcomeCount),
   };
 }
 

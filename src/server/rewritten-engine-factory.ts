@@ -123,7 +123,7 @@ import { shaMatches } from "../env/deploy-gate";
 import { ensureMirror, ensureMirrorAtBranch, defaultMirrorDeps, workdirRoot } from "../integrations/repo-mirror";
 import { SqliteRunHistoryAdapter } from "./run-history-sqlite-adapter";
 import { SqliteLearningRepository, type LearningStore } from "@contexts/cross-run-learning/infrastructure/sqlite-learning-repository.adapter";
-import { listLearningRules, upsertLearningRule, incrementRuleUsage, recordRuleOutcome, updateRunOutcomeReflection } from "./history";
+import { listLearningRules, listAllLearningRules, upsertLearningRule, incrementRuleUsage, recordRuleOutcome, updateRunOutcomeReflection } from "./history";
 import { preventionOutcome } from "@contexts/cross-run-learning/domain/rule-fold";
 import { ReflectorPortAdapter, REFLECT_TIMEOUT_MS } from "@contexts/cross-run-learning/infrastructure/reflector-port.adapter";
 import { YamlBoundaryProfileAdapter } from "@contexts/service-topology/infrastructure/yaml-boundary-profile.adapter";
@@ -201,6 +201,33 @@ export function historyLearningStore(appName: string): LearningStore {
         confidence: r.confidence,
         usage_count: r.usageCount,
         outcome_count: r.outcomeCount,
+        oracle_outcome_count: r.oracleOutcomeCount,
+        success_rate: r.successRate,
+        last_verified: r.lastVerified,
+        source: r.source,
+        at: r.at,
+      })),
+    // Task 2 (full-flow remediation, WS1.3 closure): wires the store's OPTIONAL selectAllRules onto
+    // history.ts's UNFILTERED listAllLearningRules(app, limit) — the SAME row-shape mapping
+    // selectRules above already does, just backed by the unfiltered (all-statuses, incl.
+    // deprecated/superseded) query instead of the active/candidate-only one. Before this fix,
+    // SqliteLearningRepository.listAll(app, limit) always fell back to [] in production (this
+    // store never implemented the method), so ReflectorPortAdapter's anti-respawn dedup
+    // (decideDistill scanning the FULL existing-rule set) was a documented pass-through: it always
+    // received an empty existing set and could never actually detect a duplicate. Wiring this
+    // makes that dedup live.
+    selectAllRules: (app, limit) =>
+      listAllLearningRules(app, limit).map((r) => ({
+        id: r.id,
+        trigger_text: r.trigger,
+        action_text: r.action,
+        error_class: r.errorClass,
+        archetype: r.archetype ?? null,
+        status: r.status,
+        confidence: r.confidence,
+        usage_count: r.usageCount,
+        outcome_count: r.outcomeCount,
+        oracle_outcome_count: r.oracleOutcomeCount,
         success_rate: r.successRate,
         last_verified: r.lastVerified,
         source: r.source,
@@ -244,15 +271,19 @@ export function historyLearningStore(appName: string): LearningStore {
 
         if (valueScore !== null) {
           // Oracle path: a real value-oracle score is available — fold it onto every retrieved id
-          // independently (each rule's running mean advances on its own).
+          // independently (each rule's running mean advances on its own). WS1.4(b): isOracleScore=true
+          // here is what satisfies nextStatus's objective-evidence gate for candidate -> active.
           for (const id of rulesRetrieved) {
-            recordRuleOutcome(id, valueScore, coverageCreditConfirmed);
+            recordRuleOutcome(id, valueScore, coverageCreditConfirmed, true);
           }
         } else {
           // Prevention path: no oracle score for this run — derive a weaker, conservative signal
           // from the run's OWN errorClass via preventionOutcome(rule.errorClass, outcome.errorClass).
           // listLearningRules(appName, 200) is the SAME lookup already used above (line ~192) to
           // build the retrieval id->rule map, reused here for the per-rule errorClass lookup.
+          // WS1.4(b): isOracleScore is omitted (defaults to false) — prevention credit is DERIVED
+          // (absence of a failure class), never an objective observation, so it must never advance
+          // oracleOutcomeCount or by itself satisfy the candidate -> active promotion gate.
           const rules = listLearningRules(appName, 200);
           const byId = new Map(rules.map((r) => [r.id, r]));
           for (const id of rulesRetrieved) {

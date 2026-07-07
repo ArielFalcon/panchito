@@ -31,6 +31,7 @@ function makeRule(overrides: Partial<LegacyLearningRule> = {}): LegacyLearningRu
     confidence: "low",
     usageCount: 0,
     outcomeCount: 0,
+    oracleOutcomeCount: 0,
     successRate: null,
     lastVerified: null,
     source: "distiller",
@@ -95,18 +96,22 @@ test("PARITY: preventionOutcome — empty ruleErrorClass returns null (no signal
 });
 
 test("PARITY: applyOutcome running-mean + hysteresis matches legacy across a transition sample table", () => {
-  const scenarios: Array<{ rule: Partial<LegacyLearningRule>; score: number; coverageCreditConfirmed: boolean | null }> = [
-    { rule: { status: "candidate", outcomeCount: 0, successRate: null }, score: 0.8, coverageCreditConfirmed: null },
-    { rule: { status: "candidate", outcomeCount: 2, successRate: 0.5 }, score: 0.9, coverageCreditConfirmed: true },
-    { rule: { status: "candidate", outcomeCount: 2, successRate: 0.9 }, score: 0.9, coverageCreditConfirmed: false },
-    { rule: { status: "active", outcomeCount: 5, successRate: 0.5 }, score: 0.1, coverageCreditConfirmed: null },
-    { rule: { status: "deprecated", outcomeCount: 5, successRate: 0.5 }, score: 0.9, coverageCreditConfirmed: null },
-    { rule: { status: "pending", outcomeCount: 0, successRate: null }, score: 0.5, coverageCreditConfirmed: null },
+  const scenarios: Array<{ rule: Partial<LegacyLearningRule>; score: number; coverageCreditConfirmed: boolean | null; isOracleScore?: boolean }> = [
+    { rule: { status: "candidate", outcomeCount: 0, successRate: null }, score: 0.8, coverageCreditConfirmed: null, isOracleScore: true },
+    { rule: { status: "candidate", outcomeCount: 2, successRate: 0.5 }, score: 0.9, coverageCreditConfirmed: true, isOracleScore: true },
+    { rule: { status: "candidate", outcomeCount: 2, successRate: 0.9 }, score: 0.9, coverageCreditConfirmed: false, isOracleScore: true },
+    { rule: { status: "active", outcomeCount: 5, successRate: 0.5 }, score: 0.1, coverageCreditConfirmed: null, isOracleScore: true },
+    { rule: { status: "deprecated", outcomeCount: 5, successRate: 0.5 }, score: 0.9, coverageCreditConfirmed: null, isOracleScore: true },
+    { rule: { status: "pending", outcomeCount: 0, successRate: null }, score: 0.5, coverageCreditConfirmed: null, isOracleScore: true },
+    // WS1.4(b): the prevention-path dimension (isOracleScore=false / omitted) — both twins must
+    // hold a candidate at "candidate" here even though outcomeCount reaches MIN_OUTCOMES and
+    // successRate clears PROMOTE_RATE, because zero outcomes were oracle-scored.
+    { rule: { status: "candidate", outcomeCount: 2, successRate: 0.6, oracleOutcomeCount: 0 }, score: 0.6, coverageCreditConfirmed: null, isOracleScore: false },
   ];
   for (const s of scenarios) {
     const rule = makeRule(s.rule);
-    const ported = applyOutcome(rule as never, s.score, s.coverageCreditConfirmed);
-    const legacy = legacyApplyOutcome(rule, s.score, s.coverageCreditConfirmed);
+    const ported = applyOutcome(rule as never, s.score, s.coverageCreditConfirmed, s.isOracleScore);
+    const legacy = legacyApplyOutcome(rule, s.score, s.coverageCreditConfirmed, s.isOracleScore);
     assert.deepEqual(ported, legacy, JSON.stringify(s));
   }
 });

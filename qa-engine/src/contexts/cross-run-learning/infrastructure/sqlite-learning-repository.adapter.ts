@@ -25,6 +25,11 @@ export interface LearningRow {
   confidence: string;
   usage_count: number;
   outcome_count: number;
+  // WS1.4(b): mirrors history.ts's learning_rules.oracle_outcome_count column. Optional here
+  // (rather than required) so a pre-existing store fake that predates this column still
+  // satisfies the interface structurally — rowToRule below defaults an absent value to 0,
+  // matching legacy rowToRule's own `(row.oracle_outcome_count as number) ?? 0` read pattern.
+  oracle_outcome_count?: number;
   success_rate: number | null;
   last_verified: string | null;
   source: string;
@@ -53,6 +58,10 @@ export interface LearningStore {
   // the active/candidate-only listLearningRules). The store-level primitive
   // LearningRepositoryPort.listAll delegates to. Optional: a store fake/wiring that never distills
   // need not implement it — LearningRepositoryPort.listAll fails open to [] when absent.
+  //
+  // LIVE as of Task 2 (full-flow remediation): src/server/rewritten-engine-factory.ts's
+  // historyLearningStore() now implements this, backed by history.ts's own listAllLearningRules —
+  // the production wiring is no longer a pass-through.
   selectAllRules?(app: string, limit: number): LearningRow[];
 }
 
@@ -76,6 +85,7 @@ function rowToRule(row: LearningRow): LearningRule {
     confidence: row.confidence === "low" ? "low" : row.confidence === "high" ? "high" : "medium",
     usageCount: row.usage_count,
     outcomeCount: row.outcome_count ?? 0,
+    oracleOutcomeCount: row.oracle_outcome_count ?? 0,
     successRate: row.success_rate,
     lastVerified: row.last_verified,
     source: row.source,
@@ -116,10 +126,14 @@ export class SqliteLearningRepository implements LearningRepositoryPort {
   }
 
   // WS1.3 (full-flow remediation): delegates to the injected store's own selectAllRules when
-  // present — a store fake/wiring that omits it (e.g. the v1 production bridge, which only wires
-  // the active/candidate-filtered selectRules) makes this a fail-open no-op ([]), never a stricter
-  // gate than before this method existed. Never gates publish — same off-path contract class as
-  // applyOutcome/incrementUsage on this port.
+  // present — a store fake/wiring that omits it makes this a fail-open no-op ([]), never a
+  // stricter gate than before this method existed. Never gates publish — same off-path contract
+  // class as applyOutcome/incrementUsage on this port.
+  //
+  // LIVE as of Task 2 (full-flow remediation): the v1 production bridge
+  // (rewritten-engine-factory.ts's historyLearningStore) now implements selectAllRules, so this
+  // delegation returns REAL rows in production, not just []. The fail-open fallback above remains
+  // for any store/fake that still omits it (e.g. StubLearningRepository, unit tests).
   async listAll(app: string, limit: number): Promise<LearningRule[]> {
     const rows = this.store.selectAllRules?.(app, limit) ?? [];
     return rows.map(rowToRule);

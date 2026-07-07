@@ -28,7 +28,11 @@ describe("human veto / restore (setRuleStatusByHuman)", () => {
     const app = uniqueApp();
     const id = `${app}-r`;
     upsertLearningRule({ id, app, trigger: "Applies when x changes", action: "do y", errorClass: "E-FRAGILE-SELECTOR", source: "run-1" });
-    for (let i = 0; i < 3; i++) recordRuleOutcome(id, 1); // earn promotion → active → retrievable
+    // WS1.4(b): isOracleScore=true earns promotion → active → retrievable (matches this test's
+    // original intent — without it these outcomes would leave the rule at candidate, which is
+    // also retrievable, but the precondition below is written to assert the ACTIVE, proven case).
+    for (let i = 0; i < 3; i++) recordRuleOutcome(id, 1, null, true); // earn promotion → active → retrievable
+    assert.equal(listAllLearningRules(app, 10).find((r) => r.id === id)?.status, "active", "precondition: the rule earned promotion to active");
     assert.ok(listLearningRules(app, 10).some((r) => r.id === id), "precondition: an active rule is in the retrieval list");
 
     setRuleStatusByHuman(id, "deprecated");

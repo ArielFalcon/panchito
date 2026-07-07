@@ -26,6 +26,14 @@
 // deprecated/superseded) that the inline construction bypassed entirely. `app` on ReflectorPortDeps
 // (previously carried only for ctor parity, never read) is now genuinely consumed: it scopes the
 // repo.listAll(app, ...) call that fetches the existing-rule set the dedup decision runs against.
+//
+// LIVE as of Task 2 (full-flow remediation): repo.listAll(app, ...) above used to resolve to []
+// in every production run — the factory's historyLearningStore (src/server/
+// rewritten-engine-factory.ts) never implemented LearningStore.selectAllRules, so
+// SqliteLearningRepository.listAll() fell back to its own documented fail-open empty set, and this
+// dedup guard, though fully implemented here, was a structural pass-through end-to-end. Task 2
+// wires selectAllRules onto history.ts's listAllLearningRules, so decideDistill below now runs
+// against the REAL full existing-rule set (all statuses) in production.
 import type { LearningRepositoryPort, LearningRule, ReflectionInput, StructuredReflection } from "../application/ports/index.ts";
 import type { AgentRuntimePort } from "@kernel/ports/agent-runtime.port.ts";
 import { capRuleFields, decideDistill } from "../domain/distill-rule.ts";
@@ -230,6 +238,7 @@ export class ReflectorPortAdapter {
         confidence: "low",
         usageCount: 0,
         outcomeCount: 0,
+        oracleOutcomeCount: 0,
         successRate: null,
         lastVerified: null,
         source: input.runId,

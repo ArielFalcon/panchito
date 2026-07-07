@@ -24,6 +24,12 @@ export interface LearningRule {
   confidence: Confidence;
   usageCount: number; // times this rule was retrieved into a prompt
   outcomeCount: number; // times an objective outcome (valueScore) was folded in
+  // WS1.4(b): count of outcomes folded in via an ORACLE-scored path (valueScore !== null) —
+  // never via the prevention path (preventionOutcome's derived, absence-of-failure signal).
+  // Defaults to 0 on read for legacy rows that predate this column (see history.ts rowToRule).
+  // This is the objective-evidence anchor: prevention credit can raise successRate/confidence,
+  // but it can NEVER by itself satisfy the candidate -> active gate (see nextStatus below).
+  oracleOutcomeCount: number;
   successRate: number | null; // running mean of outcomes in [0,1] (null until first outcome)
   lastVerified: string | null;
   source: string;
@@ -62,7 +68,23 @@ export function deriveConfidence(outcomeCount: number, successRate: number | nul
 // This is the non-circular anchor: a rule can only earn `active` when the test that exercised it
 // also covered the diff's changed lines, not just made the reviewer happy. Coverage stays
 // non-blocking where unmeasurable (null), so the flywheel turns for every app.
-function nextStatus(status: RuleStatus, outcomeCount: number, successRate: number, coverageCreditConfirmed: boolean | null = null): RuleStatus {
+//
+// WS1.4(b): oracleOutcomeCount is the SECOND non-circular anchor, alongside coverage. Promotion is
+// objective-signal-only per the project invariant — prevention credit is DERIVED (absence of a
+// failure class), not an objective observation, so three clean prevention-only runs must NEVER by
+// themselves promote a candidate to `active` (the reviewer's authoritative reject-on-sight tier).
+// At least one of the folded outcomes must be oracle-scored (valueScore !== null at the call site)
+// before candidate -> active can fire. This gate applies ONLY to that one transition — demotion
+// (active -> deprecated) and the retired pending -> candidate edge are unaffected, and an
+// already-`active` rule is never re-evaluated downward by this gate (nextStatus's `active` case
+// below never reads oracleOutcomeCount at all).
+function nextStatus(
+  status: RuleStatus,
+  outcomeCount: number,
+  successRate: number,
+  coverageCreditConfirmed: boolean | null = null,
+  oracleOutcomeCount = 0,
+): RuleStatus {
   // Phase 7: pending → candidate on first outcome. A correction-sourced rule starts as "pending"
   // (excluded from retrieval) and graduates to "candidate" (eligible for retrieval) as soon as
   // one run folds an outcome in. From then on the standard candidate → active promotion logic
@@ -76,6 +98,11 @@ function nextStatus(status: RuleStatus, outcomeCount: number, successRate: numbe
       // promotion. When coverage is unmeasurable (null), allow promotion on verdict signal alone so
       // the flywheel turns for every app, not just those with source-mapped DEV environments.
       if (coverageCreditConfirmed === false) return "candidate"; // measured, no credit — hold
+      // WS1.4(b) oracle-evidence anchor: promotion requires AT LEAST ONE oracle-scored outcome.
+      // Prevention-only evidence (however consistent) may raise successRate/confidence but never
+      // flips status on its own — this is the full gate the interim WS1.4(a) empty-class guard
+      // was a stepping stone toward.
+      if (oracleOutcomeCount < 1) return "candidate"; // zero objective evidence — hold
       return "active";
     }
     case "active":
@@ -128,16 +155,29 @@ export function preventionOutcome(ruleErrorClass: ErrorClass, runErrorClass: Err
 // Phase 7: coverageCreditConfirmed gates the candidate → active promotion step when coverage
 // is measurable. Pass true when coverage confirmed credit, false when measured but zero credit,
 // null (default) when coverage is not applicable/measured (promotion uses verdict signal only).
-export function applyOutcome(rule: LearningRule, score: number, coverageCreditConfirmed: boolean | null = null): LearningRule {
+//
+// WS1.4(b): isOracleScore tells applyOutcome whether THIS outcome came from the oracle path
+// (a real valueScore, gateSignals.valueScore !== null at the call site) or the prevention path
+// (preventionOutcome's derived signal). Defaults to false — the caller must opt IN to oracle
+// credit, never opt out of the prevention-only ceiling by omission. Only a true value here
+// advances oracleOutcomeCount, which nextStatus requires to be >= 1 before candidate -> active.
+export function applyOutcome(
+  rule: LearningRule,
+  score: number,
+  coverageCreditConfirmed: boolean | null = null,
+  isOracleScore = false,
+): LearningRule {
   const n = (rule.outcomeCount ?? 0) + 1;
+  const oracleOutcomeCount = (rule.oracleOutcomeCount ?? 0) + (isOracleScore ? 1 : 0);
   const prev = rule.successRate;
   const successRate = prev === null || prev === undefined ? score : prev + (score - prev) / n;
   return {
     ...rule,
     outcomeCount: n,
+    oracleOutcomeCount,
     successRate,
     confidence: deriveConfidence(n, successRate),
-    status: nextStatus(rule.status, n, successRate, coverageCreditConfirmed),
+    status: nextStatus(rule.status, n, successRate, coverageCreditConfirmed, oracleOutcomeCount),
   };
 }
 

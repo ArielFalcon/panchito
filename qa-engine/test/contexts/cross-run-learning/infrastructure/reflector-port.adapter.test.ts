@@ -250,6 +250,7 @@ test("reflect() skips saving when the distilled rule normalizes onto an EXISTING
     confidence: "low",
     usageCount: 0,
     outcomeCount: 5,
+    oracleOutcomeCount: 0,
     successRate: 0.1,
     lastVerified: null,
     source: "run-old",

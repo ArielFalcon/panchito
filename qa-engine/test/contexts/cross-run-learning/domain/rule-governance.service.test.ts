@@ -5,7 +5,7 @@ import type { LearningRule } from "@contexts/cross-run-learning/application/port
 
 // `at` is required: the full legacy LearningRule includes it (history.ts ORDER BY ... at DESC).
 const rule = (status: LearningRule["status"], successRate: number | null, trigger: string, at = "2026-01-01T00:00:00.000Z"): LearningRule =>
-  ({ id: trigger, trigger, action: "a", errorClass: "E-X", archetype: null, status, confidence: "medium", usageCount: 0, outcomeCount: 0, successRate, lastVerified: null, source: "oracle", at });
+  ({ id: trigger, trigger, action: "a", errorClass: "E-X", archetype: null, status, confidence: "medium", usageCount: 0, outcomeCount: 0, oracleOutcomeCount: 0, successRate, lastVerified: null, source: "oracle", at });
 
 const svc = new RuleGovernanceService();
 
@@ -43,7 +43,7 @@ const ruleWithMeta = (
   status: LearningRule["status"], successRate: number | null, trigger: string,
   errorClass: string, archetype: string | null, at = "2026-01-01T00:00:00.000Z",
 ): LearningRule =>
-  ({ id: trigger, trigger, action: "a", errorClass, archetype, status, confidence: "medium", usageCount: 0, outcomeCount: 0, successRate, lastVerified: null, source: "oracle", at });
+  ({ id: trigger, trigger, action: "a", errorClass, archetype, status, confidence: "medium", usageCount: 0, outcomeCount: 0, oracleOutcomeCount: 0, successRate, lastVerified: null, source: "oracle", at });
 
 test("topRules: without a relevance bias, behaves EXACTLY as before (pure SQL-ORDER-BY parity)", () => {
   const rules = [

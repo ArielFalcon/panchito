@@ -11,6 +11,7 @@ function r(over: Partial<LearningRule>): LearningRule {
     confidence: "high",
     usageCount: 0,
     outcomeCount: 5,
+    oracleOutcomeCount: 5,
     successRate: 0.8,
     lastVerified: null,
     source: "run-1",

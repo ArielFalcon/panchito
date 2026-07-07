@@ -178,6 +178,7 @@ function ensureDb(): void {
       confidence TEXT NOT NULL DEFAULT 'low',
       usage_count INTEGER NOT NULL DEFAULT 0,
       outcome_count INTEGER NOT NULL DEFAULT 0,
+      oracle_outcome_count INTEGER NOT NULL DEFAULT 0,
       success_rate REAL,
       last_verified TEXT,
       source TEXT NOT NULL,
@@ -247,6 +248,13 @@ function ensureDb(): void {
   if (!columnExists("learning_rules", "archetype")) {
     db.exec("ALTER TABLE learning_rules ADD COLUMN archetype TEXT");
   }
+  // WS1.4(b) (full-flow remediation): promotion requires oracle evidence. Existing ledger rows get
+  // oracle_outcome_count 0 via DEFAULT — this does NOT demote any already-`active` rule (nextStatus's
+  // `active` case never reads oracleOutcomeCount; the gate applies ONLY to the candidate -> active
+  // TRANSITION, never to a rule that already holds `active`).
+  if (!columnExists("learning_rules", "oracle_outcome_count")) {
+    db.exec("ALTER TABLE learning_rules ADD COLUMN oracle_outcome_count INTEGER NOT NULL DEFAULT 0");
+  }
   if (!columnExists("runs", "trigger_repo")) {
     db.exec("ALTER TABLE runs ADD COLUMN trigger_repo TEXT");
   }
@@ -281,12 +289,13 @@ function ensureDb(): void {
 
   // learning_rules (Phase 2 — placeholder for Graphiti)
   upsertRuleStmt = db.prepare(`
-    INSERT INTO learning_rules (id, app, trigger_text, action_text, error_class, archetype, confidence, usage_count, outcome_count, success_rate, last_verified, source, status, at)
-    VALUES (@id, @app, @trigger, @action, @errorClass, @archetype, @confidence, @usageCount, @outcomeCount, @successRate, @lastVerified, @source, @status, @at)
+    INSERT INTO learning_rules (id, app, trigger_text, action_text, error_class, archetype, confidence, usage_count, outcome_count, oracle_outcome_count, success_rate, last_verified, source, status, at)
+    VALUES (@id, @app, @trigger, @action, @errorClass, @archetype, @confidence, @usageCount, @outcomeCount, @oracleOutcomeCount, @successRate, @lastVerified, @source, @status, @at)
     ON CONFLICT(id) DO UPDATE SET
       confidence = excluded.confidence,
       usage_count = excluded.usage_count,
       outcome_count = excluded.outcome_count,
+      oracle_outcome_count = excluded.oracle_outcome_count,
       success_rate = excluded.success_rate,
       last_verified = excluded.last_verified,
       status = excluded.status
@@ -641,6 +650,7 @@ export function upsertLearningRule(rule: RuleUpsert & { app: string; id: string;
     confidence: "low" as Confidence,
     usageCount: 0,
     outcomeCount: 0,
+    oracleOutcomeCount: 0,
     successRate: null,
     lastVerified: null,
     source: rule.source,
@@ -659,6 +669,7 @@ function rowToRule(row: Record<string, unknown>): LearningRule {
     confidence: row.confidence as Confidence,
     usageCount: row.usage_count as number,
     outcomeCount: (row.outcome_count as number) ?? 0,
+    oracleOutcomeCount: (row.oracle_outcome_count as number) ?? 0,
     successRate: row.success_rate as number | null,
     lastVerified: row.last_verified as string | null,
     source: row.source as string,
@@ -700,14 +711,21 @@ export function incrementRuleUsage(ruleIds: string[]): void {
 // the test covered changed lines; false when coverage was measured but found zero credit; null
 // (default) when coverage is not applicable (cross-repo, unmeasured, policy=off). The gate only
 // applies to the candidate → active transition — it never blocks demotion or pending → candidate.
-export function recordRuleOutcome(ruleId: string, score: number, coverageCreditConfirmed: boolean | null = null): void {
+//
+// WS1.4(b): `isOracleScore` tells applyOutcome whether THIS outcome is oracle-scored (the caller's
+// valueScore path, gateSignals.valueScore !== null) or prevention-scored (the caller's
+// preventionOutcome-derived path). Defaults to false — the two call sites in
+// rewritten-engine-factory.ts's recordOutcome closure thread `true` from the valueScore path and
+// `false` (or omit) from the prevention path. Promotion (candidate → active) additionally requires
+// oracleOutcomeCount >= 1 — see applyOutcome/nextStatus's own header for the full gate.
+export function recordRuleOutcome(ruleId: string, score: number, coverageCreditConfirmed: boolean | null = null, isOracleScore = false): void {
   ensureDb();
   const row = db.prepare("SELECT * FROM learning_rules WHERE id = ?").get(ruleId) as Record<string, unknown> | undefined;
   if (!row) return;
-  const updated = applyOutcome(rowToRule(row), score, coverageCreditConfirmed);
+  const updated = applyOutcome(rowToRule(row), score, coverageCreditConfirmed, isOracleScore);
   db.prepare(
-    "UPDATE learning_rules SET success_rate = ?, outcome_count = ?, confidence = ?, status = ?, last_verified = ? WHERE id = ?",
-  ).run(updated.successRate, updated.outcomeCount, updated.confidence, updated.status, new Date().toISOString(), ruleId);
+    "UPDATE learning_rules SET success_rate = ?, outcome_count = ?, oracle_outcome_count = ?, confidence = ?, status = ?, last_verified = ? WHERE id = ?",
+  ).run(updated.successRate, updated.outcomeCount, updated.oracleOutcomeCount, updated.confidence, updated.status, new Date().toISOString(), ruleId);
 }
 
 // Human-initiated governance override: veto a rule (force it to 'deprecated') or restore a

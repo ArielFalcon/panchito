@@ -158,14 +158,30 @@ test("continuationDepth walks the parentRunId chain", () => {
 test("recordRuleOutcome accumulates a running mean and earns promotion (never overwrites)", () => {
   const app = "hist-learn-1";
   upsertLearningRule({ id: "lr-1", app, trigger: "t", action: "a", errorClass: "E-FALSE-POSITIVE", source: "run-x" });
-  recordRuleOutcome("lr-1", 0.8);
-  recordRuleOutcome("lr-1", 0.8);
-  recordRuleOutcome("lr-1", 0.8);
+  // WS1.4(b): promotion requires at least one oracle-scored outcome — isOracleScore=true (4th arg)
+  // exercises this test's original intent (generic running-mean + promotion math).
+  recordRuleOutcome("lr-1", 0.8, null, true);
+  recordRuleOutcome("lr-1", 0.8, null, true);
+  recordRuleOutcome("lr-1", 0.8, null, true);
   const r = listLearningRules(app, 10).find((x) => x.id === "lr-1");
   assert.ok(r, "rule should still exist");
   assert.equal(r!.outcomeCount, 3); // accumulated across outcomes, not overwritten
   assert.ok(Math.abs(r!.successRate! - 0.8) < 1e-9, `expected ~0.8, got ${r!.successRate}`);
+  assert.equal(r!.oracleOutcomeCount, 3, "all three outcomes were oracle-scored");
   assert.equal(r!.status, "active"); // promotion earned from objective outcomes
+});
+
+test("recordRuleOutcome does NOT promote on good outcomes alone when none are oracle-scored (WS1.4(b))", () => {
+  const app = "hist-learn-no-oracle";
+  upsertLearningRule({ id: "lr-no-oracle", app, trigger: "t", action: "a", errorClass: "E-FALSE-POSITIVE", source: "run-x" });
+  recordRuleOutcome("lr-no-oracle", 0.8);
+  recordRuleOutcome("lr-no-oracle", 0.8);
+  recordRuleOutcome("lr-no-oracle", 0.8);
+  const r = listLearningRules(app, 10).find((x) => x.id === "lr-no-oracle");
+  assert.ok(r, "rule should still exist");
+  assert.equal(r!.outcomeCount, 3);
+  assert.equal(r!.oracleOutcomeCount, 0, "isOracleScore was never passed — defaults to false");
+  assert.equal(r!.status, "candidate", "WS1.4(b): zero objective evidence — must not promote regardless of successRate");
 });
 
 test("createRecord persists triggerRepo and getRecord returns it", () => {

@@ -23,6 +23,7 @@ function rule(overrides: Partial<LearningRule> = {}): LearningRule {
     confidence: "low",
     usageCount: 0,
     outcomeCount: 0,
+    oracleOutcomeCount: 0,
     successRate: null,
     lastVerified: null,
     source: "run-1",
@@ -60,14 +61,19 @@ describe("preventionOutcome (governance signal without an oracle)", () => {
     assert.equal(preventionOutcome("E-INFRA", "E-INFRA"), null);
     assert.equal(preventionOutcome("E-FLAKY", "E-FLAKY"), null);
   });
-  it("a rule that consistently holds is promoted to active, but plateaus at medium", () => {
+  // WS1.4(b) SUPERSEDES this test's original expectation (status: "active"). Promotion is
+  // objective-signal-only: prevention credit alone (however consistent) must never flip a
+  // candidate to active — see nextStatus's oracleOutcomeCount gate. successRate/confidence still
+  // plateau at medium exactly as before; only the status assertion changes.
+  it("a rule that consistently holds via prevention alone plateaus successRate/confidence at medium but does NOT promote (WS1.4(b))", () => {
     let r = rule({ status: "candidate", errorClass: "E-FRAGILE-SELECTOR" });
     for (let i = 0; i < 5; i++) {
       const s = preventionOutcome(r.errorClass, null);
-      if (s !== null) r = applyOutcome(r, s);
+      if (s !== null) r = applyOutcome(r, s); // prevention path — isOracleScore omitted/false
     }
-    assert.equal(r.status, "active", "held across runs → promoted");
+    assert.equal(r.status, "candidate", "WS1.4(b): prevention-only credit must NOT promote — zero oracle evidence was folded in");
     assert.equal(r.confidence, "medium", "proxy-only promotion never reaches high");
+    assert.equal(r.oracleOutcomeCount, 0, "no outcome in this loop was oracle-scored");
   });
   it("a rule whose class keeps recurring is demoted out of active", () => {
     let r = rule({ status: "active", successRate: 0.7, outcomeCount: 4, errorClass: "E-FRAGILE-SELECTOR" });
@@ -193,21 +199,34 @@ describe("applyOutcome", () => {
     assert.ok(Math.abs(r.successRate! - 0.5) < 1e-9, `expected ~0.5, got ${r.successRate}`);
   });
 
-  it("promotes a candidate to active after enough good outcomes", () => {
+  it("promotes a candidate to active after enough good ORACLE-scored outcomes", () => {
+    // WS1.4(b): promotion requires at least one oracle-scored outcome — isOracleScore=true here
+    // exercises the generic hysteresis/promotion math with the objective-evidence gate satisfied.
     let r = rule({ status: "candidate" });
-    r = applyOutcome(r, 0.8);
-    r = applyOutcome(r, 0.8);
+    r = applyOutcome(r, 0.8, null, true);
+    r = applyOutcome(r, 0.8, null, true);
     assert.equal(r.status, "candidate"); // only 2 outcomes
-    r = applyOutcome(r, 0.8);
-    assert.equal(r.status, "active"); // 3 outcomes, mean >= promote threshold
+    r = applyOutcome(r, 0.8, null, true);
+    assert.equal(r.status, "active"); // 3 outcomes, mean >= promote threshold, oracle evidence present
   });
 
-  it("does NOT promote when the mean stays below the threshold", () => {
+  it("does NOT promote when the mean stays below the threshold (even with oracle evidence)", () => {
     let r = rule({ status: "candidate" });
-    r = applyOutcome(r, 0.5);
-    r = applyOutcome(r, 0.5);
-    r = applyOutcome(r, 0.5);
+    r = applyOutcome(r, 0.5, null, true);
+    r = applyOutcome(r, 0.5, null, true);
+    r = applyOutcome(r, 0.5, null, true);
     assert.equal(r.status, "candidate");
+  });
+
+  // WS1.4(b): the full gate — three good outcomes with NO oracle evidence at all must NOT promote,
+  // even though the mean clears PROMOTE_RATE and MIN_OUTCOMES is satisfied.
+  it("does NOT promote a candidate on good outcomes alone when none are oracle-scored (WS1.4(b) objective-evidence gate)", () => {
+    let r = rule({ status: "candidate" });
+    r = applyOutcome(r, 0.8); // isOracleScore defaults to false
+    r = applyOutcome(r, 0.8);
+    r = applyOutcome(r, 0.8);
+    assert.equal(r.status, "candidate", "zero oracle-scored outcomes — promotion must be held regardless of successRate");
+    assert.equal(r.oracleOutcomeCount, 0);
   });
 
   it("demotes an active rule only after SUSTAINED low outcomes (tolerant, not trigger-happy)", () => {
@@ -327,35 +346,39 @@ describe("Phase 7 (c): pending → candidate transition on first outcome (applyO
   });
 
   it("a pending → candidate transition requires further outcomes before active promotion", () => {
+    // WS1.4(b): isOracleScore=true isolates the pending/MIN_OUTCOMES dimension this test targets —
+    // the objective-evidence gate is satisfied throughout, so promotion is governed purely by
+    // outcomeCount/successRate, exactly this test's original intent.
     let r = rule({ status: "pending" as import("./learning-rule").RuleStatus, outcomeCount: 0, successRate: null });
-    r = applyOutcome(r, 0.9); // pending → candidate
+    r = applyOutcome(r, 0.9, null, true); // pending → candidate
     assert.equal(r.status, "candidate", "after one outcome: candidate");
     // Not yet enough outcomes (MIN_OUTCOMES=3): stays candidate
-    r = applyOutcome(r, 0.9);
+    r = applyOutcome(r, 0.9, null, true);
     assert.equal(r.status, "candidate", "two outcomes: still candidate (not enough for promotion)");
-    r = applyOutcome(r, 0.9);
-    assert.equal(r.status, "active", "three outcomes above PROMOTE_RATE: promoted to active");
+    r = applyOutcome(r, 0.9, null, true);
+    assert.equal(r.status, "active", "three outcomes above PROMOTE_RATE, all oracle-scored: promoted to active");
   });
 });
 
 describe("Phase 7 (d): coverage-anchored promotion governance", () => {
   it("candidate rule is promoted when coverage credit is confirmed (coverageCreditConfirmed=true)", () => {
-    // Build a candidate rule at the promotion threshold.
+    // Build a candidate rule at the promotion threshold. WS1.4(b): isOracleScore=true isolates the
+    // coverage dimension this test targets from the separate oracle-evidence gate.
     let r = rule({ status: "candidate", outcomeCount: 0, successRate: null });
-    for (let i = 0; i < 3; i++) r = applyOutcome(r, 0.7, true); // confirmed credit each time
-    assert.equal(r.status, "active", "promotion must proceed when coverage credit is confirmed");
+    for (let i = 0; i < 3; i++) r = applyOutcome(r, 0.7, true, true); // confirmed credit + oracle-scored, each time
+    assert.equal(r.status, "active", "promotion must proceed when coverage credit is confirmed and oracle evidence exists");
   });
 
   it("candidate rule is NOT promoted when coverage is measured but no credit (coverageCreditConfirmed=false)", () => {
     let r = rule({ status: "candidate", outcomeCount: 0, successRate: null });
-    // Apply enough outcomes at the promotion rate — but with no coverage credit.
-    for (let i = 0; i < 5; i++) r = applyOutcome(r, 0.7, false);
-    assert.equal(r.status, "candidate", "promotion must be blocked when coverage measured zero credit");
+    // Apply enough outcomes at the promotion rate (oracle-scored) — but with no coverage credit.
+    for (let i = 0; i < 5; i++) r = applyOutcome(r, 0.7, false, true);
+    assert.equal(r.status, "candidate", "promotion must be blocked when coverage measured zero credit, even with oracle evidence");
   });
 
   it("candidate rule IS promoted when coverage is unmeasurable (coverageCreditConfirmed=null) — non-blocking", () => {
     let r = rule({ status: "candidate", outcomeCount: 0, successRate: null });
-    for (let i = 0; i < 3; i++) r = applyOutcome(r, 0.7, null); // null = unmeasured
+    for (let i = 0; i < 3; i++) r = applyOutcome(r, 0.7, null, true); // null = unmeasured; oracle-scored
     assert.equal(r.status, "active", "promotion must proceed when coverage is not measurable (flywheel turns for all apps)");
   });
 
@@ -366,6 +389,15 @@ describe("Phase 7 (d): coverage-anchored promotion governance", () => {
     let r = rule({ status: "active", outcomeCount: 3, successRate: 0.8 });
     for (let i = 0; i < 20; i++) r = applyOutcome(r, 0.0, false); // bad outcomes + no coverage credit
     assert.equal(r.status, "deprecated", "demotion must happen regardless of coverage credit");
+  });
+
+  // WS1.4(b): the coverage gate and the oracle-evidence gate are INDEPENDENT — confirmed coverage
+  // credit alone does not substitute for oracle evidence.
+  it("candidate rule is NOT promoted on confirmed coverage credit alone, without any oracle-scored outcome (WS1.4(b))", () => {
+    let r = rule({ status: "candidate", outcomeCount: 0, successRate: null });
+    for (let i = 0; i < 3; i++) r = applyOutcome(r, 0.7, true); // confirmed credit, but isOracleScore omitted (false)
+    assert.equal(r.status, "candidate", "coverage credit confirmed is necessary but not sufficient — oracle evidence is a SEPARATE requirement");
+    assert.equal(r.oracleOutcomeCount, 0);
   });
 });
 
@@ -380,6 +412,7 @@ function mkRule(id: string, action: string, status: "active" | "candidate" = "ac
     confidence: "medium",
     usageCount: 0,
     outcomeCount: 3,
+    oracleOutcomeCount: 3,
     successRate: 0.6,
     lastVerified: null,
     source: "test",
@@ -436,6 +469,7 @@ describe("selectForRetrieval determinism", () => {
       confidence: "medium",
       usageCount: 0,
       outcomeCount: 3,
+      oracleOutcomeCount: 3,
       successRate: 0.6,
       lastVerified: null,
       source: "test",
@@ -459,6 +493,7 @@ describe("selectForRetrieval determinism", () => {
       confidence: "high",
       usageCount: 0,
       outcomeCount: 3,
+      oracleOutcomeCount: 3,
       successRate: 0.9,
       lastVerified: null,
       source: "t",
@@ -486,7 +521,7 @@ describe("attributableRules — context-directed attribution filter", () => {
   function mkRule(id: string, archetype: string | null): LearningRule {
     return {
       id, trigger: "t", action: "a", errorClass: "E-FALSE-POSITIVE", archetype,
-      confidence: "medium", usageCount: 0, outcomeCount: 3, successRate: 0.6,
+      confidence: "medium", usageCount: 0, outcomeCount: 3, oracleOutcomeCount: 3, successRate: 0.6,
       lastVerified: null, source: "t", status: "active", at: "2026-01-01T00:00:00.000Z",
     };
   }

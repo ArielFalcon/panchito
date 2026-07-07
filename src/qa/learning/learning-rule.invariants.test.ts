@@ -22,6 +22,7 @@ function seedRule(overrides: Partial<LearningRule> = {}): LearningRule {
     confidence: "low",
     usageCount: 0,
     outcomeCount: 0,
+    oracleOutcomeCount: 0,
     successRate: null,
     lastVerified: null,
     source: "seed",
@@ -31,8 +32,13 @@ function seedRule(overrides: Partial<LearningRule> = {}): LearningRule {
   };
 }
 
-function fold(rule: LearningRule, scores: number[]): LearningRule {
-  return scores.reduce((r, s) => applyOutcome(r, s), rule);
+// WS1.4(b): `isOracleScore` defaults to true here — this invariant net's `fold` calls are almost
+// all exercising the OBJECTIVE-EVIDENCE side of governance (oracle-range scores like 1/0.9), so the
+// default keeps every pre-existing call site's intent unchanged. The one exception (the
+// prevention-only PREVENTION_HELD_SCORE plateau test, below) explicitly passes `false` — see that
+// test's own updated comment for why WS1.4(b) changes its expected status.
+function fold(rule: LearningRule, scores: number[], isOracleScore = true): LearningRule {
+  return scores.reduce((r, s) => applyOutcome(r, s, null, isOracleScore), rule);
 }
 
 describe("ledger invariant: high confidence ⟹ oracle ground-truth", () => {
@@ -48,10 +54,26 @@ describe("ledger invariant: high confidence ⟹ oracle ground-truth", () => {
     assert.notEqual(mixed.confidence, "high");
   });
 
-  it("PREVENTION_HELD_SCORE plateaus exactly at promote-to-active but caps at 'medium'", () => {
-    const held = fold(seedRule(), Array(5).fill(PREVENTION_HELD_SCORE));
-    assert.equal(held.status, "active", "consistent prevention earns promotion to active");
+  // WS1.4(b) SUPERSEDES this test's original expectation (status: "active"). Promotion is
+  // objective-signal-only — prevention credit is DERIVED (absence of a failure class), not an
+  // objective observation, so it must never by itself satisfy the candidate -> active gate, no
+  // matter how many clean runs accrue. successRate/confidence are UNCHANGED (still plateau at
+  // medium); only status now stays at "candidate" absent any oracle-scored outcome.
+  it("PREVENTION_HELD_SCORE plateaus successRate/confidence at 'medium' but NEVER promotes on its own (WS1.4(b) oracle-evidence gate)", () => {
+    const held = fold(seedRule(), Array(5).fill(PREVENTION_HELD_SCORE), false); // prevention path — isOracleScore=false
+    assert.equal(held.status, "candidate", "WS1.4(b): prevention-only credit must NOT promote — zero objective evidence was folded in");
     assert.equal(held.confidence, "medium", "but never lifts past medium without the oracle");
+    assert.equal(held.oracleOutcomeCount, 0, "no outcome in this sequence was oracle-scored");
+  });
+
+  // WS1.4(b) companion: the SAME prevention-held rule, plus one oracle-scored outcome at or above
+  // PROMOTE_RATE, DOES cross into active — the objective-evidence anchor is satisfied.
+  it("PREVENTION_HELD_SCORE plateau + one oracle-scored outcome unlocks promotion to active", () => {
+    const held = fold(seedRule(), Array(5).fill(PREVENTION_HELD_SCORE), false);
+    assert.equal(held.status, "candidate");
+    const withOracle = applyOutcome(held, PREVENTION_HELD_SCORE, null, true);
+    assert.equal(withOracle.oracleOutcomeCount, 1);
+    assert.equal(withOracle.status, "active", "one oracle-scored outcome satisfies the WS1.4(b) evidence anchor");
   });
 
   it("an oracle-range signal (≥0.7) is what unlocks 'high'", () => {

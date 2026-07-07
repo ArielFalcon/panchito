@@ -26,8 +26,10 @@ describe("distillReflection dedup against ALL rule statuses", () => {
     const action = "assert the response body matches the submitted input";
 
     // Create a rule, promote it to active, then demote it to 'deprecated' via sustained bad outcomes.
+    // WS1.4(b): promotion requires at least one oracle-scored outcome — isOracleScore=true here
+    // satisfies that gate so this test can reach 'active' before demoting, exactly its original intent.
     upsertLearningRule({ id: "dep-rule", app, trigger, action, errorClass: "E-FALSE-POSITIVE", source: "seed" });
-    for (let i = 0; i < 3; i++) recordRuleOutcome("dep-rule", 0.9); // → active
+    for (let i = 0; i < 3; i++) recordRuleOutcome("dep-rule", 0.9, null, true); // → active
     for (let i = 0; i < 8; i++) recordRuleOutcome("dep-rule", 0.0); // → deprecated
 
     const deprecated = listAllLearningRules(app, 50).find((r) => r.id === "dep-rule");

@@ -53,7 +53,7 @@ test("retrieve() delegates to LearningRepositoryPort.topRules and returns the FU
   const rule: LearningRule = {
     id: "r1", trigger: "selector absent", action: "use role+name", errorClass: "E-EXEC-FAIL",
     archetype: null, status: "active", confidence: "high", usageCount: 3, outcomeCount: 3,
-    successRate: 1, lastVerified: null, source: "run-1", at: new Date().toISOString(),
+    oracleOutcomeCount: 3, successRate: 1, lastVerified: null, source: "run-1", at: new Date().toISOString(),
   };
   const repo: LearningRepositoryPort = {
     save: async () => {},
@@ -85,7 +85,7 @@ test("retrieve() includes the repository row's real id in each RetrievedRule (WS
   const rule: LearningRule = {
     id: "rule-id-distinct-from-trigger", trigger: "selector absent", action: "use role+name",
     errorClass: "E-EXEC-FAIL", archetype: null, status: "active", confidence: "high",
-    usageCount: 3, outcomeCount: 3, successRate: 1, lastVerified: null, source: "run-1",
+    usageCount: 3, outcomeCount: 3, oracleOutcomeCount: 3, successRate: 1, lastVerified: null, source: "run-1",
     at: new Date().toISOString(),
   };
   const repo: LearningRepositoryPort = {
@@ -105,7 +105,7 @@ test("retrieve() narrows a candidate rule's status verbatim (not coerced to acti
   const rule: LearningRule = {
     id: "r2", trigger: "flaky wait", action: "use expect.poll", errorClass: "E-FLAKY",
     archetype: null, status: "candidate", confidence: "low", usageCount: 0, outcomeCount: 0,
-    successRate: null, lastVerified: null, source: "run-2", at: new Date().toISOString(),
+    oracleOutcomeCount: 0, successRate: null, lastVerified: null, source: "run-2", at: new Date().toISOString(),
   };
   const repo: LearningRepositoryPort = {
     save: async () => {},
@@ -134,7 +134,7 @@ test("retrieve() calls LearningRepositoryPort.incrementUsage with the retrieved 
   const rule: LearningRule = {
     id: "r3", trigger: "no aria label", action: "add role+name", errorClass: "E-EXEC-FAIL",
     archetype: null, status: "active", confidence: "medium", usageCount: 1, outcomeCount: 1,
-    successRate: 0.8, lastVerified: null, source: "run-3", at: new Date().toISOString(),
+    oracleOutcomeCount: 1, successRate: 0.8, lastVerified: null, source: "run-3", at: new Date().toISOString(),
   };
   let incrementedIds: readonly string[] | undefined;
   const repo: LearningRepositoryPort = {
@@ -175,7 +175,7 @@ test("retrieve() still returns the retrieved rules when incrementUsage REJECTS, 
   const rule: LearningRule = {
     id: "r5", trigger: "missing alt text", action: "add alt attribute", errorClass: "E-EXEC-FAIL",
     archetype: null, status: "active", confidence: "high", usageCount: 2, outcomeCount: 2,
-    successRate: 1, lastVerified: null, source: "run-5", at: new Date().toISOString(),
+    oracleOutcomeCount: 2, successRate: 1, lastVerified: null, source: "run-5", at: new Date().toISOString(),
   };
   const repo: LearningRepositoryPort = {
     save: async () => {},
@@ -202,7 +202,7 @@ test("retrieve() still returns the retrieved rules when incrementUsage REJECTS, 
 test("retrieve() with a rejecting incrementUsage does NOT reject the caller's own promise", async () => {
   const rule: LearningRule = {
     id: "r6", trigger: "t", action: "a", errorClass: "E-X", archetype: null, status: "candidate",
-    confidence: "low", usageCount: 0, outcomeCount: 0, successRate: null, lastVerified: null,
+    confidence: "low", usageCount: 0, outcomeCount: 0, oracleOutcomeCount: 0, successRate: null, lastVerified: null,
     source: "run-6", at: new Date().toISOString(),
   };
   const repo: LearningRepositoryPort = {
@@ -219,7 +219,7 @@ test("retrieve() with a rejecting incrementUsage does NOT reject the caller's ow
 test("retrieve() tolerates a store without incrementUsage wired (optional method, off-path)", async () => {
   const rule: LearningRule = {
     id: "r4", trigger: "t", action: "a", errorClass: "E-X", archetype: null, status: "active",
-    confidence: "low", usageCount: 0, outcomeCount: 0, successRate: null, lastVerified: null,
+    confidence: "low", usageCount: 0, outcomeCount: 0, oracleOutcomeCount: 0, successRate: null, lastVerified: null,
     source: "run-4", at: new Date().toISOString(),
   };
   const repo: LearningRepositoryPort = {

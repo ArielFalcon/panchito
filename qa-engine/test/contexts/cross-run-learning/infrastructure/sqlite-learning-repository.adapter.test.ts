@@ -58,7 +58,7 @@ test("save delegates to the injected upsert (no SQLite in the test)", async () =
   const calls: string[] = [];
   const repo = new SqliteLearningRepository({ selectRules: () => [], upsert: (r) => calls.push(r.trigger), recordOutcome: () => {} });
   // upsert receives a full LearningRule; assert trigger passes through
-  await repo.save({ id: "r3", trigger: "new", action: "a", errorClass: "E-Z", archetype: null, status: "candidate", confidence: "medium", usageCount: 0, outcomeCount: 0, successRate: null, lastVerified: null, source: "oracle", at: new Date().toISOString() });
+  await repo.save({ id: "r3", trigger: "new", action: "a", errorClass: "E-Z", archetype: null, status: "candidate", confidence: "medium", usageCount: 0, outcomeCount: 0, oracleOutcomeCount: 0, successRate: null, lastVerified: null, source: "oracle", at: new Date().toISOString() });
   assert.deepEqual(calls, ["new"]);
 });
 

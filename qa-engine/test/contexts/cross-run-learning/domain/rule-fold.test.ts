@@ -13,7 +13,7 @@
 // touching the forbidden factory file.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { preventionOutcome, applyOutcome } from "@contexts/cross-run-learning/domain/rule-fold.ts";
+import { preventionOutcome, applyOutcome, PREVENTION_HELD_SCORE } from "@contexts/cross-run-learning/domain/rule-fold.ts";
 import type { LearningRule } from "@contexts/cross-run-learning/application/ports/index.ts";
 
 function makeRule(overrides: Partial<LearningRule> = {}): LearningRule {
@@ -26,6 +26,7 @@ function makeRule(overrides: Partial<LearningRule> = {}): LearningRule {
     confidence: "low",
     usageCount: 0,
     outcomeCount: 0,
+    oracleOutcomeCount: 0,
     successRate: null,
     lastVerified: null,
     source: "distiller",
@@ -53,7 +54,13 @@ test("WS1.4(a): a rule with errorClass \"\" folded across three clean runs does 
   assert.equal(rule.status, "candidate", "status must NOT advance toward active — MIN_OUTCOMES (3) was never reached because nothing was ever recorded");
 });
 
-test("WS1.4(a) regression pin: a rule with a REAL errorClass still earns held credit (PREVENTION_HELD_SCORE) when its class did not recur, and promotes after MIN_OUTCOMES clean runs", () => {
+// WS1.4(b) SUPERSEDES this test's original expectation: three clean prevention-only runs used to
+// promote a real-class candidate straight to "active" (PREVENTION_HELD_SCORE sits exactly on
+// PROMOTE_RATE). That was the objective-signal gap WS1.4(b) closes — prevention credit is DERIVED
+// (absence of a failure class), not an objective observation, so it must never by itself satisfy
+// the candidate -> active gate. The accrual math (outcomeCount/successRate/confidence) is
+// UNCHANGED and still pinned here; only the status assertion flips from "active" to "candidate".
+test("WS1.4(b): a rule with a REAL errorClass still earns held credit (PREVENTION_HELD_SCORE) on clean runs, but prevention-only credit does NOT promote to active without oracle evidence", () => {
   let rule = makeRule({ errorClass: "E-FRAGILE-SELECTOR", status: "candidate", outcomeCount: 0, successRate: null });
 
   for (let i = 0; i < 3; i++) {
@@ -62,8 +69,29 @@ test("WS1.4(a) regression pin: a rule with a REAL errorClass still earns held cr
 
   assert.equal(rule.outcomeCount, 3, "a real-class rule DOES accrue prevention credit on clean runs — this is the designed, non-circular promotion signal");
   assert.equal(rule.successRate, 0.6, "held credit plateaus at PREVENTION_HELD_SCORE (0.6) — capped at medium confidence, never high");
-  assert.equal(rule.status, "active", "three clean held runs promote a real-class candidate to active — unaffected by the empty-class guard");
-  assert.equal(rule.confidence, "medium", "prevention-only promotion never reaches high confidence");
+  assert.equal(rule.oracleOutcomeCount, 0, "prevention-path folds must NEVER advance oracleOutcomeCount — foldPreventionOutcome never sets isOracleScore");
+  assert.equal(rule.status, "candidate", "WS1.4(b): three clean prevention-only runs must NOT promote — zero objective evidence was ever folded in");
+  assert.equal(rule.confidence, "medium", "confidence is derived from successRate/outcomeCount alone and is unaffected by the promotion gate");
+});
+
+// WS1.4(b) full gate: pin the exact constant relationship the task calls out — with
+// PREVENTION_HELD_SCORE === PROMOTE_RATE (both 0.6), three clean prevention-only runs must NOT
+// promote (oracleOutcomeCount stays 0), but the SAME three runs plus one oracle-scored outcome at
+// or above the promote rate MUST promote (oracleOutcomeCount reaches 1).
+test("WS1.4(b): PREVENTION_HELD_SCORE === PROMOTE_RATE — three prevention-only runs hold at candidate; a fourth ORACLE-scored outcome promotes", () => {
+  assert.equal(PREVENTION_HELD_SCORE, 0.6, "pin the constant this test's design depends on");
+
+  let rule = makeRule({ errorClass: "E-FRAGILE-SELECTOR", status: "candidate", outcomeCount: 0, successRate: null });
+  for (let i = 0; i < 3; i++) {
+    rule = foldPreventionOutcome(rule, null); // clean run, three times over
+  }
+  assert.equal(rule.status, "candidate", "three clean prevention-only runs: zero oracle evidence, must NOT promote");
+  assert.equal(rule.oracleOutcomeCount, 0);
+
+  // A 4th outcome, this time REAL oracle evidence (valueScore path — isOracleScore=true).
+  rule = applyOutcome(rule, 0.75, null, true);
+  assert.equal(rule.oracleOutcomeCount, 1, "the oracle-scored outcome must advance oracleOutcomeCount");
+  assert.equal(rule.status, "active", "at least one oracle-scored outcome unblocks promotion once successRate/outcomeCount already clear their own thresholds");
 });
 
 test("WS1.4(a): an empty-errorClass rule also earns no debit when its own (nonexistent) class 'recurs' — the unfalsifiable guard is symmetric, not just a held-credit block", () => {

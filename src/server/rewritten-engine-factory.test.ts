@@ -663,6 +663,7 @@ test("historyLearningStore(appName).upsert() persists the REAL app name, not the
     confidence: "low",
     usageCount: 0,
     outcomeCount: 0,
+    oracleOutcomeCount: 0,
     successRate: null,
     lastVerified: null,
     source: "test",
@@ -691,7 +692,7 @@ test("historyLearningStore(appName).incrementUsage() bridges onto history.ts's i
   store.upsert({
     id: ruleId, trigger: "t", action: "a", errorClass: "E-X", archetype: null,
     status: "candidate", confidence: "low", usageCount: 0, outcomeCount: 0,
-    successRate: null, lastVerified: null, source: "test", at: new Date().toISOString(),
+    oracleOutcomeCount: 0, successRate: null, lastVerified: null, source: "test", at: new Date().toISOString(),
   });
 
   store.incrementUsage?.([ruleId]);
@@ -717,7 +718,7 @@ test("historyLearningStore(appName).recordOutcome() — oracle path folds valueS
     store.upsert({
       id, trigger: "t", action: "a", errorClass: "E-EXEC-FAIL", archetype: null,
       status: "candidate", confidence: "low", usageCount: 0, outcomeCount: 0,
-      successRate: null, lastVerified: null, source: "test", at: new Date().toISOString(),
+      oracleOutcomeCount: 0, successRate: null, lastVerified: null, source: "test", at: new Date().toISOString(),
     });
   }
 
@@ -734,8 +735,10 @@ test("historyLearningStore(appName).recordOutcome() — oracle path folds valueS
   const r2 = rows.find((r) => r.id === ruleId2);
   assert.equal(r1?.outcomeCount, 1, "rule 1 must fold exactly once");
   assert.equal(r1?.successRate, 0.8, "rule 1's successRate must equal the folded valueScore (first outcome)");
+  assert.equal(r1?.oracleOutcomeCount, 1, "WS1.4(b): the oracle path (valueScore !== null) must advance oracleOutcomeCount");
   assert.equal(r2?.outcomeCount, 1, "rule 2 must fold independently of rule 1");
   assert.equal(r2?.successRate, 0.8);
+  assert.equal(r2?.oracleOutcomeCount, 1);
 });
 
 // WS1.1 (full-flow remediation, most critical finding): THE INTEGRATION-HONEST TEST. Every test
@@ -769,7 +772,7 @@ test("WS1.1 integration: upsert -> retrieve (real LearningPortAdapter) -> derive
   store.upsert({
     id: ruleId, trigger: ruleTrigger, action: "use role+name", errorClass: "E-EXEC-FAIL",
     archetype: null, status: "active", confidence: "high", usageCount: 0, outcomeCount: 0,
-    successRate: null, lastVerified: null, source: "test", at: new Date().toISOString(),
+    oracleOutcomeCount: 0, successRate: null, lastVerified: null, source: "test", at: new Date().toISOString(),
   });
 
   // Real retrieval path: the SAME SqliteLearningRepository + LearningPortAdapter production wires
@@ -805,6 +808,7 @@ test("WS1.1 integration: upsert -> retrieve (real LearningPortAdapter) -> derive
   const folded = rows.find((r) => r.id === ruleId);
   assert.equal(folded?.outcomeCount, 1, "outcome_count must ADVANCE from 0 to 1 — this is the exact governance-fold edge WS1.1 fixes; before the fix this stayed frozen at 0 with no error");
   assert.equal(folded?.successRate, 0.75, "successRate must equal the folded valueScore (first outcome)");
+  assert.equal(folded?.oracleOutcomeCount, 1, "WS1.4(b): the oracle path (gateSignals.valueScore !== null) must advance oracle_outcome_count");
 });
 
 test("historyLearningStore(appName).recordOutcome() — empty rulesRetrieved is a safe no-op", async () => {
@@ -817,7 +821,7 @@ test("historyLearningStore(appName).recordOutcome() — empty rulesRetrieved is 
   store.upsert({
     id: ruleId, trigger: "t", action: "a", errorClass: "E-EXEC-FAIL", archetype: null,
     status: "candidate", confidence: "low", usageCount: 0, outcomeCount: 0,
-    successRate: null, lastVerified: null, source: "test", at: new Date().toISOString(),
+    oracleOutcomeCount: 0, successRate: null, lastVerified: null, source: "test", at: new Date().toISOString(),
   });
 
   store.recordOutcome({
@@ -845,17 +849,17 @@ test("historyLearningStore(appName).recordOutcome() — prevention path scores v
   store.upsert({
     id: heldRuleId, trigger: "t", action: "a", errorClass: "E-FRAGILE-SELECTOR", archetype: null,
     status: "candidate", confidence: "low", usageCount: 0, outcomeCount: 0,
-    successRate: null, lastVerified: null, source: "test", at: new Date().toISOString(),
+    oracleOutcomeCount: 0, successRate: null, lastVerified: null, source: "test", at: new Date().toISOString(),
   });
   store.upsert({
     id: failedRuleId, trigger: "t2", action: "a2", errorClass: "E-EXEC-FAIL", archetype: null,
     status: "candidate", confidence: "low", usageCount: 0, outcomeCount: 0,
-    successRate: null, lastVerified: null, source: "test", at: new Date().toISOString(),
+    oracleOutcomeCount: 0, successRate: null, lastVerified: null, source: "test", at: new Date().toISOString(),
   });
   store.upsert({
     id: noisyRuleId, trigger: "t3", action: "a3", errorClass: "E-FRAGILE-SELECTOR", archetype: null,
     status: "candidate", confidence: "low", usageCount: 0, outcomeCount: 0,
-    successRate: null, lastVerified: null, source: "test", at: new Date().toISOString(),
+    oracleOutcomeCount: 0, successRate: null, lastVerified: null, source: "test", at: new Date().toISOString(),
   });
 
   // A clean run (errorClass: null): heldRuleId's own class ("E-FRAGILE-SELECTOR") did NOT recur ->
@@ -875,8 +879,76 @@ test("historyLearningStore(appName).recordOutcome() — prevention path scores v
   const noisy = rows.find((r) => r.id === noisyRuleId);
   assert.equal(held?.outcomeCount, 1, "held rule must fold via the prevention path (weak positive)");
   assert.equal(held?.successRate, 0.6, "PREVENTION_HELD_SCORE for a clean run");
+  assert.equal(held?.oracleOutcomeCount, 0, "WS1.4(b): the prevention path must NEVER advance oracle_outcome_count");
   assert.equal(failed?.outcomeCount, 1, "unrelated rule on a clean run also holds (weak positive)");
+  assert.equal(failed?.oracleOutcomeCount, 0, "WS1.4(b): prevention path — no oracle evidence");
   assert.equal(noisy?.outcomeCount, 0, "a rule NOT in rulesRetrieved must never fold");
+});
+
+// Task 2 (full-flow remediation, WS1.3 closure): THE INTEGRATION-HONEST TEST for selectAllRules.
+// Before this fix, historyLearningStore(appName) never implemented LearningStore.selectAllRules,
+// so SqliteLearningRepository.listAll() always fell back to its own documented fail-open empty
+// set — ReflectorPortAdapter's anti-respawn dedup (decideDistill against the FULL existing-rule
+// set, incl. deprecated/superseded) was fully implemented but structurally inert in production: it
+// could never actually see a prior rule to dedup against. This test walks the REAL production
+// wiring end to end: upsert a DEPRECATED rule directly into the SAME learning_rules table
+// historyLearningStore(app) reads/writes, then run the distill DECISION the reflector's save path
+// uses (decideDistill against SqliteLearningRepository.listAll(app, ...)'s real output) and assert
+// the duplicate is skipped — proving listAll surfaces real rows, not [].
+test("Task 2: historyLearningStore(appName).selectAllRules wiring — SqliteLearningRepository.listAll surfaces a DEPRECATED rule so decideDistill skips a normalized duplicate (WS1.3 dedup goes live)", async () => {
+  const { historyLearningStore } = await import("./rewritten-engine-factory");
+  const { SqliteLearningRepository } = await import(
+    "@contexts/cross-run-learning/infrastructure/sqlite-learning-repository.adapter"
+  );
+  const { decideDistill, capRuleFields } = await import("@contexts/cross-run-learning/domain/distill-rule");
+  const app = `factory-learning-selectall-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const deprecatedRuleId = `rule-deprecated-${app}`;
+
+  const store = historyLearningStore(app);
+  // A rule that was tried and demoted — the anti-respawn guard's whole reason to exist: a
+  // recurring failure pattern must not spawn a FRESH candidate for a pattern already tried and
+  // found wanting.
+  store.upsert({
+    id: deprecatedRuleId,
+    trigger: "Applies when a form submit button lacks a stable selector",
+    action: "use getbyrole('button', { name: ... })",
+    errorClass: "E-FRAGILE-SELECTOR",
+    archetype: null,
+    status: "candidate", // upsertLearningRule always inserts as candidate (see history.ts's own doc)
+    confidence: "low",
+    usageCount: 0,
+    outcomeCount: 0,
+    oracleOutcomeCount: 0,
+    successRate: null,
+    lastVerified: null,
+    source: "test",
+    at: new Date().toISOString(),
+  });
+  // Force it to deprecated the SAME way a real demotion would (via the human-override path in
+  // history.ts) — proving the dedup guard sees it EVEN THOUGH it is excluded from normal retrieval.
+  const { setRuleStatusByHuman } = await import("./history");
+  setRuleStatusByHuman(deprecatedRuleId, "deprecated");
+
+  // Real production wiring: the SAME SqliteLearningRepository this factory composes
+  // (`new SqliteLearningRepository(historyLearningStore(app.name))`, ~line 524).
+  const repo = new SqliteLearningRepository(store);
+
+  // Before Task 2's fix, this always returned [] regardless of what upsert() had just written.
+  const existing = await repo.listAll(app, 200);
+  assert.ok(existing.some((r) => r.id === deprecatedRuleId), "listAll() must surface the deprecated row — this is the exact seam Task 2 wires live");
+  assert.equal(existing.find((r) => r.id === deprecatedRuleId)?.status, "deprecated", "the row's real status must survive the round-trip");
+
+  // Run the SAME distill decision the reflector's save path runs (reflector-port.adapter.ts's
+  // `decideDistill(capped, existing)`), with a candidate whose trigger/action normalize onto the
+  // SAME ruleKey as the deprecated row above (differs only in casing/whitespace/punctuation).
+  const capped = capRuleFields({
+    trigger: "applies when a Form Submit button lacks a stable selector",
+    action: "Use getByRole('button', { name: ... }).",
+  });
+  const decision = decideDistill(capped, existing);
+
+  assert.equal(decision.decision, "skip-duplicate", "WS1.3 anti-respawn dedup: a normalized duplicate of a DEPRECATED rule must be skipped, not saved as a fresh candidate");
+  assert.equal((decision as { match: { id: string } }).match.id, deprecatedRuleId, "the match must be the SAME deprecated row, proving listAll (not an empty fallback) drove the decision");
 });
 
 test("createRewrittenEngineFactory's produced CompositionConfig carries the SAME real runHistory/learningRepo wiring", () => {

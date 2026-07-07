@@ -12,6 +12,7 @@ function rule(overrides: Partial<LearningRule> = {}): LearningRule {
     confidence: "low",
     usageCount: 0,
     outcomeCount: 0,
+    oracleOutcomeCount: 0,
     successRate: null,
     lastVerified: null,
     source: "run-1",

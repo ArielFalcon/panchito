@@ -23,9 +23,10 @@ describe("retrieveRules: usage incremented only on the budget-fitted set (real-D
         errorClass: "E-FALSE-POSITIVE",
         source: "test",
       });
-      // Fold in 3 good outcomes to promote each rule to active so they are all equally ranked
-      // and the budget alone determines which are dropped.
-      for (let j = 0; j < 3; j++) recordRuleOutcome(id, 0.9);
+      // Fold in 3 good ORACLE-scored outcomes to promote each rule to active so they are all
+      // equally ranked and the budget alone determines which are dropped. WS1.4(b): isOracleScore
+      // must be true or these would all stay candidate instead of being promoted.
+      for (let j = 0; j < 3; j++) recordRuleOutcome(id, 0.9, null, true);
     }
 
     const out = retrieveRules({ app, maxRules: 8 });

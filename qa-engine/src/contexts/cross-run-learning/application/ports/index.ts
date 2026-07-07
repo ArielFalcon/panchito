@@ -33,6 +33,10 @@ export interface LearningRule {
   confidence: "low" | "medium" | "high";
   usageCount: number;
   outcomeCount: number;
+  // WS1.4(b): count of outcomes folded via the ORACLE-scored path (valueScore !== null), never the
+  // prevention path. Mirrors legacy src/qa/learning/learning-rule.ts's LearningRule.oracleOutcomeCount
+  // exactly — the objective-evidence anchor nextStatus's candidate -> active gate requires >= 1 of.
+  oracleOutcomeCount: number;
   successRate: number | null;
   lastVerified: string | null;
   source: string;
@@ -70,10 +74,15 @@ export interface LearningRepositoryPort {
   // see a deprecated/superseded row and would let a demoted pattern respawn as a fresh candidate.
   // Mirrors legacy's listAllLearningRules(app, limit) (src/server/history.ts), which exists for
   // EXACTLY this reason: "ALL rules regardless of status — used ONLY by the distiller for
-  // de-duplication". Optional (same optionality convention as incrementUsage above) so existing
-  // callers/fakes/stores that never distill need not implement it; ReflectorPortAdapter is the one
-  // production call site. A store that omits it makes this a fail-open no-op (empty existing set)
-  // — never a stricter behavior than before this method existed.
+  // de-duplication". Optional (same optionality convention as incrementUsage above) so a
+  // caller/fake/store that never distills need not implement it.
+  //
+  // LIVE as of Task 2 (full-flow remediation): the production bridge
+  // (src/server/rewritten-engine-factory.ts's historyLearningStore) now wires this onto
+  // history.ts's listAllLearningRules via SqliteLearningRepository.listAll — ReflectorPortAdapter's
+  // anti-respawn dedup actually sees the full existing-rule set in production. A store/fake that
+  // still omits selectAllRules remains a fail-open no-op (empty existing set), never a stricter
+  // gate than before this method existed — that fallback is preserved for tests only now.
   listAll?(app: string, limit: number): Promise<LearningRule[]>;
 }
 // Aligned to legacy src/types.ts StructuredReflection (8 fields). Field pruning, if any, is decided
