@@ -94,7 +94,7 @@ test("active-run guard: the running job's mirror is never deleted, orphaned or s
 
 test("protected mirror names are never deleted", () => {
   const { deps, removed } = makeDeps({
-    entries: [entry("ai-pipeline-self", STALE)], // orphan AND stale — still protected
+    entries: [entry("panchito-self", STALE)], // orphan AND stale — still protected
     configured: [],
   });
   const result = pruneMirrors(deps);

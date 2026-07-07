@@ -1,6 +1,6 @@
-# @ai-pipeline/sdk
+# @panchito/sdk
 
-Typed TypeScript client for the ai-pipeline orchestrator control API.
+Typed TypeScript client for the panchito orchestrator control API.
 
 - **Types are generated** from `contract/openapi.json` (the same artifact panchito's Go
   client consumes) via `npm run sdk:gen` → `src/types.gen.ts`. They never drift from the
@@ -12,7 +12,7 @@ Typed TypeScript client for the ai-pipeline orchestrator control API.
 ## Usage
 
 ```ts
-import { createClient } from "@ai-pipeline/sdk";
+import { createClient } from "@panchito/sdk";
 
 // Same-origin (served by the orchestrator at /app): baseUrl "" carries the operator's creds.
 const client = createClient({ baseUrl: "", token });

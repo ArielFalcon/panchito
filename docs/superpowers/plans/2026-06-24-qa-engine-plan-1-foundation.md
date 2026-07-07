@@ -47,7 +47,7 @@ The spec's `file:line` references are from a stale snapshot; the code keeps movi
 - [ ] **Step 1: Run the verification commands**
 
 ```bash
-cd /Users/arielyumn/Desktop/TRABAJO/ai-pipeline
+cd /Users/arielyumn/Desktop/TRABAJO/panchito
 rg -n 'export (async )?function runPipeline' src/pipeline.ts
 wc -l src/pipeline.ts
 echo "pipeline.test.ts runPipeline calls: $(rg -c 'runPipeline\(' src/pipeline.test.ts)"
@@ -102,7 +102,7 @@ The two immovable seams are `PipelineDeps` + `runPipeline` (the function seam) a
 - [ ] **Step 1: Check whether a drift-guard already exists**
 
 ```bash
-cd /Users/arielyumn/Desktop/TRABAJO/ai-pipeline
+cd /Users/arielyumn/Desktop/TRABAJO/panchito
 rg -l 'openapi' src/contract/*.test.ts
 cat package.json | rg 'contract:gen'
 rg -n 'gen-openapi' scripts/ 2>/dev/null
@@ -217,7 +217,7 @@ Create the empty parallel package with strict TS and path aliases. No engine cod
 - [ ] **Step 3: Create the mirror roots**
 
 ```bash
-cd /Users/arielyumn/Desktop/TRABAJO/ai-pipeline
+cd /Users/arielyumn/Desktop/TRABAJO/panchito
 mkdir -p qa-engine/src qa-engine/test/characterization/goldens
 touch qa-engine/src/.gitkeep qa-engine/test/.gitkeep
 ```
@@ -461,7 +461,7 @@ Run the *legacy* `runPipeline` for the 10 canonical scenarios, sanitize each `Ru
 - [ ] **Step 1: Identify the 10 source scenarios**
 
 ```bash
-cd /Users/arielyumn/Desktop/TRABAJO/ai-pipeline
+cd /Users/arielyumn/Desktop/TRABAJO/panchito
 rg -n "^test\(" src/pipeline.test.ts | rg -i "pass|fail|flaky|skip|invalid|infra|code|cross|shadow|context" | head -40
 ```
 
@@ -602,7 +602,7 @@ Verify the characterization net actually kills mutants in the trust keystone (`d
 - [ ] **Step 1: Read the existing Stryker pattern**
 
 ```bash
-cd /Users/arielyumn/Desktop/TRABAJO/ai-pipeline
+cd /Users/arielyumn/Desktop/TRABAJO/panchito
 rg -n "stryker|testRunner|mutate" src/qa/learning/mutation-code.ts | head -20
 ```
 
@@ -671,4 +671,4 @@ git commit -m "test(qa-engine): Stryker gate proving the change-coverage net kil
 
 **3. Type consistency:** `ComparableOutcome`/`runOutcomeEquivalent` (Task 5) are reused verbatim in Task 6's parity test. `RunOutcome` fields (runId, app, sha, mode, target, verdict, errorClass, gateSignals.{static,coverageRatio,valueScore,reviewerCorrections,reviewerApproved,reviewerRationale,flaky,retries}, at) match `src/types.ts`. `CaptureDeps extends PipelineDeps` with `savedOutcomes`, matching the `pipeline.test.ts` stub convention.
 
-**Open follow-ups for later plans (not Plan-1 gaps):** Plan 6 extends `golden-parity.test.ts` to run the rewritten engine against these goldens; Plan 7 handles the `data/ai-pipeline.db` → panchito rename (C1).
+**Open follow-ups for later plans (not Plan-1 gaps):** Plan 6 extends `golden-parity.test.ts` to run the rewritten engine against these goldens; Plan 7 handles the `data/panchito.db` → panchito rename (C1).

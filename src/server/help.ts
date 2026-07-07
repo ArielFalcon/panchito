@@ -1,17 +1,17 @@
 import { sanitizeText } from "../orchestrator/sanitizer";
 
 const PRODUCT_CONTEXT = `
-You are answering questions about panchito — the TUI (Terminal UI) for the ai-pipeline QA engine.
+You are answering questions about panchito — the TUI (Terminal UI) for the panchito QA engine.
 Use ONLY the information below. If the answer is not here, say so plainly — do not invent.
 
-## What is panchito / ai-pipeline
+## What is panchito / panchito
 
-ai-pipeline is an app-agnostic, centralized AI-assisted E2E QA engine. It watches team repos;
+panchito is an app-agnostic, centralized AI-assisted E2E QA engine. It watches team repos;
 when a commit is deployed to DEV, an AI agent runtime (OpenCode, Codex, or dual mode) generates Playwright E2E tests for the
 blast radius, runs them against the live DEV site, and — when green + reviewer-approved —
 commits them into the app repo's e2e/ folder via a PR with auto-merge. Failures open a GitHub Issue.
 
-panchito is the Ink (React for terminal) TUI that talks to the ai-pipeline orchestrator service
+panchito is the Ink (React for terminal) TUI that talks to the panchito orchestrator service
 over HTTP. It provides a visual dashboard for launching and tracking QA runs.
 
 ## How to run

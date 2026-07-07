@@ -2,7 +2,7 @@
 
 **Status:** Draft — 2026-06-24
 
-This document specifies a full rewrite of `ai-pipeline` into a new `qa-engine/`
+This document specifies a full rewrite of `panchito` into a new `qa-engine/`
 package, built in parallel to the running `src/` orchestrator (branch-by-abstraction)
 and switched in behind a single feature flag. The target is a **Hexagonal + Clean
 Architecture** with **tactical, selective DDD**: exactly **10 bounded contexts** as
@@ -19,7 +19,7 @@ PR + auto-merge. This is a design artifact; no source code is touched by it.
 
 ## 1. Summary
 
-`ai-pipeline` today is a working but structurally entangled QA engine whose entire
+`panchito` today is a working but structurally entangled QA engine whose entire
 orchestration, verdict policy, prompt assembly, budget management, coverage measurement,
 learning fold, cross-repo routing, and security confinement live inside a single
 ~2080-line `runPipeline` function (`runPipeline` in `src/pipeline.ts` (≈:816 at HEAD)).
@@ -83,7 +83,7 @@ call site — so a parallel engine satisfies the **sole direct caller** (`src/se
 
 The rewrite is the moment to land five cleanups that would be costly to retrofit later:
 
-- **C1 — Unify naming under `panchito`.** Erase every trace of the old name `ai-pipeline`: the `package.json` name, the docker service/container names and `docker-compose*`, env/config references, and any in-code identifiers/strings. Scope = internal nomenclature, docker, and configs; renaming the git remote/repo is a separate, optional call (out of this spec unless requested). The new engine module stays named `qa-engine/` (descriptive) inside project `panchito`.
+- **C1 — Unify naming under `panchito`.** Erase every trace of the old name `panchito`: the `package.json` name, the docker service/container names and `docker-compose*`, env/config references, and any in-code identifiers/strings. Scope = internal nomenclature, docker, and configs; renaming the git remote/repo is a separate, optional call (out of this spec unless requested). The new engine module stays named `qa-engine/` (descriptive) inside project `panchito`.
 - **C2 — Tests in a mirror `test/` tree.** Production code under `qa-engine/src/`; tests under `qa-engine/test/` mirroring the `src/` scaffolding (the Java `src/main`/`src/test` convention), NOT colocated `*.test.ts`. tsconfig path aliases (`@kernel/*`, `@contexts/*`, `@interface/*`) keep the mirrored imports clean. The Phase-1 mechanism is the **glob extension**: `"qa-engine/test/**/*.test.ts"` is added to the root `npm test` command alongside `--import ./test-setup.mjs` (resolved relative to the repo root — the same per-process SQLite isolation path already in use). "npm workspace" is a documented fallback only, not an unresolved OR. For typecheck: the root `tsc --noEmit` covers only `src/`; qa-engine type errors are caught by adding a TypeScript project reference (`references: [{ path: "./qa-engine" }]` in the root tsconfig) or an explicit `tsc -p qa-engine` step in `npm run typecheck`. See §7.2 Step 3 for the settled mechanism.
 - **C3 — Deep comment cleanup.** The current code is full of decision-log and intermediate-process comments. Final comments must be clean and useful: keep ONLY what helps a human or AI agent understand something the code does not state explicitly; delete the rest. (Already a CLAUDE.md invariant: comments describe the final state, not the process.)
 - **C4 — Code-mode ports ready, depth deferred.** All code-mode ports/adapters are defined, encapsulated, and fragmented in v1 (the §6 seams), but their DEEP implementation is a later stage — after the current (e2e) flow is switched in and stable. The interface is the v1 deliverable; the heavy adapters (real non-invasive JaCoCo injection, backend authoring, backend reviewer rubric) are YAGNI until stage 2. Consistent, not contradictory: the seam is cheap and buys the fragmentation; the expensive impl waits until needed.
@@ -253,7 +253,7 @@ cut §2; `pipeline-orchestration` map).
 ### 5.2 The `qa-engine/` folder tree
 
 ```
-panchito/                               # project root — renamed from "ai-pipeline" everywhere
+panchito/                               # project root — renamed from "panchito" everywhere
 │                                       # (package.json name, docker service/container, compose, configs, code)
 └── qa-engine/                          # the NEW engine, built in parallel to src/, switched in by a flag
     ├── package.json  tsconfig.json     # strict + noUncheckedIndexedAccess; path aliases @kernel/* @contexts/*
@@ -861,7 +861,7 @@ Items the design doc intentionally does NOT resolve — tracked here so they are
   clean-state step (after scaffold at §7.2 Step 3, before ports at Step 4):
   - `package.json` `name` field
   - `docker-compose.yml` and `docker-compose.override.yml` service names and container names
-  - `AI_PIPELINE_REPO` and `AI_PIPELINE_ROOT` env vars (all references in `src/`, compose,
+  - `PANCHITO_REPO` and `PANCHITO_ROOT` env vars (all references in `src/`, compose,
     and docs)
   - `SELF_REPO` default value in `src/index.ts`
   - `CLAUDE.md` strings that reference the old name

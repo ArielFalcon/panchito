@@ -170,7 +170,7 @@ are added to `qa-engine/tsconfig.json`'s `exclude` list.
 
 - [ ] Confirm the agent-runtime wrapped exports still match (grep, not line numbers):
   ```bash
-  cd /Users/arielyumn/Desktop/TRABAJO/ai-pipeline
+  cd /Users/arielyumn/Desktop/TRABAJO/panchito
   rg -n "export (class|function) (OpenCodeRuntimeStrategy|CodexRuntimeStrategy|codexErrorToInfra)" src/agent-runtime/opencode-strategy.ts src/agent-runtime/codex-strategy.ts
   rg -n "export (class|function) (SingleAgentFacade|DualAgentFacade|configFromEnv|validateAgentRuntimeConfig|publicAgentConfig|capabilitiesForRole|assignmentForRole)" src/agent-runtime/facades.ts src/agent-runtime/config.ts src/agent-runtime/types.ts
   rg -n "export type (AgentProvider|AgentMode|AgentRole)" src/agent-runtime/types.ts
@@ -286,7 +286,7 @@ are added to `qa-engine/tsconfig.json`'s `exclude` list.
 
 - [ ] Confirm the port is NOT already kernel-resident (drives this task's necessity):
   ```bash
-  cd /Users/arielyumn/Desktop/TRABAJO/ai-pipeline
+  cd /Users/arielyumn/Desktop/TRABAJO/panchito
   fd "agent-runtime.port.ts" qa-engine/src/shared-kernel/ports/ || echo "ABSENT — kernel relocation required"
   rg -n "export interface AgentRuntimePort" qa-engine/src/contexts/agent-runtime/application/ports/index.ts
   ```
@@ -1674,7 +1674,7 @@ are added to `qa-engine/tsconfig.json`'s `exclude` list.
 
 - [ ] Confirm `deepseek-v4-pro` is now in the catalog (the user's one-line change landed):
   ```bash
-  cd /Users/arielyumn/Desktop/TRABAJO/ai-pipeline
+  cd /Users/arielyumn/Desktop/TRABAJO/panchito
   rg -n "deepseek-v4-pro" src/integrations/model-window-catalog.ts
   ```
   **GATE:** if there is NO match → STOP. Phase B is blocked. Report: "Phase B blocked — the catalog-green

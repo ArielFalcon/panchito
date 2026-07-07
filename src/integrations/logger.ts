@@ -5,7 +5,7 @@ import { join } from "node:path";
 // Replaces ad-hoc console.log with a single stream so logs can be shipped to
 // Loki/CloudWatch/etc without being interleaved with stdout noise.
 
-const LOG_DIR = join(process.env.AI_PIPELINE_ROOT ?? process.cwd(), "data", "logs");
+const LOG_DIR = join(process.env.PANCHITO_ROOT ?? process.cwd(), "data", "logs");
 const MAX_LOG_SIZE = 50 * 1024 * 1024; // 50 MB
 const MAX_LOG_FILES = 5;
 

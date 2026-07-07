@@ -12,7 +12,7 @@
 # server-side guarantee that a fix failing typecheck/tests can never land on main.
 set -euo pipefail
 
-REPO="${1:-ArielFalcon/ai-pipeline}"
+REPO="${1:-ArielFalcon/panchito}"
 : "${GITHUB_TOKEN:?set GITHUB_TOKEN (needs admin on the repo)}"
 
 api() {

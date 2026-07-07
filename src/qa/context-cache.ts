@@ -11,7 +11,7 @@ import { join } from "node:path";
 import type { ArchitectureContext } from "./context";
 
 function cacheDir(): string {
-  const dir = join(process.env.AI_PIPELINE_ROOT ?? process.cwd(), "data", "context-cache");
+  const dir = join(process.env.PANCHITO_ROOT ?? process.cwd(), "data", "context-cache");
   mkdirSync(dir, { recursive: true });
   return dir;
 }

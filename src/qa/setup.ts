@@ -256,7 +256,7 @@ function markInstallCurrent(e2eDir: string): void {
 }
 
 function seedDir(): string {
-  return join(process.env.AI_PIPELINE_ROOT ?? process.cwd(), "config", "e2e");
+  return join(process.env.PANCHITO_ROOT ?? process.cwd(), "config", "e2e");
 }
 
 export const defaultSetupDeps: SetupDeps = {

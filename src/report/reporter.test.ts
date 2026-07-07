@@ -96,7 +96,7 @@ test("PR body documents what the suite covers and how it was validated — no lo
     parentRunId: "run-deadbeef",
   });
   assert.match(body, /## What this PR adds/);
-  assert.match(body, /E2E tests generated\/updated by ai-pipeline for `abc123`/);
+  assert.match(body, /E2E tests generated\/updated by panchito for `abc123`/);
   assert.match(body, /\*\*Covers:\*\*[\s\S]*\*\*checkout\*\* — a cart with >10 items/);
   assert.match(body, /\*\*Validation:\*\* harness green/);
   assert.match(body, /Continuation of run-deadbeef/);

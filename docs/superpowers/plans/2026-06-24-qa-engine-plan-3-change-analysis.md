@@ -65,7 +65,7 @@ The user edits `src/` in parallel; the snapshot drifts. Lock today's facts befor
 - [ ] **Step 1: Confirm the 3 diff-content parsers still live where the spec says**
 
 ```bash
-cd /Users/arielyumn/Desktop/TRABAJO/ai-pipeline
+cd /Users/arielyumn/Desktop/TRABAJO/panchito
 rg -n 'export function parseDiffHunks'        src/qa/change-coverage.ts
 rg -n 'export function parseChangedFiles'     src/qa/commit-classify.ts
 rg -n 'function changedFilesFromDiff'         src/qa/static-signal/semantic-diff.ts
@@ -900,7 +900,7 @@ Plan 2 left `application/ports/index.ts` a stub with loose VO shapes and `extrac
 Before replacing the barrel, find every qa-engine consumer that imports the old loose VO shapes (`ChangedSymbol`, `RelationEdge`, `ComplexityHotspot`, `FileChangeKind`, `ChangePattern`) from the change-analysis ports barrel. Those callers must be updated to import from the domain module (`../../domain/static-signal.ts` or via `@contexts/change-analysis/domain/static-signal.ts`) once the barrel stops re-exporting them.
 
 ```bash
-cd /Users/arielyumn/Desktop/TRABAJO/ai-pipeline
+cd /Users/arielyumn/Desktop/TRABAJO/panchito
 rg --type ts -n 'from.*change-analysis.*ports.*index|from.*application/ports' qa-engine/src qa-engine/test 2>/dev/null
 rg --type ts -n 'ChangedSymbol|RelationEdge|ComplexityHotspot|FileChangeKind|ChangePattern' qa-engine/src qa-engine/test 2>/dev/null | rg 'from.*ports'
 ```

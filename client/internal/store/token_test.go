@@ -33,7 +33,7 @@ func TestDiscoverTokenFromFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cfg, ".api_token"), []byte("filetok\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("AI_PIPELINE_ROOT", dir)
+	t.Setenv("PANCHITO_ROOT", dir)
 
 	tok, src := DiscoverToken()
 
@@ -45,7 +45,7 @@ func TestDiscoverTokenFromFile(t *testing.T) {
 	}
 }
 
-// mkRepo creates an ai-pipeline-shaped repo (config/apps + config/e2e) at dir, with the given
+// mkRepo creates an panchito-shaped repo (config/apps + config/e2e) at dir, with the given
 // token in config/.api_token.
 func mkRepo(t *testing.T, dir, token string) {
 	t.Helper()
@@ -63,7 +63,7 @@ func mkRepo(t *testing.T, dir, token string) {
 // to the repo root (recognised by its shape: config/apps + config/e2e).
 func TestDiscoverTokenWalksUpToRepo(t *testing.T) {
 	t.Setenv("QA_API_TOKEN", "")
-	t.Setenv("AI_PIPELINE_ROOT", "")
+	t.Setenv("PANCHITO_ROOT", "")
 	repo := t.TempDir()
 	mkRepo(t, repo, "repotok")
 	sub := filepath.Join(repo, "client", "internal")
@@ -85,7 +85,7 @@ func TestDiscoverTokenWalksUpToRepo(t *testing.T) {
 // config/apps marker alone must not make the walk-up read a planted token.
 func TestDiscoverTokenIgnoresForgedMarker(t *testing.T) {
 	t.Setenv("QA_API_TOKEN", "")
-	t.Setenv("AI_PIPELINE_ROOT", "")
+	t.Setenv("PANCHITO_ROOT", "")
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "config", "apps"), 0o755); err != nil { // only one marker
 		t.Fatal(err)
@@ -103,7 +103,7 @@ func TestDiscoverTokenIgnoresForgedMarker(t *testing.T) {
 // When two repo-shaped roots are nested, the CLOSEST one to the working directory wins.
 func TestDiscoverTokenClosestRepoWins(t *testing.T) {
 	t.Setenv("QA_API_TOKEN", "")
-	t.Setenv("AI_PIPELINE_ROOT", "")
+	t.Setenv("PANCHITO_ROOT", "")
 	outer := t.TempDir()
 	mkRepo(t, outer, "outer")
 	inner := filepath.Join(outer, "inner")
@@ -154,7 +154,7 @@ func TestSaveLastHostIgnoresEmpty(t *testing.T) {
 // concrete instruction).
 func TestDiscoverTokenNone(t *testing.T) {
 	t.Setenv("QA_API_TOKEN", "")
-	t.Setenv("AI_PIPELINE_ROOT", t.TempDir()) // a root with no config/.api_token
+	t.Setenv("PANCHITO_ROOT", t.TempDir()) // a root with no config/.api_token
 	t.Chdir(t.TempDir())                       // a cwd whose ancestors are not the repo
 
 	if tok, _ := DiscoverToken(); tok != "" {

@@ -75,8 +75,8 @@ function ensureDb(): void {
   if (initialized) return;
 
   const dbPath =
-    process.env.HISTORY_DB_PATH ?? join(process.env.AI_PIPELINE_ROOT ?? process.cwd(), "data", "ai-pipeline.db");
-  mkdirSync(join(process.env.AI_PIPELINE_ROOT ?? process.cwd(), "data"), { recursive: true });
+    process.env.HISTORY_DB_PATH ?? join(process.env.PANCHITO_ROOT ?? process.cwd(), "data", "panchito.db");
+  mkdirSync(join(process.env.PANCHITO_ROOT ?? process.cwd(), "data"), { recursive: true });
 
   db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
@@ -1062,15 +1062,15 @@ export function computeTelemetryAnalysis(app: string, windowDays?: number): Tele
 
 export async function backupDatabase(): Promise<{ backedUp: boolean; path?: string; error?: string }> {
   if (!initialized) return { backedUp: false, error: "db not initialized" };
-  const backupDir = join(process.env.AI_PIPELINE_ROOT ?? process.cwd(), "data", "backups");
+  const backupDir = join(process.env.PANCHITO_ROOT ?? process.cwd(), "data", "backups");
   try {
     mkdirSync(backupDir, { recursive: true });
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const backupPath = join(backupDir, `ai-pipeline-${timestamp}.db`);
+    const backupPath = join(backupDir, `panchito-${timestamp}.db`);
     await db.backup(backupPath);
     // Prune old backups: keep only the last 7
     const files = readdirSync(backupDir)
-      .filter((f: string) => f.startsWith("ai-pipeline-") && f.endsWith(".db"))
+      .filter((f: string) => f.startsWith("panchito-") && f.endsWith(".db"))
       .sort();
     while (files.length > 7) {
       const old = files.shift();

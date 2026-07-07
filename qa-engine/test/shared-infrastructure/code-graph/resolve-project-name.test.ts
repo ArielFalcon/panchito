@@ -49,7 +49,7 @@ test("no matching root_path resolves to undefined (fail-open — the unindexed-r
     JSON.stringify({ projects: [{ name: "some-other-app", root_path: "/some/other/app" }] }),
   );
 
-  const name = await resolveProjectName(client, "/Users/arielyumn/Desktop/TRABAJO/ai-pipeline");
+  const name = await resolveProjectName(client, "/Users/arielyumn/Desktop/TRABAJO/panchito");
 
   assert.equal(name, undefined);
 });

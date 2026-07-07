@@ -14,7 +14,7 @@
 // (code:null), malformed JSON, a missing/malformed `projects` array, or no matching root_path all
 // resolve to `undefined` — NEVER a thrown error. A caller treats `undefined` exactly like an
 // unindexed repo (CodeGraphPort's own "no structural signal" contract) — this is the path EVERY
-// watched app without a pre-built index hits today (confirmed: this very repo, ai-pipeline, is
+// watched app without a pre-built index hits today (confirmed: this very repo, panchito, is
 // itself unindexed and correctly resolves to undefined).
 //
 export interface ProjectNameCliClient {

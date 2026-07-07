@@ -46,8 +46,8 @@ import { OnboardingService } from "@contexts/service-topology/application/onboar
 import { CodebaseMemoryClient } from "../qa-engine/src/shared-infrastructure/code-graph/codebase-memory-client";
 import { redactError } from "./util/redact";
 
-const SELF_REPO = process.env.AI_PIPELINE_REPO ?? "ArielFalcon/ai-pipeline";
-const ROOT = process.env.AI_PIPELINE_ROOT ?? process.cwd();
+const SELF_REPO = process.env.PANCHITO_REPO ?? "ArielFalcon/panchito";
+const ROOT = process.env.PANCHITO_ROOT ?? process.cwd();
 const TOKEN_FILE = join(ROOT, "config", ".api_token");
 // Durable backing (OBS-01) lives in createDurableRunEventStore, shared with the CLI so every
 // trigger persists events identically: the live SSE stream survives a restart (e.g. the
@@ -725,7 +725,7 @@ const server = createServer(async (req, res) => {
 finalizeInterruptedRuns();
 
 server.listen(port, () => {
-  logJson("info", `ai-pipeline listening on :${port}${apiToken ? " (API auth on)" : ""}`);
+  logJson("info", `panchito listening on :${port}${apiToken ? " (API auth on)" : ""}`);
   // Make global fetch proxy-aware (HTTP(S)_PROXY/NO_PROXY) from boot, before any GitHub API or
   // health call. No-op when no proxy is configured. (A per-run build refines the timeouts.)
   const startupTimeout = Number(process.env.OPENCODE_TIMEOUT_MS) || 900_000;

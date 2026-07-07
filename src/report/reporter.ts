@@ -170,7 +170,7 @@ export function renderPrBody(input: PrBodyInput): string {
   const what = input.isCode ? "Source-code tests" : "E2E tests";
   const blocks: string[] = [
     "## What this PR adds",
-    `${what} generated/updated by ai-pipeline for \`${s(input.sha)}\`.`,
+    `${what} generated/updated by panchito for \`${s(input.sha)}\`.`,
   ];
 
   const covered = (input.tested ?? []).filter((t) => t.flow || t.objective).slice(0, MAX_ITEMS);

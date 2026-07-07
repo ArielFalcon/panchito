@@ -3,7 +3,7 @@
 //
 // The dashboard is served same-origin by the orchestrator at /app, so baseUrl is "" and the
 // browser carries the operator's existing credentials to /api/v1/*.
-import { createClient, type SignalsView, type RunEvent } from "@ai-pipeline/sdk";
+import { createClient, type SignalsView, type RunEvent } from "@panchito/sdk";
 
 export function makeClient() {
   return createClient({ baseUrl: "" });

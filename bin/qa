@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# qa — interactive layer for the ai-pipeline control API.
+# qa — interactive layer for the panchito control API.
 # Talks HTTP to a RUNNING orchestrator (docker compose up). Needs: curl, jq.
 # Auth: set QA_API_TOKEN to match the service's QA_API_TOKEN.
 # Host:  override with QA_HOST (default localhost:8080).

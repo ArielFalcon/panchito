@@ -14,7 +14,7 @@ export interface EnvStoreFs {
   write(content: string): void;
 }
 
-export function defaultEnvStoreFs(envPath = join(process.env.AI_PIPELINE_ROOT ?? process.cwd(), ".env")): EnvStoreFs {
+export function defaultEnvStoreFs(envPath = join(process.env.PANCHITO_ROOT ?? process.cwd(), ".env")): EnvStoreFs {
   return {
     read: () => (existsSync(envPath) ? readFileSync(envPath, "utf8") : null),
     write: (c) => {

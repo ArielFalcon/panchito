@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { parse } from "yaml";
 import { AppConfigSchema, type ValidatedAppConfig } from "./schemas";
 
-const ROOT = process.env.AI_PIPELINE_ROOT ?? process.cwd();
+const ROOT = process.env.PANCHITO_ROOT ?? process.cwd();
 
 export interface AppConfig extends ValidatedAppConfig {}
 

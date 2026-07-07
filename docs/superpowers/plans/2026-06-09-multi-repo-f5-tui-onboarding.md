@@ -187,7 +187,7 @@ export interface EnvStoreFs {
   write(content: string): void;
 }
 
-export function defaultEnvStoreFs(envPath = join(process.env.AI_PIPELINE_ROOT ?? process.cwd(), ".env")): EnvStoreFs {
+export function defaultEnvStoreFs(envPath = join(process.env.PANCHITO_ROOT ?? process.cwd(), ".env")): EnvStoreFs {
   return {
     read: () => (existsSync(envPath) ? readFileSync(envPath, "utf8") : null),
     write: (c) => writeFileSync(envPath, c, "utf8"),
@@ -714,7 +714,7 @@ const appAdminDeps: AppAdminDeps = {
   getRepoInfo: (repo) => github.getRepo(repo),
   configExists: (name) => configExists(name),
   writeConfig: (name, yaml) => writeConfig(name, yaml),
-  deleteConfig: (name) => unlinkSync(join(process.env.AI_PIPELINE_ROOT ?? process.cwd(), "config", "apps", `${name}.yaml`)),
+  deleteConfig: (name) => unlinkSync(join(process.env.PANCHITO_ROOT ?? process.cwd(), "config", "apps", `${name}.yaml`)),
   deleteMirror: (repo) => rmSync(join(process.env.MIRROR_DIR ?? join(process.cwd(), ".mirrors"), repo.replaceAll("/", "__")), { recursive: true, force: true }),
   deleteHistory: (app) => deleteAppHistory(app),
   applyEnv: (vars) => applyEnvVars(vars, { fs: defaultEnvStoreFs(), env: process.env }),

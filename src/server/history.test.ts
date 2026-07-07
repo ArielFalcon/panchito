@@ -210,8 +210,8 @@ test("deleteAppHistory removes the app's runs (cascading cases/specs) but not ot
 
 test("backupDatabase writes a consistent, openable snapshot containing committed rows", async () => {
   const tmpRoot = mkdtempSync(join(tmpdir(), "hist-backup-"));
-  const prevRoot = process.env.AI_PIPELINE_ROOT;
-  process.env.AI_PIPELINE_ROOT = tmpRoot;
+  const prevRoot = process.env.PANCHITO_ROOT;
+  process.env.PANCHITO_ROOT = tmpRoot;
   try {
     const rec = createRecord({ app: "hist-backup", sha: "abc1234", target: "e2e", mode: "diff" });
     const r = await backupDatabase();
@@ -226,8 +226,8 @@ test("backupDatabase writes a consistent, openable snapshot containing committed
       snapshot.close();
     }
   } finally {
-    if (prevRoot === undefined) delete process.env.AI_PIPELINE_ROOT;
-    else process.env.AI_PIPELINE_ROOT = prevRoot;
+    if (prevRoot === undefined) delete process.env.PANCHITO_ROOT;
+    else process.env.PANCHITO_ROOT = prevRoot;
     rmSync(tmpRoot, { recursive: true, force: true });
   }
 });
@@ -282,25 +282,25 @@ test("getRunOutcome returns the single run's outcome and round-trips the reviewe
 
 test("backupDatabase keeps only the last 7 backups", async () => {
   const tmpRoot = mkdtempSync(join(tmpdir(), "hist-backup-prune-"));
-  const prevRoot = process.env.AI_PIPELINE_ROOT;
-  process.env.AI_PIPELINE_ROOT = tmpRoot;
+  const prevRoot = process.env.PANCHITO_ROOT;
+  process.env.PANCHITO_ROOT = tmpRoot;
   try {
     const backupDir = join(tmpRoot, "data", "backups");
     mkdirSync(backupDir, { recursive: true });
     // Pre-seed 9 older "backups" (lexically before any real ISO timestamp).
     for (let i = 0; i < 9; i++) {
-      writeFileSync(join(backupDir, `ai-pipeline-0000-0${i}.db`), "stale");
+      writeFileSync(join(backupDir, `panchito-0000-0${i}.db`), "stale");
     }
     const r = await backupDatabase();
     assert.equal(r.backedUp, true);
-    const remaining = readdirSync(backupDir).filter((f) => f.startsWith("ai-pipeline-") && f.endsWith(".db"));
+    const remaining = readdirSync(backupDir).filter((f) => f.startsWith("panchito-") && f.endsWith(".db"));
     assert.equal(remaining.length, 7);
     // The newest (real) backup survives; the oldest seeds were dropped.
     assert.ok(remaining.includes(basename(r.path!)));
-    assert.ok(!remaining.includes("ai-pipeline-0000-00.db"));
+    assert.ok(!remaining.includes("panchito-0000-00.db"));
   } finally {
-    if (prevRoot === undefined) delete process.env.AI_PIPELINE_ROOT;
-    else process.env.AI_PIPELINE_ROOT = prevRoot;
+    if (prevRoot === undefined) delete process.env.PANCHITO_ROOT;
+    else process.env.PANCHITO_ROOT = prevRoot;
     rmSync(tmpRoot, { recursive: true, force: true });
   }
 });

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# panchito — the Go/Bubble Tea terminal client for the ai-pipeline control plane.
+# panchito — the Go/Bubble Tea terminal client for the panchito control plane.
 # Talks HTTP to a RUNNING orchestrator (docker compose up). Build once, run freely:
 # the compiled binary lives in Go's bin dir; this shim builds it on first use only.
 # Env: QA_HOST (default localhost:8080) · QA_API_TOKEN (if the service requires auth).

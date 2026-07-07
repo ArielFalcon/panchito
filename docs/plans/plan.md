@@ -1,4 +1,4 @@
-# E2E Remediation Plan — panchito (ai-pipeline)
+# E2E Remediation Plan — panchito (panchito)
 
 > **Status:** Phase 0 (diagnosis + validation) COMPLETE. Keystone validated with real production data. Implementation of Phase 1 NOT yet started (one safe win applied).
 > **Last updated:** 2026-06-22
@@ -16,14 +16,14 @@ A fresh session can resume exactly by reading this section + the engram observat
 **Immediate next action:** Implement **Phase 1.1 (bounded agent self-execution loop)** + its **data-isolation corollary**, with TDD, in the worktree. See [§ Phase 1](#phase-1--correctness-the-roi-core) and [§ Next steps](#-next-steps-exact).
 
 **Environment state (verified 2026-06-22):**
-- Docker is UP. Containers running: `ai-pipeline-orchestrator-1` (healthy), `ai-pipeline-agents-1` (healthy), full `spring-petclinic-*` microservice stack.
-- **The real run history is in the Docker volume `ai-pipeline_qa-data`**, NOT in the repo. Re-access it with:
+- Docker is UP. Containers running: `panchito-orchestrator-1` (healthy), `panchito-agents-1` (healthy), full `spring-petclinic-*` microservice stack.
+- **The real run history is in the Docker volume `panchito_qa-data`**, NOT in the repo. Re-access it with:
   ```bash
-  mkdir -p /tmp/realqa && docker cp ai-pipeline-orchestrator-1:/app/data/ai-pipeline.db /tmp/realqa/
-  docker cp ai-pipeline-orchestrator-1:/app/data/ai-pipeline.db-wal /tmp/realqa/ 2>/dev/null || true
-  sqlite3 /tmp/realqa/ai-pipeline.db "SELECT app,target,mode,verdict,COUNT(*) FROM run_outcomes GROUP BY 1,2,3,4;"
+  mkdir -p /tmp/realqa && docker cp panchito-orchestrator-1:/app/data/panchito.db /tmp/realqa/
+  docker cp panchito-orchestrator-1:/app/data/panchito.db-wal /tmp/realqa/ 2>/dev/null || true
+  sqlite3 /tmp/realqa/panchito.db "SELECT app,target,mode,verdict,COUNT(*) FROM run_outcomes GROUP BY 1,2,3,4;"
   ```
-  ⚠️ The repo-local `data/ai-pipeline.db` is POLLUTED with test fixtures (apps `tel-*`, sha `abc1234`) — DO NOT use it for analysis. Real data = Docker volume only.
+  ⚠️ The repo-local `data/panchito.db` is POLLUTED with test fixtures (apps `tel-*`, sha `abc1234`) — DO NOT use it for analysis. Real data = Docker volume only.
 - Green gate: `npm test` (900+ tests, tsx) + `npm run typecheck`. Both MUST stay green. Typecheck was green at baseline this session.
 - `node_modules` in the worktree is a symlink to the parent checkout's `node_modules`.
 

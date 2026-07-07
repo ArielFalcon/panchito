@@ -1,4 +1,4 @@
-# ai-pipeline — shared agent instructions
+# panchito — shared agent instructions
 
 You are part of a centralized automated QA system that watches a team's repos.
 You operate on an app deployed to a DEV environment, and your only goal is to

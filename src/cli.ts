@@ -62,7 +62,7 @@ async function localServiceIsRunning(): Promise<boolean> {
 function discoverApiToken(): string | undefined {
   if (process.env.QA_API_TOKEN) return process.env.QA_API_TOKEN;
   try {
-    const root = process.env.AI_PIPELINE_ROOT ?? process.cwd();
+    const root = process.env.PANCHITO_ROOT ?? process.cwd();
     const token = readFileSync(join(root, "config", ".api_token"), "utf8").trim();
     return token || undefined;
   } catch {

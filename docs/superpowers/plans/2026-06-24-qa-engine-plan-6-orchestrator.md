@@ -177,7 +177,7 @@ Seam-3 `killTree` decoupling (after the user's `dom-snapshot.ts` WIP lands, via 
 
 - [ ] Confirm the `runPipeline` signature + verdict set are unchanged (grep, not line numbers):
   ```bash
-  cd /Users/arielyumn/Desktop/TRABAJO/ai-pipeline
+  cd /Users/arielyumn/Desktop/TRABAJO/panchito
   rg -n "export async function runPipeline" src/pipeline.ts
   rg -n "export interface PipelineDeps" src/pipeline.ts
   rg -n "verdict: \"(pass|fail|flaky|invalid|infra-error|skipped)\"|verdict = \"" src/pipeline.ts | head -20
@@ -1153,7 +1153,7 @@ the test-execution original)
 - [x] Re-confirm the gap and the sibling entry points to wrap (grep — record the exact symbols/paths so each
   bridge wraps a REAL collaborator, not an invented one):
   ```bash
-  cd /Users/arielyumn/Desktop/TRABAJO/ai-pipeline
+  cd /Users/arielyumn/Desktop/TRABAJO/panchito
   rg -n "implements (ChangeAnalysisPort|GenerationPort|ReviewPort|ValidationPort|ExecutionPort|ObjectiveSignalPort|PublicationPort|LearningPort|WorkspacePort|DeployGatePort|RunHistoryPort)" qa-engine/src/ || echo "ZERO — bridges absent, Task E.0 builds them (expected)"
   rg -ln "class GenerateTestsUseCase"                          qa-engine/src/contexts/generation/
   rg -ln "class AnalyzeChangeUseCase|analyze-change.use-case"  qa-engine/src/contexts/change-analysis/

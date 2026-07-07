@@ -13,7 +13,7 @@ import { existsSync, rmSync, cpSync, readFileSync, writeFileSync } from "node:fs
 import { execSync } from "node:child_process";
 import { join } from "node:path";
 
-const ROOT = process.env.AI_PIPELINE_ROOT ?? process.cwd();
+const ROOT = process.env.PANCHITO_ROOT ?? process.cwd();
 const MARKER = join(ROOT, "data", "pending-swap.json");
 const MAX_BOOT_ATTEMPTS = 3;
 

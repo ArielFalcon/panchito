@@ -968,7 +968,7 @@ async function handleHelp(req: IncomingMessage, res: ServerResponse, deps: ApiDe
       context: fullContext,
       question,
       instruction:
-        "You are a helpful assistant answering questions about panchito (the TUI for ai-pipeline). " +
+        "You are a helpful assistant answering questions about panchito (the TUI for panchito). " +
         "Use ONLY the context below. " +
         "TERMINAL-FRIENDLY FORMATTING (this renders in a TUI via Ink <Text>): " +
         "allowed: blank lines, indentation, capitalized headers (RESUMEN, USO), " +

@@ -1,11 +1,11 @@
-# @ai-pipeline/web — operator/value dashboard (slot)
+# @panchito/web — operator/value dashboard (slot)
 
-The web dashboard for ai-pipeline. **The UI implementation is delegated**; this package is
+The web dashboard for panchito. **The UI implementation is delegated**; this package is
 the prepared slot and its integration contract.
 
 ## How it fits
 
-- Lives in this monorepo as a workspace; consumes [`@ai-pipeline/sdk`](../packages/sdk) for
+- Lives in this monorepo as a workspace; consumes [`@panchito/sdk`](../packages/sdk) for
   all backend access (typed, generated from the contract — no hand-written request glue).
 - Built to **`web/dist`** and served **same-origin** by the orchestrator at **`/app`** (see
   `src/server/static.ts`). No CORS; the browser carries the operator's credentials.
@@ -15,7 +15,7 @@ the prepared slot and its integration contract.
 ## Contract for the dashboard build
 
 - Output a static SPA build into `web/dist` (including `index.html`).
-- Import the SDK: `import { createClient } from "@ai-pipeline/sdk"`, called with
+- Import the SDK: `import { createClient } from "@panchito/sdk"`, called with
   `{ baseUrl: "" }` (same-origin).
 - Client-side routes under `/app/*` are fine — the orchestrator falls back to `index.html`.
 

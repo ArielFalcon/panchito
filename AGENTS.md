@@ -2,7 +2,7 @@
 
 ## What this is
 
-`ai-pipeline` is an **app-agnostic, centralized AI-assisted E2E QA engine**. It watches team repos; when a commit is deployed to DEV, an AI agent (OpenCode and/or Codex) generates Playwright E2E tests for the blast radius, runs them against the live DEV site, and — when green + reviewer-approved — commits them into the app repo's `e2e/` folder via a PR with auto-merge. Failures open a GitHub Issue.
+`panchito` is an **app-agnostic, centralized AI-assisted E2E QA engine**. It watches team repos; when a commit is deployed to DEV, an AI agent (OpenCode and/or Codex) generates Playwright E2E tests for the blast radius, runs them against the live DEV site, and — when green + reviewer-approved — commits them into the app repo's `e2e/` folder via a PR with auto-merge. Failures open a GitHub Issue.
 
 **Priority: stable, reliable, deterministic > features.** The hardest problem is trust — see [the value/trust risk](#the-valuetrust-risk).
 

@@ -19,7 +19,7 @@ import { logJson } from "../integrations/logger";
 
 export const PRUNE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 // Mirrors that are never pruned (the maintainer's own working copy).
-export const PROTECTED_MIRROR_NAMES = new Set(["ai-pipeline-self"]);
+export const PROTECTED_MIRROR_NAMES = new Set(["panchito-self"]);
 
 // Directory name of a repo's mirror under the mirrors root (see repo-mirror.ts).
 export function repoSlug(repo: string): string {

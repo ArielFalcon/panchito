@@ -134,7 +134,7 @@ legacy `src/` original; they are added to `qa-engine/tsconfig.json`'s `exclude` 
 
 - [ ] Confirm the wrapped exports still match (grep, not line numbers):
   ```bash
-  cd /Users/arielyumn/Desktop/TRABAJO/ai-pipeline
+  cd /Users/arielyumn/Desktop/TRABAJO/panchito
   rg -n "export function (runE2E|runCodeTests|detectCodeProject|coverageCommand|parsePorcelain)" src/qa/execute.ts src/qa/code-runner.ts
   rg -n "export (interface|function) (ExecuteDeps|CodeExecuteDeps|RunOutput|CodeRunOutput)" src/qa/execute.ts src/qa/code-runner.ts
   rg -n "export function (decideCoverage|blocksPublish|defaultCollectCoverage|parseLcov|parseIstanbulJson|parseJacocoXml|parseV8Coverage|collectNativeBranchCoverage)" src/qa/change-coverage.ts

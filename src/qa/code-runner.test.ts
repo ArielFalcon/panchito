@@ -395,7 +395,7 @@ test("node --test that executed zero tests is infra-error, not a false pass", as
 });
 
 test("npm test wrapping node:test that executed ZERO tests is infra-error (the real self-test case)", async () => {
-  // ai-pipeline's own test command is `npm test`, which wraps `node --test`. The node:test
+  // panchito's own test command is `npm test`, which wraps `node --test`. The node:test
   // summary still reports the count, so a zero-test run MUST be caught even though cmd is `npm`.
   const project: CodeProject = { ecosystem: "node", install: null, test: { cmd: "npm", args: ["test"] } };
   const deps: CodeExecuteDeps = { detect: () => project, runTests: async () => ({ exitCode: 0, logs: "ℹ tests 0\nℹ pass 0\nℹ fail 0" }) };

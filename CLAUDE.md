@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`ai-pipeline` is an **app-agnostic, centralized AI-assisted E2E QA engine** (a
+`panchito` is an **app-agnostic, centralized AI-assisted E2E QA engine** (a
 template — no app is bundled). It watches a team's repos; when a commit is
 deployed to DEV, an AI agent (OpenCode and/or Codex) generates Playwright E2E tests for the
 change's blast radius, runs them **against the live DEV site** (the app is never

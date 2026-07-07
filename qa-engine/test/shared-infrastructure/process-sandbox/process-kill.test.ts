@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import type { ChildProcess } from "node:child_process";
 import { ProcessKillAdapter } from "../../../src/shared-infrastructure/process-sandbox/process-kill.adapter.ts";
 // Import depth: from qa-engine/test/shared-infrastructure/process-sandbox/ → qa-engine/src/ is 3 levels up
-// (../../../). 4 levels would reach the repo root (ai-pipeline/src/), which is wrong.
+// (../../../). 4 levels would reach the repo root (panchito/src/), which is wrong.
 
 function fakeChild(pid: number | undefined, killSpy: string[]): ChildProcess {
   return { pid, kill(sig?: string) { killSpy.push(`direct:${sig}`); return true; } } as unknown as ChildProcess;

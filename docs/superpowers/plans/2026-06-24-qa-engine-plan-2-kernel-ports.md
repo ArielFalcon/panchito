@@ -82,7 +82,7 @@ The user edits `src/` in parallel; the snapshot drifts. Lock today's facts befor
 - [ ] **Step 1: Confirm the kernel forward-edge still exists (must, per the locked decision)**
 
 ```bash
-cd /Users/arielyumn/Desktop/TRABAJO/ai-pipeline
+cd /Users/arielyumn/Desktop/TRABAJO/panchito
 rg -n 'qa/learning/taxonomy|qa/usage' src/types.ts
 ```
 Expected: 4 hits — `export type { ErrorClass } from "./qa/learning/taxonomy"` (:214), `import("./qa/learning/taxonomy").ErrorClass` (:223 and :266), `import("./qa/usage").RunUsage` (:245). If they moved, the kernel `RunOutcome` (Task 7) still must NOT reproduce them: `ErrorClass` stays in cross-run-learning, `RunUsage` in agent-runtime.
@@ -127,7 +127,7 @@ Plan 1 set the root `typecheck` script to `tsc --build --force`, which **emits**
 - [ ] **Step 1: Read the current script**
 
 ```bash
-cd /Users/arielyumn/Desktop/TRABAJO/ai-pipeline
+cd /Users/arielyumn/Desktop/TRABAJO/panchito
 rg -n '"typecheck"' package.json
 ```
 Expected: `"typecheck": "tsc --build --force"`.
@@ -1113,7 +1113,7 @@ import assert from "node:assert/strict";
 import type { ChildProcess } from "node:child_process";
 import { ProcessKillAdapter } from "../../../src/shared-infrastructure/process-sandbox/process-kill.adapter.ts";
 // Import depth: from qa-engine/test/shared-infrastructure/process-sandbox/ → qa-engine/src/ is 3 levels up
-// (../../../). 4 levels would reach the repo root (ai-pipeline/src/), which is wrong.
+// (../../../). 4 levels would reach the repo root (panchito/src/), which is wrong.
 
 function fakeChild(pid: number | undefined, killSpy: string[]): ChildProcess {
   return { pid, kill(sig?: string) { killSpy.push(`direct:${sig}`); return true; } } as unknown as ChildProcess;
@@ -1857,7 +1857,7 @@ Make the agent-is-read-only invariant **structural** (§2 G3, §8 R4): no module
 - [ ] **Step 1: Install dependency-cruiser**
 
 ```bash
-cd /Users/arielyumn/Desktop/TRABAJO/ai-pipeline
+cd /Users/arielyumn/Desktop/TRABAJO/panchito
 npm install -D dependency-cruiser
 rg -n 'dependency-cruiser' package.json
 ```
@@ -1942,7 +1942,7 @@ context path (`contexts/workspace-and-publication`), so any import of that conte
 not just a specific vcs-write adapter filename. This makes the falsifiability probe genuine.
 
 ```bash
-cd /Users/arielyumn/Desktop/TRABAJO/ai-pipeline
+cd /Users/arielyumn/Desktop/TRABAJO/panchito
 mkdir -p qa-engine/src/contexts/generation/infrastructure
 printf '%s\n' \
   'import type { VcsWritePort } from "../../workspace-and-publication/application/ports/index.ts";' \
@@ -1985,7 +1985,7 @@ Run the whole gate across both trees to confirm Plan 2 left everything green and
 - [ ] **Step 1: Full typecheck**
 
 ```bash
-cd /Users/arielyumn/Desktop/TRABAJO/ai-pipeline
+cd /Users/arielyumn/Desktop/TRABAJO/panchito
 npm run typecheck && echo "TYPECHECK OK"
 ```
 Expected: `TYPECHECK OK`, no `.tsbuildinfo`/`.d.ts` emitted (`git status --porcelain qa-engine | rg '\.d\.ts|tsbuildinfo' || echo clean`).
