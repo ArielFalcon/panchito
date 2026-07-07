@@ -51,7 +51,6 @@ import type { OpencodeRunInput } from "@contexts/generation/application/ports/ge
 
 function stubPorts(overrides: Partial<{
   classify: ChangeAnalysisPort["classify"];
-  analyze: ChangeAnalysisPort["analyze"];
   generate: GenerationPort["generate"];
   review: ReviewPort["review"];
   validate: ValidationPort["validate"];
@@ -74,7 +73,6 @@ function stubPorts(overrides: Partial<{
   const foldedOutcomes: RunOutcome[] = [];
 
   const changeAnalysis: ChangeAnalysisPort = {
-    analyze: overrides.analyze ?? (async (sha) => BlastRadius.of(sha, ["src/x.ts"])),
     classify: overrides.classify ?? (async () => ({ action: "generate", reason: "diff touches src/x.ts", diff: "" })),
   };
   const generation: GenerationPort = {
@@ -714,6 +712,145 @@ test("RunQaUseCase — cross-repo (needsReview:false): review() is NEVER called"
 
   assert.equal(out.decision.verdict, "pass");
   assert.equal(reviewCallCount, 0, "needsReview:false must skip the review port entirely");
+});
+
+// ── WS7.2 (full-flow remediation): regression semantics restored. classify().action === "regression"
+// (perf/refactor commits, behavior-preserving per BOTH the message AND the diff cross-check) must
+// skip generation entirely, run the EXISTING suite, and publish nothing new on a pass — mirrors
+// legacy's `if (generating) { ...generate+review... } else { log("regression: not generating tests;
+// validating and running the existing suite.") }` (src/pipeline.ts:2015-2238), which this
+// composition had hardcoded away (generating was `const generating = true` unconditionally).
+
+test("WS7.2 characterization: a regression commit that PASSES the existing suite publishes NOTHING (pass/none), never calls generate() or review()", async () => {
+  let generateCallCount = 0;
+  let reviewCallCount = 0;
+  let executeCallCount = 0;
+  let publishCallCount = 0;
+  const { ports } = stubPorts({
+    classify: async () => ({ action: "regression", reason: "type=refactor", diff: "diff --git a/src/x.ts b/src/x.ts\n+moved code\n" }),
+    execute: async () => { executeCallCount++; return { verdict: "pass", cases: [{ name: "existing-suite-flow", status: "pass" as const }], logs: "" }; },
+  });
+  ports.generation.generate = async () => { generateCallCount++; return { specs: ["a.spec.ts"], approved: true }; };
+  ports.review.review = async () => { reviewCallCount++; return { approved: true, corrections: [], blockingCount: 0, parsed: true }; };
+  ports.publication.publish = async () => { publishCallCount++; return { outcome: "pr" }; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "ws7.2-regression-pass-nothing-new" });
+
+  assert.equal(generateCallCount, 0, "a regression run must NEVER call GenerationPort.generate() — no new tests are written");
+  assert.equal(reviewCallCount, 0, "a regression run must NEVER call the reviewer — nothing new was generated to judge");
+  assert.equal(executeCallCount, 1, "the EXISTING suite must still be executed (regression's whole purpose)");
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(out.decision.sideEffect, "none", "a passing regression run publishes NOTHING — matches decide()'s own !ev.generating branch");
+  assert.equal(publishCallCount, 0, "sideEffect:'none' must never dispatch to the publish port");
+});
+
+test("WS7.2 characterization: a regression commit whose EXISTING suite FAILS still opens an Issue (fail/issue), FixLoop never regenerates (generating:false)", async () => {
+  let generateCallCount = 0;
+  let executeCallCount = 0;
+  const { ports } = stubPorts({
+    classify: async () => ({ action: "regression", reason: "type=perf", diff: "diff --git a/src/x.ts b/src/x.ts\n+perf tweak\n" }),
+    execute: async () => { executeCallCount++; return { verdict: "fail", cases: [{ name: "stale-flow", status: "fail" as const }], logs: "boom" }; },
+  });
+  ports.generation.generate = async () => { generateCallCount++; return { specs: ["a.spec.ts"], approved: true }; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "ws7.2-regression-fail-issue" });
+
+  assert.equal(generateCallCount, 0, "generate() must never be called for a regression run, including inside the FixLoop's own regen path (gated on `generating`)");
+  assert.equal(executeCallCount, 1, "the FixLoop must not retry-execute either, since its own loop condition includes `generating`");
+  assert.equal(out.decision.verdict, "fail");
+  assert.equal(out.decision.sideEffect, "issue", "a red existing suite still surfaces — the normal fail/Issue machinery, unchanged");
+});
+
+test("WS7.2 characterization: reviewerApproved persists as undefined (never a fabricated true) for a passing regression run", async () => {
+  const { ports } = stubPorts({
+    classify: async () => ({ action: "regression", reason: "type=refactor", diff: "" }),
+    execute: async () => ({ verdict: "pass", cases: [{ name: "existing-suite-flow", status: "pass" as const }], logs: "" }),
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "ws7.2-regression-reviewer-approved-undefined" });
+
+  assert.equal(out.gateSignals.reviewerApproved, undefined, "legacy persists reviewerApproved as null for a regression run (result stays unset) — this use-case's equivalent is undefined, never the synthetic generate() stand-in's approved:true");
+});
+
+test("WS7.2 characterization: a generate-typed commit (unchanged) still calls generate() normally — regression's own gate does not leak into other actions", async () => {
+  let generateCallCount = 0;
+  const { ports } = stubPorts({
+    classify: async () => ({ action: "generate", reason: "type=feat", diff: "diff --git a/src/x.ts b/src/x.ts\n+if (x) return 1;\n" }),
+  });
+  ports.generation.generate = async () => { generateCallCount++; return { specs: ["a.spec.ts"], approved: true }; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "ws7.2-generate-unaffected" });
+
+  assert.ok(generateCallCount >= 1, "a genuinely generate-typed commit must still call generate() — WS7.2 only gates the regression action");
+});
+
+// ── WS7.1 (full-flow remediation, multi-commit range restoration): input.baseSha threads into
+// ChangeAnalysisPort.classify(sha, {baseSha}) — the use-case's own half of the seam (the runner's
+// half is pinned in src/server/runner.test.ts).
+
+test("WS7.1: input.baseSha is forwarded to classify() as {baseSha}, absent -> classify() called with no opts (single-commit, unchanged)", async () => {
+  const seenOpts: unknown[] = [];
+  const { ports } = stubPorts({
+    classify: async (_sha, opts) => { seenOpts.push(opts); return { action: "generate", reason: "type=feat", diff: "" }; },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "ws7.1-no-basesha" });
+  await useCase.run({ ...baseInput, runId: "ws7.1-with-basesha", baseSha: Sha.of("bad00001") });
+
+  assert.equal(seenOpts[0], undefined, "no input.baseSha -> classify() called with opts undefined, byte-identical to before WS7.1");
+  assert.deepEqual(seenOpts[1], { baseSha: Sha.of("bad00001") }, "input.baseSha must be forwarded verbatim as classify()'s opts.baseSha");
+});
+
+// ── WS7.4 (full-flow remediation): classifyCommit's reason/contradiction thread into the
+// generation enrichment (the highest-value aiming hint for an escalated commit).
+
+test("WS7.4: classification.reason + contradiction:true reach baseEnrichment when the classifier escalated", async () => {
+  const capturedEnrichments: (Record<string, unknown> | undefined)[] = [];
+  const { ports } = stubPorts({
+    classify: async () => ({
+      action: "generate",
+      reason: "message 'refactor' expected no tests, but the diff adds logic → escalated to generate",
+      diff: "diff --git a/src/x.ts b/src/x.ts\n+if (x) return 1;\n",
+      contradiction: true,
+    }),
+  });
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
+    capturedEnrichments.push(enrichment as Record<string, unknown> | undefined);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "ws7.4-reason-contradiction-present" });
+
+  assert.ok(capturedEnrichments.length > 0);
+  for (const captured of capturedEnrichments) {
+    assert.equal(captured?.classificationReason, "message 'refactor' expected no tests, but the diff adds logic → escalated to generate");
+    assert.equal(captured?.contradiction, true);
+  }
+});
+
+test("WS7.4: contradiction key is ABSENT (never a fabricated false) when the classifier did not escalate", async () => {
+  const capturedEnrichments: (Record<string, unknown> | undefined)[] = [];
+  const { ports } = stubPorts({
+    classify: async () => ({ action: "generate", reason: "type=feat", diff: "diff --git a/src/x.ts b/src/x.ts\n+if (x) return 1;\n" }),
+  });
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
+    capturedEnrichments.push(enrichment as Record<string, unknown> | undefined);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "ws7.4-no-contradiction" });
+
+  for (const captured of capturedEnrichments) {
+    assert.ok(captured && !("contradiction" in captured), "an absent/false contradiction must never add the key — matches every sibling field's conditional-spread contract");
+    assert.equal(captured?.classificationReason, "type=feat");
+  }
 });
 
 test("RunQaUseCase — fail-issue: the FixLoop genuinely engages (generate + execute called MORE than once, retries > 0)", async () => {
@@ -4024,6 +4161,45 @@ test("4b.5: a non-diff mode run (classificationIntent never populated) still cal
 
   assert.equal(renderCallCount, 1, "render() is still invoked once per run regardless of mode (the adapter/port itself short-circuits an empty BlastRadius, not the use-case)");
   assert.equal(recordedChangedFiles?.length, 0, "outside diff mode, classificationIntent is never populated, so the BlastRadius passed to render() must be empty — this is correct, tested behavior, not a gap");
+});
+
+// ── WS7.5 (full-flow remediation): structuralSignal must be SKIPPED on cross-repo runs — the
+// adapter is pinned to the PRIMARY repo's graph at composition, so a cross-repo run's
+// runBlastRadius carries the SERVICE repo's changed file paths; querying the primary graph with
+// them is either empty (harmless) or worst-case FALSE coupling bullets from convention-coincident
+// paths. A wrong signal is worse than no signal — this gate closes that.
+
+test("WS7.5: structuralSignal.render() is NEVER called when input.triggerRepo is set (cross-repo run)", async () => {
+  let renderCallCount = 0;
+  const { ports } = stubPorts({});
+  const structuralSignal: StructuralSignalPort = {
+    render: async () => { renderCallCount++; return "## Structural blast radius\nsome content"; },
+  };
+  const useCase = new RunQaUseCase({ ...ports, structuralSignal, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "ws7.5-cross-repo-skip", triggerRepo: "org/orders-svc" });
+
+  assert.equal(renderCallCount, 0, "a cross-repo run must never query the primary-scoped structural graph");
+});
+
+test("WS7.5: baseEnrichment carries NO staticSignal key at all on a cross-repo run, even though structuralSignal is wired", async () => {
+  const capturedEnrichments: (Record<string, unknown> | undefined)[] = [];
+  const { ports } = stubPorts({});
+  const structuralSignal: StructuralSignalPort = {
+    render: async () => "## Structural blast radius\nsome content",
+  };
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
+    capturedEnrichments.push(enrichment as Record<string, unknown> | undefined);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, structuralSignal, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "ws7.5-cross-repo-no-static-signal", triggerRepo: "org/orders-svc" });
+
+  assert.ok(capturedEnrichments.length > 0, "generate() must have been called at least once");
+  for (const captured of capturedEnrichments) {
+    assert.ok(captured && !("staticSignal" in captured), "staticSignal must not exist at all on a cross-repo run — never a stale/wrong signal");
+  }
 });
 
 // ── Stitcher→Generation seam (design §3.5, S2.5): RunQaUseCase's [SWAP] serviceLinks collaborator.

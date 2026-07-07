@@ -53,6 +53,13 @@ export interface RunInput {
   // structurally what RunQaInput expects — see that adapter's own header on why no remapping is
   // needed beyond a type-level cast).
   previousNamespace?: string;
+  // WS7.1 (full-flow remediation, multi-commit range restoration): mirrors legacy's RunOptions.
+  // baseSha (src/types.ts) / RunRequest.baseSha (src/server/runner.ts) — when set, this run's diff
+  // spans baseSha..sha (a PR/push range), not a single commit. Threaded straight through by
+  // RewrittenOrchestratorAdapter.run(input) into RunQaUseCase.run(input) unchanged (this type is
+  // structurally what RunQaInput expects), which forwards it to ChangeAnalysisPort.classify(sha,
+  // {baseSha}) in diff mode. Absent (the common case) -> single-commit classification, unchanged.
+  baseSha?: Sha;
 }
 export interface RunPipelinePort {
   // signal is a SEPARATE transport arg (mirrors legacy runPipeline's own trailing signal
@@ -63,8 +70,15 @@ export interface RunPipelinePort {
 }
 
 // ── Driven capability ports (one per orchestrated context) ────────────────────
+// WS7.7(a) (full-flow remediation, hygiene): analyze(sha) was DELETED — rg-verified zero
+// production callers anywhere in run-qa.use-case.ts (the only consumer of this port). A dead port
+// method invites false confidence ("classify() failing? maybe try analyze()") for a capability
+// nothing actually calls. NOTE this is narrower than the plan's original framing ("+ VcsReadPort.
+// blastRadius") — VcsReadPort.blastRadius (the underlying git-mirror method) is NOT dead: it has a
+// real, separate production caller (service-topology/application/resolve-cross-repo-impact.
+// use-case.ts, via its own locally-scoped VcsReadPort-shaped interface), so it stays. Only the
+// unreachable ChangeAnalysisPort.analyze() wrapper is removed.
 export interface ChangeAnalysisPort {
-  analyze(sha: Sha): Promise<BlastRadius>;
   // diff: the "dynamic diff" fix (engram #936) — classify() already fetches the commit's diff
   // internally (to feed classifyCommit); surfacing it here lets the caller thread the REAL per-run
   // diff into generation instead of a stale/empty static value. Only "diff" mode calls classify()
@@ -78,7 +92,22 @@ export interface ChangeAnalysisPort {
   // reviewer objective derivation reads intent?.message (src/pipeline.ts:1682) — into review() too.
   // Optional: a stub/legacy caller that omits it is unaffected (matches every other optional field
   // this barrel has widened with — dynamic diff, signal, etc.).
-  classify(sha: Sha): Promise<{ action: "skip" | "regression" | "generate"; reason: string; diff: string; intent?: CommitIntent }>;
+  //
+  // contradiction: WS7.4 (full-flow remediation) — classifyCommit() already computes this
+  // (CommitClassification.contradiction: the message claimed no behavior change but the diff
+  // escalated the action anyway) and it was dropped at this exact boundary, same class of gap as
+  // intent/diff above. Surfaced so RunQaUseCase can thread it (alongside `reason`, already
+  // returned) into the generation enrichment — the highest-value aiming hint for an escalated
+  // commit is telling the agent EXACTLY why the message and the diff disagree. Optional/undefined
+  // when classifyCommit did not escalate (the common case) — never fabricated.
+  //
+  // opts.baseSha: WS7.1 (full-flow remediation, multi-commit range restoration) — when set, the
+  // caller is asking for a RANGE classification (baseSha..sha), not a single commit. The adapter
+  // fetches every commit's message in the range and the UNION diff, then applies
+  // classifyRange's own MAX-severity reduction (domain/commit-classification.ts). Absent (the
+  // common case) -> `sha^..sha` exactly as today, byte-identical behavior — this parameter is
+  // strictly additive.
+  classify(sha: Sha, opts?: { baseSha?: Sha }): Promise<{ action: "skip" | "regression" | "generate"; reason: string; diff: string; intent?: CommitIntent; contradiction?: boolean }>;
 }
 // W2 fix (F1, generation regen/enrichment context — audit-verified cutover blocker): the legacy's
 // GenerateInput (src/integrations/opencode-client.ts's OpencodeRunInput) carries fixCases/
@@ -108,6 +137,18 @@ export interface GenerationEnrichment {
   // way the dynamic diff already is, so diff-mode generation receives the SAME intent the legacy's
   // baseGenInput() forwards on every call (src/pipeline.ts:1678's `intent,`).
   intent?: CommitIntent;
+  // WS7.4 (full-flow remediation): classifyCommit()'s own explanation of ITS decision — why this
+  // commit's action is what it is (e.g. "message 'refactor' expected no tests, but the diff adds
+  // logic → escalated to generate"). Distinct from `intent` (WHAT changed) — this is WHY the
+  // classifier decided what it decided, the highest-value aiming hint for a commit whose message
+  // and diff disagree. Rendered as one line in the task section (buildTask, src/integrations/
+  // prompts.ts), sanitized like every other model-bound string. Absent outside diff mode (matches
+  // every other classify()-sourced field's diff-mode-only contract).
+  classificationReason?: string;
+  // WS7.4: classifyCommit()'s own `contradiction` flag — true when the message claimed no behavior
+  // change (skip/regression) but the diff cross-check escalated the action anyway. A one-line
+  // boolean hint the generator can act on directly ("the message under-promises — trust the diff").
+  contradiction?: boolean;
   // Manifest-enrichment fix: the run's commit sha, needed to stamp OpencodeRunInput.sha so
   // GenerateTestsUseCase can populate ManifestEntry.changeRef.sha (the real manifest schema
   // requires changeRef.sha non-empty — src/orchestrator/schemas.ts ManifestEntrySchema). `sha` is

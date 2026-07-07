@@ -277,6 +277,11 @@ export interface RunQaInput {
   // contract). Absent -> the cleanup phase never fires this run, matching legacy's own
   // `opts.previousNamespace &&` guard exactly.
   previousNamespace?: string;
+  // WS7.1 (full-flow remediation, multi-commit range restoration): mirrors RunInput.baseSha
+  // (../ports/index.ts) exactly — when set, this run's diff spans baseSha..sha (a PR/push range).
+  // Threaded straight through by RewrittenOrchestratorAdapter (structural cast, no remapping)
+  // into this run()'s own classify() call in diff mode. Absent -> single-commit classification.
+  baseSha?: Sha;
 }
 
 export interface RunQaResult {
@@ -401,20 +406,39 @@ export class RunQaUseCase {
     // and the reviewer's own objective derivation (src/pipeline.ts:1682).
     let classificationDiff: string | undefined;
     let classificationIntent: CommitIntent | undefined;
+    // WS7.4 (full-flow remediation): classifyCommit's own explanation of its decision — hoisted
+    // alongside classificationDiff/classificationIntent above (the SAME diff-mode-only, "dynamic"
+    // per-run precedent) so baseEnrichment below can thread it into the generation prompt. Absent
+    // outside diff mode (classify() never runs there), matching every sibling field.
+    let classificationReason: string | undefined;
+    let classificationContradiction: boolean | undefined;
+    // WS7.2 (full-flow remediation): honor classifyCommit's three-way taxonomy. skip already
+    // returns above; "regression" (perf/refactor, behavior-preserving per BOTH the message AND the
+    // diff cross-check — see commit-classification.ts's own escalation) must run the EXISTING suite
+    // without generating anything new (mirrors legacy's `generating = cls.action === "generate"`,
+    // src/pipeline.ts:1268 — the pre-cutover behavior this composition had hardcoded away). Every
+    // non-diff mode (complete/exhaustive/manual/context) never classifies, so it always generates,
+    // matching CLAUDE.md's own mode table ("the others always generate").
+    let generating = true;
     if (input.mode === "diff") {
       this.deps.observer?.onStep("classify");
-      const classification = await this.deps.changeAnalysis.classify(input.sha);
+      // WS7.1 (full-flow remediation, multi-commit range restoration): thread input.baseSha
+      // through — absent -> the adapter's own single-commit fallback (sha^..sha), byte-identical
+      // to before this fix; set -> a baseSha..sha range classification (classifyRange's
+      // MAX-severity reduction over every commit in the range, union diff).
+      const classification = await this.deps.changeAnalysis.classify(input.sha, input.baseSha ? { baseSha: input.baseSha } : undefined);
       classificationDiff = classification.diff;
       classificationIntent = classification.intent;
+      classificationReason = classification.reason;
+      classificationContradiction = classification.contradiction;
       if (classification.action === "skip") {
         return this.skippedResult();
       }
+      generating = classification.action !== "regression";
     }
     if (signal?.aborted) {
       return this.abortedResult();
     }
-
-    const generating = true; // this composition always attempts generation (diff-mode skip already handled above)
 
     // Phase: setup (SetupPort) — CLAUDE.md run-flow step 3: bootstraps the config/e2e seed into
     // e2e/ (first time) + npm ci (e2e target), or installs the repo's own deps (code target), so the
@@ -570,13 +594,25 @@ export class RunQaUseCase {
     // Best-effort by design (mirrors preGenerationGrounding's own fail-open posture immediately
     // above): a throw from the port is caught and logged, degrading to "" (no staticSignal) —
     // this seam is advisory-only and must never abort a run.
+    //
+    // WS7.5 (full-flow remediation): gated on `!input.triggerRepo` — the adapter is pinned to the
+    // PRIMARY repo's graph at composition (composition-root.ts), and this use-case had NO
+    // triggerRepo guard at all before this fix. A cross-repo run's runBlastRadius carries the
+    // SERVICE repo's changed file paths, so querying the primary graph with them is either an empty
+    // result (harmless but wasted) or, worst case, FALSE coupling bullets from convention-coincident
+    // paths (e.g. both repos have a `src/main/java/...` layout) — a wrong signal is worse than no
+    // signal, since it aims the generator with false `[coupling]` authority. The honest-empty fix is
+    // this one guard; per-service graph indexes (re-pointing the adapter itself) are separate,
+    // real-scope future work (mirrors crossRepoImpact's own per-repo resolution pattern).
     let blastRadiusSignal = "";
-    if (this.deps.structuralSignal) {
+    if (this.deps.structuralSignal && !input.triggerRepo) {
       try {
         blastRadiusSignal = await this.deps.structuralSignal.render(workspace.specDir, runBlastRadius);
       } catch (err) {
         console.error("[qa] WARNING: structural blast-radius signal failed (non-fatal, generation continues without it):", err);
       }
+    } else if (this.deps.structuralSignal && input.triggerRepo) {
+      console.log("[qa] structural signal skipped: cross-repo run — graph is primary-scoped");
     }
 
     // Stitcher→Generation seam (design §3.5, ADR-7): UNLIKE blastRadiusSignal above, this block is
@@ -635,6 +671,12 @@ export class RunQaUseCase {
       // Slice C (structural-signals-expansion, design §3.8): mirrors serviceLinks' own conditional-
       // spread precedent — absent/empty crossRepoImpact never adds the key at all.
       ...(crossRepoImpact?.impactedLinks.length ? { crossRepoImpact: { impactedLinks: crossRepoImpact.impactedLinks } } : {}),
+      // WS7.4 (full-flow remediation): classifyCommit's own reason/contradiction — mirrors every
+      // other diff-mode-only field's conditional-spread precedent above. contradiction is spread
+      // ONLY when true (an absent/false contradiction never adds the key — matches the "never
+      // fabricated" contract every sibling field here follows).
+      ...(classificationReason ? { classificationReason } : {}),
+      ...(classificationContradiction ? { contradiction: true } : {}),
     };
     // The reviewer's own enrichment base — SEPARATE from baseEnrichment (generation-shaped) because
     // ReviewEnrichment carries domSnapshot, not contextPack/existingSpecFiles (generation-only
@@ -651,9 +693,16 @@ export class RunQaUseCase {
       ...(retrievedRules.length ? { learnedRules: retrievedRules } : {}),
     };
 
-    // Phase: generate (GenerationPort).
-    this.deps.observer?.onStep("generate");
-    let generated = await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff, baseEnrichment);
+    // Phase: generate (GenerationPort). WS7.2: skipped entirely when generating is false (a
+    // regression commit) — mirrors legacy's own `if (generating) { result = await generateOnce(...) }
+    // else { log("regression: not generating tests...") }` (src/pipeline.ts:2015-2238). The
+    // synthetic { specs: [], approved: true } stand-in matches the legacy's own `result: AgentResult
+    // | null = null` default read downstream as `result?.specs.length ?? 0` (always 0) — it is NOT a
+    // real GenerationPort call, so no tokens are spent and no agent decision is fabricated.
+    this.deps.observer?.onStep("generate", generating ? undefined : "regression: running the existing suite, not generating");
+    let generated = generating
+      ? await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff, baseEnrichment)
+      : { specs: [] as string[], approved: true };
 
     // Diagnosability fix (live-run root cause): when generation comes back with ZERO specs AND
     // approved===false, the agent almost always left an explanatory note (e.g. "no LIVE DEV URL
@@ -664,16 +713,23 @@ export class RunQaUseCase {
     // agent-session transcript. Stashed here and threaded into whichever terminal this run actually
     // reaches (the static-gate "invalid" or the health-preflight "infra-error" below) so the note
     // survives to the persisted RunOutcome. Never invents new verdict semantics — only carries an
-    // already-produced diagnostic forward.
+    // already-produced diagnostic forward. Never fires for a regression run (generated.approved is
+    // always true above, so the `!generated.approved` conjunct is false).
     const generationNote = !generated.approved && generated.specs.length === 0 && generated.note ? generated.note : undefined;
 
     // Agent no-op: approved + zero specs -> skipped (CLAUDE.md invariant: a VALID skipped, never invalid).
+    // WS7.2: gated on `generating` — a regression run's synthetic { approved:true, specs:[] } stand-in
+    // above would otherwise match this SAME shape and be misclassified as an agent no-op (wrong
+    // verdict: "skipped" instead of running the existing suite through validate/execute/decide, where
+    // the `!ev.generating` branch already produces the correct "pass"/"none" — or an Issue if the
+    // existing suite is red). A regression is a deliberate no-generation POLICY decision (classifyCommit's
+    // own action), never the agent's own runtime decision — the two must not collapse into one branch.
     //
     // FIX E (judgment-day): the legacy calls persistOutcome(skipped) here (src/pipeline.ts:2226-2234)
     // — save YES, fold NO (foldRunLearning is never called for this source). This use-case's own
     // skippedResult() previously never persisted at all — that ONLY matched the classify-skip
     // source above (a bare return), silently dropping the agent-no-op skip's own save call.
-    if (generated.approved && generated.specs.length === 0) {
+    if (generating && generated.approved && generated.specs.length === 0) {
       // FIX 1 (judgment-day D.7 batch 2): persistOutcome (src/pipeline.ts:2233) is the SAME closure
       // at EVERY call site — `app.qa.needsReview && result ? result.approved : null` reads
       // `result.approved` here too (the agent-no-op case is `result.approved===true` by definition
@@ -843,7 +899,13 @@ export class RunQaUseCase {
     // (including any static-fix repair rounds above) has already run. Reads `lastGenerated` (the
     // LATEST generation attempt), not the original `generated`, so a repaired spec's own approved
     // flag is what persists — matching the legacy's `result` reassignment across the static-fix loop.
-    const reviewerApprovedFromGeneration = cfg.needsReview ? lastGenerated.approved : undefined;
+    //
+    // WS7.2: ALSO gated on `generating` — matches legacy's `app.qa.needsReview && result ?
+    // result.approved : null` (src/pipeline.ts:1114), where `result` stays `null` for a regression
+    // run (generation never ran) so the persisted reviewerApproved is `null`/undefined, never the
+    // synthetic `{approved:true}` stand-in this use-case substitutes above for downstream shape
+    // compatibility — that stand-in is not a real agent decision and must not be persisted as one.
+    const reviewerApprovedFromGeneration = cfg.needsReview && generating ? lastGenerated.approved : undefined;
 
     if (!validation.ok) {
       // FIX 2 (judgment-day D.7 batch 2): a context-mode validate() failure is this composition's
@@ -1343,7 +1405,13 @@ export class RunQaUseCase {
     // below has a chance to overwrite it with the INDEPENDENT reviewer's own verdict on an actual
     // pass+review call.
     let reviewerApprovedForOutcome: boolean | undefined = reviewerApprovedFromGeneration;
-    if (run.verdict === "pass" && cfg.needsReview) {
+    // WS7.2: ALSO gated on `generating` — legacy's reviewGenerated() is only ever called from
+    // inside the `if (generating)` block (src/pipeline.ts:2015-2236); a regression run never invokes
+    // the reviewer (nothing new was generated to judge, and `decide()`'s own `!ev.generating` branch
+    // already wins over any reviewer-rejection branch regardless of what a review call would return
+    // — see run-decision.service.ts's own precedence comment). Skipping the call here saves a real
+    // LLM invocation on every perf/refactor commit, matching legacy's cost profile exactly.
+    if (run.verdict === "pass" && cfg.needsReview && generating) {
       // W2 fix (F3, reviewer-corrections regeneration loop — audit-verified cutover blocker): ports
       // the legacy's reviewGenerated() round loop VERBATIM (src/pipeline.ts:1608-1802). Legacy bounds
       // (re-verified against src/pipeline.ts:803 + the loop body, not invented here):
@@ -1600,6 +1668,17 @@ export class RunQaUseCase {
         // report, not "0 bytes of something"). serviceLinksCount/contractDriftCount are gated on
         // this.deps.serviceLinks's PRESENCE (the resolver being wired), not a truthy count — so 0
         // honestly means "resolver ran, found none", distinguishable from "no resolver wired".
+        //
+        // WS7.7(b) (full-flow remediation, hygiene, DECISION — write-for-later, documented): these
+        // 4 fields persist into gate_signals (src/server/run-history-sqlite-adapter.ts stores the
+        // WHOLE outcome.gateSignals object as one JSON blob) but have ZERO readers today —
+        // src/server/run-report-view.ts's toRunReportView (the run-detail API/TUI surface) reads
+        // only coverageRatio/valueScore/usage off outcome.gateSignals by name; it does not surface
+        // structuralSignalBytes/serviceLinksCount/contractDriftCount/impactedLinksCount as an
+        // insight card. Chose "write-for-later" over "add a reader" here: a new insight card is a
+        // real UI feature (chart type, thresholds, copy) — out of proportion for a P3 hygiene item.
+        // The data is cheap (persisted regardless) and forward-looking calibration for when these
+        // signals earn a dedicated insight; nothing here needs deleting or gating further.
         ...(blastRadiusSignal ? { structuralSignalBytes: Buffer.byteLength(blastRadiusSignal, "utf8") } : {}),
         ...(this.deps.serviceLinks
           ? { serviceLinksCount: resolvedServiceLinks.length, contractDriftCount: resolvedContractDrift.length }

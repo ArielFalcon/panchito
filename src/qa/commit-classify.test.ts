@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyCommit, parseChangedFiles } from "./commit-classify";
+import { classifyCommit, classifyRange, parseChangedFiles } from "./commit-classify";
 
 const logicDiff = [
   "diff --git a/src/checkout.ts b/src/checkout.ts",
@@ -147,4 +147,54 @@ test("code-like words inside a string literal do not look like logic", () => {
   const c = classifyCommit("style: copy tweak", stringDiff);
   assert.equal(c.hasLogicChange, false);
   assert.equal(c.action, "skip");
+});
+
+// ── WS7.3(a): .html/.astro are now source-file extensions ──────────────────────────────────────
+
+test("WS7.3(a): a .html diff with added logic escalates a chore commit to generate", () => {
+  const d = ["diff --git a/src/index.html b/src/index.html", "+++ b/src/index.html", "+<script>if (loggedIn) redirect();</script>"].join("\n");
+  assert.equal(classifyCommit("chore: tweak markup", d).action, "generate");
+});
+
+test("WS7.3(a): a .astro diff with added logic escalates a style commit to generate", () => {
+  const d = ["diff --git a/src/pages/index.astro b/src/pages/index.astro", "+++ b/src/pages/index.astro", "+if (isAdmin) { return Astro.redirect('/admin'); }"].join("\n");
+  assert.equal(classifyCommit("style: format", d).action, "generate");
+});
+
+// ── WS7.3(b): removal-heavy skip-typed commits escalate to regression ──────────────────────────
+
+test("WS7.3(b): a chore commit that removes logic escalates to regression, not generate", () => {
+  const d = ["diff --git a/src/svc.ts b/src/svc.ts", "+++ b/src/svc.ts", "-if (legacyFlag) doOldThing();"].join("\n");
+  const c = classifyCommit("chore: cleanup dead code", d);
+  assert.equal(c.action, "regression");
+  assert.equal(c.contradiction, true);
+});
+
+// ── WS7.3(c): SQL migrations escalate a skip-typed commit to regression ────────────────────────
+
+test("WS7.3(c): a Flyway-style migration escalates a chore commit to regression", () => {
+  const d = [
+    "diff --git a/db/migration/V2__add_column.sql b/db/migration/V2__add_column.sql",
+    "+++ b/db/migration/V2__add_column.sql",
+    "+ALTER TABLE owners ADD COLUMN loyalty_points INT;",
+  ].join("\n");
+  assert.equal(classifyCommit("chore: db update", d).action, "regression");
+});
+
+test("WS7.3(c): an unrelated .sql file outside a migration path does NOT escalate", () => {
+  const d = ["diff --git a/scripts/adhoc-report.sql b/scripts/adhoc-report.sql", "+++ b/scripts/adhoc-report.sql", "+SELECT 2;"].join("\n");
+  assert.equal(classifyCommit("chore: report tweak", d).action, "skip");
+});
+
+// ── WS7.1: classifyRange — MAX-severity reduction over a commit range ──────────────────────────
+
+test("classifyRange: a single message (no range) is byte-identical to classifyCommit", () => {
+  assert.deepEqual(classifyRange("feat: new payment screen", [], logicDiff), classifyCommit("feat: new payment screen", logicDiff));
+});
+
+test("classifyRange: a feat buried under a chore head still generates (MAX severity wins), intent stays the head's own", () => {
+  const c = classifyRange("chore: bump deps", ["feat: new payment screen"], logicDiff);
+  assert.equal(c.action, "generate");
+  assert.equal(c.type, "chore");
+  assert.equal(c.message, "chore: bump deps");
 });

@@ -110,6 +110,12 @@ export interface OpencodeRunInput {
   appName: string; // engram project — scopes all memory to this app
   baseUrl?: string; // e2e: the LIVE DEV URL the agent must navigate to (Playwright MCP)
   intent?: CommitIntent; // diff mode: commit intent (type + message + files)
+  // WS7.4 (full-flow remediation): classifyCommit's own explanation of its action decision, and
+  // whether the message contradicted the diff (an escalated commit) — mirrors intent's own
+  // "diff mode only, sourced from ChangeAnalysisPort.classify()" contract. Rendered as one line
+  // each in the task section (buildTask, src/integrations/prompts.ts) when present.
+  classificationReason?: string;
+  contradiction?: boolean;
   guidance?: string; // manual mode: user instructions
   openapi?: string | string[]; // optional hint (from app config): where the repo's OpenAPI contract(s) live
   fixCases?: QaCase[]; // re-generation: failed cases from a previous execution to fix

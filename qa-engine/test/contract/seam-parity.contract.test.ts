@@ -75,6 +75,7 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
     runId: true, contextMap: true, explorer: true, contextBrief: true, contextPack: true,
     staticSignal: true, diffArchetypes: true, existingSpecFiles: true, service: true, services: true,
     serviceLinks: true, contractDrift: true, crossRepoImpact: true,
+    classificationReason: true, contradiction: true,
   } satisfies Record<keyof OpencodeRunInput, true>;
 
   // Fields the rewritten path deliberately sources OUTSIDE this adapter's ctx+enrichment, or that
@@ -98,6 +99,7 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
       "appName", "guidance", "baseUrl", "reviewCorrections", "fixCases", "selectorContradictions",
       "domSnapshot", "coverageGap", "intent", "learnedRules", "contextPack", "existingSpecFiles", "runId",
       "openapi", "staticSignal", "serviceLinks", "contractDrift", "crossRepoImpact",
+      "classificationReason", "contradiction",
     ];
     const allFieldNames = Object.keys(ALL_FIELDS).sort();
     const accountedFor = [...new Set([...mapped, ...Object.keys(ALLOWLIST)])].sort();
@@ -175,6 +177,8 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
           tier: "contract-file",
         }],
       },
+      classificationReason: S("classificationReason"),
+      contradiction: true,
     });
 
     assert.ok(captured, "renderMain must have been called — the generator session never ran");
@@ -215,6 +219,8 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
     assert.equal(captured!.contractDrift?.[0]?.path, S("d.path"), `contractDrift dropped at ${dyingLayer}`);
     assert.equal(captured!.crossRepoImpact?.impactedLinks[0]?.link.from.repo, S("cri.l.from.repo"), `crossRepoImpact dropped at ${dyingLayer}`);
     assert.equal(captured!.crossRepoImpact?.impactedLinks[0]?.tier, "contract-file", `crossRepoImpact.impactedLinks[].tier dropped at ${dyingLayer}`);
+    assert.equal(captured!.classificationReason, S("classificationReason"), `classificationReason dropped at ${dyingLayer} (WS7.4)`);
+    assert.equal(captured!.contradiction, true, `contradiction dropped at ${dyingLayer} (WS7.4)`);
   });
 });
 

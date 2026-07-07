@@ -23,7 +23,6 @@ import type {
   DeployGatePort,
   RunHistoryPort,
 } from "@contexts/qa-run-orchestration/application/ports/index.ts";
-import { BlastRadius } from "@kernel/blast-radius.ts";
 import { ok } from "@kernel/result.ts";
 import type { RunOutcome } from "@kernel/run-outcome.ts";
 
@@ -35,7 +34,6 @@ import type { RunOutcome } from "@kernel/run-outcome.ts";
 
 function stubPorts(overrides: Partial<{
   classify: ChangeAnalysisPort["classify"];
-  analyze: ChangeAnalysisPort["analyze"];
   generate: GenerationPort["generate"];
   review: ReviewPort["review"];
   validate: ValidationPort["validate"];
@@ -53,7 +51,6 @@ function stubPorts(overrides: Partial<{
   const foldedOutcomes: RunOutcome[] = [];
 
   const changeAnalysis: ChangeAnalysisPort = {
-    analyze: overrides.analyze ?? (async (sha) => BlastRadius.of(sha, ["src/x.ts"])),
     classify: overrides.classify ?? (async () => ({ action: "generate", reason: "diff touches src/x.ts", diff: "" })),
   };
   const generation: GenerationPort = {

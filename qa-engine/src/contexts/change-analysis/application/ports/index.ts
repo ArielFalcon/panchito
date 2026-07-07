@@ -17,6 +17,20 @@ export interface VcsReadPort {
   diff(sha: Sha, opts?: { baseSha?: Sha; commits?: number }): Promise<string>;
   message(sha: Sha): Promise<string>;
   blastRadius(sha: Sha, opts?: { baseSha?: Sha; commits?: number }): Promise<BlastRadius>;
+  // WS7.1 (full-flow remediation, multi-commit range restoration): the OTHER commits' messages in
+  // the FULL reachable `baseSha..sha` range — every commit reachable from sha but not from baseSha,
+  // EXCLUDING sha itself (the head commit's own message is already available via message(sha) and
+  // classifyRange takes it as a separate, explicit argument — see that function's own "never
+  // inferred from array position" doc). "Full reachable" means BOTH parents of any merge commit are
+  // traversed (F1 fix — the earlier `baseSha..sha^` walked only the FIRST parent and silently
+  // dropped every commit that arrived via a merged branch). Order is UNSPECIFIED (classifyRange
+  // only takes the MAX-severity action across these, so ordering is irrelevant to the caller).
+  // Returns [] when opts.baseSha is absent or equals sha (no range — the single-commit path,
+  // unchanged). OPTIONAL (matches this barrel's own [SWAP] precedent for every other add-on
+  // collaborator): a VcsReadPort implementation/test-double that predates this fix omits it
+  // entirely and is unaffected — ChangeAnalysisPortAdapter treats an absent method the same as an
+  // empty range (single-commit classification, byte-identical to before WS7.1).
+  otherMessages?(sha: Sha, opts: { baseSha: Sha }): Promise<string[]>;
 }
 
 // What every extractor receives. Carries the analyzed change so each wrapped tool has what it needs

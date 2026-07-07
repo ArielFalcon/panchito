@@ -1436,6 +1436,26 @@ function buildTask(input: OpencodeRunInput): string {
           `the code actually changes, not just what the message promises.`,
           ``,
         ]),
+    // WS7.4 (full-flow remediation): classifyCommit's own explanation of ITS decision — the
+    // highest-value aiming hint for a commit whose message and diff disagree (a "refactor"/"chore"
+    // message that actually adds behavior). Rendered whenever the classifier computed a reason,
+    // regardless of regen round (unlike the diff cross-check instruction above, this explains a
+    // decision already made, not evidence that may have shed).
+    //
+    // F2 fix (adversarial review, LOW): classificationReason is a MODEL-bound string (it only ever
+    // reaches the generation prompt, never an Issue body), so it is sanitized in "model" mode —
+    // matching the sibling model-bound calls on this path (domSnapshot at :687/:1083/:1743). The
+    // previous call omitted the mode arg, defaulting to the aggressive "issue" (Issue-bound) policy:
+    // it failed safe (over-redacted) but contradicted this very comment. `contradiction` only
+    // toggles a STATIC literal suffix (no user/model text flows through it), so there is nothing to
+    // sanitize on that field.
+    ...(input.classificationReason
+      ? [
+          `## Classifier note`,
+          `${sanitizeText(input.classificationReason, "model").text}${input.contradiction ? " (the commit message under-promised — trust the diff)" : ""}`,
+          ``,
+        ]
+      : []),
     // Seam e: objective/acceptance-criterion now precedes the diff block so the agent reads
     // the GOAL before the evidence. The diff is rendered as a separate task-band section in
     // buildPromptAssembled (with shedAs:"semi-stable") so both orderings are satisfied:

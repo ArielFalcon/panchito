@@ -1,9 +1,14 @@
 // test/contexts/qa-run-orchestration/infrastructure/bridges/change-analysis-port.adapter.test.ts
 // RED-first (Task E.0): ChangeAnalysisPortAdapter must DELEGATE to the REAL sibling collaborator —
-// change-analysis's VcsReadPort (blastRadius for analyze()) and the domain classifyCommit(message,
-// diff) function (for classify(), sourcing message/diff from the SAME VcsReadPort). NO new policy —
-// this is a shape/delegation test, not a re-test of classifyCommit's own classification table (that
-// lives in commit-classification.test.ts / commit-classification-parity.test.ts).
+// the domain classifyCommit(message, diff) function (for classify(), sourcing message/diff from
+// the SAME VcsReadPort). NO new policy — this is a shape/delegation test, not a re-test of
+// classifyCommit's own classification table (that lives in commit-classification.test.ts /
+// commit-classification-parity.test.ts).
+//
+// WS7.7(a) (full-flow remediation, hygiene): analyze() was DELETED from ChangeAnalysisPort (zero
+// production callers) — its own delegation test is removed here too. fakeVcsRead still declares
+// blastRadius in its default shape because VcsReadPort itself still requires it (a real, separate
+// caller exists elsewhere — see change-analysis-port.adapter.ts's own header).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ChangeAnalysisPortAdapter } from "@contexts/qa-run-orchestration/infrastructure/bridges/change-analysis-port.adapter.ts";
@@ -19,22 +24,6 @@ function fakeVcsRead(overrides: Partial<VcsReadPort> = {}): VcsReadPort {
     ...overrides,
   };
 }
-
-test("analyze() delegates to VcsReadPort.blastRadius and returns its BlastRadius verbatim", async () => {
-  const sha = Sha.of("abc1234");
-  const expected = BlastRadius.of(sha, ["src/a.ts", "src/b.ts"]);
-  let calledWith: Sha | undefined;
-  const vcs = fakeVcsRead({
-    blastRadius: async (s) => { calledWith = s; return expected; },
-  });
-  const adapter = new ChangeAnalysisPortAdapter(vcs);
-
-  const result = await adapter.analyze(sha);
-
-  assert.equal(calledWith, sha, "must forward the SAME Sha to VcsReadPort.blastRadius");
-  assert.deepEqual([...result.changedFiles], ["src/a.ts", "src/b.ts"]);
-  assert.equal(result.sha, sha);
-});
 
 test("classify() sources message+diff from VcsReadPort and delegates to classifyCommit verbatim", async () => {
   const sha = Sha.of("def5678");
@@ -120,4 +109,58 @@ test("classify() surfaces breaking:true for a BREAKING CHANGE commit, matching c
 
   assert.equal(result.intent.breaking, true);
   assert.equal(result.action, "generate");
+});
+
+// ── WS7.1 (full-flow remediation, multi-commit range restoration) ──────────────────────────────
+
+test("classify(sha, {baseSha}) sources the UNION diff via VcsReadPort.diff(sha, {baseSha}) and the range's other messages via otherMessages()", async () => {
+  const sha = Sha.of("deadbee1");
+  const baseSha = Sha.of("bad00001");
+  let diffOpts: unknown;
+  let otherMessagesCalled = false;
+  const vcs = fakeVcsRead({
+    message: async () => "chore: bump deps",
+    diff: async (_s, opts) => { diffOpts = opts; return "diff --git a/src/x.ts b/src/x.ts\n+++ b/src/x.ts\n+if (a) return 1;\n"; },
+    otherMessages: async (_s, _opts) => { otherMessagesCalled = true; return ["feat: add x"]; },
+  });
+  const adapter = new ChangeAnalysisPortAdapter(vcs);
+
+  const result = await adapter.classify(sha, { baseSha });
+
+  assert.deepEqual(diffOpts, { baseSha }, "must forward baseSha to VcsReadPort.diff so it fetches the UNION diff");
+  assert.equal(otherMessagesCalled, true, "must fetch the range's other commit messages via otherMessages()");
+  // MAX-severity: chore (head) + feat (other) → generate wins, matching classifyRange's own contract.
+  assert.equal(result.action, "generate");
+  assert.equal(result.intent.type, "chore", "intent must stay the HEAD commit's own, even when a range member escalates the action");
+});
+
+test("classify(sha) with NO opts.baseSha never calls otherMessages — byte-identical to the single-commit path", async () => {
+  const sha = Sha.of("deadbee1");
+  let otherMessagesCalled = false;
+  const vcs = fakeVcsRead({
+    message: async () => "feat: new checkout flow",
+    diff: async () => "diff --git a/src/checkout.ts b/src/checkout.ts\n+++ b/src/checkout.ts\n+if (total > 0) { charge(); }\n",
+    otherMessages: async () => { otherMessagesCalled = true; return []; },
+  });
+  const adapter = new ChangeAnalysisPortAdapter(vcs);
+
+  await adapter.classify(sha);
+
+  assert.equal(otherMessagesCalled, false, "otherMessages must never be called when the caller supplies no baseSha");
+});
+
+test("classify(sha, {baseSha}) degrades to a single-commit-equivalent range when VcsReadPort has no otherMessages collaborator ([SWAP])", async () => {
+  const sha = Sha.of("deadbee1");
+  const baseSha = Sha.of("bad00001");
+  // fakeVcsRead's default shape omits otherMessages entirely — mirrors a VcsReadPort
+  // implementation/test-double that predates WS7.1.
+  const vcs = fakeVcsRead({
+    message: async () => "chore: bump deps",
+    diff: async () => "diff --git a/README.md b/README.md\n+++ b/README.md\n+more prose\n",
+  });
+  const adapter = new ChangeAnalysisPortAdapter(vcs);
+
+  const result = await adapter.classify(sha, { baseSha });
+
+  assert.equal(result.action, "skip", "absent otherMessages must not throw — degrades to the head commit's own classification");
 });

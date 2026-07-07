@@ -278,6 +278,11 @@ export class GenerationPortAdapter implements GenerationPort {
       ...(enrichment?.crossRepoImpact?.impactedLinks.length
         ? { crossRepoImpact: { impactedLinks: enrichment.crossRepoImpact.impactedLinks.map((x) => ({ ...x })) } }
         : {}),
+      // WS7.4 (full-flow remediation): 1:1 spread, mirroring intent's own conditional-spread
+      // precedent — mapped onto the SAME OpencodeRunInput.classificationReason/contradiction
+      // fields generation-ports.ts declares. Absent -> omitted, unchanged prompt.
+      ...(enrichment?.classificationReason ? { classificationReason: enrichment.classificationReason } : {}),
+      ...(enrichment?.contradiction ? { contradiction: true } : {}),
     };
 
     const generated = await this.useCase.generate(input, { ...(signal ? { signal } : {}) });

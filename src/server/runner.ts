@@ -313,6 +313,14 @@ async function runViaRewrittenEngine(
     ...(req.guidance ? { guidance: req.guidance } : {}),
     ...(req.triggerRepo ? { triggerRepo: req.triggerRepo } : {}),
     ...(previousNamespace ? { previousNamespace } : {}),
+    // WS7.1 (full-flow remediation, multi-commit range restoration): the SINGLE seam that was
+    // dropping req.baseSha entirely — RunRequest.baseSha (this file's own type, above) was already
+    // parsed correctly at both entry points (src/index.ts's webhook handler, src/cli.ts's
+    // --base-sha flag) and threaded into enqueueTrackedRun's RunRequest, but this RunInput
+    // construction — the ONLY place a RunRequest becomes what the engine actually receives — never
+    // forwarded it. A push of N commits tested only the head commit's own diff; this restores the
+    // full range. Absent -> unchanged (RunQaUseCase falls back to single-commit classification).
+    ...(req.baseSha ? { baseSha: Sha.of(req.baseSha) } : {}),
   };
   const outcome = await port.run(input, signal);
   // W3 F3: thread the real per-case results into history.addCase (the single source of truth for

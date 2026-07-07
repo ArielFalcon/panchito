@@ -423,6 +423,54 @@ test("PIPELINE_ENGINE=rewritten — RunInput.triggerRepo is absent (not fabricat
   }
 });
 
+// ── WS7.1 (full-flow remediation, multi-commit range restoration) ──────────────────────────────
+// req.baseSha was ALREADY parsed correctly at both entry points (src/index.ts's webhook handler,
+// src/cli.ts's --base-sha flag) and threaded into RunRequest — but runViaRewrittenEngine's own
+// RunInput construction (this file) dropped it before it ever reached the engine. These tests pin
+// the exact seam that fix closes: the ONE place a RunRequest becomes a RunInput.
+
+test("PIPELINE_ENGINE=rewritten — the runner threads req.baseSha into port.run's RunInput when present", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const { port, calls } = fakePort({ verdict: "pass" });
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-base-sha", sha: "def5678", target: "e2e", mode: "diff", source: "webhook", baseSha: "abc1234" },
+      { loadApp: cfg, engineFactory: () => port },
+    );
+    await queue.drain();
+    assert.equal(getRecord(id)!.verdict, "pass");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.baseSha?.value, "abc1234", "RunInput.baseSha must carry req.baseSha through to port.run — this is the exact seam WS7.1 restores");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("PIPELINE_ENGINE=rewritten — RunInput.baseSha is absent (not fabricated) when req.baseSha is omitted", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const { port, calls } = fakePort({ verdict: "pass" });
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-base-sha-absent", sha: "def5678", target: "e2e", mode: "diff", source: "manual" },
+      { loadApp: cfg, engineFactory: () => port },
+    );
+    await queue.drain();
+    assert.equal(getRecord(id)!.verdict, "pass");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.baseSha, undefined, "a single-commit run must never fabricate a baseSha — backward compatible with today's behavior");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
 // ── Bug fix (cross-repo composition threading) — engineFactory's `run` param must ALSO carry
 // triggerRepo, not just mode/guidance. Prior to this fix, req.triggerRepo reached RunInput (pinned
 // above) but never reached the engineFactory's `run` object, so rewritten-engine-factory.ts had no

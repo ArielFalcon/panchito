@@ -84,10 +84,74 @@ export function classifyCommit(message: string, diff: string): CommitClassificat
     action = "generate";
     const what = hasLogicChange ? "logic" : "behavior config";
     reason = `message '${type}' expected no tests, but the diff adds ${what} → escalated to generate`;
+  } else if (action === "skip") {
+    // WS7.3(b)/(c) (full-flow remediation, conservative expansion): two DISTINCT blind spots that
+    // both under-classify a skip-typed commit as untestable, closed the SAME way — escalate to
+    // REGRESSION (run the existing suite; stale specs surface), never GENERATE. This is
+    // deliberately weaker than the added-logic/added-config escalation above: a removal or a
+    // migration invalidates EXISTING expectations more than it creates a brand-new surface to
+    // cover, so the cheap, targeted response is re-running what already exists, not writing new
+    // tests speculatively. A red result then flows through the normal fix/Issue machinery exactly
+    // like any other regression run.
+    const removedLogic = genuinelyRemovedLogic(diff);
+    const migrationChange = genuinelyAddedMigration(diff);
+    if (removedLogic > 0) {
+      contradiction = true;
+      action = "regression";
+      reason = `message '${type}' expected no tests, but the diff REMOVES logic (${removedLogic} line(s)) → escalated to regression (stale specs may surface)`;
+    } else if (migrationChange > 0) {
+      contradiction = true;
+      action = "regression";
+      reason = `message '${type}' expected no tests, but the diff adds a DB migration → escalated to regression`;
+    }
   }
+  // WS7.3(d) (full-flow remediation, DECISION — documented known limit): constant-value changes
+  // (e.g. `timeout: 5000` → `timeout: 10000`) are NOT auto-escalated. A value-diff heuristic on
+  // arbitrary source is high-noise (nearly every line touches SOME literal) and the false-generate
+  // cost at fleet scale is real. Accepted blind spot — revisit with telemetry if skip-then-fail
+  // incidents against this exact shape show up in practice; do not add a heuristic here on a hunch.
 
   return { type, breaking, message: firstLine, body: body || undefined, changedFiles, hasLogicChange, contradiction, action, reason };
 }
+
+// WS7.1 (full-flow remediation, multi-commit range restoration): severity order for reducing
+// several per-commit classifications down to ONE action. "skip < regression < generate" — the
+// action must reflect the WORST (most test-worthy) change anywhere in the range: a single `feat`
+// buried under a stack of `chore` commits must still generate, and any commit that needs the
+// existing suite re-run (regression) must not be silently outvoted by a majority of skips.
+const ACTION_SEVERITY: Record<CommitAction, number> = { skip: 0, regression: 1, generate: 2 };
+
+// Classifies a PUSH/PR range of commits as ONE decision. `headMessage` is the tip commit's own
+// message (ALWAYS passed explicitly — never inferred from array position, since a caller's commit
+// list could be ordered either way depending on how it was fetched); `otherMessages` are the rest
+// of the range (order-independent — only the MAX-severity action is derived from them). Mirrors
+// the single-commit classifyCommit() exactly when otherMessages is empty (the common, no-baseSha
+// case) — same DEFAULT_ACTION table, same escalation cross-check — so a caller with no range gets
+// byte-identical behavior to before this function existed.
+//
+// Design (per the remediation plan): classify EACH commit message (head + others) against the
+// SAME union diff (the diff DEV will actually run against) — this reuses classifyCommit's own
+// escalation cross-check verbatim for every message, rather than inventing a second escalation
+// rule. Take the MAX-severity action across the whole range ("skip < regression < generate").
+// `intent` (type/breaking/message/body/changedFiles) is ALWAYS the head commit's own — the agent's
+// test objective is grounded in what the developer actually wrote for the tip commit, never an
+// arbitrary or averaged message from the range.
+export function classifyRange(headMessage: string, otherMessages: readonly string[], diff: string): CommitClassification {
+  const headClassification = classifyCommit(headMessage, diff);
+  const otherClassifications = otherMessages.map((m) => classifyCommit(m, diff));
+  const all = [headClassification, ...otherClassifications];
+  const winner = all.reduce((worst, cur) =>
+    ACTION_SEVERITY[cur.action] > ACTION_SEVERITY[worst.action] ? cur : worst,
+  );
+  return {
+    ...headClassification,
+    action: winner.action,
+    reason: otherMessages.length > 0 ? `range of ${all.length} commit(s): ${winner.reason}` : winner.reason,
+    contradiction: winner.contradiction,
+    hasLogicChange: all.some((c) => c.hasLogicChange),
+  };
+}
+
 
 const TYPES = new Set<string>([
   "feat", "fix", "perf", "refactor", "chore", "style", "docs", "ci", "build", "test", "revert",
@@ -103,9 +167,16 @@ function parseHeader(message: string): { type: CommitType; breaking: boolean } {
   return { type, breaking };
 }
 
+// WS7.3(a) (full-flow remediation, conservative expansion — premise-corrected): .vue/.svelte were
+// ALREADY present (verified against the live tree before this fix; the plan's original premise
+// that they were missing was wrong). Only .html/.astro were the genuinely-missing framework
+// template extensions — for an E2E engine, a template change IS a behavior change (it's what the
+// browser renders), so it belongs in the same source-file set every other markup/component
+// extension here already gets.
 const SOURCE_EXT = new Set([
   "ts", "tsx", "js", "jsx", "mjs", "cjs", "java", "kt", "py", "go", "rb", "cs",
   "php", "rs", "swift", "scala", "c", "cc", "cpp", "h", "hpp", "vue", "svelte",
+  "html", "astro",
 ]);
 
 function isSourceFile(path: string): boolean {
@@ -141,6 +212,102 @@ function genuinelyAddedLogic(diff: string): number {
   }
   // Subtract relocations by content: an added logic line with a matching removed line is
   // a move, not new logic. Each removal can cancel at most one addition.
+  const removedCounts = new Map<string, number>();
+  for (const r of removed) removedCounts.set(r, (removedCounts.get(r) ?? 0) + 1);
+  let net = 0;
+  for (const a of added) {
+    const c = removedCounts.get(a) ?? 0;
+    if (c > 0) removedCounts.set(a, c - 1);
+    else net++;
+  }
+  return net;
+}
+
+// WS7.3(b) (full-flow remediation, conservative expansion): GENUINELY-removed logic — the
+// symmetric twin of genuinelyAddedLogic above, same relocation subtraction, but counting the
+// OPPOSITE direction (removed lines minus those that have an identical added counterpart — a
+// relocation, not a deletion of behavior). A removal-only diff (deleting a guard, a branch, an
+// entire function) never registered in genuinelyAddedLogic (which only ever counts the `+` side),
+// so a skip-typed commit that REMOVES real logic previously escalated to nothing at all — the
+// existing suite's coverage of that removed behavior goes stale and silently unverified. Kept as
+// its OWN standalone walk (not a refactor of genuinelyAddedLogic) so the existing, tested function
+// is never put at risk by this addition — the two are twins by construction, pinned by their own
+// parity/behavior tests, not by sharing a code path.
+function genuinelyRemovedLogic(diff: string): number {
+  let currentSource = false;
+  const added: string[] = [];
+  const removed: string[] = [];
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+++ ")) {
+      currentSource = isSourceFile(line.replace(/^\+\+\+ (?:b\/)?/, ""));
+      continue;
+    }
+    if (line.startsWith("--- ") || line.startsWith("diff --git")) {
+      if (line.startsWith("diff --git")) currentSource = false;
+      continue;
+    }
+    if (!currentSource) continue;
+    if (line.startsWith("+")) {
+      if (looksLikeLogic(line.slice(1))) added.push(line.slice(1).trim());
+    } else if (line.startsWith("-")) {
+      if (looksLikeLogic(line.slice(1))) removed.push(line.slice(1).trim());
+    }
+  }
+  // Subtract relocations by content: a removed logic line with a matching added line is a move,
+  // not deleted behavior. Each addition can cancel at most one removal (mirrors genuinelyAddedLogic's
+  // own cancellation direction, reversed).
+  const addedCounts = new Map<string, number>();
+  for (const a of added) addedCounts.set(a, (addedCounts.get(a) ?? 0) + 1);
+  let net = 0;
+  for (const r of removed) {
+    const c = addedCounts.get(r) ?? 0;
+    if (c > 0) addedCounts.set(r, c - 1);
+    else net++;
+  }
+  return net;
+}
+
+// WS7.3(c) (full-flow remediation, conservative expansion): SQL migration files — deliberately
+// NARROW, matching the same "behavior-config, not everything" discipline BEHAVIOR_CONFIG below
+// already applies: a bare `.sql` file changed under a conventional migration DIRECTORY (Flyway/
+// Liquibase's own `db/migration`, `migrations`, or `db/changelog` layouts), or a `.sql` file whose
+// NAME carries a migration-tool version/sequence prefix (Flyway `V1__`/`R__`, a bare numeric
+// sequence like `001_add_column.sql`) — a schema migration invalidates existing expectations (a
+// dropped column, a renamed table) more than it creates new coverage surface, so it escalates
+// exactly like a removal (regression: run the suite, stale specs surface), never generate.
+const MIGRATION_PATH = /(^|\/)(db[\\/]migration|migrations|db[\\/]changelog)[\\/][^/]+\.sql$/i;
+const MIGRATION_FILENAME = /(^|\/)(v\d+(\.\d+)*__|r__|\d{3,}[_-]).*\.sql$/i;
+
+function isMigrationFile(path: string): boolean {
+  return MIGRATION_PATH.test(path) || MIGRATION_FILENAME.test(path);
+}
+
+// Net-added lines (any content, not just "looks like logic" — SQL DDL/DML has none of the
+// LOGIC-regex keywords) in a migration file. Any added line is schema-affecting by definition of
+// the file being a migration at all; relocations are subtracted by content, matching every other
+// genuinely* walker's own discipline.
+function genuinelyAddedMigration(diff: string): number {
+  let inMigration = false;
+  const added: string[] = [];
+  const removed: string[] = [];
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+++ ")) {
+      inMigration = isMigrationFile(line.replace(/^\+\+\+ (?:b\/)?/, ""));
+      continue;
+    }
+    if (line.startsWith("--- ") || line.startsWith("diff --git")) {
+      if (line.startsWith("diff --git")) inMigration = false;
+      continue;
+    }
+    if (!inMigration) continue;
+    if (line.startsWith("+")) {
+      const c = line.slice(1).trim();
+      if (c && !/^--/.test(c)) added.push(c);
+    } else if (line.startsWith("-")) {
+      const c = line.slice(1).trim();
+      if (c && !/^--/.test(c)) removed.push(c);
+    }
+  }
   const removedCounts = new Map<string, number>();
   for (const r of removed) removedCounts.set(r, (removedCounts.get(r) ?? 0) + 1);
   let net = 0;
