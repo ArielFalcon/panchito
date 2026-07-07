@@ -5101,3 +5101,30 @@ test("WS4 4.3: the initial generate() call never carries static-gate fixCases en
   assert.equal(capturedFixCases.length, 1, "a clean pass never engages the static-fix loop — exactly ONE generate() call");
   assert.equal(capturedFixCases[0], undefined, "the initial generate() call must never carry static-gate fixCases enrichment");
 });
+
+test("empty-generation guard: a generation that returns parsed:false + zero specs is infra-error, NOT a silent skip (surface integration errors loudly)", async () => {
+  const { ports } = stubPorts({
+    // The agent runtime returned no parseable verdict (provider quota/outage/timeout returning empty
+    // rather than throwing). approved defaults true on an unparseable verdict, so WITHOUT the guard
+    // this would fall into the approved+zero-specs no-op skip and masquerade as "no test-worthy change".
+    generate: async () => ({ specs: [], approved: true, parsed: false }),
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "empty-generation-parsed-false-infra" });
+
+  assert.equal(out.decision.verdict, "infra-error", "empty/unparseable generation must surface as infra-error, never skipped");
+});
+
+test("no-op honored: a genuine agent no-op (parsed:true + approved + zero specs) still skips — the guard does not over-fire", async () => {
+  const { ports } = stubPorts({
+    // The agent emitted a real, parseable verdict deciding no tests are warranted — the legitimate
+    // CLAUDE.md no-op that MUST stay `skipped`. Only parsed:false (above) diverts to infra-error.
+    generate: async () => ({ specs: [], approved: true, parsed: true }),
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "genuine-no-op-parsed-true-skips" });
+
+  assert.equal(out.decision.verdict, "skipped", "a genuine parsed no-op is a valid skip, never infra-error");
+});

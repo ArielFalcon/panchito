@@ -248,7 +248,7 @@ export interface GenerationPort {
   // the field was silently dropped at this interface boundary and Lever-2's checkSpecSelectors
   // always received specSources:[] no matter what the adapter produced underneath. Absent/empty ->
   // unchanged (no readSpecSource collaborator wired, or nothing was generated) — never fabricated.
-  generate(objectives: readonly Objective[], specDir: string, signal?: AbortSignal, diff?: string, enrichment?: GenerationEnrichment): Promise<{ specs: string[]; approved: boolean; note?: string; specSources?: string[] }>;
+  generate(objectives: readonly Objective[], specDir: string, signal?: AbortSignal, diff?: string, enrichment?: GenerationEnrichment): Promise<{ specs: string[]; approved: boolean; note?: string; specSources?: string[]; parsed?: boolean }>;
 }
 // ReviewPort is the authoritative publish gate's seam. blockingCount distinguishes blocking
 // corrections (must regenerate) from advisory ones (may approve when only advisory remain);

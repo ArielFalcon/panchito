@@ -70,6 +70,14 @@ export interface GenerationResult {
   approved: boolean;
   reviewed: boolean;
   note?: string;
+  // parsed: did the GENERATOR emit a parseable closing verdict at all (VerdictParserPort.parseGenerator's
+  // own `parsed`)? FALSE means the agent runtime returned no usable output — an empty/errored session
+  // (provider quota exhausted, timeout, model refusal, runtime outage), NOT a deliberate agent no-op.
+  // The orchestrator uses this to keep the "approved + zero specs -> skipped" no-op invariant from
+  // swallowing a runtime failure into a silent "no test-worthy change" skip (surface-integration-errors
+  // -loudly invariant). Absent -> treated as a genuine result (backward compatible: a synthetic
+  // regression stand-in or a legacy stub carries no runtime-failure signal).
+  parsed?: boolean;
 }
 
 // Options for a single generate() call.
@@ -192,6 +200,7 @@ export class GenerateTestsUseCase {
         reviewed: false,
         approved: true,
         note: deliverable.note,
+        parsed: deliverable.parsed,
       };
     }
 
@@ -259,6 +268,7 @@ export class GenerateTestsUseCase {
       reviewed: true,
       approved,
       note: approved ? undefined : (reviewJudgment.rationale ?? "the reviewer did not approve the E2E tests"),
+      parsed: deliverable.parsed,
     };
   }
 }

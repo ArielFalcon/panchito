@@ -721,6 +721,27 @@ export class RunQaUseCase {
     // always true above, so the `!generated.approved` conjunct is false).
     const generationNote = !generated.approved && generated.specs.length === 0 && generated.note ? generated.note : undefined;
 
+    // Empty/errored generation guard (live-probe root cause — surface-integration-errors-loudly
+    // invariant): the agent runtime returned NO parseable verdict (`parsed === false`) AND zero specs.
+    // This is NOT a deliberate agent no-op — it is an empty/failed generation session (provider quota
+    // exhausted, timeout, model refusal, runtime outage returning empty rather than throwing). Without
+    // this guard it falls into the no-op skip below (approved defaults true on an unparseable verdict),
+    // masquerading as a clean "no test-worthy change" skip and hiding a real runtime failure from the
+    // operator, the learner (skipped never folds), and the queue. Route it to infra-error instead:
+    // loud, non-Issue (never blames the watched app), excluded from learning (infra-error never
+    // folds/reflects — matches the suppression matrix), and honest that the RUNTIME failed, not the
+    // code. Provider/app/mode-agnostic — every runtime that yields empty output lands here uniformly.
+    // Ordered BEFORE the no-op skip so a genuine no-op (parsed !== false) still skips as designed.
+    if (generating && generated.parsed === false && generated.specs.length === 0) {
+      const emptyNote =
+        generated.note ||
+        "generation produced no parseable output — the agent runtime returned an empty/errored session " +
+          "(provider unavailable, quota exhausted, timeout, or model refusal). Not a code defect and not a " +
+          "no-op decision; surfaced as infra-error so it is diagnosable rather than a silent skip.";
+      console.error(`[qa] generation runtime failure (empty, unparseable output): ${emptyNote}`);
+      return this.infraErrorResult(emptyNote);
+    }
+
     // Agent no-op: approved + zero specs -> skipped (CLAUDE.md invariant: a VALID skipped, never invalid).
     // WS7.2: gated on `generating` — a regression run's synthetic { approved:true, specs:[] } stand-in
     // above would otherwise match this SAME shape and be misclassified as an agent no-op (wrong

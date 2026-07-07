@@ -182,6 +182,10 @@ export interface GenerationPortResult {
   approved: boolean;
   note?: string;
   specSources?: string[];
+  // parsed: forwarded from GenerateTestsUseCase — FALSE means the agent runtime emitted no parseable
+  // verdict (empty/errored session), so the orchestrator can distinguish a genuine agent no-op from a
+  // runtime failure instead of silently skipping. See GenerationResult.parsed's own doc.
+  parsed?: boolean;
 }
 
 export class GenerationPortAdapter implements GenerationPort {
@@ -291,6 +295,7 @@ export class GenerationPortAdapter implements GenerationPort {
       specs: generated.specs,
       approved: generated.approved,
       ...(generated.note !== undefined ? { note: generated.note } : {}),
+      ...(generated.parsed !== undefined ? { parsed: generated.parsed } : {}),
     };
 
     if (this.collaborators.readSpecSource && generated.specs.length > 0) {
