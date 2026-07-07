@@ -64,6 +64,17 @@ export interface LearningRepositoryPort {
   // returned, immediately after retrieval — matching legacy's own "record usage on exactly what the
   // generator will see" ordering.
   incrementUsage?(ids: readonly string[]): Promise<void>;
+  // WS1.3 (full-flow remediation): minimal read for the anti-respawn dedup guard
+  // (cross-run-learning/domain/distill-rule.ts's decideDistill). topRules() is RETRIEVAL-scoped —
+  // it filters to active/candidate only (RuleGovernanceService's RETRIEVABLE set) — so it cannot
+  // see a deprecated/superseded row and would let a demoted pattern respawn as a fresh candidate.
+  // Mirrors legacy's listAllLearningRules(app, limit) (src/server/history.ts), which exists for
+  // EXACTLY this reason: "ALL rules regardless of status — used ONLY by the distiller for
+  // de-duplication". Optional (same optionality convention as incrementUsage above) so existing
+  // callers/fakes/stores that never distill need not implement it; ReflectorPortAdapter is the one
+  // production call site. A store that omits it makes this a fail-open no-op (empty existing set)
+  // — never a stricter behavior than before this method existed.
+  listAll?(app: string, limit: number): Promise<LearningRule[]>;
 }
 // Aligned to legacy src/types.ts StructuredReflection (8 fields). Field pruning, if any, is decided
 // when porting the learning context (Plan 6), not here — do not silently truncate.

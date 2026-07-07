@@ -115,3 +115,30 @@ test("incrementUsage tolerates a store without incrementUsage wired", async () =
   const repo = new SqliteLearningRepository({ selectRules: () => [], upsert: () => {}, recordOutcome: () => {} });
   await assert.doesNotReject(() => repo.incrementUsage(["r1"]));
 });
+
+// WS1.3 (full-flow remediation): listAll delegates to the injected store's own selectAllRules —
+// UNFILTERED by status (unlike selectRules/topRules, which are retrieval-scoped to active/
+// candidate) — and fails open to [] when the store doesn't implement it (mirrors incrementUsage's
+// own optional-method convention on this same port).
+test("listAll delegates to the injected store.selectAllRules, unfiltered by status", async () => {
+  const deprecatedRow = { id: "dep", trigger_text: "t-dep", action_text: "a-dep", error_class: "E-X", archetype: null, status: "deprecated", confidence: "low", usage_count: 0, outcome_count: 5, success_rate: 0.1, last_verified: null, source: "oracle", at: "2026-01-01T00:00:00.000Z" };
+  const seenArgs: Array<{ app: string; limit: number }> = [];
+  const repo = new SqliteLearningRepository({
+    selectRules: () => [],
+    upsert: () => {},
+    recordOutcome: () => {},
+    selectAllRules: (app, limit) => { seenArgs.push({ app, limit }); return [deprecatedRow]; },
+  });
+
+  const all = await repo.listAll("test-app", 200);
+
+  assert.deepEqual(seenArgs, [{ app: "test-app", limit: 200 }]);
+  assert.equal(all.length, 1);
+  assert.equal(all[0]?.status, "deprecated", "listAll must NOT filter out deprecated rows (unlike topRules)");
+});
+
+test("listAll tolerates a store without selectAllRules wired (fail-open to [])", async () => {
+  const repo = new SqliteLearningRepository({ selectRules: () => [], upsert: () => {}, recordOutcome: () => {} });
+  const all = await repo.listAll("test-app", 200);
+  assert.deepEqual(all, []);
+});

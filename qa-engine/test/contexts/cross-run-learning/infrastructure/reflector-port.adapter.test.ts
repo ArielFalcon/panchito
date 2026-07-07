@@ -220,3 +220,96 @@ test("reflect() forwards a custom timeoutMs override to openSession", async () =
 test("REFLECT_TIMEOUT_MS defaults to 60000", () => {
   assert.equal(REFLECT_TIMEOUT_MS, 60_000);
 });
+
+// ── WS1.3 (full-flow remediation): route the save through distill-rule.ts's decideDistill ──────
+// ReflectorPortAdapter previously built LearningRule objects inline, bypassing the anti-respawn
+// dedup guard entirely. These tests pin: (a) a reflection whose rule normalizes onto an EXISTING
+// rule's key (even a deprecated one) is skipped — repo.save NOT called; (b) a novel rule saves
+// with a normalized trigger and capped fields; (c) the untouched anti-Goodhart pins above
+// (candidate/low, no initialStatus threading) still hold with the new distill routing in place.
+
+function fakeRepoWithExisting(existing: LearningRule[], onSave?: (rule: LearningRule) => void): LearningRepositoryPort {
+  return {
+    save: async (rule) => { onSave?.(rule); },
+    topRules: async () => [],
+    applyOutcome: async () => {},
+    listAll: async () => existing,
+  };
+}
+
+test("reflect() skips saving when the distilled rule normalizes onto an EXISTING rule's key, even a deprecated one", async () => {
+  // Legacy dedup keys on the NORMALIZED trigger/action text; seed a deprecated rule sharing the
+  // exact normalized key the canonical "Applies when ..." trigger below produces.
+  const existingDeprecated: LearningRule = {
+    id: "deprecated-rule-1",
+    trigger: "Applies when a form submit button lacks a stable selector",
+    action: "use getbyrole('button', { name: ... })",
+    errorClass: "E-EXEC-FAIL",
+    archetype: null,
+    status: "deprecated",
+    confidence: "low",
+    usageCount: 0,
+    outcomeCount: 5,
+    successRate: 0.1,
+    lastVerified: null,
+    source: "run-old",
+    at: "2026-01-01T00:00:00.000Z",
+  };
+
+  let saveCalled = false;
+  const logs: string[] = [];
+  const runtime = fakeRuntime({});
+  const repo = fakeRepoWithExisting([existingDeprecated], () => { saveCalled = true; });
+  const adapter = new ReflectorPortAdapter({
+    runtime, repo, backfill: () => {}, cwd: "/mirror/app", app: "app",
+    onSkipDuplicate: (line) => logs.push(line),
+  });
+
+  await adapter.reflect(baseInput);
+
+  assert.equal(saveCalled, false, "a duplicate (even against a deprecated row) must not be saved");
+  assert.ok(logs.length > 0, "a log line must be emitted for the skip");
+});
+
+test("reflect() saves a novel rule with normalized trigger and capped fields", async () => {
+  let savedRule: LearningRule | undefined;
+  const runtime = fakeRuntime({});
+  const repo = fakeRepoWithExisting([], (rule) => { savedRule = rule; });
+  const adapter = new ReflectorPortAdapter({ runtime, repo, backfill: () => {}, cwd: "/mirror/app", app: "app" });
+
+  await adapter.reflect(baseInput);
+
+  assert.ok(savedRule, "a novel rule must be saved");
+  assert.equal(
+    savedRule?.trigger,
+    "Applies when a form submit button lacks a stable selector",
+    "trigger must be canonicalized to the 'Applies when ...' form",
+  );
+  assert.ok((savedRule?.trigger.length ?? 0) <= 400, "trigger must respect the field cap");
+  assert.ok((savedRule?.action.length ?? 0) <= 400, "action must respect the field cap");
+});
+
+test("reflect() with a repo that has no listAll (fail-open): still saves a novel rule normally", async () => {
+  let savedRule: LearningRule | undefined;
+  const runtime = fakeRuntime({});
+  const repo = fakeRepo((rule) => { savedRule = rule; }); // no listAll on this fake
+  const adapter = new ReflectorPortAdapter({ runtime, repo, backfill: () => {}, cwd: "/mirror/app", app: "app" });
+
+  await adapter.reflect(baseInput);
+
+  assert.ok(savedRule, "a repo without listAll must fail open (empty existing set), not throw or block saving");
+});
+
+test("reflect() still never threads initialStatus and still saves candidate/low with distill routing in place", async () => {
+  let savedRule: LearningRule | undefined;
+  const runtime = fakeRuntime({});
+  const repo = fakeRepoWithExisting([], (rule) => { savedRule = rule; });
+  const adapter = new ReflectorPortAdapter({ runtime, repo, backfill: () => {}, cwd: "/mirror/app", app: "app" });
+
+  await adapter.reflect(baseInput);
+
+  assert.ok(savedRule);
+  assert.equal(savedRule?.status, "candidate");
+  assert.equal(savedRule?.confidence, "low");
+  assert.equal(Object.prototype.hasOwnProperty.call(savedRule, "initialStatus"), false);
+});

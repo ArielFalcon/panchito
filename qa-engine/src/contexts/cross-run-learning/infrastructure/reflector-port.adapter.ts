@@ -18,8 +18,22 @@
 // balanced-brace JSON extractor (lastJsonMatching/extractJsonObjects, originally
 // src/integrations/verdict-parse.ts) is ported alongside them rather than imported across the
 // hexagonal boundary.
+//
+// WS1.3 (full-flow remediation): the save path now routes through distill-rule.ts's decideDistill
+// (the ported anti-respawn dedup guard + field caps + trigger canonicalization) instead of
+// constructing the LearningRule inline. This restores the dedup semantics legacy's
+// src/qa/learning/distiller.ts had (exact-text ruleKey dedup against ALL statuses incl.
+// deprecated/superseded) that the inline construction bypassed entirely. `app` on ReflectorPortDeps
+// (previously carried only for ctor parity, never read) is now genuinely consumed: it scopes the
+// repo.listAll(app, ...) call that fetches the existing-rule set the dedup decision runs against.
 import type { LearningRepositoryPort, LearningRule, ReflectionInput, StructuredReflection } from "../application/ports/index.ts";
 import type { AgentRuntimePort } from "@kernel/ports/agent-runtime.port.ts";
+import { capRuleFields, decideDistill } from "../domain/distill-rule.ts";
+
+// Bounded so a single reflect() call never fans out unbounded rule history when scanning for
+// dedup — mirrors legacy's own listAllLearningRules(app, limit) default cap (src/server/
+// history.ts / src/qa/learning/distiller.ts's DEDUP_WINDOW).
+const DEDUP_SCAN_LIMIT = 200;
 
 // ── Ported verbatim from src/integrations/verdict-parse.ts ──────────────────────────────────────
 // Extracts every BALANCED top-level JSON object from free-form agent text, respecting string
@@ -153,17 +167,20 @@ export interface ReflectorPortDeps {
   // Injectable so a test can assert the swallow without polluting stderr; defaults to console.error,
   // mirroring LearningPortAdapter's onFoldError convention on the sibling port.
   onReflectError?: (e: unknown) => void;
+  // WS1.3: injectable so a test can assert the skip without polluting stderr; defaults to
+  // console.log. Fired when decideDistill finds the distilled rule duplicates an EXISTING rule
+  // (any status, incl. deprecated/superseded) — never an error, since a skip is the anti-respawn
+  // guard working as intended, not a fault.
+  onSkipDuplicate?: (line: string) => void;
 }
 
 export class ReflectorPortAdapter {
   constructor(private readonly deps: ReflectorPortDeps) {}
 
   async reflect(input: ReflectionInput): Promise<void> {
-    // `app` is carried on ReflectorPortDeps for ctor parity with the design's documented DI seam
-    // (a future per-app-scoped save projection may need it) but LearningRepositoryPort.save(rule)
-    // takes no `app` argument today — the port type has no such field — so it is not read here.
-    const { runtime, repo, backfill, cwd, timeoutMs, onReflectError } = this.deps;
+    const { runtime, repo, backfill, cwd, app, timeoutMs, onReflectError } = this.deps;
     const reportError = onReflectError ?? ((e: unknown) => console.error("[ReflectorPortAdapter] reflect failed (off-path, swallowed):", e));
+    const reportSkip = this.deps.onSkipDuplicate ?? ((line: string) => console.log(line));
 
     let session: Awaited<ReturnType<AgentRuntimePort["openSession"]>> | undefined;
     try {
@@ -176,13 +193,37 @@ export class ReflectorPortAdapter {
       const reflection = parseStructuredReflection(output);
       if (!reflection) return; // malformed/incomplete JSON: logged no-op, never a throw
 
+      // WS1.3: cap fields + canonicalize the trigger BEFORE the dedup key is computed — mirrors
+      // legacy's reflectionToRuleUpsert -> distillReflection ordering (the ruleKey is computed on
+      // the ALREADY-normalized/capped candidate, never the raw LLM text).
+      const capped = capRuleFields({
+        trigger: reflection.preventiveRule.trigger,
+        action: reflection.preventiveRule.action,
+      });
+
+      // WS1.3: fetch the FULL existing-rule set (any status, incl. deprecated/superseded) so a
+      // demoted pattern cannot respawn as a fresh candidate. listAll is optional on the port
+      // (mirrors incrementUsage's own optionality) — a repo/store that doesn't implement it fails
+      // open to an empty existing set, never a stricter gate than before this guard existed.
+      const existing = await repo.listAll?.(app, DEDUP_SCAN_LIMIT) ?? [];
+      const distilled = decideDistill(capped, existing);
+
+      if (distilled.decision === "skip-duplicate") {
+        // Never an error: the anti-respawn guard working as intended, not a fault. Reflection
+        // stays fault-isolated — a skip must not surface any louder than a normal no-op.
+        reportSkip(
+          `[ReflectorPortAdapter] skipped duplicate rule (key="${distilled.key}", matches existing id="${distilled.match.id}", status="${distilled.match.status}")`,
+        );
+        return;
+      }
+
       // ADR-3: status/confidence are hardcoded here — candidate/low — NEVER threaded from an
       // "initialStatus"-shaped field. This is the anti-Goodhart guarantee: reflection can only ever
       // author a candidate, never an active rule.
       const rule: LearningRule = {
         id: `rule-${input.runId.slice(-8)}-${Math.random().toString(16).slice(2, 8)}`,
-        trigger: reflection.preventiveRule.trigger,
-        action: reflection.preventiveRule.action,
+        trigger: capped.trigger,
+        action: capped.action,
         errorClass: reflection.errorClass,
         archetype: null,
         status: "candidate",

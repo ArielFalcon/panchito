@@ -14,4 +14,7 @@ export class StubLearningRepository implements LearningRepositoryPort {
   // W3 fix (F3a): no-op — topRules() always returns [] here, so there is never a retrieved id to
   // increment; kept for interface completeness with LearningRepositoryPort.
   async incrementUsage(_ids: readonly string[]): Promise<void> { /* off-path no-op */ }
+  // WS1.3: no-op — learning is off-path in v1, so there are never any existing rules to dedup
+  // against; kept for interface completeness with LearningRepositoryPort.
+  async listAll(_app: string, _limit: number): Promise<LearningRule[]> { return []; }
 }

@@ -48,6 +48,12 @@ export interface LearningStore {
   // history.ts) — the store-level primitive LearningRepositoryPort.incrementUsage delegates to.
   // Optional: a store fake that never exercises retrieval-usage tracking need not implement it.
   incrementUsage?(ids: readonly string[]): void;
+  // WS1.3 (full-flow remediation): mirrors legacy's listAllLearningRules(app, limit) (src/server/
+  // history.ts) — UNFILTERED by status (unlike selectRules, which the production wiring backs with
+  // the active/candidate-only listLearningRules). The store-level primitive
+  // LearningRepositoryPort.listAll delegates to. Optional: a store fake/wiring that never distills
+  // need not implement it — LearningRepositoryPort.listAll fails open to [] when absent.
+  selectAllRules?(app: string, limit: number): LearningRow[];
 }
 
 // §11: 'pending' (retired) maps to 'candidate'. Any unknown status also falls back to 'candidate'
@@ -107,5 +113,15 @@ export class SqliteLearningRepository implements LearningRepositoryPort {
   // telemetry, never gates publish, same contract class as applyOutcome).
   async incrementUsage(ids: readonly string[]): Promise<void> {
     this.store.incrementUsage?.(ids);
+  }
+
+  // WS1.3 (full-flow remediation): delegates to the injected store's own selectAllRules when
+  // present — a store fake/wiring that omits it (e.g. the v1 production bridge, which only wires
+  // the active/candidate-filtered selectRules) makes this a fail-open no-op ([]), never a stricter
+  // gate than before this method existed. Never gates publish — same off-path contract class as
+  // applyOutcome/incrementUsage on this port.
+  async listAll(app: string, limit: number): Promise<LearningRule[]> {
+    const rows = this.store.selectAllRules?.(app, limit) ?? [];
+    return rows.map(rowToRule);
   }
 }

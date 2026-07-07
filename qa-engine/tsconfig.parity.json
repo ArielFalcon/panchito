@@ -53,6 +53,7 @@
     "test/contexts/qa-run-orchestration/domain/helpers/selector-check-parity.test.ts",
     "test/contexts/qa-run-orchestration/domain/helpers/error-class-parity.test.ts",
     "test/contexts/cross-run-learning/domain/rule-fold-parity.test.ts",
+    "test/contexts/cross-run-learning/domain/distill-rule-parity.test.ts",
     "test/contract/seam-parity.contract.test.ts"
   ]
 }
