@@ -419,3 +419,74 @@ test("WS3.1: publish() sanitizes the adjudication reason through the SAME inject
   assert.ok(!bodySeen.includes("sk-abc123XYZ"), `the adjudication reason's secret must be sanitized — got: ${bodySeen}`);
   assert.ok(bodySeen.includes("[REDACTED_SECRET]"), "the sanitized replacement must appear in the rendered body");
 });
+
+// ── Follow-up #28 (reviewer-outage observability hardening) — a fleet-wide reviewer outage
+// (ReviewPortAdapter's catch mapping any session failure to {approved:false, parsed:false,
+// rationale:"reviewer unavailable: <reason>"}) previously degraded every green run to
+// Issue-instead-of-PR with the ONLY trace being a console.error at the moment of failure — never in
+// the Issue body, never in RunOutcome. `reviewerNote` (OPTIONAL, mirrors adjudication's own
+// backward-compat precedent immediately above) threads the reviewer-unavailable rationale into the
+// Issue body so the human reading it sees WHY there is no PR. Scope: ONLY the reviewer-unavailable
+// case ever threads this — a genuine reviewer REJECTION keeps today's rendering (corrections are
+// already that signal), never populating reviewerNote. ──────────────────────────────────────────
+
+test("reviewer-outage note: publish() renders a 'Reviewer unavailable' section in the Issue body when reviewerNote is present", async () => {
+  const decide = new PublishDecisionService();
+  let bodySeen = "";
+  const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/10", number: 10 }; } };
+  const pr = fakePr();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: false, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({
+    verdict: "pass",
+    cases: [],
+    logs: "x",
+    reviewerNote: "reviewer unavailable: timed out after 360000ms",
+  });
+
+  assert.match(result.outcome, /issue/);
+  assert.match(bodySeen, /Reviewer unavailable/);
+  assert.match(bodySeen, /timed out after 360000ms/);
+});
+
+test("reviewer-outage note: publish() omits the 'Reviewer unavailable' section entirely when reviewerNote is absent (backward-compat)", async () => {
+  const decide = new PublishDecisionService();
+  let bodySeen = "";
+  const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/11", number: 11 }; } };
+  const pr = fakePr();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "fail", cases: [], logs: "x" });
+
+  assert.match(result.outcome, /issue/);
+  assert.ok(!bodySeen.includes("Reviewer unavailable"), `no reviewerNote was supplied, so the section must be entirely absent — got: ${bodySeen}`);
+});
+
+test("reviewer-outage note: publish() sanitizes reviewerNote through the SAME injected sanitizer as logs/cases/adjudication", async () => {
+  const decide = new PublishDecisionService();
+  let bodySeen = "";
+  const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/12", number: 12 }; } };
+  const pr = fakePr();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const sanitize = (text: string) => text.replace(/sk-[A-Za-z0-9]+/g, "[REDACTED_SECRET]");
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: false, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({
+    verdict: "pass",
+    cases: [],
+    logs: "x",
+    reviewerNote: "reviewer unavailable: leaked token sk-abc123XYZ during session",
+  });
+
+  assert.match(result.outcome, /issue/);
+  assert.ok(!bodySeen.includes("sk-abc123XYZ"), `the reviewerNote's secret must be sanitized — got: ${bodySeen}`);
+  assert.ok(bodySeen.includes("[REDACTED_SECRET]"), "the sanitized replacement must appear in the rendered body");
+});

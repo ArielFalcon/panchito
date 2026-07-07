@@ -290,6 +290,13 @@ export interface ReviewEnrichment {
   // (a SEPARATE session from the generator's). Absent -> ReviewInput.runId stays unset, unchanged.
   runId?: string;
 }
+// Follow-up #28: the ReviewPort failure contract's rationale marker — the adapter's catch PRODUCES
+// `${REVIEWER_UNAVAILABLE_MARKER}: <reason>` and the use-case MATCHES on it to thread the outage
+// note into the published Issue + RunOutcome.gateSignals.reviewerRationale. One exported constant
+// so producer and matcher can never drift apart (a reworded message would otherwise silently stop
+// the note from threading while the fail-closed posture kept working — invisible feature death).
+export const REVIEWER_UNAVAILABLE_MARKER = "reviewer unavailable";
+
 export interface ReviewPort {
   // diff: the run's REAL per-run commit diff (Plan 7.6 dynamic-diff), so the reviewer grounds on the
   // actual change — NOT a static composition-time value that is empty in production. Optional: absent
@@ -450,6 +457,18 @@ export interface PublicationPort {
     // renders them as text, never branches on them, so a closed union here would buy nothing but an
     // import edge into the FixLoop's domain types from this port surface.
     adjudication?: { class: string; confidence: string; reason: string };
+    // Follow-up #28 (reviewer-outage observability hardening): the review loop's reviewer-unavailable
+    // rationale — ReviewPortAdapter's own fail-closed catch produces `rationale: "reviewer
+    // unavailable: <reason>"` when the reviewer session itself throws (timeout, env misconfig,
+    // provider down), but the review loop only ever branches on approved/parsed/corrections/
+    // blockingCount, so this rationale was silently dropped: a fleet-wide reviewer outage degraded
+    // every green run to Issue-instead-of-PR with no trace beyond a console.error at the moment of
+    // failure. OPTIONAL, same backward-compat precedent as adjudication immediately above: absent ->
+    // the adapter renders no "Reviewer unavailable" section at all. Threaded ONLY for that specific
+    // fail-closed exit — never for a genuine reviewer rejection (corrections are already the signal
+    // for that case) — so the human reading the Issue can tell "reviewer never actually ran" apart
+    // from "reviewer ran and rejected".
+    reviewerNote?: string;
   }): Promise<{ outcome: string }>;
 }
 // W3 fix (F1, dual-judge round): LearningPort.retrieve() previously returned bare trigger strings

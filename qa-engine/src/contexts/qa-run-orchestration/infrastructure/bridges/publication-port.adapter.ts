@@ -107,11 +107,21 @@ function renderAdjudicationSection(
     `- Reason: ${sanitize(adjudication.reason)}`,
   ];
 }
+// Follow-up #28 (reviewer-outage observability hardening): renders the reviewer-unavailable
+// rationale ReviewPortAdapter's own catch block produces (review-port.adapter.ts's
+// `reviewer unavailable: ${reason}` marker) through the SAME sanitizer every other rendered field
+// uses — mirrors renderAdjudicationSection's own section-rendering shape immediately above. Scoped
+// tightly: the caller (run-qa.use-case.ts) only ever populates this for the reviewer-unavailable
+// fail-closed exit, never for a genuine reviewer rejection (corrections already signal that case).
+function renderReviewerNoteSection(note: string, sanitize: (text: string) => string): string[] {
+  return ["", "Reviewer unavailable", sanitize(note)];
+}
 function renderBody(
   cases: readonly QaCase[],
   logs: string,
   sanitize: (text: string) => string,
   adjudication: { class: string; confidence: string; reason: string } | undefined,
+  reviewerNote: string | undefined,
 ): string {
   const failing = cases
     .filter((c) => c.status === "fail")
@@ -120,6 +130,7 @@ function renderBody(
     sanitize(logs),
     ...(failing.length > 0 ? ["", "Failing cases:", ...failing] : []),
     ...(adjudication ? renderAdjudicationSection(adjudication, sanitize) : []),
+    ...(reviewerNote ? renderReviewerNoteSection(reviewerNote, sanitize) : []),
   ].join("\n");
 }
 
@@ -159,6 +170,12 @@ export class PublicationPortAdapter implements PublicationPort {
     // use-case when one exists. OPTIONAL — absent (every pre-existing caller/stub/test) renders no
     // adjudication section at all, same backward-compat precedent as every other dynamic field above.
     adjudication?: { class: string; confidence: string; reason: string };
+    // Follow-up #28 (reviewer-outage observability hardening): the review loop's reviewer-unavailable
+    // rationale (ReviewPortAdapter's own fail-closed catch — "reviewer unavailable: <reason>"),
+    // threaded by the use-case ONLY for that specific fail-closed exit — never for a genuine reviewer
+    // rejection. OPTIONAL, same backward-compat precedent as adjudication above: absent renders no
+    // "Reviewer unavailable" section at all.
+    reviewerNote?: string;
   }): Promise<{ outcome: string }> {
     // Audit fix (judgment-day): prefer the REAL per-run decision value when the caller supplies
     // one; fall back to the static composition-time ctx only when absent (backward-compat for
@@ -176,7 +193,7 @@ export class PublicationPortAdapter implements PublicationPort {
     // composition root (src/server/rewritten-engine-factory.ts).
     const sanitize = this.deps.sanitize;
     const title = renderTitle(decision.verdict, sanitize);
-    const body = renderBody(decision.cases, decision.logs, sanitize, decision.adjudication);
+    const body = renderBody(decision.cases, decision.logs, sanitize, decision.adjudication, decision.reviewerNote);
     // F3: Issue creation routes to the triggering repo when supplied; PR creation always targets
     // ctx.repo (the primary repo) — never the trigger repo.
     const issueRepo = decision.issueRepo ?? this.ctx.repo;

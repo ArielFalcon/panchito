@@ -58,6 +58,7 @@ import type {
   CrossRepoImpactPort,
   CrossRepoImpact,
 } from "./ports/index.ts";
+import { REVIEWER_UNAVAILABLE_MARKER } from "./ports/index.ts";
 import { decide, type RunEvidence } from "../domain/run-decision.service.ts";
 import { RunDecision } from "../domain/run-decision.ts";
 import { FixLoop, type FixLoopExecutionPort, type FixLoopGenerationPort, type FixLoopSelectorCheckPort } from "../domain/fix-loop.aggregate.ts";
@@ -1421,6 +1422,17 @@ export class RunQaUseCase {
     // reaches gateSignals.reviewerCorrections at the mainline persist call below. Stays [] when the
     // review loop never runs (non-pass verdict, !needsReview, or a regression run) — never fabricated.
     let finalReviewerCorrections: string[] = [];
+    // Follow-up #28 (reviewer-outage observability hardening): the review loop's reviewer-unavailable
+    // rationale — outer-scoped alongside finalReviewerCorrections above for the SAME reason (survives
+    // past the review block, reaches both the publish() payload and the persisted RunOutcome further
+    // down). Populated ONLY when the loop's fail-closed exit is the reviewer-unavailable one
+    // (ReviewPortAdapter's own catch: `rationale: "reviewer unavailable: <reason>"`) — matched on that
+    // exact marker, not on `parsed === false` alone, so a genuine parse-miss (unparseable model
+    // output, unrelated rationale text) never fabricates this note. Never set on a genuine rejection
+    // (parsed:true) — corrections are already that signal (finalReviewerCorrections above).
+    let finalReviewerRationale: string | undefined;
+    // REVIEWER_UNAVAILABLE_MARKER: imported from ./ports/index.ts — the ReviewPort failure contract's
+    // shared producer/matcher constant (follow-up #28).
     // WS7.2: ALSO gated on `generating` — legacy's reviewGenerated() is only ever called from
     // inside the `if (generating)` block (src/pipeline.ts:2015-2236); a regression run never invokes
     // the reviewer (nothing new was generated to judge, and `decide()`'s own `!ev.generating` branch
@@ -1510,6 +1522,17 @@ export class RunQaUseCase {
         // header comment above).
         if (reviewResult.parsed === false) {
           reviewerApproved = false;
+          // Follow-up #28 (reviewer-outage observability hardening): a parse miss is not always the
+          // SAME failure — ReviewPortAdapter's own catch (review-port.adapter.ts) maps a genuinely
+          // thrown session failure (timeout, env misconfig, provider down) to this exact shape,
+          // tagging its rationale with the "reviewer unavailable" marker; the model producing
+          // unparseable JSON is a DIFFERENT parse-miss with unrelated (or absent) rationale text.
+          // Match on the marker itself, not on parsed===false alone, so only the genuine outage
+          // threads a note — the run's decision/verdict path is UNCHANGED either way (both still
+          // fail closed via reviewerApproved=false above).
+          if (reviewResult.rationale?.includes(REVIEWER_UNAVAILABLE_MARKER)) {
+            finalReviewerRationale = reviewResult.rationale;
+          }
           break;
         }
         // executedRed override (task #42, dual-judge confirmed) — mirrors legacy's D4/#669-close
@@ -1649,6 +1672,11 @@ export class RunQaUseCase {
         // pass or a run whose FixLoop never engaged, matching lastAdjudicatorVerdict's own "never
         // fabricated" contract (captured above, at the FixLoop call site).
         ...(lastAdjudicatorVerdict ? { adjudication: lastAdjudicatorVerdict } : {}),
+        // Follow-up #28 (reviewer-outage observability hardening): thread the review loop's
+        // reviewer-unavailable rationale when one exists — absent for a genuine rejection/approval or
+        // a run whose review loop never engaged, matching finalReviewerRationale's own "never
+        // fabricated, marker-scoped" contract (captured above, at the review call site).
+        ...(finalReviewerRationale ? { reviewerNote: finalReviewerRationale } : {}),
       });
       publishOutcome = published.outcome;
     }
@@ -1687,6 +1715,14 @@ export class RunQaUseCase {
         // WS1.5: the review loop's real final-round corrections — [] when the review loop never ran
         // or ultimately approved, matching finalReviewerCorrections' own "never fabricated" contract.
         reviewerCorrections: finalReviewerCorrections,
+        // Follow-up #28 (reviewer-outage observability hardening): persists the reviewer-unavailable
+        // rationale durably onto the ALREADY-EXISTING, comparator-blind RunOutcome.gateSignals.
+        // reviewerRationale slot (shared-kernel/run-outcome.ts) — this field was declared and
+        // seam-parity-tested (test/contract/seam-parity.contract.test.ts) but never populated by this
+        // use-case; it needed no new kernel field. Absent when the review loop never engaged, ended
+        // in a genuine rejection, or approved, matching finalReviewerRationale's own "never
+        // fabricated, marker-scoped" contract (captured above, at the review call site).
+        ...(finalReviewerRationale ? { reviewerRationale: finalReviewerRationale } : {}),
         // FIX F1: the publish outcome string (e.g. "pr: <url>", "issue: <url>", "quarantine: ...",
         // "shadow: ...", "noop: ...") reaches the persisted RunOutcome so a run's publish result is
         // diagnosable from the run record alone — never fabricated when publish() was never called
@@ -1963,6 +1999,12 @@ export class RunQaUseCase {
       // (skipped/invalid/infra-error, all pre-review or non-reviewed paths) omits it and gets the []
       // default below, matching this field's own "never fabricated" contract.
       reviewerCorrections?: string[];
+      // Follow-up #28 (reviewer-outage observability hardening): the review loop's reviewer-unavailable
+      // rationale — only the mainline caller (post-review) threads a real value, and only for that
+      // specific fail-closed exit (marker-scoped, see finalReviewerRationale's own header). Every
+      // other toRunOutcome() call site omits it and gets undefined via the conditional-spread below,
+      // matching RunOutcome.gateSignals.reviewerRationale's own pre-existing optional contract.
+      reviewerRationale?: string;
       valueScore?: number | null;
       note?: string;
       rulesRetrieved?: string[];
@@ -2015,6 +2057,11 @@ export class RunQaUseCase {
         // WS1.5: the review loop's real final-round corrections when the mainline caller threads
         // them; [] for every other call site (never ran a review, or the review ultimately approved).
         reviewerCorrections: extra?.reviewerCorrections ?? [],
+        // Follow-up #28 (reviewer-outage observability hardening): conditional-spread (never a
+        // fabricated ""), mirroring reviewerApproved's own precedent immediately below — true
+        // undefined survives when the mainline caller never threaded a reviewer-unavailable rationale
+        // (genuine rejection, approval, or the review loop never ran).
+        ...(extra?.reviewerRationale !== undefined ? { reviewerRationale: extra.reviewerRationale } : {}),
         ...(extra?.reviewerApproved !== undefined ? { reviewerApproved: extra.reviewerApproved } : {}),
         flaky: decision.verdict === "flaky",
         retries,

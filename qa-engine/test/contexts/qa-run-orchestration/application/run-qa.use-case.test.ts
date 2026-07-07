@@ -1567,6 +1567,153 @@ test("WS3.1: a run without a FixLoop adjudicator verdict (clean first-try pass) 
   assert.equal(publishedDecision?.adjudication, undefined, "a clean pass never engages the FixLoop, so adjudication must be omitted — never fabricated");
 });
 
+// ── Follow-up #28 (reviewer-outage observability hardening) — WS6.1 made ReviewPortAdapter's catch
+// map ANY session failure (env misconfig, provider down, timeout) to {approved:false, parsed:false,
+// rationale:"reviewer unavailable: <reason>"}, but the review loop only ever reads
+// approved/parsed/corrections/blockingCount — rationale was dropped silently, so a fleet-wide
+// reviewer outage degraded every green run to Issue-instead-of-PR with NO trace beyond a
+// console.error. Mirrors WS3.1's adjudication -> publish() pattern exactly: thread the marker
+// ONLY when the review loop's fail-closed exit is the reviewer-unavailable one (rationale carries
+// the adapter's own "reviewer unavailable" marker), never for a genuine parse-miss with unrelated
+// rationale text, and never for a genuine rejection (corrections already signal that). ────────────
+
+test("follow-up #28: a review() throw (reviewer unavailable) publishes an Issue whose payload carries the reviewerNote", async () => {
+  let publishedNote: string | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass", cases: [], logs: "" }),
+    review: async () => ({
+      approved: false,
+      corrections: [],
+      rationale: "reviewer unavailable: timed out after 360000ms",
+      parsed: false,
+    }),
+  });
+  ports.publication.publish = async (decision) => {
+    publishedNote = (decision as { reviewerNote?: string }).reviewerNote;
+    return { outcome: "issue: https://github.com/org/app/issues/28" };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig }); // needsReview: true
+
+  const out = await useCase.run({ ...baseInput, runId: "follow-up-28-reviewer-unavailable" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(out.decision.sideEffect, "issue", "a reviewer outage must fail CLOSED (issue), not silently approve (pr)");
+  assert.equal(publishedNote, "reviewer unavailable: timed out after 360000ms", "the publish payload must carry the reviewer-unavailable rationale verbatim");
+});
+
+test("follow-up #28: a NORMAL reviewer rejection (parsed:true) does NOT carry a reviewerNote", async () => {
+  let publishedDecision: { reviewerNote?: string } | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass", cases: [], logs: "" }),
+    review: async () => ({
+      approved: false,
+      corrections: ["[false-positive] weak assertion"],
+      blockingCount: 1,
+      rationale: "the assertion is too weak to catch a regression",
+      parsed: true,
+    }),
+  });
+  ports.publication.publish = async (decision) => {
+    publishedDecision = decision;
+    return { outcome: "issue: https://github.com/org/app/issues/29" };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "follow-up-28-normal-rejection-no-note" });
+
+  assert.equal(out.decision.sideEffect, "issue");
+  assert.ok(publishedDecision, "publish() must have been called");
+  assert.equal(publishedDecision?.reviewerNote, undefined, "a genuine reviewer rejection must NOT thread a reviewerNote — corrections are already the signal for that case");
+});
+
+test("follow-up #28: a genuine parse-miss whose rationale is unrelated text does NOT carry a reviewerNote (marker-scoped, not parsed:false alone)", async () => {
+  let publishedDecision: { reviewerNote?: string } | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass", cases: [], logs: "" }),
+    review: async () => ({
+      approved: true,
+      corrections: [],
+      rationale: "the model produced garbage, not JSON",
+      parsed: false,
+    }),
+  });
+  ports.publication.publish = async (decision) => {
+    publishedDecision = decision;
+    return { outcome: "issue: https://github.com/org/app/issues/30" };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "follow-up-28-generic-parse-miss-no-note" });
+
+  assert.equal(out.decision.sideEffect, "issue", "a parse miss still fails closed");
+  assert.ok(publishedDecision, "publish() must have been called");
+  assert.equal(publishedDecision?.reviewerNote, undefined, "only the reviewer-unavailable marker threads a note — a generic parse-miss rationale is NOT the same signal");
+});
+
+test("follow-up #28: a normal reviewer APPROVAL is unaffected — no reviewerNote, still routes to pr", async () => {
+  let publishedDecision: { reviewerNote?: string } | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass", cases: [], logs: "" }),
+    review: async () => ({ approved: true, corrections: [], blockingCount: 0, parsed: true }),
+  });
+  ports.publication.publish = async (decision) => {
+    publishedDecision = decision;
+    return { outcome: "pr" };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "follow-up-28-normal-approval-unaffected" });
+
+  assert.equal(out.decision.sideEffect, "pr");
+  assert.ok(publishedDecision, "publish() must have been called");
+  assert.equal(publishedDecision?.reviewerNote, undefined, "a normal approval must never carry a reviewerNote");
+});
+
+test("follow-up #28: the reviewer-unavailable rationale is also persisted durably onto RunOutcome.gateSignals.reviewerRationale", async () => {
+  let saved: import("@kernel/run-outcome.ts").RunOutcome | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass", cases: [], logs: "" }),
+    review: async () => ({
+      approved: false,
+      corrections: [],
+      rationale: "reviewer unavailable: reviewer session failed (provider down)",
+      parsed: false,
+    }),
+  });
+  ports.runHistory.save = async (outcome) => { saved = outcome; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "follow-up-28-persisted-rationale" });
+
+  assert.ok(saved, "runHistory.save() must have been called");
+  assert.equal(
+    saved!.gateSignals.reviewerRationale,
+    "reviewer unavailable: reviewer session failed (provider down)",
+    "the reviewer-unavailable rationale must persist durably so it is diagnosable from the run record alone",
+  );
+});
+
+test("follow-up #28: a normal rejection does NOT populate gateSignals.reviewerRationale either", async () => {
+  let saved: import("@kernel/run-outcome.ts").RunOutcome | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass", cases: [], logs: "" }),
+    review: async () => ({
+      approved: false,
+      corrections: ["[false-positive] weak assertion"],
+      blockingCount: 1,
+      rationale: "the assertion is too weak",
+      parsed: true,
+    }),
+  });
+  ports.runHistory.save = async (outcome) => { saved = outcome; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "follow-up-28-normal-rejection-no-persisted-rationale" });
+
+  assert.ok(saved, "runHistory.save() must have been called");
+  assert.equal(saved!.gateSignals.reviewerRationale, undefined, "a genuine rejection must not populate reviewerRationale — this slot is scoped to the reviewer-unavailable case only");
+});
+
 // ── reflector-rewire (design ADR-1, suppression matrix): the reflect call site adds a SECOND
 // ANDed condition on top of shouldDistillLearning(...) — reflect fires only when
 // shouldDistillLearning(...) AND verdict !== "flaky" AND errorClass not in {E-INFRA, E-FLAKY}.

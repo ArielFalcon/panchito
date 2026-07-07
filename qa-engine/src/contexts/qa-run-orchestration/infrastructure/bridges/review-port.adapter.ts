@@ -29,6 +29,7 @@
 // src/pipeline.ts:1682) — guidance still wins when both are present.
 import type { QaCase } from "@kernel/qa-case.ts";
 import type { ReviewPort, ReviewEnrichment } from "../../application/ports/index.ts";
+import { REVIEWER_UNAVAILABLE_MARKER } from "../../application/ports/index.ts";
 import type { AgentRuntimePort } from "@kernel/ports/agent-runtime.port.ts";
 import type { PromptRenderingPort, VerdictParserPort } from "@contexts/generation/application/ports/index.ts";
 import type { ReviewInput } from "@contexts/generation/application/ports/generation-ports.ts";
@@ -173,7 +174,7 @@ export class ReviewPortAdapter implements ReviewPort {
       return {
         approved: false,
         corrections: [],
-        rationale: `reviewer unavailable: ${reason}`,
+        rationale: `${REVIEWER_UNAVAILABLE_MARKER}: ${reason}`,
         parsed: false,
       };
     }

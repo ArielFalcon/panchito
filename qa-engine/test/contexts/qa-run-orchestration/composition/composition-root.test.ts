@@ -450,6 +450,73 @@ test("buildProduction(rewritten) threads cfg.target:'code' onto ReviewInput.targ
   assert.equal(seenTarget, "code", "ReviewInput.target must be 'code' for a code-target run");
 });
 
+// Follow-up #28 (reviewer-outage observability hardening, item 2): cfg.reviewTimeoutMs -> the
+// ReviewPortAdapter construction's timeoutMs was pinned at both endpoints (composition-root.ts's own
+// cfg.reviewTimeoutMs field, and ReviewPortAdapter's own ctx.timeoutMs -> openSession opts.timeoutMs
+// unit test) but the MIDDLE link — composition-root.ts actually threading cfg.reviewTimeoutMs into
+// the ReviewPortAdapter it constructs — had no dedicated test here, unlike cfg.target's own test
+// immediately above. Mirrors that test's exact structure: a fake reviewRuntime.runtime.openSession
+// captures the opts it receives so this test observes the SAME seam ReviewPortAdapter's own unit
+// test observes, but exercised through the real composition wiring.
+test("buildProduction(rewritten) threads cfg.reviewTimeoutMs onto ReviewPortAdapter's openSession opts.timeoutMs", async () => {
+  let seenTimeoutMs: number | undefined;
+  const cfg = fakeConfig({
+    needsReview: true,
+    reviewTimeoutMs: 360_000,
+    reviewRuntime: {
+      runtime: {
+        openSession: async (_role: string, _cwd: string, opts?: { timeoutMs?: number }) => {
+          seenTimeoutMs = opts?.timeoutMs;
+          return { prompt: async () => ({ output: "{}" }), dispose: async () => {} };
+        },
+      },
+      rendering: { renderReviewer: () => ({ text: "", sectionSizes: {} }) },
+      verdicts: { parseReview: () => ({ approved: true, corrections: [], parsed: true, valid: true, issues: [] }) },
+    },
+  });
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "e2e",
+    runId: "composition-root-review-timeout-ms",
+  });
+
+  assert.equal(seenTimeoutMs, 360_000, "cfg.reviewTimeoutMs must reach ReviewPortAdapter's openSession opts.timeoutMs — the reviewer needs its OWN budget, not a silently-dropped composition-time value");
+});
+
+test("buildProduction(rewritten) with absent cfg.reviewTimeoutMs omits timeoutMs from ReviewPortAdapter's openSession opts (backward compatible)", async () => {
+  let sawTimeoutKey = false;
+  const cfg = fakeConfig({
+    needsReview: true,
+    reviewRuntime: {
+      runtime: {
+        openSession: async (_role: string, _cwd: string, opts?: { timeoutMs?: number }) => {
+          sawTimeoutKey = opts !== undefined && "timeoutMs" in opts && opts.timeoutMs !== undefined;
+          return { prompt: async () => ({ output: "{}" }), dispose: async () => {} };
+        },
+      },
+      rendering: { renderReviewer: () => ({ text: "", sectionSizes: {} }) },
+      verdicts: { parseReview: () => ({ approved: true, corrections: [], parsed: true, valid: true, issues: [] }) },
+    },
+  });
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "e2e",
+    runId: "composition-root-review-timeout-ms-absent",
+  });
+
+  assert.equal(sawTimeoutKey, false, "absent cfg.reviewTimeoutMs must not fabricate a timeout the composition layer never configured");
+});
+
 test("buildProduction(rewritten) surfaces infra-error when a wired setup collaborator throws", async () => {
   const cfg = fakeConfig({
     target: "e2e",
