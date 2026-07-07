@@ -1493,6 +1493,49 @@ test("reflector-rewire: static-gate invalid (errorClass=E-STATIC) — learning.f
   assert.deepEqual(Object.keys(capturedInput?.gateSignals ?? {}).sort(), ["coverageRatio", "flaky", "retries", "reviewerCorrections", "static", "valueScore"].sort());
 });
 
+// WS1.2 (full-flow remediation): a clean green run resolves errorClass:null via the taxonomy
+// (errorClassFromVerdict's own `case "pass": ... return null` when coverageRatio is null or >= the
+// minimum ratio) — the pre-fix reflect gate only ANDed shouldDistillLearning(...) AND
+// verdict!=="flaky" AND errorClass not in {E-INFRA,E-FLAKY}, none of which exclude a null
+// errorClass, so every clean pass burned a reflector session against a failure-framed prompt and
+// minted an unfalsifiable candidate rule. The fold gate is UNCHANGED (fold-on-green is the designed
+// promotion signal) — only reflect must stop firing on a genuinely healthy run.
+test("WS1.2: a clean green run (errorClass:null) — learning.fold() IS called (fold gate unchanged), reflector.reflect() is NOT called (no qualifying failure to reflect on)", async () => {
+  let foldCallCount = 0;
+  let reflectCallCount = 0;
+  const { ports } = stubPorts(); // default execute() => clean pass, no coverage config => coverageRatio stays null
+  ports.learning.fold = async () => { foldCallCount++; };
+  const reflector = makeFakeReflector(() => { reflectCallCount++; });
+  const useCase = new RunQaUseCase({ ...ports, reflector, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "ws1.2-clean-pass-fold-yes-reflect-no" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(out.errorClass, null, "a clean pass with no coverage gap resolves errorClass:null via the taxonomy");
+  assert.equal(foldCallCount, 1, "learning.fold() must still be called on a clean pass — fold-on-green is the designed promotion signal, unaffected by this fix");
+  assert.equal(reflectCallCount, 0, "reflector.reflect() must NOT be called on a clean pass — there is no qualifying failure (errorClass is null) for the reflector to distill a rule from");
+});
+
+test("WS1.2 regression pin: a fail run with a real errorClass (E-EXEC-FAIL) still reflects — the new null-errorClass guard does not suppress genuine failures", async () => {
+  let foldCallCount = 0;
+  let reflectCallCount = 0;
+  let capturedInput: ReflectionInput | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "fail" as const, cases: [{ name: "checkout", status: "fail" as const, detail: "assertion failed" }], logs: "x" }),
+  });
+  ports.learning.fold = async () => { foldCallCount++; };
+  const reflector = makeFakeReflector((input) => { reflectCallCount++; capturedInput = input; });
+  const useCase = new RunQaUseCase({ ...ports, reflector, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "ws1.2-real-errorclass-still-reflects" });
+
+  assert.equal(out.decision.verdict, "fail");
+  assert.equal(out.errorClass, "E-EXEC-FAIL");
+  assert.equal(foldCallCount, 1, "learning.fold() must be called on a genuine failure");
+  assert.equal(reflectCallCount, 1, "reflector.reflect() must still be called when errorClass is a real, non-empty class — the WS1.2 fix only suppresses null/empty errorClass, not genuine failures");
+  assert.equal(capturedInput?.errorClass, "E-EXEC-FAIL");
+});
+
 test("reflector-rewire: reflector dep ABSENT ([SWAP]-optional) — a gate-true outcome still runs fold, reflect is skipped without error", async () => {
   let foldCallCount = 0;
   const { ports } = stubPorts({ validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }) });
@@ -3251,19 +3294,53 @@ test("WS1.1: the returned RunQaResult also carries rulesRetrieved as IDS (Rewrit
   assert.deepEqual(out.rulesRetrieved, ["rule-a-id", "rule-b-id"]);
 });
 
-test("W3 F2: an early-exit terminal (static-gate invalid) persists rulesRetrieved:[] — legacy parity, retrieve() result is never threaded to a non-mainline exit", async () => {
+// WS1.6 (full-flow remediation): SUPERSEDES the prior "legacy parity, always []" pin above — the
+// terminal `learning.fold()` call (run-qa.use-case.ts ~:2032/2047) was a STRUCTURAL no-op whenever
+// retrieval genuinely happened before this terminal exit, because rulesRetrieved.length===0 is what
+// the factory-level fold consumer treats as "nothing to fold" (no rule ids to attribute outcome_count
+// against). A static-gate "invalid" run in which retrieved rules failed to prevent the E-STATIC
+// verdict is legitimate fold evidence — retrieval happens strictly BEFORE the static gate can ever
+// run (see run-qa.use-case.ts's own retrievedRuleIds derivation, ordered before generate()), so both
+// terminalResult("invalid", ...) call sites (static-gate invalid, mid-run health-preflight
+// infra-error) are POST-retrieval and now thread the real ids through.
+test("WS1.6: an invalid-verdict run that HAD retrieved rules persists a terminal outcome whose rulesRetrieved carries the ids, and learning.fold() receives it (suppression matrix: invalid folds AND reflects, unchanged)", async () => {
   let savedRulesRetrieved: string[] | undefined;
+  let foldedRulesRetrieved: string[] | undefined;
+  let foldCallCount = 0;
+  let reflectCallCount = 0;
+  const rule = makeRetrievedRule("would-be-injected-rule", { id: "rule-terminal-001" });
   const { ports } = stubPorts({
-    retrieve: async () => [makeRetrievedRule("would-be-injected-rule")],
+    retrieve: async () => [rule],
     validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }),
   });
   ports.runHistory.save = async (outcome) => { savedRulesRetrieved = outcome.rulesRetrieved; };
-  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+  ports.learning.fold = async (outcome) => { foldCallCount++; foldedRulesRetrieved = outcome.rulesRetrieved; };
+  const reflector = makeFakeReflector(() => { reflectCallCount++; });
+  const useCase = new RunQaUseCase({ ...ports, reflector, config: baseConfig });
 
-  const out = await useCase.run({ ...baseInput, runId: "w3-f2-invalid-exit-no-rules" });
+  const out = await useCase.run({ ...baseInput, runId: "ws1.6-invalid-exit-carries-rules" });
 
   assert.equal(out.decision.verdict, "invalid");
-  assert.deepEqual(savedRulesRetrieved, [], "legacy's persistOutcome() only threads retrievedRuleIds at its OWN mainline call site — every other exit gets []");
+  assert.deepEqual(savedRulesRetrieved, ["rule-terminal-001"], "the persisted terminal RunOutcome.rulesRetrieved must carry the retrieved rule's id — retrieval happened strictly before the static gate that produced this invalid verdict");
+  assert.equal(foldCallCount, 1, "learning.fold() must still be called on an invalid verdict (suppression matrix: invalid folds, unchanged)");
+  assert.deepEqual(foldedRulesRetrieved, ["rule-terminal-001"], "learning.fold() must receive the SAME non-empty rulesRetrieved the terminal outcome was persisted with — this is the fix: previously rulesRetrieved was always [], making the fold a structural no-op for rule-outcome attribution");
+  assert.equal(reflectCallCount, 1, "reflector.reflect() must still be called on an invalid verdict (suppression matrix: invalid reflects too, unchanged by WS1.6)");
+});
+
+test("WS1.6 regression pin: a pre-retrieval exit (classify-skip) still persists nothing — rulesRetrieved threading never reaches an exit that fires before retrieve() runs", async () => {
+  let saveCallCount = 0;
+  const { ports } = stubPorts({
+    classify: async () => ({ action: "skip", reason: "docs-only change", diff: "" }),
+    retrieve: async () => [makeRetrievedRule("would-be-injected-rule")],
+  });
+  ports.runHistory.save = async () => { saveCallCount++; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "ws1.6-classify-skip-still-empty" });
+
+  assert.equal(out.decision.verdict, "skipped");
+  assert.deepEqual(out.rulesRetrieved, [], "a classify-skip returns before learning.retrieve() is ever called (see run-qa.use-case.ts's classify-skip bare-return, strictly before the retrievedRuleIds derivation) — it must stay [], never fabricated");
+  assert.equal(saveCallCount, 0, "a classify-skip never calls runHistory.save() at all — matches the legacy's own bare-return, unaffected by WS1.6");
 });
 
 // ── Slice B (structural-signals-expansion, design §2/ADR-B): structuralSignalBytes/

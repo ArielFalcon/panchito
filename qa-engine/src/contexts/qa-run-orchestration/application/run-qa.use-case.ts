@@ -868,6 +868,10 @@ export class RunQaUseCase {
         // validation.ok held long enough to reach it, W2 (post-static-fix-loop) — real accumulated
         // values, not the hardcoded 0 this terminal used to carry.
         { preExecAmbiguityCatches, deterministicSelectorBlocks, catalogGateInWindow, catalogGateAdvisory, catalogGateFailClosed },
+        // WS1.6 (full-flow remediation): this exit fires strictly after learning.retrieve() (the
+        // static gate runs post-generate, retrieval runs pre-generate) — the real retrieved ids, not
+        // the terminal helper's own [] default.
+        retrievedRuleIds,
       );
     }
 
@@ -929,6 +933,14 @@ export class RunQaUseCase {
         // (post static-fix loop, pre-execute) — real accumulated values, not the hardcoded 0 this
         // terminal used to carry.
         { preExecAmbiguityCatches, deterministicSelectorBlocks, catalogGateInWindow, catalogGateAdvisory, catalogGateFailClosed },
+        // WS1.6 (full-flow remediation): this exit fires strictly after learning.retrieve() (retrieval
+        // runs pre-generate; this health pre-flight runs post-generate/post-static-fix-loop) — the
+        // real retrieved ids, not the terminal helper's own [] default. Note: decide()'s own sideEffect
+        // for "infra-error" is "none" (no Issue), and the fold/reflect gates above are both hard-gated
+        // on `verdict === "invalid"`, so this infra-error call site's ids reach the PERSISTED
+        // RunOutcome.rulesRetrieved (diagnosability) but never reach a fold/reflect call — infra-error
+        // stays fold-free and reflect-free, unchanged by this fix.
+        retrievedRuleIds,
       );
     }
     if (signal?.aborted) {
@@ -1588,20 +1600,35 @@ export class RunQaUseCase {
         await this.deps.learning.fold(mainlineOutcome);
       }
 
-      // reflector-rewire (design ADR-1): the reflect gate ANDs a SECOND, STRICTER condition on top
-      // of the SAME shouldDistillLearning(...) boolean the fold above just used (reused, never
-      // re-derived) — verdict !== "flaky" AND errorClass not in {E-INFRA, E-FLAKY}. This is a
-      // DELIBERATE fold-vs-reflect asymmetry (legacy parity, explore #1082): a flaky/E-INFRA/E-FLAKY
-      // run is allowed to feed the deterministic governance fold (unchanged above) but must NEVER
-      // author an LLM reflection rule from environmental noise (Goodhart). [SWAP]-optional: absent
+      // reflector-rewire (design ADR-1): the reflect gate ANDs further conditions on top of the SAME
+      // shouldDistillLearning(...) boolean the fold above just used (reused, never re-derived) —
+      // verdict !== "flaky" AND errorClass not in {E-INFRA, E-FLAKY}. This is a DELIBERATE
+      // fold-vs-reflect asymmetry (legacy parity, explore #1082): a flaky/E-INFRA/E-FLAKY run is
+      // allowed to feed the deterministic governance fold (unchanged above) but must NEVER author an
+      // LLM reflection rule from environmental noise (Goodhart). [SWAP]-optional: absent
       // `deps.reflector` is a no-op, zero behavior change (mirrors every other optional collaborator
       // in this use-case). Fault-isolated by the adapter itself — no extra try/catch here.
+      //
+      // WS1.2 (full-flow remediation): a FIFTH condition — mainlineOutcome.errorClass must be a real,
+      // non-empty class. Before this fix, a clean green run (errorClass:null via
+      // errorClassFromVerdict's own `case "pass": ... return null`) satisfied every other condition
+      // above (shouldDistillLearning(false,"pass",undefined) === true; verdict !== "flaky"; null is
+      // neither "E-INFRA" nor "E-FLAKY"), so EVERY healthy green run reached reflect() — burning a
+      // reflector session against a failure-framed prompt and minting an unfalsifiable
+      // errorClass:"" candidate rule (WS1.4a closes the credit-earning side; this closes the
+      // ledger-pollution/prompt-budget side at the source). `!== ""` is defensive belt-and-braces
+      // alongside `!= null` — resolveErrorClass never actually returns "", but a reflect gate must
+      // never treat a falsy-but-defined class as "qualifying" either. Fold-on-green is UNCHANGED
+      // (prevention credit on a clean run is the designed promotion signal) — only reflect requires
+      // a genuine, taxonomy-derived failure class to fire on.
       if (
         this.deps.reflector &&
         shouldDistillLearning(cfg.isCode, decision.verdict, mainlineOutcome.adjudication?.class) &&
         decision.verdict !== "flaky" &&
         mainlineOutcome.errorClass !== "E-INFRA" &&
-        mainlineOutcome.errorClass !== "E-FLAKY"
+        mainlineOutcome.errorClass !== "E-FLAKY" &&
+        mainlineOutcome.errorClass != null &&
+        mainlineOutcome.errorClass !== ""
       ) {
         await this.deps.reflector.reflect(this.toReflectionInput(mainlineOutcome));
       }
@@ -1688,12 +1715,18 @@ export class RunQaUseCase {
       mode: outcome.mode,
       verdict: outcome.verdict,
       // ReflectionInput.errorClass is the narrow (non-null) ErrorClass alias — outcome.errorClass is
-      // the kernel's WIDE `string | null`. A null errorClass here would mean "healthy green, no
-      // taxonomy label" (see error-class.ts's own errorClassFromVerdict), which never reaches this
-      // projection: both call sites only invoke toReflectionInput() after the stricter reflect gate
-      // (verdict !== "flaky" AND errorClass not in {E-INFRA,E-FLAKY}) has already passed, and every
-      // reachable verdict on that path (invalid, fail, pass-with-coverage-gap) yields a non-null
-      // class. Coalesce to "" defensively rather than widen the port's own declared type.
+      // the kernel's WIDE `string | null`. A null errorClass means "healthy green, no taxonomy
+      // label" (see error-class.ts's own errorClassFromVerdict, `case "pass": ... return null`) —
+      // WS1.2 (full-flow remediation) CORRECTS this doc's prior claim that "every reachable verdict
+      // on that path yields a non-null class": that was PROVABLY FALSE for a clean pass with
+      // coverageRatio null or >= the minimum ratio, which resolves errorClass:null while still
+      // satisfying every OTHER pre-WS1.2 reflect-gate condition (shouldDistillLearning is true for a
+      // pass; verdict !== "flaky"; null is neither "E-INFRA" nor "E-FLAKY") — so a null errorClass
+      // DID reach this projection on every clean green run, until WS1.2 added the explicit
+      // `errorClass != null && errorClass !== ""` conjunct to both reflect gate call sites (mainline,
+      // above; terminal, below), which now genuinely guarantees a non-null/non-empty class by the
+      // time toReflectionInput() is ever invoked. Coalesce to "" defensively rather than widen the
+      // port's own declared type — belt-and-braces only, structurally unreachable post-WS1.2.
       errorClass: outcome.errorClass ?? "",
       gateSignals: {
         static: outcome.gateSignals.static,
@@ -1969,6 +2002,16 @@ export class RunQaUseCase {
       catalogGateAdvisory: number;
       catalogGateFailClosed: number;
     } = { preExecAmbiguityCatches: 0, deterministicSelectorBlocks: 0, catalogGateInWindow: 0, catalogGateAdvisory: 0, catalogGateFailClosed: 0 },
+    // WS1.6 (full-flow remediation): the retrieved rule IDS (WS1.1's `retrievedRuleIds` local) — BOTH
+    // call sites of this helper (static-gate invalid, mid-run health-preflight infra-error) fire
+    // strictly AFTER learning.retrieve() has already run (retrieval happens once, before the first
+    // generate() call, ordered ahead of both the static-fix loop and the health pre-flight), so both
+    // genuinely have real ids to thread — unlike groundingSignals above, this is NOT gated on a
+    // per-caller "did the gate run" question, it is gated on "did retrieval run", which is ALWAYS
+    // true by the time either call site is reached. Defaults to [] for a caller that predates this
+    // fix (backward compatible) and is also the correct value for any FUTURE terminal exit that
+    // fires before retrieval — never a fabricated non-empty array.
+    rulesRetrieved: string[] = [],
   ): Promise<RunQaResult> {
     const decision = decide({
       verdict,
@@ -2018,6 +2061,13 @@ export class RunQaUseCase {
         reviewerApproved: reviewerApprovedForOutcome,
         note: combinedNote,
         ...groundingSignals,
+        // WS1.6 (full-flow remediation): the SAME conditional-spread discipline as the mainline
+        // exit's own rulesRetrieved threading (above, `...(retrievedRuleIds.length ? {...} : {})`) —
+        // an empty array (retrieval found nothing, or a future pre-retrieval caller passes the
+        // default) omits the override entirely, falling back to toRunOutcome's own `?? []` default;
+        // a non-empty array reaches the persisted RunOutcome so the terminal `learning.fold()` call
+        // below is no longer a structural no-op for rule-outcome attribution.
+        ...(rulesRetrieved.length ? { rulesRetrieved } : {}),
       });
       await this.deps.runHistory.save(terminalOutcome);
       // post-cutover-remediation P3 (unit 4): the SAME shouldDistillLearning guard as the mainline
@@ -2041,6 +2091,17 @@ export class RunQaUseCase {
       // unchanged) — so the errorClass!=="E-INFRA" check below is a structural belt-and-braces guard
       // (defensive parity with the mainline site's identical condition), not a currently-reachable
       // branch on this path today.
+      //
+      // WS1.2 VERIFIED (full-flow remediation): unlike the mainline site, this terminal does NOT need
+      // the additional `errorClass != null && errorClass !== ""` conjunct. `verdict` is narrowed by
+      // TypeScript to the literal `"invalid"` (this helper's own signature: `verdict: "invalid" |
+      // "infra-error"`, further narrowed by the `verdict === "invalid"` check above), and
+      // errorClassFromVerdict's switch (error-class.ts) resolves `case "invalid": return "E-STATIC"`
+      // UNCONDITIONALLY — there is no branch, coverage check, or reviewer-correction path that can
+      // turn an "invalid" verdict into a null errorClass. `errorClass` here (derived at
+      // this.deriveErrorClass(verdict, null, null), above) is therefore ALWAYS the literal string
+      // "E-STATIC", never null and never "" — a reachable-null scenario is structurally impossible on
+      // this path, so no gate change was needed here; the mainline site is the ONLY one WS1.2 fixes.
       if (
         this.deps.reflector &&
         verdict === "invalid" &&
@@ -2080,10 +2141,17 @@ export class RunQaUseCase {
         catalogGateFailClosed: skipPersist ? 0 : groundingSignals.catalogGateFailClosed,
       },
       cases: [],
-      // W3 F2: legacy parity — neither invalid nor infra-error persistOutcome call threads
-      // retrievedRuleIds (src/pipeline.ts:2315/2334's persistOutcome(invalid/infra, ...) calls both
-      // omit it), so this terminal's outcome is always [], matching toRunOutcome's own default above.
-      rulesRetrieved: [],
+      // WS1.6 (full-flow remediation): SUPERSEDES the prior "always [], matches legacy" comment here
+      // — legacy's own persistOutcome(invalid/infra, ...) calls (src/pipeline.ts:2315/2334) never
+      // threaded retrievedRuleIds, but that was legacy's gap, not a deliberate contract this
+      // rewrite must reproduce: an invalid/infra-error terminal in which retrieved rules failed to
+      // prevent the verdict is legitimate fold evidence the prior [] silently discarded (the
+      // terminal `learning.fold()` call above was a structural no-op whenever rulesRetrieved.length
+      // was 0). Mirrors the mainline exit's own isContextCleanPass-gated rulesRetrieved (above): []
+      // only when skipPersist is true (nothing was genuinely persisted) or when this helper's caller
+      // passed no ids (a pre-retrieval exit, which never reaches this helper today — see
+      // retrievedRuleIds's own derivation ordering).
+      rulesRetrieved: skipPersist ? [] : rulesRetrieved,
       ...(!skipPersist && combinedNote !== undefined ? { note: combinedNote } : {}),
     };
   }
