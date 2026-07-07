@@ -300,3 +300,94 @@ test("shadow fidelity: a PASS run's shadow preview still logs the would-be PR", 
   assert.match(result.outcome, /would: pr/);
   assert.ok(logs.some((l) => l.includes("would open PR")), `expected a PR preview, got: ${logs.join(" | ")}`);
 });
+
+// ── WS3.1 (adjudication -> Issue body) — the FixLoop's deterministic adjudicator verdict (class/
+// confidence/reason) is computed and gates learning, but was previously silently dropped at the
+// publish() boundary — the human reading the GitHub Issue never saw the engine's own diagnosis.
+// OPTIONAL field: absent -> the "Engine adjudication" section is omitted entirely (backward-compat
+// for every pre-existing caller/stub that never threads it). Present -> rendered through the SAME
+// injected sanitizer the logs/case fields already use. ──────────────────────────────────────────
+
+test("WS3.1: publish() renders an 'Engine adjudication' section in the Issue body when adjudication is present", async () => {
+  const decide = new PublishDecisionService();
+  let bodySeen = "";
+  const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/6", number: 6 }; } };
+  const pr = fakePr();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({
+    verdict: "fail",
+    cases: [{ name: "checkout", status: "fail", detail: "server error" }],
+    logs: "x",
+    adjudication: { class: "app_defect", confidence: "high", reason: "App defect detected: backend returned a 5xx server error (status 503)" },
+  });
+
+  assert.match(result.outcome, /issue/);
+  assert.match(bodySeen, /Engine adjudication/);
+  assert.match(bodySeen, /app_defect/);
+  assert.match(bodySeen, /high/);
+  assert.match(bodySeen, /App defect detected: backend returned a 5xx server error \(status 503\)/);
+});
+
+test("WS3.1: publish() omits the 'Engine adjudication' section entirely when adjudication is absent (backward-compat)", async () => {
+  const decide = new PublishDecisionService();
+  let bodySeen = "";
+  const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/7", number: 7 }; } };
+  const pr = fakePr();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "fail", cases: [], logs: "x" });
+
+  assert.match(result.outcome, /issue/);
+  assert.ok(!bodySeen.includes("Engine adjudication"), `no adjudication was supplied, so the section must be entirely absent — got: ${bodySeen}`);
+});
+
+test("WS3.1: publish() words a low-confidence adjudication as an engine guess (hint), not a firm diagnosis", async () => {
+  const decide = new PublishDecisionService();
+  let bodySeen = "";
+  const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/8", number: 8 }; } };
+  const pr = fakePr();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({
+    verdict: "fail",
+    cases: [],
+    logs: "x",
+    adjudication: { class: "generated_test_defect", confidence: "low", reason: "No progress and ambiguous failure — stopping fix-loop for human review." },
+  });
+
+  assert.match(result.outcome, /issue/);
+  assert.match(bodySeen, /Engine adjudication \(low confidence — treat as a hint\)/, `expected the low-confidence hedge wording — got: ${bodySeen}`);
+});
+
+test("WS3.1: publish() sanitizes the adjudication reason through the SAME injected sanitizer as logs/cases", async () => {
+  const decide = new PublishDecisionService();
+  let bodySeen = "";
+  const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/9", number: 9 }; } };
+  const pr = fakePr();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const sanitize = (text: string) => text.replace(/sk-[A-Za-z0-9]+/g, "[REDACTED_SECRET]");
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({
+    verdict: "fail",
+    cases: [],
+    logs: "x",
+    adjudication: { class: "app_defect", confidence: "high", reason: "leaked token sk-abc123XYZ during adjudication" },
+  });
+
+  assert.match(result.outcome, /issue/);
+  assert.ok(!bodySeen.includes("sk-abc123XYZ"), `the adjudication reason's secret must be sanitized — got: ${bodySeen}`);
+  assert.ok(bodySeen.includes("[REDACTED_SECRET]"), "the sanitized replacement must appear in the rendered body");
+});

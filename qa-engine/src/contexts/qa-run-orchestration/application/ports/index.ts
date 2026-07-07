@@ -383,6 +383,18 @@ export interface PublicationPort {
     // adapter's static ctx.repo (every ordinary monorepo run), same precedent as the fields above.
     // PR creation always targets ctx.repo (the primary repo), regardless of this field.
     issueRepo?: string;
+    // WS3.1 (adjudication -> Issue body): the FixLoop's own last adjudicator verdict
+    // (FixLoopResult.lastAdjudicatorVerdict) — computed, used to gate learning (shouldDistillLearning),
+    // but previously dropped silently at this exact boundary; the human reading the GitHub Issue never
+    // saw the engine's own diagnosis. OPTIONAL, same backward-compat precedent as every other dynamic
+    // field on this port: absent -> the adapter renders no adjudication section at all (every
+    // pre-existing caller/stub/test keeps compiling and behaving identically). Present only for runs
+    // whose FixLoop actually reached the adjudicate() decision point (a clean first-try pass never has
+    // one). `class`/`confidence` are carried as plain strings (not the domain's closed unions) — this
+    // is a PORT-BOUNDARY projection, matching the RetrievedRule precedent above: the adapter only ever
+    // renders them as text, never branches on them, so a closed union here would buy nothing but an
+    // import edge into the FixLoop's domain types from this port surface.
+    adjudication?: { class: string; confidence: string; reason: string };
   }): Promise<{ outcome: string }>;
 }
 // W3 fix (F1, dual-judge round): LearningPort.retrieve() previously returned bare trigger strings

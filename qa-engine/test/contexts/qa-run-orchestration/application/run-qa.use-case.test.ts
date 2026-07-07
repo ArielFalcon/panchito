@@ -1351,6 +1351,52 @@ test("P3: terminal-invalid fold site carries the SAME app_defect guard (structur
   assert.equal(foldCallCount, 1, "the terminal-invalid fold must still fire — the app_defect guard is structurally a no-op on this path today (regression pin: a future reorder that routes an adjudicated outcome here must not silently bypass the guard)");
 });
 
+// ── WS3.1 (adjudication -> Issue body): the FixLoop's last adjudicator verdict must reach
+// PublicationPort.publish() as the OPTIONAL `adjudication` field — present only when the FixLoop
+// actually engaged and reached the adjudicate() decision point; absent on a clean first-try pass. ──
+
+test("WS3.1: a failing run whose FixLoop produced an adjudicator verdict publishes with `adjudication` populated", async () => {
+  let publishedAdjudication: { class: string; confidence: string; reason: string } | undefined;
+  const { ports } = stubPorts({
+    // Every execute() call (initial + every FixLoop retry) fails with a case carrying an attributed
+    // 5xx — adjudicate.service.ts Rule 2.5 fires, routing to app_defect/high-confidence/break-issue.
+    execute: async () => ({
+      verdict: "fail" as const,
+      cases: [{ name: "checkout", status: "fail" as const, detail: "server error", httpStatus: 500 }],
+      logs: "x",
+    }),
+  });
+  ports.publication.publish = async (decision) => {
+    publishedAdjudication = decision.adjudication;
+    return { outcome: "issue: https://github.com/org/app/issues/42" };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "ws3.1-adjudication-populated" });
+
+  assert.equal(out.decision.verdict, "fail");
+  assert.ok(publishedAdjudication, "publish() must receive a populated adjudication field");
+  assert.equal(publishedAdjudication?.class, "app_defect");
+  assert.equal(publishedAdjudication?.confidence, "high");
+  assert.match(publishedAdjudication?.reason ?? "", /5xx/);
+});
+
+test("WS3.1: a run without a FixLoop adjudicator verdict (clean first-try pass) publishes without the `adjudication` field", async () => {
+  let publishedDecision: { adjudication?: unknown } | undefined;
+  const { ports } = stubPorts();
+  ports.publication.publish = async (decision) => {
+    publishedDecision = decision;
+    return { outcome: "pr" };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "ws3.1-adjudication-absent-on-clean-pass" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.ok(publishedDecision, "publish() must have been called");
+  assert.equal(publishedDecision?.adjudication, undefined, "a clean pass never engages the FixLoop, so adjudication must be omitted — never fabricated");
+});
+
 // ── reflector-rewire (design ADR-1, suppression matrix): the reflect call site adds a SECOND
 // ANDed condition on top of shouldDistillLearning(...) — reflect fires only when
 // shouldDistillLearning(...) AND verdict !== "flaky" AND errorClass not in {E-INFRA, E-FLAKY}.

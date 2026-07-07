@@ -61,6 +61,7 @@ import type {
 import { decide, type RunEvidence } from "../domain/run-decision.service.ts";
 import { RunDecision } from "../domain/run-decision.ts";
 import { FixLoop, type FixLoopExecutionPort, type FixLoopGenerationPort, type FixLoopSelectorCheckPort } from "../domain/fix-loop.aggregate.ts";
+import type { AdjudicatorVerdict } from "../domain/adjudicate.service.ts";
 import { checkSpecSelectors } from "../domain/helpers/selector-check.ts";
 import { resolveErrorClass } from "../domain/helpers/error-class.ts";
 import { shouldDistillLearning } from "../domain/helpers/should-distill-learning.ts";
@@ -648,6 +649,12 @@ export class RunQaUseCase {
     // further down. Stays undefined for every run whose FixLoop never engaged (context mode's
     // synthetic pass, or a first-try pass) — never fabricated.
     let lastAdjudicatorVerdictClass: string | undefined;
+    // WS3.1 (adjudication -> Issue body): the FixLoop's own FULL last adjudicator verdict (class +
+    // confidence + reason), hoisted alongside lastAdjudicatorVerdictClass above and captured at the
+    // SAME site — read at the publish() call site below so the human reading the GitHub Issue sees
+    // the engine's own diagnosis, not just a bare class string. Same "never fabricated" contract:
+    // stays undefined for every run whose FixLoop never engaged.
+    let lastAdjudicatorVerdict: AdjudicatorVerdict | undefined;
 
     // Phase: pre-exec grounding gate (Plan 7-R B5). [SWAP] absent PreExecGroundingPort -> the whole
     // phase (W1 below + the W2 re-check further down) is a no-op; the counters stay the literal 0
@@ -1054,6 +1061,9 @@ export class RunQaUseCase {
       // the loop condition never engaged at all), matching lastAdjudicatorVerdictClass's own
       // "never fabricated" contract above.
       lastAdjudicatorVerdictClass = fixLoopResult.lastAdjudicatorVerdict?.class;
+      // WS3.1: capture the FULL verdict object (class + confidence + reason) at the SAME site, for
+      // the publish() call site below.
+      lastAdjudicatorVerdict = fixLoopResult.lastAdjudicatorVerdict;
     }
 
     // executedRed override (task #42): captured here, BEFORE the `if (run.verdict === "pass")`
@@ -1411,6 +1421,11 @@ export class RunQaUseCase {
         reviewerApproved,
         coverageBlocks: blocksPublish,
         ...(input.triggerRepo ? { issueRepo: input.triggerRepo } : {}),
+        // WS3.1 (adjudication -> Issue body): thread the FixLoop's own last adjudicator verdict when
+        // one exists (any fail path that actually ran the FixLoop) — absent for a clean first-try
+        // pass or a run whose FixLoop never engaged, matching lastAdjudicatorVerdict's own "never
+        // fabricated" contract (captured above, at the FixLoop call site).
+        ...(lastAdjudicatorVerdict ? { adjudication: lastAdjudicatorVerdict } : {}),
       });
       publishOutcome = published.outcome;
     }

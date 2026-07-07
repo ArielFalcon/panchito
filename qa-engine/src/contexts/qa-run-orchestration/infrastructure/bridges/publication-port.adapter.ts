@@ -82,11 +82,41 @@ export interface PublicationPortStaticContext {
 function renderTitle(verdict: RunVerdict, sanitize: (text: string) => string): string {
   return `qa-bot: ${sanitize(verdict)} run`;
 }
-function renderBody(cases: readonly QaCase[], logs: string, sanitize: (text: string) => string): string {
+// WS3.1 (adjudication -> Issue body): renders the FixLoop's own last adjudicator verdict — class,
+// confidence, reason — through the SAME sanitizer every other rendered field uses. Low confidence is
+// worded as an engine GUESS (a hint for the human, not a firm diagnosis) rather than a flat label,
+// since a low-confidence verdict is the adjudicator's own "ambiguous, stopping for human review"
+// branch (adjudicate.service.ts) — presenting it with the same confidence as a high-confidence
+// app_defect/5xx detection would overstate what the engine actually knows.
+function renderAdjudicationSection(
+  adjudication: { class: string; confidence: string; reason: string },
+  sanitize: (text: string) => string,
+): string[] {
+  const heading = adjudication.confidence === "low"
+    ? "Engine adjudication (low confidence — treat as a hint)"
+    : "Engine adjudication";
+  return [
+    "",
+    heading,
+    `- Class: ${sanitize(adjudication.class)}`,
+    `- Confidence: ${sanitize(adjudication.confidence)}`,
+    `- Reason: ${sanitize(adjudication.reason)}`,
+  ];
+}
+function renderBody(
+  cases: readonly QaCase[],
+  logs: string,
+  sanitize: (text: string) => string,
+  adjudication: { class: string; confidence: string; reason: string } | undefined,
+): string {
   const failing = cases
     .filter((c) => c.status === "fail")
     .map((c) => `- ${sanitize(c.name)}: ${c.detail ? sanitize(c.detail) : ""}`);
-  return [sanitize(logs), ...(failing.length > 0 ? ["", "Failing cases:", ...failing] : [])].join("\n");
+  return [
+    sanitize(logs),
+    ...(failing.length > 0 ? ["", "Failing cases:", ...failing] : []),
+    ...(adjudication ? renderAdjudicationSection(adjudication, sanitize) : []),
+  ].join("\n");
 }
 
 export class PublicationPortAdapter implements PublicationPort {
@@ -109,6 +139,10 @@ export class PublicationPortAdapter implements PublicationPort {
     // on this port (the established backward-compat precedent above). PR creation ALWAYS uses
     // ctx.repo — the suite PR targets the primary repo regardless of which repo triggered the run.
     issueRepo?: string;
+    // WS3.1 (adjudication -> Issue body): the FixLoop's own last adjudicator verdict, threaded by the
+    // use-case when one exists. OPTIONAL — absent (every pre-existing caller/stub/test) renders no
+    // adjudication section at all, same backward-compat precedent as every other dynamic field above.
+    adjudication?: { class: string; confidence: string; reason: string };
   }): Promise<{ outcome: string }> {
     // Audit fix (judgment-day): prefer the REAL per-run decision value when the caller supplies
     // one; fall back to the static composition-time ctx only when absent (backward-compat for
@@ -125,7 +159,7 @@ export class PublicationPortAdapter implements PublicationPort {
     // the REAL sanitizeText is injected by the composition root (src/server/rewritten-engine-factory.ts).
     const sanitize = this.deps.sanitize ?? ((text: string) => text);
     const title = renderTitle(decision.verdict, sanitize);
-    const body = renderBody(decision.cases, decision.logs, sanitize);
+    const body = renderBody(decision.cases, decision.logs, sanitize, decision.adjudication);
     // F3: Issue creation routes to the triggering repo when supplied; PR creation always targets
     // ctx.repo (the primary repo) — never the trigger repo.
     const issueRepo = decision.issueRepo ?? this.ctx.repo;
