@@ -156,6 +156,20 @@ export interface GenerationPortStaticContext {
   // "known once per run, not per generate() call" shape as baseUrl above — NOT per-call/dynamic like
   // diff/intent. Absent -> unchanged (matches every other optional field on this context).
   openapi?: string | string[];
+  // Cross-repo generation-prompt parity (legacy pipeline.ts:1909): identifies the TRIGGERING
+  // microservice for a cross-repo run — its repo, its OWN read-only mirror dir, and its OWN openapi
+  // hint (all distinct from ctx.mirrorDir/ctx.openapi above, which stay bound to the PRIMARY repo).
+  // App-static (fixed for the whole run, known once at composition time), the SAME shape as
+  // baseUrl/openapi above — NOT per-call/dynamic. Maps 1:1 onto OpencodeRunInput.service. Absent
+  // (the common same-repo case) -> unchanged, matching every other optional field on this context.
+  service?: { repo: string; mirrorDir: string; openapi?: string | string[] };
+  // Context-mode multi-service parity (legacy pipeline.ts:1330-1355 buildContextMap): EVERY declared
+  // service repo (read-only working copies), distinct from `service` above (the SINGLE triggering
+  // service on a cross-repo run — mutually exclusive with this field by construction, since context
+  // mode can never be service-triggered). App-static, the SAME shape as service/openapi above — NOT
+  // per-call/dynamic. Maps 1:1 onto OpencodeRunInput.services. Absent (every non-context run, or a
+  // context run with no declared services) -> unchanged, matching every other optional field here.
+  services?: Array<{ repo: string; mirrorDir: string; openapi?: string | string[] }>;
 }
 
 export interface GenerationPortCollaborators {
@@ -211,6 +225,12 @@ export class GenerationPortAdapter implements GenerationPort {
       ...(this.ctx.baseUrl ? { baseUrl: this.ctx.baseUrl } : {}),
       // W5 fix (seam-parity FIXME): app-static, mirrors baseUrl's own "known once per run" shape.
       ...(this.ctx.openapi ? { openapi: this.ctx.openapi } : {}),
+      // Cross-repo generation-prompt parity (legacy pipeline.ts:1909): app-static, mirrors
+      // openapi's own conditional-spread precedent immediately above.
+      ...(this.ctx.service ? { service: this.ctx.service } : {}),
+      // Context-mode multi-service parity (legacy pipeline.ts:1330-1355 buildContextMap): app-static,
+      // mirrors service's own conditional-spread precedent immediately above.
+      ...(this.ctx.services?.length ? { services: this.ctx.services } : {}),
       // W2 fix (F1): spread-conditional — every enrichment field is independently optional, mapped
       // 1:1 onto the SAME OpencodeRunInput fields buildPromptAssembled already renders sections for.
       // Absent enrichment or an absent/empty individual field -> that field is omitted from `input`,

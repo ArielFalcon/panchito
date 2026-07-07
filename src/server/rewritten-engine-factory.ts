@@ -499,7 +499,20 @@ export function buildRewrittenCompositionConfig(
       await mirror.ensureMirror(triggerService.repo, checkoutSha.value, defaultMirrorDeps);
       return mirror.ensureMirrorAtBranch(app.repo, app.baseBranch ?? "main", defaultMirrorDeps);
     }
-    return mirror.ensureMirror(app.repo, checkoutSha.value, defaultMirrorDeps);
+    const primaryDir = await mirror.ensureMirror(app.repo, checkoutSha.value, defaultMirrorDeps);
+    // Context-mode multi-service parity (legacy pipeline.ts:1330-1355 buildContextMap): mirror every
+    // declared service READ-ONLY at its OWN svc.baseBranch ?? "main", sequentially like the legacy
+    // loop — these are advisory prompt-context sources for the FE<->BE architecture map, never the
+    // diff/classify source (that stays PRIMARY-bound for context mode by the sibling guard above), so
+    // there is no ordering dependency against ChangeAnalysis.classify() the way triggerService's
+    // cross-repo branch has. Config paths (CompositionConfig.services, composed above) are static —
+    // this is where the actual clones are brought into existence by run time.
+    if (run.mode === "context" && app.services?.length) {
+      for (const svc of app.services) {
+        await mirror.ensureMirrorAtBranch(svc.repo, svc.baseBranch ?? "main", defaultMirrorDeps);
+      }
+    }
+    return primaryDir;
   };
 
   // W3 F2 / reflector-rewire (Unit 5): ONE SqliteLearningRepository instance per composed run,
@@ -615,7 +628,7 @@ export function buildRewrittenCompositionConfig(
             mirrorRoot, // the SAME local already computed above (deps.mirrorRoot ?? workdirRoot())
             services: app.services.map((s) => ({ repo: s.repo })),
             boundaryProfiles: new YamlBoundaryProfileAdapter((name) =>
-              expandEnv(readFileSync(join(process.env.AI_PIPELINE_ROOT ?? process.cwd(), "config", "apps", `${name}.yaml`), "utf8"))),
+              expandEnv(readFileSync(join(process.env.PANCHITO_ROOT ?? process.cwd(), "config", "apps", `${name}.yaml`), "utf8"))),
           },
         }
       : {}),
@@ -650,6 +663,34 @@ export function buildRewrittenCompositionConfig(
     // — threaded straight through to CompositionConfig.openapi so GenerationPortAdapter's ctx
     // carries it into OpencodeRunInput.openapi (prompts.ts:500,1068's OpenAPI-hint rendering).
     ...(app.openapi ? { openapi: app.openapi } : {}),
+    // Cross-repo generation-prompt parity (legacy pipeline.ts:1909, restored by this fix): only a
+    // genuine cross-repo run (triggerService resolved above) supplies this — same-repo runs (the
+    // common case) omit the key entirely. mirrorDir is the SAME vcsDir this factory already computes
+    // for ChangeAnalysisPort above (never re-derived, so it can't silently diverge from where
+    // ensureMirror actually writes); openapi is preserved as declared on the service YAML entry
+    // (string | string[] | undefined), mirroring app.openapi's own conditional-spread precedent
+    // immediately above.
+    ...(triggerService
+      ? { triggerService: { repo: triggerService.repo, mirrorDir: vcsDir, ...(triggerService.openapi ? { openapi: triggerService.openapi } : {}) } }
+      : {}),
+    // Context-mode multi-service parity (legacy pipeline.ts:1330-1355 buildContextMap, restored by
+    // this fix): a context-mode run threads EVERY declared app.services[] entry through — same-repo
+    // context runs and every non-context mode omit the key entirely (mutually exclusive with
+    // triggerService above by the sibling guard already thrown near this function's top). Each
+    // service's mirrorDir uses the SAME join(mirrorRoot, repo.replaceAll("/", "__")) formula
+    // vcsDir/triggerService already use — never re-derived, so it can't silently diverge from where
+    // the checkout closure below actually materializes it. openapi is preserved as declared on the
+    // service YAML entry, mirroring triggerService's own conditional-spread precedent immediately
+    // above.
+    ...(run.mode === "context" && app.services?.length
+      ? {
+          services: app.services.map((svc) => ({
+            repo: svc.repo,
+            mirrorDir: join(mirrorRoot, svc.repo.replaceAll("/", "__")),
+            ...(svc.openapi ? { openapi: svc.openapi } : {}),
+          })),
+        }
+      : {}),
     // Audit fix (worst leak in audit-2026-07-flaky-selector-leaks): mirrors legacy's
     // resolveTestIdAttribute(app) (src/pipeline.ts:835: `config.e2e?.testIdAttribute ?? "data-testid"`)
     // — but deliberately WITHOUT the "data-testid" default. CompositionConfig's own doc

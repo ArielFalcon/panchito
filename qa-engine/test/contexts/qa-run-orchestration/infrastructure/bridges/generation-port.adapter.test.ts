@@ -494,6 +494,124 @@ test("generate() with absent/empty enrichment.contractDrift OMITS the key entire
   }
 });
 
+// ── Cross-repo generation-prompt parity (legacy pipeline.ts:1909): `service` identifies the
+// TRIGGERING microservice (repo + its OWN mirror dir + its OWN openapi hint) for a cross-repo run —
+// distinct from ctx.mirrorDir/ctx.openapi, which stay bound to the PRIMARY repo. App-static (known
+// once per run, fixed for the whole run), so it lives on GenerationPortStaticContext exactly like
+// baseUrl/openapi above, NOT on the per-call GenerationEnrichment (which carries only values that
+// vary between generate() calls within the same run). Absent -> OMITTED entirely, the SAME
+// absence-vs-present discipline serviceLinks/contractDrift above already established.
+
+test("generate() maps ctx.service onto OpencodeRunInput.service when the run is cross-repo (triggered by a declared microservice)", async () => {
+  const ports = fakeGenerationPorts();
+  let capturedInput: OpencodeRunInput | undefined;
+  const originalGenerate = GenerateTestsUseCase.prototype.generate;
+  GenerateTestsUseCase.prototype.generate = async function (input: OpencodeRunInput, opts) {
+    capturedInput = input;
+    return originalGenerate.call(this, input, opts);
+  };
+  try {
+    const useCase = new GenerateTestsUseCase(ports);
+    const adapter = new GenerationPortAdapter(useCase, {
+      repo: "org/front", appName: "app", mirrorDir: "/mirrors/org/front", e2eRelDir: "e2e",
+      namespace: "qa-bot-abc1234", needsReview: false, target: "e2e", mode: "diff", diff: "",
+      service: { repo: "org/orders-svc", mirrorDir: "/mirrors/org/orders-svc", openapi: "openapi.yaml" },
+    });
+
+    await adapter.generate([], "/mirrors/org/front/e2e");
+
+    assert.deepEqual(capturedInput?.service, { repo: "org/orders-svc", mirrorDir: "/mirrors/org/orders-svc", openapi: "openapi.yaml" });
+    assert.equal(capturedInput?.mirrorDir, "/mirrors/org/front", "the PRIMARY mirrorDir must stay the agent's cwd — service.mirrorDir is a read-only sibling, never a substitute");
+  } finally {
+    GenerateTestsUseCase.prototype.generate = originalGenerate;
+  }
+});
+
+test("generate() with no ctx.service (same-repo run) OMITS the service key entirely from OpencodeRunInput", async () => {
+  const ports = fakeGenerationPorts();
+  let capturedInput: OpencodeRunInput | undefined;
+  const originalGenerate = GenerateTestsUseCase.prototype.generate;
+  GenerateTestsUseCase.prototype.generate = async function (input: OpencodeRunInput, opts) {
+    capturedInput = input;
+    return originalGenerate.call(this, input, opts);
+  };
+  try {
+    const useCase = new GenerateTestsUseCase(ports);
+    const adapter = new GenerationPortAdapter(useCase, {
+      repo: "org/app", appName: "app", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e",
+      namespace: "qa-bot-abc1234", needsReview: false, target: "e2e", mode: "diff", diff: "",
+    });
+
+    await adapter.generate([], "/mirrors/org/app/e2e");
+
+    assert.equal("service" in (capturedInput ?? {}), false, "no ctx.service (the common same-repo case) must OMIT the key, not set it to undefined");
+  } finally {
+    GenerateTestsUseCase.prototype.generate = originalGenerate;
+  }
+});
+
+// ── Context-mode multi-service parity (legacy pipeline.ts:1330-1355 buildContextMap): `services`
+// carries EVERY declared microservice repo (read-only working copies) for a context-mode run, so the
+// agent can extract each service's OpenAPI operations into the unified FE<->BE context map
+// (buildContextTask's "## Microservice repos" section, prompts.ts:1181). App-static (known once per
+// run, fixed for the whole run), the SAME shape as ctx.service above — NOT per-call/dynamic. Maps 1:1
+// onto OpencodeRunInput.services. Absent -> OMITTED entirely, the SAME absence-vs-present discipline
+// ctx.service/serviceLinks/contractDrift above already established.
+
+test("generate() maps ctx.services onto OpencodeRunInput.services (context mode, every declared service)", async () => {
+  const ports = fakeGenerationPorts();
+  let capturedInput: OpencodeRunInput | undefined;
+  const originalGenerate = GenerateTestsUseCase.prototype.generate;
+  GenerateTestsUseCase.prototype.generate = async function (input: OpencodeRunInput, opts) {
+    capturedInput = input;
+    return originalGenerate.call(this, input, opts);
+  };
+  try {
+    const useCase = new GenerateTestsUseCase(ports);
+    const adapter = new GenerationPortAdapter(useCase, {
+      repo: "org/front", appName: "app", mirrorDir: "/mirrors/org/front", e2eRelDir: "e2e",
+      namespace: "qa-bot-abc1234", needsReview: false, target: "e2e", mode: "context", diff: "",
+      services: [
+        { repo: "org/orders-svc", mirrorDir: "/mirrors/org/orders-svc", openapi: "openapi.yaml" },
+        { repo: "org/payments-svc", mirrorDir: "/mirrors/org/payments-svc" },
+      ],
+    });
+
+    await adapter.generate([], "/mirrors/org/front/e2e");
+
+    assert.deepEqual(capturedInput?.services, [
+      { repo: "org/orders-svc", mirrorDir: "/mirrors/org/orders-svc", openapi: "openapi.yaml" },
+      { repo: "org/payments-svc", mirrorDir: "/mirrors/org/payments-svc" },
+    ]);
+    assert.equal(capturedInput?.mirrorDir, "/mirrors/org/front", "the PRIMARY mirrorDir must stay the agent's cwd — service mirrorDirs are read-only siblings, never a substitute");
+  } finally {
+    GenerateTestsUseCase.prototype.generate = originalGenerate;
+  }
+});
+
+test("generate() with no ctx.services OMITS the services key entirely from OpencodeRunInput", async () => {
+  const ports = fakeGenerationPorts();
+  let capturedInput: OpencodeRunInput | undefined;
+  const originalGenerate = GenerateTestsUseCase.prototype.generate;
+  GenerateTestsUseCase.prototype.generate = async function (input: OpencodeRunInput, opts) {
+    capturedInput = input;
+    return originalGenerate.call(this, input, opts);
+  };
+  try {
+    const useCase = new GenerateTestsUseCase(ports);
+    const adapter = new GenerationPortAdapter(useCase, {
+      repo: "org/app", appName: "app", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e",
+      namespace: "qa-bot-abc1234", needsReview: false, target: "e2e", mode: "diff", diff: "",
+    });
+
+    await adapter.generate([], "/mirrors/org/app/e2e");
+
+    assert.equal("services" in (capturedInput ?? {}), false, "no ctx.services (the common case) must OMIT the key, not set it to undefined or an empty array");
+  } finally {
+    GenerateTestsUseCase.prototype.generate = originalGenerate;
+  }
+});
+
 // ── W3 F2 (dual-judge round): renderLearnedRules is a FAITHFUL, byte-comparable port of legacy's
 // renderRulesForPrompt (src/qa/learning/learning-rule.ts:237-270) — same section headers, same
 // framing sentences, same proven/experimental split, same per-rule field layout. ──────────────────

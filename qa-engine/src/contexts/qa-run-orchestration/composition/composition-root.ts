@@ -208,6 +208,28 @@ export interface CompositionConfig {
     codebaseMemory: ProjectNameCliClient & CodebaseMemoryCliClient;
     runner: SandboxedBinaryRunner;
   };
+  // Cross-repo generation-prompt parity (legacy pipeline.ts:1909, restored by this fix): identifies
+  // the TRIGGERING microservice for a cross-repo run — its repo, its OWN read-only mirror dir, and
+  // its OWN openapi hint. Advisory, prompt-context ONLY: reaches GenerationPortAdapter's
+  // ctx.service -> OpencodeRunInput.service (buildPromptAssembled already renders a "Cross-repo
+  // trigger" section for it) and NOTHING else — no verdict/gate/coverage/publish path reads it, the
+  // SAME posture crossRepoImpact/serviceLinks above already document. OPTIONAL: absent (the common
+  // same-repo case) -> undefined, NEVER a stub — the caller (src/server/rewritten-engine-factory.ts,
+  // the ONE module with the per-run triggerRepo/service resolution) supplies it only for a genuine
+  // cross-repo run.
+  triggerService?: { repo: string; mirrorDir: string; openapi?: string | string[] };
+  // Context-mode multi-service parity (legacy pipeline.ts:1330-1355 buildContextMap, restored by this
+  // fix): EVERY declared service repo for a context-mode run — each mirrored read-only at its OWN
+  // svc.baseBranch ?? "main" — so the agent can extract each service's OpenAPI operations into the
+  // unified FE<->BE context map. Advisory, prompt-context ONLY: reaches GenerationPortAdapter's
+  // ctx.services -> OpencodeRunInput.services (buildContextTask already renders a "## Microservice
+  // repos" section for it) and NOTHING else — no verdict/gate/coverage/publish path reads it, the SAME
+  // posture triggerService above documents. Mutually exclusive with triggerService by construction
+  // (context mode can never be service-triggered — see the factory's own sibling guard). OPTIONAL:
+  // absent (every non-context run, or a context run with no declared services) -> undefined, NEVER an
+  // empty array — the caller (src/server/rewritten-engine-factory.ts) supplies it only for a genuine
+  // context-mode run with app.services declared.
+  services?: Array<{ repo: string; mirrorDir: string; openapi?: string | string[] }>;
   // The FE<->BE architecture map (context.json), if loaded — feeds the context pack's contract
   // filtering. Absent -> the pack degrades to blast-radius + DOM only (mirrors buildContextPack's
   // own graceful degradation when contextMap is absent).
@@ -362,6 +384,15 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
       // W5 fix (seam-parity FIXME): threads the app's declared OpenAPI glob hint through — mirrors
       // baseUrl's own conditional-spread precedent immediately above.
       ...(cfg.openapi ? { openapi: cfg.openapi } : {}),
+      // Cross-repo generation-prompt parity (legacy pipeline.ts:1909): threads the triggering
+      // service's identity through — mirrors openapi's own conditional-spread precedent immediately
+      // above. Absent (same-repo run) -> omitted entirely.
+      ...(cfg.triggerService ? { service: cfg.triggerService } : {}),
+      // Context-mode multi-service parity (legacy pipeline.ts:1330-1355 buildContextMap): threads
+      // every declared service ref through — mirrors triggerService's own conditional-spread
+      // precedent immediately above. Absent/empty (non-context runs, or no declared services) ->
+      // omitted entirely.
+      ...(cfg.services?.length ? { services: cfg.services } : {}),
     },
     { ...(cfg.readSpecSource ? { readSpecSource: cfg.readSpecSource } : {}) },
   );

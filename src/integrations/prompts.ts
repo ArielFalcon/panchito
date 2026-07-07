@@ -165,6 +165,29 @@ export function buildWorkerPromptAssembled(w: ParallelWorkerInput): AssembledPro
   const MAX_DRIFT = 20;
   const hasLinks = Boolean(w.serviceLinks?.length);
   const hasDrift = Boolean(w.contractDrift?.length);
+  // Slice C (structural-signals-expansion, design §3.6) worker counterpart: extends this SAME
+  // section with inline "[IMPACTED:<tier>]" markers on matched bullets — NOT a new/duplicate
+  // subsection, mirroring the single-agent S2.4 section exactly. The lookup key matches the
+  // bullet's own from/to identity exactly; built ONCE, byte-identical when crossRepoImpact is
+  // absent (empty map -> tierFor always undefined -> prefix always "").
+  const linkKey = (l: { from: { repo: string; file: string; symbol: string }; to: { repo: string } }): string =>
+    `${l.from.repo}/${l.from.file}#${l.from.symbol}->${l.to.repo}`;
+  const impactedTierByKey = new Map(
+    (w.crossRepoImpact?.impactedLinks ?? []).map(({ link, tier }) => [linkKey(link), tier] as const),
+  );
+  const tierFor = (l: { from: { repo: string; file: string; symbol: string }; to: { repo: string } }): string | undefined =>
+    impactedTierByKey.get(linkKey(l));
+  // A link's [IMPACTED:tier] marker must survive the MAX_LINKS ceiling: the resolver returns links
+  // in discovery order, so on a >MAX_LINKS app the one impacted link can sit past the cut and lose
+  // the exact annotation this run exists to surface. Impacted links render first (stable order
+  // inside each partition); an empty impacted set skips the reorder — byte-identical when absent.
+  const orderedLinks =
+    impactedTierByKey.size > 0 && hasLinks
+      ? [
+          ...w.serviceLinks!.filter((l) => tierFor(l) !== undefined),
+          ...w.serviceLinks!.filter((l) => tierFor(l) === undefined),
+        ]
+      : w.serviceLinks ?? [];
   const workerServiceLinksContent =
     hasLinks || hasDrift
       ? [
@@ -172,9 +195,11 @@ export function buildWorkerPromptAssembled(w: ParallelWorkerInput): AssembledPro
           "Structural FE→BE contract links resolved from the code, NOT a gate. Verify against the live app; absent links do NOT imply no dependency.",
           "",
           ...(hasLinks
-            ? w.serviceLinks!.slice(0, MAX_LINKS).map((l) =>
-                `- \`${s(l.from.repo)}/${s(l.from.file)}#${s(l.from.symbol)}\` -> ` +
-                `${s(l.to.repo)} ${s(l.contractRef ?? l.to.symbol)} (${s(l.transport)}, confidence ${l.confidence.toFixed(2)})`)
+            ? orderedLinks.slice(0, MAX_LINKS).map((l) => {
+                const tier = tierFor(l);
+                return `- ${tier ? `[IMPACTED:${s(tier)}] ` : ""}\`${s(l.from.repo)}/${s(l.from.file)}#${s(l.from.symbol)}\` -> ` +
+                  `${s(l.to.repo)} ${s(l.contractRef ?? l.to.symbol)} (${s(l.transport)}, confidence ${l.confidence.toFixed(2)})`;
+              })
             : []),
           ...(hasDrift
             ? ["", "### Contract drift (WARNINGS — front calls an endpoint the backend contract does not declare):",

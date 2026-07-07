@@ -1082,6 +1082,82 @@ test("A-R3(1): worker prompt with populated serviceLinks renders the 'Cross-serv
   );
 });
 
+// ── A-R3/C-R6 (worker counterpart): the worker-prompt "Cross-service links" section gains the SAME
+// inline "[IMPACTED:<tier>] markers on matched bullets — NOT a new/duplicate subsection, the same
+// impacted-first-before-MAX_LINKS ordering from 62b6bb4, and the same byte-identical-when-absent
+// guarantee — mirroring the single-agent C-R6 family exactly, now on ParallelWorkerInput. ────────
+
+test("A-R3-C-R6(1): a matched link's EXISTING bullet gets the '[IMPACTED:<tier>]' prefix in the worker prompt", () => {
+  const text = buildWorkerPrompt(mkWorkerInput({
+    serviceLinks: [link1],
+    crossRepoImpact: { impactedLinks: [{ link: link1, tier: "contract-file" }] },
+  }));
+  assert.match(text, /\[IMPACTED:contract-file\]/, "the matched link's bullet must carry the inline tier marker");
+  assert.match(
+    text,
+    /\[IMPACTED:contract-file\] `org\/front\/src\/api\.ts#getOrder`/,
+    "the marker must prefix the SAME existing bullet line, not a separate entry",
+  );
+});
+
+test("A-R3-C-R6(2): no duplicate '### Impacted by this change' (or similarly named) subsection is ever rendered in the worker prompt", () => {
+  const text = buildWorkerPrompt(mkWorkerInput({
+    serviceLinks: [link1],
+    crossRepoImpact: { impactedLinks: [{ link: link1, tier: "contract-file" }] },
+  }));
+  assert.ok(!/impacted by this change/i.test(text), "no separate 'Impacted by this change' subsection must ever be rendered in the worker prompt");
+  const occurrences = text.split("Cross-service links").length - 1;
+  assert.equal(occurrences, 1, "the Cross-service links section header must render exactly once in the worker prompt, never duplicated for the impacted subset");
+});
+
+test("A-R3-C-R6(3): an empty crossRepoImpact.impactedLinks is byte-identical to the field being entirely absent in the worker prompt", () => {
+  const withEmpty = buildWorkerPrompt(mkWorkerInput({ serviceLinks: [link1], crossRepoImpact: { impactedLinks: [] } }));
+  const withoutField = buildWorkerPrompt(mkWorkerInput({ serviceLinks: [link1] }));
+  assert.equal(withEmpty, withoutField, "an empty impacted set must render byte-identical to the field being entirely absent");
+  assert.ok(!withoutField.includes("[IMPACTED:"), "no inline marker may render when crossRepoImpact is absent");
+});
+
+test("A-R3-C-R6(4): a link present in serviceLinks but NOT in crossRepoImpact.impactedLinks renders with NO marker prefix in the worker prompt", () => {
+  const unmatchedLink = {
+    from: { repo: "org/front", file: "src/other.ts", symbol: "getOther" },
+    to: { repo: "org/other", file: "src/routes.ts", symbol: "GET /other" },
+    transport: "http" as const,
+    contractRef: "GET /other",
+    confidence: 0.9,
+    source: "openapi",
+  };
+  const text = buildWorkerPrompt(mkWorkerInput({
+    serviceLinks: [link1, unmatchedLink],
+    crossRepoImpact: { impactedLinks: [{ link: link1, tier: "impacted-symbol" }] },
+  }));
+  assert.match(text, /\[IMPACTED:impacted-symbol\] `org\/front\/src\/api\.ts#getOrder`/, "the matched link must carry the marker");
+  assert.doesNotMatch(
+    text.split("\n").find((l) => l.includes("getOther")) ?? "",
+    /\[IMPACTED:/,
+    "an unmatched link's bullet must render with NO [IMPACTED:...] prefix",
+  );
+});
+
+test("A-R3-C-R6(5): an impacted link past the MAX_LINKS cut still renders WITH its marker in the worker prompt — impacted links survive truncation", () => {
+  const filler = Array.from({ length: 44 }, (_, i) => ({
+    from: { repo: "org/front", file: `src/f${i}.ts`, symbol: `call${i}` },
+    to: { repo: "org/other", file: "src/routes.ts", symbol: `GET /f${i}` },
+    transport: "http" as const,
+    contractRef: `GET /f${i}`,
+    confidence: 0.9,
+    source: "openapi",
+  }));
+  const text = buildWorkerPrompt(mkWorkerInput({
+    serviceLinks: [...filler, link1], // the impacted link sits at index 44 — past the 40-link ceiling
+    crossRepoImpact: { impactedLinks: [{ link: link1, tier: "contract-file" }] },
+  }));
+  assert.match(
+    text,
+    /\[IMPACTED:contract-file\] `org\/front\/src\/api\.ts#getOrder`/,
+    "the impacted link must survive the MAX_LINKS truncation with its marker in the worker prompt — discovery order must not silently drop the one annotated link",
+  );
+});
+
 test("A-R3(2): worker prompt with contractDrift renders the 'Contract drift (WARNINGS' sub-heading", () => {
   const text = buildWorkerPrompt(mkWorkerInput({ serviceLinks: [link1], contractDrift: [drift1] }));
   assert.match(text, /Contract drift \(WARNINGS/, "worker prompt must render the drift sub-heading");

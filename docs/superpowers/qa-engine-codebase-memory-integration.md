@@ -1,7 +1,7 @@
 # Codebase-Memory Integration — design (qa-engine, hexagonal/DDD)
 
 From a hands-on evaluation (2026-06-27) of `DeusData/codebase-memory-mcp` run against the real
-indexed `nname` system (Angular `name-webapp` + 4 Spring microservices) and the `ai-pipeline` repo
+indexed `nname` system (Angular `name-webapp` + 4 Spring microservices) and the `panchito` repo
 itself. This document specifies how the tool plugs into the NEW `qa-engine/` architecture, what it
 replaces, and how the existing analysis tools (tree-sitter, lizard, difftastic, ast-grep, Serena)
 are adapted. The legacy `src/` is the cutover source and is out of scope except where `qa-engine/`
@@ -44,31 +44,31 @@ What it provides, confirmed on our code:
 
 | Capability | Evidence on our repos |
 |---|---|
-| Structural graph (Function/Method/Class/Interface/Route/Channel nodes; CALLS/IMPORTS/HTTP_CALLS/… edges) | ai-pipeline: 7078 nodes / 21533 edges |
+| Structural graph (Function/Method/Class/Interface/Route/Channel nodes; CALLS/IMPORTS/HTTP_CALLS/… edges) | panchito: 7078 nodes / 21533 edges |
 | Complexity per node | `complexity` (cyclomatic) + `cognitive` + `transitive_loop_depth` + `linear_scan_in_loop`; `runPipeline` correctly ranked #1 at cyclomatic 226 / cognitive 563 |
 | Co-change coupling | `FILE_CHANGES_WITH{coupling_score, co_changes}` from git history (e.g. `agent-activity.ts`↔`opencode-client.ts` = 0.73 / 8 co-changes) |
 | Transitive call graph + impact | `trace_path` (calls/data_flow), `detect_changes` (diff → impacted symbols) |
-| **Test coverage edges (TESTS / TESTS_FILE) — ai-pipeline-internal** | **375 `TESTS` + 123 `TESTS_FILE` edges in ai-pipeline's own unit suite.** Measured: `name-webapp` has 0 TESTS / 248 TESTS_FILE edges; the 4 Spring microservices have 0/0. Playwright e2e specs generate NO TESTS edges (URL/DOM navigation, no static symbol imports). `existingCoverage` returns empty when the target repo has no unit tests (e.g. the 4 Spring microservices: 0/0); returns file-level results for repos that carry unit tests (e.g. name-webapp: 248 TESTS_FILE) even in e2e mode (see §6.1). |
+| **Test coverage edges (TESTS / TESTS_FILE) — panchito-internal** | **375 `TESTS` + 123 `TESTS_FILE` edges in panchito's own unit suite.** Measured: `name-webapp` has 0 TESTS / 248 TESTS_FILE edges; the 4 Spring microservices have 0/0. Playwright e2e specs generate NO TESTS edges (URL/DOM navigation, no static symbol imports). `existingCoverage` returns empty when the target repo has no unit tests (e.g. the 4 Spring microservices: 0/0); returns file-level results for repos that carry unit tests (e.g. name-webapp: 248 TESTS_FILE) even in e2e mode (see §6.1). |
 | Structural similarity | `SIMILAR_TO` (125 edges, Jaccard) — duplicate-pattern candidates; advisory signal for the generator (§6.1) |
-| Error-flow signal | `RAISES` (90 edges) — maps throw sites to exception types; negative-test candidates for the generator (advisory). **Caveat:** 88/90 in ai-pipeline point to a single Go `Error` node (2 go to non-Go error types); Java Spring apps have real typed exceptions. Validate per watched app — reliable for Java, potentially degenerate in TS; advisory only. |
-| Structural linkage — ai-pipeline-internal | `CONFIGURES` (105 edges) — links constant identifiers to the files that reference them (structural, ai-pipeline-internal; **0 CONFIGURES edges in `name-webapp` and all 4 Spring services**). Not an env-dependency or test-setup signal in watched apps; advisory signal within ai-pipeline only. **[Deferred — not yet wired; no phase assigned; ai-pipeline-internal only — tracked as future implementation note]** |
+| Error-flow signal | `RAISES` (90 edges) — maps throw sites to exception types; negative-test candidates for the generator (advisory). **Caveat:** 88/90 in panchito point to a single Go `Error` node (2 go to non-Go error types); Java Spring apps have real typed exceptions. Validate per watched app — reliable for Java, potentially degenerate in TS; advisory only. |
+| Structural linkage — panchito-internal | `CONFIGURES` (105 edges) — links constant identifiers to the files that reference them (structural, panchito-internal; **0 CONFIGURES edges in `name-webapp` and all 4 Spring services**). Not an env-dependency or test-setup signal in watched apps; advisory signal within panchito only. **[Deferred — not yet wired; no phase assigned; panchito-internal only — tracked as future implementation note]** |
 | Data-flow / write-side-effect signal | `WRITES` (478 edges) — maps functions to the variables they write; larger than FILE_CHANGES_WITH/SIMILAR_TO/TESTS_FILE/RAISES/CONFIGURES combined. Advisory signal for negative-test and side-effect awareness in the generator. **[Deferred — not yet wired; no phase assigned — tracked as future implementation note]** |
 | Class hierarchy | `INHERITS` (56 edges) — class inheritance; relevant for Java OOP blast radius (a changed parent method affects subclass-type callers). The adapter should traverse `INHERITS` when expanding `impactedSymbols` for Java repos. |
-| Event-flow edges | `EMITS` / `LISTENS_ON` — event-flow (3/2 edges in ai-pipeline, EventEmitter-based; 0 in watched repos). **[Deferred — conceptual foundation only. EventEmitter detection is structurally unlike NATS/Kafka topics; an `EventTopicResolver` must be built from scratch against a NATS-instrumented repo. Not yet wired; no phase assigned — tracked as future implementation note]** |
+| Event-flow edges | `EMITS` / `LISTENS_ON` — event-flow (3/2 edges in panchito, EventEmitter-based; 0 in watched repos). **[Deferred — conceptual foundation only. EventEmitter detection is structurally unlike NATS/Kafka topics; an `EventTopicResolver` must be built from scratch against a NATS-instrumented repo. Not yet wired; no phase assigned — tracked as future implementation note]** |
 | Semantic search | local embeddings (`SEMANTICALLY_RELATED` edges, `search_graph(semantic_query)`) — the vector store the legacy lacked |
 | Incremental indexing | content-hash; re-parses only changed files |
 
 > **Point-in-time caveat:** all per-edge-type counts in this table (375 TESTS, 125 SIMILAR_TO, 478 WRITES, 105 CONFIGURES, etc.) come from `get_graph_schema` / `search_graph` at a single evaluation snapshot (2026-06-27). The index re-runs on every commit; counts drift as the codebase evolves. Treat all figures as approximate, not exact.
 
 Multi-language: tree-sitter (158 langs) + hybrid LSP (9 langs incl. TS/JS/Java/Python/Go). Our
-`ai-pipeline` index alone spans TypeScript + a Go TUI client.
+`panchito` index alone spans TypeScript + a Go TUI client.
 
 ## 3. Measured limits (and how the design absorbs them)
 
 | Limit | Measurement | How the design handles it |
 |---|---|---|
-| Call resolution is mostly **heuristic**, not LSP-grade | TS-only: ~7.8% LSP on `name-webapp`, ~15–18% at evaluation time on `ai-pipeline` (re-measure against a current index before calibrating the floor — these are point-in-time snapshots; the index re-runs per commit); Java: ~14% LSP, ~86% heuristic. Note: earlier drafts stated ~18% TS LSP — that figure mixed Go calls into the denominator. The LOWER TS precision strengthens (not weakens) the case for keeping Serena as the precision layer. | Use the graph for **breadth** (advisory `signal`); gate blocking decisions at `confidence >= 0.85`. **Two separate thresholds:** advisory/`signal` threshold (~0.55, broad blast radius for generator guidance); blocking/`enforce` threshold (0.85+, PR-gating only). Phase 4 collects calibration data; Phase 7 is the enforce gate. Keep 0.85 blocking-only until Phase 7. |
-| Confidence coverage is narrow at 0.85 | ~62% of CALL edges (3583/5799 — `ai-pipeline` repo, point-in-time 2026-06-27; re-measure per run) fall below 0.85. False-negatives (a hollow blast radius → missed regressions) are a distinct anti-Goodhart risk from false-positives. | **Never use 0.85 as the only threshold.** Feed low-confidence edges into `signal` mode advisory (rendered into `staticSignal`, never `enforce`). Phase 4 collects calibration data; Phase 7 is the enforce gate (sets the thresholds and formally enables `enforce` mode). |
+| Call resolution is mostly **heuristic**, not LSP-grade | TS-only: ~7.8% LSP on `name-webapp`, ~15–18% at evaluation time on `panchito` (re-measure against a current index before calibrating the floor — these are point-in-time snapshots; the index re-runs per commit); Java: ~14% LSP, ~86% heuristic. Note: earlier drafts stated ~18% TS LSP — that figure mixed Go calls into the denominator. The LOWER TS precision strengthens (not weakens) the case for keeping Serena as the precision layer. | Use the graph for **breadth** (advisory `signal`); gate blocking decisions at `confidence >= 0.85`. **Two separate thresholds:** advisory/`signal` threshold (~0.55, broad blast radius for generator guidance); blocking/`enforce` threshold (0.85+, PR-gating only). Phase 4 collects calibration data; Phase 7 is the enforce gate. Keep 0.85 blocking-only until Phase 7. |
+| Confidence coverage is narrow at 0.85 | ~62% of CALL edges (3583/5799 — `panchito` repo, point-in-time 2026-06-27; re-measure per run) fall below 0.85. False-negatives (a hollow blast radius → missed regressions) are a distinct anti-Goodhart risk from false-positives. | **Never use 0.85 as the only threshold.** Feed low-confidence edges into `signal` mode advisory (rendered into `staticSignal`, never `enforce`). Phase 4 collects calibration data; Phase 7 is the enforce gate (sets the thresholds and formally enables `enforce` mode). |
 | webapp re-parse accuracy | 99/290 calls unresolved on `name-webapp` (point-in-time; re-verify) | Serena (LSP, agent-side) escalates for low-confidence / polymorphic cases; LSP coverage varies by project and Angular template structure (§7) |
 | **Cross-repo = 0** on a real stack | `cross-repo-intelligence` from all 5 repos → `total_cross_edges: 0`. Each project's schema was inspected independently (the tool has no cross-project query surface); the 0-edge result is confirmed per-project. Spring `Route` nodes have `path=""` and ignore the in-repo OpenAPI; Angular egress through `rest-client.service.ts` is not followed; NATS channels not detected at all (`MATCH (n:Channel)` → 0). | Do not use the tool for boundaries. `ServiceBoundaryResolverPort` owns it (§6.2), OpenAPI-anchored |
 | No SHA on the index | `index_status` returns `{nodes, edges, status}` only — no indexed SHA/timestamp | `CodeGraphPort.syncTo()` always runs after checkout; freshness is by on-disk content hash, not git (§6.5) |
@@ -807,7 +807,7 @@ PR-blocking decision until it has earned it through measured calibration.
   the AST impl meets/beats the spike yield on the full system.
 
 - **Confidence floor calibration — dual threshold required.** `0.85` is a starting hypothesis for
-  the blocking threshold; it excludes ~62% of CALL edges (3583/5799 — `ai-pipeline` repo, point-in-time 2026-06-27; re-measure per run). Phase 4 collects
+  the blocking threshold; it excludes ~62% of CALL edges (3583/5799 — `panchito` repo, point-in-time 2026-06-27; re-measure per run). Phase 4 collects
   calibration data; **Phase 7 is the enforce gate** — it sets both the advisory threshold (~0.55)
   and the blocking threshold (0.85+) and formally enables `enforce` mode. Before Phase 7, all graph
   blast radius use is advisory only. FALSE-NEGATIVES (a hollow blast radius → missed regressions)

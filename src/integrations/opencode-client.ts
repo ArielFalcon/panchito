@@ -1206,11 +1206,12 @@ export interface ParallelWorkerInput {
   staticSignal?: string; // deterministic pre-computed analysis (signal-only, fail-open)
   // parity-for-the-future: no live fan-out on qa-engine today (GenerateTestsUseCase is single-session;
   // nothing constructs ParallelWorkerInput on the rewritten engine). Threaded so the worker seam
-  // carries these structural signals the day generateParallel is ported (crossRepoImpact is
-  // deliberately NOT threaded here — a tracked follow-up for the fan-out port); the NEW key-drift
-  // gate (not the round-trip, which tolerates one-sided optionals) guards them from then on.
+  // already carries these structural signals — including crossRepoImpact — the day generateParallel
+  // is ported; dormant until then. The key-drift gate (not the round-trip, which tolerates one-sided
+  // optionals) guards all three from drifting between the two mirrors.
   serviceLinks?: OcServiceLink[];
   contractDrift?: OcContractDrift[];
+  crossRepoImpact?: { impactedLinks: Array<{ link: OcServiceLink; tier: string }> };
 }
 
 // Dispatch each worker objective to a SEPARATE qa-worker session, bounded concurrency.
@@ -1501,6 +1502,7 @@ export async function runOpencodeParallel(
     // parity-for-the-future: dormant — this map only executes on the legacy generateParallel path.
     ...(input.serviceLinks?.length ? { serviceLinks: input.serviceLinks } : {}),
     ...(input.contractDrift?.length ? { contractDrift: input.contractDrift } : {}),
+    ...(input.crossRepoImpact?.impactedLinks.length ? { crossRepoImpact: input.crossRepoImpact } : {}),
   }));
 
   // Dispatch grounded objectives to lite workers in parallel.
