@@ -152,7 +152,7 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
       coverageGap: S("coverageGap"),
       intent: { type: "feat", breaking: false, message: S("intent.message"), changedFiles: [S("intent.changedFiles")] },
       sha: S("sha"),
-      learnedRules: [{ trigger: S("rule.trigger"), action: S("rule.action"), errorClass: "E-EXEC-FAIL", status: "active", confidence: "high" }],
+      learnedRules: [{ id: S("rule.id"), trigger: S("rule.trigger"), action: S("rule.action"), errorClass: "E-EXEC-FAIL", status: "active", confidence: "high" }],
       contextPack: S("contextPack"),
       existingSpecFiles: [S("existingSpecFiles")],
       runId: S("runId"),
@@ -275,7 +275,7 @@ describe("seam-parity: REVIEW (ReviewInput vs ReviewPortAdapter)", () => {
       {
         priorCorrections: [S("priorCorrections")],
         intent: { type: "feat", breaking: false, message: S("intent.message"), changedFiles: [] },
-        learnedRules: [{ trigger: S("rule.trigger"), action: S("rule.action"), errorClass: "E-EXEC-FAIL", status: "active", confidence: "high" }],
+        learnedRules: [{ id: S("rule.id"), trigger: S("rule.trigger"), action: S("rule.action"), errorClass: "E-EXEC-FAIL", status: "active", confidence: "high" }],
         domSnapshot: S("domSnapshot"),
         runId: S("runId"),
       },

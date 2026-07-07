@@ -239,8 +239,8 @@ test("review() renders enrichment.learnedRules via the reviewer-specific (active
 
   await adapter.review("/mirrors/org/app/e2e", cases, undefined, {
     learnedRules: [
-      { trigger: "selector absent", action: "use role+name", errorClass: "E-EXEC-FAIL", status: "active", confidence: "high" },
-      { trigger: "flaky wait", action: "use expect.poll", errorClass: "E-FLAKY", status: "candidate", confidence: "low" },
+      { id: "rule-active", trigger: "selector absent", action: "use role+name", errorClass: "E-EXEC-FAIL", status: "active", confidence: "high" },
+      { id: "rule-candidate", trigger: "flaky wait", action: "use expect.poll", errorClass: "E-FLAKY", status: "candidate", confidence: "low" },
     ],
   });
 

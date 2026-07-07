@@ -499,11 +499,11 @@ test("generate() with absent/empty enrichment.contractDrift OMITS the key entire
 // framing sentences, same proven/experimental split, same per-rule field layout. ──────────────────
 
 const activeRule: RetrievedRule = {
-  trigger: "selector absent", action: "use role+name", errorClass: "E-EXEC-FAIL",
+  id: "rule-active", trigger: "selector absent", action: "use role+name", errorClass: "E-EXEC-FAIL",
   status: "active", confidence: "high",
 };
 const candidateRule: RetrievedRule = {
-  trigger: "flaky wait", action: "use expect.poll", errorClass: "E-FLAKY",
+  id: "rule-candidate", trigger: "flaky wait", action: "use expect.poll", errorClass: "E-FLAKY",
   status: "candidate", confidence: "low",
 };
 

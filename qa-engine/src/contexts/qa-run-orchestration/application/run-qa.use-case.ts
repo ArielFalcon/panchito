@@ -318,10 +318,11 @@ export interface RunQaResult {
   // NOT a full log-streaming port (CLAUDE.md scope note, see kernel RunOutcome.logs's own doc) —
   // this is the one-shot post-execution string ExecutionPort already produces, nothing more.
   logs?: string;
-  // W3 F2 (mirrors errorClass/valueScore/reviewerApproved's own doc above): the retrieved rule
-  // trigger strings, surfaced HERE so RewrittenOrchestratorAdapter's toOutcome() can mirror the SAME
-  // value toRunOutcome() persisted (mainline exit only — see toRunOutcome's own rulesRetrieved doc;
-  // every other exit's persisted outcome is [], matching legacy's persistOutcome asymmetry exactly).
+  // W3 F2 (mirrors errorClass/valueScore/reviewerApproved's own doc above): the retrieved rule IDS
+  // (WS1.1 fix — was trigger text, a silent no-op bug; see this file's own retrieve() call-site
+  // doc), surfaced HERE so RewrittenOrchestratorAdapter's toOutcome() can mirror the SAME value
+  // toRunOutcome() persisted (mainline exit only — see toRunOutcome's own rulesRetrieved doc; every
+  // other exit's persisted outcome is [], matching legacy's persistOutcome asymmetry exactly).
   rulesRetrieved: string[];
   // Diagnostic note. Two distinct sources, never both at once (mutually exclusive terminal shapes):
   //  1. An infra-error/invalid-shaped terminal (CLAUDE.md "surface integration errors loudly — never
@@ -489,19 +490,29 @@ export class RunQaUseCase {
     // contract (learning-port.adapter.ts's fold() doc: "a failure is logged and swallowed"); retrieve()
     // itself has no such guard documented on the port, but retrieval failing must not abort generation
     // either (retrieval is an enrichment, not a requirement) — bestEffort-shaped inline try/catch, never
-    // propagated. `retrievedRules` (W3 F1, widened from bare trigger strings to structured RetrievedRule[])
-    // feeds the prompt enrichment (below); `retrievedRuleTriggers` (derived) feeds the persisted
-    // RunOutcome.rulesRetrieved (toRunOutcome), matching legacy's retrievedRuleIds dual-use exactly
-    // (src/pipeline.ts:2038's retrievedRuleIds assignment, later reused at persistOutcome time) — this
-    // use-case's own RunOutcome.rulesRetrieved contract is (and was, pre-widening) trigger text, not
-    // rule ids; the widening only changes what generate()/review() receive, not what gets persisted.
+    // propagated. `retrievedRules` (the full structured RetrievedRule[] — trigger/action/errorClass/
+    // status/confidence) feeds the PROMPT enrichment (below, baseEnrichment/baseReviewEnrichment's
+    // `learnedRules`) — the generator/reviewer render `trigger`/`action` as text, never `id`.
+    //
+    // WS1.1 (full-flow remediation, most critical finding — FIX, was a silent no-op): `retrievedRuleIds`
+    // (derived below) feeds the persisted RunOutcome.rulesRetrieved (toRunOutcome) with the rules'
+    // real IDS, not trigger text. Before this fix, this derivation mapped `r.trigger` — the comment
+    // here used to claim that mirrored "legacy's retrievedRuleIds dual-use", which was
+    // self-contradictory: legacy's own retrievedRuleIds (src/pipeline.ts:2038) was populated from
+    // rule IDS, never trigger text. Persisting trigger text broke the consumer's BY-ID fold silently
+    // end-to-end: src/server/rewritten-engine-factory.ts's recordOutcome iterates rulesRetrieved
+    // calling recordRuleOutcome(id, ...) / looking up `byId.get(id)`, and src/server/history.ts's
+    // `SELECT * FROM learning_rules WHERE id = ?` never matched a row — so outcome_count stayed
+    // frozen at 0 forever, and the governance fold (promotion/demotion) never engaged. Now that
+    // RetrievedRule carries a real `id` (learning-port.adapter.ts's retrieve()), this derivation maps
+    // `r.id` — the SAME ids the adapter already threads into incrementUsage() one call earlier.
     let retrievedRules: RetrievedRule[] = [];
     try {
       retrievedRules = await this.deps.learning.retrieve(input.sha);
     } catch (err) {
       console.error("[qa] learning retrieval failed (non-fatal, generation continues ungrounded):", err);
     }
-    const retrievedRuleTriggers = retrievedRules.map((r) => r.trigger);
+    const retrievedRuleIds = retrievedRules.map((r) => r.id);
 
     // Phase: pre-generation grounding (Plan 7-R W4, audit CRITICAL). [SWAP] absent
     // PreGenerationGroundingPort -> the phase is a no-op: contextPack/existingSpecFiles stay
@@ -1529,8 +1540,9 @@ export class RunQaUseCase {
         ...(publishOutcome !== undefined ? { note: publishOutcome } : {}),
         // W3 F2 (legacy parity: src/pipeline.ts:3267's persistOutcome(..., rulesRetrieved:
         // retrievedRuleIds, ...) — the ONLY persistOutcome call site that threads it): the retrieved
-        // rule triggers reach the persisted RunOutcome on the mainline exit only.
-        ...(retrievedRuleTriggers.length ? { rulesRetrieved: retrievedRuleTriggers } : {}),
+        // rule IDS (WS1.1 fix — was trigger text) reach the persisted RunOutcome on the mainline
+        // exit only.
+        ...(retrievedRuleIds.length ? { rulesRetrieved: retrievedRuleIds } : {}),
         // Plan 7-R B5.3 (leak 3 fix): the pre-exec grounding gate's real, run-level accumulated
         // counters — replaces the hardcoded 0 the persisted RunOutcome carried before this gate
         // existed (mirrors legacy's persistOutcome() reading its own module-scope accumulators,
@@ -1608,7 +1620,8 @@ export class RunQaUseCase {
       // W3 F2: mirrors the SAME isContextCleanPass gate the persisted mainlineOutcome above uses —
       // a clean context pass never persists (see isContextCleanPass above), so its returned
       // RunQaResult must not report retrieved rules either (nothing was genuinely persisted).
-      rulesRetrieved: isContextCleanPass ? [] : retrievedRuleTriggers,
+      // WS1.1: retrievedRuleIds (not trigger text) — see this file's own retrieve() call-site doc.
+      rulesRetrieved: isContextCleanPass ? [] : retrievedRuleIds,
       gateSignals: {
         // FIX 2 (judgment-day D.7 batch 2): a CLEAN context-mode pass never persists a real
         // RunOutcome at all (see isContextCleanPass above) — the legacy's own comparator counterpart

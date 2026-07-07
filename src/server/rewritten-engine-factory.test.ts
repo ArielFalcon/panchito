@@ -738,6 +738,75 @@ test("historyLearningStore(appName).recordOutcome() — oracle path folds valueS
   assert.equal(r2?.successRate, 0.8);
 });
 
+// WS1.1 (full-flow remediation, most critical finding): THE INTEGRATION-HONEST TEST. Every test
+// above this one hand-builds `rulesRetrieved: [ruleId1, ruleId2]` directly with the real ids already
+// known — none of them walk the REAL production seam that broke: LearningPortAdapter.retrieve()
+// (qa-engine's port bridge) projecting RetrievedRule[] from the SAME SqliteLearningRepository /
+// historyLearningStore this file already wires, then the caller deriving the persisted
+// rulesRetrieved from THAT result exactly the way run-qa.use-case.ts does (`r.id`, post-fix — was
+// `r.trigger`, the bug). Before the WS1.1 fix, this exact chain (upsert -> retrieve -> derive
+// rulesRetrieved -> fold) silently produced trigger TEXT instead of ids, so recordOutcome's by-id
+// lookup (`byId.get(id)` / recordRuleOutcome(id, ...)) missed every row and outcome_count stayed
+// frozen at 0 forever — no promotion/demotion ever engaged, with zero errors anywhere. This test
+// pins the full chain green.
+test("WS1.1 integration: upsert -> retrieve (real LearningPortAdapter) -> derive rulesRetrieved by id -> fold (real recordOutcome) advances outcome_count (was frozen at 0 pre-fix)", async () => {
+  const { historyLearningStore } = await import("./rewritten-engine-factory");
+  const { listLearningRules } = await import("./history");
+  const { SqliteLearningRepository } = await import(
+    "@contexts/cross-run-learning/infrastructure/sqlite-learning-repository.adapter"
+  );
+  const { LearningPortAdapter } = await import(
+    "@contexts/qa-run-orchestration/infrastructure/bridges/learning-port.adapter"
+  );
+  const app = `factory-learning-ws1-1-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  // Deliberately DIFFERENT from the rule's trigger text — if the chain regresses to persisting
+  // trigger text instead of ids, the fold's byId lookup would miss this row exactly as it did
+  // before the fix, and outcome_count would stay 0 (the assertion below would fail loudly).
+  const ruleId = `rule-ws1-1-${app}`;
+  const ruleTrigger = "selector absent — WS1.1 trigger text, NEVER the fold key";
+
+  const store = historyLearningStore(app);
+  store.upsert({
+    id: ruleId, trigger: ruleTrigger, action: "use role+name", errorClass: "E-EXEC-FAIL",
+    archetype: null, status: "active", confidence: "high", usageCount: 0, outcomeCount: 0,
+    successRate: null, lastVerified: null, source: "test", at: new Date().toISOString(),
+  });
+
+  // Real retrieval path: the SAME SqliteLearningRepository + LearningPortAdapter production wires
+  // (buildRewrittenCompositionConfig composes `new SqliteLearningRepository(historyLearningStore(app.name))`
+  // at line ~524 of this module, and composition-root.ts wraps it in LearningPortAdapter).
+  const repo = new SqliteLearningRepository(store);
+  const adapter = new LearningPortAdapter(repo, app);
+  const retrievedRules = await adapter.retrieve(Sha.of("abc1234567"));
+
+  assert.equal(retrievedRules.length, 1, "the upserted rule must be retrievable");
+  assert.equal(retrievedRules[0]?.id, ruleId, "retrieve() must surface the real row id (the WS1.1 fix)");
+  assert.equal(retrievedRules[0]?.trigger, ruleTrigger, "retrieve() must ALSO still surface the prompt-facing trigger text (untouched by this fix)");
+
+  // Derive rulesRetrieved the SAME way run-qa.use-case.ts does post-fix: `retrievedRules.map(r => r.id)`
+  // — NOT `r.trigger` (that mapping was the bug this work-unit fixes).
+  const rulesRetrieved = retrievedRules.map((r) => r.id);
+  assert.deepEqual(rulesRetrieved, [ruleId], "the derived rulesRetrieved must carry ids, not trigger text");
+
+  const outcome = {
+    runId: "run-ws1-1", app, sha: "abc1234567", mode: "diff", target: "e2e", verdict: "pass",
+    errorClass: null,
+    gateSignals: { static: true, coverageRatio: 0.9, valueScore: 0.75, reviewerCorrections: [], flaky: false, retries: 0 },
+    rulesRetrieved,
+    at: new Date().toISOString(),
+  } as never;
+
+  // Fold via the REAL LearningPort.fold() -> LearningRepositoryPort.applyOutcome() ->
+  // historyLearningStore(app).recordOutcome() -> history.ts's recordRuleOutcome(id, ...) chain —
+  // the exact production path, not a hand-rolled call to recordOutcome/recordRuleOutcome directly.
+  await adapter.fold(outcome);
+
+  const rows = listLearningRules(app, 10);
+  const folded = rows.find((r) => r.id === ruleId);
+  assert.equal(folded?.outcomeCount, 1, "outcome_count must ADVANCE from 0 to 1 — this is the exact governance-fold edge WS1.1 fixes; before the fix this stayed frozen at 0 with no error");
+  assert.equal(folded?.successRate, 0.75, "successRate must equal the folded valueScore (first outcome)");
+});
+
 test("historyLearningStore(appName).recordOutcome() — empty rulesRetrieved is a safe no-op", async () => {
   const { historyLearningStore } = await import("./rewritten-engine-factory");
   const { listLearningRules } = await import("./history");

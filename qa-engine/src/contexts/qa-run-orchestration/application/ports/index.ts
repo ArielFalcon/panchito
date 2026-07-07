@@ -417,6 +417,15 @@ export interface PublicationPort {
 // topRules's own RETRIEVABLE gate) — a widened union here would let callers handle branches that
 // can structurally never occur.
 export interface RetrievedRule {
+  // WS1.1 (full-flow remediation, most critical finding): the ledger's PRIMARY KEY, used for
+  // outcome-fold attribution ONLY (RunOutcome.rulesRetrieved persists ids so the by-id fold at the
+  // consumer — e.g. rewritten-engine-factory.ts's recordOutcome / history.ts's
+  // `SELECT * FROM learning_rules WHERE id = ?` — actually matches a row instead of silently
+  // missing every one). `trigger` (below) remains the prompt-facing text rendered into the
+  // generator/reviewer prompt — the two fields serve DIFFERENT consumers and must never be
+  // conflated: this id is never rendered into a prompt, and `trigger` is never used for fold
+  // attribution.
+  id: string;
   trigger: string;
   action: string;
   errorClass: string;

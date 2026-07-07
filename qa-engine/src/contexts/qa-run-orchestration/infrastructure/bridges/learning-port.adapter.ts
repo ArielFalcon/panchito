@@ -7,6 +7,10 @@
 // bare-trigger string[] projection previously here starved both prompt renderers of action/
 // errorClass/status/confidence). The v1 default (StubLearningRepository) makes this provably a
 // no-op — retrieve() genuinely returns [] until a real store is wired.
+// WS1.1 (full-flow remediation): the projection now ALSO carries the row's real `id` (the ledger's
+// primary key) — it was dropped here previously, which silently starved the run-qa use-case's
+// persisted RunOutcome.rulesRetrieved of anything but trigger text, breaking the consumer's by-id
+// fold (rewritten-engine-factory.ts's recordOutcome / history.ts's id lookup) with no error, ever.
 import type { Sha } from "@kernel/sha.ts";
 import type { RunOutcome } from "@kernel/run-outcome.ts";
 import type { LearningPort, RetrievedRule } from "../../application/ports/index.ts";
@@ -68,6 +72,12 @@ export class LearningPortAdapter implements LearningPort {
       }
     }
     return rules.map((r) => ({
+      // WS1.1 (full-flow remediation, most critical finding): the real repository row id, previously
+      // dropped at this exact projection — the SAME id already threaded into incrementUsage() two
+      // lines above (proof the id is in scope here). Without it, the use-case's persisted
+      // RunOutcome.rulesRetrieved had nothing but trigger TEXT to fold by, and the consumer's by-id
+      // fold (SELECT ... WHERE id = ?) missed every row silently.
+      id: r.id,
       trigger: r.trigger,
       action: r.action,
       errorClass: r.errorClass,

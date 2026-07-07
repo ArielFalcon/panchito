@@ -65,12 +65,40 @@ test("retrieve() delegates to LearningRepositoryPort.topRules and returns the FU
   const result = await adapter.retrieve(Sha.of("abc1234"));
 
   assert.deepEqual(result, [{
+    id: "r1",
     trigger: "selector absent",
     action: "use role+name",
     errorClass: "E-EXEC-FAIL",
     status: "active",
     confidence: "high",
   }]);
+});
+
+// WS1.1 (full-flow remediation, most critical finding): retrieve() previously dropped the
+// repository row's real id at this exact projection — RunOutcome.rulesRetrieved persisted trigger
+// TEXT instead of ids, so the factory's by-id fold (rewritten-engine-factory.ts's recordOutcome)
+// missed every row and outcome_count stayed frozen at 0 forever (no promotion/demotion ever
+// engaged). This test pins the id surviving the LearningRule -> RetrievedRule projection —
+// it is the row's PRIMARY KEY used for outcome-fold attribution, distinct from `trigger` (the
+// prompt-facing text).
+test("retrieve() includes the repository row's real id in each RetrievedRule (WS1.1 fold-attribution fix)", async () => {
+  const rule: LearningRule = {
+    id: "rule-id-distinct-from-trigger", trigger: "selector absent", action: "use role+name",
+    errorClass: "E-EXEC-FAIL", archetype: null, status: "active", confidence: "high",
+    usageCount: 3, outcomeCount: 3, successRate: 1, lastVerified: null, source: "run-1",
+    at: new Date().toISOString(),
+  };
+  const repo: LearningRepositoryPort = {
+    save: async () => {},
+    topRules: async () => [rule],
+    applyOutcome: async () => {},
+  };
+  const adapter = new LearningPortAdapter(repo, "app");
+
+  const result = await adapter.retrieve(Sha.of("abc1234"));
+
+  assert.equal(result[0]?.id, "rule-id-distinct-from-trigger", "the row's real id must survive the projection, not be dropped");
+  assert.notEqual(result[0]?.id, result[0]?.trigger, "id and trigger are DIFFERENT fields — this pins the caller cannot mistake one for the other");
 });
 
 test("retrieve() narrows a candidate rule's status verbatim (not coerced to active)", async () => {
@@ -161,6 +189,7 @@ test("retrieve() still returns the retrieved rules when incrementUsage REJECTS, 
   const result = await adapter.retrieve(Sha.of("abc1234"));
 
   assert.deepEqual(result, [{
+    id: "r5",
     trigger: "missing alt text",
     action: "add alt attribute",
     errorClass: "E-EXEC-FAIL",

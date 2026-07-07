@@ -3144,9 +3144,16 @@ test("W2-F5: a non-diff mode never calls classify(), so generate() receives no i
 //
 // W3 F1 (dual-judge round): retrieve() now returns structured RetrievedRule[] (trigger/action/
 // errorClass/status/confidence), not bare trigger strings — these fixtures/assertions were updated
-// to match the widened port contract; RunOutcome.rulesRetrieved stays trigger-text (unchanged
-// contract — see run-qa.use-case.ts's own `retrievedRuleTriggers` derivation comment).
+// to match the widened port contract.
+//
+// WS1.1 (full-flow remediation, most critical finding): RetrievedRule now ALSO carries `id` (the
+// ledger's primary key) — RunOutcome.rulesRetrieved persists IDS, not trigger text (the prior
+// contract silently starved the by-id fold at the consumer, freezing outcome_count at 0 forever;
+// see run-qa.use-case.ts's own `retrievedRuleIds` derivation comment). The default id here is
+// DELIBERATELY DIFFERENT from trigger (`id-<trigger>`, never equal) so a regression that persists
+// trigger text instead of ids fails loudly instead of passing by coincidence.
 const makeRetrievedRule = (trigger: string, overrides: Partial<RetrievedRule> = {}): RetrievedRule => ({
+  id: overrides.id ?? `id-${trigger}`,
   trigger,
   action: overrides.action ?? "default action",
   errorClass: overrides.errorClass ?? "E-EXEC-FAIL",
@@ -3221,24 +3228,27 @@ test("W3 F2: a retrieve() failure does not abort the run — generation still pr
   assert.equal(out.decision.verdict, "pass", "a retrieval failure must be swallowed, not propagated as a run failure");
 });
 
-test("W3 F2: the retrieved rule triggers reach the persisted RunOutcome.rulesRetrieved on the mainline exit", async () => {
+test("WS1.1: the retrieved rule IDS (not trigger text) reach the persisted RunOutcome.rulesRetrieved on the mainline exit", async () => {
   let savedRulesRetrieved: string[] | undefined;
-  const { ports } = stubPorts({ retrieve: async () => [makeRetrievedRule("fabricated-testid-guard")] });
+  const rule = makeRetrievedRule("fabricated-testid-guard", { id: "rule-id-001" });
+  const { ports } = stubPorts({ retrieve: async () => [rule] });
   ports.runHistory.save = async (outcome) => { savedRulesRetrieved = outcome.rulesRetrieved; };
   const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
 
   await useCase.run({ ...baseInput, runId: "w3-f2-persisted-rules-retrieved" });
 
-  assert.deepEqual(savedRulesRetrieved, ["fabricated-testid-guard"]);
+  assert.deepEqual(savedRulesRetrieved, ["rule-id-001"], "the persisted rulesRetrieved must carry the rule's ID (the fold-attribution key), not its trigger text");
 });
 
-test("W3 F2: the returned RunQaResult also carries rulesRetrieved (RewrittenOrchestratorAdapter's own read-back path)", async () => {
-  const { ports } = stubPorts({ retrieve: async () => [makeRetrievedRule("rule-a"), makeRetrievedRule("rule-b")] });
+test("WS1.1: the returned RunQaResult also carries rulesRetrieved as IDS (RewrittenOrchestratorAdapter's own read-back path)", async () => {
+  const ruleA = makeRetrievedRule("rule-a-trigger-text", { id: "rule-a-id" });
+  const ruleB = makeRetrievedRule("rule-b-trigger-text", { id: "rule-b-id" });
+  const { ports } = stubPorts({ retrieve: async () => [ruleA, ruleB] });
   const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
 
   const out = await useCase.run({ ...baseInput, runId: "w3-f2-returned-rules-retrieved" });
 
-  assert.deepEqual(out.rulesRetrieved, ["rule-a", "rule-b"]);
+  assert.deepEqual(out.rulesRetrieved, ["rule-a-id", "rule-b-id"]);
 });
 
 test("W3 F2: an early-exit terminal (static-gate invalid) persists rulesRetrieved:[] — legacy parity, retrieve() result is never threaded to a non-mainline exit", async () => {
