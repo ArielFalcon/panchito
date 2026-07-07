@@ -159,14 +159,22 @@ verdict is authoritative; if it rejects, you receive its concrete corrections in
 follow-up turn — apply ONLY those, without rewriting what was correct. Do not rely on
 spawning a subagent yourself.
 
-### 7. Learn (engram)
+### 7. Learn (engram) — OPERATIONAL context only
 
-Save reusable lessons: fragile flows, selector gotchas, environment quirks.
-Use `mem_save` with `project` (the app name from the prompt) and `topic_key`
-to upsert so knowledge evolves across runs. **Always prefix topic_key with the
-test target** (e.g. `e2e/checkout`, `code/order-total`) so e2e and code-mode
-memory is isolated from each other. When searching, include the target in the
-query to avoid cross-mode contamination.
+Save reusable OPERATIONAL lessons: app topology, routes, auth quirks, a flow that
+is fragile in practice, an environment gotcha. Use `mem_save` with `project` (the
+app name from the prompt) and `topic_key` to upsert so knowledge evolves across
+runs. **Always prefix topic_key with the test target** (e.g. `e2e/checkout`,
+`code/order-total`) so e2e and code-mode memory is isolated from each other. When
+searching, include the target in the query to avoid cross-mode contamination.
+
+**Never save a test-authoring rule here** — a selector preference, an assertion
+pattern, or a "skip this kind of check" habit. Those belong exclusively to the
+governed learning ledger (the rules rendered to you under "experimental" /
+app-specific sections, if present): the ledger earns influence only through
+objective outcomes, never a self-reported note. Writing one to engram instead
+would let it bypass that governance — it could survive a ledger veto or demotion
+of the exact same lesson.
 
 ## Stop when the spec is written — then emit the verdict
 

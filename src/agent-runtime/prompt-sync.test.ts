@@ -183,6 +183,53 @@ describe("prompt-sync drift guard", () => {
     }
   });
 
+  it("WS1.7: both qa-reviewer.md mirrors reject-on-sight a ledger-bypassing 'learned habit' spec comment", () => {
+    for (const rel of ["agent/roles/qa-reviewer.md", "agents/agent/qa-reviewer.md"]) {
+      const content = readFile(rel);
+      assert.ok(
+        /ledger-bypassing/i.test(content) && /learned habit/i.test(content),
+        `${rel} must reject a spec comment citing engram/memory as the source of a test-authoring ` +
+          `habit (WS1.7: the governed ledger, not engram, owns test-authoring rules).`,
+      );
+      assert.ok(
+        /engram/i.test(content),
+        `${rel} anti-pattern catalog must reference engram by name so the reviewer recognizes the bypass pattern.`,
+      );
+    }
+  });
+
+  it("WS1.7: both AGENTS.md mirrors scope engram to operational context and forbid test-authoring rules", () => {
+    for (const rel of ["agent/AGENTS.md", "agents/AGENTS.md"]) {
+      const content = readFile(rel);
+      assert.ok(
+        /operational context/i.test(content),
+        `${rel} must scope engram to operational context (WS1.7).`,
+      );
+      assert.ok(
+        /never.{0,20}test-authoring rules|test-authoring rules.{0,20}never/is.test(content) || /NEVER for test-authoring rules/i.test(content),
+        `${rel} must explicitly forbid test-authoring rules in engram (WS1.7).`,
+      );
+      assert.ok(
+        /governed learning ledger/i.test(content),
+        `${rel} must point test-authoring rules at the governed learning ledger instead (WS1.7).`,
+      );
+    }
+  });
+
+  it("WS1.7: both qa-generator.md mirrors' engram section forbids test-authoring rules (Procedure is WAIVED but must stay consistent)", () => {
+    for (const rel of ["agent/roles/qa-generator.md", "agents/agent/qa-generator.md"]) {
+      const content = readFile(rel);
+      assert.ok(
+        /Never save a test-authoring rule/i.test(content),
+        `${rel} must forbid saving test-authoring rules to engram (WS1.7).`,
+      );
+      assert.ok(
+        /governed learning ledger/i.test(content),
+        `${rel} must point to the governed learning ledger as the exclusive owner of test-authoring rules (WS1.7).`,
+      );
+    }
+  });
+
   it("agent/roles/qa-reviewer.md contains the app-agnostic warning and ARIA-role selector guidance (AC1.1.2)", () => {
     const codexReviewer = readFile("agent/roles/qa-reviewer.md");
     // These anchors are confirmed present by the design gate.
