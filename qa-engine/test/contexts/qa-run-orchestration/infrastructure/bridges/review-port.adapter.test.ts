@@ -287,3 +287,84 @@ test("review() threads ctx.target:'e2e' unchanged (backward compatible default f
 
   assert.equal(seenTarget, "e2e");
 });
+
+// ── WS6.1 (full-flow remediation, timeouts & operational observability): ReviewPortAdapter.review()
+// previously passed NO timeoutMs into openSession(), so the reviewer silently inherited the
+// dispatcher's ~25.5min ceiling instead of the purpose-built REVIEWER_TIMEOUT_MS (6min) — a hung
+// reviewer could hold the sequential queue 25-50min. ReviewPortStaticContext.timeoutMs (optional,
+// composition-supplied — the adapter stays agnostic to the constant's numeric value, same pattern
+// as baseUrl/guidance) now threads straight into openSession's own opts.timeoutMs. ──────────────────
+
+test("review() threads ctx.timeoutMs into openSession's opts.timeoutMs (reviewer gets its OWN budget, not the dispatcher's)", async () => {
+  let seenTimeoutMs: number | undefined;
+  const runtime: AgentRuntimePort = {
+    openSession: async (_role, _cwd, opts) => {
+      seenTimeoutMs = opts?.timeoutMs;
+      return { prompt: async () => ({ output: "verdict-json" }), dispose: async () => {} };
+    },
+  };
+  const verdicts = fakeVerdicts({ approved: true, corrections: [], parsed: true, valid: true, issues: [] });
+  const adapter = new ReviewPortAdapter({ runtime, rendering: fakeRendering(), verdicts }, {
+    diff: "", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e", appName: "app", mode: "diff", timeoutMs: 360_000,
+  });
+
+  await adapter.review("/mirrors/org/app/e2e", cases);
+
+  assert.equal(seenTimeoutMs, 360_000, "the reviewer's OWN budget (e.g. REVIEWER_TIMEOUT_MS) must reach openSession, not be silently dropped");
+});
+
+test("review() with absent ctx.timeoutMs omits it from openSession opts (backward compatible — no forced timeout)", async () => {
+  let sawTimeoutKey = false;
+  const runtime: AgentRuntimePort = {
+    openSession: async (_role, _cwd, opts) => {
+      sawTimeoutKey = opts !== undefined && "timeoutMs" in opts && opts.timeoutMs !== undefined;
+      return { prompt: async () => ({ output: "verdict-json" }), dispose: async () => {} };
+    },
+  };
+  const verdicts = fakeVerdicts({ approved: true, corrections: [], parsed: true, valid: true, issues: [] });
+  const adapter = new ReviewPortAdapter({ runtime, rendering: fakeRendering(), verdicts }, {
+    diff: "", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e", appName: "app", mode: "diff",
+  });
+
+  await adapter.review("/mirrors/org/app/e2e", cases);
+
+  assert.equal(sawTimeoutKey, false, "absent ctx.timeoutMs must not fabricate a timeout the composition layer never configured");
+});
+
+test("review() maps a thrown openSession/prompt failure (e.g. a reviewer timeout) to a fail-closed ReviewResult with a distinctive note — never a crash, never approved:true", async () => {
+  const runtime: AgentRuntimePort = {
+    openSession: async () => {
+      throw new Error("reviewer session timed out after 360000ms");
+    },
+  };
+  const verdicts = fakeVerdicts({ approved: true, corrections: [], parsed: true, valid: true, issues: [] });
+  const adapter = new ReviewPortAdapter({ runtime, rendering: fakeRendering(), verdicts }, {
+    diff: "", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e", appName: "app", mode: "diff", timeoutMs: 360_000,
+  });
+
+  const result = await adapter.review("/mirrors/org/app/e2e", cases);
+
+  assert.equal(result.approved, false, "a reviewer failure must NEVER read as approved");
+  assert.equal(result.parsed, false, "a reviewer failure is a parse-equivalent miss — not an actionable rejection to regenerate against");
+  assert.ok(result.rationale?.includes("reviewer unavailable"), "the rationale must carry a distinctive, human-legible note distinguishing this from a real rejection");
+  assert.ok(result.rationale?.includes("timed out"), "the original failure reason should be visible for operators");
+});
+
+test("review() maps a thrown session.prompt() failure the same fail-closed way (not just openSession failures)", async () => {
+  const runtime: AgentRuntimePort = {
+    openSession: async () => ({
+      prompt: async () => { throw new Error("stalled: no activity for 360000ms"); },
+      dispose: async () => {},
+    }),
+  };
+  const verdicts = fakeVerdicts({ approved: true, corrections: [], parsed: true, valid: true, issues: [] });
+  const adapter = new ReviewPortAdapter({ runtime, rendering: fakeRendering(), verdicts }, {
+    diff: "", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e", appName: "app", mode: "diff", timeoutMs: 360_000,
+  });
+
+  const result = await adapter.review("/mirrors/org/app/e2e", cases);
+
+  assert.equal(result.approved, false);
+  assert.equal(result.parsed, false);
+  assert.ok(result.rationale?.includes("reviewer unavailable"));
+});

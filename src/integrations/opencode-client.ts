@@ -1744,6 +1744,50 @@ export function withStallWatchdog(
   };
 }
 
+// WS6.2 (full-flow remediation, timeouts & operational observability): registerRunSession/
+// unregisterRunSession existed and were exported, but nothing on the rewritten (qa-engine)
+// production path ever called them (the only call sites were the legacy runOpencode/
+// generateParallel/maybeExplore/maybePlan functions — dead since the cutover deleted
+// src/pipeline.ts). A session opened with a descriptor.runId never got mapped to its run, so SSE
+// live-activity events for that session were never routed to the TUI's live run panel.
+//
+// Wrap AgentDeps at the SAME composition seam withStallWatchdog/withUsageSink already use (see
+// createRewrittenEngineFactory's getAgentDeps wrapping) so every session opened through the
+// rewritten engine — generator, reviewer, or any future role — registers/unregisters automatically
+// whenever the caller supplied a descriptor.runId. Absent runId (e.g. a unit test or an operator
+// script with no run context) -> no registration is attempted, matching every other "absent ->
+// unchanged" optional-field contract in this file.
+//
+// `collaborators` is a testability seam (mirrors withStallWatchdog's watchdogFactory precedent) —
+// defaults to the REAL exported registerRunSession/unregisterRunSession in production.
+export function withSessionRegistration(
+  baseDeps: AgentDeps,
+  collaborators: {
+    register?: typeof registerRunSession;
+    unregister?: typeof unregisterRunSession;
+  } = {},
+): AgentDeps {
+  const register = collaborators.register ?? registerRunSession;
+  const unregister = collaborators.unregister ?? unregisterRunSession;
+
+  return {
+    ...baseDeps,
+    open: async (agent, cwd, opts) => {
+      const inner = await baseDeps.open(agent, cwd, opts);
+      const runId = opts?.descriptor?.runId;
+      if (runId) register(inner.id, runId, cwd);
+
+      return {
+        ...inner,
+        dispose: async () => {
+          if (runId) unregister(inner.id);
+          await inner.dispose();
+        },
+      };
+    },
+  };
+}
+
 // Integration boundary: real connection to `opencode serve`. Not covered by unit
 // tests (like the Playwright runner). The SDK is imported lazily so tests do not
 // require the package. OPENCODE_SERVE_URL points to the `opencode` container.

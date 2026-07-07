@@ -1526,6 +1526,43 @@ test("reflector-rewire: static-gate invalid (errorClass=E-STATIC) — learning.f
   assert.deepEqual(Object.keys(capturedInput?.gateSignals ?? {}).sort(), ["coverageRatio", "flaky", "retries", "reviewerCorrections", "static", "valueScore"].sort());
 });
 
+// ── WS6.3 (full-flow remediation, timeouts & operational observability): reflect() is awaited
+// inline — up to 60s per qualifying run on a sequential queue (kept awaited: determinism requires
+// the reflection back-fill to land before the run closes; see the plan's own rationale). This test
+// pins that the reflect() call's OWN duration is measured and surfaced on the existing run-event
+// channel (ObserverPort.onEvent, "log.line" — the schema's own documented "fallback: only what is
+// NOT a domain event" slot) so the cost is visible without inventing a new RunStep/event type. ────
+
+test("WS6.3: reflect() duration is measured and emitted via observer.onEvent({type:'log.line'}) on a qualifying failure run (static-gate invalid)", async () => {
+  const { ports } = stubPorts({ validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }) });
+  const reflector = makeFakeReflector(() => {});
+  const { observer, events } = fakeObserver();
+  const useCase = new RunQaUseCase({ ...ports, reflector, observer, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "reflector-telemetry-duration" });
+
+  assert.equal(out.decision.verdict, "invalid");
+  const logLines = events.filter((e): e is { type: "log.line"; level: "info" | "warn" | "error"; text: string } => e.type === "log.line");
+  const reflectLine = logLines.find((e) => e.text.includes("reflect"));
+  assert.ok(reflectLine, "a log.line event naming the reflect phase must be emitted");
+  assert.match(reflectLine!.text, /reflector-telemetry-duration/, "the run id must be visible in the telemetry line");
+  assert.match(reflectLine!.text, /\d+ ?ms/, "the reflect() call's own duration (in ms) must be visible in the telemetry line");
+});
+
+test("WS6.3: reflect() duration telemetry is NOT emitted when the reflect gate suppresses the call (flaky verdict)", async () => {
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "flaky", cases: [{ name: "checkout", status: "flaky" as const }], logs: "" }),
+  });
+  const reflector = makeFakeReflector(() => {});
+  const { observer, events } = fakeObserver();
+  const useCase = new RunQaUseCase({ ...ports, reflector, observer, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "reflector-telemetry-suppressed" });
+
+  const logLines = events.filter((e) => e.type === "log.line" && (e as { text: string }).text.includes("reflect"));
+  assert.equal(logLines.length, 0, "no reflect telemetry should fire when the reflect gate itself never calls reflect()");
+});
+
 // WS1.2 (full-flow remediation): a clean green run resolves errorClass:null via the taxonomy
 // (errorClassFromVerdict's own `case "pass": ... return null` when coverageRatio is null or >= the
 // minimum ratio) — the pre-fix reflect gate only ANDed shouldDistillLearning(...) AND

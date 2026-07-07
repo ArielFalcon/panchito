@@ -202,10 +202,15 @@ export class GenerationPortAdapter implements GenerationPort {
       // it already threads intent — see GenerationEnrichment.sha's own comment for why that call
       // site is out of this change's scope).
       sha: enrichment?.sha ?? "",
-      // W5 fix (seam-parity FIXME): threads the run's id onto OpencodeRunInput.runId, which
-      // opencode-client.ts uses for the SSE session descriptor (registerRunSession/appendLog
-      // telemetry) — without it, rewritten-path generator sessions never appeared in live run
-      // activity/telemetry. Absent -> omitted, unchanged (today's behavior for a caller that
+      // W5 fix (seam-parity FIXME): threads the run's id onto OpencodeRunInput.runId, which becomes
+      // the session descriptor's runId. WS6.2 correction (full-flow remediation): this field alone
+      // was NOT sufficient for SSE registration on the rewritten path — registerRunSession was never
+      // called here (the claim this comment previously made was wrong); the actual gap was in the
+      // composition seam (rewritten-engine-factory.ts's runtimeAdapter open() closure was dropping
+      // opts?.descriptor before it ever reached AgentDeps.open, and nothing wrapped AgentDeps with
+      // withSessionRegistration). Both are now fixed at the factory's composition point — this
+      // field's own contribution is unchanged: supplying a correct descriptor.runId so that fix has
+      // something real to register. Absent -> omitted, unchanged (today's behavior for a caller that
       // predates this enrichment field).
       ...(enrichment?.runId ? { runId: enrichment.runId } : {}),
       // "Dynamic diff" fix (engram #936): PREFER the run's real diff (threaded per-call from

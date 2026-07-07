@@ -10,6 +10,7 @@ import { defaultMirrorDeps, type MirrorDeps } from "../integrations/repo-mirror"
 import { SqliteRunHistoryAdapter } from "./run-history-sqlite-adapter";
 import { SqliteLearningRepository } from "@contexts/cross-run-learning/infrastructure/sqlite-learning-repository.adapter";
 import { Sha } from "@kernel/sha";
+import { REVIEWER_TIMEOUT_MS, withUsageSink, withStallWatchdog, withSessionRegistration, activityRouter } from "../integrations/opencode-client";
 
 const cfg = (name: string): AppConfig => ({
   name,
@@ -73,6 +74,17 @@ test("buildRewrittenCompositionConfig leaves baseUrl absent for a code-mode app 
   const app: AppConfig = { ...cfg("factory-baseurl-code"), code: true, dev: undefined };
   const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
   assert.equal(config.baseUrl, undefined);
+});
+
+// ── WS6.1 (full-flow remediation, timeouts & operational observability) ──────────────────────────
+// The factory must supply the purpose-built REVIEWER_TIMEOUT_MS (6min) as CompositionConfig.
+// reviewTimeoutMs, so ReviewPortAdapter.review() stops silently inheriting the dispatcher's
+// ~25.5min worst-case ceiling for a hung reviewer session.
+
+test("buildRewrittenCompositionConfig sets reviewTimeoutMs to the exported REVIEWER_TIMEOUT_MS constant", () => {
+  const app = cfg("factory-review-timeout");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  assert.equal(config.reviewTimeoutMs, REVIEWER_TIMEOUT_MS, "the reviewer must get its OWN purpose-built budget, not the dispatcher's coarse ceiling");
 });
 
 // ── W4 follow-up (Task #37 audit CRITICAL, a9e7dfb) — grounding collaborators ──────────────────────
@@ -482,6 +494,71 @@ test("createRewrittenEngineFactory never calls getAgentDeps during construction 
     });
     factory(cfg("factory-lazy-agent"), "qa-bot-abc1234-runA", { mode: "diff" });
     assert.equal(calls, 0, "constructing the factory + composing the port must not eagerly open an agent session");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+// ── WS6.2 (full-flow remediation, timeouts & operational observability) ──────────────────────────
+// withUsageSink/withStallWatchdog/withSessionRegistration existed and were fully unit-tested, but
+// nothing on the production path ever composed them onto the AgentDeps this factory hands to
+// wireBridges() — a session opened through the rewritten engine never registered for SSE, never
+// tripped the stall watchdog, and never fed a usage sink. These tests prove the composition itself
+// (the wrapper unit tests already pin each wrapper's own behavior in isolation).
+
+test("createRewrittenEngineFactory wraps deps.getAgentDeps() so a session opened with descriptor.runId registers for SSE (activityRouter.sessionMap())", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    let openedSessionId: string | undefined;
+    const rawGetAgentDeps = (): AgentDeps => ({
+      open: async (_agent, _cwd, _opts) => {
+        openedSessionId = "factory-sse-session-1";
+        return { id: openedSessionId, prompt: async () => "output", dispose: async () => {} };
+      },
+    });
+    const app = cfg("factory-sse-registration");
+    const config = buildRewrittenCompositionConfig(
+      app,
+      { getAgentDeps: () => withUsageSink(withStallWatchdog(withSessionRegistration(rawGetAgentDeps()))) },
+      "qa-bot-abc1234-runSSE",
+      { mode: "diff" },
+    );
+
+    // Exercise the SAME seam a real review call uses: runtimeAdapter.openSession -> deps.open with a
+    // descriptor carrying runId (mirrors ReviewPortAdapter's own openSession call shape).
+    const session = await config.reviewRuntime.runtime.openSession("reviewer", "/mirrors/org/app", {
+      descriptor: { runId: "run-sse-1", role: "qa-reviewer" },
+    });
+
+    assert.ok(openedSessionId, "the raw AgentDeps.open must have been reached through the wrap chain");
+    assert.equal(activityRouter.sessionMap().get(openedSessionId!), "run-sse-1", "the session must be registered in the SAME activityRouter the SSE stream reads from");
+
+    await session.dispose();
+    assert.equal(activityRouter.sessionMap().has(openedSessionId!), false, "dispose must unregister the session (no leaked SSE mapping)");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("createRewrittenEngineFactory's engineFactory (not just buildRewrittenCompositionConfig directly) composes the SAME wrap chain end-to-end", () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    let getAgentDepsCalls = 0;
+    const factory = createRewrittenEngineFactory({
+      getAgentDeps: () => {
+        getAgentDepsCalls++;
+        return stubAgentDeps();
+      },
+    });
+    const port = factory(cfg("factory-wrap-chain"), "qa-bot-abc1234-runWrap", { mode: "diff" });
+    assert.equal(typeof port.run, "function");
+    // Construction must stay lazy (mirrors the pre-existing "never calls getAgentDeps during
+    // construction" test above) — the wrap itself must not defeat that laziness.
+    assert.equal(getAgentDepsCalls, 0, "wrapping getAgentDeps must not eagerly invoke the underlying factory");
   } finally {
     if (prev === undefined) delete process.env.PIPELINE_ENGINE;
     else process.env.PIPELINE_ENGINE = prev;

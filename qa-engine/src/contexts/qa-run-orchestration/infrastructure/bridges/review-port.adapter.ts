@@ -56,6 +56,13 @@ export interface ReviewPortStaticContext {
   // undefined -> renderReviewer's own "E2E tests" default (unchanged e2e behavior, backward
   // compatible with every pre-existing caller/test that omits it).
   target?: TestTarget;
+  // WS6.1 (full-flow remediation, timeouts & operational observability): the reviewer's OWN prompt
+  // deadline (composition supplies REVIEWER_TIMEOUT_MS — src/integrations/opencode-client.ts, a
+  // purpose-built 6min budget) so a hung reviewer session times out on ITS OWN ceiling instead of
+  // silently inheriting the dispatcher's ~25.5min worst-case (the bug this field closes: the adapter
+  // previously passed NO timeoutMs into openSession at all). Optional: absent -> openSession opts
+  // omit timeoutMs entirely, unchanged behavior for every pre-existing caller/test.
+  timeoutMs?: number;
 }
 
 export class ReviewPortAdapter implements ReviewPort {
@@ -112,34 +119,63 @@ export class ReviewPortAdapter implements ReviewPort {
     };
     const assembled = rendering.renderReviewer(reviewInput);
 
-    // W5 fix (seam-parity FIXME, runId/onTurn threading): threads descriptor.runId so the real
-    // AgentDeps.open() can register this standalone reviewer session for SSE live activity and its
-    // own internal agent_turns persistence (defaultOnTurn) — mirrors GenerateTestsUseCase's own
-    // reviewer-session descriptor fix (generate-tests.use-case.ts).
-    const session = await runtime.openSession("reviewer", this.ctx.mirrorDir, {
-      descriptor: { runId: enrichment?.runId, role: "qa-reviewer" },
-    });
-    let output: string;
+    // WS6.1 (full-flow remediation, timeouts & operational observability): the reviewer's own
+    // session runs under a LOUD-but-non-fatal boundary — a thrown failure (most commonly a
+    // REVIEWER_TIMEOUT_MS expiry, but any openSession/prompt/dispose fault reads the same way) must
+    // be surfaced (logged, per "surface integration errors loudly") WITHOUT crashing the whole run:
+    // the run's own execution evidence (already computed by this point — Filter C already passed)
+    // must still reach a decision. Mapping to the SAME fail-closed shape the parse-miss branch below
+    // already returns (`parsed:false` -> `approved:false`, no regeneration round burned) reuses an
+    // EXISTING, already-tested posture rather than inventing a new one — run-qa.use-case.ts's review
+    // loop treats `parsed === false` as an immediate, non-actionable rejection (see its own header
+    // comment), which is exactly "reviewer unavailable, fail closed, go to Issue with what we have".
     try {
-      const out = await session.prompt(assembled.text, { sectionSizes: assembled.sectionSizes });
-      output = out.output;
-    } finally {
-      await session.dispose();
+      // W5 fix (seam-parity FIXME, runId/onTurn threading): threads descriptor.runId through to the
+      // real AgentDeps.open(). WS6.2 correction (full-flow remediation): this descriptor alone was
+      // NOT sufficient for SSE registration — the rewritten composition path (rewritten-engine-
+      // factory.ts's runtimeAdapter open() closure) was silently DROPPING opts?.descriptor before
+      // ever reaching AgentDeps.open, and nothing called registerRunSession on that path either
+      // (withSessionRegistration, opencode-client.ts). Both gaps are now closed at the composition
+      // seam (createRewrittenEngineFactory wraps getAgentDeps with withSessionRegistration; the
+      // runtimeAdapter closure now forwards descriptor) — this adapter's own contribution is simply
+      // supplying a correct descriptor.runId, same as GenerateTestsUseCase's reviewer-session
+      // descriptor (generate-tests.use-case.ts). defaultAgentDeps' own agent_turns persistence
+      // (defaultOnTurn) reads the SAME descriptor.runId independently of the SSE registration fix.
+      const session = await runtime.openSession("reviewer", this.ctx.mirrorDir, {
+        descriptor: { runId: enrichment?.runId, role: "qa-reviewer" },
+        ...(this.ctx.timeoutMs !== undefined ? { timeoutMs: this.ctx.timeoutMs } : {}),
+      });
+      let output: string;
+      try {
+        const out = await session.prompt(assembled.text, { sectionSizes: assembled.sectionSizes });
+        output = out.output;
+      } finally {
+        await session.dispose();
+      }
+
+      const judgment = verdicts.parseReview(output);
+
+      // Fail-closed gate, verbatim per ReviewJudgment's own documented contract: a parse miss
+      // (parsed:false) is NOT an actionable rejection but is ALSO never a free pass — approved MUST
+      // read false regardless of what the (unparseable) judgment's own approved field claims.
+      const approved = judgment.parsed === false ? false : judgment.approved;
+
+      return {
+        approved,
+        corrections: judgment.corrections,
+        ...(judgment.rationale !== undefined ? { rationale: judgment.rationale } : {}),
+        ...(judgment.blockingCount !== undefined ? { blockingCount: judgment.blockingCount } : {}),
+        ...(judgment.parsed !== undefined ? { parsed: judgment.parsed } : {}),
+      };
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      console.error(`[qa] reviewer session failed (${reason}) — reviewer unavailable, failing closed without burning a regeneration round.`);
+      return {
+        approved: false,
+        corrections: [],
+        rationale: `reviewer unavailable: ${reason}`,
+        parsed: false,
+      };
     }
-
-    const judgment = verdicts.parseReview(output);
-
-    // Fail-closed gate, verbatim per ReviewJudgment's own documented contract: a parse miss
-    // (parsed:false) is NOT an actionable rejection but is ALSO never a free pass — approved MUST
-    // read false regardless of what the (unparseable) judgment's own approved field claims.
-    const approved = judgment.parsed === false ? false : judgment.approved;
-
-    return {
-      approved,
-      corrections: judgment.corrections,
-      ...(judgment.rationale !== undefined ? { rationale: judgment.rationale } : {}),
-      ...(judgment.blockingCount !== undefined ? { blockingCount: judgment.blockingCount } : {}),
-      ...(judgment.parsed !== undefined ? { parsed: judgment.parsed } : {}),
-    };
   }
 }

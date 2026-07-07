@@ -1660,7 +1660,24 @@ export class RunQaUseCase {
         mainlineOutcome.errorClass != null &&
         mainlineOutcome.errorClass !== ""
       ) {
+        // WS6.3 (full-flow remediation, timeouts & operational observability): reflect() stays
+        // AWAITED inline (determinism — the run's persisted outcome must include the reflection
+        // back-fill before the run closes; a fire-and-forget would race updateRunOutcomeReflection
+        // against run finalization and the next run's retrieval). Measuring and surfacing its OWN
+        // duration (up to 60s per qualifying run on a sequential queue) makes that cost visible
+        // without changing the await. No existing phase-duration mechanism exists in this use-case
+        // (RunOutcome.gateSignals.phaseTimings is declared but never populated, and RunStep has no
+        // "reflect" literal) — this reuses the run-event schema's own documented fallback slot
+        // ("log.line": only what is NOT a domain event) rather than inventing a new RunStep/event
+        // type for one telemetry line.
+        const reflectStartedAt = Date.now();
         await this.deps.reflector.reflect(this.toReflectionInput(mainlineOutcome));
+        const reflectMs = Date.now() - reflectStartedAt;
+        this.deps.observer?.onEvent({
+          type: "log.line",
+          level: "info",
+          text: `[qa] reflect() for run ${mainlineOutcome.runId} took ${reflectMs}ms`,
+        });
       }
     }
 
@@ -2139,7 +2156,18 @@ export class RunQaUseCase {
         terminalOutcome.errorClass !== "E-INFRA" &&
         terminalOutcome.errorClass !== "E-FLAKY"
       ) {
+        // WS6.3 (full-flow remediation, timeouts & operational observability): mirrors the mainline
+        // reflect site's identical duration telemetry (see that site's own header for the full
+        // rationale — determinism keeps this awaited; the log.line event is the existing fallback
+        // channel, not a new RunStep/event type).
+        const reflectStartedAt = Date.now();
         await this.deps.reflector.reflect(this.toReflectionInput(terminalOutcome));
+        const reflectMs = Date.now() - reflectStartedAt;
+        this.deps.observer?.onEvent({
+          type: "log.line",
+          level: "info",
+          text: `[qa] reflect() for run ${terminalOutcome.runId} took ${reflectMs}ms`,
+        });
       }
     }
     this.deps.observer?.onStep("done");

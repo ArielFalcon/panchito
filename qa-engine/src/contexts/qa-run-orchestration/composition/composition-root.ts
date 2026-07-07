@@ -123,6 +123,12 @@ export interface CompositionConfig {
     rendering: Pick<PromptRenderingPort, "renderReviewer">;
     verdicts: Pick<VerdictParserPort, "parseReview">;
   };
+  // WS6.1 (full-flow remediation, timeouts & operational observability): the reviewer's OWN prompt
+  // deadline, threaded verbatim into ReviewPortStaticContext.timeoutMs. Composition-root stays
+  // agnostic to the constant's numeric value — the production factory (rewritten-engine-factory.ts)
+  // supplies REVIEWER_TIMEOUT_MS (src/integrations/opencode-client.ts); a unit test can supply any
+  // value or omit it entirely (unchanged pre-existing behavior — no forced timeout).
+  reviewTimeoutMs?: number;
 
   // ValidationPort collaborator — target-selected dispatch (WS2.2, full-flow remediation), mirroring
   // executionStrategies' own shape immediately below. e2e: the FULL static gate (tsc/eslint-
@@ -417,6 +423,9 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
     target: cfg.target,
     ...(cfg.baseUrl ? { baseUrl: cfg.baseUrl } : {}),
     ...(cfg.guidance ? { guidance: cfg.guidance } : {}),
+    // WS6.1 (full-flow remediation, timeouts & operational observability): threads the reviewer's
+    // OWN prompt deadline (see ReviewPortStaticContext.timeoutMs's own header).
+    ...(cfg.reviewTimeoutMs !== undefined ? { timeoutMs: cfg.reviewTimeoutMs } : {}),
   });
 
   const validation = new ValidationPortAdapter(

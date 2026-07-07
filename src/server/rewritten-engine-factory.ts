@@ -56,6 +56,14 @@ import { readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import type { AppConfig } from "../orchestrator/config-loader";
 import type { AgentDeps } from "../integrations/opencode-client";
+// WS6.1 (full-flow remediation, timeouts & operational observability): the purpose-built reviewer
+// budget (6min, env-tunable via OPENCODE_REVIEWER_TIMEOUT_MS) — threaded into CompositionConfig.
+// reviewTimeoutMs so ReviewPortAdapter.review() no longer silently inherits the dispatcher's
+// ~25.5min worst-case ceiling.
+import { REVIEWER_TIMEOUT_MS } from "../integrations/opencode-client";
+// WS6.2 (full-flow remediation, timeouts & operational observability): see
+// createRewrittenEngineFactory's own header comment for why these three wrappers are composed here.
+import { withUsageSink, withStallWatchdog, withSessionRegistration } from "../integrations/opencode-client";
 import type { RunPipelinePort, ObserverPort } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 import { buildProduction, type CompositionConfig } from "@contexts/qa-run-orchestration/composition/composition-root";
 import { Sha } from "@kernel/sha";
@@ -453,6 +461,15 @@ export function buildRewrittenCompositionConfig(
   // second AgentRuntimeManager. onUsage/onTurn are deliberately not forwarded, matching the operator
   // template exactly (AgentRuntimeAdapter's LegacyAgentDeps types them against the kernel
   // UsageSnapshot/AgentTurnEvent shapes, a genuinely different shape from src/qa/usage.ts's).
+  //
+  // WS6.2 (full-flow remediation, timeouts & operational observability): `descriptor` was
+  // previously DROPPED here — AgentRuntimeAdapter.openSession (qa-engine's generation/infrastructure/
+  // agent-runtime.adapter.ts) already forwards opts?.descriptor into this closure's `opts`, but this
+  // closure never forwarded it onward to `real.open(...)`, so descriptor.runId never reached
+  // withSessionRegistration (or defaultAgentDeps' own agent_turns persistence sink) on the rewritten
+  // production path — a session opened by ReviewPortAdapter/GenerationPortAdapter with a real runId
+  // silently lost that identity right here. Forwarding it mirrors the signal/timeoutMs/model
+  // precedent immediately above (conditional spread — absent stays absent, never fabricated).
   const runtimeAdapter = new AgentRuntimeAdapter(
     {
       open: async (agent, cwd, opts) => {
@@ -461,6 +478,7 @@ export function buildRewrittenCompositionConfig(
           ...(opts?.signal ? { signal: opts.signal } : {}),
           ...(opts?.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
           ...(opts?.model ? { model: opts.model } : {}),
+          ...(opts?.descriptor ? { descriptor: opts.descriptor } : {}),
         });
       },
     },
@@ -605,6 +623,9 @@ export function buildRewrittenCompositionConfig(
       rendering,
       verdicts,
     },
+    // WS6.1 (full-flow remediation, timeouts & operational observability): see the import's own
+    // header comment above.
+    reviewTimeoutMs: REVIEWER_TIMEOUT_MS,
     validationStrategies: { e2e: staticGate, code: codeValidate },
     executionStrategies: { e2e, code },
     // SetupPort (CLAUDE.md run-flow step 3): bootstraps the config/e2e seed into e2e/ (first run) +
@@ -885,12 +906,29 @@ export function buildRewrittenCompositionConfig(
 // buildRewrittenCompositionConfig — unlike previousNamespace, it now ALSO shapes composition itself
 // (vcs/checkout/the deploy gate route to the declared service, not just the primary), not merely a
 // RunInput-only seam. See buildRewrittenCompositionConfig's own header for the full contract.
+//
+// WS6.2 (full-flow remediation, timeouts & operational observability): withUsageSink/
+// withStallWatchdog/withSessionRegistration existed and were fully tested, but nothing on the
+// rewritten production path ever composed them onto the AgentDeps this factory consumes — the
+// factory received deps.getAgentDeps() RAW (src/index.ts's currentAgentDeps / src/cli.ts's
+// equivalent), so a hung session never tripped the 180s stall watchdog, usage snapshots never
+// reached a sink, and sessions never registered for SSE (see withSessionRegistration's own header).
+// Wrapping HERE — the single seam BOTH src/index.ts (webhook path) and src/cli.ts (manual/CLI path)
+// already funnel through via createRewrittenEngineFactory — restores all three without duplicating
+// the wrap at each entrypoint. The wrap itself stays LAZY (deps.getAgentDeps is called, not
+// deps.getAgentDeps() eagerly captured) so factory construction still never touches a real agent
+// session, matching the existing "construction must never call .open()" contract this file's own
+// tests already pin.
 export function createRewrittenEngineFactory(
   deps: RewrittenEngineFactoryDeps,
 ): (appConfig: AppConfig, namespace: string, run: { mode: RunMode; guidance?: string; triggerRepo?: string }, observer?: ObserverPort, previousNamespace?: string) => RunPipelinePort {
   const env = deps.env ?? process.env;
+  const wrappedDeps: RewrittenEngineFactoryDeps = {
+    ...deps,
+    getAgentDeps: () => withUsageSink(withStallWatchdog(withSessionRegistration(deps.getAgentDeps()))),
+  };
   return (appConfig: AppConfig, namespace: string, run: { mode: RunMode; guidance?: string; triggerRepo?: string }, observer?: ObserverPort): RunPipelinePort => {
-    const cfg = buildRewrittenCompositionConfig(appConfig, deps, namespace, run, observer);
+    const cfg = buildRewrittenCompositionConfig(appConfig, wrappedDeps, namespace, run, observer);
     return buildProduction(env, cfg);
   };
 }
