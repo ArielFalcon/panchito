@@ -405,7 +405,9 @@ async function shutdown() {
 // ──────────────────────────────────────────────────────────────────────────────────────
 // ensureCodexConfig — supervisor writes $CODEX_HOME/config.toml at boot (T-P0-2 / C0.1)
 // ──────────────────────────────────────────────────────────────────────────────────────
-// Generates a Codex config.toml with [mcp_servers.*] blocks matching opencode.json:97-121.
+// Generates a Codex config.toml with [mcp_servers.*] blocks matching the top-level "mcp"
+// server registry in opencode.json (referenced by key, not line — the file's agent section
+// grew substantially in WS8 and line pointers went stale).
 // Translation rules (design D2):
 //   - opencode `command` array → TOML `command` = head, `args` = tail
 //   - opencode `environment` object → TOML `env` table, with `{env:X}` placeholders
@@ -435,7 +437,7 @@ export function ensureCodexConfig(codexHome, env = process.env) {
     return env[match[1]] ?? "";
   }
 
-  // MCP server definitions (mirroring opencode.json:97-121).
+  // MCP server definitions (mirroring the top-level "mcp" server registry in opencode.json).
   // Each entry: { command: string[], environment?: Record<string,string> }
   const MCP_SERVERS = [
     {
