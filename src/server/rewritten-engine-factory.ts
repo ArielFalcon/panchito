@@ -117,8 +117,9 @@ import {
   specFileForFlow,
 } from "../integrations/prompts";
 import { parseVerdict } from "../integrations/verdict-parse";
-import { parseReviewerVerdict } from "../integrations/verdict-validate";
+import { parseReviewerVerdict, checkGeneratorVerdict, repairInstruction } from "../integrations/verdict-validate";
 import { roleWindowBytes } from "../integrations/model-window-catalog";
+import type { RepairPort } from "@contexts/generation/application/generate-tests.use-case.ts";
 import { validateSpecs, defaultValidateDeps } from "../qa/validate";
 import { validateCodeProject, defaultCodeValidateDeps } from "../qa/code-validate";
 import { runE2E, defaultExecuteDeps, defaultCleanupDeps } from "../qa/execute";
@@ -487,12 +488,26 @@ export function buildRewrittenCompositionConfig(
   const rendering = new PromptRenderingAdapter({ buildPromptAssembled, buildWorkerPromptAssembled, buildReviewerPromptAssembled, buildExplorerPrompt, specFileForFlow });
   const verdicts = new VerdictParserAdapter({ parseVerdict, parseReviewerVerdict });
 
+  // Follow-up #27 (WS9 review): the bounded contract-repair was DORMANT on this production path —
+  // GenerationPorts.repair is optional and nothing here constructed a concrete RepairPort, so a
+  // malformed generator/reviewer verdict got NO bounded re-prompt and the fail-closed gate fired
+  // immediately. Wraps the SAME legacy checkGeneratorVerdict/repairInstruction (src/integrations/
+  // verdict-validate.ts) the legacy opencode-client.ts bounded-repair loop already uses, so both
+  // engines repair identically. `instruction`'s opts.priorResponseTail is forwarded verbatim —
+  // repairInstruction already accepts it (WS9, tail frame-hardening) and the use-case now threads
+  // the agent's own prior-turn output (generatorOutput/reviewText) into it at both call sites.
+  const repair: RepairPort = {
+    checkGenerator: (text) => checkGeneratorVerdict(text),
+    instruction: (kind, issues, opts) => repairInstruction(kind, issues, opts),
+  };
+
   const generationUseCase = new GenerateTestsUseCase({
     runtime: runtimeAdapter,
     rendering,
     verdicts,
     manifest: new ManifestRepositoryAdapter({ readManifest, reconcileManifest }),
     budget: new PromptBudgetAdapter(roleWindowBytes, capDiff, capText),
+    repair,
   });
 
   const staticGate = new StaticGateAdapter({

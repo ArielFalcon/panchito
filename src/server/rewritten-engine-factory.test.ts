@@ -62,6 +62,84 @@ test("buildRewrittenCompositionConfig maps an e2e AppConfig into a complete Comp
   assert.equal(typeof config.checkout, "function");
 });
 
+// ── follow-up #27: bounded contract-repair (RepairPort) wired into the rewritten production path ──
+// Before this fix, GenerateTestsUseCase.GenerationPorts.repair was constructed nowhere in this
+// factory — the generator/reviewer contract-repair branches (generate-tests.use-case.ts's own
+// `if (repair)` guards) were dormant in production: a malformed verdict got NO bounded re-prompt and
+// the fail-closed gate fired immediately. This test asserts the composed use-case's `repair` port is
+// non-undefined (structural — proves the factory wires it), and a companion integration test below
+// drives a malformed generator verdict through the REAL wrapped checkGeneratorVerdict/repairInstruction
+// to prove the branch actually activates.
+test("buildRewrittenCompositionConfig wires a non-undefined RepairPort into GenerateTestsUseCase (the bounded contract-repair was dormant on the production path before this fix)", () => {
+  const app = cfg("factory-repair");
+  const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });
+  // GenerationPorts.repair is a private constructor field on GenerateTestsUseCase — reach into it
+  // structurally (same class, no public accessor exists) to confirm the factory actually supplied it.
+  const ports = (config.generationUseCase as unknown as { ports: { repair?: unknown } }).ports;
+  assert.ok(ports.repair, "GenerationPorts.repair must be wired (was dormant/undefined before this fix)");
+});
+
+test("the composed RepairPort drives GenerateTestsUseCase's generator-contract-check branch end-to-end: a malformed verdict text triggers exactly one repair via the real wrapped checkGeneratorVerdict", async () => {
+  const app = cfg("factory-repair-e2e");
+
+  let promptCount = 0;
+  const capturedRepairPrompts: string[] = [];
+  // Stub AgentDeps.open so the composed real runtime adapter drives the use-case without a live
+  // OpenCode/Codex process — mirrors this factory's own construction contract (AgentRuntimeAdapter's
+  // `open` closure calls deps.getAgentDeps().open(...) lazily, only when generate() actually runs).
+  const fakeAgentDeps: AgentDeps = {
+    open: async () => ({
+      id: "fake-session",
+      prompt: async (text: string) => {
+        promptCount++;
+        if (promptCount === 1) {
+          // Malformed generator output: no closing verdict JSON with a `specs` array at all —
+          // checkGeneratorVerdict (src/integrations/verdict-validate.ts) must reject this.
+          return "I wrote the tests but forgot to emit the closing JSON verdict.";
+        }
+        // The bounded repair turn: capture what the repair instruction actually said, then emit a
+        // valid verdict so the use-case can complete.
+        capturedRepairPrompts.push(text);
+        return '{"specs":["flows/repaired.spec.ts"]}';
+      },
+      dispose: async () => {},
+    }),
+  };
+  const repairApp = buildRewrittenCompositionConfig(
+    app,
+    { getAgentDeps: () => fakeAgentDeps },
+    "qa-bot-abc1234-run1",
+    { mode: "diff" },
+  );
+
+  const result = await repairApp.generationUseCase.generate({
+    repo: app.repo,
+    sha: "shaRepair1",
+    diff: "d",
+    mirrorDir: "/m",
+    e2eRelDir: "e2e",
+    namespace: "ns",
+    needsReview: false,
+    target: "e2e",
+    mode: "diff",
+    appName: app.name,
+  });
+
+  assert.equal(promptCount, 2, "exactly one initial prompt + one bounded repair re-prompt");
+  assert.equal(capturedRepairPrompts.length, 1, "the repair instruction fired exactly once");
+  assert.match(
+    capturedRepairPrompts[0] ?? "",
+    /no closing verdict JSON found/,
+    "the repair instruction names the real checkGeneratorVerdict issue text",
+  );
+  assert.match(
+    capturedRepairPrompts[0] ?? "",
+    /I wrote the tests but forgot to emit the closing JSON verdict\./,
+    "the repair instruction embeds the agent's own prior-turn output (priorResponseTail)",
+  );
+  assert.deepEqual(result.specs, ["flows/repaired.spec.ts"], "repaired specs reached the final result");
+});
+
 // ── Gap fixes (engram #961) — baseUrl, testIdAttribute, mode/guidance, publish flags ──────────────
 
 test("buildRewrittenCompositionConfig sets baseUrl from app.dev.baseUrl (the live E2eExecutionStrategy crash fix)", () => {

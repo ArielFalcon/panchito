@@ -583,6 +583,160 @@ test("a spec present in specs[] but ABSENT from specMetas[] gets NO manifest ent
   assert.equal(reconcileArgs?.[0]?.flow, "checkout");
 });
 
+// ── follow-up #27: RepairPort.instruction carries priorResponseTail ───────────────────────────
+// Widens the bounded repair loop (B.3.2/B.3.3 above) to thread the agent's own prior-turn output
+// through RepairPort.instruction's opts, so a STATELESS repair re-prompt (e.g. a fresh `codex exec`
+// process with no session resume) can genuinely recover its prior specifics instead of fabricating a
+// new verdict. Pinned via a fake RepairPort that captures the opts it receives at each call site.
+test("follow-up #27: a malformed generator verdict triggers ONE bounded repair whose instruction carries priorResponseTail (the agent's own prior output)", async () => {
+  const capturedOpts: Array<{ kind: string; issues: string[]; opts?: { priorResponseTail?: string } }> = [];
+  let sessionPromptCount = 0;
+
+  const ports: GenerationPorts = {
+    runtime: {
+      openSession: async () => ({
+        prompt: async () => {
+          sessionPromptCount++;
+          if (sessionPromptCount === 1) {
+            // First call: malformed generator output (no specs field) — the prior turn's text.
+            return { output: '{"note":"oops — forgot specs"}' };
+          }
+          return { output: '{"specs":["flows/repair.spec.ts"]}' };
+        },
+        dispose: () => {},
+      }),
+    },
+    rendering: {
+      render: () => "",
+      renderMain: () => ({ text: "MAIN_PROMPT", sectionSizes: {} }),
+      renderWorker: () => ({ text: "", sectionSizes: {} }),
+      renderReviewer: () => ({ text: "", sectionSizes: {} }),
+      renderExplorer: () => "",
+      specFileForFlow: (flow) => `flows/${flow}.spec.ts`,
+    },
+    verdicts: {
+      parseGenerator: (text) => {
+        if (text.includes('"specs"')) return { specs: ["flows/repair.spec.ts"], parsed: true };
+        return { specs: [], parsed: true };
+      },
+      parseReview: () => ({ approved: true, corrections: [], valid: true, issues: [] }),
+    },
+    manifest: {
+      read: async () => [],
+      reconcile: async (_d, e) => [...e] as ManifestEntry[],
+    },
+    budget: {
+      capDiff: (d) => d,
+      capText: (t) => t,
+      budgetForRole: () => 0,
+    },
+    repair: {
+      checkGenerator: (text) => {
+        if (text.includes('"specs"')) return { valid: true, issues: [] };
+        return { valid: false, issues: ["no closing verdict JSON found"] };
+      },
+      instruction: (kind, issues, opts) => {
+        capturedOpts.push({ kind, issues, opts });
+        return `REPAIR ${kind}: ${issues.join(";")}`;
+      },
+    },
+  };
+
+  const useCase = new GenerateTestsUseCase(ports);
+  await useCase.generate({
+    repo: "r",
+    sha: "s",
+    diff: "d",
+    mirrorDir: "/m",
+    e2eRelDir: "e2e",
+    namespace: "ns",
+    needsReview: false,
+    target: "e2e",
+    mode: "diff",
+    appName: "a",
+  });
+
+  assert.equal(sessionPromptCount, 2, "exactly two prompt calls: initial + one bounded repair");
+  assert.equal(capturedOpts.length, 1, "instruction() called exactly once (bounded repair)");
+  assert.equal(capturedOpts[0]?.kind, "generator");
+  assert.equal(
+    capturedOpts[0]?.opts?.priorResponseTail,
+    '{"note":"oops — forgot specs"}',
+    "priorResponseTail carries the generator's own prior (malformed) turn output",
+  );
+});
+
+test("follow-up #27: a malformed reviewer verdict triggers ONE bounded repair whose instruction carries priorResponseTail", async () => {
+  const capturedOpts: Array<{ kind: string; issues: string[]; opts?: { priorResponseTail?: string } }> = [];
+  let reviewCallCount = 0;
+
+  const ports: GenerationPorts = {
+    runtime: {
+      openSession: async () => ({
+        prompt: async () => ({ output: "SESSION_OUTPUT_WITH_BAD_APPROVED_FIELD" }),
+        dispose: () => {},
+      }),
+    },
+    rendering: {
+      render: () => "",
+      renderMain: () => ({ text: "GEN_PROMPT", sectionSizes: {} }),
+      renderWorker: () => ({ text: "", sectionSizes: {} }),
+      renderReviewer: () => ({ text: "REV_PROMPT", sectionSizes: {} }),
+      renderExplorer: () => "",
+      specFileForFlow: (flow) => `flows/${flow}.spec.ts`,
+    },
+    verdicts: {
+      parseGenerator: () => ({ specs: ["flows/a.spec.ts"], parsed: true }),
+      parseReview: () => {
+        reviewCallCount++;
+        if (reviewCallCount === 1) {
+          return { approved: false, corrections: [], valid: false, issues: ["approved: expected boolean"], parsed: true };
+        }
+        return { approved: true, corrections: [], valid: true, issues: [], parsed: true };
+      },
+    },
+    manifest: {
+      read: async () => [],
+      reconcile: async (_d, e) => [...e] as ManifestEntry[],
+    },
+    budget: {
+      capDiff: (d) => d,
+      capText: (t) => t,
+      budgetForRole: () => 0,
+    },
+    repair: {
+      checkGenerator: () => ({ valid: true, issues: [] }),
+      instruction: (kind, issues, opts) => {
+        capturedOpts.push({ kind, issues, opts });
+        return `REPAIR ${kind}: ${issues.join(";")}`;
+      },
+    },
+  };
+
+  const useCase = new GenerateTestsUseCase(ports);
+  await useCase.generate({
+    repo: "r",
+    sha: "s",
+    diff: "d",
+    mirrorDir: "/m",
+    e2eRelDir: "e2e",
+    namespace: "ns",
+    needsReview: true,
+    target: "e2e",
+    mode: "diff",
+    appName: "a",
+  });
+
+  assert.equal(capturedOpts.length, 1, "instruction() called exactly once (bounded reviewer repair)");
+  assert.equal(capturedOpts[0]?.kind, "reviewer");
+  assert.equal(
+    capturedOpts[0]?.opts?.priorResponseTail,
+    "SESSION_OUTPUT_WITH_BAD_APPROVED_FIELD",
+    "priorResponseTail carries the reviewer's own prior (malformed) turn output",
+  );
+  assert.equal(reviewCallCount, 2, "parseReview called twice: initial + after repair");
+});
+
 // ── manifest schema conformance: assembled entries satisfy the real static-gate schema ─────────
 // Cross-checks the assembled entry shape against the ACTUAL ManifestEntrySchema the orchestrator's
 // static gate validates (src/orchestrator/schemas.ts) — replicated here (qa-engine does not import

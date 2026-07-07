@@ -23,9 +23,17 @@ import type { OpencodeRunInput } from "./ports/generation-ports.ts";
 
 // Injected repair utilities (wrapping repairInstruction + checkGeneratorVerdict from src/).
 // Optional: when absent the use-case skips the generator contract check (useful for minimal stubs).
+//
+// `instruction`'s `opts.priorResponseTail` (follow-up #27, wiring the bounded contract-repair onto
+// the rewritten production path): the agent's own prior output for this turn, threaded through so a
+// STATELESS repair re-prompt (e.g. a fresh `codex exec` process with no session resume) can genuinely
+// recover the specifics of what it already decided instead of fabricating a new verdict from scratch.
+// OpenCode's server-side session already remembers the prior turn, so passing this there is additive
+// (a harmless restatement of context the session already holds), never harmful — mirrors
+// src/integrations/verdict-validate.ts's own RepairInstructionOpts (WS9) that this port wraps.
 export interface RepairPort {
   checkGenerator(text: string): { valid: boolean; issues: string[] };
-  instruction(kind: "generator" | "reviewer", issues: string[]): string;
+  instruction(kind: "generator" | "reviewer", issues: string[], opts?: { priorResponseTail?: string }): string;
 }
 
 // All ports the use-case depends on.
@@ -116,8 +124,11 @@ export class GenerateTestsUseCase {
         const genCheck = repair.checkGenerator(generatorOutput);
         if (!genCheck.valid) {
           opts?.onRepair?.();
+          // priorResponseTail: generatorOutput is the agent's own prior turn (set from result.output
+          // just above) — threading it lets a stateless repair re-prompt (a fresh runtime process
+          // with no session memory) recover its prior specifics instead of fabricating a new verdict.
           const repairResult = await session.prompt(
-            repair.instruction("generator", genCheck.issues),
+            repair.instruction("generator", genCheck.issues, { priorResponseTail: generatorOutput }),
             { isRepair: true },
           );
           generatorOutput = repairResult.output;
@@ -219,8 +230,10 @@ export class GenerateTestsUseCase {
       let v = verdicts.parseReview(reviewText);
       if (!v.valid && repair) {
         opts?.onRepair?.();
+        // priorResponseTail: reviewText is the reviewer's own prior turn (set from reviewOut.output
+        // just above) — same rationale as the generator repair site above.
         const repaired = await reviewerSession.prompt(
-          repair.instruction("reviewer", v.issues),
+          repair.instruction("reviewer", v.issues, { priorResponseTail: reviewText }),
           { isRepair: true },
         );
         reviewText = repaired.output;
