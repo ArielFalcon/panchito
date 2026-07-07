@@ -5,9 +5,24 @@
 // Interfaces only — no GitWriteAdapter.
 
 // [SWAP — orchestrator-only; the security seam]. Only this context's adapters implement it.
+//
+// PROD-BLOCKER fix: widened with the remaining legacy git-mechanics primitives (src/integrations/
+// publish.ts's publishChanges — checkout -B, status-check/skip-if-no-changes, local-exclude write)
+// so this port is the COMPLETE git side of publish. Previously only commit/push existed and this
+// port's sole implementation (VcsWriteAdapter) was never instantiated anywhere outside its own
+// test — the rewritten publish path called straight into GitHubPrAdapter.openWithAutoMerge() with
+// no branch ever created/pushed. checkoutBranch/hasChanges/writeExcludes close that gap.
 export interface VcsWritePort {
   commit(dir: string, message: string, files: readonly string[]): Promise<void>;
   push(dir: string, branch: string): Promise<void>;
+  // git checkout -B <branch> — (re)creates the publish branch at the mirror's current HEAD.
+  checkoutBranch(dir: string, branch: string): Promise<void>;
+  // `git status --porcelain -- <pathspecs>` non-empty -> true. Scoped to the exact pathspecs (never
+  // the whole repo) so an unrelated dirty file elsewhere in the mirror never triggers a publish.
+  hasChanges(dir: string, pathspecs: readonly string[]): Promise<boolean>;
+  // Writes gitignore-style patterns to .git/info/exclude (LOCAL, never committed) so `git add` on a
+  // directory pathspec silently skips installed deps/artifacts instead of failing on an ignored path.
+  writeExcludes(dir: string, patterns: readonly string[]): Promise<void>;
 }
 export interface PullRequest { url: string; number: number; }
 export interface Issue { url: string; number: number; }

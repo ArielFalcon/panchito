@@ -1677,6 +1677,13 @@ export class RunQaUseCase {
         // a run whose review loop never engaged, matching finalReviewerRationale's own "never
         // fabricated, marker-scoped" contract (captured above, at the review call site).
         ...(finalReviewerRationale ? { reviewerNote: finalReviewerRationale } : {}),
+        // PROD-BLOCKER fix: thread the REAL per-run mirrorDir (WorkspacePort.prepare()'s own return
+        // value, captured in `workspace` at the top of this method) + this run's sha — the ONLY call
+        // site that can ever route to "pr" (terminalResult()'s own publish() call serves invalid/
+        // infra-error verdicts, which PublishDecisionService never routes to "pr" — see that
+        // service's own decide() switch), so this is the ONLY place these values are needed.
+        mirrorDir: workspace.mirrorDir,
+        sha: input.sha.toString(),
       });
       publishOutcome = published.outcome;
     }

@@ -80,6 +80,10 @@ function fakeConfig(overrides: Partial<CompositionConfig> = {}): CompositionConf
     versionPoll: async () => ({ serving: true }),
     githubPr: { openWithAutoMerge: async () => ({ url: "https://github.com/org/app/pull/1", number: 1 }) },
     githubIssue: { open: async () => ({ url: "https://github.com/org/app/issues/1", number: 1 }) },
+    // PROD-BLOCKER fix: vcsWrite is now REQUIRED for any run this suite drives to the "pr" outcome
+    // (PublicationPortAdapter's own fail-closed guard throws otherwise — see that file's own header).
+    // Wired here once, same "one base object feeds every call site" convention as sanitize below.
+    vcsWrite: { publish: async () => ({ changed: true }) },
     historyFilePath: "/tmp/qa-run-history.jsonl",
     // WS5.4b (full-flow remediation): PublicationPortAdapter's sanitize collaborator is now REQUIRED
     // (constructor throws if absent — fail-closed publication default). This fake config's ONE base

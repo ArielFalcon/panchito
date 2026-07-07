@@ -78,7 +78,7 @@ function stubPorts(overrides: Partial<{
     retrieve: overrides.retrieve ?? (async () => []),
   };
   const workspace: WorkspacePort = {
-    prepare: overrides.prepare ?? (async () => ({ specDir: "/tmp/qa-golden/e2e" })),
+    prepare: overrides.prepare ?? (async () => ({ specDir: "/tmp/qa-golden/e2e", mirrorDir: "/tmp/qa-golden" })),
   };
   const deployGate: DeployGatePort = {
     waitUntilServing: overrides.waitUntilServing ?? (async () => ok(true)),

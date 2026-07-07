@@ -53,8 +53,14 @@ export class WorkspacePortAdapter implements WorkspacePort {
     private readonly ctx: WorkspacePortStaticContext,
   ) {}
 
-  async prepare(sha: Sha): Promise<{ specDir: string }> {
+  async prepare(sha: Sha): Promise<{ specDir: string; mirrorDir: string }> {
     const mirrorDir = await this.checkout(sha);
-    return { specDir: this.ctx.specRelDir ? `${mirrorDir}/${this.ctx.specRelDir}` : mirrorDir };
+    // PROD-BLOCKER fix: mirrorDir is now ALSO returned (bare, pre-specRelDir-join) — the publish "pr"
+    // route stages/commits/pushes from the mirror ROOT (e2e's own pathspec ["e2e"] and code's ["."]
+    // are both already relative to mirrorDir, never specDir), so it needs this value directly rather
+    // than trying to derive it back out of specDir (which would be lossy for the code target, where
+    // specDir === mirrorDir, and error-prone for e2e, where undoing the join means stripping a
+    // caller-supplied suffix string back off).
+    return { specDir: this.ctx.specRelDir ? `${mirrorDir}/${this.ctx.specRelDir}` : mirrorDir, mirrorDir };
   }
 }

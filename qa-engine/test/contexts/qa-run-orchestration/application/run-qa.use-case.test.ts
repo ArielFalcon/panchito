@@ -101,7 +101,7 @@ function stubPorts(overrides: Partial<{
     retrieve: overrides.retrieve ?? (async () => []),
   };
   const workspace: WorkspacePort = {
-    prepare: overrides.prepare ?? (async () => ({ specDir: "/tmp/qa-golden/e2e" })),
+    prepare: overrides.prepare ?? (async () => ({ specDir: "/tmp/qa-golden/e2e", mirrorDir: "/tmp/qa-golden" })),
   };
   const deployGate: DeployGatePort = {
     waitUntilServing: overrides.waitUntilServing ?? (async () => ok(true)),
@@ -2384,6 +2384,45 @@ test("FIX 5: publish() is called with the coverageBlocks field threaded (not dro
   assert.equal(out.decision.sideEffect, "pr", "signal mode must still publish even with a failing coverage signal");
   assert.ok(publishedDecision, "publication.publish() must have been called");
   assert.equal(publishedDecision!.coverageBlocks, false, "publish() must receive a threaded coverageBlocks field (undefined here would mean the call site dropped it)");
+});
+
+// PROD-BLOCKER fix: the publish "pr" route needs the REAL per-run mirrorDir (WorkspacePort.prepare()'s
+// own return value) + sha to stage/commit/push the agent's generated tests before the PR is opened
+// (publication-port.adapter.ts's own vcsWrite collaborator). Previously WorkspacePort.prepare() only
+// returned specDir, so there was NO source for mirrorDir anywhere in this use-case — this pins that
+// the mainline publish() call site (the only one that can ever route to "pr") threads both fields.
+
+test("PROD-BLOCKER: publish() is called with mirrorDir threaded from WorkspacePort.prepare()'s own return value on the 'pr' side effect", async () => {
+  let publishedDecision: { verdict: string; mirrorDir?: string; sha?: string } | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass", cases: [], logs: "" }),
+    review: async () => ({ approved: true, corrections: [], blockingCount: 0, parsed: true }),
+    prepare: async () => ({ specDir: "/mirrors/org/app/e2e", mirrorDir: "/mirrors/org/app" }),
+  });
+  ports.publication.publish = async (decision) => { publishedDecision = decision; return { outcome: "pr" }; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "prod-blocker-mirrordir-threaded" });
+
+  assert.equal(out.decision.sideEffect, "pr");
+  assert.ok(publishedDecision, "publication.publish() must have been called for the 'pr' side effect");
+  assert.equal(publishedDecision!.mirrorDir, "/mirrors/org/app", "publish() must receive the REAL per-run mirrorDir from WorkspacePort.prepare(), not a dropped/undefined value");
+});
+
+test("PROD-BLOCKER: publish() is called with sha threaded from input.sha on the 'pr' side effect", async () => {
+  let publishedDecision: { verdict: string; mirrorDir?: string; sha?: string } | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass", cases: [], logs: "" }),
+    review: async () => ({ approved: true, corrections: [], blockingCount: 0, parsed: true }),
+  });
+  ports.publication.publish = async (decision) => { publishedDecision = decision; return { outcome: "pr" }; };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, sha: Sha.of("def5678"), runId: "prod-blocker-sha-threaded" });
+
+  assert.equal(out.decision.sideEffect, "pr");
+  assert.ok(publishedDecision, "publication.publish() must have been called for the 'pr' side effect");
+  assert.equal(publishedDecision!.sha, "def5678", "publish() must receive this run's REAL sha, not a dropped/undefined value");
 });
 
 test("FIX 1 (D.7 batch 2): reviewerApproved on a genuine pass+review call still reflects the INDEPENDENT reviewer's verdict, not generation's", async () => {

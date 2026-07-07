@@ -38,7 +38,7 @@ import { ReviewPortAdapter, type ReviewPortRuntime } from "../infrastructure/bri
 import { ValidationPortAdapter } from "../infrastructure/bridges/validation-port.adapter.ts";
 import { ExecutionPortAdapter } from "../infrastructure/bridges/execution-port.adapter.ts";
 import { ObjectiveSignalPortAdapter } from "../infrastructure/bridges/objective-signal-port.adapter.ts";
-import { PublicationPortAdapter, type GitHubPrCollaborator, type GitHubIssueCollaborator } from "../infrastructure/bridges/publication-port.adapter.ts";
+import { PublicationPortAdapter, type GitHubPrCollaborator, type GitHubIssueCollaborator, type VcsPublishCollaborator } from "../infrastructure/bridges/publication-port.adapter.ts";
 import { LearningPortAdapter } from "../infrastructure/bridges/learning-port.adapter.ts";
 import { WorkspacePortAdapter, type CheckoutFn } from "../infrastructure/bridges/workspace-port.adapter.ts";
 import { DeployGatePortAdapter, NullDeployGateAdapter, type VersionPollFn } from "../infrastructure/bridges/deploy-gate-port.adapter.ts";
@@ -273,6 +273,13 @@ export interface CompositionConfig {
   // the shadow-log path, per the security-boundary note in publication-port.adapter.ts).
   githubPr: GitHubPrCollaborator;
   githubIssue: GitHubIssueCollaborator;
+  // PROD-BLOCKER fix: OPTIONAL here for the SAME reason it is optional on PublicationPortCollaborators
+  // (publication-port.adapter.ts's own doc) — only the "pr" route needs it, so a shadow-only or
+  // issue-only composition/test is not forced to wire a collaborator it never invokes. The REAL
+  // production composition (src/server/rewritten-engine-factory.ts) always supplies it; an absent
+  // vcsWrite reaching an ACTUAL "pr" route is a composition defect that throws loudly at publish()
+  // time (PublicationPortAdapter's own fail-closed guard), never a silent PR against an unpushed branch.
+  vcsWrite?: VcsPublishCollaborator;
   reviewerApprovedForPublish?: boolean;
   coverageBlocksForPublish?: boolean;
   e2eChangedForPublish?: boolean;
@@ -616,6 +623,12 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
       issue: cfg.githubIssue,
       shadowLog: new ShadowLogAdapter(),
       sanitize: cfg.sanitize,
+      // PROD-BLOCKER fix: threads the composition's real git-write collaborator (constructed in
+      // rewritten-engine-factory.ts from VcsWriteAdapter + the CODE_ADD/E2E_ADD pathspec dispatch) —
+      // conditionally spread so a composition that never wires one (buildShadow's own override below
+      // ALSO never needs it — shadow mode's "pr"-shaped decisions log through shadowLog, never reach
+      // this adapter's "pr" case at all) does not carry an explicit `vcsWrite: undefined` key.
+      ...(cfg.vcsWrite ? { vcsWrite: cfg.vcsWrite } : {}),
     },
     {
       repo: cfg.repo,

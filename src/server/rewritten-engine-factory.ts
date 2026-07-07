@@ -53,7 +53,7 @@
 //      straight into prompt assembly).
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import type { AppConfig } from "../orchestrator/config-loader";
 import type { AgentDeps } from "../integrations/opencode-client";
 // WS6.1 (full-flow remediation, timeouts & operational observability): the purpose-built reviewer
@@ -87,6 +87,8 @@ import { StrykerMutationOracleAdapter } from "@contexts/objective-signal/infrast
 import { FaultInjectionOracleAdapter } from "@contexts/objective-signal/infrastructure/fault-injection-oracle.adapter";
 import { GitHubPrAdapter } from "@contexts/workspace-and-publication/infrastructure/github-pr.adapter";
 import { GitHubIssueAdapter } from "@contexts/workspace-and-publication/infrastructure/github-issue.adapter";
+import { VcsWriteAdapter } from "@contexts/workspace-and-publication/infrastructure/vcs-write.adapter";
+import type { VcsPublishCollaborator } from "@contexts/qa-run-orchestration/infrastructure/bridges/publication-port.adapter";
 import { makeTargetCoverageCollector } from "@contexts/objective-signal/infrastructure/target-coverage-collector";
 import { assembleChangeCoverage } from "@contexts/objective-signal/domain/assemble-change-coverage";
 
@@ -131,7 +133,7 @@ import { sanitizeText } from "../orchestrator/sanitizer";
 import { runMutationOracle, realMutationDeps } from "../qa/learning/mutation-code";
 import { runFaultInjectionOracle, defaultFaultInjectionDeps } from "../qa/learning/fault-injection-e2e";
 import { shaMatches } from "../env/deploy-gate";
-import { ensureMirror, ensureMirrorAtBranch, defaultMirrorDeps, workdirRoot } from "../integrations/repo-mirror";
+import { ensureMirror, ensureMirrorAtBranch, defaultMirrorDeps, workdirRoot, realGit, authHeaderArgs } from "../integrations/repo-mirror";
 import { SqliteRunHistoryAdapter } from "./run-history-sqlite-adapter";
 import { SqliteLearningRepository, type LearningStore } from "@contexts/cross-run-learning/infrastructure/sqlite-learning-repository.adapter";
 import { listLearningRules, listAllLearningRules, upsertLearningRule, incrementRuleUsage, recordRuleOutcome, updateRunOutcomeReflection } from "./history";
@@ -157,6 +159,121 @@ export function roleToAgentName(role: AgentRole): string {
     proposer: "qa-proposer",
   };
   return map[role];
+}
+
+// PROD-BLOCKER fix: the git-write side of publish() — stage/commit/push the agent's generated tests
+// BEFORE PublicationPortAdapter's "pr" route opens the PR (see that file's own header for the full
+// bug description: GitHubPrAdapter.openWithAutoMerge() was previously called against a branch that
+// was NEVER created/committed/pushed, because VcsWriteAdapter — the only VcsWritePort implementation
+// — was never instantiated anywhere in composition-root.ts).
+//
+// Ports (not imports) the exact legacy sequence from src/integrations/publish.ts's publishChanges:
+// writeExcludes -> status-check/skip-if-no-changes -> checkout -B -> add -> commit -> push. Deliberately
+// does NOT call createPullRequest/enableAutoMerge/mergePullRequest itself — publication-port.adapter.ts's
+// "pr" case already owns PR creation via the SEPARATE githubPr collaborator (GitHubPrAdapter, wired
+// below); duplicating PR creation here would open two PRs. This keeps GitHubPrAdapter as the SINGLE
+// place owning PR-creation/merge-fallback, and this collaborator as the SINGLE place owning git
+// mechanics — no behavior is duplicated between the two.
+//
+// Target dispatch (e2e vs code), mirroring publish.ts's own E2E_ADD/CODE_ADD/E2E_EXCLUDES/CODE_EXCLUDES
+// exactly: e2e publishes only the `e2e/` dir (publishE2e-shaped); code publishes the whole tree minus
+// installed deps/build output/run artifacts (publishCode-shaped) — the SAME split Execution/Setup/
+// Validation adapters already make on `cfg.isCode` elsewhere in this factory.
+const E2E_PUBLISH_ADD = ["e2e"];
+const E2E_PUBLISH_EXCLUDES = ["node_modules/", ".qa/coverage/", ".qa/measured.json"];
+const CODE_PUBLISH_ADD = ["."];
+const CODE_PUBLISH_EXCLUDES = [
+  "node_modules/",
+  ".env",
+  ".env.*",
+  "*.env",
+  "dist/",
+  "build/",
+  "__pycache__/",
+  "*.pyc",
+  ".venv/",
+  "venv/",
+  "target/",
+  ".next/",
+  "coverage/",
+  "e2e/.qa/coverage/",
+  ".stryker-tmp/",
+  "stryker.conf.json",
+  "reports/mutation/",
+];
+
+// Writes gitignore-style patterns to .git/info/exclude (LOCAL, never committed) — same real fs write
+// as publish.ts's own defaultPublishDeps.writeExcludes.
+function writeExcludes(mirrorDir: string, patterns: readonly string[]): void {
+  const dir = join(mirrorDir, ".git", "info");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "exclude"), patterns.map((p) => `${p}\n`).join(""));
+}
+
+type GitFn = (args: string[], cwd?: string) => Promise<string>;
+
+// Adversarial-review CRITICALs (auth-on-push + commit identity): realGit is a BARE execFile wrapper
+// — it applies hardenGitArgs (hooks/safe.directory) + GIT_TERMINAL_PROMPT=0 but NEVER prepends
+// authHeaderArgs(); auth in this codebase is applied per CALL SITE (repo-mirror's own syncMirror/
+// resolveRef, legacy publish.ts:124 `[...authHeaderArgs(), "push", ...]`). Likewise a fresh mirror
+// has NO git identity configured anywhere (Dockerfile/compose/repo-mirror set none), which is why
+// legacy committed with `-c user.name=<GIT_AUTHOR_NAME ?? "panchito"> -c user.email=
+// <GIT_AUTHOR_EMAIL ?? "panchito@users.noreply.github.com">` (publish.ts:107-108,120-123). Without
+// these, every real pr-route push fails non-interactively and every fresh-mirror commit hard-fails
+// "Author identity unknown".
+//
+// SEAM CHOICE: the decoration lives HERE (factory land), wrapping the injected git fn, so the
+// qa-engine VcsWriteAdapter stays 100% token-agnostic — honoring its own header contract ("the
+// real-wiring obligation is on the injector, not this class") and keeping all token/identity
+// knowledge in src/server. Dispatch keys on args[0], which for this adapter is ALWAYS the bare git
+// subcommand (VcsWriteAdapter never emits leading -c flags itself — its unit tests pin every argv
+// shape; hardenGitArgs' own -c flags are prepended later, inside realGit, after this decorator).
+// Both env vars are read at CALL time, exactly like legacy (authHeaderArgs() reads GITHUB_TOKEN per
+// call; publishChanges read GIT_AUTHOR_* per call).
+function withPublishGitDecorations(git: GitFn): GitFn {
+  return (args, cwd) => {
+    if (args[0] === "push") return git([...authHeaderArgs(), ...args], cwd);
+    if (args[0] === "commit") {
+      const name = process.env.GIT_AUTHOR_NAME ?? "panchito";
+      const email = process.env.GIT_AUTHOR_EMAIL ?? "panchito@users.noreply.github.com";
+      return git(["-c", `user.name=${name}`, "-c", `user.email=${email}`, ...args], cwd);
+    }
+    return git(args, cwd);
+  };
+}
+
+// Exported for structural/unit testing (rewritten-engine-factory.test.ts) — constructs the
+// VcsPublishCollaborator dispatched by isCode. `git`/`writeExcludesFn` are injectable (default to the
+// REAL realGit / fs-backed writeExcludes, the same DI pattern VcsWriteAdapter itself already uses) so
+// the exact call sequence can be pinned with a fake git fn, mirroring publish.test.ts's own
+// established convention for this exact class of git-mechanics test — no real subprocess/filesystem
+// needed to prove the sequence/dispatch is correct. The injected git fn is ALWAYS wrapped in
+// withPublishGitDecorations (above) — the fake therefore observes the SAME decorated argv the real
+// realGit receives in production, which is exactly what lets the tests pin the auth/identity
+// prefixes instead of only recording bare argv (the gap that let both CRITICALs slip first time).
+export function buildVcsPublish(
+  isCode: boolean,
+  git: GitFn = realGit,
+  writeExcludesFn: (dir: string, patterns: readonly string[]) => void = writeExcludes,
+): VcsPublishCollaborator {
+  const vcs = new VcsWriteAdapter(withPublishGitDecorations(git), writeExcludesFn);
+  const addDir = isCode ? CODE_PUBLISH_ADD : E2E_PUBLISH_ADD;
+  const excludes = isCode ? CODE_PUBLISH_EXCLUDES : E2E_PUBLISH_EXCLUDES;
+  return {
+    async publish({ mirrorDir, branch }): Promise<{ changed: boolean }> {
+      // Apply local ignore patterns FIRST (same ordering as publish.ts's publishChanges) so both the
+      // change check and the `git add` below silently skip installed deps/artifacts instead of
+      // failing on an ignored path (the node_modules/.gitignore `git add` failure this ordering fixes).
+      await vcs.writeExcludes(mirrorDir, excludes);
+      const changed = await vcs.hasChanges(mirrorDir, addDir);
+      if (!changed) return { changed: false };
+      await vcs.checkoutBranch(mirrorDir, branch);
+      const commitMsg = isCode ? "test(code): automated QA" : "test(e2e): automated QA";
+      await vcs.commit(mirrorDir, commitMsg, addDir);
+      await vcs.push(mirrorDir, branch);
+      return { changed: true };
+    },
+  };
 }
 
 // One-shot /version fetch + sha/health match — VersionPollFn's contract is a SINGLE probe per
@@ -804,6 +921,12 @@ export function buildRewrittenCompositionConfig(
       app.baseBranch ?? "main",
     ),
     githubIssue: new GitHubIssueAdapter((repo, title, body) => github.openIssue(repo, title, body)),
+    // PROD-BLOCKER fix: the REAL git-write collaborator — stages/commits/pushes the agent's generated
+    // tests to the PR branch BEFORE githubPr.openWithAutoMerge() is called (PublicationPortAdapter's
+    // "pr" route, see that file's own header). Dispatched by isCode exactly like
+    // validationStrategies/executionStrategies/setupCollaborators above (e2e publishes only e2e/;
+    // code publishes the whole tree minus installed deps/build output).
+    vcsWrite: buildVcsPublish(isCode),
     reviewerApprovedForPublish: true,
     coverageBlocksForPublish: false,
     e2eChangedForPublish: true,

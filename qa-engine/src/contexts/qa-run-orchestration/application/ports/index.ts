@@ -469,6 +469,18 @@ export interface PublicationPort {
     // for that case) — so the human reading the Issue can tell "reviewer never actually ran" apart
     // from "reviewer ran and rejected".
     reviewerNote?: string;
+    // PROD-BLOCKER fix: the REAL per-run mirrorDir (WorkspacePort.prepare()'s own return value,
+    // threaded by the use-case — the same "dynamic per-run value" precedent as every other optional
+    // field on this port) + the run's sha, needed ONLY by the "pr" route's git-write step (stage/
+    // commit/push the agent's generated tests before the PR is opened — see
+    // publication-port.adapter.ts's own header for why this was missing entirely before this fix).
+    // OPTIONAL for the same backward-compat reason as every field above: a pre-existing caller/stub/
+    // test that only ever passed {verdict, cases, logs} keeps compiling. Absent on an ACTUAL "pr"
+    // route with a required vcsWrite collaborator wired is a composition defect, not a valid steady
+    // state — PublicationPortAdapter's "pr" branch throws loudly rather than silently skip the git
+    // write (see that file's own fail-closed comment).
+    mirrorDir?: string;
+    sha?: string;
   }): Promise<{ outcome: string }>;
 }
 // W3 fix (F1, dual-judge round): LearningPort.retrieve() previously returned bare trigger strings
@@ -507,7 +519,13 @@ export interface LearningPort {
 // needs to import it from the other. Re-export it here so callers of this barrel get a single import.
 export type { DeployGatePort } from "@kernel/ports/deploy-gate.port.ts";
 export interface WorkspacePort {
-  prepare(sha: Sha): Promise<{ specDir: string }>;
+  // PROD-BLOCKER fix: `mirrorDir` (the bare per-run working-copy dir checkout(sha) resolved, BEFORE
+  // specRelDir is joined on) is now ALSO returned alongside `specDir` — the publish "pr" route needs
+  // the mirror root (to stage/commit/push e2e/ or the whole tree), not the target-aware specDir
+  // (WorkspacePortAdapter's own e2e-vs-code join). Previously only specDir existed and there was no
+  // other source for mirrorDir anywhere in RunQaUseCase, which is exactly why the git-write step
+  // could never be threaded through publish() before this fix.
+  prepare(sha: Sha): Promise<{ specDir: string; mirrorDir: string }>;
 }
 // Replaces the 7 positional callbacks (onStep/onCase/…) with one typed observer.
 export interface ObserverPort {

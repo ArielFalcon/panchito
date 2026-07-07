@@ -29,16 +29,31 @@ function fakeIssue(): GitHubIssueAdapter {
 // helper explicitly so it keeps exercising routing/rendering behavior, not the fail-closed gate itself.
 const identitySanitize = (text: string) => text;
 
+// PROD-BLOCKER fix: the "pr" route previously called GitHubPrAdapter.openWithAutoMerge() directly
+// against ctx.branch — a branch that was NEVER created/committed/pushed (VcsWriteAdapter, the only
+// VcsWritePort implementation, was never instantiated anywhere in composition-root.ts — grep-
+// confirmed zero references outside its own test). Every green, reviewer-approved, non-shadow run
+// failed at the PR step (GitHub 404/422 on a nonexistent branch). `vcsWrite` is a NEW required
+// collaborator (duck-typed per this file's own confinement pattern — see the header note on why
+// this bridge depends only on LOCAL structural interfaces, never a concrete workspace-and-publication
+// import) invoked ONLY on the "pr" route, BEFORE pr.openWithAutoMerge — mirroring the legacy
+// contract (src/integrations/publish.ts's publishChanges: checkout -B -> add -> commit -> push ->
+// THEN createPullRequest).
+function fakeVcsWrite(calls: string[]): { publish: (input: { mirrorDir: string; branch: string; sha: string }) => Promise<{ changed: boolean }> } {
+  return { publish: async () => { calls.push("vcsWrite"); return { changed: true }; } };
+}
+
 test("publish() routes to GitHubPrAdapter when the decision resolves to 'pr' (green+approved+covered+e2eChanged)", async () => {
   const decide = new PublishDecisionService();
   const pr = fakePr();
   const issue = fakeIssue();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
+  const vcsWrite = fakeVcsWrite([]);
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
-  const result = await adapter.publish({ verdict: "pass", cases: [], logs: "" });
+  const result = await adapter.publish({ verdict: "pass", cases: [], logs: "", mirrorDir: "/mirrors/org/app", sha: "abc1234" });
 
   assert.match(result.outcome, /pr/);
 });
@@ -116,11 +131,12 @@ test("publish() falls back to ctx.reviewerApproved (static) when the decision om
   const pr = fakePr();
   const issue = fakeIssue();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
+  const vcsWrite = fakeVcsWrite([]);
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
-  const result = await adapter.publish({ verdict: "pass", cases: [], logs: "" });
+  const result = await adapter.publish({ verdict: "pass", cases: [], logs: "", mirrorDir: "/mirrors/org/app", sha: "abc1234" });
 
   assert.match(result.outcome, /pr/, "with no dynamic override, the static ctx.reviewerApproved:true must still apply");
 });
@@ -182,11 +198,12 @@ test("F3: publish() still targets ctx.repo for a PR even when issueRepo is suppl
   const pr = { openWithAutoMerge: async (repo: string) => { prRepoSeen = repo; return { url: "https://github.com/org/app/pull/1", number: 1 }; } };
   const issue = fakeIssue();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
+  const vcsWrite = fakeVcsWrite([]);
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
-  const result = await adapter.publish({ verdict: "pass", cases: [], logs: "", issueRepo: "org/orders-svc" });
+  const result = await adapter.publish({ verdict: "pass", cases: [], logs: "", issueRepo: "org/orders-svc", mirrorDir: "/mirrors/org/app", sha: "abc1234" });
 
   assert.match(result.outcome, /pr/);
   assert.equal(prRepoSeen, "org/app", "PR creation must always target ctx.repo (the primary repo), never the trigger repo, even when issueRepo is present");
@@ -249,6 +266,153 @@ test("F4: publish() applies the injected sanitize() to each failing case's name 
   assert.match(result.outcome, /issue/);
   assert.ok(!bodySeen.includes("sk-def456UVW"), `the case name's secret must be sanitized — got: ${bodySeen}`);
   assert.ok(!bodySeen.includes("sk-ghi789RST"), `the case detail's secret must be sanitized — got: ${bodySeen}`);
+});
+
+// ── PROD-BLOCKER fix (vcsWrite: stage/commit/push before the PR call) ─────────────────────────────
+// See fakeVcsWrite's own header note above for the full bug description. These tests pin: (1) the
+// vcsWrite collaborator runs BEFORE pr.openWithAutoMerge on the "pr" route, in that exact order;
+// (2) issue/shadow/noop/quarantine routes NEVER invoke it (git-write is a PR-only side effect);
+// (3) a "nothing changed" result from vcsWrite short-circuits — no PR call, outcome reflects noop;
+// (4) a "pr" route with vcsWrite absent throws loudly at publish() time (fail-closed, WS5.4b pattern
+// — checked lazily inside the "pr" case rather than the constructor, since unlike sanitize [used on
+// every rendered body] vcsWrite is relevant ONLY to the "pr" route; every other test in this file
+// exercising issue/shadow/noop legitimately omits it and must keep passing unchanged).
+
+test("PROD-BLOCKER: publish() invokes vcsWrite BEFORE pr.openWithAutoMerge on the 'pr' route (call-order pinned)", async () => {
+  const decide = new PublishDecisionService();
+  const order: string[] = [];
+  const pr = { openWithAutoMerge: async () => { order.push("pr.openWithAutoMerge"); return { url: "https://github.com/org/app/pull/1", number: 1 }; } };
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const vcsWrite = { publish: async () => { order.push("vcsWrite.publish"); return { changed: true }; } };
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "pass", cases: [], logs: "", mirrorDir: "/mirrors/org/app", sha: "abc1234" });
+
+  assert.match(result.outcome, /pr/);
+  assert.deepEqual(order, ["vcsWrite.publish", "pr.openWithAutoMerge"], "the git write must land BEFORE the PR is opened — the legacy contract's exact ordering");
+});
+
+test("PROD-BLOCKER: publish() threads mirrorDir/branch/sha from the decision + ctx into vcsWrite.publish", async () => {
+  const decide = new PublishDecisionService();
+  let seen: { mirrorDir: string; branch: string; sha: string } | undefined;
+  const pr = fakePr();
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const vcsWrite = { publish: async (input: { mirrorDir: string; branch: string; sha: string }) => { seen = input; return { changed: true }; } };
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  await adapter.publish({ verdict: "pass", cases: [], logs: "", mirrorDir: "/mirrors/org/app", sha: "abc1234" });
+
+  assert.deepEqual(seen, { mirrorDir: "/mirrors/org/app", branch: "qa-bot/abc1234", sha: "abc1234" }, "vcsWrite must push to the SAME branch the PR is opened against, not an independently-computed one");
+});
+
+test("PROD-BLOCKER: publish() never invokes vcsWrite on the 'issue' route (fail verdict)", async () => {
+  const decide = new PublishDecisionService();
+  let vcsWriteCalled = false;
+  const pr = fakePr();
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const vcsWrite = { publish: async () => { vcsWriteCalled = true; return { changed: true }; } };
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "fail", cases: [], logs: "boom" });
+
+  assert.match(result.outcome, /issue/);
+  assert.equal(vcsWriteCalled, false, "vcsWrite is a PR-only side effect — an Issue route must never touch git");
+});
+
+test("PROD-BLOCKER: publish() never invokes vcsWrite on the 'shadow' route, even when the underlying decision would be 'pr'", async () => {
+  const decide = new PublishDecisionService();
+  let vcsWriteCalled = false;
+  const pr = fakePr();
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const vcsWrite = { publish: async () => { vcsWriteCalled = true; return { changed: true }; } };
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: true, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "pass", cases: [], logs: "" });
+
+  assert.match(result.outcome, /shadow/);
+  assert.equal(vcsWriteCalled, false, "shadow mode must stay entirely side-effect-free — it only PREVIEWS what would happen, never touches real git");
+});
+
+test("PROD-BLOCKER: publish() never invokes vcsWrite on a 'noop' route (green, no e2e/ changes)", async () => {
+  const decide = new PublishDecisionService();
+  let vcsWriteCalled = false;
+  const pr = fakePr();
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const vcsWrite = { publish: async () => { vcsWriteCalled = true; return { changed: true }; } };
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "pass", cases: [], logs: "", e2eChanged: false });
+
+  assert.match(result.outcome, /noop/);
+  assert.equal(vcsWriteCalled, false, "a noop route (nothing to publish) must never touch git");
+});
+
+test("PROD-BLOCKER: publish() never invokes vcsWrite on the 'quarantine' route (flaky verdict)", async () => {
+  const decide = new PublishDecisionService();
+  let vcsWriteCalled = false;
+  const pr = fakePr();
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const vcsWrite = { publish: async () => { vcsWriteCalled = true; return { changed: true }; } };
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "flaky", cases: [], logs: "" });
+
+  assert.match(result.outcome, /quarantine/);
+  assert.equal(vcsWriteCalled, false, "flaky routes to quarantine, never a PR — git must stay untouched");
+});
+
+test("PROD-BLOCKER: publish() short-circuits to a noop-shaped outcome when vcsWrite reports nothing changed (skip-if-no-changes) — no PR call", async () => {
+  const decide = new PublishDecisionService();
+  let prCalled = false;
+  const pr = { openWithAutoMerge: async () => { prCalled = true; return { url: "https://github.com/org/app/pull/1", number: 1 }; } };
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const vcsWrite = { publish: async () => ({ changed: false }) };
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "pass", cases: [], logs: "", mirrorDir: "/mirrors/org/app", sha: "abc1234" });
+
+  assert.equal(prCalled, false, "no changes to publish -> the PR must never be opened");
+  assert.match(result.outcome, /noop/, "the outcome must honestly reflect that nothing was published, matching legacy's own no-change skip semantic (CLAUDE.md-documented: a green run with no e2e/ changes opens no PR)");
+});
+
+test("PROD-BLOCKER: publish() throws loudly on the 'pr' route when vcsWrite is absent (fail-closed — never silently opens a PR against a phantom branch)", async () => {
+  const decide = new PublishDecisionService();
+  const pr = fakePr();
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  // vcsWrite is deliberately omitted (it is OPTIONAL at the type level — see PublicationPortCollaborators'
+  // own doc for why) to prove the fail-closed runtime guard on the "pr" route specifically.
+  const adapter = new PublicationPortAdapter(
+    { decide, pr, issue, shadowLog, sanitize: identitySanitize },
+    { repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true },
+  );
+
+  await assert.rejects(
+    () => adapter.publish({ verdict: "pass", cases: [], logs: "", mirrorDir: "/mirrors/org/app", sha: "abc1234" }),
+    /vcsWrite/i,
+    "a 'pr' route with no vcsWrite collaborator wired must throw naming the gap, never silently call pr.openWithAutoMerge against an unpushed branch",
+  );
 });
 
 // WS5.4b (fail-closed publication default) — sanitize is now REQUIRED, not defaulted to identity.

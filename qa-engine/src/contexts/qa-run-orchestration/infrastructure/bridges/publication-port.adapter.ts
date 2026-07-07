@@ -52,6 +52,19 @@ export interface ShadowLogCollaborator {
   // outcome string still names the would-be action).
   openIssue?(repo: string, title: string, body: string): Promise<void>;
 }
+// PROD-BLOCKER fix: the "pr" route previously called GitHubPrAdapter.openWithAutoMerge() directly —
+// no branch was ever created/committed/pushed first (VcsWriteAdapter, the only VcsWritePort
+// implementation, was never instantiated anywhere in composition-root.ts before this fix). This
+// local structural mirror (duck-typed, NOT importing VcsWritePort or workspace-and-publication's
+// concrete adapter — same arch-lint confinement pattern as every other collaborator interface
+// above) is the git-write step: stage + commit + push the agent's generated tests to `branch`,
+// mirroring the legacy contract (src/integrations/publish.ts's publishChanges: checkout -B -> add
+// -> commit -> push, with a skip-if-no-changes short-circuit) BEFORE the PR is opened. `changed:
+// false` mirrors that same skip-if-no-changes semantic — publish() must not open a PR when there is
+// nothing to publish (a CLAUDE.md-documented behavior: "Honor the agent's no-op decision").
+export interface VcsPublishCollaborator {
+  publish(input: { mirrorDir: string; branch: string; sha: string }): Promise<{ changed: boolean }>;
+}
 
 export interface PublicationPortCollaborators {
   decide: PublishDecisionCollaborator;
@@ -68,6 +81,16 @@ export interface PublicationPortCollaborators {
   // root (src/server/rewritten-engine-factory.ts, which already imports src/) wires the REAL
   // sanitizeText here; qa-engine/src stays src/-free — the sanitizer is injected, never imported.
   sanitize: (text: string) => string;
+  // PROD-BLOCKER fix: OPTIONAL at the type level (unlike sanitize, which the constructor requires
+  // unconditionally) but enforced FAIL-CLOSED AT RUNTIME, checked lazily inside the "pr" case
+  // (publish()'s own switch) — see that switch case's own comment. Unlike sanitize (applied to every
+  // rendered Issue/PR body on every route), vcsWrite is relevant ONLY to the "pr" route; making it
+  // required at construction time would force every issue/shadow/noop/quarantine-only test and
+  // caller (every OTHER test in this file) to wire a collaborator they never invoke. Absent + "pr"
+  // route reached -> publish() throws loudly rather than silently opening a PR against an unpushed
+  // branch — the same fail-closed OUTCOME as WS5.4b's sanitize guard, just gated on the route that
+  // actually needs it instead of every route.
+  vcsWrite?: VcsPublishCollaborator;
 }
 
 export interface PublicationPortStaticContext {
@@ -176,6 +199,12 @@ export class PublicationPortAdapter implements PublicationPort {
     // rejection. OPTIONAL, same backward-compat precedent as adjudication above: absent renders no
     // "Reviewer unavailable" section at all.
     reviewerNote?: string;
+    // PROD-BLOCKER fix: the REAL per-run mirrorDir (WorkspacePort.prepare()'s own return value) + the
+    // run's sha, needed ONLY by the "pr" route's git-write step — see the port's own doc (ports/
+    // index.ts) and VcsPublishCollaborator's doc above for the full contract. OPTIONAL, same
+    // backward-compat precedent as every other dynamic field on this method.
+    mirrorDir?: string;
+    sha?: string;
   }): Promise<{ outcome: string }> {
     // Audit fix (judgment-day): prefer the REAL per-run decision value when the caller supplies
     // one; fall back to the static composition-time ctx only when absent (backward-compat for
@@ -222,6 +251,43 @@ export class PublicationPortAdapter implements PublicationPort {
         return { outcome: `shadow: ${publishDecision.reason} (would: ${underlying.outcome})` };
       }
       case "pr": {
+        // PROD-BLOCKER fix: stage/commit/push the agent's generated tests to this.ctx.branch BEFORE
+        // opening the PR — mirroring the legacy contract exactly (src/integrations/publish.ts's
+        // publishChanges: checkout -B -> add -> commit -> push -> THEN createPullRequest). Fail-closed
+        // (WS5.4b pattern, but scoped to this route — see PublicationPortCollaborators.vcsWrite's own
+        // doc for why this is checked here rather than in the constructor): a composition that wires
+        // the "pr" route but forgets vcsWrite must throw loudly, never silently call
+        // pr.openWithAutoMerge against a branch nothing ever pushed.
+        if (!this.deps.vcsWrite) {
+          throw new Error(
+            "PublicationPortAdapter: 'vcsWrite' is a REQUIRED collaborator for the 'pr' route (PROD-BLOCKER fix — " +
+              "the agent's generated tests must be staged/committed/pushed before the PR is opened) — " +
+              "the composition root must inject the real git-write collaborator; refusing to open a PR against an unpushed branch.",
+          );
+        }
+        // mirrorDir/sha are per-run dynamic values threaded by the use-case (RunQaUseCase reads them
+        // from WorkspacePort.prepare()'s own return value and input.sha) — see the port's own doc for
+        // why they are optional at the type level (backward-compat) but required in practice for a
+        // real "pr" route to do anything meaningful. An absent mirrorDir/sha here is the SAME class of
+        // composition defect as an absent vcsWrite collaborator — fail loudly rather than push to "".
+        if (!decision.mirrorDir || !decision.sha) {
+          throw new Error(
+            "PublicationPortAdapter: the 'pr' route requires decision.mirrorDir and decision.sha (the per-run values " +
+              "RunQaUseCase threads from WorkspacePort.prepare()/input.sha) — refusing to stage/commit/push with no mirror to operate on.",
+          );
+        }
+        const written = await this.deps.vcsWrite.publish({
+          mirrorDir: decision.mirrorDir,
+          branch: this.ctx.branch,
+          sha: decision.sha,
+        });
+        // Skip-if-no-changes (legacy parity, CLAUDE.md "Honor the agent's no-op decision"): nothing
+        // to publish -> no PR, ever. Mirrors publishChanges' own `if (!status.trim()) return null`
+        // short-circuit exactly — the PublishDecisionService already routed here believing e2eChanged
+        // was true, but the REAL git diff is the ground truth this adapter can observe directly.
+        if (!written.changed) {
+          return { outcome: "noop: vcsWrite reported no changes to publish — the suite already covers the change, no PR opened" };
+        }
         const pr = await this.deps.pr.openWithAutoMerge(this.ctx.repo, this.ctx.branch, title, body);
         return { outcome: `pr: ${pr.url}` };
       }
