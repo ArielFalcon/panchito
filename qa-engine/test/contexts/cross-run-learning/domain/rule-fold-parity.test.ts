@@ -72,6 +72,13 @@ test("PARITY: preventionOutcome matches legacy across errorClass combinations", 
     ["E-FRAGILE-SELECTOR", "E-FRAGILE-SELECTOR"],
     ["E-FRAGILE-SELECTOR", null],
     ["E-FRAGILE-SELECTOR", "E-EXEC-FAIL"],
+    // WS1.4(a): empty/blank ruleErrorClass is unfalsifiable (a real run's errorClass is never "" —
+    // only a genuine ErrorClass or null) — both twins must return null (no signal) instead of the
+    // free PREVENTION_HELD_SCORE ride, across every runErrorClass shape, so the twins cannot drift.
+    ["", null],
+    ["", "E-EXEC-FAIL"],
+    ["", "E-INFRA"],
+    ["   ", null],
   ];
   for (const [ruleClass, runClass] of samples) {
     assert.equal(
@@ -80,6 +87,11 @@ test("PARITY: preventionOutcome matches legacy across errorClass combinations", 
       JSON.stringify([ruleClass, runClass]),
     );
   }
+});
+
+test("PARITY: preventionOutcome — empty ruleErrorClass returns null (no signal) in BOTH twins, never PREVENTION_HELD_SCORE", () => {
+  assert.equal(preventionOutcome("" as never, null), null, "ported twin");
+  assert.equal(legacyPreventionOutcome("" as never, null), null, "legacy twin");
 });
 
 test("PARITY: applyOutcome running-mean + hysteresis matches legacy across a transition sample table", () => {

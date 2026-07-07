@@ -77,6 +77,20 @@ describe("preventionOutcome (governance signal without an oracle)", () => {
     }
     assert.equal(r.status, "deprecated", "a rule that never prevents its class loses trust");
   });
+
+  // WS1.4(a) (full-flow remediation, INTERIM promotion-safety gate): a rule with an EMPTY/blank
+  // errorClass is unfalsifiable under the prevention path — a real run's errorClass is either a
+  // genuine ErrorClass value or null (never ""), so `runErrorClass === ruleErrorClass` can NEVER
+  // be true for an empty ruleErrorClass. The rule can therefore only ever hit the `runErrorClass
+  // === null` branch (PREVENTION_HELD_SCORE, a free ride to promotion) and can never be scored 0.
+  // Empty/blank ruleErrorClass now returns null (no signal) so it can never accrue credit at all.
+  it("returns null (no signal) when the rule's own errorClass is empty — unfalsifiable, can never be scored 0, must not collect free held-credit", () => {
+    assert.equal(preventionOutcome("" as never, null), null, "empty ruleErrorClass + clean run must yield no signal, not PREVENTION_HELD_SCORE");
+    assert.equal(preventionOutcome("" as never, "E-EXEC-FAIL"), null, "empty ruleErrorClass + unrelated failure must yield no signal");
+  });
+  it("returns null when the rule's own errorClass is blank (whitespace-only) — same unfalsifiable shape as empty", () => {
+    assert.equal(preventionOutcome("   " as never, null), null);
+  });
 });
 
 describe("deduplicateRules", () => {

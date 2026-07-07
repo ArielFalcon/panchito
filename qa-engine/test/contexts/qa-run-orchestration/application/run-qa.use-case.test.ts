@@ -1536,6 +1536,40 @@ test("WS1.2 regression pin: a fail run with a real errorClass (E-EXEC-FAIL) stil
   assert.equal(capturedInput?.errorClass, "E-EXEC-FAIL");
 });
 
+// WS1.4(a) (full-flow remediation, reviewer pin from the WS1.2 gate): a `pass` verdict WITH a
+// coverage gap resolves errorClass:E-COVERAGE-GAP (FIX 4, see the test above at "errorClass is
+// E-COVERAGE-GAP on a green run with a below-threshold coverageRatio") — a REAL, non-null,
+// non-empty taxonomy class, not the null the WS1.2 guard suppresses. The WS1.2 fix added
+// `errorClass != null && errorClass !== ""` to the reflect gate specifically to stop a HEALTHY
+// clean pass (errorClass:null) from burning a reflector session — it must NOT have collaterally
+// killed this genuinely-teachable path: a pass whose test failed to exercise the changed lines is
+// exactly the kind of signal the reflector should learn from.
+test("WS1.4(a): a pass run WITH a coverage gap (errorClass E-COVERAGE-GAP) still fires reflector.reflect() — the WS1.2 null-guard must not suppress this genuine teaching path", async () => {
+  let foldCallCount = 0;
+  let reflectCallCount = 0;
+  let capturedInput: ReflectionInput | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass", cases: [], logs: "" }),
+    measure: async () => ({ status: "fail", ratio: 0.25 }),
+  });
+  ports.learning.fold = async () => { foldCallCount++; };
+  const reflector = makeFakeReflector((input) => { reflectCallCount++; capturedInput = input; });
+  const useCase = new RunQaUseCase({
+    ...ports,
+    reflector,
+    config: { ...baseConfig, needsReview: false, coveragePolicyMode: "signal" }, // signal never blocks, but errorClass is still derived
+  });
+
+  const out = await useCase.run({ ...baseInput, runId: "ws1.4a-coverage-gap-pass-still-reflects" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(out.errorClass, "E-COVERAGE-GAP", "a green run with coverageRatio below the default minRatio (0.7) must derive errorClass:E-COVERAGE-GAP");
+  assert.equal(foldCallCount, 1, "learning.fold() must be called on a pass-with-coverage-gap (fold-on-green, unaffected)");
+  assert.equal(reflectCallCount, 1, "reflector.reflect() must still be called — E-COVERAGE-GAP is a real, non-empty class, not the null/empty shape the WS1.2 guard suppresses");
+  assert.equal(capturedInput?.errorClass, "E-COVERAGE-GAP");
+  assert.equal(capturedInput?.verdict, "pass");
+});
+
 test("reflector-rewire: reflector dep ABSENT ([SWAP]-optional) — a gate-true outcome still runs fold, reflect is skipped without error", async () => {
   let foldCallCount = 0;
   const { ports } = stubPorts({ validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }) });

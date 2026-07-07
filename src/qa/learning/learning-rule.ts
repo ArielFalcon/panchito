@@ -106,7 +106,15 @@ function nextStatus(status: RuleStatus, outcomeCount: number, successRate: numbe
 // "medium". Only the oracle's higher scores lift a rule into "high".
 export const PREVENTION_HELD_SCORE = 0.6;
 
+// WS1.4(a) (full-flow remediation, INTERIM promotion-safety gate): a rule whose OWN errorClass is
+// empty/blank is unfalsifiable — a real run's errorClass is either a genuine, non-blank ErrorClass
+// value or null (the taxonomy never produces ""), so `runErrorClass === ruleErrorClass` can NEVER
+// be true for a blank ruleErrorClass. Such a rule could therefore only ever hit the clean-run branch
+// below (PREVENTION_HELD_SCORE) and could never be scored 0 — a free ride to promotion with zero
+// falsifiable evidence. Guard first, before any class comparison, so a blank rule earns no prevention
+// signal at all (the caller already treats null as "no write" — see rewritten-engine-factory.ts).
 export function preventionOutcome(ruleErrorClass: ErrorClass, runErrorClass: ErrorClass | null): number | null {
+  if (ruleErrorClass.trim() === "") return null; // unfalsifiable rule — no credit, no debit
   if (runErrorClass === "E-INFRA" || runErrorClass === "E-FLAKY") return null; // noisy — teaches nothing
   if (runErrorClass === ruleErrorClass) return 0; // the rule did not prevent its own class
   if (runErrorClass === null) return PREVENTION_HELD_SCORE; // clean run → the rule held (weak positive)
