@@ -15,12 +15,20 @@
 //
 // Scope note: only the PURE ErrorClass-derivation logic is re-ported — not labelRunOutcome() itself
 // (that legacy function also builds the full RunOutcome shape, which RunQaUseCase.toRunOutcome()
-// already owns). errorClassFromCorrections is included for completeness/parity fidelity even though
-// RunQaUseCase currently threads reviewerCorrections:[] (ReviewPort's corrections are not yet
-// threaded into gateSignals.reviewerCorrections at this layer — a distinct, out-of-scope gap); the
-// verbatim reviewer-correction taxonomy classifier is ported so the SAME resolveErrorClass control
-// flow (verdict-derived classes short-circuit first, then reviewer corrections, then coverage-gap,
-// then the value-oracle E-VALUE-SURVIVED band) is available unabridged, not partially copied.
+// already owns). errorClassFromCorrections is included for completeness/parity fidelity; the
+// verbatim reviewer-correction taxonomy classifier lets the SAME resolveErrorClass control flow
+// (verdict-derived classes short-circuit first, then reviewer corrections, then coverage-gap, then
+// the value-oracle E-VALUE-SURVIVED band) run unabridged, not partially copied.
+//
+// WS1.5 (full-flow remediation): CLOSED — RunQaUseCase.deriveErrorClass() now threads the review
+// loop's real final-round corrections (finalReviewerCorrections in run-qa.use-case.ts) instead of a
+// hardcoded []. E-FALSE-POSITIVE/E-WRONG-OBJECTIVE/E-FRAGILE-SELECTOR/E-NO-CLEANUP are derivable
+// end-to-end from a genuine reviewer rejection. E-REVIEWER-REJECTED (the catch-all for an untagged/
+// unrecognized correction) is NOT produced by resolveErrorClass itself — neither this port nor the
+// legacy labeler.ts ever assigns it (verified: grep shows zero production assignment sites in
+// src/qa/learning/labeler.ts). It is exclusively the corrections-DISTILLATION fallback (legacy
+// src/qa/learning/distiller.ts's correctionToRuleUpsert, ported to cross-run-learning/domain/
+// distill-rule.ts's correctionToRuleUpsert) — a different call site from this one.
 //
 // E-INFRA is recorded but EXCLUDED from learning (infrastructure failures teach nothing) — this is
 // the legacy taxonomy's own documented behavior (src/qa/learning/taxonomy.ts:11), preserved verbatim.

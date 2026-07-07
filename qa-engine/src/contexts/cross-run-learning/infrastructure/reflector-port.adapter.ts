@@ -34,9 +34,18 @@
 // dedup guard, though fully implemented here, was a structural pass-through end-to-end. Task 2
 // wires selectAllRules onto history.ts's listAllLearningRules, so decideDistill below now runs
 // against the REAL full existing-rule set (all statuses) in production.
+//
+// WS1.5 (full-flow remediation): TWO further gaps closed. (1) archetype was hardcoded `null` on
+// every saved rule — now threaded from `input.archetype` (the use-case's diff-derived structural
+// shape, distill-rule.ts's detectArchetype), coalesced to null only when the use-case genuinely
+// has none to offer (never fabricated here). (2) errorClass was always trusted from the LLM's own
+// echoed `reflection.errorClass` — now, when `input.gateSignals.reviewerCorrections` is non-empty
+// (a reviewer-rejection outcome), it is DETERMINISTICALLY re-derived via distill-rule.ts's
+// correctionToErrorClass, restoring legacy's correctionToRuleUpsert non-LLM-trusting semantics
+// (the prompt's "do NOT change it" instruction is advisory, not enforced — an LLM can still drift).
 import type { LearningRepositoryPort, LearningRule, ReflectionInput, StructuredReflection } from "../application/ports/index.ts";
 import type { AgentRuntimePort } from "@kernel/ports/agent-runtime.port.ts";
-import { capRuleFields, decideDistill } from "../domain/distill-rule.ts";
+import { capRuleFields, correctionToErrorClass, decideDistill } from "../domain/distill-rule.ts";
 
 // Bounded so a single reflect() call never fans out unbounded rule history when scanning for
 // dedup — mirrors legacy's own listAllLearningRules(app, limit) default cap (src/server/
@@ -225,6 +234,19 @@ export class ReflectorPortAdapter {
         return;
       }
 
+      // WS1.5 (full-flow remediation, corrections-distillation channel): when this outcome carries
+      // real reviewer-rejection corrections, the errorClass is DETERMINISTICALLY re-derived from
+      // them (correctionToErrorClass — the closed-vocabulary [tag] first, keyword heuristics, then
+      // the E-REVIEWER-REJECTED fallback) rather than trusted from the LLM's own echoed
+      // `reflection.errorClass`. The prompt instructs the model "the errorClass ... is already
+      // determined by the gates — do NOT change it", but an LLM is non-deterministic and can still
+      // disobey; corrections are the objective, non-LLM signal, so they win when present. Absent
+      // corrections (a structural failure with no reviewer involved), the reflection's own echoed
+      // class is used unchanged — matching this method's pre-existing behavior exactly.
+      const derivedErrorClass = input.gateSignals.reviewerCorrections.length > 0
+        ? correctionToErrorClass(input.gateSignals.reviewerCorrections[0]!)
+        : reflection.errorClass;
+
       // ADR-3: status/confidence are hardcoded here — candidate/low — NEVER threaded from an
       // "initialStatus"-shaped field. This is the anti-Goodhart guarantee: reflection can only ever
       // author a candidate, never an active rule.
@@ -232,8 +254,11 @@ export class ReflectorPortAdapter {
         id: `rule-${input.runId.slice(-8)}-${Math.random().toString(16).slice(2, 8)}`,
         trigger: capped.trigger,
         action: capped.action,
-        errorClass: reflection.errorClass,
-        archetype: null,
+        errorClass: derivedErrorClass,
+        // WS1.5: the use-case's diff-derived structural shape (detectArchetype) — see
+        // ReflectionInput.archetype's own header for why this is a tag, not raw diff text. Coalesced
+        // to null (never undefined) so every saved rule has an explicit, non-fabricated value.
+        archetype: input.archetype ?? null,
         status: "candidate",
         confidence: "low",
         usageCount: 0,

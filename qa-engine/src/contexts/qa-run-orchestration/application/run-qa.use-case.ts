@@ -74,6 +74,9 @@ import { checkPreExecGrounding, checkPersistingAmbiguity } from "../domain/pre-e
 // barrel — same cross-context import precedent as LearningRepositoryPort (composition-root.ts /
 // learning-port.adapter.ts already import from @contexts/cross-run-learning/application/ports).
 import type { ReflectorPort, ReflectionInput } from "@contexts/cross-run-learning/application/ports/index.ts";
+// WS1.5 (full-flow remediation): detectArchetype is the diff's structural-shape detector (pure
+// domain logic, same cross-context import precedent as ReflectorPort/ReflectionInput above).
+import { detectArchetype } from "@contexts/cross-run-learning/domain/distill-rule.ts";
 
 // FIX B (judgment-day, HIGH)'s own value: the change-coverage minRatio default (src/qa/
 // change-coverage.ts's DEFAULT_COVERAGE_POLICY.minRatio) — needed here too so the FIX 4 errorClass
@@ -959,6 +962,10 @@ export class RunQaUseCase {
         // static gate runs post-generate, retrieval runs pre-generate) — the real retrieved ids, not
         // the terminal helper's own [] default.
         retrievedRuleIds,
+        // WS1.5 (full-flow remediation): the diff-derived structural shape, same classificationDiff
+        // every other diff-mode enrichment reuses — null outside diff mode (classificationDiff stays
+        // undefined there).
+        detectArchetype(classificationDiff, classificationIntent?.changedFiles ?? []),
       );
     }
 
@@ -1028,6 +1035,10 @@ export class RunQaUseCase {
         // RunOutcome.rulesRetrieved (diagnosability) but never reach a fold/reflect call — infra-error
         // stays fold-free and reflect-free, unchanged by this fix.
         retrievedRuleIds,
+        // WS1.5 (full-flow remediation): threaded for signature consistency with the sibling
+        // terminalResult("invalid", ...) call above — inert here (this infra-error exit never
+        // reaches the reflect gate, verdict-gated to "invalid" only), but never fabricated either.
+        detectArchetype(classificationDiff, classificationIntent?.changedFiles ?? []),
       );
     }
     if (signal?.aborted) {
@@ -1405,6 +1416,11 @@ export class RunQaUseCase {
     // below has a chance to overwrite it with the INDEPENDENT reviewer's own verdict on an actual
     // pass+review call.
     let reviewerApprovedForOutcome: boolean | undefined = reviewerApprovedFromGeneration;
+    // WS1.5 (full-flow remediation): the review loop's FINAL round's own corrections — outer-scoped
+    // (same convention as reviewerApprovedForOutcome above) so it survives past the review block and
+    // reaches gateSignals.reviewerCorrections at the mainline persist call below. Stays [] when the
+    // review loop never runs (non-pass verdict, !needsReview, or a regression run) — never fabricated.
+    let finalReviewerCorrections: string[] = [];
     // WS7.2: ALSO gated on `generating` — legacy's reviewGenerated() is only ever called from
     // inside the `if (generating)` block (src/pipeline.ts:2015-2236); a regression run never invokes
     // the reviewer (nothing new was generated to judge, and `decide()`'s own `!ev.generating` branch
@@ -1444,6 +1460,15 @@ export class RunQaUseCase {
       const MAX_REVIEW_ROUNDS = 2;
       let reviewCases = run.cases;
       let previousRoundCorrections: string[] | undefined;
+      // WS1.5: finalReviewerCorrections is declared OUTER-scoped above (see its own header comment).
+      // Distinct from previousRoundCorrections (which threads the PRIOR round's corrections into the
+      // NEXT round's regen/priorCorrections and is never read once the loop ends). Deliberately NOT
+      // set on the parse-miss or executedRed early exits below: neither carries real reviewer-authored
+      // correction text (a parse miss produced no interpretable JSON; executedRed is a structural
+      // override, not a content judgment) — neither invents one. executedRed is round-0-only, so the
+      // variable is still its [] initial there; a round-1 parse miss leaves round 0's own REJECTION
+      // corrections in place (the run ends rejected, and those are the only real reviewer-authored
+      // corrections that exist for it — same honest posture as the empty-regen lost-cause exit).
       // Plan 7-R W4: memoized per round the SAME way legacy's reviewGenerated() memoizes
       // (src/pipeline.ts:1625-1651's `lastSpecsKey`/`specsKey`) — re-capture DOM ONLY when the
       // reviewed spec set actually changed round-to-round, never on every round unconditionally.
@@ -1520,6 +1545,17 @@ export class RunQaUseCase {
         const blockingCount = reviewResult.blockingCount ?? reviewResult.corrections.length;
         const gateApproves = reviewResult.approved && blockingCount === 0;
         reviewerApproved = gateApproves;
+        // WS1.5 (guard hardened after an adversarial-review CRITICAL): only a REJECTING round's
+        // corrections become a learning/errorClass signal. An APPROVING round clears the variable —
+        // including its OWN advisory-only corrections: the reviewer contract (qa-reviewer.md's
+        // severity rules) explicitly lets the gate pass with advisory corrections attached
+        // ("recorded as notes, not requirements"), so blockingCount===0 says NOTHING about
+        // corrections.length. Threading an approval's advisory notes here would derive a failure
+        // class (e.g. E-FRAGILE-SELECTOR) on an approved PASSING run — re-opening the exact
+        // reflect-on-green regression WS1.2 closed and mislabeling a healthy pass as a failure.
+        // This also makes convergence correct for free: a later approving round overwrites an
+        // earlier rejection's corrections with [], and a terminal rejection keeps its own.
+        finalReviewerCorrections = gateApproves ? [] : reviewResult.corrections;
         if (gateApproves) break;
         // Rejected. Terminal on the LAST round — no further regeneration (mirrors legacy's
         // `if (round === MAX_REVIEW_ROUNDS - 1) return {...}`, :1773).
@@ -1634,7 +1670,12 @@ export class RunQaUseCase {
     // RewrittenOrchestratorAdapter's toOutcome() mirrors EXACTLY what was persisted, never a second,
     // independently-derived (and potentially drifting) computation.
     const gateValueScore = valueScore;
-    const errorClass = this.deriveErrorClass(decision.verdict, coverageRatio, gateValueScore);
+    // WS1.5 (full-flow remediation): thread the review loop's REAL final-round corrections into
+    // errorClass derivation — previously deriveErrorClass always received [] here (a hardcoded
+    // literal, documented as a known gap in this method's own header), so E-FALSE-POSITIVE/
+    // E-WRONG-OBJECTIVE/E-FRAGILE-SELECTOR/E-NO-CLEANUP were structurally underivable at this call
+    // site regardless of what the reviewer actually said.
+    const errorClass = this.deriveErrorClass(decision.verdict, coverageRatio, gateValueScore, finalReviewerCorrections);
     let mainlineOutcome: RunOutcome | undefined;
     if (!isContextCleanPass) {
       mainlineOutcome = this.toRunOutcome(input, decision, run.cases, retries, coverageRatio, errorClass, {
@@ -1643,6 +1684,9 @@ export class RunQaUseCase {
         staticOk: validation.ok,
         reviewerApproved: reviewerApprovedForOutcome,
         valueScore: gateValueScore,
+        // WS1.5: the review loop's real final-round corrections — [] when the review loop never ran
+        // or ultimately approved, matching finalReviewerCorrections' own "never fabricated" contract.
+        reviewerCorrections: finalReviewerCorrections,
         // FIX F1: the publish outcome string (e.g. "pr: <url>", "issue: <url>", "quarantine: ...",
         // "shadow: ...", "noop: ...") reaches the persisted RunOutcome so a run's publish result is
         // diagnosable from the run record alone — never fabricated when publish() was never called
@@ -1750,7 +1794,12 @@ export class RunQaUseCase {
         // ("log.line": only what is NOT a domain event) rather than inventing a new RunStep/event
         // type for one telemetry line.
         const reflectStartedAt = Date.now();
-        await this.deps.reflector.reflect(this.toReflectionInput(mainlineOutcome));
+        // WS1.5 (full-flow remediation): archetype computed from the SAME classificationDiff/
+        // changedFiles every other diff-mode enrichment already reuses (the "dynamic diff"
+        // precedent) — undefined outside diff mode (classificationDiff stays undefined there),
+        // so detectArchetype correctly returns null rather than fabricating a shape.
+        const archetype = detectArchetype(classificationDiff, classificationIntent?.changedFiles ?? []);
+        await this.deps.reflector.reflect(this.toReflectionInput(mainlineOutcome, archetype));
         const reflectMs = Date.now() - reflectStartedAt;
         this.deps.observer?.onEvent({
           type: "log.line",
@@ -1812,17 +1861,21 @@ export class RunQaUseCase {
   // FIX 4 (judgment-day D.7): shared errorClass derivation via the re-ported labeler taxonomy
   // (domain/helpers/error-class.ts's resolveErrorClass — a VERBATIM port of src/qa/learning/
   // labeler.ts's resolveErrorClass + src/qa/learning/taxonomy.ts), matching the legacy's
-  // labelRunOutcome() call exactly. reviewerCorrections stays [] (not yet threaded into this
-  // use-case's gateSignals — an undeclared, separate gap from the 5 CONFIRMED divergences this fix
-  // batch closes), so the reviewer-correction-derived classes never fire at this layer; the
-  // verdict/coverage/value-score bands (E-STATIC/E-EXEC-FAIL/E-FLAKY/E-INFRA/E-COVERAGE-GAP/
-  // E-VALUE-SURVIVED) are fully derived.
-  private deriveErrorClass(verdict: string, coverageRatio: number | null, valueScore: number | null): string | null {
+  // labelRunOutcome() call exactly.
+  // WS1.5 (full-flow remediation): reviewerCorrections is now the review loop's REAL final-round
+  // corrections (threaded by the mainline caller below as finalReviewerCorrections) — previously
+  // hardcoded to [] here (a documented, separate gap from the 5 divergences the earlier fix batch
+  // closed), which made E-FALSE-POSITIVE/E-WRONG-OBJECTIVE/E-FRAGILE-SELECTOR/E-NO-CLEANUP
+  // structurally underivable regardless of what the reviewer actually said. Every OTHER caller of
+  // this method (skipped/infra-error/terminal — none of which ever reach a review call) still omits
+  // the parameter and gets [] via the default, matching the "never fabricated" contract every other
+  // optional extra in this class follows.
+  private deriveErrorClass(verdict: string, coverageRatio: number | null, valueScore: number | null, reviewerCorrections: string[] = []): string | null {
     return resolveErrorClass({
       verdict,
       coverageRatio,
       minCoverageRatio: DEFAULT_MIN_COVERAGE_RATIO,
-      reviewerCorrections: [],
+      reviewerCorrections,
       valueScore,
     });
   }
@@ -1833,7 +1886,11 @@ export class RunQaUseCase {
   // STRUCTURALLY unreachable from the result (ReflectionInput has no such fields), so a reflection
   // prompt can never leak raw execution logs or diagnostic notes even if the adapter's own prompt
   // builder were later widened.
-  private toReflectionInput(outcome: RunOutcome): ReflectionInput {
+  // WS1.5 (full-flow remediation): `archetype` is computed by the CALLER (detectArchetype against
+  // classificationDiff, diff-mode only) and passed in here rather than re-derived from the
+  // RunOutcome — the outcome carries no diff/changedFiles field (by design, same narrow-projection
+  // discipline), so archetype detection must happen where the diff is still in scope.
+  private toReflectionInput(outcome: RunOutcome, archetype: string | null): ReflectionInput {
     return {
       runId: outcome.runId,
       app: outcome.app,
@@ -1862,6 +1919,7 @@ export class RunQaUseCase {
         flaky: outcome.gateSignals.flaky,
         retries: outcome.gateSignals.retries,
       },
+      archetype,
     };
   }
 
@@ -1900,6 +1958,11 @@ export class RunQaUseCase {
       // below) — only callers whose path genuinely passed the static gate thread true.
       staticOk?: boolean;
       reviewerApproved?: boolean;
+      // WS1.5 (full-flow remediation): the review loop's real final-round corrections — only the
+      // mainline caller (post-review) has real text to thread; every other toRunOutcome() call site
+      // (skipped/invalid/infra-error, all pre-review or non-reviewed paths) omits it and gets the []
+      // default below, matching this field's own "never fabricated" contract.
+      reviewerCorrections?: string[];
       valueScore?: number | null;
       note?: string;
       rulesRetrieved?: string[];
@@ -1949,7 +2012,9 @@ export class RunQaUseCase {
         static: extra?.staticOk ?? false,
         coverageRatio: gateCoverageRatio,
         valueScore: gateValueScore,
-        reviewerCorrections: [],
+        // WS1.5: the review loop's real final-round corrections when the mainline caller threads
+        // them; [] for every other call site (never ran a review, or the review ultimately approved).
+        reviewerCorrections: extra?.reviewerCorrections ?? [],
         ...(extra?.reviewerApproved !== undefined ? { reviewerApproved: extra.reviewerApproved } : {}),
         flaky: decision.verdict === "flaky",
         retries,
@@ -2138,6 +2203,12 @@ export class RunQaUseCase {
     // fix (backward compatible) and is also the correct value for any FUTURE terminal exit that
     // fires before retrieval — never a fabricated non-empty array.
     rulesRetrieved: string[] = [],
+    // WS1.5 (full-flow remediation): the diff-derived structural shape (detectArchetype), computed
+    // by the caller from the SAME classificationDiff in scope at both call sites (static-gate
+    // invalid, mid-run infra-error — both fire after classify() has already run in diff mode).
+    // Defaults to null for a caller that predates this fix or has no diff to analyze — never
+    // fabricated, same "never ran" convention as groundingSignals' own default above.
+    archetype: string | null = null,
   ): Promise<RunQaResult> {
     const decision = decide({
       verdict,
@@ -2240,7 +2311,7 @@ export class RunQaUseCase {
         // rationale — determinism keeps this awaited; the log.line event is the existing fallback
         // channel, not a new RunStep/event type).
         const reflectStartedAt = Date.now();
-        await this.deps.reflector.reflect(this.toReflectionInput(terminalOutcome));
+        await this.deps.reflector.reflect(this.toReflectionInput(terminalOutcome, archetype));
         const reflectMs = Date.now() - reflectStartedAt;
         this.deps.observer?.onEvent({
           type: "log.line",

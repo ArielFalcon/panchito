@@ -13,16 +13,20 @@ import {
   ruleKey,
   capRuleFields,
   decideDistill,
+  detectArchetype,
+  correctionToErrorClass,
   RULE_FIELD_MAX,
   TRIGGER_PREFIX,
 } from "@contexts/cross-run-learning/domain/distill-rule.ts";
 import {
   normalizeTrigger as legacyNormalizeTrigger,
   isWellFormedTrigger as legacyIsWellFormedTrigger,
+  correctionToRuleUpsert as legacyCorrectionToRuleUpsert,
 } from "../../../../../src/qa/learning/distiller.ts";
 import { ruleKey as legacyRuleKey, deduplicateRules as legacyDeduplicateRules } from "../../../../../src/qa/learning/learning-rule.ts";
 import type { LearningRule as LegacyLearningRule, RuleUpsert as LegacyRuleUpsert } from "../../../../../src/qa/learning/learning-rule.ts";
 import type { LearningRule } from "@contexts/cross-run-learning/application/ports/index.ts";
+import { detectStructuralPatterns as legacyDetectStructuralPatterns } from "../../../../../src/qa/learning/structural-pattern.ts";
 
 function makeLegacyRule(overrides: Partial<LegacyLearningRule> = {}): LegacyLearningRule {
   return {
@@ -172,4 +176,52 @@ test("PARITY: decideDistill key matches legacy ruleKey for the same candidate", 
   const candidate = { trigger: "Fragile Selector.", action: "USE getByRole  " };
   const ported = decideDistill(candidate, []);
   assert.equal(ported.key, legacyRuleKey(candidate));
+});
+
+// ── WS1.5 (full-flow remediation): archetype detection — the diff's structural shape
+// (form/api-call/stateful-cache/auth-flow/data-list/generic), the SAME detectStructuralPatterns
+// legacy declares (src/qa/learning/structural-pattern.ts) but NEVER wires into a distilled
+// LearningRule.archetype at any production call site (verified: distillReflection/
+// distillReviewerCorrections have zero production callers even in legacy). detectArchetype ports
+// the SAME detection logic and picks the FIRST matched pattern's kind — a single, non-fabricated
+// archetype tag for the reflector's rule, closing the "archetype always null" gap without
+// conflating it with errorClass (a different, unrelated taxonomy — see rule-governance.service.ts's
+// own header on why archetype/errorClass are independent relevance signals). ─────────────────────
+
+test("PARITY: detectArchetype's underlying pattern detection matches legacy detectStructuralPatterns across representative diffs", () => {
+  const samples: Array<{ diff: string; files: string[] }> = [
+    { diff: "+<form onSubmit={handleSubmit}>\n+  <input required />", files: ["Login.tsx"] },
+    { diff: "+const res = await fetch('/api/orders', { method: 'POST', body: JSON.stringify(payload) });", files: ["orders.ts"] },
+    { diff: "+localStorage.setItem('cache', data);\n+function invalidate() {}", files: ["cache.ts"] },
+    { diff: "+await login(username, password);\n+const token = session.jwt;", files: ["auth.ts"] },
+    { diff: "+function renderList(items) { return items.filter(...).map(...); }\n+// pagination + empty state", files: ["list.ts"] },
+    { diff: "+const x = 1 + 1;", files: ["math.ts"] },
+  ];
+  for (const s of samples) {
+    const legacyKinds = legacyDetectStructuralPatterns(s.diff, s.files).map((p) => p.kind);
+    const archetype = detectArchetype(s.diff, s.files);
+    assert.equal(archetype, legacyKinds[0] ?? null, JSON.stringify(s));
+  }
+});
+
+test("detectArchetype returns null for an absent/empty diff — never fabricates a shape for a non-diff-mode run", () => {
+  assert.equal(detectArchetype(undefined, []), null);
+  assert.equal(detectArchetype("", []), null);
+});
+
+test("PARITY: correctionToErrorClass matches legacy correctionToRuleUpsert's errorClass derivation, including the E-REVIEWER-REJECTED fallback", () => {
+  const samples = [
+    "[false-positive] asserts nothing",
+    "[wrong-objective] tests the wrong flow",
+    "[fragile-selector] uses nth-child",
+    "[no-cleanup] leaves orphaned data",
+    "[other] no recognizable anti-pattern",
+    "no tag at all, and no keyword match either",
+    "contains the phrase false positive in prose",
+  ];
+  for (const text of samples) {
+    const ported = correctionToErrorClass(text);
+    const legacy = legacyCorrectionToRuleUpsert({ correction: text, runId: "r1" });
+    assert.equal(ported, legacy?.errorClass, JSON.stringify(text));
+  }
 });

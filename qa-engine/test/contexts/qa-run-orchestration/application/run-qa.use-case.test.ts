@@ -1661,6 +1661,30 @@ test("reflector-rewire: static-gate invalid (errorClass=E-STATIC) — learning.f
   // ADR-4: the narrow projection must carry ONLY the declared gateSignals sub-fields — no logs/note
   // ever reach the reflector (structurally unreachable: ReflectionInput has no such keys).
   assert.deepEqual(Object.keys(capturedInput?.gateSignals ?? {}).sort(), ["coverageRatio", "flaky", "retries", "reviewerCorrections", "static", "valueScore"].sort());
+  assert.equal(capturedInput?.archetype, null, "an empty classify() diff (this test's default stub) must yield archetype:null — never fabricated");
+});
+
+// WS1.5 (full-flow remediation): archetype threading on the terminal (E-STATIC) reflect path —
+// distinct call site from the mainline path (toReflectionInput is invoked twice, once per
+// terminalResult/mainline exit), each computing its own detectArchetype from the SAME
+// classificationDiff in scope at that exit.
+test("WS1.5: static-gate invalid with a form-shaped diff threads a real (non-null) archetype into the reflector", async () => {
+  let capturedInput: ReflectionInput | undefined;
+  const { ports } = stubPorts({
+    validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }),
+    classify: async () => ({
+      action: "generate",
+      reason: "diff touches a form",
+      diff: "diff --git a/Signup.tsx b/Signup.tsx\n+<form onSubmit={handleSubmit}>\n+  <input required />\n",
+      intent: { type: "feat", breaking: false, message: "add signup form", changedFiles: ["Signup.tsx"] },
+    }),
+  });
+  const reflector = makeFakeReflector((input) => { capturedInput = input; });
+  const useCase = new RunQaUseCase({ ...ports, reflector, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "ws1-5-static-invalid-archetype-thread" });
+
+  assert.equal(capturedInput?.archetype, "form");
 });
 
 // ── WS6.3 (full-flow remediation, timeouts & operational observability): reflect() is awaited
@@ -3356,6 +3380,126 @@ test("W2-F3: corrections persist through the legacy's bound (2 rounds) -> termin
   assert.equal(generateCallCount, 1 + 1, "exactly 1 review-driven regeneration (round 0's rejection) on top of the initial generate() call — round 1's rejection is terminal, no further regen");
   assert.equal(out.decision.verdict, "pass", "the harness verdict itself is still 'pass' — it is the REVIEWER that rejected, not execution");
   assert.equal(out.decision.sideEffect, "issue", "a reviewer rejection that survives the full bound must route to an Issue, never a PR — matches decide()'s needsReview && !reviewerApproved branch");
+});
+
+// ── WS1.5 (full-flow remediation): the review loop's FINAL rejection round's own corrections
+// must reach the persisted RunOutcome.gateSignals.reviewerCorrections — previously hardcoded to
+// [] (run-qa.use-case.ts's toRunOutcome/deriveErrorClass), which made E-FALSE-POSITIVE/
+// E-WRONG-OBJECTIVE/E-FRAGILE-SELECTOR/E-NO-CLEANUP structurally underivable and the reflection
+// prompt's "reviewer corrections" section never rendered. ─────────────────────────────────────
+
+test("WS1.5: a terminal reviewer rejection threads its corrections into gateSignals.reviewerCorrections and derives the tagged errorClass", async () => {
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass" as const, cases: [{ name: "login", status: "pass" as const }], logs: "" }),
+  });
+  ports.review.review = async () => {
+    // Rejects on EVERY round — the persistent-rejection case (same fixture as the bound test above).
+    return { approved: false, corrections: ["[false-positive] asserts nothing on the discount"], blockingCount: 1, parsed: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "ws1-5-corrections-thread-into-gate-signals" });
+
+  assert.equal(out.decision.sideEffect, "issue");
+  assert.deepEqual(
+    out.outcome?.gateSignals.reviewerCorrections,
+    ["[false-positive] asserts nothing on the discount"],
+    "the FINAL round's own rejection corrections must reach the persisted outcome's gateSignals — not []",
+  );
+  assert.equal(
+    out.errorClass,
+    "E-FALSE-POSITIVE",
+    "resolveErrorClass must now derive the tagged class from the real reviewerCorrections, not fall through to null",
+  );
+});
+
+test("WS1.5: an APPROVED review (no rejection) still persists gateSignals.reviewerCorrections as [] — never fabricated", async () => {
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass" as const, cases: [{ name: "login", status: "pass" as const }], logs: "" }),
+  });
+  ports.review.review = async () => ({ approved: true, corrections: [], blockingCount: 0, parsed: true });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "ws1-5-approved-no-corrections" });
+
+  assert.equal(out.decision.sideEffect, "pr");
+  assert.deepEqual(out.outcome?.gateSignals.reviewerCorrections, []);
+  assert.equal(out.errorClass, null, "a healthy approved green run must still resolve to no error class");
+});
+
+// WS1.5 BOUNDARY (adversarial-review CRITICAL): the reviewer contract (qa-reviewer.md's severity
+// rules) explicitly allows an APPROVING verdict to carry advisory-only corrections — "The gate
+// PASSES with advisory-only corrections — they are recorded as notes, not requirements".
+// blockingCount===0 says NOTHING about corrections.length. Those advisory notes must NEVER become
+// a learning/errorClass signal: threading them would derive e.g. E-FRAGILE-SELECTOR on a PASSING,
+// APPROVED run, re-opening the exact reflect-on-green regression WS1.2 closed (a non-null class
+// satisfies the reflect gate) and minting a mislabeled candidate rule from a healthy pass.
+test("WS1.5 BOUNDARY: approved with ADVISORY-ONLY corrections (blockingCount 0) — errorClass stays null, reflect() does NOT fire, persisted reviewerCorrections is []", async () => {
+  let reflectCallCount = 0;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass" as const, cases: [{ name: "login", status: "pass" as const }], logs: "" }),
+  });
+  ports.review.review = async () => ({
+    approved: true,
+    corrections: ["[fragile-selector] prefer role-based locator"], // advisory note on an APPROVAL
+    blockingCount: 0,
+    parsed: true,
+  });
+  const reflector = makeFakeReflector(() => { reflectCallCount++; });
+  const useCase = new RunQaUseCase({ ...ports, reflector, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "ws1-5-approved-advisory-only-boundary" });
+
+  assert.equal(out.decision.sideEffect, "pr", "advisory-only corrections on an approval must still publish (the reviewer contract's own gate semantics)");
+  assert.equal(out.errorClass, null, "an approved pass must resolve errorClass:null — an advisory note is a note, never a failure-taxonomy signal");
+  assert.deepEqual(out.outcome?.gateSignals.reviewerCorrections, [], "advisory notes on an approval are never persisted as learning-visible corrections");
+  assert.equal(reflectCallCount, 0, "reflect() must NOT fire on an approved green — the WS1.2 reflect-on-green closure must survive advisory notes");
+});
+
+test("WS1.5: a rejection resolved by convergence (round 1 APPROVES, even with an advisory note) persists gateSignals.reviewerCorrections as [] — approval clears, rejection threads", async () => {
+  let reviewCallCount = 0;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass" as const, cases: [{ name: "login", status: "pass" as const }], logs: "" }),
+  });
+  ports.review.review = async () => {
+    reviewCallCount++;
+    if (reviewCallCount === 1) {
+      return { approved: false, corrections: ["[fragile-selector] round 0 nit"], blockingCount: 1, parsed: true };
+    }
+    // The approving round carries a leftover ADVISORY note — the guard is "approval -> []",
+    // not "last round's raw corrections win": an approving round's advisory notes are notes,
+    // never a learning/errorClass signal (see the BOUNDARY test above).
+    return { approved: true, corrections: ["[fragile-selector] minor residual style nit"], blockingCount: 0, parsed: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "ws1-5-convergence-final-round-wins" });
+
+  assert.equal(reviewCallCount, 2);
+  assert.equal(out.decision.sideEffect, "pr", "round 1 approved — the run must publish");
+  assert.deepEqual(
+    out.outcome?.gateSignals.reviewerCorrections,
+    [],
+    "the run ultimately APPROVED — approval clears the earlier rejection's corrections AND its own advisory notes; only a FINAL rejection ever threads corrections",
+  );
+  assert.equal(out.errorClass, null, "an ultimately-approved pass must not inherit an errorClass from either round's corrections");
+});
+
+test("WS1.5: reviewer-rejection reaches the reflector with the real (non-null) errorClass — the reflect gate no longer suppresses it as an unfalsifiable green", async () => {
+  let capturedInput: ReflectionInput | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass" as const, cases: [{ name: "login", status: "pass" as const }], logs: "" }),
+  });
+  ports.review.review = async () => ({ approved: false, corrections: ["[wrong-objective] tests login, commit changed checkout"], blockingCount: 1, parsed: true });
+  const reflector = makeFakeReflector((input) => { capturedInput = input; });
+  const useCase = new RunQaUseCase({ ...ports, reflector, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "ws1-5-reviewer-rejection-reaches-reflector" });
+
+  assert.equal(out.errorClass, "E-WRONG-OBJECTIVE");
+  assert.ok(capturedInput, "reflector.reflect() must fire — E-WRONG-OBJECTIVE is a real, non-empty error class");
+  assert.equal(capturedInput?.errorClass, "E-WRONG-OBJECTIVE");
+  assert.deepEqual(capturedInput?.gateSignals.reviewerCorrections, ["[wrong-objective] tests login, commit changed checkout"]);
 });
 
 test("W2-F3: parsed:false (a parse miss) fails closed WITHOUT burning a regeneration round", async () => {

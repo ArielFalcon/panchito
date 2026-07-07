@@ -118,6 +118,15 @@ export interface ReflectionInput {
     flaky: boolean;
     retries: number;
   };
+  // WS1.5 (full-flow remediation): the run's diff-derived structural shape (form/api-call/
+  // stateful-cache/auth-flow/data-list/generic — cross-run-learning/domain/distill-rule.ts's
+  // detectArchetype), computed by the use-case from the SAME classificationDiff every other
+  // diff-mode enrichment already reuses. NOT the raw diff itself — ADR-4's narrow-projection
+  // contract (this interface's own header) is preserved: only the already-derived tag crosses the
+  // port boundary, never raw diff text. Absent/null outside diff mode (no diff to analyze) or when
+  // detection found no recognizable shape falls back to "generic" — see detectArchetype's own
+  // "never fabricates" contract for the true absent case (undefined diff -> null).
+  archetype?: string | null;
 }
 
 // ADR-1 (reflector-rewire design): the reflect gate is STRICTER than the fold gate at the call
