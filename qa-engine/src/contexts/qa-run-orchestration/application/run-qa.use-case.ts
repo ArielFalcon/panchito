@@ -551,9 +551,17 @@ export class RunQaUseCase {
     // this — the SAME source the "dynamic diff"/W2-F5 intent threading above uses). Outside diff
     // mode classificationIntent stays undefined -> an empty BlastRadius -> the structuralSignal
     // port's own contract short-circuits to "" (matches every other mode's absent-section
-    // behavior). This is intentionally NOT the empty BlastRadius.of(input.sha, []) placeholder used
-    // elsewhere in this file (the objectiveSignal.measure() call, a DIFFERENT consumer) — that one
-    // stays untouched; this is a SEPARATE, purpose-built BlastRadius for the structural-signal seam.
+    // behavior).
+    //
+    // WS2.3 (full-flow remediation, code-mode restoration): this SAME BlastRadius is now ALSO
+    // threaded into both objectiveSignal.measure() calls below (mainline measurement + the
+    // enforce-mode coverage-regen re-measure) — previously each passed its own
+    // `BlastRadius.of(input.sha, [])` empty-literal placeholder, so StrykerMutationOracleAdapter's
+    // `br.changedFiles` forward into selectMutateTargets never scoped the mutation run to the
+    // diff on the code target (unscoped: slower, and a diluted valueScore feeding WS1.4's
+    // promotion gate). e2e's fault-injection oracle ignores `br` entirely, so reusing this one
+    // BlastRadius for both consumers is strictly narrowing for code and a no-op for e2e — no
+    // second, independently-computed BlastRadius needed.
     const runBlastRadius = BlastRadius.of(input.sha, classificationIntent?.changedFiles ?? []);
     // Best-effort by design (mirrors preGenerationGrounding's own fail-open posture immediately
     // above): a throw from the port is caught and logged, degrading to "" (no staticSignal) —
@@ -763,8 +771,16 @@ export class RunQaUseCase {
     // pipeline.ts:2269's `result = await generateOnce(...)`) — the LATEST generation attempt's own
     // `approved` flag is what FIX 1's reviewerApprovedFromGeneration (below) must read, not the
     // stale pre-repair `generated` value.
+    // WS2.2 (full-flow remediation, code-mode restoration): changedFiles threads the SAME
+    // classificationIntent-derived scoping runBlastRadius uses (below, structuralSignal/measure) into
+    // the code-target compile gate (CodeValidationStrategy -> validateCodeProject) for diff-scoped
+    // compilation on monorepos (legacy parity: src/pipeline.ts's `intent?.changedFiles ?? []` at
+    // every deps.validateCode call site). Ignored by the e2e static gate. Empty outside diff mode
+    // (classificationIntent stays undefined) — the code-target strategy's own fallback then probes
+    // the working tree directly (validateCodeProject's `effectiveChangedFiles`), never a crash.
+    const validateChangedFiles = classificationIntent?.changedFiles ?? [];
     this.deps.observer?.onStep("validate");
-    let validation = await this.deps.validation.validate(workspace.specDir);
+    let validation = await this.deps.validation.validate(workspace.specDir, validateChangedFiles);
     let lastGenerated = generated;
     let staticFixRounds = 0;
     while (!validation.ok && !validation.infra && generating && lastGenerated.specs.length > 0 && staticFixRounds < MAX_STATIC_FIX_ROUNDS) {
@@ -791,7 +807,7 @@ export class RunQaUseCase {
         ...baseEnrichment,
         fixCases: [{ name: "static-gate", status: "fail", detail: staticGateErrorDetail }],
       });
-      validation = await this.deps.validation.validate(workspace.specDir);
+      validation = await this.deps.validation.validate(workspace.specDir, validateChangedFiles);
     }
 
     // W2 — deterministic block re-check (Plan 7-R B5, mirrors src/pipeline.ts:2282-2299 exactly):
@@ -834,16 +850,21 @@ export class RunQaUseCase {
       // never reaches persistOutcome. Every OTHER mode's static-gate invalid still persists exactly
       // as before.
       //
-      // NOTE on validation.infra (CLAUDE.md invariant scope): this branch is deliberately NOT split
-      // on validation.infra here — that verdict-mapping divergence from the legacy (infra:true should
-      // map to "infra-error", not "invalid"; src/pipeline.ts:2305) is a KNOWN, DECLARED divergence
-      // tracked in parity-allowlist.json ("scenarios.ts:codemode-infra-toolchain" in
-      // golden-outcome.test.ts) with its own explicit "not reproducible/fixed at this layer per this
-      // task's scope" note — changing the verdict here would silently close that allowlisted gap and
-      // break golden-outcome.test.ts's own assertion that the divergence still exists. This fix's
-      // scope is strictly the diagnostic note (CLAUDE.md "surface integration errors loudly"), not
-      // the verdict-mapping gap — so validation.errors now reaches the note on the SAME "invalid"
-      // verdict this branch already returns, leaving the Task E.0/Slice E consumption gap untouched.
+      // WS2.2 (full-flow remediation, code-mode restoration): the verdict-mapping divergence this
+      // comment used to declare as "known, tracked in parity-allowlist.json" is CLOSED — empirically
+      // re-verified (judgment-day mandate) that parity-allowlist.json and golden-outcome.test.ts do
+      // NOT exist anywhere in the tree (both deleted at the Plan 7.6 cutover along with the rest of
+      // the legacy characterization harness), so there was no live allowlist entry left to "break" —
+      // the comment had gone stale. `run-decision-parity.test.ts`'s `codemode-infra-toolchain`
+      // scenario asserts the DESIRED evidence->decide() mapping in isolation (a hand-fed
+      // RunEvidence table exercising ONLY decide(), never this use-case's own validate() branch) —
+      // it was aspirational, not a live pin of this code path; before this fix, a real toolchain-
+      // missing validate() call landed here and returned "invalid" unconditionally, matching
+      // neither legacy's own infra split (src/pipeline.ts:2305) nor that test's intent. Branching on
+      // validation.infra restores legacy semantics for BOTH targets uniformly (the field means the
+      // same thing regardless of what produced it: the gate itself could not run — a broken/missing
+      // toolchain, playwright binary, tsc/mvn/go absent — never a code-quality defect to blame on
+      // the agent or the generated tests).
       console.error("[qa] static gate failed:", validation.errors);
       // Diagnosability fix: an empty, unapproved generation (generationNote, above) reaching this
       // static-gate failure means the static-gate errors ALONE would hide WHY nothing was
@@ -852,12 +873,12 @@ export class RunQaUseCase {
         .filter((part): part is string => Boolean(part))
         .join("\n\n") || undefined;
       return await this.terminalResult(
-        "invalid",
+        validation.infra ? "infra-error" : "invalid",
         cfg,
         input,
         { generating, static: false },
         reviewerApprovedFromGeneration,
-        input.mode === "context",
+        !validation.infra && input.mode === "context",
         // FIX 3 (judgment-day D.7 batch 2): the static-fix loop's own accumulated retries (repair
         // rounds consumed before the static gate finally gave up) — verified empirically against
         // the real legacy runPipeline (retries:2 for an always-failing validate(), matching
@@ -1217,8 +1238,11 @@ export class RunQaUseCase {
       // NEW optional trailing arg (see ObjectiveSignalPort.measure's own header) rather than left
       // for the composition root's static, always-empty `baselineCases: []` placeholder to supply.
       const baselineCases = run.cases.filter((c) => c.status === "pass").map((c) => c.name);
+      // WS2.3 (full-flow remediation): runBlastRadius (built above from classificationIntent.
+      // changedFiles) replaces the empty BlastRadius.of(input.sha, []) placeholder — see this
+      // method's own comment at runBlastRadius's declaration for the full rationale.
       const signal = await this.deps.objectiveSignal.measure(
-        BlastRadius.of(input.sha, []),
+        runBlastRadius,
         workspace.specDir,
         input.triggerRepo ? undefined : classificationDiff,
         baselineCases,
@@ -1260,7 +1284,7 @@ export class RunQaUseCase {
           coverageGap: gap,
         });
         if (regen.specs.length > 0) {
-          const regenValidation = await this.deps.validation.validate(workspace.specDir);
+          const regenValidation = await this.deps.validation.validate(workspace.specDir, validateChangedFiles);
           if (regenValidation.ok) {
             const regenNamespace = `${input.runId}-coverage-regen`;
             const regenRun = await this.deps.execution.execute(workspace.specDir, {
@@ -1274,8 +1298,10 @@ export class RunQaUseCase {
               // under — never the composition-time namespace the FIRST measure() implicitly used.
               // Omitting this override silently re-reads the first run's stale dumps whenever the
               // regen produced genuinely new specs, making signal2/blocksPublish measure nothing new.
+              // WS2.3 (full-flow remediation): runBlastRadius replaces the empty placeholder here
+              // too — the SAME real BlastRadius the mainline measure() call above now uses.
               const signal2 = await this.deps.objectiveSignal.measure(
-                BlastRadius.of(input.sha, []),
+                runBlastRadius,
                 workspace.specDir,
                 classificationDiff,
                 regenBaselineCases,

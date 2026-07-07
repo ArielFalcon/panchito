@@ -32,7 +32,7 @@ import type { ReviewPort, ReviewEnrichment } from "../../application/ports/index
 import type { AgentRuntimePort } from "@kernel/ports/agent-runtime.port.ts";
 import type { PromptRenderingPort, VerdictParserPort } from "@contexts/generation/application/ports/index.ts";
 import type { ReviewInput } from "@contexts/generation/application/ports/generation-ports.ts";
-import type { RunMode } from "@kernel/run-mode.ts";
+import type { RunMode, TestTarget } from "@kernel/run-mode.ts";
 import { renderLearnedRulesForReviewer } from "./generation-port.adapter.ts";
 
 export interface ReviewPortRuntime {
@@ -49,6 +49,13 @@ export interface ReviewPortStaticContext {
   mode: RunMode;
   baseUrl?: string;
   guidance?: string;
+  // WS2.4 (full-flow remediation, code-mode restoration): ReviewInput.target?: TestTarget already
+  // existed on the type and buildReviewerPromptAssembled ALREADY read it (`input.target === "code"
+  // ? "tests" : "E2E tests"`, prompts.ts) — this adapter simply never populated the field, so every
+  // code-mode review rendered "E2E tests" framing regardless of target. Optional: absent defaults to
+  // undefined -> renderReviewer's own "E2E tests" default (unchanged e2e behavior, backward
+  // compatible with every pre-existing caller/test that omits it).
+  target?: TestTarget;
 }
 
 export class ReviewPortAdapter implements ReviewPort {
@@ -79,6 +86,10 @@ export class ReviewPortAdapter implements ReviewPort {
       mode: this.ctx.mode,
       ...(this.ctx.baseUrl ? { baseUrl: this.ctx.baseUrl } : {}),
       ...(this.ctx.guidance ? { guidance: this.ctx.guidance } : {}),
+      // WS2.4 (full-flow remediation, code-mode restoration): threads target so
+      // buildReviewerPromptAssembled renders the correct framing ("tests" for code, "E2E tests" for
+      // e2e — prompts.ts's own `input.target === "code" ? "tests" : "E2E tests"`).
+      ...(this.ctx.target ? { target: this.ctx.target } : {}),
       // W2 fix (F3): priorCorrections verbatim; objective falls back to intent.message ONLY when no
       // manual guidance was already set above — mirrors legacy's `opts.guidance ?? intent?.message`
       // (src/pipeline.ts:1682) exactly (guidance wins, intent is the fallback).

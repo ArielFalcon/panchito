@@ -20,13 +20,31 @@
 // it resolves to (primary repo vs. a triggering service repo) is the injected fn's own concern, not
 // this adapter's. Errors from checkout propagate loudly (CLAUDE.md: never swallow an integration
 // error into an empty result).
+//
+// WS2.1 (full-flow remediation, code-mode restoration): this adapter was previously e2e-only in
+// effect — the composition root always passed "e2e" as the rel-dir (rewritten-engine-factory.ts's
+// own `const e2eRelDir = "e2e"` was UNCONDITIONAL), so a code:true app's specDir resolved to
+// `<mirrorDir>/e2e`, a directory that never exists for a code-mode watched repo (panchito has no
+// e2e/ folder) — setup/validate/execute all died against a phantom path. Legacy passed `mirrorDir`
+// itself for the code target (git show 1228ea7~1:src/pipeline.ts:1299 `setupCode(mirrorDir, ...)`,
+// :2497 `executeCode(mirrorDir, ...)` — never a mirrorDir/e2e subpath). `specRelDir` (renamed from
+// `e2eRelDir` to make the field's target-aware contract explicit — it is no longer always "the e2e
+// folder") reproduces that exactly: an EMPTY string composes to the bare mirrorDir, never
+// `mirrorDir/` (a trailing-slash artifact would be a cosmetic but needless divergence from legacy's
+// literal `mirrorDir` value). A non-empty specRelDir (e2e's "e2e") keeps the prior join unchanged.
 import type { Sha } from "@kernel/sha.ts";
 import type { WorkspacePort } from "../../application/ports/index.ts";
 
 export type CheckoutFn = (sha: Sha) => Promise<string>; // resolves the sha's working-copy mirrorDir
 
 export interface WorkspacePortStaticContext {
-  e2eRelDir: string; // tests folder relative to mirrorDir (e.g. "e2e") — mirrors OpencodeRunInput.e2eRelDir
+  // Tests folder relative to mirrorDir. "e2e" for the e2e target; "" (empty) for the code target —
+  // an empty value composes prepare()'s specDir to the BARE mirrorDir, matching legacy's code-mode
+  // semantics exactly (see this module's own header). Renamed from `e2eRelDir` (which implied "the
+  // e2e folder" unconditionally) to `specRelDir` to make the target-aware contract explicit at the
+  // type level; distinct from CompositionConfig.e2eRelDir, which stays the PROMPT-side "e2e folder
+  // name" constant (unused by code-mode prompt builders — see rewritten-engine-factory.ts's own note).
+  specRelDir: string;
 }
 
 export class WorkspacePortAdapter implements WorkspacePort {
@@ -37,6 +55,6 @@ export class WorkspacePortAdapter implements WorkspacePort {
 
   async prepare(sha: Sha): Promise<{ specDir: string }> {
     const mirrorDir = await this.checkout(sha);
-    return { specDir: `${mirrorDir}/${this.ctx.e2eRelDir}` };
+    return { specDir: this.ctx.specRelDir ? `${mirrorDir}/${this.ctx.specRelDir}` : mirrorDir };
   }
 }

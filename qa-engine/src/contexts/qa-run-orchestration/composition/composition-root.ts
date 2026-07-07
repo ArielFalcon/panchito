@@ -66,6 +66,7 @@ import type { PromptRenderingPort, VerdictParserPort } from "@contexts/generatio
 import type { StaticGateAdapter } from "@contexts/test-execution/infrastructure/static-gate.adapter.ts";
 import type { E2eExecutionStrategy } from "@contexts/test-execution/infrastructure/e2e-execution.strategy.ts";
 import type { CodeExecutionStrategy } from "@contexts/test-execution/infrastructure/code-execution.strategy.ts";
+import type { CodeValidationStrategy } from "@contexts/test-execution/infrastructure/code-validation.strategy.ts";
 import { DecideCoverageService, type CoveragePolicy, type ChangeCoverage } from "@contexts/objective-signal/domain/decide-coverage.service.ts";
 import type { CoverageCollectorPort, ValueOraclePort } from "@contexts/objective-signal/application/ports/index.ts";
 import { PublishDecisionService } from "@contexts/workspace-and-publication/domain/publish-decision.service.ts";
@@ -123,8 +124,15 @@ export interface CompositionConfig {
     verdicts: Pick<VerdictParserPort, "parseReview">;
   };
 
-  // ValidationPort collaborator.
-  staticGate: Pick<StaticGateAdapter, "validateAll">;
+  // ValidationPort collaborator — target-selected dispatch (WS2.2, full-flow remediation), mirroring
+  // executionStrategies' own shape immediately below. e2e: the FULL static gate (tsc/eslint-
+  // playwright/playwright --list/manifest/zero-assertion guard). code: the compile-feedback gate
+  // ported from src/qa/code-validate.ts (Filter B for the code target — previously unwired, so the
+  // code target reached execution with zero pre-execution feedback).
+  validationStrategies: {
+    e2e: Pick<StaticGateAdapter, "validateAll">;
+    code: Pick<CodeValidationStrategy, "validate">;
+  };
 
   // ExecutionPort collaborator — target-selected strategy dispatch.
   executionStrategies: {
@@ -403,11 +411,21 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
     e2eRelDir: cfg.e2eRelDir,
     appName: cfg.appName,
     mode: cfg.mode,
+    // WS2.4 (full-flow remediation, code-mode restoration): threads cfg.target so a code-target
+    // review renders the correct "tests" framing instead of "E2E tests" (see
+    // ReviewPortStaticContext.target's own header).
+    target: cfg.target,
     ...(cfg.baseUrl ? { baseUrl: cfg.baseUrl } : {}),
     ...(cfg.guidance ? { guidance: cfg.guidance } : {}),
   });
 
-  const validation = new ValidationPortAdapter(cfg.staticGate as StaticGateAdapter);
+  const validation = new ValidationPortAdapter(
+    {
+      e2e: cfg.validationStrategies.e2e as StaticGateAdapter,
+      code: cfg.validationStrategies.code as CodeValidationStrategy,
+    },
+    { target: cfg.target },
+  );
 
   const execution = new ExecutionPortAdapter(
     { e2e: cfg.executionStrategies.e2e as E2eExecutionStrategy, code: cfg.executionStrategies.code as CodeExecutionStrategy },
@@ -542,7 +560,14 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
 
   const learning = new LearningPortAdapter(cfg.learningRepo ?? new StubLearningRepository(), cfg.appName);
 
-  const workspace = new WorkspacePortAdapter(cfg.checkout, { e2eRelDir: cfg.e2eRelDir });
+  // WS2.1 (full-flow remediation): the workspace's specRelDir is TARGET-AWARE, not the same value
+  // as cfg.e2eRelDir (which stays the PROMPT-side "e2e folder name" constant — GenerationPortAdapter/
+  // ReviewPortAdapter/preGenerationGrounding etc. below still read cfg.e2eRelDir unchanged, and
+  // buildCodeTask never references it — grep-confirmed, see rewritten-engine-factory.ts's own note
+  // at its e2eRelDir declaration). An empty specRelDir on the code target composes prepare()'s
+  // specDir to the bare mirrorDir (WorkspacePortAdapter's own header) — legacy parity for
+  // setupCode/executeCode(mirrorDir, ...). e2e keeps cfg.e2eRelDir unchanged.
+  const workspace = new WorkspacePortAdapter(cfg.checkout, { specRelDir: cfg.isCode ? "" : cfg.e2eRelDir });
 
   const deployGate = cfg.versionUrl
     ? new DeployGatePortAdapter(

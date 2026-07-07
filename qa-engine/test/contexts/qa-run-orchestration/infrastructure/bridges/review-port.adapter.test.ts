@@ -249,3 +249,41 @@ test("review() renders enrichment.learnedRules via the reviewer-specific (active
   assert.ok(seenInput?.learnedRules?.includes("Each was learned from a real failure and proven by the value oracle or sustained prevention."));
   assert.ok(seenInput?.learnedRules?.includes("Treat them as an extension of the anti-pattern catalog: if a spec violates one, REJECT."));
 });
+
+// ── WS2.4 (full-flow remediation, code-mode restoration): ReviewInput.target?: TestTarget already
+// exists on the type and buildReviewerPromptAssembled ALREADY reads it (`input.target === "code" ?
+// "tests" : "E2E tests"`, prompts.ts) — grep-confirmed the render side was ready; only this adapter
+// never populated the field, so every code-mode review rendered "E2E tests" framing regardless of
+// target. ReviewPortStaticContext now carries `target`, threaded verbatim onto ReviewInput.target. ──
+
+test("review() threads ctx.target onto ReviewInput.target for a code-mode review (closes the 'E2E tests' framing bug)", async () => {
+  let seenTarget: string | undefined;
+  const rendering: PromptRenderingPort = {
+    ...fakeRendering(),
+    renderReviewer: (input) => { seenTarget = (input as { target?: string }).target; return { text: "reviewer-prompt", sectionSizes: {} }; },
+  };
+  const verdicts = fakeVerdicts({ approved: true, corrections: [], parsed: true, valid: true, issues: [] });
+  const adapter = new ReviewPortAdapter({ runtime: fakeRuntime("verdict-json"), rendering, verdicts }, {
+    diff: "", mirrorDir: "/mirrors/org/code-app", e2eRelDir: "e2e", appName: "app", mode: "diff", target: "code",
+  });
+
+  await adapter.review("/mirrors/org/code-app", cases);
+
+  assert.equal(seenTarget, "code", "ReviewInput.target must carry 'code' so buildReviewerPromptAssembled renders 'tests', not 'E2E tests'");
+});
+
+test("review() threads ctx.target:'e2e' unchanged (backward compatible default framing)", async () => {
+  let seenTarget: string | undefined;
+  const rendering: PromptRenderingPort = {
+    ...fakeRendering(),
+    renderReviewer: (input) => { seenTarget = (input as { target?: string }).target; return { text: "reviewer-prompt", sectionSizes: {} }; },
+  };
+  const verdicts = fakeVerdicts({ approved: true, corrections: [], parsed: true, valid: true, issues: [] });
+  const adapter = new ReviewPortAdapter({ runtime: fakeRuntime("verdict-json"), rendering, verdicts }, {
+    diff: "", mirrorDir: "/mirrors/org/app", e2eRelDir: "e2e", appName: "app", mode: "diff", target: "e2e",
+  });
+
+  await adapter.review("/mirrors/org/app/e2e", cases);
+
+  assert.equal(seenTarget, "e2e");
+});

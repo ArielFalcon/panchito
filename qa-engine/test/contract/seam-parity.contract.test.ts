@@ -615,7 +615,7 @@ describe("seam-parity: COMPOSITION (CompositionConfig vs buildRewrittenCompositi
     const nonOptional: Array<keyof typeof cfg> = [
       "repo", "appName", "mirrorDir", "e2eRelDir", "branch", "target", "mode", "needsReview",
       "shadow", "onFailure", "maxRetries", "isCode", "coveragePolicyMode", "vcs", "generationUseCase",
-      "reviewRuntime", "staticGate", "executionStrategies", "objectiveSignal", "coveragePolicy",
+      "reviewRuntime", "validationStrategies", "executionStrategies", "objectiveSignal", "coveragePolicy",
       "githubPr", "githubIssue", "checkout",
     ];
     for (const field of nonOptional) {

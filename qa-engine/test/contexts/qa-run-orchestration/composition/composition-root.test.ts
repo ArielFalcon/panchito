@@ -57,8 +57,9 @@ function fakeConfig(overrides: Partial<CompositionConfig> = {}): CompositionConf
       rendering: { renderReviewer: () => ({ text: "", sectionSizes: {} }) },
       verdicts: { parseReview: () => ({ approved: true, corrections: [], parsed: true, valid: true, issues: [] }) },
     },
-    staticGate: {
-      validateAll: async () => ({ ok: true, errors: [], infra: false }),
+    validationStrategies: {
+      e2e: { validateAll: async () => ({ ok: true, errors: [], infra: false }) },
+      code: { validate: async () => ({ ok: true, errors: [], infra: false }) },
     },
     executionStrategies: {
       e2e: { run: async () => ({ verdict: "pass", cases: [], logs: "" }) },
@@ -125,7 +126,10 @@ test("buildProduction(rewritten) drives a full run end-to-end through the 11 wir
 test("buildProduction wires cfg.reflectorPort through to RunQaUseCase — a static-gate invalid run reaches reflector.reflect()", async () => {
   let reflectCallCount = 0;
   const cfg = fakeConfig({
-    staticGate: { validateAll: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"], infra: false }) },
+    validationStrategies: {
+      e2e: { validateAll: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"], infra: false }) },
+      code: { validate: async () => ({ ok: true, errors: [], infra: false }) },
+    },
     reflectorPort: {
       reflect: async () => { reflectCallCount++; },
     },
@@ -339,6 +343,104 @@ test("buildProduction(rewritten) wires setupCollaborators.code into the run when
 
   assert.equal(setupCalled, true, "the code setup collaborator must run before generation when setupCollaborators is wired");
   assert.equal(outcome.verdict, "pass");
+});
+
+// WS2.1 (full-flow remediation): the seam the stubbed parity suite missed — a code:true app's
+// composed specDir must be the BARE mirrorDir (legacy parity: setupCode(mirrorDir, ...) /
+// executeCode(mirrorDir, ...), git show 1228ea7~1:src/pipeline.ts:1299,2497), never
+// `mirrorDir/e2e` (a directory that does not exist for a code-mode watched repo). Captures the
+// specDir the composed WorkspacePortAdapter actually produced via the SAME setupCollaborators.code
+// capture point the test above already uses (setup(specDir, ...) receives workspace.specDir
+// verbatim — see setup-port.adapter.ts).
+test("buildProduction(rewritten) composes specDir as the bare mirrorDir for a code:true app (WorkspacePortAdapter target-awareness)", async () => {
+  let capturedSpecDir: string | undefined;
+  const cfg = fakeConfig({
+    target: "code",
+    isCode: true,
+    mirrorDir: "/mirrors/org/code-app",
+    checkout: async () => "/mirrors/org/code-app",
+    setupCollaborators: {
+      e2e: async () => { throw new Error("must not be called for target 'code'"); },
+      code: async (specDir) => { capturedSpecDir = specDir; },
+    },
+  });
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "code",
+    runId: "composition-root-specdir-code",
+  });
+
+  assert.equal(capturedSpecDir, "/mirrors/org/code-app", "code target: specDir must be the bare mirrorDir, never mirrorDir/e2e");
+  assert.equal(outcome.verdict, "pass");
+});
+
+// WS2.2 (full-flow remediation): the code target dispatches ValidationPort to CodeValidationStrategy,
+// never StaticGateAdapter — the compile-feedback gate ported from src/qa/code-validate.ts (Filter B
+// for CODE mode, previously unwired). A toolchain failure (infra:true) must resolve to infra-error,
+// never invalid, and execute() must never be reached.
+test("buildProduction(rewritten) dispatches ValidationPort to the code strategy for a code:true app — a toolchain failure resolves to infra-error, never reaches execute()", async () => {
+  let executeCalled = false;
+  const cfg = fakeConfig({
+    target: "code",
+    isCode: true,
+    validationStrategies: {
+      e2e: { validateAll: async () => { throw new Error("must not be called for target 'code'"); } },
+      code: { validate: async () => ({ ok: false, errors: ["[compile] JAVA_HOME is not set"], infra: true }) },
+    },
+    executionStrategies: {
+      e2e: { run: async () => { throw new Error("must not be called for target 'code'"); } },
+      code: { run: async () => { executeCalled = true; return { verdict: "pass", cases: [], logs: "" }; } },
+    },
+  });
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "code",
+    runId: "composition-root-code-validate-infra",
+  });
+
+  assert.equal(outcome.verdict, "infra-error", "a code-target compile-gate toolchain failure must resolve to infra-error, not invalid");
+  assert.equal(executeCalled, false, "a validation failure must block BEFORE execution, never call it");
+});
+
+// WS2.4 (full-flow remediation, code-mode restoration): a code-target review must render the
+// "tests" framing (buildReviewerPromptAssembled's own `input.target === "code" ? "tests" : "E2E
+// tests"`), not "E2E tests" — closes the ReviewPortAdapter wiring gap (target was never threaded).
+test("buildProduction(rewritten) threads cfg.target:'code' onto ReviewInput.target — the code-mode review no longer renders 'E2E tests' framing", async () => {
+  let seenTarget: string | undefined;
+  const cfg = fakeConfig({
+    target: "code",
+    isCode: true,
+    needsReview: true,
+    reviewRuntime: {
+      runtime: { openSession: async () => ({ prompt: async () => ({ output: "{}" }), dispose: async () => {} }) },
+      rendering: {
+        renderReviewer: (input: { target?: string }) => { seenTarget = input.target; return { text: "", sectionSizes: {} }; },
+      },
+      verdicts: { parseReview: () => ({ approved: true, corrections: [], parsed: true, valid: true, issues: [] }) },
+    },
+  });
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+
+  await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "code",
+    runId: "composition-root-review-target-code",
+  });
+
+  assert.equal(seenTarget, "code", "ReviewInput.target must be 'code' for a code-target run");
 });
 
 test("buildProduction(rewritten) surfaces infra-error when a wired setup collaborator throws", async () => {

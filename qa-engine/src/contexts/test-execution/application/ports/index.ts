@@ -45,6 +45,17 @@ export interface ExecutionResult { verdict: RunVerdict; cases: QaCase[]; logs: s
 export interface ExecutionStrategyPort {
   run(req: ExecutionRequest): Promise<ExecutionResult>;
 }
+
+// WS2.2 (full-flow remediation, code-mode restoration): Filter B for the CODE target — a
+// compile-feedback gate, ported from src/qa/code-validate.ts's validateCodeProject (legacy had
+// this; qa-engine never wired it — the code target previously had NO pre-execution feedback at
+// all). [SWAP — StaticGateAdapter (e2e: tsc/eslint-playwright/playwright --list/manifest) vs this
+// (code: per-ecosystem compile-only command, e.g. `mvn test-compile`/`tsc --noEmit`/`go vet`)].
+// Returns the SAME ValidationResult shape StaticGatePort.validateAll does, so ValidationPortAdapter
+// can dispatch between the two without widening RunQaUseCase's own validation.validate() contract.
+export interface CodeValidatePort {
+  validate(specDir: string, changedFiles?: string[]): Promise<ValidationResult>;
+}
 // Static gate (tsc/eslint-playwright/playwright --list/manifest) — lifted from ValidateDeps.
 // validateAll runs the FULL gate (all 4 checks + the zero-assertion guard) in one call, matching
 // the behavior of the legacy validateSpecs. Consumers that call validateAll cannot silently skip

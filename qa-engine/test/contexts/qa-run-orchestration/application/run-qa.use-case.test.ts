@@ -745,6 +745,39 @@ test("RunQaUseCase — invalid-issue: execute() is NEVER called (static gate blo
   assert.equal(executeCallCount, 0, "a static-gate failure must block BEFORE execution, never call it");
 });
 
+// WS2.2 (full-flow remediation, code-mode restoration): a code-target validation failure whose
+// `infra:true` (a broken/missing toolchain — e.g. JAVA_HOME misconfigured) must resolve to
+// "infra-error", not "invalid" — the compile gate itself could not run, so the failure is
+// inconclusive infrastructure, never a code defect blamed on the agent. Empirically verified
+// (grep-traced) BEFORE this fix: run-qa.use-case.ts's static-gate branch returned "invalid"
+// unconditionally regardless of validation.infra — this test would have failed pre-fix.
+test("RunQaUseCase — a code-target validation failure with infra:true resolves to infra-error, not invalid", async () => {
+  let executeCallCount = 0;
+  const { ports } = stubPorts({
+    validate: async () => ({ ok: false, errors: ["[compile] JAVA_HOME is not set and could not be found."], infra: true }),
+  });
+  ports.execution.execute = async () => { executeCallCount++; return { verdict: "pass", cases: [], logs: "" }; };
+  const useCase = new RunQaUseCase({ ...ports, config: { ...baseConfig, isCode: true } });
+
+  const out = await useCase.run({ ...baseInput, target: "code", runId: "ws2-2-code-infra-error" });
+
+  assert.equal(out.decision.verdict, "infra-error", "a broken toolchain (validation.infra:true) must map to infra-error, never invalid");
+  assert.equal(executeCallCount, 0, "an infra-error validation failure must block BEFORE execution, never call it");
+});
+
+// e2e parity: an e2e static-gate failure whose infra:true is ALSO infra-error today (the same fix
+// applies uniformly — the verdict-mapping branch is target-agnostic, only validation.infra matters).
+test("RunQaUseCase — an e2e-target validation failure with infra:true ALSO resolves to infra-error (target-agnostic fix)", async () => {
+  const { ports } = stubPorts({
+    validate: async () => ({ ok: false, errors: ["playwright: browser binary missing"], infra: true }),
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "ws2-2-e2e-infra-error" });
+
+  assert.equal(out.decision.verdict, "infra-error");
+});
+
 test("RunQaUseCase — infra-error: execute() is NEVER called (DEV unhealthy before execution)", async () => {
   let executeCallCount = 0;
   const { ports } = stubPorts({ waitUntilServing: async () => ({ ok: false, error: new Error("DEV unhealthy") }) });
@@ -2324,6 +2357,66 @@ test("KEYSTONE: the SAME diff-mode PASS run WITHOUT input.triggerRepo still thre
   await useCase.run({ ...baseInput, mode: "diff", runId: "keystone-monorepo-control" });
 
   assert.equal(seenDiff, "diff --git a/src/x.ts b/src/x.ts", "a monorepo (non-cross-repo) run must be unaffected by the triggerRepo guard — control case for the test above");
+});
+
+// WS2.3 (full-flow remediation, code-mode restoration): both measure() call sites (the mainline
+// coverage/oracle measurement and the enforce-mode coverage-regen re-measure) must thread the run's
+// REAL BlastRadius (the same runBlastRadius built from classificationIntent.changedFiles that feeds
+// structuralSignal) instead of the hardcoded BlastRadius.of(input.sha, []) placeholder. The mutation
+// oracle (StrykerMutationOracleAdapter, code target) forwards br.changedFiles into
+// selectMutateTargets — an empty literal meant code-mode's oracle NEVER scoped to the diff, running
+// unscoped (slower, diluted valueScore that feeds WS1.4's promotion gate).
+test("KEYSTONE: measure() receives the run's REAL BlastRadius (changedFiles from classificationIntent), not an empty placeholder", async () => {
+  let seenChangedFiles: readonly string[] | undefined;
+  const { ports } = stubPorts({
+    classify: async () => ({
+      action: "generate",
+      reason: "diff touches src/orders.ts",
+      diff: "diff --git a/src/orders.ts b/src/orders.ts",
+      intent: { type: "fix", breaking: false, message: "fix: correct order total calculation", changedFiles: ["src/orders.ts", "src/orders.test.ts"] },
+    }),
+    measure: async (br) => {
+      seenChangedFiles = br.changedFiles;
+      return { status: "unknown", ratio: null };
+    },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: { ...baseConfig, isCode: true } });
+
+  await useCase.run({ ...baseInput, target: "code", mode: "diff", runId: "ws2-3-real-blast-radius" });
+
+  // BlastRadius.of() sorts+dedupes its changedFiles (see blast-radius.ts) — assert set equality,
+  // not literal array order.
+  assert.deepEqual([...(seenChangedFiles ?? [])].sort(), ["src/orders.test.ts", "src/orders.ts"], "measure() must receive the REAL changed files, not an empty BlastRadius.of(sha, []) placeholder");
+});
+
+test("KEYSTONE: the enforce-mode coverage-regen re-measure ALSO receives the run's REAL BlastRadius", async () => {
+  const seenChangedFilesPerCall: (readonly string[] | undefined)[] = [];
+  let measureCallCount = 0;
+  const { ports } = stubPorts({
+    classify: async () => ({
+      action: "generate",
+      reason: "diff touches src/orders.ts",
+      diff: "diff --git a/src/orders.ts b/src/orders.ts",
+      intent: { type: "fix", breaking: false, message: "fix: correct order total calculation", changedFiles: ["src/orders.ts"] },
+    }),
+    measure: async (br) => {
+      measureCallCount++;
+      seenChangedFilesPerCall.push(br.changedFiles);
+      // First call blocks (fail); the regen fires; the SECOND call (re-measure) is what this test pins.
+      return measureCallCount === 1
+        ? { status: "fail" as const, ratio: 0.2, uncovered: [{ file: "src/orders.ts", lines: [1] }] }
+        : { status: "pass" as const, ratio: 0.9 };
+    },
+    blocks: (status) => status === "fail",
+    generate: async () => ({ specs: ["a.spec.ts"], approved: true }),
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: { ...baseConfig, coveragePolicyMode: "enforce" } });
+
+  await useCase.run({ ...baseInput, mode: "diff", runId: "ws2-3-regen-real-blast-radius" });
+
+  assert.equal(measureCallCount, 2, "expected the enforce-mode one-shot regen to trigger a second measure() call");
+  assert.deepEqual(seenChangedFilesPerCall[0], ["src/orders.ts"], "the FIRST measure() call must carry the real changed files");
+  assert.deepEqual(seenChangedFilesPerCall[1], ["src/orders.ts"], "the regen's re-measure() call must ALSO carry the real changed files, not an empty placeholder");
 });
 
 // ── ObserverPort wiring (bug fix): the rewritten engine's RunRecord/RunEvents stayed frozen

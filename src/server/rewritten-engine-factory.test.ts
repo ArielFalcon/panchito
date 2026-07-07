@@ -46,7 +46,8 @@ test("buildRewrittenCompositionConfig maps an e2e AppConfig into a complete Comp
   assert.equal(config.diff, "", "static diff is always empty — the rewritten adapters resolve the REAL per-run diff dynamically");
   assert.ok(config.vcs, "vcs collaborator must be wired");
   assert.ok(config.generationUseCase, "generationUseCase collaborator must be wired");
-  assert.ok(config.staticGate, "staticGate collaborator must be wired");
+  assert.ok(config.validationStrategies.e2e, "e2e validation (static gate) collaborator must be wired");
+  assert.ok(config.validationStrategies.code, "code validation (compile gate, WS2.2 full-flow remediation) collaborator must be wired");
   assert.ok(config.executionStrategies.e2e, "e2e execution strategy must be wired");
   assert.ok(config.executionStrategies.code, "code execution strategy must be wired");
   assert.ok(config.setupCollaborators?.e2e, "SetupPort e2e collaborator must be wired (CLAUDE.md run-flow step 3 — missing before this fix)");

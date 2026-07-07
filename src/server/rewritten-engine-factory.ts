@@ -74,6 +74,7 @@ import { capDiff, capText } from "@contexts/generation/infrastructure/prompt-cap
 import { StaticGateAdapter } from "@contexts/test-execution/infrastructure/static-gate.adapter";
 import { E2eExecutionStrategy } from "@contexts/test-execution/infrastructure/e2e-execution.strategy";
 import { CodeExecutionStrategy } from "@contexts/test-execution/infrastructure/code-execution.strategy";
+import { CodeValidationStrategy } from "@contexts/test-execution/infrastructure/code-validation.strategy";
 import { StrykerMutationOracleAdapter } from "@contexts/objective-signal/infrastructure/stryker-mutation-oracle.adapter";
 import { FaultInjectionOracleAdapter } from "@contexts/objective-signal/infrastructure/fault-injection-oracle.adapter";
 import { GitHubPrAdapter } from "@contexts/workspace-and-publication/infrastructure/github-pr.adapter";
@@ -111,6 +112,7 @@ import { parseVerdict } from "../integrations/verdict-parse";
 import { parseReviewerVerdict } from "../integrations/verdict-validate";
 import { roleWindowBytes } from "../integrations/model-window-catalog";
 import { validateSpecs, defaultValidateDeps } from "../qa/validate";
+import { validateCodeProject, defaultCodeValidateDeps } from "../qa/code-validate";
 import { runE2E, defaultExecuteDeps, defaultCleanupDeps } from "../qa/execute";
 import { runCodeTests, defaultCodeExecuteDeps, runCodeCoverage } from "../qa/code-runner";
 import { setupE2eProject, defaultSetupDeps } from "../qa/setup";
@@ -482,6 +484,12 @@ export function buildRewrittenCompositionConfig(
     checkManifest: defaultValidateDeps.checkManifest,
     validateAll: (specDir) => validateSpecs(specDir, defaultValidateDeps),
   });
+  // WS2.2 (full-flow remediation, code-mode restoration): Filter B for the CODE target — the
+  // compile-feedback gate ported from src/qa/code-validate.ts, wired here for the first time
+  // (previously the code target had NO pre-execution feedback at all; a compile error surfaced
+  // only as an opaque whole-build failure at execution). Mirrors the e2e staticGate's own
+  // construction immediately above.
+  const codeValidate = new CodeValidationStrategy((repoDir, opts) => validateCodeProject(repoDir, defaultCodeValidateDeps, opts));
 
   const e2e = new E2eExecutionStrategy((specDir, opts) => runE2E(specDir, opts, defaultExecuteDeps));
   const code = new CodeExecutionStrategy((repoDir, opts) => runCodeTests(repoDir, opts, defaultCodeExecuteDeps));
@@ -597,7 +605,7 @@ export function buildRewrittenCompositionConfig(
       rendering,
       verdicts,
     },
-    staticGate,
+    validationStrategies: { e2e: staticGate, code: codeValidate },
     executionStrategies: { e2e, code },
     // SetupPort (CLAUDE.md run-flow step 3): bootstraps the config/e2e seed into e2e/ (first run) +
     // npm ci, or installs the repo's own deps for code mode — the SAME real src/qa/setup.ts /

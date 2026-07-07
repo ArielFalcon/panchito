@@ -265,7 +265,13 @@ export interface ReviewPort {
   }>;
 }
 export interface ValidationPort {
-  validate(specDir: string): Promise<{ ok: boolean; errors: string[]; infra?: boolean }>; // infra optional: mirrors src/qa/validate.ts CheckResult
+  // changedFiles: WS2.2 (full-flow remediation) — optional trailing arg (the SAME "enrichment
+  // object"-adjacent, absent-safe precedent ExecutionOpts/ReviewEnrichment already established),
+  // threaded to the code-target compile gate for diff-scoped compilation (mirrors
+  // ExecutionRequest.changedFiles' own module-scoping concept). Ignored by the e2e static gate
+  // (StaticGateAdapter.validateAll takes no such param) — present only so the SAME port call site
+  // in RunQaUseCase can pass it uniformly regardless of target.
+  validate(specDir: string, changedFiles?: string[]): Promise<{ ok: boolean; errors: string[]; infra?: boolean }>; // infra optional: mirrors src/qa/validate.ts CheckResult
 }
 // W4 fix (F1, audit-verified cutover blocker): the legacy's execute() opts (src/qa/execute.ts
 // ExecuteOptions, threaded through pipeline.ts's own runE2E/runCodeTests call sites) carry
