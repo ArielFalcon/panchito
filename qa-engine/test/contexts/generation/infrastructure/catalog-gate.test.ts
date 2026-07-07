@@ -64,7 +64,7 @@ test("catalogGate: no test-ids → empty result (never throws)", () => {
 // untouched; these tests pipe a REAL RouteSnapshot through buildRouteCatalog (not a hand-built
 // RouteCatalog) so the invariant is proven end-to-end, not just asserted on a pre-shaped fixture.
 
-test("catalogGate: a RouteSnapshot degraded via a classified runtimeErrors signal is advisory, never fail-closed", () => {
+test("catalogGate: a RENDERED route with runtime errors is CAPTURED (trusted) — the gate fail-closes on a genuinely-absent selector instead of being disabled by app-health", () => {
   const spec = `await page.goto("/owners/new"); await page.getByTestId("ghost-btn").click();`;
   const snapshot = {
     route: "/owners/new",
@@ -74,10 +74,10 @@ test("catalogGate: a RouteSnapshot degraded via a classified runtimeErrors signa
     runtimeErrors: [{ type: "pageerror", text: "TypeError: undefined is not a function" }],
   };
   const catalog = buildRouteCatalog(snapshot);
-  assert.equal(catalog.status, "degraded", "sanity: the snapshot must actually degrade");
+  // Live-probe fix: runtime errors no longer degrade a rendered route — its selectors are real.
+  assert.equal(catalog.status, "captured", "a rendered route stays trusted despite runtime errors");
   const r = catalogGate(spec, catalog);
-  assert.deepEqual(r.failClosed, [], "a runtimeErrors-degraded route must never fail-closed-block");
-  assert.equal(r.advisory, 1);
+  assert.deepEqual(r.failClosed, ["ghost-btn"], "on a TRUSTED route the ghost-btn (absent from the real testId catalog) is now correctly fail-closed — the grounding gate works instead of being disabled by a console error");
 });
 
 test("catalogGate: a RouteSnapshot degraded via zero captured nodes is advisory, never fail-closed", () => {

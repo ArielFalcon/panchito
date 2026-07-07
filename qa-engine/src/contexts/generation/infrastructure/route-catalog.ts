@@ -54,20 +54,26 @@ export function buildTestIdIndex(capturedValues: readonly string[]): Map<string,
   return index;
 }
 
-// Fix 2 (audit leak 5): inline mirror of src/qa/failure-adjudicator.ts's classifyRuntimeErrors
-// (FRAMEWORK_ERROR_RE / BENIGN_NOISE_RE). classifyRuntimeErrors does NOT exist in qa-engine/src, so
-// the regex logic is duplicated here rather than imported — same conservative, project-agnostic
-// signature set: NG#### (Angular runtime error codes), the Angular zone/ErrorHandler "ERROR Error:"
-// console prefix, "Uncaught" (any framework's browser prefix), and "Unhandled Promise rejection".
-// Deliberately does NOT match a bare "Error:" — a false positive on a handled/logged error would mask
-// a real generated-test defect, which is the wrong safe direction (mirrors the legacy decision).
+// Runtime-error signature set (conservative, project-agnostic): NG#### (Angular runtime error codes),
+// the Angular zone/ErrorHandler "ERROR Error:" console prefix, "Uncaught" (any framework's browser
+// prefix), and "Unhandled Promise rejection". A bare "Error:" is deliberately NOT matched (apps
+// routinely console.error("Error: …") for handled/logged errors — a false positive there would be the
+// wrong direction). Benign transport noise is excluded.
 const FRAMEWORK_ERROR_RE = /\bNG\d+\b|ERROR Error:|Uncaught|Unhandled Promise rejection/;
 const BENIGN_NOISE_RE = /Failed to load resource|favicon|net::ERR_/i;
 
-/** True when a route's raw captured runtime signals contain a genuine app defect: ANY `pageerror`
- *  (always a strong signal — an uncaught JS exception, regardless of text), or a `console` entry that
- *  matches FRAMEWORK_ERROR_RE after excluding BENIGN_NOISE_RE. Mirrors classifyRuntimeErrors' logic. */
-function hasAppDefectSignal(errors: readonly { type: string; text: string }[]): boolean {
+/** True when a route's captured runtime signals contain a genuine app-defect signature: ANY
+ *  `pageerror` (an uncaught JS exception), or a `console` entry matching FRAMEWORK_ERROR_RE after
+ *  excluding benign transport noise.
+ *
+ *  IMPORTANT (live-probe fix): this is an ADVISORY signal only — it drives the agent-facing
+ *  "possibly broken app; verify live" warning in dom-snapshot.ts and mirrors the FixLoop
+ *  adjudicator's runtime-error classification. It DELIBERATELY does NOT feed buildRouteCatalog's
+ *  degrade decision: a route that rendered a full DOM stays a trustworthy source of selectors even
+ *  when the app logged an error (a missing icon, an optional 401, a third-party warning — the norm in
+ *  real SPAs). Grounding trust is structural (empty render / capture error / redirect), not
+ *  app-health. Conflating the two disabled the selector gate on essentially every production app. */
+export function hasRuntimeErrorSignal(errors: readonly { type: string; text: string }[]): boolean {
   for (const e of errors) {
     if (e.type === "pageerror") return true;
     if (BENIGN_NOISE_RE.test(e.text)) continue;
@@ -115,10 +121,21 @@ function isRedirect(route: string, finalUrl: string | undefined): boolean {
  *  existing `error` check; none of them change the `error` path's behavior. */
 export function buildRouteCatalog(snapshot: RouteSnapshot): RouteCatalog {
   const captureFailed = snapshot.error !== undefined;
-  const runtimeDefect = !captureFailed && hasAppDefectSignal(snapshot.runtimeErrors ?? []);
   const emptyRender = !captureFailed && (snapshot.nodes?.length ?? 0) === 0;
   const redirected = !captureFailed && isRedirect(snapshot.route, snapshot.finalUrl);
-  const degraded = captureFailed || runtimeDefect || emptyRender || redirected;
+  // Live-probe root cause (transversal): grounding trust is about whether the DOM STRUCTURALLY
+  // rendered — captureFailed / emptyRender / redirect — NOT about whether the app logged a runtime
+  // error. A route that renders a full DOM but emits a NON-fatal console/pageerror (a missing
+  // FontAwesome icon, a 401 on an optional auth probe, a third-party warning — the norm in real
+  // SPAs) is still a trustworthy source of REAL selectors. Degrading it here (as an earlier
+  // "runtimeErrors ⇒ degraded" rule did) disabled the selector gate on essentially every
+  // production app that logs anything, forcing the agent to author ungrounded selectors — the exact
+  // quality collapse this gate exists to prevent. Runtime errors are ADJUDICATION evidence, not a
+  // grounding-trust signal, and are handled in their proper places, untouched by this change: the
+  // formatted DOM snapshot still warns the AGENT "possibly broken app; verify live"
+  // (dom-snapshot.ts), and the FixLoop adjudicator still classifies them as app_defect on a FAILING
+  // test (adjudicate.service.ts Rule 2.6). Only the miscategorised grounding-catalog degrade is removed.
+  const degraded = captureFailed || emptyRender || redirected;
   return {
     route: snapshot.route,
     status: degraded ? ROUTE_STATUS.DEGRADED : ROUTE_STATUS.CAPTURED,

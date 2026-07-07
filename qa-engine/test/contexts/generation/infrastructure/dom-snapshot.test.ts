@@ -437,7 +437,7 @@ test("formatDomSnapshot warns on a route that rendered empty (zero nodes, no cap
   assert.match(out, /possibly broken app/, "an empty route must warn, not render a silent bare header");
 });
 
-test("formatDomSnapshot warns on a route degraded via a classified runtimeErrors signal", () => {
+test("formatDomSnapshot gives a runtimeErrors route an ADVISORY warning but STILL renders its nodes (grounding trusted, app-health flagged)", () => {
   const out = formatDomSnapshot([{
     route: "/owners/new",
     nodes: ["button: Submit"],
@@ -445,7 +445,8 @@ test("formatDomSnapshot warns on a route degraded via a classified runtimeErrors
     runtimeErrors: [{ type: "pageerror", text: "TypeError: undefined is not a function" }],
   }]);
   assert.match(out, /route \/owners\/new:/);
-  assert.match(out, /possibly broken app/, "a runtimeErrors-degraded route must warn");
+  assert.match(out, /the app logged runtime errors/, "a rendered route with runtime errors must carry the advisory heads-up");
+  assert.match(out, /button: Submit/, "its nodes MUST still be rendered — the route is a trusted grounding source, only app-health is advisory");
 });
 
 test("formatDomSnapshot warns on a route degraded via a redirect (finalUrl mismatch)", () => {

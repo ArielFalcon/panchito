@@ -24,7 +24,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scrubEnv } from "../../../shared-infrastructure/process-sandbox/scrub-env.ts";
 import { ProcessKillAdapter } from "../../../shared-infrastructure/process-sandbox/process-kill.adapter.ts";
-import { buildRouteCatalog, buildTestIdIndex, degradedRouteWarning, ROUTE_STATUS } from "./route-catalog.ts";
+import { buildRouteCatalog, buildTestIdIndex, degradedRouteWarning, hasRuntimeErrorSignal, ROUTE_STATUS } from "./route-catalog.ts";
 import type { ChangedElement } from "../../../shared-kernel/diff-parser/changed-element.ts";
 
 const processKill = new ProcessKillAdapter();
@@ -296,15 +296,21 @@ export function formatDomSnapshot(snaps: RouteSnapshot[], changed?: ChangedEleme
       lines.push(`route ${s.route}: (could not capture — ${s.error})`);
       continue;
     }
-    // Fix 2 (audit leak 5) sub-case 5: a route can render WITHOUT a capture `error` yet still be
-    // degraded (empty nodes, a classified runtimeErrors signal, or a redirect) — reuse
-    // buildRouteCatalog's SAME degrade policy (imported above) so this warning never drifts from the
-    // gate's own trust decision. A degraded/empty route gets a warning line instead of a silent bare
-    // header, so the agent knows NOT to trust this route's grounding.
+    // A route that STRUCTURALLY failed to render (empty nodes, capture error, or a redirect — the
+    // buildRouteCatalog degrade policy) gets a warning line instead of a silent bare header and its
+    // nodes are NOT rendered: the agent must not trust this route's grounding.
     if (buildRouteCatalog(s).status === ROUTE_STATUS.DEGRADED) {
       lines.push(`route ${s.route}: (route rendered empty or errored — possibly broken app; verify live)`);
       continue;
     }
+    // Live-probe fix: a route that DID render but whose app logged a runtime error (a missing icon, an
+    // uncaught handler, a framework error) stays a TRUSTED grounding source — its nodes ARE rendered
+    // below — but the agent still gets an advisory heads-up so it verifies live and does not blindly
+    // assert app-generated content. This warning is DECOUPLED from grounding trust: the route is
+    // captured, the selectors are real, only the app's own health is in question.
+    const runtimeErrorAdvisory = hasRuntimeErrorSignal(s.runtimeErrors ?? [])
+      ? " (note: the app logged runtime errors — possibly a defect; verify live before asserting on app-generated content)"
+      : "";
     const all = s.nodes ?? [];
     // Over budget: keep EVERY priority (table/list) node, then fill the remaining budget with the
     // rest in document order. Guarantees the author always sees the table that drives its selectors.
@@ -321,7 +327,7 @@ export function formatDomSnapshot(snaps: RouteSnapshot[], changed?: ChangedEleme
     // State tokens are rendered DISPLAY-ONLY as a suffix after the attr hint and before [CHANGED:].
     // They NEVER appear on structural "(present)" marker lines.
     const stateMap = s.states && s.states.size > 0 ? s.states : null;
-    lines.push(`route ${s.route}:`);
+    lines.push(`route ${s.route}:${runtimeErrorAdvisory}`);
     for (const n of nodes) {
       // State suffix: rendered only for non-marker lines. The attrMap lookup uses the bare key
       // (normalizeKey strips state if nodes[] ever carries a suffix — defensive); the state is looked

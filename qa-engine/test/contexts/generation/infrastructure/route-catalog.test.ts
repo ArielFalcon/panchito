@@ -70,42 +70,36 @@ test("degradedRouteWarning lists the degraded routes loudly and is undefined whe
   assert.equal(degradedRouteWarning([captured]), undefined, "all-captured ⇒ no warning");
 });
 
-// ── Fix 2 (audit leak 5): degrade on classified runtimeErrors, zero nodes, or a redirect ──
-// A route can render "successfully" (no capture `error`) yet still be UNTRUSTWORTHY grounding: a
-// broken client-side render throws a pageerror / logs a framework error, the page ends up with zero
-// interactive nodes, or the app silently redirected (e.g. bounced to a login page). All three must
-// degrade the SAME way a capture `error` does — never fail-closed-block (that invariant belongs to
-// catalog-gate.ts and is NOT touched here), only lose trust.
+// ── Grounding trust is STRUCTURAL: degrade only on zero nodes, a capture error, or a redirect ──
+// Live-probe fix (transversal): a route that renders a full DOM but emits a runtime error (a missing
+// FontAwesome icon, a 401 on an optional auth probe, an uncaught handler somewhere on the page) is
+// STILL a trustworthy source of real selectors — its captured nodes are real. Runtime errors are
+// ADJUDICATION evidence (agent-facing "possibly broken app" warning + the FixLoop adjudicator on a
+// FAILING test), NOT a grounding-trust signal. Degrading the catalog on them disabled the selector
+// gate on essentially every production app that logs anything. So runtimeErrors — console OR
+// pageerror — no longer degrade a route that actually rendered; only structural render failure does.
 
-test("buildRouteCatalog degrades a route with a pageerror runtime signal (always a strong signal)", () => {
+test("buildRouteCatalog does NOT degrade a rendered route on a pageerror — a rendered DOM's selectors stay trustworthy (runtime errors are adjudication evidence, not grounding-trust)", () => {
   const cat = buildRouteCatalog({
     route: "/owners/new",
     nodes: ["button: Submit"],
     settled: true,
     runtimeErrors: [{ type: "pageerror", text: "TypeError: Cannot read properties of undefined" }],
   });
-  assert.equal(cat.status, "degraded", "an uncaught pageerror must degrade the route");
+  assert.equal(cat.status, "captured", "a full render is trustworthy for grounding even with a pageerror — the defect surfaces at execution/adjudication, not here");
 });
 
-test("buildRouteCatalog degrades a route whose console errors match FRAMEWORK_ERROR_RE (NG#### / ERROR Error: / Uncaught / Unhandled Promise rejection)", () => {
-  const cases = ["NG0100: Expression changed", "ERROR Error: something broke", "Uncaught ReferenceError: x", "Unhandled Promise rejection: y"];
+test("buildRouteCatalog does NOT degrade a rendered route on framework-shaped console errors (the real-SPA norm: missing icons, ErrorHandler logs) — grounding must survive them", () => {
+  const cases = ["NG0100: Expression changed", "ERROR Error: Could not find icon with iconName=shopping-cart", "Uncaught ReferenceError: x", "Unhandled Promise rejection: y"];
   for (const text of cases) {
     const cat = buildRouteCatalog({ route: "/x", nodes: ["button: y"], settled: true, runtimeErrors: [{ type: "console", text }] });
-    assert.equal(cat.status, "degraded", `console text "${text}" must match FRAMEWORK_ERROR_RE and degrade`);
+    assert.equal(cat.status, "captured", `a rendered route must stay CAPTURED despite the console error "${text}" — it is adjudication evidence, not a grounding-distrust signal`);
   }
 });
 
-test("buildRouteCatalog does NOT degrade on benign console noise (favicon / resource load / net::ERR_)", () => {
-  const cases = ["Failed to load resource: the server responded with 404", "favicon.ico 404", "net::ERR_INTERNET_DISCONNECTED"];
-  for (const text of cases) {
-    const cat = buildRouteCatalog({ route: "/x", nodes: ["button: y"], settled: true, runtimeErrors: [{ type: "console", text }] });
-    assert.equal(cat.status, "captured", `benign noise "${text}" must NOT degrade the route`);
-  }
-});
-
-test("buildRouteCatalog does NOT degrade on a bare 'Error:' console message (deliberate — avoids false positives on handled/logged errors)", () => {
-  const cat = buildRouteCatalog({ route: "/x", nodes: ["button: y"], settled: true, runtimeErrors: [{ type: "console", text: "Error: something was logged, not thrown" }] });
-  assert.equal(cat.status, "captured", "a bare 'Error:' must not match the classifier (mirrors failure-adjudicator.ts)");
+test("buildRouteCatalog still degrades a route with a runtime error AND zero nodes — the render genuinely failed (structural, via emptyRender)", () => {
+  const cat = buildRouteCatalog({ route: "/x", nodes: [], settled: true, runtimeErrors: [{ type: "pageerror", text: "TypeError: boom during render" }] });
+  assert.equal(cat.status, "degraded", "zero nodes is the structural broken-render signal and still degrades, independent of the runtime error");
 });
 
 test("buildRouteCatalog degrades a route with zero captured nodes", () => {
