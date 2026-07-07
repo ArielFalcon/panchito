@@ -4077,3 +4077,239 @@ test("C-R7: anti-inert integration proof — a recording CrossRepoImpactPort fak
   assert.deepEqual(invocations[0]?.links, [link]);
   assert.notEqual(out.decision.verdict, "infra-error", "a wired crossRepoImpact collaborator must never destabilize the run");
 });
+
+// ── WS4 (full-flow remediation, 4.1): thread the missing FixLoop inputs — initialSpecSources,
+// the fix-loop generation closure's own specSources return, and failureDomSnapshot. Before this
+// fix, GenerationPort.generate()'s return type carried no specSources field at all (the barrel's
+// own contract), so round 0's Lever-2 check ALWAYS saw specSources:[] no matter what the real
+// GenerationPortAdapter's readSpecSource collaborator produced — checkSpecSelectors(specSources,
+// trees) with an empty specSources array structurally cannot find a contradiction (its for-loop
+// never runs). These tests prove the wiring by driving a REAL absent-selector contradiction through
+// checkSpecSelectors' own pure contract: a spec source referencing a selector genuinely absent from
+// the failure-point tree can only surface as a contradiction if specSources reaches Lever-2 non-empty. ──
+
+const ABSENT_BUTTON_SPEC_SOURCE = `await page.getByRole("button", { name: "Submit" }).click();`;
+
+test("WS4 4.1: initialSpecSources threads from the initial generation into FixLoopInput, arming round-0's Lever-2 check", async () => {
+  const capturedEnrichments: Array<{ selectorContradictions?: readonly string[]; fixCases?: readonly unknown[] }> = [];
+  let generateCallCount = 0;
+  const { ports } = stubPorts({
+    generate: async (_objectives, _specDir, _signal, _diff, enrichment) => {
+      generateCallCount++;
+      capturedEnrichments.push(enrichment ?? {});
+      // The initial (round -1) generate() call returns the spec whose source text is later re-read
+      // as specSources — GenerationPort's widened return type (this fix) carries it back here.
+      return { specs: ["a.spec.ts"], approved: true, specSources: [ABSENT_BUTTON_SPEC_SOURCE] };
+    },
+    execute: async () => ({
+      verdict: "fail" as const,
+      // The failure-point tree carries a "button" role but with a DIFFERENT name ("Cancel", not
+      // "Submit") — this is what makes the absence CONCLUSIVE (verifiable) per selectorPresent's own
+      // contract: a role must be seen at least once with a real name for a name-mismatch to count as
+      // verifiable-absent rather than merely unverifiable (a bare "heading: Owners" tree, with no
+      // "button" role at all, would be unverifiable — see selectorPresent's `anyRoleWithRealName`
+      // gate). Lever-2 must find "button:Submit" verifiably absent IF (and only if) initialSpecSources
+      // reached round 0's check.
+      cases: [{ name: "checkout", status: "fail" as const, detail: "boom", failureDom: "heading: Owners\nbutton: Cancel" }],
+      logs: "x",
+    }),
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "ws4-4.1-initial-spec-sources-arms-round-0" });
+
+  assert.ok(generateCallCount > 1, "sanity: the FixLoop must have engaged at least one regen round");
+  const roundWithContradiction = capturedEnrichments.find(
+    (e) => (e.fixCases?.length ?? 0) > 0 && (e.selectorContradictions?.length ?? 0) > 0,
+  );
+  assert.ok(
+    roundWithContradiction,
+    "expected a FixLoop regen call carrying a selectorContradictions entry for the absent button:Submit selector — this can ONLY happen if initialSpecSources reached round 0's Lever-2 check",
+  );
+  assert.match(roundWithContradiction!.selectorContradictions![0]!, /button.*Submit.*NOT in the captured failure-point tree/);
+});
+
+const CLEAN_HEADING_SPEC_SOURCE = `await page.getByRole("heading", { name: "Owners" }).click();`;
+
+test("WS4 4.1: the fix-loop generation closure's returned specSources re-arms the NEXT round's Lever-2 check", async () => {
+  const capturedEnrichments: Array<{ selectorContradictions?: readonly string[] }> = [];
+  let generateCallCount = 0;
+  let executeCallCount = 0;
+  const { ports } = stubPorts({
+    generate: async (_objectives, _specDir, _signal, _diff, enrichment) => {
+      generateCallCount++;
+      capturedEnrichments.push(enrichment ?? {});
+      // Round -1 (initial generate, generateCallCount===1) returns a CLEAN spec (its selector IS
+      // present in every failure tree below) — round 0's Lever-2 check finds nothing absent, so the
+      // loop does NOT short-circuit (fix-loop.aggregate.ts sub-decision 6) and genuinely re-executes.
+      // The FixLoop's OWN first regen call (generateCallCount===2, triggered by execute() failing)
+      // returns the absent-button spec source instead — this must re-arm round 1's Lever-2 check via
+      // the CLOSURE's returned specSources (never the static initial seed, which stayed clean).
+      const specSources = generateCallCount === 1 ? [CLEAN_HEADING_SPEC_SOURCE] : [ABSENT_BUTTON_SPEC_SOURCE];
+      return { specs: ["a.spec.ts"], approved: true, specSources };
+    },
+    execute: async () => {
+      executeCallCount++;
+      // Same "verifiable-absent" requirement as the sibling test above: the tree must carry the
+      // "button" role WITH a real (different) name for the "Submit" mismatch to be conclusive; the
+      // "heading: Owners" node keeps the CLEAN spec's own selector genuinely present every round. The
+      // failing case's NAME changes every round (Signal B — decideProgress's "failing name set
+      // changed" progress signal) so the fix-loop's fail-closed gate stays OPEN through round 1
+      // instead of closing to break-needs-human before a second regen call can ever happen.
+      return {
+        verdict: "fail" as const,
+        cases: [{ name: `checkout-${executeCallCount}`, status: "fail" as const, detail: "boom", failureDom: "heading: Owners\nbutton: Cancel" }],
+        logs: "x",
+      };
+    },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: { ...baseConfig, maxRetries: 2 } });
+
+  await useCase.run({ ...baseInput, runId: "ws4-4.1-regen-specsources-rearms-next-round" });
+
+  assert.ok(executeCallCount > 1, "sanity: the FixLoop must have retried at least once (round 0 found nothing absent, so it did not short-circuit)");
+  const roundWithContradiction = capturedEnrichments.find((e) => (e.selectorContradictions?.length ?? 0) > 0);
+  assert.ok(
+    roundWithContradiction,
+    "expected a LATER FixLoop regen call to carry a selectorContradictions entry sourced from the PRIOR round's own regen specSources — proving the closure's returned specSources feeds the next round's Lever-2 check",
+  );
+  assert.match(roundWithContradiction!.selectorContradictions![0]!, /button.*Submit.*NOT in the captured failure-point tree/);
+});
+
+test("WS4 4.1: failureDomSnapshot threads the initial run's failure-point DOM into the FixLoop's regen prompt", async () => {
+  const capturedDomSnapshots: (string | undefined)[] = [];
+  const { ports } = stubPorts({
+    execute: async () => ({
+      verdict: "fail" as const,
+      cases: [{ name: "checkout", status: "fail" as const, detail: "boom", failureDom: "heading: Owners\nbutton: Submit" }],
+      logs: "x",
+    }),
+  });
+  ports.generation.generate = async (_objectives, _specDir, _signal, _diff, enrichment) => {
+    capturedDomSnapshots.push(enrichment?.domSnapshot);
+    return { specs: ["a.spec.ts"], approved: true };
+  };
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "ws4-4.1-failure-dom-snapshot-threaded" });
+
+  const regenWithSnapshot = capturedDomSnapshots.find((s) => s?.includes("heading: Owners"));
+  assert.ok(
+    regenWithSnapshot,
+    "expected at least one FixLoop regen call's domSnapshot to carry the initial failing case's captured failure-point DOM (built once from the run's initial failing cases, threaded via FixLoopInput.failureDomSnapshot)",
+  );
+});
+
+// ── WS4 (full-flow remediation, 4.2): wire FixLoopDeps.revalidate to the existing ValidationPort.
+// Before this fix, a regenerated e2e spec with a compile error burned a live DEV execution to
+// discover what tsc/eslint already knew — the aggregate no-ops gracefully when revalidate is absent
+// (fix-loop.aggregate.ts's own [SWAP] contract), but nothing ever supplied it. ────────────────────
+
+test("WS4 4.2: after a fix-round regen, the FixLoop's revalidate hook is invoked against the SAME ValidationPort", async () => {
+  let validateCallCount = 0;
+  let executeCallCount = 0;
+  const { ports } = stubPorts({
+    validate: async () => {
+      validateCallCount++;
+      return { ok: true, errors: [] };
+    },
+    execute: async () => {
+      executeCallCount++;
+      if (executeCallCount === 1) {
+        return { verdict: "fail" as const, cases: [{ name: "checkout", status: "fail" as const, detail: "boom" }], logs: "x" };
+      }
+      return { verdict: "pass" as const, cases: [{ name: "checkout", status: "pass" as const }], logs: "" };
+    },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "ws4-4.2-revalidate-invoked" });
+
+  assert.notEqual(out.decision.verdict, "invalid");
+  // 1 initial validate() (the static gate, pre-execute) + at least 1 revalidate() call inside the
+  // FixLoop's own e2e retry branch (fix-loop.aggregate.ts:351-354) before the retry-execute.
+  assert.ok(validateCallCount > 1, `expected the FixLoop's revalidate hook to call validation.validate() again before the retry-execute, got ${validateCallCount} total validate() call(s)`);
+});
+
+test("WS4 4.2: a failed revalidation short-circuits the retry — execute() is NOT called again, run keeps its original verdict (per the aggregate's own contract)", async () => {
+  let validateCallCount = 0;
+  let executeCallCount = 0;
+  const { ports } = stubPorts({
+    validate: async () => {
+      validateCallCount++;
+      // The FIRST validate() call is the static gate (pre-execute) — must pass so we actually reach
+      // execute(). The SECOND call is the FixLoop's own revalidate() hook, post-regen — fails,
+      // per this test's scope.
+      if (validateCallCount === 1) return { ok: true, errors: [] };
+      return { ok: false, errors: ["[lint] no-wait-for-timeout"] };
+    },
+    execute: async () => {
+      executeCallCount++;
+      return { verdict: "fail" as const, cases: [{ name: "checkout", status: "fail" as const, detail: "boom" }], logs: "x" };
+    },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "ws4-4.2-failed-revalidate-short-circuits" });
+
+  assert.equal(executeCallCount, 1, "a failed revalidate() must break the retry loop BEFORE any retry-execute call (fix-loop.aggregate.ts:351-354's own `if (!reValidation.ok) break;` contract) — execute() must have been called only the initial time");
+});
+
+// ── WS4 (full-flow remediation, 4.3): the static-fix repair loop must carry the validation errors
+// into the regen call as fixCases-shaped enrichment, and ONLY for repair rounds (never the initial
+// generate() call). Before this fix, the repair regen call site (run-qa.use-case.ts ~:746) spread
+// bare baseEnrichment — the tsc/eslint errors never reached the prompt at all. ─────────────────────
+
+test("WS4 4.3: a static-gate repair round threads the validation errors into the regen call as fixCases, bounded", async () => {
+  const capturedFixCases: Array<readonly { name: string; detail?: string }[] | undefined> = [];
+  let validateCallCount = 0;
+  let generateCallCount = 0;
+  const { ports } = stubPorts({
+    validate: async () => {
+      validateCallCount++;
+      return validateCallCount === 1
+        ? { ok: false, errors: ["39:11  error  'specialtyCell' is assigned a value but never used"] }
+        : { ok: true, errors: [] };
+    },
+    generate: async (_objectives, _specDir, _signal, _diff, enrichment) => {
+      generateCallCount++;
+      capturedFixCases.push(enrichment?.fixCases as readonly { name: string; detail?: string }[] | undefined);
+      return { specs: ["a.spec.ts"], approved: true };
+    },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "ws4-4.3-static-fix-threads-errors" });
+
+  assert.equal(out.decision.verdict, "pass", "the static gate must still recover within MAX_STATIC_FIX_ROUNDS");
+  assert.equal(generateCallCount, 2, "exactly 1 initial generate() + 1 repair regen for a single-round recovery");
+
+  // Call 0 is the INITIAL generate() — must NOT carry the static-gate fixCases enrichment.
+  assert.equal(capturedFixCases[0], undefined, "the INITIAL generate() call must NOT receive static-gate fixCases enrichment");
+
+  // Call 1 is the repair regen — must carry a "static-gate"-named case whose detail includes the
+  // validation error text, bounded (never unboundedly long).
+  const repairFixCases = capturedFixCases[1];
+  assert.ok(repairFixCases && repairFixCases.length > 0, "the repair regen call must receive fixCases carrying the static-gate errors");
+  const staticGateCase = repairFixCases!.find((c) => c.name === "static-gate");
+  assert.ok(staticGateCase, "expected a fixCases entry named 'static-gate' so the prompt shows the source of the failure");
+  assert.match(staticGateCase!.detail ?? "", /specialtyCell/, "the static-gate fixCases entry must carry the actual validation error text");
+  assert.ok((staticGateCase!.detail?.length ?? 0) <= 4000, "the static-gate error detail must be bounded (~4000 chars cap), never unboundedly long");
+});
+
+test("WS4 4.3: the initial generate() call never carries static-gate fixCases enrichment even when the static-fix loop never engages (clean first pass)", async () => {
+  const capturedFixCases: unknown[] = [];
+  const { ports } = stubPorts({
+    generate: async (_objectives, _specDir, _signal, _diff, enrichment) => {
+      capturedFixCases.push(enrichment?.fixCases);
+      return { specs: ["a.spec.ts"], approved: true };
+    },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "ws4-4.3-clean-pass-no-static-fixcases" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(capturedFixCases.length, 1, "a clean pass never engages the static-fix loop — exactly ONE generate() call");
+  assert.equal(capturedFixCases[0], undefined, "the initial generate() call must never carry static-gate fixCases enrichment");
+});

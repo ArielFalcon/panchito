@@ -86,6 +86,33 @@ const DEFAULT_MIN_COVERAGE_RATIO = 0.7;
 // policy, gating the static-fix loop this use-case's validate phase now ports.
 const MAX_STATIC_FIX_ROUNDS = 2;
 
+// WS4 (full-flow remediation, 4.3): bounds the static-gate validation-error text threaded into the
+// static-fix repair regen's fixCases enrichment (below) — a raw tsc/eslint error dump can run
+// unboundedly long; this cap keeps the prompt payload sane, matching every other prompt-facing cap
+// in this codebase (e.g. renderCoverageGap's own `max` slice, objective-signal/domain/
+// render-coverage-gap.ts).
+const STATIC_GATE_ERROR_DETAIL_MAX_CHARS = 4000;
+
+// WS4 (full-flow remediation, 4.1): builds the prompt-side "failure-point DOM" snapshot threaded
+// into FixLoopInput.failureDomSnapshot — a small, LOCAL renderer (this use-case's own concern, not a
+// shared domain helper) mirroring the deleted legacy's buildFailureDom (src/pipeline.ts, removed at
+// cutover 1228ea7): one "### <case name>" header per failing case that carries a failureDom,
+// followed by that case's captured a11y tree lines verbatim. Distinct from fix-loop.aggregate.ts's
+// OWN buildFailureDomLines (which splits a SINGLE case's failureDom into lines for Lever-2's
+// per-case check) — this renders potentially MULTIPLE cases into ONE prompt-facing block. Pure;
+// returns undefined when no failing case carries a failureDom (matches the aggregate's own
+// "absent when no failed case carries a failureDom" doc on FixLoopInput.failureDomSnapshot).
+function buildFailureDomSnapshot(cases: readonly QaCase[]): string | undefined {
+  const parts: string[] = [];
+  for (const c of cases) {
+    if (c.status !== "fail" || !c.failureDom) continue;
+    const lines = c.failureDom.split("\n").filter((l) => l.trim());
+    if (lines.length === 0) continue;
+    parts.push(`### ${c.name}\n${lines.join("\n")}`);
+  }
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
+}
+
 // Config the use-case reads (kept minimal and explicit — the full AppConfig shape is a src/
 // concern; the composition root (Slice E) narrows the real config to this input, matching the
 // same discipline the domain VOs already use for their own inputs).
@@ -712,12 +739,14 @@ export class RunQaUseCase {
     // already got a fix-loop — this loop closes that asymmetry: feed the validation errors back via
     // a fresh GenerationPort.generate() call and re-validate, bounded by MAX_STATIC_FIX_ROUNDS (=2,
     // src/pipeline.ts:804, verbatim). Skipped entirely when nothing was generated to repair (mirrors
-    // the legacy's own `(result?.specs.length ?? 0) > 0` conjunct at src/pipeline.ts:2261) — this
-    // composition's GenerationPort carries no reviewCorrections-shaped feedback field (the SAME
-    // established port-shape limit the FixLoop's own generation wiring already accepts a few lines
-    // below, per fix-loop.aggregate.ts's own header), so the repair regen call is the identical
-    // `this.deps.generation.generate([], workspace.specDir)` shape this use-case already uses
-    // everywhere else — porting the LOOP CONDITION + BOUND exactly, not a new feedback channel.
+    // the legacy's own `(result?.specs.length ?? 0) > 0` conjunct at src/pipeline.ts:2261).
+    //
+    // WS4 (full-flow remediation, 4.3): the repair regen call threads the validation errors into
+    // GenerationEnrichment.fixCases — a synthetic single QaCase named "static-gate" carrying the
+    // (bounded) error text, so the repair prompt actually shows WHAT tsc/eslint reported, instead of
+    // the bare `baseEnrichment` this use-case previously spread with no feedback channel at all.
+    // ONLY the repair rounds below get this enrichment — the INITIAL generate() call (above this
+    // loop) never carries it, matching the loop's own "nothing to repair yet" scope.
     //
     // `lastGenerated` mirrors the legacy's own `result` reassignment across the loop (src/
     // pipeline.ts:2269's `result = await generateOnce(...)`) — the LATEST generation attempt's own
@@ -743,7 +772,14 @@ export class RunQaUseCase {
       // "Dynamic diff" fix: the repair regeneration reuses the SAME classificationDiff, not a
       // dropped/empty value — a repair round must see the same real change context the initial
       // generate() call did. W2 fix (F5): same for classificationIntent, via baseEnrichment.
-      lastGenerated = await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff, baseEnrichment);
+      //
+      // WS4 (4.3): bound the error text before threading it — a raw tsc/eslint dump can be
+      // arbitrarily long; cap at STATIC_GATE_ERROR_DETAIL_MAX_CHARS so the prompt payload stays sane.
+      const staticGateErrorDetail = validation.errors.join("\n\n").slice(0, STATIC_GATE_ERROR_DETAIL_MAX_CHARS);
+      lastGenerated = await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff, {
+        ...baseEnrichment,
+        fixCases: [{ name: "static-gate", status: "fail", detail: staticGateErrorDetail }],
+      });
       validation = await this.deps.validation.validate(workspace.specDir);
     }
 
@@ -1011,7 +1047,14 @@ export class RunQaUseCase {
           // clear them after this first FixLoop regen so later rounds rely solely on the FixLoop's
           // own fresh post-failure selector check.
           pendingSelectorContradictions = [];
-          return { specs: r.specs, approved: r.approved, note: r.note };
+          // WS4 (full-flow remediation, 4.1): forward the JUST-GENERATED spec sources back to the
+          // aggregate — fix-loop.aggregate.ts's own run() stores this as `lastRegenResult.specSources`
+          // and reads it at the START of the NEXT round's Lever-2 check (FixLoopGenerateResult.
+          // specSources' own doc: "every round AFTER round 0 ... uses the CURRENT regen call's OWN
+          // FixLoopGenerateResult.specSources, fresh every round"). Previously dropped here, so every
+          // round after the first re-armed Lever-2 with an empty array regardless of what the
+          // GenerationPort adapter actually produced.
+          return { specs: r.specs, approved: r.approved, note: r.note, specSources: r.specSources };
         },
       };
       const fixLoopSelectorCheck: FixLoopSelectorCheckPort = {
@@ -1021,6 +1064,13 @@ export class RunQaUseCase {
         execution: fixLoopExecution,
         generation: fixLoopGeneration,
         selectorCheck: fixLoopSelectorCheck,
+        // WS4 (full-flow remediation, 4.2): reuse the EXISTING ValidationPort — no new port. Mirrors
+        // the legacy's own re-validate-before-retry-execute step (fix-loop.aggregate.ts:351-354's
+        // `if (this.deps.revalidate) { ... if (!reValidation.ok) break; }`). Before this fix, a
+        // regenerated e2e spec with a compile error silently skipped straight to a live DEV
+        // execution to discover what tsc/eslint already knew — this closes that gap by giving the
+        // aggregate's own [SWAP] contract a real collaborator instead of the graceful no-op default.
+        revalidate: (specDir) => this.deps.validation.validate(specDir),
       });
       const cycleBudget = CycleBudget.derive({ maxRetries: cfg.maxRetries });
       const wallClockBudget = WallClockBudget.derive({ cycleBudget, agentTimeoutMs: 0 });
@@ -1036,6 +1086,19 @@ export class RunQaUseCase {
       // measured this run — filtering would silently undercount the keystone's own denominator (the
       // passing, non-retried specs' lines would look uncovered).
       const coverageWillMeasure = generating && input.mode === "diff" && cfg.coveragePolicyMode !== "off";
+      // WS4 (full-flow remediation, 4.1): the INITIAL (pre-loop) generation's own spec source text —
+      // `lastGenerated` is the LATEST generation attempt reaching this point (the static-fix loop's
+      // own repair rounds, above, may have reassigned it; a run with no static-gate repairs reads the
+      // very first `generated`). Seeds round 0's Lever-2 check (FixLoopInput.initialSpecSources' own
+      // doc: "mirrors src/pipeline.ts's `result` local being ALREADY populated by the pre-loop
+      // generation"). Absent when the GenerationPort adapter has no readSpecSource collaborator
+      // wired — never fabricated.
+      const initialSpecSources = lastGenerated.specSources;
+      // WS4 (full-flow remediation, 4.1): the failure-point DOM snapshot for the FixLoop's regen
+      // prompt, built ONCE from THIS run's initial failing cases (before any FixLoop round has
+      // re-executed anything) — matches FixLoopInput.failureDomSnapshot's own doc ("a snapshot string
+      // for the regen prompt"). Absent when none of the initial failing cases carried a failureDom.
+      const failureDomSnapshot = buildFailureDomSnapshot(run.cases);
       const fixLoopResult = await fixLoop.run({
         initialRun: { verdict: run.verdict, cases: run.cases },
         isCode: cfg.isCode,
@@ -1048,6 +1111,9 @@ export class RunQaUseCase {
         devHealthy,
         namespace: input.runId,
         coverageWillMeasure,
+        ...(initialSpecSources?.length ? { initialSpecSources } : {}),
+        ...(failureDomSnapshot ? { failureDomSnapshot } : {}),
+        specDir: workspace.specDir,
       });
       run = { verdict: fixLoopResult.run.verdict, cases: fixLoopResult.run.cases, logs: run.logs };
       // FIX 3 (judgment-day D.7 batch 2): ACCUMULATE onto the shared `retries` counter (`+=`), not a

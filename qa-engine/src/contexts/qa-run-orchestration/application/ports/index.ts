@@ -199,7 +199,15 @@ export interface GenerationPort {
   // enrichment: W2 fix (F1) — see GenerationEnrichment's own header. Optional trailing object;
   // absent -> the adapter's OpencodeRunInput carries none of these fields, an unchanged prompt
   // (exactly today's behavior).
-  generate(objectives: readonly Objective[], specDir: string, signal?: AbortSignal, diff?: string, enrichment?: GenerationEnrichment): Promise<{ specs: string[]; approved: boolean; note?: string }>;
+  //
+  // specSources: WS4 (full-flow remediation, 4.1) — the JUST-GENERATED spec files' own source text,
+  // mirrors FixLoopGenerateResult.specSources' own contract (fix-loop.aggregate.ts) and the REAL
+  // GenerationPortAdapter's already-wired (optional) readSpecSource collaborator, which populates
+  // this exact field on its concrete return value today — this barrel simply never declared it, so
+  // the field was silently dropped at this interface boundary and Lever-2's checkSpecSelectors
+  // always received specSources:[] no matter what the adapter produced underneath. Absent/empty ->
+  // unchanged (no readSpecSource collaborator wired, or nothing was generated) — never fabricated.
+  generate(objectives: readonly Objective[], specDir: string, signal?: AbortSignal, diff?: string, enrichment?: GenerationEnrichment): Promise<{ specs: string[]; approved: boolean; note?: string; specSources?: string[] }>;
 }
 // ReviewPort is the authoritative publish gate's seam. blockingCount distinguishes blocking
 // corrections (must regenerate) from advisory ones (may approve when only advisory remain);
