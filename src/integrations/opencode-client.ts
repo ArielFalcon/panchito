@@ -772,7 +772,14 @@ export async function runOpencode(
       console.warn(`[qa] generator verdict failed the typed contract (${genCheck.issues.join("; ")}); requesting one repair.`);
       // Phase 6a: notify the shared cycle counter before the repair re-prompt fires.
       opts?.onRepair?.();
-      finalText = await session.prompt(repairInstruction("generator", genCheck.issues), { isRepair: true });
+      // WS9.1: pass the prior response's tail so the repair prompt is self-contained — a
+      // provider whose session does not remember the prior turn (Codex's exec-per-prompt
+      // transport) can genuinely recover its own verdict instead of fabricating one. Harmless
+      // for OpenCode (its server-side session already remembers the turn).
+      finalText = await session.prompt(
+        repairInstruction("generator", genCheck.issues, { priorResponseTail: finalText }),
+        { isRepair: true },
+      );
       if (!checkGeneratorVerdict(finalText).valid) {
         console.warn("[qa] generator verdict still invalid after repair — proceeding with best-effort parse (disk reconciliation still applies).");
       }
@@ -963,12 +970,15 @@ export interface ReviewResult {
 // The reviewer is a bounded, read-only judge (10 steps, contents inlined in the prompt) —
 // it must never inherit the generator's 25-minute worst-case budget: a hung reviewer would
 // add that whole window to the run before the loop fails closed.
-const REVIEWER_TIMEOUT_MS = Number(process.env.OPENCODE_REVIEWER_TIMEOUT_MS) || 6 * 60 * 1000;
+// Exported (WS9.3): CodexRuntimeStrategy imports this so both providers share ONE per-role
+// budget policy instead of Codex silently drifting from whatever this constant becomes.
+export const REVIEWER_TIMEOUT_MS = Number(process.env.OPENCODE_REVIEWER_TIMEOUT_MS) || 6 * 60 * 1000;
 // The explorer is a read-only PRE-pass; cap it well below the generator/diff budget so a hung
 // explorer cannot hold the sequential queue for the full window before the generator even starts.
 // 90s proved too tight on large microservice monorepos (petclinic): the read-only brief needs room
 // to finish; 240s still sits far under the generator's 25-minute worst case.
-const EXPLORER_TIMEOUT_MS = Number(process.env.OPENCODE_EXPLORER_TIMEOUT_MS) || 240 * 1000;
+// Exported (WS9.3): same cross-provider budget-sharing rationale as REVIEWER_TIMEOUT_MS above.
+export const EXPLORER_TIMEOUT_MS = Number(process.env.OPENCODE_EXPLORER_TIMEOUT_MS) || 240 * 1000;
 // The fan-out planner for a SCOPED mode (diff/manual — one commit or one guidance string) derives
 // objectives from the brief + code; it must NOT navigate (F3), so it needs nowhere near the generator's
 // per-mode budget. Bound it with its OWN deadline: it reads OPENCODE_PLANNER_TIMEOUT_MS, NOT the global
@@ -1020,7 +1030,12 @@ export async function reviewIndependently(
       console.warn(`[qa] reviewer verdict failed the typed contract (${v.issues.join("; ")}); requesting one repair.`);
       // Phase 6a: notify the shared cycle counter before the repair re-prompt fires.
       opts?.onRepair?.();
-      output = await session.prompt(repairInstruction("reviewer", v.issues), { isRepair: true });
+      // WS9.1: same self-contained-repair fallback as the generator path above — embed the
+      // prior response's tail so a stateless provider session can recover its own verdict.
+      output = await session.prompt(
+        repairInstruction("reviewer", v.issues, { priorResponseTail: output }),
+        { isRepair: true },
+      );
       v = parseReviewerVerdict(output);
     }
     if (v.parsed && v.valid) {

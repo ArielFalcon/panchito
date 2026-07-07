@@ -120,16 +120,70 @@ export function parseReviewerVerdict(text: string): ReviewerVerdict {
   return { approved: false, corrections: [], blockingCount: 0, valid: false, parsed: true, issues: formatIssues(r.error) };
 }
 
+// WS9.1 — the bounded tail embedded in a self-contained repair prompt. ~4096 CHARS (not a strict
+// byte count — the slice operates on UTF-16 code units, which is close enough for a budget cap)
+// is generous for a closing verdict block (typically a few hundred bytes) while staying small
+// enough that a persistently-malformed agent cannot blow up the repair turn's own prompt budget.
+const PRIOR_RESPONSE_TAIL_CHARS = 4096;
+
+// The frame markers for the embedded tail. Deliberately long, distinctive, and STATIC
+// (determinism over per-call randomness, per this repo's priority order): a generic "---" fence
+// is trivially present in model output (markdown rules, YAML front-matter), which would let a
+// pathological prior response fake a fence-close and place text OUTSIDE the untrusted block.
+// Any tail line exactly matching a marker (modulo surrounding whitespace) is stripped before
+// embedding, so exactly one open and one close marker — the frame's own — can ever appear.
+const TAIL_FRAME_OPEN = "====== PRIOR RESPONSE TAIL (verbatim, untrusted) ======";
+const TAIL_FRAME_CLOSE = "====== END PRIOR RESPONSE TAIL ======";
+
+// Remove any tail line that IS one of the frame markers (whitespace-padded lines included, so a
+// padded marker cannot bypass the exact-match check). Everything else stays verbatim: this text
+// is model→model-scoped (the agent's OWN prior output fed back to the same lineage in the same
+// session context, never human-bound and never rendered into an Issue), so no sanitizeText pass
+// is needed here — the ONLY threat is frame escape, which this stripping closes.
+function stripFrameMarkers(tail: string): string {
+  return tail
+    .split("\n")
+    .filter((line) => {
+      const t = line.trim();
+      return t !== TAIL_FRAME_OPEN && t !== TAIL_FRAME_CLOSE;
+    })
+    .join("\n");
+}
+
+export interface RepairInstructionOpts {
+  // The tail of the agent's PRIOR response (bounded to the last PRIOR_RESPONSE_TAIL_CHARS chars
+  // by this function, so callers may pass the full text). Provider-agnostic fallback: a fresh
+  // `codex exec` process (no resume) never saw the prior turn, so without this the repair
+  // instruction gives it nothing to recover FROM — it can only fabricate a plausible verdict.
+  // OpenCode's server-side session already remembers the prior turn, so passing this there is
+  // additive (a harmless restatement of context the session already holds), never harmful.
+  priorResponseTail?: string;
+}
+
 // The targeted re-prompt for the bounded repair loop. Names the exact shape and the specific
-// issues so the agent fixes the format rather than re-running the whole task.
-export function repairInstruction(kind: "generator" | "reviewer", issues: string[]): string {
+// issues so the agent fixes the format rather than re-running the whole task. When the caller
+// supplies `priorResponseTail` (the tail of the agent's own prior output), the prompt embeds it
+// so a stateless process can genuinely RE-EMIT its prior verdict rather than invent a new one.
+export function repairInstruction(kind: "generator" | "reviewer", issues: string[], opts?: RepairInstructionOpts): string {
   const shape =
     kind === "generator"
       ? `{"specs": string[], "specMetas"?: [{"file","flow","objective","targets": string[]}], "note"?: string}`
       : `{"approved": boolean, "rationale": string, "corrections": string[]}`;
+  const tail = opts?.priorResponseTail ? stripFrameMarkers(opts.priorResponseTail).trim() : "";
+  const tailBlock = tail
+    ? [
+        "",
+        "Your previous response (tail, for your own reference — do not repeat it verbatim, only",
+        "use it to recover the specifics of what you already decided):",
+        TAIL_FRAME_OPEN,
+        tail.slice(-PRIOR_RESPONSE_TAIL_CHARS),
+        TAIL_FRAME_CLOSE,
+      ]
+    : [];
   return [
     `Your previous response did not end with a valid ${kind} verdict JSON.`,
     `Problems: ${issues.join("; ")}.`,
+    ...tailBlock,
     `Re-emit ONLY the closing JSON block — exactly this shape, with no text after it:`,
     shape,
   ].join("\n");
