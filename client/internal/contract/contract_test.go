@@ -200,3 +200,51 @@ func TestOnboardingJobStatusDecodesIndexingStateFromServerJSON(t *testing.T) {
 		t.Fatalf("error not decoded: %+v", progress[1])
 	}
 }
+
+// Decoding a payload whose "resolution" carries the full per-edge summary (Add-Project Wizard,
+// Slice A hardening: `drift` added to ResolutionSummarySchema alongside edges/unresolved/external)
+// — the same no-drift guarantee as the tests above, now proving the whole resolution block,
+// including the new `drift` count, round-trips through the generated Go type. Two edges over
+// different transports (http, event) exercise the Transport enum on both members.
+func TestOnboardingJobStatusDecodesResolutionSummaryFromServerJSON(t *testing.T) {
+	const payload = `{
+		"state":"done","app":"shop","round":2,"ceiling":3,"candidatesScored":5,
+		"outcome":"winner",
+		"resolution":{
+			"edges":[
+				{"fromRepo":"org/web","toRepo":"org/svc-a","transport":"http","calls":14},
+				{"fromRepo":"org/web","toRepo":"org/svc-b","transport":"event","calls":3}
+			],
+			"drift":2,
+			"unresolved":4,
+			"external":1
+		},
+		"startedAt":"2026-07-08T00:00:00.000Z","finishedAt":"2026-07-08T00:02:00.000Z"
+	}`
+	var s OnboardingJobStatus
+	if err := json.Unmarshal([]byte(payload), &s); err != nil {
+		t.Fatalf("decode OnboardingJobStatus (resolution summary): %v", err)
+	}
+	if s.Resolution == nil {
+		t.Fatalf("resolution not decoded")
+	}
+	res := s.Resolution
+	if len(res.Edges) != 2 {
+		t.Fatalf("want 2 edges, got %d: %+v", len(res.Edges), res.Edges)
+	}
+	if e := res.Edges[0]; e.FromRepo != "org/web" || e.ToRepo != "org/svc-a" || e.Transport != OnboardingJobStatusResolutionEdgesTransportHttp || e.Calls != 14 {
+		t.Fatalf("first edge fields not decoded: %+v", e)
+	}
+	if e := res.Edges[1]; e.ToRepo != "org/svc-b" || e.Transport != OnboardingJobStatusResolutionEdgesTransportEvent {
+		t.Fatalf("second edge transport not decoded: %+v", e)
+	}
+	if res.Drift != 2 {
+		t.Fatalf("drift not decoded: got %v want 2", res.Drift)
+	}
+	if res.Unresolved != 4 {
+		t.Fatalf("unresolved not decoded: got %v want 4", res.Unresolved)
+	}
+	if res.External != 1 {
+		t.Fatalf("external not decoded: got %v want 1", res.External)
+	}
+}

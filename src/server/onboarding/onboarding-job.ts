@@ -20,6 +20,7 @@ import type { BoundaryProfile, RepoRef } from "@contexts/service-topology/domain
 import { serializeBoundary, spliceBoundariesBlock } from "./write-boundaries";
 import { aggregateResolution, type ResolutionSummary } from "./resolution-summary";
 import { redactError } from "../../util/redact";
+import { logJson } from "../../integrations/logger";
 
 /** const-object-then-type pattern (typescript SKILL) — never a raw string union. */
 export const ONBOARD_STATE = {
@@ -143,6 +144,7 @@ export interface OnboardingJobDeps {
 const DEFAULT_MIRROR_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_JOB_TIMEOUT_MS = 20 * 60 * 1000;
 const DEFAULT_INDEX_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_RESOLVE_TIMEOUT_MS = 60 * 1000;
 
 function defaultConfigPath(app: string): string {
   return `config/apps/${app}.yaml`;
@@ -344,9 +346,16 @@ export function createOnboardingJob(deps: OnboardingJobDeps): OnboardingJob {
         let resolution: ResolutionSummary | undefined;
         if (deps.resolveLinks) {
           try {
-            resolution = aggregateResolution(await deps.resolveLinks(result.profile, system, front));
-          } catch {
-            resolution = undefined; // advisory only — a resolve failure must never flip the winner outcome
+            const resolved = await raceTimeout(
+              deps.resolveLinks(result.profile, system, front),
+              DEFAULT_RESOLVE_TIMEOUT_MS,
+              () => {},
+              "resolving links timed out",
+            );
+            resolution = aggregateResolution(resolved);
+          } catch (err) {
+            resolution = undefined; // advisory only — never flips the winner outcome
+            logJson("warn", "onboarding resolveLinks failed (advisory)", { error: redactError(err) });
           }
         }
         status = { ...status, state: ONBOARD_STATE.done, outcome: ONBOARD_OUTCOME.winner, resolvedProfile: result.profile, resolution, finishedAt };

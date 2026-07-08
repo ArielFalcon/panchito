@@ -14,6 +14,9 @@ export interface ResolutionSummary {
   edges: BoundaryEdgeSummary[];
   unresolved: number;
   external: number;
+  /** Count of FE↔BE contract drift entries — frontend calls an endpoint the backend's OpenAPI
+   *  does not declare. A contract mismatch worth surfacing, not just a resolution gap. */
+  drift: number;
 }
 
 export function aggregateResolution(result: ResolveLinksResult): ResolutionSummary {
@@ -24,5 +27,10 @@ export function aggregateResolution(result: ResolveLinksResult): ResolutionSumma
     if (existing) existing.calls += 1;
     else byKey.set(key, { fromRepo: link.from.repo, toRepo: link.to.repo, transport: link.transport, calls: 1 });
   }
-  return { edges: [...byKey.values()], unresolved: result.unresolved.length, external: result.external.length };
+  return {
+    edges: [...byKey.values()],
+    unresolved: result.unresolved.length,
+    external: result.external.length,
+    drift: result.drift.length,
+  };
 }

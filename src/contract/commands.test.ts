@@ -121,7 +121,7 @@ test("OnboardingJobStatusSchema rejects an indexProgress entry with an invalid R
 test("OnboardingJobStatusSchema accepts a resolution summary", () => {
   const parsed = OnboardingJobStatusSchema.safeParse({
     state: "done", round: 1, ceiling: 3, candidatesScored: 1, outcome: "winner",
-    resolution: { edges: [{ fromRepo: "org/web", toRepo: "org/svc-a", transport: "http", calls: 2 }], unresolved: 0, external: 1 },
+    resolution: { edges: [{ fromRepo: "org/web", toRepo: "org/svc-a", transport: "http", calls: 2 }], unresolved: 0, external: 1, drift: 0 },
   });
   assert.equal(parsed.success, true);
 });
@@ -131,9 +131,19 @@ test("ResolutionSummarySchema rejects a BoundaryEdgeSummary entry with an invali
     edges: [{ fromRepo: "org/web", toRepo: "org/svc-a", transport: "rpc", calls: 1 }],
     unresolved: 0,
     external: 0,
+    drift: 0,
   }));
   assert.throws(() => ResolutionSummarySchema.parse({
     edges: [{ fromRepo: "org/web", toRepo: "org/svc-a", transport: "grpc", calls: 1 }],
+    unresolved: 0,
+    external: 0,
+    drift: 0,
+  }));
+});
+
+test("ResolutionSummarySchema rejects a payload missing drift (Slice A hardening: drift is required, mirroring unresolved/external)", () => {
+  assert.throws(() => ResolutionSummarySchema.parse({
+    edges: [],
     unresolved: 0,
     external: 0,
   }));

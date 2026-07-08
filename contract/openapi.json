@@ -2434,12 +2434,16 @@
               },
               "external": {
                 "type": "number"
+              },
+              "drift": {
+                "type": "number"
               }
             },
             "required": [
               "edges",
               "unresolved",
-              "external"
+              "external",
+              "drift"
             ],
             "additionalProperties": false
           }

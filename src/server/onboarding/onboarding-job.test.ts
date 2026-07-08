@@ -624,14 +624,23 @@ test("a winning run WITHOUT a resolveLinks dep still finishes winner with resolu
   assert.equal(status.resolution, undefined);
 });
 
-test("a winning run whose resolveLinks throws still finishes winner; resolution is swallowed to undefined (advisory-only, never flips the outcome)", async () => {
-  const job = createOnboardingJob(buildDeps({
-    resolveLinks: async () => { throw new Error("resolver exploded"); },
-  }));
-  await job.propose({ app: "nname", repo: "ArielFalcon/nname-gateway", services: [] });
+test("a winning run whose resolveLinks throws still finishes winner; resolution is swallowed to undefined, and the failure is logged once (redacted) instead of swallowed silently (advisory-only, never flips the outcome; review #1+#6)", async () => {
+  const originalWarn = console.warn;
+  const logged: string[] = [];
+  console.warn = (...args: unknown[]) => { logged.push(args.map(String).join(" ")); };
+  try {
+    const job = createOnboardingJob(buildDeps({
+      resolveLinks: async () => { throw new Error("resolver exploded"); },
+    }));
+    await job.propose({ app: "nname", repo: "ArielFalcon/nname-gateway", services: [] });
 
-  const status = job.status();
-  assert.equal(status.state, ONBOARD_STATE.done);
-  assert.equal(status.outcome, "winner", "a resolveLinks failure must never flip the winner outcome");
-  assert.equal(status.resolution, undefined);
+    const status = job.status();
+    assert.equal(status.state, ONBOARD_STATE.done);
+    assert.equal(status.outcome, "winner", "a resolveLinks failure must never flip the winner outcome");
+    assert.equal(status.resolution, undefined);
+    assert.equal(logged.length, 1, "the resolveLinks failure must be logged exactly once, not swallowed silently");
+    assert.match(logged[0] ?? "", /resolveLinks failed/i, "the log line must be identifiable as a resolveLinks failure");
+  } finally {
+    console.warn = originalWarn;
+  }
 });

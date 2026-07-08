@@ -1268,6 +1268,7 @@ type OnboardingJobStatus struct {
 	LastResolvedScore *float32                    `json:"lastResolvedScore,omitempty"`
 	Outcome           *OnboardingJobStatusOutcome `json:"outcome,omitempty"`
 	Resolution        *struct {
+		Drift float32 `json:"drift"`
 		Edges []struct {
 			Calls     float32                                     `json:"calls"`
 			FromRepo  string                                      `json:"fromRepo"`

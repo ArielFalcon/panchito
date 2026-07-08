@@ -300,6 +300,9 @@ export const ResolutionSummarySchema = z.object({
   edges: z.array(BoundaryEdgeSummarySchema),
   unresolved: z.number(),
   external: z.number(),
+  // FE↔BE contract drift count — frontend calls to endpoints the backend's OpenAPI doesn't
+  // declare (Add-Project Wizard, Slice A hardening). A contract mismatch worth surfacing.
+  drift: z.number(),
 });
 
 export const OnboardingJobStatusSchema = z.object({
