@@ -169,3 +169,87 @@ func TestFormEscInEditModeExits(t *testing.T) {
 		t.Fatalf("edit-mode form esc must emit backMsg; got %#v", cmd())
 	}
 }
+
+// The repo step's enter prefill must be idempotent: a form -> (esc) -> repo -> (enter) -> form
+// round-trip (B5) must NOT clobber a manually edited name or a typed base URL.
+func TestFormValuesSurviveRepoRoundTrip(t *testing.T) {
+	m := newOnboardModel(nil)
+	m.step = appStepRepo
+	m.repos = []contract.RepoListItem{{FullName: "org/web"}}
+	m, _ = m.updateRepo(tea.KeyMsg{Type: tea.KeySpace}) // select org/web (frontend)
+	m, _ = m.updateRepo(tea.KeyMsg{Type: tea.KeyEnter}) // -> form
+	m.nameInput.SetValue("my-shop")
+	m.baseInput.SetValue("https://dev.shop.com")
+	m, _ = m.updateForm(tea.KeyMsg{Type: tea.KeyEsc}) // back to repo (B5)
+	if m.step != appStepRepo {
+		t.Fatalf("expected repo step; got %v", m.step)
+	}
+	m, _ = m.updateRepo(tea.KeyMsg{Type: tea.KeyEnter}) // forward to form again
+	if m.nameInput.Value() != "my-shop" {
+		t.Fatalf("name wiped on round-trip: %q", m.nameInput.Value())
+	}
+	if m.baseInput.Value() != "https://dev.shop.com" {
+		t.Fatalf("base URL wiped on round-trip: %q", m.baseInput.Value())
+	}
+}
+
+// "/" must work even when the repo list came back empty — otherwise the manual-entry
+// input is focused but never rendered, so the user gets no feedback for their keystrokes.
+func TestManualInputRendersWhenRepoListEmpty(t *testing.T) {
+	m := newOnboardModel(nil)
+	m.step, m.width = appStepRepo, 100
+	m.repos = nil // empty list
+	m.manualActive = true
+	m.manualInput.SetValue("org/typed")
+	out := strings.ToLower(m.View())
+	if !strings.Contains(out, "org/typed") {
+		t.Fatalf("manual input must render even with an empty repo list:\n%s", out)
+	}
+}
+
+// The manual "/" entry's affordance is "add repo" — it must never remove an already-selected
+// repo, unlike the space-key toggle.
+func TestManualAddIsAddOnlyNeverRemoves(t *testing.T) {
+	m := newOnboardModel(nil)
+	m.step = appStepRepo
+	m.repos = []contract.RepoListItem{{FullName: "org/web"}}
+	m, _ = m.updateRepo(tea.KeyMsg{Type: tea.KeySpace}) // select org/web via space
+	if len(m.selected) != 1 {
+		t.Fatalf("expected 1 selected after space; got %d", len(m.selected))
+	}
+	m.manualActive = true
+	m.manualInput.SetValue("org/web")
+	m, _ = m.updateManualRepo(tea.KeyMsg{Type: tea.KeyEnter}) // manual-add the same slug again
+	if len(m.selected) != 1 {
+		t.Fatalf("manual add of an already-selected repo must be add-only, not a removal; got %+v", m.selected)
+	}
+	if m.selected[0].fullName != "org/web" || m.selected[0].role != "frontend" {
+		t.Fatalf("expected org/web to remain selected as frontend; got %+v", m.selected)
+	}
+}
+
+// reposLoadedMsg keeps m.selected across owner switches, but the checkbox list only marks
+// repos present in the CURRENT m.repos page — so a cross-owner or otherwise off-list pick
+// becomes invisible (and undoable only by memory) unless a summary surfaces it.
+func TestSelectionSummaryShowsOffListRepos(t *testing.T) {
+	m := newOnboardModel(nil)
+	m.step, m.width = appStepRepo, 100
+	m.repos = []contract.RepoListItem{{FullName: "org/web"}}
+	m.selected = []repoRole{{"org/web", "frontend"}, {"org/other-owner-repo", "service"}}
+	out := m.View()
+	if !strings.Contains(out, "org/other-owner-repo") {
+		t.Fatalf("selection summary must show off-list repos:\n%s", out)
+	}
+}
+
+// buildCreateInput must agree with frontendRepo() (used for display + the repo-step
+// prefill) on which frontend wins when more than one is present: the FIRST. This is
+// defensive — the UI's one-frontend invariant makes this unreachable in practice — but it
+// locks the contract so the two never silently diverge.
+func TestCreateInputTakesFirstFrontendWhenMultiplePresent(t *testing.T) {
+	sel := []repoRole{{"org/first", "frontend"}, {"org/second", "frontend"}}
+	in := buildCreateInput(sel, "shop", "https://dev", "", "e2e", "qa", true, true, nil)
+	if in.Repo != "org/first" {
+		t.Fatalf("expected the first frontend to win; got %q", in.Repo)
+	}
+}

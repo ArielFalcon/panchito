@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type appAdminMode string
@@ -258,8 +259,9 @@ func (m appAdminModel) updateRepo(msg tea.KeyMsg) (appAdminModel, tea.Cmd) {
 		}
 		m.err = ""
 		m.repo = m.frontendRepo()
-		m.nameInput.SetValue(suggestAppName(m.repo))
-		m.baseInput.SetValue("")
+		if strings.TrimSpace(m.nameInput.Value()) == "" {
+			m.nameInput.SetValue(suggestAppName(m.repo))
+		}
 		m.nameInput.Focus()
 		m.step = appStepForm
 	case "esc":
@@ -276,6 +278,21 @@ func (m *appAdminModel) toggleSelected(full string) {
 		if s.fullName == full {
 			m.selected = append(m.selected[:i], m.selected[i+1:]...)
 			return
+		}
+	}
+	role := "service"
+	if m.frontendRepo() == "" {
+		role = "frontend"
+	}
+	m.selected = append(m.selected, repoRole{fullName: full, role: role})
+}
+
+// addSelected adds the repo if not already selected (add-only, for the "/" manual entry). Role
+// defaults to frontend when none exists yet, else service. A slug already present is left as-is.
+func (m *appAdminModel) addSelected(full string) {
+	for _, s := range m.selected {
+		if s.fullName == full {
+			return // already selected — "add" is a no-op, never a removal
 		}
 	}
 	role := "service"
@@ -326,7 +343,7 @@ func (m appAdminModel) updateManualRepo(msg tea.KeyMsg) (appAdminModel, tea.Cmd)
 	case "enter":
 		slug := strings.TrimSpace(m.manualInput.Value())
 		if slug != "" {
-			m.toggleSelected(slug)
+			m.addSelected(slug)
 		}
 		m.manualInput.SetValue("")
 		m.manualActive = false
@@ -556,16 +573,25 @@ func (m appAdminModel) footerHint() string {
 // invariant is legible at a glance, not just enforced by validateSelection), the cursor marker
 // on top, and — when the user pressed "/" — the manual typed-slug entry inline above the list.
 func (m appAdminModel) renderRepos() string {
-	if len(m.repos) == 0 {
-		return hintStyle.Render("no repos found") + "\n"
-	}
 	w := contentWidth(m.width)
 	var b strings.Builder
-	b.WriteString(labelRule(w, "repos", hintStyle.Render(pluralize(len(m.repos), "repo", "repos"))) + "\n")
+	// Render regardless of whether m.repos is empty — "/" can be pressed on an empty list,
+	// and the input must still give visual feedback for what the user types.
 	if m.manualActive {
 		marker := lipgloss.NewStyle().Foreground(colEmber).Render("▸ ")
 		b.WriteString(marker + labelStyle.Render("add repo ") + m.manualInput.View() + "\n")
 	}
+	// m.selected persists across owner switches and manual adds, so it can hold repos not
+	// present on the current page (a different owner, or typed by hand) — the checkbox list
+	// below can't mark those, so recap the full pick list here where it's always visible.
+	if summary := m.renderSelectionSummary(w); summary != "" {
+		b.WriteString(summary + "\n")
+	}
+	if len(m.repos) == 0 {
+		b.WriteString(hintStyle.Render("no repos found") + "\n")
+		return b.String()
+	}
+	b.WriteString(labelRule(w, "repos", hintStyle.Render(pluralize(len(m.repos), "repo", "repos"))) + "\n")
 	for i, repo := range m.repos {
 		mark, role, label := "☐", "—", repo.FullName
 		for _, s := range m.selected {
@@ -588,6 +614,34 @@ func (m appAdminModel) renderRepos() string {
 		}
 	}
 	return b.String()
+}
+
+// renderSelectionSummary is a one-line recap of every selected repo (★ marks the frontend),
+// so picks made on a different owner page or via manual entry stay visible and reviewable
+// even once they scroll off the current m.repos page. Empty selection renders nothing.
+func (m appAdminModel) renderSelectionSummary(width int) string {
+	if len(m.selected) == 0 {
+		return ""
+	}
+	parts := make([]string, len(m.selected))
+	for i, s := range m.selected {
+		p := s.fullName
+		if s.role == "frontend" {
+			p += " ★"
+		}
+		parts[i] = p
+	}
+	line := fmt.Sprintf("selected (%d): %s", len(m.selected), strings.Join(parts, ", "))
+	return hintStyle.Render(truncateLine(line, width))
+}
+
+// truncateLine clips s to width display cells (ANSI-aware), appending an ellipsis when
+// clipped, so a one-line summary can never overflow the content grid.
+func truncateLine(s string, width int) string {
+	if width <= 0 || lipgloss.Width(s) <= width {
+		return s
+	}
+	return ansi.Truncate(s, width, "…")
 }
 
 // yesNo renders a boolean as a styled yes/no, matching the design language rather than
@@ -709,7 +763,9 @@ func buildCreateInput(sel []repoRole, name, baseURL, versionURL, target, prefix 
 	var services []contract.OnboardServiceInput
 	for _, s := range sel {
 		if s.role == "frontend" {
-			repo = s.fullName
+			if repo == "" {
+				repo = s.fullName // first frontend wins, matching frontendRepo()
+			}
 		} else {
 			services = append(services, contract.OnboardServiceInput{Repo: s.fullName})
 		}
