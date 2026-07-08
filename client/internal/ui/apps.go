@@ -506,7 +506,7 @@ func (m appAdminModel) save() (appAdminModel, tea.Cmd) {
 	m.loading = true
 	m.err = ""
 	if m.mode == appAdminEdit {
-		return m, updateAppCmd(m.client, m.appName(), name, m.repo, baseURL, versionURL, m.target, prefix, m.shadow, m.needsReview)
+		return m, updateAppCmd(m.client, m.appName(), name, m.repo, baseURL, versionURL, m.target, prefix, m.shadow, m.needsReview, m.envVars())
 	}
 	in := buildCreateInput(m.selected, name, baseURL, versionURL, m.target, prefix, m.shadow, m.needsReview, m.envVars())
 	return m, createAppCmd(m.client, in, name)
@@ -891,20 +891,32 @@ func createAppCmd(c *api.Client, in contract.CreateAppInput, name string) tea.Cm
 	}
 }
 
-func updateAppCmd(c *api.Client, originalName, name, repo, baseURL, versionURL, target, prefix string, shadow, needsReview bool) tea.Cmd {
+// buildUpdateInput maps the edit form into the wire input, mirroring buildCreateInput's env
+// handling: env is attached only when non-empty (m.envVars() already resolves basic-auth-off or
+// an empty user to nil), so an edit made with auth left disabled sends no Env and never wipes
+// DEV Basic Auth creds already stored server-side.
+func buildUpdateInput(repo, baseURL, versionURL, target, prefix string, shadow, needsReview bool, env map[string]string) contract.UpdateAppInput {
+	in := contract.UpdateAppInput{
+		Repo:           stringPtrOrNil(repo),
+		BaseUrl:        stringPtrOrNil(baseURL),
+		VersionUrl:     stringPtrOrNil(versionURL),
+		TestDataPrefix: stringPtrOrNil(prefix),
+		Shadow:         &shadow,
+		NeedsReview:    &needsReview,
+	}
+	t := contract.UpdateAppInputTarget(target)
+	in.Target = &t
+	if len(env) > 0 {
+		in.Env = &env
+	}
+	return in
+}
+
+func updateAppCmd(c *api.Client, originalName, name, repo, baseURL, versionURL, target, prefix string, shadow, needsReview bool, env map[string]string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		input := contract.UpdateAppInput{
-			Repo:           stringPtrOrNil(repo),
-			BaseUrl:        stringPtrOrNil(baseURL),
-			VersionUrl:     stringPtrOrNil(versionURL),
-			TestDataPrefix: stringPtrOrNil(prefix),
-			Shadow:         &shadow,
-			NeedsReview:    &needsReview,
-		}
-		t := contract.UpdateAppInputTarget(target)
-		input.Target = &t
+		input := buildUpdateInput(repo, baseURL, versionURL, target, prefix, shadow, needsReview, env)
 		if _, err := c.UpdateApp(ctx, originalName, input); err != nil {
 			return errMsg{err}
 		}

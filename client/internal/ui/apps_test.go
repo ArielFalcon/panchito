@@ -344,3 +344,26 @@ func TestEnvVarsFromBasicAuth(t *testing.T) {
 		t.Fatal("disabled auth must yield no env vars")
 	}
 }
+
+// The edit form reuses the create form, so it shows the DEV Basic Auth fields — but
+// updateAppCmd used to build its UpdateAppInput with no Env at all, silently discarding any
+// creds typed on an edit. buildUpdateInput must thread env exactly like buildCreateInput does:
+// non-nil only when the caller passes a non-empty map (m.envVars()'s contract — basic auth on
+// with a non-empty user), so an edit with auth left disabled sends no Env and never wipes
+// creds already stored server-side.
+func TestBuildUpdateInputCarriesEnvWhenBasicAuth(t *testing.T) {
+	in := buildUpdateInput("org/web", "https://dev", "", "e2e", "qa", true, true, map[string]string{"DEV_ENV_USER": "u", "DEV_ENV_PASS": "p"})
+	if in.Env == nil {
+		t.Fatal("edit input must carry env when basic auth is set")
+	}
+	if (*in.Env)["DEV_ENV_USER"] != "u" || (*in.Env)["DEV_ENV_PASS"] != "p" {
+		t.Fatalf("env creds not threaded; got %+v", *in.Env)
+	}
+}
+
+func TestBuildUpdateInputOmitsEnvWhenNone(t *testing.T) {
+	in := buildUpdateInput("org/web", "https://dev", "", "e2e", "qa", true, true, nil)
+	if in.Env != nil {
+		t.Fatalf("no env expected (must not wipe existing creds); got %+v", *in.Env)
+	}
+}
