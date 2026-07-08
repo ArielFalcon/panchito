@@ -30,6 +30,22 @@ const (
 	appStepDelete
 )
 
+// repoRole is a repo chosen for the app plus its role. Exactly one "frontend" (the config
+// `repo`/primary) is required; the rest become `services[]`.
+type repoRole struct {
+	fullName string
+	role     string // "frontend" | "service"
+}
+
+func nextRole(r string) string {
+	switch r {
+	case "frontend":
+		return "service"
+	default:
+		return "frontend"
+	}
+}
+
 // Form field indices — fixed layout. version & prefix are optional (blank for code apps).
 const (
 	fName = iota
@@ -58,6 +74,9 @@ type appAdminModel struct {
 	baseInput    textinput.Model
 	versionInput textinput.Model
 	prefixInput  textinput.Model
+	selected     []repoRole      // repos chosen for this project (multi-select), with roles
+	manualInput  textinput.Model // "/" opens this to type a repo slug by hand
+	manualActive bool
 	repo         string
 	target       string
 	shadow       bool
@@ -74,6 +93,7 @@ func newOnboardModel(client *api.Client) appAdminModel {
 	m.baseInput = appTextInput("https://dev.example.com", 42)
 	m.versionInput = appTextInput("https://dev.example.com/version (optional)", 42)
 	m.prefixInput = appTextInput("qa-bot (optional)", 28)
+	m.manualInput = appTextInput("org/repo", 42)
 	return m
 }
 
