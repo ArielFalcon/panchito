@@ -534,7 +534,7 @@ func (m appAdminModel) footerHint() string {
 	case appStepOwner:
 		return "↑↓ choose · enter load repos · esc back"
 	case appStepRepo:
-		return "↑↓ choose · enter form · esc owner"
+		return "↑↓ move · space toggle · r role · / type repo · enter continue · esc owner"
 	case appStepForm:
 		return "tab move · space toggle · enter next/save · esc back"
 	case appStepDelete:
@@ -544,6 +544,10 @@ func (m appAdminModel) footerHint() string {
 	}
 }
 
+// renderRepos is the multi-select repo+role picker: a checkbox and role per repo (checked
+// repos get "frontend" or "service"; the frontend one is starred so the wizard's one-frontend
+// invariant is legible at a glance, not just enforced by validateSelection), the cursor marker
+// on top, and — when the user pressed "/" — the manual typed-slug entry inline above the list.
 func (m appAdminModel) renderRepos() string {
 	if len(m.repos) == 0 {
 		return hintStyle.Render("no repos found") + "\n"
@@ -551,15 +555,29 @@ func (m appAdminModel) renderRepos() string {
 	w := contentWidth(m.width)
 	var b strings.Builder
 	b.WriteString(labelRule(w, "repos", hintStyle.Render(pluralize(len(m.repos), "repo", "repos"))) + "\n")
+	if m.manualActive {
+		marker := lipgloss.NewStyle().Foreground(colEmber).Render("▸ ")
+		b.WriteString(marker + labelStyle.Render("add repo ") + m.manualInput.View() + "\n")
+	}
 	for i, repo := range m.repos {
+		mark, role, label := "☐", "—", repo.FullName
+		for _, s := range m.selected {
+			if s.fullName == repo.FullName {
+				mark, role = "☑", s.role
+			}
+		}
+		if role == "frontend" {
+			label = "★ " + label // the primary/frontend repo stays visually distinct
+		}
 		privacy := "public"
 		if repo.Private {
 			privacy = "private"
 		}
+		hint := fmt.Sprintf("role: %s · %s", role, privacy)
 		if i == m.repoCursor {
-			b.WriteString(selectedRow(w, "", repo.FullName, privacy) + "\n")
+			b.WriteString(selectedRow(w, mark, label, hint) + "\n")
 		} else {
-			b.WriteString(normalRow(w, "", repo.FullName, privacy) + "\n")
+			b.WriteString(normalRow(w, mark, label, hint) + "\n")
 		}
 	}
 	return b.String()

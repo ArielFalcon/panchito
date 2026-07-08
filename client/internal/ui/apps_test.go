@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ArielFalcon/panchito/internal/contract"
@@ -46,5 +47,62 @@ func TestRepoStepRequiresExactlyOneFrontend(t *testing.T) {
 	}
 	if m.err == "" {
 		t.Fatal("expected a validation error for zero frontends")
+	}
+}
+
+func TestRepoStepViewShowsCheckboxesRolesAndHints(t *testing.T) {
+	m := newOnboardModel(nil)
+	m.step, m.width = appStepRepo, 100
+	m.repos = []contract.RepoListItem{{FullName: "org/web"}, {FullName: "org/svc"}}
+	m.selected = []repoRole{{"org/web", "frontend"}}
+	out := strings.ToLower(m.View())
+	for _, w := range []string{"org/web", "org/svc", "frontend", "space", "role"} {
+		if !strings.Contains(out, w) {
+			t.Fatalf("repo-step View missing %q:\n%s", w, out)
+		}
+	}
+}
+
+// The manual "/" typed-slug entry must actually surface in the View while active — otherwise
+// the user has no visual feedback that their keystrokes are going into the input.
+func TestRepoStepViewShowsManualInputWhenActive(t *testing.T) {
+	m := newOnboardModel(nil)
+	m.step, m.width = appStepRepo, 100
+	m.repos = []contract.RepoListItem{{FullName: "org/web"}}
+	m.manualActive = true
+	m.manualInput.SetValue("org/typed")
+	out := m.View()
+	if !strings.Contains(out, "org/typed") {
+		t.Fatalf("repo-step View should show the manual input value when active:\n%s", out)
+	}
+}
+
+// Each selected repo's OWN row must carry its own role — the wizard's core invariant
+// (exactly one frontend) has to be legible at a glance, per row, not just present somewhere
+// in the overall View (which TestRepoStepViewShowsCheckboxesRolesAndHints already allows).
+func TestRepoStepViewMarksFrontendRepoDistinctly(t *testing.T) {
+	m := newOnboardModel(nil)
+	m.step, m.width = appStepRepo, 100
+	m.repos = []contract.RepoListItem{{FullName: "org/web"}, {FullName: "org/svc"}}
+	m.selected = []repoRole{{"org/web", "frontend"}, {"org/svc", "service"}}
+	out := strings.ToLower(m.View())
+	lines := strings.Split(out, "\n")
+	var webLine, svcLine string
+	for _, l := range lines {
+		switch {
+		case strings.Contains(l, "org/web"):
+			webLine = l
+		case strings.Contains(l, "org/svc"):
+			svcLine = l
+		}
+	}
+	if webLine == "" || svcLine == "" {
+		t.Fatalf("expected both repos to render a row:\n%s", out)
+	}
+	if !strings.Contains(webLine, "frontend") {
+		t.Fatalf("the frontend repo's own row must show its role:\n%s", webLine)
+	}
+	if strings.Contains(svcLine, "frontend") {
+		t.Fatalf("the service repo's row must not be marked as frontend:\n%s", svcLine)
 	}
 }
