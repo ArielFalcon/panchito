@@ -48,6 +48,7 @@ func nextRole(r string) string {
 }
 
 // Form field indices — fixed layout. version & prefix are optional (blank for code apps).
+// fAuthUser/fAuthPass only ever get focus when authMode == "basic" (see moveFormFocus).
 const (
 	fName = iota
 	fURL
@@ -56,6 +57,9 @@ const (
 	fShadow
 	fReview
 	fPrefix
+	fAuth
+	fAuthUser
+	fAuthPass
 	fSave
 )
 
@@ -85,6 +89,11 @@ type appAdminModel struct {
 	purge        bool
 	app          *contract.AppView
 	width        int
+	// authMode is the DEV-environment HTTP Basic Auth gate ("disabled" | "basic") — Playwright
+	// httpCredentials, NOT app login. "basic" reveals userInput/passInput for DEV_ENV_USER/PASS.
+	authMode  string
+	userInput textinput.Model
+	passInput textinput.Model
 }
 
 func newOnboardModel(client *api.Client) appAdminModel {
@@ -95,6 +104,10 @@ func newOnboardModel(client *api.Client) appAdminModel {
 	m.versionInput = appTextInput("https://dev.example.com/version (optional)", 42)
 	m.prefixInput = appTextInput("qa-bot (optional)", 28)
 	m.manualInput = appTextInput("org/repo", 42)
+	m.authMode = "disabled"
+	m.userInput = appTextInput("env user", 28)
+	m.passInput = appTextInput("env password", 28)
+	m.passInput.EchoMode = textinput.EchoPassword
 	return m
 }
 
@@ -396,6 +409,10 @@ func (m appAdminModel) updateForm(msg tea.KeyMsg) (appAdminModel, tea.Cmd) {
 		m.versionInput, cmd = m.versionInput.Update(msg)
 	case fPrefix:
 		m.prefixInput, cmd = m.prefixInput.Update(msg)
+	case fAuthUser:
+		m.userInput, cmd = m.userInput.Update(msg)
+	case fAuthPass:
+		m.passInput, cmd = m.passInput.Update(msg)
 	}
 	return m, cmd
 }
@@ -412,10 +429,25 @@ func (m *appAdminModel) moveFormFocus(delta int) {
 	if m.formCursor > fSave {
 		m.formCursor = minCursor
 	}
+	// The env user/password rows exist only when basic auth is selected; skip over them otherwise
+	// so tab/arrow navigation doesn't land on hidden fields.
+	if m.authMode != "basic" {
+		for m.formCursor == fAuthUser || m.formCursor == fAuthPass {
+			m.formCursor += delta
+			if m.formCursor < minCursor {
+				m.formCursor = fSave
+			}
+			if m.formCursor > fSave {
+				m.formCursor = minCursor
+			}
+		}
+	}
 	m.nameInput.Blur()
 	m.baseInput.Blur()
 	m.versionInput.Blur()
 	m.prefixInput.Blur()
+	m.userInput.Blur()
+	m.passInput.Blur()
 	switch m.formCursor {
 	case fName:
 		if m.mode != appAdminEdit {
@@ -427,6 +459,10 @@ func (m *appAdminModel) moveFormFocus(delta int) {
 		m.versionInput.Focus()
 	case fPrefix:
 		m.prefixInput.Focus()
+	case fAuthUser:
+		m.userInput.Focus()
+	case fAuthPass:
+		m.passInput.Focus()
 	}
 }
 
@@ -442,6 +478,12 @@ func (m *appAdminModel) toggleFormValue() {
 		m.shadow = !m.shadow
 	case fReview:
 		m.needsReview = !m.needsReview
+	case fAuth:
+		if m.authMode == "basic" {
+			m.authMode = "disabled"
+		} else {
+			m.authMode = "basic"
+		}
 	}
 }
 
@@ -466,8 +508,22 @@ func (m appAdminModel) save() (appAdminModel, tea.Cmd) {
 	if m.mode == appAdminEdit {
 		return m, updateAppCmd(m.client, m.appName(), name, m.repo, baseURL, versionURL, m.target, prefix, m.shadow, m.needsReview)
 	}
-	in := buildCreateInput(m.selected, name, baseURL, versionURL, m.target, prefix, m.shadow, m.needsReview, nil)
+	in := buildCreateInput(m.selected, name, baseURL, versionURL, m.target, prefix, m.shadow, m.needsReview, m.envVars())
 	return m, createAppCmd(m.client, in, name)
+}
+
+// envVars returns the DEV-environment Basic Auth creds to persist (DEV_ENV_USER/PASS) when basic
+// auth is enabled with a non-empty user; nil otherwise. These feed Playwright httpCredentials —
+// the environment gate, not app login.
+func (m appAdminModel) envVars() map[string]string {
+	if m.authMode != "basic" {
+		return nil
+	}
+	user := strings.TrimSpace(m.userInput.Value())
+	if user == "" {
+		return nil
+	}
+	return map[string]string{"DEV_ENV_USER": user, "DEV_ENV_PASS": m.passInput.Value()}
 }
 
 func (m appAdminModel) appName() string {
@@ -653,29 +709,44 @@ func yesNo(b bool) string {
 	return hintStyle.Render("no")
 }
 
+// formRow pairs a rendered row with the field enum it represents, so rows that are only
+// SOMETIMES present (the auth user/password rows) don't desync the cursor/bold-highlight
+// logic below from a plain positional index the way a bare []string would.
+type formRow struct {
+	cursor int
+	text   string
+}
+
 func (m appAdminModel) renderForm() string {
 	nameRow := labelStyle.Render("name    ") + m.nameInput.View()
 	if m.mode == appAdminEdit {
 		nameRow = labelStyle.Render("name    ") + hintStyle.Render(m.appName())
 	}
-	rows := []string{
-		nameRow,
-		labelStyle.Render("url     ") + m.baseInput.View(),
-		labelStyle.Render("version ") + m.versionInput.View(),
-		labelStyle.Render("target  ") + m.target,
-		labelStyle.Render("shadow  ") + yesNo(m.shadow),
-		labelStyle.Render("review  ") + yesNo(m.needsReview),
-		labelStyle.Render("prefix  ") + m.prefixInput.View(),
-		"save",
+	rows := []formRow{
+		{fName, nameRow},
+		{fURL, labelStyle.Render("url     ") + m.baseInput.View()},
+		{fVersion, labelStyle.Render("version ") + m.versionInput.View()},
+		{fTarget, labelStyle.Render("target  ") + m.target},
+		{fShadow, labelStyle.Render("shadow  ") + yesNo(m.shadow)},
+		{fReview, labelStyle.Render("review  ") + yesNo(m.needsReview)},
+		{fPrefix, labelStyle.Render("prefix  ") + m.prefixInput.View()},
+		{fAuth, labelStyle.Render("authentication ") + authModeLabel(m.authMode)},
 	}
+	if m.authMode == "basic" {
+		rows = append(rows,
+			formRow{fAuthUser, labelStyle.Render("user     ") + m.userInput.View()},
+			formRow{fAuthPass, labelStyle.Render("password ") + m.passInput.View()},
+		)
+	}
+	rows = append(rows, formRow{fSave, "save"})
 	var b strings.Builder
 	b.WriteString(labelStyle.Render("repo    ") + m.repo + "\n")
-	for i, row := range rows {
+	for _, row := range rows {
 		marker := "  "
-		text := row
-		if i == m.formCursor {
+		text := row.text
+		if row.cursor == m.formCursor {
 			marker = lipgloss.NewStyle().Foreground(colEmber).Render("▸ ")
-			if i == fTarget || i == fShadow || i == fReview || i == fSave {
+			if row.cursor == fTarget || row.cursor == fShadow || row.cursor == fReview || row.cursor == fAuth || row.cursor == fSave {
 				text = lipgloss.NewStyle().Bold(true).Render(text)
 			}
 		}
@@ -687,6 +758,15 @@ func (m appAdminModel) renderForm() string {
 		b.WriteString("\n" + hintStyle.Render(help))
 	}
 	return b.String()
+}
+
+// authModeLabel renders authMode as the row's display value, matching yesNo()'s styling
+// convention (ok-styled when active, hint-styled for the disabled default).
+func authModeLabel(mode string) string {
+	if mode == "basic" {
+		return okStyle.Render("basic auth")
+	}
+	return hintStyle.Render("disabled")
 }
 
 // appFieldHelp is the one-line explanation shown under the form for the focused field.
@@ -706,6 +786,12 @@ func appFieldHelp(cursor int) string {
 		return "require the independent reviewer agent to approve before a suite is committed via PR"
 	case fPrefix:
 		return "optional prefix the agent uses to namespace any test data it creates"
+	case fAuth:
+		return "disabled = no auth header · basic = DEV environment HTTP Basic Auth (Playwright httpCredentials) — not app login"
+	case fAuthUser:
+		return "the DEV environment's Basic Auth username, persisted as DEV_ENV_USER"
+	case fAuthPass:
+		return "the DEV environment's Basic Auth password, persisted as DEV_ENV_PASS"
 	case fSave:
 		return "write config/apps/<name>.yaml and start watching this repo"
 	}

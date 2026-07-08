@@ -253,3 +253,94 @@ func TestCreateInputTakesFirstFrontendWhenMultiplePresent(t *testing.T) {
 		t.Fatalf("expected the first frontend to win; got %q", in.Repo)
 	}
 }
+
+// Slice C: DEV-environment Basic Auth field. authMode defaults to "disabled" (no auth
+// header written) and the auth row on the form (space toggles it, like target/shadow/review)
+// cycles it to "basic", which reveals the user+password inputs.
+func TestAuthDefaultsDisabledAndTogglesToBasic(t *testing.T) {
+	m := newOnboardModel(nil)
+	if m.authMode != "disabled" {
+		t.Fatalf("auth must default to disabled; got %q", m.authMode)
+	}
+	m.step = appStepForm
+	m.formCursor = fAuth
+	m.toggleFormValue()
+	if m.authMode != "basic" {
+		t.Fatalf("space on auth row should switch to basic; got %q", m.authMode)
+	}
+}
+
+// The env user/password rows only exist when basic auth is on, so tab/shift+tab must skip over
+// fAuthUser/fAuthPass while auth is disabled (landing on fSave/fAuth respectively without ever
+// stopping on the hidden rows), and must be able to stop on them once basic auth reveals them.
+// fAuth itself (the toggle) is never hidden, so two forward hops from fPrefix land on fSave.
+func TestMoveFormFocusSkipsHiddenAuthFieldsWhenDisabled(t *testing.T) {
+	m := newOnboardModel(nil)
+	m.step = appStepForm
+	m.authMode = "disabled"
+
+	m.formCursor = fPrefix
+	m.moveFormFocus(1) // -> fAuth (always visible, never skipped)
+	if m.formCursor != fAuth {
+		t.Fatalf("expected fAuth after one tab from fPrefix; got %d", m.formCursor)
+	}
+	m.moveFormFocus(1) // -> must skip fAuthUser/fAuthPass straight to fSave
+	if m.formCursor == fAuthUser || m.formCursor == fAuthPass {
+		t.Fatalf("disabled auth must skip the hidden credential rows; got %d", m.formCursor)
+	}
+	if m.formCursor != fSave {
+		t.Fatalf("expected fSave after skipping the hidden auth rows; got %d", m.formCursor)
+	}
+
+	// Backward from fSave must skip back over the hidden rows to fAuth.
+	m.formCursor = fSave
+	m.moveFormFocus(-1)
+	if m.formCursor != fAuth {
+		t.Fatalf("expected fAuth when tabbing back from fSave with auth disabled; got %d", m.formCursor)
+	}
+
+	// With basic auth on, the same rows must become reachable.
+	m.authMode = "basic"
+	m.formCursor = fAuth
+	m.moveFormFocus(1)
+	if m.formCursor != fAuthUser {
+		t.Fatalf("expected fAuthUser to be reachable when basic auth is on; got %d", m.formCursor)
+	}
+	m.moveFormFocus(1)
+	if m.formCursor != fAuthPass {
+		t.Fatalf("expected fAuthPass to be reachable when basic auth is on; got %d", m.formCursor)
+	}
+}
+
+func TestFormViewShowsAuthAndRevealsCredsWhenBasic(t *testing.T) {
+	m := newOnboardModel(nil)
+	m.step, m.width = appStepForm, 100
+	m.repo = "org/web"
+	out := strings.ToLower(m.View())
+	if !strings.Contains(out, "authentication") {
+		t.Fatalf("form must show an authentication row:\n%s", out)
+	}
+	if strings.Contains(out, "env password") {
+		t.Fatal("password row must be hidden while auth is disabled")
+	}
+	m.authMode = "basic"
+	out = strings.ToLower(m.View())
+	if !strings.Contains(out, "env user") || !strings.Contains(out, "env password") {
+		t.Fatalf("basic auth must reveal user+password:\n%s", out)
+	}
+}
+
+func TestEnvVarsFromBasicAuth(t *testing.T) {
+	m := newOnboardModel(nil)
+	m.authMode = "basic"
+	m.userInput.SetValue("envuser")
+	m.passInput.SetValue("envpass")
+	env := m.envVars()
+	if env["DEV_ENV_USER"] != "envuser" || env["DEV_ENV_PASS"] != "envpass" {
+		t.Fatalf("basic auth must yield DEV_ENV_USER/PASS; got %+v", env)
+	}
+	m.authMode = "disabled"
+	if len(m.envVars()) != 0 {
+		t.Fatal("disabled auth must yield no env vars")
+	}
+}
