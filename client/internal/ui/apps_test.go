@@ -106,3 +106,30 @@ func TestRepoStepViewMarksFrontendRepoDistinctly(t *testing.T) {
 		t.Fatalf("the service repo's row must not be marked as frontend:\n%s", svcLine)
 	}
 }
+
+func TestCreateInputSplitsFrontendAndServices(t *testing.T) {
+	sel := []repoRole{{"org/web", "frontend"}, {"org/svc-a", "service"}, {"org/svc-b", "service"}}
+	in := buildCreateInput(sel, "shop", "https://dev", "", "e2e", "qa", true, true, nil)
+	if in.Repo != "org/web" {
+		t.Fatalf("frontend must be the primary Repo; got %q", in.Repo)
+	}
+	if in.Services == nil || len(*in.Services) != 2 {
+		t.Fatalf("expected 2 services; got %+v", in.Services)
+	}
+	if (*in.Services)[0].Repo != "org/svc-a" || (*in.Services)[1].Repo != "org/svc-b" {
+		t.Fatalf("services must be in list order; got %+v", *in.Services)
+	}
+	if in.Name == nil || *in.Name != "shop" {
+		t.Fatalf("name must be set; got %+v", in.Name)
+	}
+}
+
+func TestCreateInputNoServicesWhenSingleFrontend(t *testing.T) {
+	in := buildCreateInput([]repoRole{{"org/only", "frontend"}}, "solo", "https://dev", "", "e2e", "qa", false, false, nil)
+	if in.Repo != "org/only" {
+		t.Fatalf("Repo=%q", in.Repo)
+	}
+	if in.Services != nil {
+		t.Fatalf("no services expected; got %+v", in.Services)
+	}
+}

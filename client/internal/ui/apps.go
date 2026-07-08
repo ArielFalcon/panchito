@@ -443,7 +443,8 @@ func (m appAdminModel) save() (appAdminModel, tea.Cmd) {
 	if m.mode == appAdminEdit {
 		return m, updateAppCmd(m.client, m.appName(), name, m.repo, baseURL, versionURL, m.target, prefix, m.shadow, m.needsReview)
 	}
-	return m, createAppCmd(m.client, m.repo, name, baseURL, versionURL, m.target, prefix, m.shadow, m.needsReview)
+	in := buildCreateInput(m.selected, name, baseURL, versionURL, m.target, prefix, m.shadow, m.needsReview, nil)
+	return m, createAppCmd(m.client, in, name)
 }
 
 func (m appAdminModel) appName() string {
@@ -694,22 +695,44 @@ func listReposCmd(c *api.Client, owner string, page int) tea.Cmd {
 	}
 }
 
-func createAppCmd(c *api.Client, repo, name, baseURL, versionURL, target, prefix string, shadow, needsReview bool) tea.Cmd {
+// buildCreateInput maps the wizard's selection + form into the wire input: the one frontend
+// (validateSelection guarantees exactly one) becomes Repo, every service becomes a Services[]
+// entry in selection order. env is attached only when non-empty (Slice C populates it).
+func buildCreateInput(sel []repoRole, name, baseURL, versionURL, target, prefix string, shadow, needsReview bool, env map[string]string) contract.CreateAppInput {
+	var repo string
+	var services []contract.OnboardServiceInput
+	for _, s := range sel {
+		if s.role == "frontend" {
+			repo = s.fullName
+		} else {
+			services = append(services, contract.OnboardServiceInput{Repo: s.fullName})
+		}
+	}
+	in := contract.CreateAppInput{
+		Repo:           repo,
+		Name:           &name,
+		BaseUrl:        stringPtrOrNil(baseURL),
+		VersionUrl:     stringPtrOrNil(versionURL),
+		TestDataPrefix: stringPtrOrNil(prefix),
+		Shadow:         &shadow,
+		NeedsReview:    &needsReview,
+	}
+	t := contract.CreateAppInputTarget(target)
+	in.Target = &t
+	if len(services) > 0 {
+		in.Services = &services
+	}
+	if len(env) > 0 {
+		in.Env = &env
+	}
+	return in
+}
+
+func createAppCmd(c *api.Client, in contract.CreateAppInput, name string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		input := contract.CreateAppInput{
-			Repo:           repo,
-			Name:           &name,
-			BaseUrl:        stringPtrOrNil(baseURL),
-			VersionUrl:     stringPtrOrNil(versionURL),
-			TestDataPrefix: stringPtrOrNil(prefix),
-			Shadow:         &shadow,
-			NeedsReview:    &needsReview,
-		}
-		t := contract.CreateAppInputTarget(target)
-		input.Target = &t
-		if _, err := c.CreateApp(ctx, input); err != nil {
+		if _, err := c.CreateApp(ctx, in); err != nil {
 			return errMsg{err}
 		}
 		return reloadAppsMsg(c, ctx, fmt.Sprintf("%s onboarded", name))
