@@ -13,7 +13,7 @@ import {
   type OnboardingJobStatus,
   type RepoIndexOutcome,
 } from "./onboarding-job";
-import type { ProfileProposerPort } from "@contexts/service-topology/application/ports/index.ts";
+import type { ProfileProposerPort, ResolveLinksResult } from "@contexts/service-topology/application/ports/index.ts";
 import type { BoundaryProfile, HttpBoundaryProfile } from "@contexts/service-topology/domain/index.ts";
 import type { OnboardingResult, OnboardingRoundProgress } from "@contexts/service-topology/application/onboarding-service.ts";
 
@@ -583,4 +583,55 @@ test("S1.5: isActive() (the mutex) is true DURING indexing and false only once i
   resolveIndex({ repo: "ArielFalcon/nname-gateway", status: "ok", nodeCount: 1 });
   await job.settled();
   assert.equal(job.isActive(), false, "the mutex is released again once indexing's finally clears it");
+});
+
+// ── Resolution summary on a winning run (Add-Project Wizard, Task A2) ───────────
+// Reuses Task A1's aggregateResolution (resolution-summary.ts). resolveLinks is an OPTIONAL,
+// additive dep on OnboardingJobDeps (mirrors indexRepo?'s precedent), populated in run()'s own
+// winner branch — BEFORE confirm() is ever called, unlike the post-confirm indexing phase above.
+
+test("a winning run with resolveLinks attaches the aggregated per-edge resolution summary to the status", async () => {
+  const resolveLinksResult: ResolveLinksResult = {
+    links: [
+      { from: { repo: "org/web", file: "a.api.ts", symbol: "getX" }, to: { repo: "org/svc-a", file: "x.ts", symbol: "opX" }, transport: "http", confidence: 1, source: "openapi" },
+      { from: { repo: "org/web", file: "b.api.ts", symbol: "getY" }, to: { repo: "org/svc-a", file: "y.ts", symbol: "opY" }, transport: "http", confidence: 1, source: "openapi" },
+    ],
+    drift: [],
+    external: [],
+    unresolved: [],
+  };
+  const job = createOnboardingJob(buildDeps({
+    resolveLinks: async () => resolveLinksResult,
+  }));
+
+  await job.propose({ app: "nname", repo: "ArielFalcon/nname-gateway", services: ["ArielFalcon/ms-name-orders"] });
+  await job.settled();
+
+  const status = job.status();
+  assert.equal(status.outcome, "winner");
+  assert.deepEqual(status.resolution?.edges, [
+    { fromRepo: "org/web", toRepo: "org/svc-a", transport: "http", calls: 2 },
+  ]);
+  assert.equal(status.resolution?.unresolved, 0);
+});
+
+test("a winning run WITHOUT a resolveLinks dep still finishes winner with resolution undefined (additive-safe, mirrors indexRepo?'s precedent)", async () => {
+  const job = createOnboardingJob(buildDeps());
+  await job.propose({ app: "nname", repo: "ArielFalcon/nname-gateway", services: [] });
+
+  const status = job.status();
+  assert.equal(status.outcome, "winner");
+  assert.equal(status.resolution, undefined);
+});
+
+test("a winning run whose resolveLinks throws still finishes winner; resolution is swallowed to undefined (advisory-only, never flips the outcome)", async () => {
+  const job = createOnboardingJob(buildDeps({
+    resolveLinks: async () => { throw new Error("resolver exploded"); },
+  }));
+  await job.propose({ app: "nname", repo: "ArielFalcon/nname-gateway", services: [] });
+
+  const status = job.status();
+  assert.equal(status.state, ONBOARD_STATE.done);
+  assert.equal(status.outcome, "winner", "a resolveLinks failure must never flip the winner outcome");
+  assert.equal(status.resolution, undefined);
 });

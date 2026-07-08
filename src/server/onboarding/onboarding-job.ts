@@ -15,9 +15,10 @@
 // returns a Promise<ProposeResult> that settles once the round finishes. The HTTP handler (5a.8)
 // is the layer that implements the 202 fire-and-forget contract by NOT awaiting that promise.
 import type { OnboardingService, OnboardingRoundProgress } from "@contexts/service-topology/application/onboarding-service.ts";
-import type { ProfileProposerPort } from "@contexts/service-topology/application/ports/index.ts";
+import type { ProfileProposerPort, ResolveLinksResult } from "@contexts/service-topology/application/ports/index.ts";
 import type { BoundaryProfile, RepoRef } from "@contexts/service-topology/domain/index.ts";
 import { serializeBoundary, spliceBoundariesBlock } from "./write-boundaries";
+import { aggregateResolution, type ResolutionSummary } from "./resolution-summary";
 import { redactError } from "../../util/redact";
 
 /** const-object-then-type pattern (typescript SKILL) — never a raw string union. */
@@ -72,6 +73,9 @@ export interface OnboardingJobStatus {
   candidatesScored: number;
   lastResolvedScore?: number;
   resolvedProfile?: BoundaryProfile;
+  /** Winning run's front->service edge summary (Task A1 aggregation). Absent for noProfile runs
+   *  and for jobs whose deps don't supply resolveLinks (additive-optional, mirrors indexProgress). */
+  resolution?: ResolutionSummary;
   outcome?: OnboardOutcome;
   error?: string;
   startedAt?: string;
@@ -111,6 +115,11 @@ export interface OnboardingJobDeps {
   /** Composes the REAL OnboardingService (qa-engine, imported, never reimplemented) wired with the
    *  onRound observer that feeds this job's live status. */
   buildOnboardingService(proposer: ProfileProposerPort, onRound: (p: OnboardingRoundProgress) => void): OnboardingService;
+  /** OPTIONAL, additive: resolves a winning profile's cross-repo links so the status can carry a
+   *  human-meaningful edge summary. A job built without it just omits `resolution` (byte-identical
+   *  to today for existing callers). Real composition (src/index.ts) wires
+   *  buildServiceBoundaryResolver; tests inject a fake. */
+  resolveLinks?(profile: BoundaryProfile, system: RepoRef[], front: RepoRef): Promise<ResolveLinksResult>;
   readConfig(path: string): string;
   writeConfig(path: string, content: string): void;
   configPath?(app: string): string;
@@ -331,9 +340,19 @@ export function createOnboardingJob(deps: OnboardingJobDeps): OnboardingJob {
       }
 
       const finishedAt = new Date().toISOString();
-      status = result.profile !== null
-        ? { ...status, state: ONBOARD_STATE.done, outcome: ONBOARD_OUTCOME.winner, resolvedProfile: result.profile, finishedAt }
-        : { ...status, state: ONBOARD_STATE.done, outcome: ONBOARD_OUTCOME.noProfile, finishedAt };
+      if (result.profile !== null) {
+        let resolution: ResolutionSummary | undefined;
+        if (deps.resolveLinks) {
+          try {
+            resolution = aggregateResolution(await deps.resolveLinks(result.profile, system, front));
+          } catch {
+            resolution = undefined; // advisory only — a resolve failure must never flip the winner outcome
+          }
+        }
+        status = { ...status, state: ONBOARD_STATE.done, outcome: ONBOARD_OUTCOME.winner, resolvedProfile: result.profile, resolution, finishedAt };
+      } else {
+        status = { ...status, state: ONBOARD_STATE.done, outcome: ONBOARD_OUTCOME.noProfile, finishedAt };
+      }
     } catch (err) {
       fail(redactError(err));
     } finally {

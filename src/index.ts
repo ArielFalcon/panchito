@@ -38,6 +38,7 @@ import { logJson } from "./integrations/logger";
 import { createOnboardingJob, type RepoIndexOutcome } from "./server/onboarding/onboarding-job";
 import { LlmProfileProposerAdapter, PROPOSER_MODEL } from "./server/onboarding/llm-profile-proposer.adapter";
 import { OnboardingService } from "@contexts/service-topology/application/onboarding-service";
+import { buildServiceBoundaryResolver } from "@contexts/service-topology/infrastructure/resolver-factory";
 // Onboarding-auto-index (Slice 1, design §2.3, probe fact #3): the post-confirm advisory-index
 // closure spawns index_repository DIRECTLY via CodebaseMemoryClient — NOT the adapter's syncTo
 // (that method's contract is incremental changed_files, per its own header). The probe confirmed
@@ -471,6 +472,7 @@ const onboardingJob = createOnboardingJob({
   hasProposerAgent: () => hasProposerAgentConfigured(),
   buildProposer: (ctx) => new LlmProfileProposerAdapter(defaultAgentDeps, PROPOSER_MODEL, ctx),
   buildOnboardingService: (proposer, onRound) => new OnboardingService(proposer, 3, onRound),
+  resolveLinks: (profile, system, front) => buildServiceBoundaryResolver([profile]).resolveLinks(system, front),
   readConfig: (path) => readFileSync(path, "utf8"),
   writeConfig: (path, content) => writeFileSync(path, content, "utf8"),
   configPath: (app) => join(ROOT, "config", "apps", `${app}.yaml`),
