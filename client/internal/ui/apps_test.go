@@ -133,3 +133,39 @@ func TestCreateInputNoServicesWhenSingleFrontend(t *testing.T) {
 		t.Fatalf("no services expected; got %+v", in.Services)
 	}
 }
+
+func TestFormEscInCreateModeGoesBackToRepoStepPreservingState(t *testing.T) {
+	m := newOnboardModel(nil) // create mode
+	m.step = appStepForm
+	m.selected = []repoRole{{"org/web", "frontend"}, {"org/svc", "service"}}
+	m.nameInput.SetValue("shop")
+	m, cmd := m.updateForm(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.step != appStepRepo {
+		t.Fatalf("create-mode form esc must go back to the repo step; got step %v", m.step)
+	}
+	if len(m.selected) != 2 || m.selected[0].fullName != "org/web" {
+		t.Fatalf("selection must survive back-nav; got %+v", m.selected)
+	}
+	if m.nameInput.Value() != "shop" {
+		t.Fatalf("form values must survive back-nav; name=%q", m.nameInput.Value())
+	}
+	if cmd != nil {
+		// must NOT emit backMsg (which would exit the wizard)
+		if _, isBack := cmd().(backMsg); isBack {
+			t.Fatal("create-mode form esc must NOT emit backMsg (that exits the wizard)")
+		}
+	}
+}
+
+func TestFormEscInEditModeExits(t *testing.T) {
+	// Edit mode opens directly on the form with no repo step, so esc must still exit.
+	m := newEditAppModel(nil, contract.AppView{Name: "shop", Repo: "org/web"})
+	m.step = appStepForm
+	_, cmd := m.updateForm(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd == nil {
+		t.Fatal("edit-mode form esc must emit a command (backMsg to exit)")
+	}
+	if _, isBack := cmd().(backMsg); !isBack {
+		t.Fatalf("edit-mode form esc must emit backMsg; got %#v", cmd())
+	}
+}

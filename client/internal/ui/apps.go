@@ -344,6 +344,12 @@ func (m appAdminModel) updateManualRepo(msg tea.KeyMsg) (appAdminModel, tea.Cmd)
 func (m appAdminModel) updateForm(msg tea.KeyMsg) (appAdminModel, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
+		if m.mode == appAdminCreate {
+			// Step back to the repo picker, preserving all wizard state (selection + form values).
+			m.step = appStepRepo
+			return m, nil
+		}
+		// Edit mode opens directly on the form — esc exits.
 		return m, func() tea.Msg { return backMsg{} }
 	case "tab", "down", "j":
 		m.moveFormFocus(1)
