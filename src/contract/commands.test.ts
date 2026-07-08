@@ -14,6 +14,7 @@ import {
   OnboardStateSchema,
   OnboardingJobStatusSchema,
   RepoIndexOutcomeSchema,
+  ResolutionSummarySchema,
   type RunRecord as ContractRunRecord,
   type QaCase as ContractQaCase,
 } from "./commands";
@@ -112,6 +113,29 @@ test("OnboardingJobStatusSchema rejects an indexProgress entry with an invalid R
     ceiling: 3,
     candidatesScored: 6,
     indexProgress: [{ repo: "org/shop", status: "pending" }],
+  }));
+});
+
+// ── Resolution summary (Add-Project Wizard, Slice A Task A3) ────────────────────
+
+test("OnboardingJobStatusSchema accepts a resolution summary", () => {
+  const parsed = OnboardingJobStatusSchema.safeParse({
+    state: "done", round: 1, ceiling: 3, candidatesScored: 1, outcome: "winner",
+    resolution: { edges: [{ fromRepo: "org/web", toRepo: "org/svc-a", transport: "http", calls: 2 }], unresolved: 0, external: 1 },
+  });
+  assert.equal(parsed.success, true);
+});
+
+test("ResolutionSummarySchema rejects a BoundaryEdgeSummary entry with an invalid transport", () => {
+  assert.doesNotThrow(() => ResolutionSummarySchema.parse({
+    edges: [{ fromRepo: "org/web", toRepo: "org/svc-a", transport: "rpc", calls: 1 }],
+    unresolved: 0,
+    external: 0,
+  }));
+  assert.throws(() => ResolutionSummarySchema.parse({
+    edges: [{ fromRepo: "org/web", toRepo: "org/svc-a", transport: "grpc", calls: 1 }],
+    unresolved: 0,
+    external: 0,
   }));
 });
 

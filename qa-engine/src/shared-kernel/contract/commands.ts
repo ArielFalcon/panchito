@@ -281,6 +281,27 @@ export const RepoIndexOutcomeSchema = z.object({
   error: z.string().optional(),
 });
 
+// Per-edge front->service resolution summary for a winning onboarding run (Add-Project Wizard,
+// Slice A). One row per (fromRepo -> toRepo, transport) with the resolved call-site count — the
+// human-legible decomposition the wizard result screen renders, never the raw score. Mirrors
+// src/server/onboarding/resolution-summary.ts's BoundaryEdgeSummary/ResolutionSummary field-for-
+// field. Flat schema — no inline nested object (typescript SKILL convention), same as
+// RepoIndexOutcomeSchema above.
+export const BoundaryEdgeTransportSchema = z.enum(["http", "event", "rpc"]);
+
+export const BoundaryEdgeSummarySchema = z.object({
+  fromRepo: z.string(),
+  toRepo: z.string(),
+  transport: BoundaryEdgeTransportSchema,
+  calls: z.number(),
+});
+
+export const ResolutionSummarySchema = z.object({
+  edges: z.array(BoundaryEdgeSummarySchema),
+  unresolved: z.number(),
+  external: z.number(),
+});
+
 export const OnboardingJobStatusSchema = z.object({
   state: OnboardStateSchema,
   app: z.string().optional(),
@@ -297,6 +318,9 @@ export const OnboardingJobStatusSchema = z.object({
   // (design §2.1-§2.2). Absent for a job whose deps never supply indexRepo (additive-optional,
   // ADR-4) — never present on a pre-indexing job either.
   indexProgress: z.array(RepoIndexOutcomeSchema).optional(),
+  // Winning run's front->service edge summary (Task A1 aggregation). Absent for noProfile runs
+  // and for jobs whose deps don't supply resolveLinks (additive-optional, mirrors indexProgress).
+  resolution: ResolutionSummarySchema.optional(),
 });
 
 export const ProposeBoundariesInputSchema = z.object({

@@ -420,15 +420,36 @@ func (e OnboardingJobStatusOutcome) Valid() bool {
 	}
 }
 
+// Defines values for OnboardingJobStatusResolutionEdgesTransport.
+const (
+	OnboardingJobStatusResolutionEdgesTransportEvent OnboardingJobStatusResolutionEdgesTransport = "event"
+	OnboardingJobStatusResolutionEdgesTransportHttp  OnboardingJobStatusResolutionEdgesTransport = "http"
+	OnboardingJobStatusResolutionEdgesTransportRpc   OnboardingJobStatusResolutionEdgesTransport = "rpc"
+)
+
+// Valid indicates whether the value is a known member of the OnboardingJobStatusResolutionEdgesTransport enum.
+func (e OnboardingJobStatusResolutionEdgesTransport) Valid() bool {
+	switch e {
+	case OnboardingJobStatusResolutionEdgesTransportEvent:
+		return true
+	case OnboardingJobStatusResolutionEdgesTransportHttp:
+		return true
+	case OnboardingJobStatusResolutionEdgesTransportRpc:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for OnboardingJobStatusResolvedProfile0Transport.
 const (
-	Http OnboardingJobStatusResolvedProfile0Transport = "http"
+	OnboardingJobStatusResolvedProfile0TransportHttp OnboardingJobStatusResolvedProfile0Transport = "http"
 )
 
 // Valid indicates whether the value is a known member of the OnboardingJobStatusResolvedProfile0Transport enum.
 func (e OnboardingJobStatusResolvedProfile0Transport) Valid() bool {
 	switch e {
-	case Http:
+	case OnboardingJobStatusResolvedProfile0TransportHttp:
 		return true
 	default:
 		return false
@@ -1244,12 +1265,22 @@ type OnboardingJobStatus struct {
 		Repo      string                                 `json:"repo"`
 		Status    OnboardingJobStatusIndexProgressStatus `json:"status"`
 	} `json:"indexProgress,omitempty"`
-	LastResolvedScore *float32                             `json:"lastResolvedScore,omitempty"`
-	Outcome           *OnboardingJobStatusOutcome          `json:"outcome,omitempty"`
-	ResolvedProfile   *OnboardingJobStatus_ResolvedProfile `json:"resolvedProfile,omitempty"`
-	Round             float32                              `json:"round"`
-	StartedAt         *string                              `json:"startedAt,omitempty"`
-	State             OnboardingJobStatusState             `json:"state"`
+	LastResolvedScore *float32                    `json:"lastResolvedScore,omitempty"`
+	Outcome           *OnboardingJobStatusOutcome `json:"outcome,omitempty"`
+	Resolution        *struct {
+		Edges []struct {
+			Calls     float32                                     `json:"calls"`
+			FromRepo  string                                      `json:"fromRepo"`
+			ToRepo    string                                      `json:"toRepo"`
+			Transport OnboardingJobStatusResolutionEdgesTransport `json:"transport"`
+		} `json:"edges"`
+		External   float32 `json:"external"`
+		Unresolved float32 `json:"unresolved"`
+	} `json:"resolution,omitempty"`
+	ResolvedProfile *OnboardingJobStatus_ResolvedProfile `json:"resolvedProfile,omitempty"`
+	Round           float32                              `json:"round"`
+	StartedAt       *string                              `json:"startedAt,omitempty"`
+	State           OnboardingJobStatusState             `json:"state"`
 }
 
 // OnboardingJobStatusIndexProgressStatus defines model for OnboardingJobStatus.IndexProgress.Status.
@@ -1257,6 +1288,9 @@ type OnboardingJobStatusIndexProgressStatus string
 
 // OnboardingJobStatusOutcome defines model for OnboardingJobStatus.Outcome.
 type OnboardingJobStatusOutcome string
+
+// OnboardingJobStatusResolutionEdgesTransport defines model for OnboardingJobStatus.Resolution.Edges.Transport.
+type OnboardingJobStatusResolutionEdgesTransport string
 
 // OnboardingJobStatusResolvedProfile0 defines model for .
 type OnboardingJobStatusResolvedProfile0 struct {

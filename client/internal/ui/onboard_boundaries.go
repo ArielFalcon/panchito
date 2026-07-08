@@ -327,7 +327,7 @@ func (m boundaryProposeModel) renderResolvedProfile() string {
 	if m.status.ResolvedProfile == nil {
 		return ""
 	}
-	if http, err := m.status.ResolvedProfile.AsOnboardingJobStatusResolvedProfile0(); err == nil && http.Transport == contract.Http {
+	if http, err := m.status.ResolvedProfile.AsOnboardingJobStatusResolvedProfile0(); err == nil && http.Transport == contract.OnboardingJobStatusResolvedProfile0TransportHttp {
 		lines := []string{
 			labelStyle.Render("transport ") + "http",
 			labelStyle.Render("frontFiles ") + http.FrontFiles,

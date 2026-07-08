@@ -79,7 +79,7 @@ func TestOnboardingJobStatusDecodesWinnerFromServerJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolvedProfile did not decode as the http variant: %v", err)
 	}
-	if profile.Transport != Http || profile.FrontFiles != "src/api/shop.ts" || profile.ServiceRepoTemplate != "org/shop-svc" {
+	if profile.Transport != OnboardingJobStatusResolvedProfile0TransportHttp || profile.FrontFiles != "src/api/shop.ts" || profile.ServiceRepoTemplate != "org/shop-svc" {
 		t.Fatalf("http profile fields: %+v", profile)
 	}
 	if profile.FrontCallSite.Receiver == nil || *profile.FrontCallSite.Receiver != "shopClient" {

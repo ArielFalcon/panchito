@@ -2393,6 +2393,55 @@
               ],
               "additionalProperties": false
             }
+          },
+          "resolution": {
+            "type": "object",
+            "properties": {
+              "edges": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "fromRepo": {
+                      "type": "string"
+                    },
+                    "toRepo": {
+                      "type": "string"
+                    },
+                    "transport": {
+                      "type": "string",
+                      "enum": [
+                        "http",
+                        "event",
+                        "rpc"
+                      ]
+                    },
+                    "calls": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "fromRepo",
+                    "toRepo",
+                    "transport",
+                    "calls"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "unresolved": {
+                "type": "number"
+              },
+              "external": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "edges",
+              "unresolved",
+              "external"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
