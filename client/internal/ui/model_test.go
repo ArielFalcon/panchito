@@ -663,6 +663,9 @@ func TestAppAdminRepoSelectionPrefillsCreateForm(t *testing.T) {
 		t.Fatalf("step=%v, want repo", m.step)
 	}
 
+	// Multi-select repo step (Task B2): space selects the cursor repo (the first pick
+	// defaults to the "frontend" role) before enter commits the selection.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if m.step != appStepForm {
 		t.Fatalf("step=%v, want form", m.step)

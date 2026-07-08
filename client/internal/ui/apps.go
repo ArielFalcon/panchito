@@ -227,6 +227,9 @@ func (m appAdminModel) renderOwner() string {
 }
 
 func (m appAdminModel) updateRepo(msg tea.KeyMsg) (appAdminModel, tea.Cmd) {
+	if m.manualActive {
+		return m.updateManualRepo(msg)
+	}
 	switch msg.String() {
 	case "up", "k":
 		if m.repoCursor > 0 {
@@ -236,21 +239,106 @@ func (m appAdminModel) updateRepo(msg tea.KeyMsg) (appAdminModel, tea.Cmd) {
 		if m.repoCursor < len(m.repos)-1 {
 			m.repoCursor++
 		}
+	case " ":
+		if len(m.repos) > 0 {
+			m.toggleSelected(m.repos[m.repoCursor].FullName)
+		}
+	case "r":
+		if len(m.repos) > 0 {
+			m.cycleRoleUnderCursor(m.repos[m.repoCursor].FullName)
+		}
+	case "/":
+		m.manualActive = true
+		m.manualInput.Focus()
+		return m, textinput.Blink
 	case "enter":
-		if len(m.repos) == 0 {
+		if err := m.validateSelection(); err != "" {
+			m.err = err
 			return m, nil
 		}
-		m.repo = m.repos[m.repoCursor].FullName
+		m.err = ""
+		m.repo = m.frontendRepo()
 		m.nameInput.SetValue(suggestAppName(m.repo))
-		m.baseInput.SetValue(fmt.Sprintf("https://github.com/%s", m.repo))
+		m.baseInput.SetValue("")
 		m.nameInput.Focus()
-		m.baseInput.Blur()
 		m.step = appStepForm
 	case "esc":
 		m.step = appStepOwner
 		m.ownerInput.Focus()
 	}
 	return m, nil
+}
+
+// toggleSelected adds the repo (defaulting the FIRST pick to "frontend", later picks to "service")
+// or removes it if already selected.
+func (m *appAdminModel) toggleSelected(full string) {
+	for i, s := range m.selected {
+		if s.fullName == full {
+			m.selected = append(m.selected[:i], m.selected[i+1:]...)
+			return
+		}
+	}
+	role := "service"
+	if m.frontendRepo() == "" {
+		role = "frontend"
+	}
+	m.selected = append(m.selected, repoRole{fullName: full, role: role})
+}
+
+func (m *appAdminModel) cycleRoleUnderCursor(full string) {
+	for i := range m.selected {
+		if m.selected[i].fullName == full {
+			m.selected[i].role = nextRole(m.selected[i].role)
+			return
+		}
+	}
+}
+
+func (m appAdminModel) frontendRepo() string {
+	for _, s := range m.selected {
+		if s.role == "frontend" {
+			return s.fullName
+		}
+	}
+	return ""
+}
+
+func (m appAdminModel) validateSelection() string {
+	if len(m.selected) == 0 {
+		return "select at least one repository (space)"
+	}
+	fronts := 0
+	for _, s := range m.selected {
+		if s.role == "frontend" {
+			fronts++
+		}
+	}
+	if fronts != 1 {
+		return "exactly one repo must be the frontend (press r to set the role)"
+	}
+	return ""
+}
+
+// updateManualRepo handles the "/" typed-slug entry: enter adds the slug (frontend if none yet,
+// else service), esc cancels. Any other key edits the input.
+func (m appAdminModel) updateManualRepo(msg tea.KeyMsg) (appAdminModel, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		slug := strings.TrimSpace(m.manualInput.Value())
+		if slug != "" {
+			m.toggleSelected(slug)
+		}
+		m.manualInput.SetValue("")
+		m.manualActive = false
+		return m, nil
+	case "esc":
+		m.manualInput.SetValue("")
+		m.manualActive = false
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.manualInput, cmd = m.manualInput.Update(msg)
+	return m, cmd
 }
 
 func (m appAdminModel) updateForm(msg tea.KeyMsg) (appAdminModel, tea.Cmd) {
