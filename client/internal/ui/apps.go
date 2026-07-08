@@ -381,10 +381,13 @@ func (m appAdminModel) updateForm(msg tea.KeyMsg) (appAdminModel, tea.Cmd) {
 		}
 		// Edit mode opens directly on the form — esc exits.
 		return m, func() tea.Msg { return backMsg{} }
-	case "tab", "down", "j":
+	// Navigate with tab/arrows only — NOT j/k: the form has text inputs (name, url, env
+	// user/pass), and using printable letters as motion aliases would eat those letters while
+	// typing (e.g. "joomeco"). Toggle rows are still reachable via tab/arrows.
+	case "tab", "down":
 		m.moveFormFocus(1)
 		return m, textinput.Blink
-	case "shift+tab", "up", "k":
+	case "shift+tab", "up":
 		m.moveFormFocus(-1)
 		return m, textinput.Blink
 	case " ":

@@ -367,3 +367,20 @@ func TestBuildUpdateInputOmitsEnvWhenNone(t *testing.T) {
 		t.Fatalf("no env expected (must not wipe existing creds); got %+v", *in.Env)
 	}
 }
+
+// Regression: on a text field, j/k must be typed, not treated as motion — otherwise words
+// containing them (e.g. "joomeco", "webapp") can't be entered. Navigation is tab/arrows only.
+func TestFormTextFieldAcceptsJAndKAsInput(t *testing.T) {
+	m := newOnboardModel(nil)
+	m.step = appStepForm
+	m.formCursor = fURL
+	m.baseInput.Focus()
+	m, _ = m.updateForm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m, _ = m.updateForm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	if m.formCursor != fURL {
+		t.Fatalf("j/k must not move focus on a text field; cursor=%v", m.formCursor)
+	}
+	if m.baseInput.Value() != "jk" {
+		t.Fatalf("j/k must type into the focused input; got %q", m.baseInput.Value())
+	}
+}
