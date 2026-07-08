@@ -24,12 +24,51 @@ func winnerProfile() contract.OnboardingJobStatus_ResolvedProfile {
 	return p
 }
 
+// winnerResolution builds a realistic Resolution: two edges the frontend actually calls, plus
+// some unresolved and drifted calls — a winner should always carry one of these now (the
+// human-meaningful result the propose screen renders), never just the raw profile shape.
+func winnerResolution() *struct {
+	Drift float32 `json:"drift"`
+	Edges []struct {
+		Calls     float32                                              `json:"calls"`
+		FromRepo  string                                               `json:"fromRepo"`
+		ToRepo    string                                               `json:"toRepo"`
+		Transport contract.OnboardingJobStatusResolutionEdgesTransport `json:"transport"`
+	} `json:"edges"`
+	External   float32 `json:"external"`
+	Unresolved float32 `json:"unresolved"`
+} {
+	return &struct {
+		Drift float32 `json:"drift"`
+		Edges []struct {
+			Calls     float32                                              `json:"calls"`
+			FromRepo  string                                               `json:"fromRepo"`
+			ToRepo    string                                               `json:"toRepo"`
+			Transport contract.OnboardingJobStatusResolutionEdgesTransport `json:"transport"`
+		} `json:"edges"`
+		External   float32 `json:"external"`
+		Unresolved float32 `json:"unresolved"`
+	}{
+		Drift: 1,
+		Edges: []struct {
+			Calls     float32                                              `json:"calls"`
+			FromRepo  string                                               `json:"fromRepo"`
+			ToRepo    string                                               `json:"toRepo"`
+			Transport contract.OnboardingJobStatusResolutionEdgesTransport `json:"transport"`
+		}{
+			{Calls: 14, FromRepo: "org/web", ToRepo: "org/svc-a", Transport: contract.OnboardingJobStatusResolutionEdgesTransportHttp},
+			{Calls: 3, FromRepo: "org/web", ToRepo: "org/svc-b", Transport: contract.OnboardingJobStatusResolutionEdgesTransportHttp},
+		},
+		Unresolved: 4,
+	}
+}
+
 func winnerStatus() contract.OnboardingJobStatus {
 	outcome := contract.Winner
 	profile := winnerProfile()
 	return contract.OnboardingJobStatus{
 		State: contract.OnboardingJobStatusStateDone, App: strPtr("shop"), Round: 2, Ceiling: 3,
-		CandidatesScored: 5, Outcome: &outcome, ResolvedProfile: &profile,
+		CandidatesScored: 5, Outcome: &outcome, ResolvedProfile: &profile, Resolution: winnerResolution(),
 	}
 }
 
@@ -92,7 +131,7 @@ func TestBoundaryProposeFoldsEveryStateIntoDistinctView(t *testing.T) {
 		{"proposing", inProgressStatus(contract.OnboardingJobStatusStateProposing, 1), []string{"proposing", "1", "3"}},
 		{"scoring", inProgressStatus(contract.OnboardingJobStatusStateScoring, 2), []string{"scoring"}},
 		{"winner", winnerStatus(), []string{"confirm"}},
-		{"no-profile", noProfileStatus(), []string{"no boundary profile found"}},
+		{"no-profile", noProfileStatus(), []string{"no repo connections", "configured"}},
 		{"failed", failedStatus(), []string{"onboarding timed out"}},
 	}
 	for _, c := range cases {
@@ -163,7 +202,54 @@ func TestBoundaryProposeEscDiscardsNoWrite(t *testing.T) {
 	}
 }
 
-// A no-profile outcome renders no confirm card and esc still just goes back.
+// The winner card's job is to show the human-meaningful RESULT: how the repos actually connect
+// (Resolution.Edges) and what still needs attention (unresolved/drift/external call counts) —
+// never the raw internal profile shape (transport/frontFiles/serviceRepoTemplate/openApiPath),
+// which the human never needs to review directly (ADAPTED from the old
+// TestBoundaryProposeRendersEventWinnerProfile — the winner card no longer renders that raw
+// template at all, so the old assertions on servicePrefixTemplate/openApiPath/eventPattern words
+// are gone by design, not by omission).
+func TestBoundaryProposeWinnerCardShowsConnectionsAndNeedsAttention(t *testing.T) {
+	m := newBoundaryProposeModel(nil, "shop")
+	m.width, m.height = 100, 30
+	m, _ = m.Update(boundaryStatusMsg{status: winnerStatus()})
+	out := strings.ToLower(m.View())
+	for _, want := range []string{"→", "org/svc-a", "14", "connect", "unresolved"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("winner View() missing %q:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{"serviceprefixtemplate", "openapipath"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("winner View() must not render the old raw profile template, found %q:\n%s", unwanted, out)
+		}
+	}
+}
+
+// A winner whose ResolvedProfile is set but Resolution is nil (eventWinnerStatus predates the
+// Resolution field) must fall back to the minimal "ready" line — never panic on a nil Resolution,
+// and never render a connections/needs-attention block it has no data for. ADAPTED from the old
+// TestBoundaryProposeRendersEventWinnerProfile: that test exercised the event-transport branch of
+// the now-deleted renderResolvedProfile; this fixture (ResolvedProfile set, Resolution nil) is now
+// the natural case for the defensive nil-Resolution fallback instead.
+func TestBoundaryProposeWinnerWithNilResolutionFallsBackToMinimalLine(t *testing.T) {
+	m := newBoundaryProposeModel(nil, "shop")
+	m.width, m.height = 100, 30
+	m, _ = m.Update(boundaryStatusMsg{status: eventWinnerStatus()})
+	out := strings.ToLower(m.View())
+	if !strings.Contains(out, "boundary profile resolved") || !strings.Contains(out, "shop") {
+		t.Fatalf("nil-Resolution winner must still render the minimal ready line:\n%s", out)
+	}
+	for _, unwanted := range []string{"how the repos connect", "needs attention", "on confirm:"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("nil-Resolution winner must not render the connections block, found %q:\n%s", unwanted, out)
+		}
+	}
+}
+
+// A no-profile outcome renders no confirm card and esc still just goes back. ADAPTED: the
+// no-profile screen now renders a meaningful configured-but-no-connections message instead of the
+// old bare hint line, so the assertion checks the new copy ("no boundary profile found" is gone).
 func TestBoundaryProposeNoProfileRendersDistinctlyFromWinner(t *testing.T) {
 	m := newBoundaryProposeModel(nil, "shop")
 	m.width, m.height = 100, 30
@@ -172,29 +258,9 @@ func TestBoundaryProposeNoProfileRendersDistinctlyFromWinner(t *testing.T) {
 	if strings.Contains(out, "confirm") {
 		t.Fatalf("a no-profile outcome must not render a confirm card:\n%s", out)
 	}
-	if !strings.Contains(out, "no boundary profile found") {
-		t.Fatalf("View() missing the no-profile message:\n%s", out)
-	}
-}
-
-// The event-transport branch of renderResolvedProfile (onboard_boundaries.go) is otherwise
-// untested — the winner fixture above only exercises the http variant. This proves the event
-// fields (files, eventPattern.kind/publishCall/listenerEventCall) actually render.
-func TestBoundaryProposeRendersEventWinnerProfile(t *testing.T) {
-	m := newBoundaryProposeModel(nil, "shop")
-	m.width, m.height = 100, 30
-	m, _ = m.Update(boundaryStatusMsg{status: eventWinnerStatus()})
-	out := strings.ToLower(m.View())
-	for _, want := range []string{
-		"transport",
-		"event",
-		"src/events/shopeventlistener.java",
-		"class-based-domain-events",
-		"eventpublisher.publish",
-		"onevent",
-	} {
+	for _, want := range []string{"no repo connections", "configured", "config/apps"} {
 		if !strings.Contains(out, want) {
-			t.Fatalf("View() missing %q for an event winner profile:\n%s", want, out)
+			t.Fatalf("View() missing %q for the no-profile message:\n%s", want, out)
 		}
 	}
 }

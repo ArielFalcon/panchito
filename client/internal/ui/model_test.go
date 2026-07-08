@@ -26,6 +26,21 @@ func TestConnectedMsgSwitchesToDashboard(t *testing.T) {
 	}
 }
 
+// Onboarding a new app must chain straight into the boundary-propose screen for that app,
+// instead of dropping the human back on the dashboard — the wizard's job isn't done until the
+// cross-repo boundaries are proposed too.
+func TestOnboardedMsgChainsIntoProposeScreen(t *testing.T) {
+	m := Model{screen: screenAppAdmin, width: 100, height: 40}
+	updated, _ := m.Update(onboardedMsg{app: "shop"})
+	mm := updated.(Model)
+	if mm.screen != screenBoundaryPropose {
+		t.Fatalf("onboarding must chain into propose; got screen %v", mm.screen)
+	}
+	if mm.boundaryPropose.app != "shop" {
+		t.Fatalf("propose must target the new app; got %q", mm.boundaryPropose.app)
+	}
+}
+
 func TestAppSelectedOpensLauncher(t *testing.T) {
 	m := Model{screen: screenDashboard}
 	updated, _ := m.Update(appSelectedMsg{app: "portfolio"})

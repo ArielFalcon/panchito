@@ -264,8 +264,16 @@ func (m boundaryProposeModel) renderFailed() string {
 	return errorStyle.Render(msg) + "\n"
 }
 
+// renderNoProfile explains a completed job that found no boundary profile as a MEANINGFUL
+// outcome, not a dead end: the app is registered and stays fully testable, it simply has no
+// detected cross-service surface (or its backend services aren't declared yet).
 func (m boundaryProposeModel) renderNoProfile() string {
-	return hintStyle.Render("completed — no boundary profile found (the app may not fit the http/event templates)") + "\n"
+	var b strings.Builder
+	b.WriteString(errorStyle.Render(fmt.Sprintf("⚠ no repo connections detected — %s is configured but has no boundary profile.", m.app)) + "\n\n")
+	b.WriteString(labelStyle.Render("registered:") + "\n")
+	b.WriteString(fmt.Sprintf("  · config/apps/%s.yaml\n\n", m.app))
+	b.WriteString(hintStyle.Render("why: no frontend call-site resolved to a declared service — the app may have no cross-service surface, or its backend services aren't declared. The app is still configured and testable.") + "\n")
+	return b.String()
 }
 
 // renderIndexing lists each RepoIndexOutcome the server has reported so far (design §2.8) — the
@@ -306,12 +314,25 @@ func (m boundaryProposeModel) renderAppMismatch() string {
 	return errorStyle.Render(fmt.Sprintf("another app's onboarding job is active: %s", other)) + "\n"
 }
 
-// renderWinnerCard shows the serialized boundary block before it lands — the human sees the
-// exact block that a confirm would write, matching the human-review-first posture (design §D.4).
+// renderWinnerCard shows the human-meaningful RESULT of a resolved boundary profile — how the
+// repos actually connect (Resolution.Edges) and what still needs attention (unresolved/drift/
+// external call counts) — never the raw internal profile shape (transport/frontFiles/
+// serviceRepoTemplate/openApiPath/eventPattern…). The human is confirming a RESULT, not reviewing
+// a schema dump; the authoritative serialization into config/apps/<name>.yaml still happens
+// server-side (spliceBoundariesBlock, design §A/§C) regardless of what this card displays. The
+// confirm gate itself (isConfirmableWinner / View dispatch / footer hint) is unchanged.
 func (m boundaryProposeModel) renderWinnerCard() string {
 	var b strings.Builder
-	b.WriteString(okStyle.Bold(true).Render("boundary profile resolved") + "\n\n")
-	b.WriteString(m.renderResolvedProfile())
+	b.WriteString(okStyle.Bold(true).Render(fmt.Sprintf("boundary profile resolved — %s is ready.", m.app)) + "\n")
+	// A winner should always carry a Resolution now, but stay defensive: fall back to just the
+	// line above instead of panicking (or rendering an empty/misleading block) on a nil field.
+	if m.status.Resolution != nil {
+		b.WriteString("\n" + m.renderConnections())
+		if attention := m.renderNeedsAttention(); attention != "" {
+			b.WriteString("\n" + attention)
+		}
+		b.WriteString("\n" + hintStyle.Render(fmt.Sprintf("on confirm: writes boundaries[] to config/apps/%s.yaml and indexes the repos", m.app)) + "\n")
+	}
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colPass).
@@ -320,34 +341,39 @@ func (m boundaryProposeModel) renderWinnerCard() string {
 	return box + "\n"
 }
 
-// renderResolvedProfile renders a human-readable preview of the resolved boundary — a client-
-// side display only; the authoritative serialization into config/apps/<name>.yaml happens
-// server-side (spliceBoundariesBlock, reused verbatim from the CLI path, design §A/§C).
-func (m boundaryProposeModel) renderResolvedProfile() string {
-	if m.status.ResolvedProfile == nil {
+// renderConnections renders "how the repos connect" — one line per Resolution.Edges entry,
+// naming which repo calls which, how often, and over what transport. The caller checks
+// m.status.Resolution for nil first.
+func (m boundaryProposeModel) renderConnections() string {
+	var b strings.Builder
+	b.WriteString(labelStyle.Render("How the repos connect:") + "\n")
+	for _, e := range m.status.Resolution.Edges {
+		b.WriteString(fmt.Sprintf("  %s → %s   %d calls (%s)\n", e.FromRepo, e.ToRepo, int(e.Calls), e.Transport))
+	}
+	return b.String()
+}
+
+// renderNeedsAttention flags whatever the resolution didn't fully explain: frontend calls that
+// resolved to no backend, calls hitting an endpoint the backend doesn't declare (contract drift),
+// and calls to third-party/undeclared hosts. A clean resolution (all three zero) renders nothing
+// — there is nothing to flag. The caller checks m.status.Resolution for nil first.
+func (m boundaryProposeModel) renderNeedsAttention() string {
+	res := m.status.Resolution
+	if res.Unresolved <= 0 && res.Drift <= 0 && res.External <= 0 {
 		return ""
 	}
-	if http, err := m.status.ResolvedProfile.AsOnboardingJobStatusResolvedProfile0(); err == nil && http.Transport == contract.OnboardingJobStatusResolvedProfile0TransportHttp {
-		lines := []string{
-			labelStyle.Render("transport ") + "http",
-			labelStyle.Render("frontFiles ") + http.FrontFiles,
-			labelStyle.Render("servicePrefixTemplate ") + http.ServicePrefixTemplate,
-			labelStyle.Render("serviceRepoTemplate ") + http.ServiceRepoTemplate,
-			labelStyle.Render("openApiPath ") + http.OpenApiPath,
-		}
-		return strings.Join(lines, "\n") + "\n"
+	var b strings.Builder
+	b.WriteString(errorStyle.Render("Needs attention:") + "\n")
+	if res.Unresolved > 0 {
+		b.WriteString(fmt.Sprintf("  · %d frontend calls unresolved (no matching backend)\n", int(res.Unresolved)))
 	}
-	if event, err := m.status.ResolvedProfile.AsOnboardingJobStatusResolvedProfile1(); err == nil {
-		lines := []string{
-			labelStyle.Render("transport ") + "event",
-			labelStyle.Render("files ") + event.Files,
-			labelStyle.Render("eventPattern.kind ") + event.EventPattern.Kind,
-			labelStyle.Render("eventPattern.publishCall ") + event.EventPattern.PublishCall,
-			labelStyle.Render("eventPattern.listenerEventCall ") + event.EventPattern.ListenerEventCall,
-		}
-		return strings.Join(lines, "\n") + "\n"
+	if res.Drift > 0 {
+		b.WriteString(fmt.Sprintf("  · %d contract-drift calls (endpoint the backend doesn't declare)\n", int(res.Drift)))
 	}
-	return hintStyle.Render("(unrecognized profile shape)") + "\n"
+	if res.External > 0 {
+		b.WriteString(fmt.Sprintf("  · %d external calls (third-party / undeclared host)\n", int(res.External)))
+	}
+	return b.String()
 }
 
 func (m boundaryProposeModel) footerHint() string {

@@ -823,6 +823,7 @@ type onboardSelectedMsg struct{}
 type editAppMsg struct{ app contract.AppView }
 type deleteAppMsg struct{ app contract.AppView }
 type onboardBoundariesMsg struct{ app string }
+type onboardedMsg struct{ app string }
 type reposLoadedMsg struct{ repos []contract.RepoListItem }
 type appsChangedMsg struct {
 	apps   []contract.AppView
@@ -883,7 +884,10 @@ func createAppCmd(c *api.Client, in contract.CreateAppInput, name string) tea.Cm
 		if _, err := c.CreateApp(ctx, in); err != nil {
 			return errMsg{err}
 		}
-		return reloadAppsMsg(c, ctx, fmt.Sprintf("%s onboarded", name))
+		// Chain straight into the boundary-propose screen for the new app (model.go's
+		// onboardedMsg handler) instead of reloading the app list and returning to the
+		// dashboard — the wizard's job isn't done until boundaries are proposed too.
+		return onboardedMsg{app: name}
 	}
 }
 

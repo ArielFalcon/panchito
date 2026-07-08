@@ -225,6 +225,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.boundaryPropose.height = m.bodyHeight()
 		m.screen = screenBoundaryPropose
 		return m, m.boundaryPropose.Init()
+	case onboardedMsg:
+		m.boundaryPropose = newBoundaryProposeModel(m.client, msg.app)
+		m.boundaryPropose.width = m.width
+		m.boundaryPropose.height = m.bodyHeight()
+		m.screen = screenBoundaryPropose
+		return m, m.boundaryPropose.Init()
 	case confirmedBoundariesMsg:
 		if len(msg.apps) > 0 {
 			m.sys.apps = msg.apps
