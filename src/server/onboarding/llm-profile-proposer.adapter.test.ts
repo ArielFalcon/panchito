@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { AgentDeps, AgentSession } from "../../integrations/opencode-client";
 import type { RepoRef } from "@contexts/service-topology/domain/index.ts";
 import type { ProposerFeedback } from "@contexts/service-topology/application/ports/index.ts";
-import { LlmProfileProposerAdapter, PROPOSER_MODEL } from "./llm-profile-proposer.adapter";
+import { LlmProfileProposerAdapter, PROPOSER_MODEL, commonSessionRoot } from "./llm-profile-proposer.adapter";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -166,9 +166,96 @@ test("propose(): calls depsFactory() DIRECTLY and pins the adapter's model on op
 
   assert.equal(opens.length, 1);
   assert.equal(opens[0]?.agent, "qa-proposer");
-  assert.equal(opens[0]?.cwd, FRONT.mirrorDir);
+  assert.equal(opens[0]?.cwd, "/mirrors", "session must root at the front+services' common ancestor, not front.mirrorDir alone");
   assert.equal(opens[0]?.model, PROPOSER_MODEL, "adapter must pin its own model, not fall through a facade");
   assert.equal(opens[0]?.timeoutMs, 12345);
+});
+
+// ── Session root (sibling-repo read hang fix) ──────────────────────────────────────────────────
+// Root cause (live-verified): the proposer's task spans the front repo AND every service repo —
+// siblings under the same mirror root. Opening the session at front.mirrorDir alone leaves a
+// service mirror OUTSIDE the session root; opencode's external-read approval gate (serve mode)
+// then waits forever for an approval that never comes, stalling the tool call at state=running
+// until the adapter's 5-min timeout aborts it -> silent fail-open to []. Rooting the session at
+// the LCA of every mirror keeps all repos inside the workspace.
+
+test("propose(): multi-repo — session opens at the common ancestor of front + all service mirrors", async () => {
+  const opens: Array<{ agent: string; cwd: string }> = [];
+  const front: RepoRef = { repo: "ArielFalcon/nname-gateway", mirrorDir: "/x/mirrors/nname-gateway" };
+  const system: RepoRef[] = [
+    { repo: "ArielFalcon/ms-name-orders", mirrorDir: "/x/mirrors/ms-name-orders" },
+    { repo: "ArielFalcon/ms-name-billing", mirrorDir: "/x/mirrors/ms-name-billing" },
+  ];
+  const depsFactory = fakeDepsFactory({
+    promptResult: fencedJson(VALID_VERDICT_JSON),
+    onOpen: (agent, cwd) => opens.push({ agent, cwd }),
+  });
+  const adapter = new LlmProfileProposerAdapter(depsFactory, PROPOSER_MODEL, { app: "nname" });
+
+  await adapter.propose(system, front);
+
+  assert.equal(opens.length, 1);
+  assert.equal(opens[0]?.agent, "qa-proposer");
+  assert.equal(opens[0]?.cwd, "/x/mirrors");
+});
+
+test("propose(): single-repo (system: []) — session opens at front.mirrorDir, unchanged", async () => {
+  const opens: Array<{ agent: string; cwd: string }> = [];
+  const front: RepoRef = { repo: "ArielFalcon/nname-gateway", mirrorDir: "/x/mirrors/nname-gateway" };
+  const depsFactory = fakeDepsFactory({
+    promptResult: fencedJson(VALID_VERDICT_JSON),
+    onOpen: (agent, cwd) => opens.push({ agent, cwd }),
+  });
+  const adapter = new LlmProfileProposerAdapter(depsFactory, PROPOSER_MODEL, { app: "nname" });
+
+  await adapter.propose([], front);
+
+  assert.equal(opens.length, 1);
+  assert.equal(opens[0]?.agent, "qa-proposer");
+  assert.equal(opens[0]?.cwd, front.mirrorDir);
+});
+
+test("propose(): LCA edge case — divergent sibling-looking dirs resolve to the true segment-wise ancestor", async () => {
+  const opens: Array<{ agent: string; cwd: string }> = [];
+  const front: RepoRef = { repo: "ArielFalcon/front", mirrorDir: "/x/mirrors/a" };
+  const system: RepoRef[] = [{ repo: "ArielFalcon/svc", mirrorDir: "/x/mirrors-other/b" }];
+  const depsFactory = fakeDepsFactory({
+    promptResult: fencedJson(VALID_VERDICT_JSON),
+    onOpen: (agent, cwd) => opens.push({ agent, cwd }),
+  });
+  const adapter = new LlmProfileProposerAdapter(depsFactory, PROPOSER_MODEL, { app: "nname" });
+
+  await adapter.propose(system, front);
+
+  assert.equal(opens.length, 1);
+  assert.equal(
+    opens[0]?.cwd,
+    "/x",
+    "must resolve via segment-wise LCA (not naive string-prefix, which would wrongly stop at '/x/mirrors')",
+  );
+});
+
+test("commonSessionRoot(): multi-repo — returns the common ancestor of front + all service mirrors", () => {
+  const front: RepoRef = { repo: "ArielFalcon/nname-gateway", mirrorDir: "/x/mirrors/nname-gateway" };
+  const system: RepoRef[] = [
+    { repo: "ArielFalcon/ms-name-orders", mirrorDir: "/x/mirrors/ms-name-orders" },
+    { repo: "ArielFalcon/ms-name-billing", mirrorDir: "/x/mirrors/ms-name-billing" },
+  ];
+
+  assert.equal(commonSessionRoot(front, system), "/x/mirrors");
+});
+
+test("commonSessionRoot(): single-repo (system: []) — returns front.mirrorDir unchanged", () => {
+  const front: RepoRef = { repo: "ArielFalcon/nname-gateway", mirrorDir: "/x/mirrors/nname-gateway" };
+
+  assert.equal(commonSessionRoot(front, []), front.mirrorDir);
+});
+
+test("commonSessionRoot(): LCA edge case — segment-wise ancestor, not naive string-prefix", () => {
+  const front: RepoRef = { repo: "ArielFalcon/front", mirrorDir: "/x/mirrors/a" };
+  const system: RepoRef[] = [{ repo: "ArielFalcon/svc", mirrorDir: "/x/mirrors-other/b" }];
+
+  assert.equal(commonSessionRoot(front, system), "/x");
 });
 
 // ── AbortSignal thread-through (Slice 5a, design delta §C session-leak fix) ────────────────────

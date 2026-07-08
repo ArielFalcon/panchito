@@ -19,6 +19,7 @@
 // allowImportingTsExtensions), a VALUE import with a literal .ts suffix fails TS5097. VALUE
 // imports below are therefore extensionless; type-only imports use the @contexts alias (already
 // resolvable from src/, matching this file's src/server neighbors).
+import { dirname, sep } from "node:path";
 import type { AgentDeps } from "../../integrations/opencode-client";
 import { defaultAgentDeps } from "../../integrations/opencode-client";
 import type { BoundaryProfile, RepoRef } from "@contexts/service-topology/domain/index.ts";
@@ -111,6 +112,50 @@ function assemblePrompt(system: RepoRef[], front: RepoRef, app: string, feedback
   return sections.join("\n");
 }
 
+/** True when `target` is `ancestor` itself, or is nested inside it (segment-aware — appends `sep`
+ *  before the `startsWith` check so "/a/foo" is never mistaken for an ancestor of "/a/foobar"). */
+function isAncestorOrSelf(ancestor: string, target: string): boolean {
+  if (ancestor === target) return true;
+  const prefix = ancestor.endsWith(sep) ? ancestor : ancestor + sep;
+  return target.startsWith(prefix);
+}
+
+/** Walks `a` up its directory tree (via `dirname`) until it is an ancestor of (or equal to) `b`.
+ *  Segment-aware by construction — never a naive string-prefix match. */
+function pairwiseCommonAncestor(a: string, b: string): string {
+  let candidate = a;
+  while (!isAncestorOrSelf(candidate, b)) {
+    const parent = dirname(candidate);
+    if (parent === candidate) break; // reached filesystem root; nothing higher to climb to
+    candidate = parent;
+  }
+  return candidate;
+}
+
+/** Computes the lowest common ancestor (LCA) directory of the front mirror and every service
+ *  mirror, so the proposer's opencode session is rooted somewhere that contains ALL repos its
+ *  prompt asks it to read.
+ *
+ *  Root cause (live-verified): the proposer's task spans the front repo AND every service repo —
+ *  sibling directories under the same mirror root. Opening the session at `front.mirrorDir` alone
+ *  means a service mirror is OUTSIDE the session root; opencode's external-read approval gate (in
+ *  serve mode) then waits forever for an approval that never comes, the tool call sits
+ *  `state=running` indefinitely, and the adapter's 5-min timeout eventually aborts it — a slow,
+ *  silent fail-open to `[]` (three empty rounds -> `noProfile`), not a fast, diagnosable error.
+ *  Rooting the session at the LCA of every mirror keeps all repos inside the workspace so
+ *  cross-service reads never trip that gate.
+ *
+ *  Single-repo apps (`system.length === 0`) keep `front.mirrorDir` verbatim — there is no sibling
+ *  repo to protect against, so behavior is unchanged.
+ *
+ *  POSIX-only: LCA is computed segment-by-segment via `node:path`'s `sep`/`dirname`, NOT a naive
+ *  string prefix (which would wrongly treat "/a/foo" as an ancestor of "/a/foobar"). This repo's
+ *  containers are POSIX-only; Windows path handling is out of scope. */
+export function commonSessionRoot(front: RepoRef, system: RepoRef[]): string {
+  if (system.length === 0) return front.mirrorDir;
+  return system.reduce((lca, s) => pairwiseCommonAncestor(lca, s.mirrorDir), front.mirrorDir);
+}
+
 /** LLM-backed ProfileProposerPort implementation. Ctor DI keeps the agent-runtime dependency
  *  swappable (a fake depsFactory drives the unit tests) and the model pin overridable for tests
  *  without touching the production default. */
@@ -128,7 +173,7 @@ export class LlmProfileProposerAdapter implements ProfileProposerPort {
   async propose(system: RepoRef[], front: RepoRef, feedback?: ProposerFeedback): Promise<BoundaryProfile[]> {
     try {
       const deps = await this.depsFactory();
-      const session = await deps.open("qa-proposer", front.mirrorDir, {
+      const session = await deps.open("qa-proposer", commonSessionRoot(front, system), {
         model: this.model,
         timeoutMs: this.ctx.timeoutMs ?? DEFAULT_PROPOSER_TIMEOUT_MS,
         signal: this.ctx.signal,
