@@ -49,7 +49,11 @@ export type PublishResult = { prUrl: string | null; merged: boolean; error?: str
 // e2e/: stage the suite; exclude installed deps + the volatile change-coverage / measured
 // fields (committing them would bloat PRs and make "did anything change?" always true).
 const E2E_ADD = ["e2e"];
-const E2E_EXCLUDES = ["node_modules/", ".qa/coverage/", ".qa/measured.json"];
+// .qa/service-context/: the cross-repo staged snapshot (src/server/service-context.ts) — a
+// disposable READ-ONLY copy of a related service's contracts/diff for the agent session, never
+// part of the suite itself. Committing it would bloat PRs with content that belongs to a
+// DIFFERENT repo and is re-staged fresh on every run anyway.
+const E2E_EXCLUDES = ["node_modules/", ".qa/coverage/", ".qa/measured.json", ".qa/service-context/"];
 
 // Code mode: tests can live anywhere (the agent matches the repo's conventions) — commit
 // the whole tree, minus installed deps, build output and run artifacts.
@@ -69,6 +73,9 @@ const CODE_EXCLUDES = [
   ".next/",
   "coverage/",
   "e2e/.qa/coverage/",
+  // Same disposable staged-context exclusion as E2E_EXCLUDES above, repo-root relative here
+  // since CODE_ADD stages the whole tree (cross-repo staging is target-agnostic).
+  "e2e/.qa/service-context/",
   // Mutation-oracle artifacts (qa/learning/mutation-code.ts) — cleaned up best-effort after
   // the pass, but a crash between Stryker and publish must never commit them into the PR.
   ".stryker-tmp/",

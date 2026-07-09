@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPrompt, buildPromptAssembled, buildPlanPromptAssembled, buildFollowupPrompt, buildWorkerPrompt, buildReviewerPrompt, buildExplorerPrompt } from "./prompts";
+import { buildPrompt, buildPromptAssembled, buildPlanPromptAssembled, buildFollowupPrompt, buildWorkerPrompt, buildReviewerPrompt, buildExplorerPrompt, buildContextTask } from "./prompts";
 import { assemble as caAssemble, section as caSection } from "./context-assembler";
 import type { OpencodeRunInput } from "./opencode-client";
 import type { ParallelWorkerInput, ReviewInput } from "@contexts/generation/application/ports/generation-ports.ts";
@@ -1427,4 +1427,66 @@ test("WS5.2: the assembled coverage-gap section survives a tiny budget that shed
   assert.ok(assembled.text.includes("COVERAGE_GAP_UNIQUE_MARKER"), "coverage-gap (shedAs critical-recap) must survive the tiny budget");
   assert.ok(assembled.sectionSizes["coverage-gap"] !== undefined, "coverage-gap must be present in sectionSizes (not shed)");
   assert.ok(assembled.sectionSizes["dom-snapshot"] === undefined, "dom-snapshot (shedAs volatile, its own default band) must be the one shed instead");
+});
+
+// ── Cross-repo prompt wording honesty (service-context staging fix) ──────────────────────────
+// input.service.mirrorDir / input.services[].mirrorDir now carry a STAGED, bounded snapshot
+// (src/server/service-context.ts), never the service's full working copy — the wording must say
+// so, and any OpenAPI hint must be rendered under the contracts/ prefix the staging actually uses.
+
+test("cross-repo diff task: describes the service path as a staged READ-ONLY snapshot, never a 'working copy', and prefixes the openapi hint with contracts/", () => {
+  const text = buildPrompt(mkInput({
+    service: { repo: "org/orders-svc", mirrorDir: "/work/e2e/.qa/service-context/org__orders-svc", openapi: "openapi/orders.yaml" },
+  }));
+  assert.match(text, /READ-ONLY staged snapshot/i);
+  assert.doesNotMatch(text, /working copy/i, "the generation task must never claim a full working copy is available");
+  assert.match(text, /contracts\/openapi\/orders\.yaml/, "the openapi hint must point at the contracts/ prefix staging actually uses");
+});
+
+test("cross-repo diff task: an array openapi hint is prefixed per-entry, not just on the joined string", () => {
+  const text = buildPrompt(mkInput({
+    service: { repo: "org/orders-svc", mirrorDir: "/staged/org__orders-svc", openapi: ["openapi/orders.yaml", "openapi/payments.yaml"] },
+  }));
+  assert.match(text, /contracts\/openapi\/orders\.yaml/);
+  assert.match(text, /contracts\/openapi\/payments\.yaml/);
+});
+
+test("cross-repo explorer prompt (diff mode): describes a staged snapshot, never a 'working copy'", () => {
+  const text = buildExplorerPrompt(mkInput({
+    service: { repo: "org/orders-svc", mirrorDir: "/staged/org__orders-svc" },
+  }));
+  assert.match(text, /READ-ONLY staged snapshot/i);
+  assert.doesNotMatch(text, /working copy/i);
+});
+
+test("cross-repo explorer prompt (manual mode): describes a staged snapshot, never a 'working copy'", () => {
+  const text = buildExplorerPrompt(mkInput({
+    mode: "manual",
+    guidance: "test the checkout flow",
+    service: { repo: "org/orders-svc", mirrorDir: "/staged/org__orders-svc" },
+  }));
+  assert.match(text, /READ-ONLY staged snapshot/i);
+  assert.doesNotMatch(text, /working copy/i);
+});
+
+test("cross-repo planner prompt: describes a staged snapshot, never a 'working copy'", () => {
+  const text = buildPlanPromptAssembled(mkInput({
+    service: { repo: "org/orders-svc", mirrorDir: "/staged/org__orders-svc" },
+  })).text;
+  assert.match(text, /READ-ONLY staged snapshot|staged working copy at/i);
+  assert.doesNotMatch(text, /\(read-only working copy at/i);
+});
+
+test("buildContextTask: describes each microservice path as a staged contract snapshot, never a mirrored working copy, and prefixes hints with contracts/", () => {
+  const text = buildContextTask(mkInput({
+    mode: "context",
+    services: [
+      { repo: "org/orders-svc", mirrorDir: "/staged/org__orders-svc", openapi: "openapi/orders.yaml" },
+      { repo: "org/payments-svc", mirrorDir: "/staged/org__payments-svc" },
+    ],
+  }));
+  assert.match(text, /staged contract snapshot/i);
+  assert.doesNotMatch(text, /mirrored READ-ONLY|working copy/i);
+  assert.match(text, /contracts\/openapi\/orders\.yaml/);
+  assert.match(text, /staged contract snapshots are local paths you can read/i);
 });

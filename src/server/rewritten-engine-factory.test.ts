@@ -1340,6 +1340,20 @@ function spyMirrorDeps() {
   return { mirror, ensureMirrorCalls, ensureMirrorAtBranchCalls };
 }
 
+// Testability seam: RewrittenEngineFactoryDeps.stageServiceContext lets tests inject a no-op for
+// the service-context staging side effect, instead of touching real disk/git — mirrors
+// spyMirrorDeps' own precedent immediately above. Checkout-focused tests that don't care about
+// staging content use this so `checkout()` never performs real fs writes against a spy mirror's
+// fabricated (non-existent) directories.
+function spyStageServiceContext() {
+  const calls: Array<{ workingCopyDir: string; repo: string; sha?: string }> = [];
+  const stageServiceContext = async (input: { workingCopyDir: string; service: { repo: string }; sha?: string }) => {
+    calls.push({ workingCopyDir: input.workingCopyDir, repo: input.service.repo, ...(input.sha ? { sha: input.sha } : {}) });
+    return { dir: `${input.workingCopyDir}/e2e/.qa/service-context/${input.service.repo.replaceAll("/", "__")}`, manifestPath: "unused" };
+  };
+  return { stageServiceContext, calls };
+}
+
 // 1. GUARD — pin same-repo behavior BEFORE touching anything: no triggerRepo must never take the
 // cross-repo branch, checkout(sha) must ensure only the PRIMARY repo at the event sha (never call
 // ensureMirrorAtBranch), and the deploy gate must read app.dev?.versionUrl exactly as before.
@@ -1397,9 +1411,10 @@ test("GUARD: no triggerRepo — vcs reads the PRIMARY mirror dir", () => {
 test("cross-repo: checkout(sha) ensures the SERVICE repo at the event sha, then returns the PRIMARY dir at baseBranch HEAD", async () => {
   const app: AppConfig = { ...cfg("factory-crossrepo-checkout"), services: [{ repo: "org/orders-svc" }] };
   const { mirror, ensureMirrorCalls, ensureMirrorAtBranchCalls } = spyMirrorDeps();
+  const { stageServiceContext } = spyStageServiceContext();
   const config = buildRewrittenCompositionConfig(
     app,
-    { getAgentDeps: stubAgentDeps, mirror },
+    { getAgentDeps: stubAgentDeps, mirror, stageServiceContext },
     "qa-bot-abc1234-run1",
     { mode: "diff", triggerRepo: "org/orders-svc" },
   );
@@ -1414,15 +1429,30 @@ test("cross-repo: checkout(sha) ensures the SERVICE repo at the event sha, then 
 test("cross-repo: checkout(sha) honors the app's configured baseBranch (not always 'main')", async () => {
   const app: AppConfig = { ...cfg("factory-crossrepo-basebranch"), baseBranch: "develop", services: [{ repo: "org/orders-svc" }] };
   const { mirror, ensureMirrorAtBranchCalls } = spyMirrorDeps();
+  const { stageServiceContext } = spyStageServiceContext();
   const config = buildRewrittenCompositionConfig(
     app,
-    { getAgentDeps: stubAgentDeps, mirror },
+    { getAgentDeps: stubAgentDeps, mirror, stageServiceContext },
     "qa-bot-abc1234-run1",
     { mode: "diff", triggerRepo: "org/orders-svc" },
   );
   await config.checkout(Sha.of("def5678901"));
   assert.deepEqual(ensureMirrorAtBranchCalls, [{ repo: "org/demo", branch: "develop", deps: defaultMirrorDeps }]);
   assert.strictEqual(ensureMirrorAtBranchCalls[0]?.deps, defaultMirrorDeps);
+});
+
+test("cross-repo: checkout(sha) stages the SERVICE's context INTO the primary working copy, after both mirrors are ensured", async () => {
+  const app: AppConfig = { ...cfg("factory-crossrepo-stage"), services: [{ repo: "org/orders-svc" }] };
+  const { mirror } = spyMirrorDeps();
+  const { stageServiceContext, calls } = spyStageServiceContext();
+  const config = buildRewrittenCompositionConfig(
+    app,
+    { getAgentDeps: stubAgentDeps, mirror, stageServiceContext },
+    "qa-bot-abc1234-run1",
+    { mode: "diff", triggerRepo: "org/orders-svc" },
+  );
+  const dir = await config.checkout(Sha.of("def5678901"));
+  assert.deepEqual(calls, [{ workingCopyDir: dir, repo: "org/orders-svc", sha: "def5678901" }], "staging must target the PRIMARY working copy (the agent session root), carrying the event sha");
 });
 
 // 3. RED — cfg.vcs must be bound to the SERVICE mirror dir (the classify/diff source), not the
@@ -1453,7 +1483,7 @@ test("cross-repo: composes CompositionConfig.triggerService = {repo, mirrorDir} 
     "qa-bot-abc1234-run1",
     { mode: "diff", triggerRepo: "org/orders-svc" },
   );
-  assert.deepEqual(config.triggerService, { repo: "org/orders-svc", mirrorDir: "/tmp/mirrors/org__orders-svc" }, "triggerService must carry the SERVICE's own repo + mirror dir, matching vcsDir's own formula — no openapi key when the service declares none");
+  assert.deepEqual(config.triggerService, { repo: "org/orders-svc", mirrorDir: "/tmp/mirrors/org__demo/e2e/.qa/service-context/org__orders-svc" }, "triggerService.mirrorDir must be the STAGED, IN-ROOT path (serviceContextDir), never the raw sibling mirror — no openapi key when the service declares none");
 });
 
 test("cross-repo: composes CompositionConfig.triggerService with openapi when the declared service carries an openapi hint", () => {
@@ -1467,7 +1497,7 @@ test("cross-repo: composes CompositionConfig.triggerService with openapi when th
     "qa-bot-abc1234-run1",
     { mode: "diff", triggerRepo: "org/orders-svc" },
   );
-  assert.deepEqual(config.triggerService, { repo: "org/orders-svc", mirrorDir: "/tmp/mirrors/org__orders-svc", openapi: "openapi/orders.yaml" });
+  assert.deepEqual(config.triggerService, { repo: "org/orders-svc", mirrorDir: "/tmp/mirrors/org__demo/e2e/.qa/service-context/org__orders-svc", openapi: "openapi/orders.yaml" });
 });
 
 test("cross-repo: composes CompositionConfig.triggerService with an array openapi hint, preserved as-is (openapi is string | string[])", () => {
@@ -1483,7 +1513,7 @@ test("cross-repo: composes CompositionConfig.triggerService with an array openap
   );
   assert.deepEqual(config.triggerService, {
     repo: "org/orders-svc",
-    mirrorDir: "/tmp/mirrors/org__orders-svc",
+    mirrorDir: "/tmp/mirrors/org__demo/e2e/.qa/service-context/org__orders-svc",
     openapi: ["openapi/orders.yaml", "openapi/payments.yaml"],
   });
 });
@@ -1659,9 +1689,9 @@ test("context mode: composes CompositionConfig.services = every declared service
     { mode: "context" },
   );
   assert.deepEqual(config.services, [
-    { repo: "org/orders-svc", mirrorDir: "/tmp/mirrors/org__orders-svc", openapi: "openapi/orders.yaml" },
-    { repo: "org/payments-svc", mirrorDir: "/tmp/mirrors/org__payments-svc" },
-  ], "each service ref must carry the SAME join(mirrorRoot, repo.replaceAll('/','__')) formula vcsDir/triggerService already use — no openapi key when a service declares none");
+    { repo: "org/orders-svc", mirrorDir: "/tmp/mirrors/org__demo/e2e/.qa/service-context/org__orders-svc", openapi: "openapi/orders.yaml" },
+    { repo: "org/payments-svc", mirrorDir: "/tmp/mirrors/org__demo/e2e/.qa/service-context/org__payments-svc" },
+  ], "each service ref must carry the SAME staged serviceContextDir formula triggerService already uses — no openapi key when a service declares none");
 });
 
 test("context mode: composes CompositionConfig.services with an array openapi hint, preserved as-is (openapi is string | string[])", () => {
@@ -1676,7 +1706,7 @@ test("context mode: composes CompositionConfig.services with an array openapi hi
     { mode: "context" },
   );
   assert.deepEqual(config.services, [
-    { repo: "org/orders-svc", mirrorDir: "/tmp/mirrors/org__orders-svc", openapi: ["openapi/orders.yaml", "openapi/payments.yaml"] },
+    { repo: "org/orders-svc", mirrorDir: "/tmp/mirrors/org__demo/e2e/.qa/service-context/org__orders-svc", openapi: ["openapi/orders.yaml", "openapi/payments.yaml"] },
   ]);
 });
 
@@ -1711,18 +1741,23 @@ test("context mode: checkout(sha) materializes every declared service via ensure
     ],
   };
   const { mirror, ensureMirrorCalls, ensureMirrorAtBranchCalls } = spyMirrorDeps();
+  const { stageServiceContext, calls } = spyStageServiceContext();
   const config = buildRewrittenCompositionConfig(
     app,
-    { getAgentDeps: stubAgentDeps, mirror },
+    { getAgentDeps: stubAgentDeps, mirror, stageServiceContext },
     "qa-bot-abc1234-run1",
     { mode: "context" },
   );
-  await config.checkout(Sha.of("abc1234567"));
+  const dir = await config.checkout(Sha.of("abc1234567"));
   assert.deepEqual(ensureMirrorCalls, [{ repo: "org/demo", sha: "abc1234567", deps: defaultMirrorDeps }], "the primary repo must still be ensured at the event sha, exactly as the same-repo path already does");
   assert.deepEqual(ensureMirrorAtBranchCalls, [
     { repo: "org/orders-svc", branch: "main", deps: defaultMirrorDeps },
     { repo: "org/payments-svc", branch: "develop", deps: defaultMirrorDeps },
   ], "every declared service must be mirrored read-only at its OWN svc.baseBranch ?? 'main', sequentially like legacy's buildContextMap loop");
+  assert.deepEqual(calls, [
+    { workingCopyDir: dir, repo: "org/orders-svc" },
+    { workingCopyDir: dir, repo: "org/payments-svc" },
+  ], "each declared service's context must be staged INTO the primary working copy — context-mode services carry no per-run sha");
 });
 
 test("non-context mode: checkout(sha) never materializes declared services, even when app.services[] is set", async () => {

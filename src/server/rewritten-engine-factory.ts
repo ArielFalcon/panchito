@@ -134,6 +134,7 @@ import { runMutationOracle, realMutationDeps } from "../qa/learning/mutation-cod
 import { runFaultInjectionOracle, defaultFaultInjectionDeps } from "../qa/learning/fault-injection-e2e";
 import { shaMatches } from "../env/deploy-gate";
 import { ensureMirror, ensureMirrorAtBranch, defaultMirrorDeps, workdirRoot, realGit, authHeaderArgs } from "../integrations/repo-mirror";
+import { stageServiceContext, serviceContextDir } from "./service-context";
 import { SqliteRunHistoryAdapter } from "./run-history-sqlite-adapter";
 import { SqliteLearningRepository, type LearningStore } from "@contexts/cross-run-learning/infrastructure/sqlite-learning-repository.adapter";
 import { listLearningRules, listAllLearningRules, upsertLearningRule, incrementRuleUsage, recordRuleOutcome, updateRunOutcomeReflection } from "./history";
@@ -462,6 +463,12 @@ export interface RewrittenEngineFactoryDeps {
     ensureMirror: typeof ensureMirror;
     ensureMirrorAtBranch: typeof ensureMirrorAtBranch;
   };
+  // Testability seam (cross-repo generation-stall fix): lets a test inject a spy/no-op for the
+  // service-context staging side effect the checkout closure performs for cross-repo runs
+  // (triggerService) and context-mode services[], instead of touching real disk/git. Mirrors the
+  // pre-existing deps.mirror precedent — defaults to the real stageServiceContext
+  // (src/server/service-context.ts) in production.
+  stageServiceContext?: typeof stageServiceContext;
 }
 
 // Assembles a REAL CompositionConfig for the given AppConfig, mirroring
@@ -552,6 +559,9 @@ export function buildRewrittenCompositionConfig(
   // to follow it, it will NOT; only the mirror ROOT PATH is overridable here, not the underlying
   // MirrorDeps used to run the actual git commands.
   const mirror = deps.mirror ?? { ensureMirror, ensureMirrorAtBranch };
+  // Testability seam (see RewrittenEngineFactoryDeps.stageServiceContext's own doc) — defaults to
+  // the real stageServiceContext in production.
+  const stage = deps.stageServiceContext ?? stageServiceContext;
 
   // CRITICAL fix (judgment-day): branch/namespace must be PER-RUN, not a static literal. A static
   // "qa-bot/rewritten" collided every run of every app on the same live-DEV test-data namespace the
@@ -683,10 +693,23 @@ export function buildRewrittenCompositionConfig(
   // PRIMARY mirror is brought to baseBranch HEAD and its dir is what the suite (setup/validate/
   // execute/publish) actually operates on. Order matters: the service mirror must already be at the
   // event sha before ChangeAnalysis.classify() runs.
+  // Cross-repo generation-stall fix: the agent session is rooted at the PRIMARY working copy, so
+  // any prompt path OUTSIDE it (a sibling service mirror) trips opencode serve's external_directory
+  // permission gate and hangs until the watchdog fires (see service-context.ts's own header for the
+  // full root cause). After each service mirror is ensured, stage its bounded, READ-ONLY context
+  // (contracts + this commit's diff) INTO the primary working copy, at the SAME deterministic path
+  // (serviceContextDir) already threaded into CompositionConfig.triggerService/services below — so
+  // by the time generation reads that path, real staged content is sitting there.
   const checkout = async (checkoutSha: Sha): Promise<string> => {
     if (triggerService) {
       await mirror.ensureMirror(triggerService.repo, checkoutSha.value, defaultMirrorDeps);
-      return mirror.ensureMirrorAtBranch(app.repo, app.baseBranch ?? "main", defaultMirrorDeps);
+      const primaryDir = await mirror.ensureMirrorAtBranch(app.repo, app.baseBranch ?? "main", defaultMirrorDeps);
+      await stage({
+        workingCopyDir: primaryDir,
+        service: { repo: triggerService.repo, mirrorDir: vcsDir, ...(triggerService.openapi ? { openapi: triggerService.openapi } : {}) },
+        sha: checkoutSha.value,
+      });
+      return primaryDir;
     }
     const primaryDir = await mirror.ensureMirror(app.repo, checkoutSha.value, defaultMirrorDeps);
     // Context-mode multi-service parity (legacy pipeline.ts:1330-1355 buildContextMap): mirror every
@@ -695,10 +718,12 @@ export function buildRewrittenCompositionConfig(
     // diff/classify source (that stays PRIMARY-bound for context mode by the sibling guard above), so
     // there is no ordering dependency against ChangeAnalysis.classify() the way triggerService's
     // cross-repo branch has. Config paths (CompositionConfig.services, composed above) are static —
-    // this is where the actual clones are brought into existence by run time.
+    // this is where the actual clones are brought into existence by run time. No sha: context-mode
+    // services carry no per-run commit, so staging is contracts-only (see service-context.ts).
     if (run.mode === "context" && app.services?.length) {
       for (const svc of app.services) {
-        await mirror.ensureMirrorAtBranch(svc.repo, svc.baseBranch ?? "main", defaultMirrorDeps);
+        const svcDir = await mirror.ensureMirrorAtBranch(svc.repo, svc.baseBranch ?? "main", defaultMirrorDeps);
+        await stage({ workingCopyDir: primaryDir, service: { repo: svc.repo, mirrorDir: svcDir, ...(svc.openapi ? { openapi: svc.openapi } : {}) } });
       }
     }
     return primaryDir;
@@ -855,30 +880,36 @@ export function buildRewrittenCompositionConfig(
     // — threaded straight through to CompositionConfig.openapi so GenerationPortAdapter's ctx
     // carries it into OpencodeRunInput.openapi (prompts.ts:500,1068's OpenAPI-hint rendering).
     ...(app.openapi ? { openapi: app.openapi } : {}),
-    // Cross-repo generation-prompt parity (legacy pipeline.ts:1909, restored by this fix): only a
-    // genuine cross-repo run (triggerService resolved above) supplies this — same-repo runs (the
-    // common case) omit the key entirely. mirrorDir is the SAME vcsDir this factory already computes
-    // for ChangeAnalysisPort above (never re-derived, so it can't silently diverge from where
-    // ensureMirror actually writes); openapi is preserved as declared on the service YAML entry
-    // (string | string[] | undefined), mirroring app.openapi's own conditional-spread precedent
-    // immediately above.
+    // Cross-repo generation-prompt parity (legacy pipeline.ts:1909, restored by this fix), UPDATED
+    // for the generation-stall fix: mirrorDir here is the STAGED, IN-ROOT path (serviceContextDir),
+    // NEVER the raw sibling mirror (vcsDir) — the agent session is rooted at the primary working
+    // copy, and any prompt path outside it trips opencode serve's external_directory permission
+    // gate and hangs (see service-context.ts's own header). vcsDir/classify are UNCHANGED (the
+    // ChangeAnalysisPort above still reads the real mirror) — only the agent-facing path switches.
+    // serviceContextDir is a PURE function of (primaryDir, repo) — the SAME deterministic formula
+    // the checkout closure above uses to know where to actually write the staged content, so this
+    // placeholder and the real staged content agree by construction (never re-derived elsewhere).
+    // Only a genuine cross-repo run (triggerService resolved above) supplies this — same-repo runs
+    // (the common case) omit the key entirely. openapi is preserved as declared on the service YAML
+    // entry (string | string[] | undefined), mirroring app.openapi's own conditional-spread
+    // precedent immediately above.
     ...(triggerService
-      ? { triggerService: { repo: triggerService.repo, mirrorDir: vcsDir, ...(triggerService.openapi ? { openapi: triggerService.openapi } : {}) } }
+      ? { triggerService: { repo: triggerService.repo, mirrorDir: serviceContextDir(mirrorDir, triggerService.repo), ...(triggerService.openapi ? { openapi: triggerService.openapi } : {}) } }
       : {}),
     // Context-mode multi-service parity (legacy pipeline.ts:1330-1355 buildContextMap, restored by
-    // this fix): a context-mode run threads EVERY declared app.services[] entry through — same-repo
-    // context runs and every non-context mode omit the key entirely (mutually exclusive with
-    // triggerService above by the sibling guard already thrown near this function's top). Each
-    // service's mirrorDir uses the SAME join(mirrorRoot, repo.replaceAll("/", "__")) formula
-    // vcsDir/triggerService already use — never re-derived, so it can't silently diverge from where
-    // the checkout closure below actually materializes it. openapi is preserved as declared on the
-    // service YAML entry, mirroring triggerService's own conditional-spread precedent immediately
-    // above.
+    // this fix), UPDATED for the generation-stall fix: a context-mode run threads EVERY declared
+    // app.services[] entry through — same-repo context runs and every non-context mode omit the key
+    // entirely (mutually exclusive with triggerService above by the sibling guard already thrown
+    // near this function's top). Each service's mirrorDir is the SAME staged serviceContextDir
+    // formula as triggerService above (never the raw sibling mirror) — never re-derived, so it can't
+    // silently diverge from where the checkout closure above actually stages it. openapi is
+    // preserved as declared on the service YAML entry, mirroring triggerService's own
+    // conditional-spread precedent immediately above.
     ...(run.mode === "context" && app.services?.length
       ? {
           services: app.services.map((svc) => ({
             repo: svc.repo,
-            mirrorDir: join(mirrorRoot, svc.repo.replaceAll("/", "__")),
+            mirrorDir: serviceContextDir(mirrorDir, svc.repo),
             ...(svc.openapi ? { openapi: svc.openapi } : {}),
           })),
         }

@@ -101,6 +101,22 @@ test("publishCode: commits the whole tree on a qa/code- branch, excluding deps v
   assert.ok(d.gitCalls.some((c) => c.includes("commit") && c.includes("test(code): automated QA for abc1234")));
 });
 
+// ── Cross-repo staged context (src/server/service-context.ts) never lands in a published commit ──
+// The staged snapshot is a disposable, per-run READ-ONLY copy of a DIFFERENT repo's contracts/diff;
+// committing it into e2e/ would bloat the PR with content that belongs to another repo entirely.
+
+test("publishE2e: excludes .qa/service-context/ via the local ignore file", async () => {
+  const d = deps(" M e2e/login.spec.ts");
+  await publishE2e(input, d);
+  assert.ok(d.excludes.includes(".qa/service-context/"), "the staged cross-repo context must never be committed");
+});
+
+test("publishCode: excludes e2e/.qa/service-context/ via the local ignore file", async () => {
+  const d = deps(" A src/math.test.ts");
+  await publishCode(input, d);
+  assert.ok(d.excludes.includes("e2e/.qa/service-context/"), "the staged cross-repo context must never be committed in code mode either");
+});
+
 // ── Publish boundary failure modes: a side-effect failure must NOT throw out of publish ──
 // The run already PASSED; a checkout/push/PR failure must be caught and returned as a
 // verdict-preserving result (error set, prUrl null, loud warning) so the runner catch-all

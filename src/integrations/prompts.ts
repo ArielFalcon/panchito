@@ -346,8 +346,9 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
         ? [
             ``,
             `## Cross-repo change (microservice)`,
-            `The commit belongs to the microservice ${input.service.repo} (read-only working copy at`,
-            `${input.service.mirrorDir}). Plan objectives for the FRONTEND flows that exercise the`,
+            `The commit belongs to the microservice ${input.service.repo}. A READ-ONLY staged snapshot`,
+            `(its OpenAPI/contract files + this commit's diff and changed files, NOT the full source) is`,
+            `at: ${input.service.mirrorDir}. Plan objectives for the FRONTEND flows that exercise the`,
             `changed service behavior through the UI.`,
           ]
         : []),
@@ -490,7 +491,7 @@ export function buildExplorerPrompt(input: OpencodeRunInput): string {
       `implements the guidance's flows and map its blast radius. Stay strictly within the guidance scope.`,
       ...(input.baseUrl ? [``, `Route context only — you do NOT navigate; selectors stay unverified. LIVE DEV URL: ${input.baseUrl}`] : []),
       ...(input.service
-        ? [``, `## Cross-repo (microservice)`, `Related service: ${input.service.repo} (read-only copy at ${input.service.mirrorDir}). Map the FRONTEND flows that exercise it.`]
+        ? [``, `## Cross-repo (microservice)`, `Related service: ${input.service.repo} (a READ-ONLY staged snapshot — contracts + this commit's changed files, not the full source — is at ${input.service.mirrorDir}). Map the FRONTEND flows that exercise it.`]
         : []),
       ``,
       `## Output — set builtForSha to ${input.sha}; end with ONLY the ExplorationBrief JSON (schema in your role prompt).`,
@@ -517,7 +518,7 @@ export function buildExplorerPrompt(input: OpencodeRunInput): string {
     "```",
     ...(input.baseUrl ? [``, `Route context only — you do NOT navigate; selectors stay unverified. LIVE DEV URL: ${input.baseUrl}`] : []),
     ...(input.service
-      ? [``, `## Cross-repo change (microservice)`, `The change is in ${input.service.repo} (read-only copy at ${input.service.mirrorDir}). Map the FRONTEND flows that exercise it.`]
+      ? [``, `## Cross-repo change (microservice)`, `The change is in ${input.service.repo} (a READ-ONLY staged snapshot — contracts + this commit's changed files, not the full source — is at ${input.service.mirrorDir}). Map the FRONTEND flows that exercise it.`]
       : []),
     ``,
     `## Output — set builtForSha to ${input.sha}; end with ONLY the ExplorationBrief JSON (schema in your role prompt).`,
@@ -1224,15 +1225,21 @@ export function buildContextTask(input: OpencodeRunInput): string {
     ? [
         ``,
         `## Microservice repos (${input.services.length})`,
-        `This app's backend is split into microservices. Each repo below is mirrored READ-ONLY;`,
+        `This app's backend is split into microservices. For each repo below, a READ-ONLY staged`,
+        `snapshot of its OpenAPI/contract files (NOT its full source) is at the local path shown;`,
         `extract its OpenAPI operations into the SAME context.json, setting each operation's`,
         `"service" field to the repo name shown here:`,
         ``,
         ...input.services.flatMap((s) => {
-          const hint = Array.isArray(s.openapi) ? s.openapi.join(", ") : s.openapi;
+          // Hints name paths relative to the SERVICE'S OWN mirror, but stageServiceContext (this
+          // module's own consumer, src/server/service-context.ts) copies matched files under a
+          // contracts/ prefix inside the staged snapshot — so the hint the agent should actually
+          // look for is contracts/<hint>, not the bare original path.
+          const hints = s.openapi ? (Array.isArray(s.openapi) ? s.openapi : [s.openapi]) : undefined;
+          const stagedHint = hints?.map((h) => `contracts/${h}`).join(", ");
           return [
-            `- **${s.repo}** — working copy at: ${s.mirrorDir}`,
-            ...(hint ? [`  OpenAPI hint: ${hint} (relative to that working copy)`] : [`  No OpenAPI hint — search that working copy for openapi/swagger files.`]),
+            `- **${s.repo}** — staged contract snapshot at: ${s.mirrorDir}`,
+            ...(stagedHint ? [`  OpenAPI hint: ${stagedHint} (relative to that staged snapshot)`] : [`  No OpenAPI hint — search that staged snapshot's contracts/ subdir for openapi/swagger files.`]),
           ];
         }),
         ``,
@@ -1271,7 +1278,7 @@ export function buildContextTask(input: OpencodeRunInput): string {
     `1. Activate serena (activate_project) on the working directory.`,
     `2. Find ALL Angular routing files (serena glob: **/*routes*.ts, **/app-routing*.ts).`,
     `   For each route definition (path + component), add an entry to routes.`,
-    `3. Find ALL OpenAPI spec files${openapiHint ? ` (start with ${openapiHint})` : ""}.${input.services?.length ? " Include every microservice repo listed above (their working copies are local paths you can read)." : ""}`,
+    `3. Find ALL OpenAPI spec files${openapiHint ? ` (start with ${openapiHint})` : ""}.${input.services?.length ? " Include every microservice repo listed above (their staged contract snapshots are local paths you can read)." : ""}`,
     `   For each operation (operationId + method + path), add an entry to api.`,
     `4. Find the generated API client files (typically src/app/generated/ or similar).`,
     `   For each client method that calls a backend operation, map its call site to a route`,
@@ -1397,16 +1404,28 @@ function buildTask(input: OpencodeRunInput): string {
   // coverage-gap) already carry a sharper established objective, so rendering it again would only
   // re-spend tokens on the system's largest prompts. capText bounds it on the first pass either way.
   const isReGen = Boolean(input.fixCases?.length || input.reviewCorrections?.length || input.coverageGap);
-  const svcOpenapi = Array.isArray(input.service?.openapi) ? input.service.openapi.join(", ") : input.service?.openapi;
+  // Hints name paths relative to the SERVICE'S OWN mirror, but stageServiceContext (this module's
+  // own consumer, src/server/service-context.ts) copies matched files under a contracts/ prefix
+  // inside the staged snapshot — so the hint the agent should actually look for is
+  // contracts/<hint>, not the bare original path.
+  const svcOpenapiHints = input.service?.openapi
+    ? Array.isArray(input.service.openapi)
+      ? input.service.openapi
+      : [input.service.openapi]
+    : undefined;
+  const svcOpenapi = svcOpenapiHints?.map((h) => `contracts/${h}`).join(", ");
   const serviceBlock = input.service
     ? [
         ``,
         `## Cross-repo change (microservice)`,
         `The commit under test belongs to the microservice ${input.service.repo}, NOT to this frontend repo.`,
-        `- The service's working copy (READ-ONLY) is at: ${input.service.mirrorDir}`,
-        ...(svcOpenapi ? [`- The service's OpenAPI contract(s): ${svcOpenapi} (paths relative to that working copy)`] : []),
+        `- A READ-ONLY staged snapshot (its OpenAPI/contract files under contracts/, plus this commit's`,
+        `  diff as CHANGE.patch and its changed files' post-change content under changed/ — NOT the`,
+        `  service's full source) is at: ${input.service.mirrorDir}`,
+        ...(svcOpenapi ? [`- The service's OpenAPI contract(s): ${svcOpenapi} (relative to that staged snapshot)`] : []),
         `- Use the architecture context below (operations whose service matches this repo) plus the`,
-        `  service's code and contract to find which frontend routes and flows this change affects.`,
+        `  staged contract and this commit's staged diff/changed files to find which frontend routes`,
+        `  and flows this change affects.`,
         `- Exercise the backend ONLY through the frontend UI at the LIVE DEV URL — never call the service directly.`,
       ]
     : [];
