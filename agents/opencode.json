@@ -93,7 +93,7 @@
         "browser_tabs": false,
         "browser_wait_for": false
       },
-      "maxSteps": 10,
+      "maxSteps": 25,
       "temperature": 0.1
     },
     "qa-maintainer": {
