@@ -1572,7 +1572,11 @@ export function reviewObjective(input: ReviewInput): { subject: string; heading:
   const commitDiffObjective = () => ({
     subject: "this commit",
     heading: `## Commit diff`,
-    body: ["```diff", sanitizeText(input.diff).text, "```"],
+    // WS5.1-parity: cap BEFORE sanitizing — capDiff splits on `diff --git` file-header boundaries,
+    // so it must see the raw diff structure; sanitizeText only redacts secret-shaped substrings and
+    // never touches those boundaries, so running it second is safe. Matches the 3 sibling raw-diff
+    // render sites (:517, :1354, :1533) — this is the 4th.
+    body: ["```diff", sanitizeText(capDiff(input.diff)).text, "```"],
     targetNoun: "the change",
   });
   // diff and code-mode runs are commit-driven: the commit's changed code is the objective.
@@ -1817,16 +1821,25 @@ export function buildReviewerPromptAssembled(input: ReviewInput): AssembledPromp
     // STABLE prefix: reviewing instructions (stable for the reviewer role).
     section("reviewer-instructions", "stable-prefix", instructionsContent, { priority: 2, cacheable: true }),
     // SEMI-STABLE: the objective (commit diff for diff mode, guidance for manual, etc.).
-    section("reviewer-objective", "semi-stable", objectiveContent, { priority: 1, language: "verbatim" }),
+    // Reviewer-budget-starvation fix: a local maxBytes backstop with overflow:"summarize" (never
+    // "drop") so a residual overflow degrades to a visibly-marked truncation instead of being
+    // silently shed whole by the cross-section budget pass. 56,000B sits above capDiff's 50,000-CHAR
+    // ceiling (a multibyte-heavy capped diff can still exceed 50,000 bytes) plus fixed-prose headroom.
+    section("reviewer-objective", "semi-stable", objectiveContent, { priority: 1, language: "verbatim", maxBytes: 56_000, overflow: "summarize" }),
     // VOLATILE: DOM grounding (priority 1 — first in VOLATILE so it precedes the spec contents that
     // reference it; the instructions refer to it position-independently as "the Live DEV DOM section").
-    ...(domContent ? [section("reviewer-dom", "volatile", domContent, { priority: 1 })] : []),
+    // 20,000B mirrors the reviewer-corrections idiom; overflow:"summarize" for a visible-marker
+    // truncation instead of a silent whole-section drop.
+    ...(domContent ? [section("reviewer-dom", "volatile", domContent, { priority: 1, maxBytes: 20_000, overflow: "summarize" })] : []),
     // VOLATILE: runtime execution result — authoritative orchestrator evidence (HTTP statuses,
     // final URLs). Priority 1.5 (after DOM, before specs) so the reviewer weighs the objective
     // 5xx signal before reading test code. Absent when execution evidence is not available.
     ...(executionResultContent ? [section("reviewer-execution-result", "volatile", executionResultContent, { priority: 1.5 })] : []),
-    // VOLATILE: spec contents (priority 2 — the primary content the reviewer judges).
-    section("reviewer-specs", "volatile", specContent, { priority: 2 }),
+    // VOLATILE: spec contents (priority 2 — the primary content the reviewer judges). 44,000B is a
+    // belt-and-suspenders backstop just above renderReviewSpecs's own 40,000B inline cap; a realistic
+    // 2-4 spec payload is never truncated by this section-level cap. overflow:"summarize" — the
+    // payload the reviewer exists to read must never be silently dropped.
+    section("reviewer-specs", "volatile", specContent, { priority: 2, maxBytes: 44_000, overflow: "summarize" }),
     // VOLATILE: proven app-specific learned rules (priority 3 — supplementary reject criteria).
     ...(learnedRulesContent ? [section("reviewer-learned-rules", "volatile", learnedRulesContent, { priority: 3 })] : []),
     // VOLATILE: Phase 4 prior-round corrections (priority 4 — convergence context; lowest priority

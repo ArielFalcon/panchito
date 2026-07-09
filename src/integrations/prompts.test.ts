@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPrompt, buildPromptAssembled, buildPlanPromptAssembled, buildFollowupPrompt, buildWorkerPrompt, buildReviewerPrompt, buildExplorerPrompt, buildContextTask } from "./prompts";
+import { buildPrompt, buildPromptAssembled, buildPlanPromptAssembled, buildFollowupPrompt, buildWorkerPrompt, buildReviewerPrompt, buildReviewerPromptAssembled, buildExplorerPrompt, buildContextTask } from "./prompts";
 import { assemble as caAssemble, section as caSection } from "./context-assembler";
+import { roleWindowBytes } from "./model-window-catalog";
 import type { OpencodeRunInput } from "./opencode-client";
 import type { ParallelWorkerInput, ReviewInput } from "@contexts/generation/application/ports/generation-ports.ts";
 import type { QaCase } from "../types";
@@ -1337,6 +1338,57 @@ test("WS5.1: buildExplorerPrompt caps a giant diff instead of embedding it whole
 test("WS5.1: a small diff (under the cap) passes through buildDiffSection unmodified (no spurious truncation)", () => {
   const small = "diff --git a/src/foo.ts b/src/foo.ts\n+export function foo() {}\n";
   const text = buildPrompt(mkInput({ diff: small, mode: "diff" }));
+  assert.ok(text.includes("export function foo()"), "a small diff must render in full");
+  assert.doesNotMatch(text, /diff truncated/i, "a small diff must not trigger the truncation marker");
+});
+
+test("WS5.1: reviewObjective/commitDiffObjective (reviewer diff objective) caps a giant diff instead of embedding it whole", () => {
+  const huge = bigDiff();
+  const reviewInput: ReviewInput = {
+    diff: huge,
+    specs: ["flows/checkout.spec.ts"],
+    mirrorDir: "/mirrors/org__app",
+    e2eRelDir: "e2e",
+    appName: "testapp",
+    mode: "diff",
+  };
+  const text = buildReviewerPrompt(reviewInput);
+  assert.ok(text.length < huge.length, "the reviewer prompt must be smaller than the raw uncapped diff");
+  assert.match(text, /diff truncated/i, "a visible truncation marker must be present");
+  assert.match(text, /git show/, "the marker must point the agent at `git show <sha>` for the full diff");
+});
+
+test("reviewer defense-in-depth: a >capDiff diff never starves the specs/dom sections", () => {
+  const huge = bigDiff();
+  const { text } = buildReviewerPromptAssembled({
+    diff: huge,
+    specs: ["flows/checkout.spec.ts"],
+    mirrorDir: "/mirrors/org__app",
+    e2eRelDir: "e2e",
+    appName: "testapp",
+    mode: "diff",
+    domSnapshot: "button: Submit\nheading: Checkout",
+  });
+  assert.match(text, /diff truncated/i, "the objective must be capped, not dropped");
+  assert.match(text, /## Specs to review/, "reviewer-specs must survive");
+  assert.match(text, /Live DEV DOM/, "reviewer-dom must survive");
+  assert.ok(
+    Buffer.byteLength(text, "utf8") <= roleWindowBytes("qa-reviewer"),
+    "the assembled reviewer prompt must respect the reviewer role's byte budget",
+  );
+});
+
+test("WS5.1: a small diff (under the cap) at the reviewer site passes through unmodified", () => {
+  const small = "diff --git a/src/foo.ts b/src/foo.ts\n+export function foo() {}\n";
+  const reviewInput: ReviewInput = {
+    diff: small,
+    specs: ["flows/checkout.spec.ts"],
+    mirrorDir: "/mirrors/org__app",
+    e2eRelDir: "e2e",
+    appName: "testapp",
+    mode: "diff",
+  };
+  const text = buildReviewerPrompt(reviewInput);
   assert.ok(text.includes("export function foo()"), "a small diff must render in full");
   assert.doesNotMatch(text, /diff truncated/i, "a small diff must not trigger the truncation marker");
 });

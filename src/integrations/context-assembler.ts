@@ -290,10 +290,11 @@ export function assemble(sections: Section[], opts: AssembleOpts = {}): Assemble
           droppedIds.push(candidate.section.id);
         } else {
           // "summarize" degrades to truncation: truncate to fill the remaining budget.
-          // FIX 8d / production note: there is NO real summarizer in this phase, and every prompt
-          // builder in prompts.ts uses overflow:"drop" (the section() default) — so in production
-          // this branch is never taken. It is kept as a TRUNCATE-not-drop fallback for any future
-          // section that opts into overflow:"summarize"; until then "summarize" effectively == drop.
+          // FIX 8d / production note: there is NO real summarizer in this phase — "summarize" always
+          // means TRUNCATE-with-a-visible-marker, never an actual condensed rewrite. This branch IS
+          // taken in production: the reviewer's load-bearing sections (reviewer-objective, reviewer-dom,
+          // reviewer-specs in prompts.ts) opt into overflow:"summarize" specifically so a residual
+          // overflow degrades to a visible truncation instead of a silent whole-section drop.
           // The remaining budget is the total budget minus the bytes of all OTHER surviving sections.
           // We must reserve space for the cap marker that capToBytes appends:
           //   marker = `\n…(section '{id}' capped at {N} bytes)`
