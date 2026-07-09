@@ -2,6 +2,30 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createApp, updateApp, deleteApp, type AppAdminDeps, type CreateAppInput } from "./app-admin";
 import type { AppConfig } from "../orchestrator/config-loader";
+import { buildYaml, type OnboardInput } from "./onboard";
+import { serializeBoundary, spliceBoundariesBlock } from "./onboarding/write-boundaries";
+import type { HttpBoundaryProfile, EventBoundaryProfile } from "@contexts/service-topology/domain/index.ts";
+
+const HTTP_BOUNDARY: HttpBoundaryProfile = {
+  transport: "http",
+  frontFiles: "**/*.api.ts",
+  frontCallSite: { kind: "receiver-verb-call", receiver: "this.rest" },
+  servicePrefixTemplate: "name-{service}-api",
+  serviceRepoTemplate: "ms-name-{service}",
+  openApiPath: "src/main/resources/openapi/api-definition.yaml",
+};
+
+const EVENT_BOUNDARY: EventBoundaryProfile = {
+  transport: "event",
+  files: "**/*.java",
+  eventPattern: {
+    kind: "class-based-domain-events",
+    listenerBaseType: "ListenerMessageDelegate",
+    listenerEventCall: "convertMsgToSpecificType",
+    subscriberBaseType: "DomainEventSubscriber",
+    publishCall: "publishGenericMessage",
+  },
+};
 
 function makeDeps(overrides: Partial<AppAdminDeps> = {}): AppAdminDeps & { written: Record<string, string>; removed: string[] } {
   const written: Record<string, string> = {};
@@ -163,4 +187,85 @@ test("updateApp dryRun returns yaml without writing", async () => {
   assert.equal(r.ok, true);
   assert.ok(r.yaml);
   assert.deepEqual(deps.written, {});
+});
+
+test("updateApp preserves an existing boundaries block, in order, across a rebuild", async () => {
+  const deps = makeDeps({
+    loadApp: (name: string) => ({
+      name,
+      repo: "org/shop-front",
+      qa: { needsReview: true, testDataPrefix: "qa" },
+      report: { onFailure: "github-issue" },
+      dev: { baseUrl: "https://x" },
+      boundaries: [HTTP_BOUNDARY, EVENT_BOUNDARY],
+    }) as unknown as AppConfig,
+  });
+
+  const r = await updateApp({ name: "shop", baseUrl: "https://new" }, deps);
+
+  assert.equal(r.ok, true);
+  const yaml = deps.written["shop"] ?? "";
+  assert.match(yaml, /boundaries:/);
+  assert.match(yaml, /openApiPath: "src\/main\/resources\/openapi\/api-definition\.yaml"/);
+  assert.match(yaml, /listenerBaseType: "ListenerMessageDelegate"/);
+  // order: the http entry (first in the input array) must appear before the event entry
+  assert.ok(yaml.indexOf("transport: http") < yaml.indexOf("transport: event"));
+
+  const expectedOnboard: OnboardInput = {
+    name: "shop",
+    repo: "org/shop-front",
+    baseBranch: "main",
+    baseUrl: "https://new",
+    target: "e2e",
+    needsReview: true,
+    shadow: true,
+    testDataPrefix: "qa",
+  };
+  const expected = spliceBoundariesBlock(buildYaml(expectedOnboard), [
+    ...serializeBoundary(HTTP_BOUNDARY),
+    ...serializeBoundary(EVENT_BOUNDARY),
+  ]);
+  assert.equal(yaml, expected);
+});
+
+test("updateApp dryRun returns the preserved boundaries block without writing", async () => {
+  const deps = makeDeps({
+    loadApp: (name: string) => ({
+      name,
+      repo: "org/shop-front",
+      qa: { needsReview: true, testDataPrefix: "qa" },
+      report: { onFailure: "github-issue" },
+      dev: { baseUrl: "https://x" },
+      boundaries: [HTTP_BOUNDARY],
+    }) as unknown as AppConfig,
+  });
+
+  const r = await updateApp({ name: "shop", baseUrl: "https://new", dryRun: true }, deps);
+
+  assert.equal(r.ok, true);
+  assert.deepEqual(deps.written, {});
+  assert.match(r.yaml ?? "", /boundaries:/);
+  assert.match(r.yaml ?? "", /openApiPath: "src\/main\/resources\/openapi\/api-definition\.yaml"/);
+});
+
+test("updateApp with no boundaries stays byte-identical to today's output", async () => {
+  const deps = makeDeps();
+
+  const r = await updateApp({ name: "shop", baseUrl: "https://new" }, deps);
+
+  assert.equal(r.ok, true);
+  const yaml = deps.written["shop"] ?? "";
+  assert.doesNotMatch(yaml, /boundaries:/);
+
+  const expectedOnboard: OnboardInput = {
+    name: "shop",
+    repo: "org/shop-front",
+    baseBranch: "main",
+    baseUrl: "https://new",
+    target: "e2e",
+    needsReview: true,
+    shadow: true,
+    testDataPrefix: "qa",
+  };
+  assert.equal(yaml, buildYaml(expectedOnboard));
 });

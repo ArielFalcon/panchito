@@ -7,6 +7,7 @@ import { parse } from "yaml";
 import { AppConfigSchema } from "../orchestrator/schemas";
 import { expandEnv, type AppConfig } from "../orchestrator/config-loader";
 import { buildYaml, suggestName, type OnboardInput, type OnboardServiceInput } from "./onboard";
+import { serializeBoundary, spliceBoundariesBlock } from "./onboarding/write-boundaries";
 import type { RepoInfo } from "../integrations/github";
 import type { TestTarget } from "../types";
 
@@ -149,7 +150,17 @@ export async function updateApp(input: UpdateAppInput, deps: AppAdminDeps): Prom
     })),
   };
 
-  const yaml = buildYaml(onboard);
+  let yaml = buildYaml(onboard);
+  // Preserve an existing boundaries: block across the rebuild — buildYaml/OnboardInput
+  // carry no boundaries, so a naive rebuild would silently drop the agent-discovered block.
+  // Re-emit via the same onboarding writer (single source of truth). Splice runs BEFORE the
+  // validation gate below, so the preserved block is what gets validated, dry-run-returned,
+  // and written. existing.boundaries is already schema-valid (loadApp parsed it) and
+  // structurally a BoundaryProfile[] (BoundarySchema z.infer == BoundaryProfile), so no mapper.
+  if (existing.boundaries?.length) {
+    const entryLines = existing.boundaries.flatMap((profile) => serializeBoundary(profile));
+    yaml = spliceBoundariesBlock(yaml, entryLines);
+  }
 
   const expansionEnv = { ...deps.env, ...(input.env ?? {}) };
   try {
