@@ -114,6 +114,10 @@ export class OnboardingService {
     try {
       return await this.proposer.propose(system, front, feedback);
     } catch {
+      // Structural safety net only: the production LLM adapter honors the port's own fail-open
+      // contract and never throws here, so this fires only if a FUTURE proposer breaks that
+      // contract — it is NOT the diagnostic point (that lives in the adapter's catch, the sole
+      // site where the real error object and app/model context are still in scope).
       return [];
     }
   }

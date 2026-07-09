@@ -34,6 +34,25 @@ const VALID_VERDICT_JSON = JSON.stringify({
   ],
 });
 
+// A single malformed candidate (missing eventPattern.publishCall) degrades to
+// UNPARSEABLE_SENTINEL via the schema's per-entry .catch, so this verdict parses successfully but
+// filters down to zero candidates — not a throw, so it must NOT trigger the failure log.
+const SENTINEL_ONLY_VERDICT_JSON = JSON.stringify({
+  candidates: [
+    {
+      transport: "event",
+      files: "**/*.java",
+      eventPattern: {
+        kind: "class-based-domain-events",
+        listenerBaseType: "ListenerMessageDelegate",
+        listenerEventCall: "convertMsgToSpecificType",
+        subscriberBaseType: "DomainEventSubscriber",
+        // missing publishCall -> degrades to UNPARSEABLE_SENTINEL
+      },
+    },
+  ],
+});
+
 const MIXED_VERDICT_JSON = JSON.stringify({
   candidates: [
     {
@@ -369,4 +388,139 @@ test("propose(): fail-open holds even when feedback is supplied and the session 
   const result = await adapter.propose(SYSTEM, FRONT, feedback);
 
   assert.deepEqual(result, []);
+});
+
+// ── Diagnostic logging on the fail-open catch (proposer-codex-instant-fail) ────────────────────
+// LlmProfileProposerAdapter.propose()'s catch is the ONLY point where the real thrown error and
+// the app/model/singleProvider context still exist before the fail-open contract erases them to
+// `[]`. These tests assert exactly one warn-level structured log per failed round, with a redacted
+// `error` field, and NO log on a successful round — including the zero-candidates-after-filtering
+// case, which is not a throw and must stay silent.
+
+test("propose(): session.prompt() rejecting logs exactly one redacted warn with {app, model, singleProvider, error} and still returns []", async () => {
+  const originalWarn = console.warn;
+  const logged: string[] = [];
+  console.warn = (...args: unknown[]) => { logged.push(args.map(String).join(" ")); };
+  // Gotcha: save the prior value and restore via `delete` when it was unset — assigning
+  // `undefined` back would coerce to the STRING "undefined" (process.env only holds strings).
+  const priorSingleProvider = process.env.AGENT_SINGLE_PROVIDER;
+  process.env.AGENT_SINGLE_PROVIDER = "single";
+  try {
+    const depsFactory = fakeDepsFactory({ promptResult: new Error("connect ECONNREFUSED 127.0.0.1:4096") });
+    const adapter = new LlmProfileProposerAdapter(depsFactory, PROPOSER_MODEL, { app: "nname" });
+
+    const result = await adapter.propose(SYSTEM, FRONT);
+
+    assert.deepEqual(result, []);
+    assert.equal(logged.length, 1, "exactly one warn log must be emitted for the failed round");
+    const entry = JSON.parse(logged[0] ?? "{}");
+    assert.equal(entry.l, "warn");
+    assert.equal(entry.app, "nname");
+    assert.equal(entry.model, PROPOSER_MODEL);
+    assert.equal(entry.singleProvider, "single", "the concrete flag VALUE must be asserted, not key presence");
+    assert.equal(entry.error, "connect ECONNREFUSED 127.0.0.1:4096");
+  } finally {
+    console.warn = originalWarn;
+    if (priorSingleProvider === undefined) delete process.env.AGENT_SINGLE_PROVIDER;
+    else process.env.AGENT_SINGLE_PROVIDER = priorSingleProvider;
+  }
+});
+
+test("propose(): deps.open() throwing before a session exists logs exactly one warn and still returns []", async () => {
+  const originalWarn = console.warn;
+  const logged: string[] = [];
+  console.warn = (...args: unknown[]) => { logged.push(args.map(String).join(" ")); };
+  try {
+    const depsFactory = fakeDepsFactory({ openThrows: true });
+    const adapter = new LlmProfileProposerAdapter(depsFactory, PROPOSER_MODEL, { app: "nname" });
+
+    const result = await adapter.propose(SYSTEM, FRONT);
+
+    assert.deepEqual(result, []);
+    assert.equal(logged.length, 1, "exactly one warn log must be emitted when open() throws");
+    const entry = JSON.parse(logged[0] ?? "{}");
+    assert.equal(entry.app, "nname");
+    assert.equal(entry.model, PROPOSER_MODEL);
+    assert.match(entry.error, /boom: open failed/);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+// NOTE (verified against the schema module's own doc + a runtime probe): ProposerVerdictSchema
+// wraps itself in a top-level `.catch({candidates: []})`, so `.parse()` structurally NEVER throws
+// for any input shape, including `extractJson` returning null for garbage text — it degrades to
+// `{candidates: []}` inside the TRY block, not via propose()'s catch(err). This is therefore a
+// successful-round-with-zero-candidates case (same family as the sentinel-only filter below), not
+// a throw — per the "No Logging on Successful Propose" requirement it must NOT log.
+test("propose(): an unparseable reply degrades to an empty verdict inside the try block (no throw) — no failure log, still returns []", async () => {
+  const originalWarn = console.warn;
+  const logged: string[] = [];
+  console.warn = (...args: unknown[]) => { logged.push(args.map(String).join(" ")); };
+  try {
+    const depsFactory = fakeDepsFactory({ promptResult: "this is not json at all, sorry." });
+    const adapter = new LlmProfileProposerAdapter(depsFactory, PROPOSER_MODEL, { app: "nname" });
+
+    const result = await adapter.propose(SYSTEM, FRONT);
+
+    assert.deepEqual(result, []);
+    assert.equal(logged.length, 0, "the schema's own fail-open .catch degrades this to a successful empty round, not a throw");
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("propose(): a secret embedded in the thrown error's message never reaches the log (redacted)", async () => {
+  const originalWarn = console.warn;
+  const logged: string[] = [];
+  console.warn = (...args: unknown[]) => { logged.push(args.map(String).join(" ")); };
+  try {
+    const depsFactory = fakeDepsFactory({
+      promptResult: new Error("401: Authorization: Bearer sk-supersecrettoken12345"),
+    });
+    const adapter = new LlmProfileProposerAdapter(depsFactory, PROPOSER_MODEL, { app: "nname" });
+
+    await adapter.propose(SYSTEM, FRONT);
+
+    assert.equal(logged.length, 1);
+    const entry = JSON.parse(logged[0] ?? "{}");
+    assert.ok(!/sk-supersecrettoken12345/.test(entry.error), "the raw token must never reach the log");
+    assert.match(entry.error, /REDACTED_CREDENTIAL/);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("propose(): a successful round with candidates emits no failure log", async () => {
+  const originalWarn = console.warn;
+  const logged: string[] = [];
+  console.warn = (...args: unknown[]) => { logged.push(args.map(String).join(" ")); };
+  try {
+    const depsFactory = fakeDepsFactory({ promptResult: fencedJson(VALID_VERDICT_JSON) });
+    const adapter = new LlmProfileProposerAdapter(depsFactory, PROPOSER_MODEL, { app: "nname" });
+
+    const result = await adapter.propose(SYSTEM, FRONT);
+
+    assert.equal(result.length, 2);
+    assert.equal(logged.length, 0, "no warn log must be emitted on a successful round");
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("propose(): a successful round filtered to zero (sentinel-only) candidates emits no failure log", async () => {
+  const originalWarn = console.warn;
+  const logged: string[] = [];
+  console.warn = (...args: unknown[]) => { logged.push(args.map(String).join(" ")); };
+  try {
+    const depsFactory = fakeDepsFactory({ promptResult: fencedJson(SENTINEL_ONLY_VERDICT_JSON) });
+    const adapter = new LlmProfileProposerAdapter(depsFactory, PROPOSER_MODEL, { app: "nname" });
+
+    const result = await adapter.propose(SYSTEM, FRONT);
+
+    assert.deepEqual(result, [], "the sentinel-only candidate must be filtered out, not treated as a throw");
+    assert.equal(logged.length, 0, "no warn log must be emitted — this is a filter, not a throw");
+  } finally {
+    console.warn = originalWarn;
+  }
 });
