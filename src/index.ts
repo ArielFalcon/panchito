@@ -52,7 +52,7 @@ import { buildServiceBoundaryResolver } from "@contexts/service-topology/infrast
 // {"repo_path": mirrorDir} alone performs the initial FULL index (project name derived from the
 // path server-side, no `project` key needed).
 import { CodebaseMemoryClient } from "../qa-engine/src/shared-infrastructure/code-graph/codebase-memory-client";
-import { redactError } from "./util/redact";
+import { RedactionPortAdapter } from "./orchestrator/sanitizer";
 
 const SELF_REPO = process.env.PANCHITO_REPO ?? "ArielFalcon/panchito";
 const ROOT = process.env.PANCHITO_ROOT ?? process.cwd();
@@ -61,6 +61,9 @@ const TOKEN_FILE = join(ROOT, "config", ".api_token");
 // loaders config-loader.ts's own callers use (no root override needed — both loaders default to
 // this file's identical process.env.PANCHITO_ROOT ?? process.cwd() computation independently).
 const appCatalog = new YamlAppConfigAdapter({ load: loadAppConfig, list: listAppConfigs });
+// sdd/migration-wiring-phase-2 Slice 7b-2: the canonical redaction adapter (env+pattern) for this
+// file's error-message responses, replacing src/util/redact.ts's redactError.
+const redactionPort = new RedactionPortAdapter();
 // Durable backing (OBS-01) lives in createDurableRunEventStore, shared with the CLI so every
 // trigger persists events identically: the live SSE stream survives a restart (e.g. the
 // maintainer hot-swap's process.exit) and eviction from the in-memory ring.
@@ -468,7 +471,7 @@ async function indexRepoForOnboarding(repo: string, mirrorDir: string): Promise<
     }
     return { repo, status: "ok", nodeCount };
   } catch (err) {
-    return { repo, status: "failed", error: redactError(err) };
+    return { repo, status: "failed", error: redactionPort.redactError(err) };
   }
 }
 

@@ -11,7 +11,7 @@ import { createRecord, updateRecord, addCase, getRecord, appendActivity, listRec
 import { recordIncident } from "./maintainer";
 import { testDataNamespace } from "../qa/test-data";
 import { RunMode, TestTarget, TriggerSource, QaCase, QaRunResult, engineStatus } from "../types";
-import { redactError } from "../util/redact";
+import { RedactionPortAdapter } from "../orchestrator/sanitizer";
 import { sleep as sleepWithAbort } from "../util/sleep";
 import { isInfraError } from "../errors";
 import type { RunEventStore } from "./run-events";
@@ -22,6 +22,10 @@ import type { RunPipelinePort, RunInput, ObserverPort } from "@contexts/qa-run-o
 
 type RunStepEvent = Extract<RunEventBody, { type: "step.changed" }>;
 type RunStep = RunStepEvent["step"];
+
+// sdd/migration-wiring-phase-2 Slice 7b-2: the canonical redaction adapter (env+pattern) for this
+// file's crash-note error message, replacing src/util/redact.ts's redactError.
+const redactionPort = new RedactionPortAdapter();
 
 // Mirror-race guard (onboarding-hardening, Slice 1) — poll granularity while an onboarding job is
 // in flight. Onboarding is minutes-long, so a 5s granularity adds negligible latency and near-zero
@@ -551,7 +555,7 @@ export function enqueueTrackedRun(queue: JobQueue, req: RunRequest, deps: Runner
       }
       // A crash MUST finalize the record (status=done) — otherwise it stays
       // "running" forever and `qa run --watch` hangs waiting for a verdict.
-      const msg = redactError(err);
+      const msg = redactionPort.redactError(err);
       // Classify by TYPE, not by substring. Genuine INFRASTRUCTURE (DeployTimeout, operator
       // cancel, anything wrapped in InfraError) is a transient, non-code condition. Anything else
       // thrown out of the pipeline (an OpenCode 500, a rejected git push, a JSON.parse that threw,

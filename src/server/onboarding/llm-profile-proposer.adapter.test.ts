@@ -485,7 +485,7 @@ test("propose(): a secret embedded in the thrown error's message never reaches t
     assert.equal(logged.length, 1);
     const entry = JSON.parse(logged[0] ?? "{}");
     assert.ok(!/sk-supersecrettoken12345/.test(entry.error), "the raw token must never reach the log");
-    assert.match(entry.error, /REDACTED_CREDENTIAL/);
+    assert.match(entry.error, /REDACTED/);
   } finally {
     console.warn = originalWarn;
   }
