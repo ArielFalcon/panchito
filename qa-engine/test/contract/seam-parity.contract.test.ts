@@ -75,7 +75,7 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
     runId: true, contextMap: true, explorer: true, contextBrief: true, contextPack: true,
     staticSignal: true, diffArchetypes: true, existingSpecFiles: true, service: true, services: true,
     serviceLinks: true, contractDrift: true, crossRepoImpact: true,
-    classificationReason: true, contradiction: true,
+    classificationReason: true, contradiction: true, structuralPatterns: true,
   } satisfies Record<keyof OpencodeRunInput, true>;
 
   // Fields the rewritten path deliberately sources OUTSIDE this adapter's ctx+enrichment, or that
@@ -88,6 +88,7 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
     contextBrief: "FIXME: no GenerationEnrichment/ctx slot exists (grep-confirmed) — prompts.ts renders the 'blast radius' plan-brief section from input.contextBrief; the rewritten path's PreGenerationGroundingPort produces a context PACK (enrichment.contextPack) instead, which is a DIFFERENT rendering path (prompts.ts:611) that partially covers this, but the raw ExplorationBrief object itself is never threaded.",
     contextMap: "NOT dropped at this bridge — sourced via a DIFFERENT port (PreGenerationGroundingPort, composition-root.ts:cfg.contextMap), which folds it into enrichment.contextPack before this adapter ever sees it. Correct by design, not a gap.",
     diffArchetypes: "FIXME: no GenerationEnrichment/ctx slot exists (grep-confirmed) — prompts.ts:829 renders a one-line 'change shape' hint from input.diffArchetypes (detectStructuralPatterns output). Dropped means the rewritten path never prioritises archetype-appropriate tests.",
+    structuralPatterns: "sdd/migration-wiring-phase-2 Slice 4 (D-E, restoration-only): NO GenerationEnrichment/ctx slot exists yet (same class of gap as diffArchetypes immediately above, deliberately out of this slice's narrow scope) — prompts.ts renders the 'Skill exemplars' section from input.structuralPatterns (restored src/qa/learning/structural-pattern.ts's detectStructuralPatterns). The prompt-rendering machinery + type + exemplar catalog are restored and tested; live population for a real rewritten-engine run is a follow-up, mirroring diffArchetypes' own still-open wiring gap.",
     failureSourced: "FIXME: no GenerationEnrichment/ctx slot exists (grep-confirmed) — prompts.ts:624,708,922 switches domSnapshot framing to 'GROUND TRUTH AT FAILURE' when true. domSnapshot itself IS threaded (enrichment.domSnapshot); the framing flag that changes how it's presented is not.",
     service: "FIXME: no GenerationEnrichment/ctx/CompositionConfig slot exists (grep-confirmed) — prompts.ts renders cross-repo framing from input.service (the triggering microservice) at 6+ call sites (286-291,433-434,456-457,1246-1251). Cross-repo runs are a documented CLAUDE.md feature (\"Cross-repo runs (microservices)\"); this is a real gap for that feature on the rewritten path.",
     services: "FIXME: no GenerationEnrichment/ctx/CompositionConfig slot exists (grep-confirmed, AppConfig.services IS real — src/orchestrator/schemas.ts) — prompts.ts:1069-1120 renders the full microservice-repo list (context mode). Same cross-repo gap as `service` above.",

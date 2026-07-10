@@ -827,6 +827,88 @@ test("C1: no diffArchetypes line when archetypes array is empty", () => {
   );
 });
 
+// ── sdd/migration-wiring-phase-2 Slice 4 (D-E skill-exemplar restore) ────────────────────────────
+// matchExemplars/renderExemplarsForPrompt (src/qa/learning/skill-exemplar.ts) run during prompt
+// assembly, keyed off input.structuralPatterns (a StructuralPattern[], NOT a single pattern —
+// matchExemplars itself takes ONE pattern, so the consumer here loops + flatMaps + dedupes before
+// rendering). Wired into buildPromptAssembled alongside the existing diffArchetypes path (same
+// semi-stable/priority-3 band), byte-budget capped at ~1.5KB like other capped sections.
+
+test("Slice 4: a matched structural pattern (form+validation) includes its exemplar template in the prompt", () => {
+  const text = buildPrompt(mkInput({
+    structuralPatterns: [{ kind: "form", hasOnSubmit: true, hasValidation: true }],
+  }));
+  assert.ok(
+    text.includes("## Skill exemplars for the detected structural patterns"),
+    "prompt must contain the Skill exemplars section heading when a pattern matches",
+  );
+  assert.ok(
+    text.includes("Form invalid input"),
+    "prompt must include the matched exemplar's name/heading",
+  );
+  assert.ok(
+    text.includes("asserts that the error message is visible and the form was NOT submitted successfully"),
+    "prompt must include the matched exemplar's own template text",
+  );
+});
+
+test("Slice 4: no matching structural pattern (generic) omits the Skill exemplars section entirely", () => {
+  const text = buildPrompt(mkInput({ structuralPatterns: [{ kind: "generic" }] }));
+  assert.ok(
+    !text.includes("## Skill exemplars for the detected structural patterns"),
+    "prompt must NOT contain the Skill exemplars heading when no pattern matches the catalog",
+  );
+});
+
+test("Slice 4: structuralPatterns absent omits the Skill exemplars section (never fabricated)", () => {
+  const text = buildPrompt(mkInput());
+  assert.ok(
+    !text.includes("## Skill exemplars for the detected structural patterns"),
+    "prompt must NOT contain the Skill exemplars heading when structuralPatterns is absent",
+  );
+});
+
+test("Slice 4: an empty structuralPatterns array omits the Skill exemplars section", () => {
+  const text = buildPrompt(mkInput({ structuralPatterns: [] }));
+  assert.ok(
+    !text.includes("## Skill exemplars for the detected structural patterns"),
+    "prompt must NOT contain the Skill exemplars heading when structuralPatterns is an empty array",
+  );
+});
+
+test("Slice 4: matched exemplars whose rendered content exceeds the ~1.5KB budget are omitted entirely (overflow:drop, no window starvation)", () => {
+  // Every BUILT_IN_EXEMPLARS entry matches — 6 exemplars, ~1.7KB rendered (measured), over the 1536
+  // byte cap. The whole section must drop rather than silently truncating mid-template or starving
+  // other sections' budget.
+  const text = buildPrompt(mkInput({
+    structuralPatterns: [
+      { kind: "form", hasOnSubmit: true, hasValidation: true },
+      { kind: "form", hasOnSubmit: true, hasValidation: false },
+      { kind: "api-call", method: "POST", hasRequestBody: true, hasErrorHandling: true },
+      { kind: "stateful-cache", sourceType: "any", hasIndependentWritePath: true },
+      { kind: "data-list", hasFilter: false, hasPagination: false, hasEmptyState: true },
+    ],
+  }));
+  assert.ok(
+    !text.includes("## Skill exemplars for the detected structural patterns"),
+    "an over-budget skill-exemplars section must be omitted entirely, not truncated mid-template",
+  );
+});
+
+test("Slice 4: duplicate exemplar matches across multiple patterns are deduped by name (never rendered twice)", () => {
+  // Two data-list-shaped patterns both match BOTH data-list exemplars (matchExemplars' own
+  // kind==='data-list' branch returns true unconditionally) — without dedup this would render
+  // "Data list empty state" twice.
+  const text = buildPrompt(mkInput({
+    structuralPatterns: [
+      { kind: "data-list", hasFilter: false, hasPagination: false, hasEmptyState: true },
+      { kind: "data-list", hasFilter: true, hasPagination: true, hasEmptyState: false },
+    ],
+  }));
+  const occurrences = (text.match(/### Data list empty state/g) ?? []).length;
+  assert.equal(occurrences, 1, "a duplicate exemplar match across patterns must render exactly once, never duplicated");
+});
+
 // ── C2: static-signal rendered in CODE-MODE prompts ──────────────────────────
 
 // C2-1: a code-mode generation input WITH staticSignal renders the static-signal section.

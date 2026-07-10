@@ -22,6 +22,7 @@ import type { QaCase } from "../types";
 // generation-ports parity test keeps the legacy opencode-client copies structurally in sync).
 import type { OpencodeRunInput, ParallelWorkerInput, ReviewInput } from "@contexts/generation/application/ports/generation-ports.ts";
 import { renderExplorationBrief } from "../qa/exploration-brief";
+import { matchExemplars, renderExemplarsForPrompt } from "../qa/learning/skill-exemplar";
 import { assemble, section, type AssembledPrompt } from "./context-assembler";
 import { roleWindowBytes } from "./model-window-catalog";
 
@@ -988,6 +989,30 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
       ? `Change shape (deterministic): ${input.diffArchetypes.join(", ")} — prioritise tests that exercise these`
       : "";
 
+  // sdd/migration-wiring-phase-2 Slice 4 (D-E skill-exemplar restore): matches each detected
+  // structural pattern against the built-in exemplar catalog (src/qa/learning/skill-exemplar.ts).
+  // matchExemplars() itself takes a SINGULAR StructuralPattern (not an array), so this consumer
+  // loops + flatMaps across input.structuralPatterns, then dedupes by exemplar name before
+  // rendering — a diff can independently match multiple patterns (e.g. a form AND an api-call), and
+  // some pattern shapes (data-list) can match more than one catalog entry on their own.
+  // renderExemplarsForPrompt([]) already returns "" for no match, so absent/empty/no-match all
+  // degrade to no section, never a fabricated heading.
+  //
+  // CHANGE-COVERAGE OBSERVATION marker (design D-E rationale): no deterministic oracle exists for
+  // "did the rich exemplar template change generation quality" — flagging here (+ engram) so a
+  // future audit can measure rich-exemplar vs one-line-diffArchetypes-hint defect-catch rate.
+  const skillExemplarsContent = (() => {
+    if (!input.structuralPatterns?.length || !isGenerationMode) return "";
+    const matched = input.structuralPatterns.flatMap((p) => matchExemplars(p));
+    const seenNames = new Set<string>();
+    const deduped = matched.filter((e) => {
+      if (seenNames.has(e.name)) return false;
+      seenNames.add(e.name);
+      return true;
+    });
+    return renderExemplarsForPrompt(deduped);
+  })();
+
   return assemble([
     // STABLE prefix: working rules (mode-specific but stable for the generator role per session).
     section("working-rules", "stable-prefix", workingRulesContent, { priority: 1, cacheable: true }),
@@ -1020,6 +1045,12 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
     // C1: diff archetypes one-line hint (tiny semi-stable section, priority 3 alongside static-signal).
     // Absent when no archetypes or non-generation mode — no empty header emitted.
     ...(diffArchetypesContent ? [section("diff-archetypes", "semi-stable", diffArchetypesContent, { priority: 3 })] : []),
+    // sdd/migration-wiring-phase-2 Slice 4 (D-E skill-exemplar restore): matched exemplar templates,
+    // alongside diffArchetypes at priority 3 (feeds the SAME structural-shape signal, richer form).
+    // Byte-budget capped at ~1.5KB, matching design's "no window starvation" requirement — an
+    // over-budget match set is OMITTED ENTIRELY (overflow:"drop" default), never a mid-template
+    // truncation, and never starves another section's share of the role's window.
+    ...(skillExemplarsContent ? [section("skill-exemplars", "semi-stable", skillExemplarsContent, { priority: 3, maxBytes: 1536 })] : []),
     // VOLATILE priority 0: Context Pack (blast-radius + DOM + contracts, pushed by orchestrator).
     // Placed FIRST in VOLATILE so the ground-truth is nearest the task and within the
     // compaction-preserved tail. The domSnapshot (failure-point capture) stays at priority 1

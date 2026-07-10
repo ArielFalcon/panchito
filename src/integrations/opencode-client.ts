@@ -17,6 +17,7 @@ import type { UsageSnapshot } from "../qa/usage";
 import { CommitIntent } from "../qa/commit-classify";
 import type { ArchitectureContext } from "../qa/context";
 import { coerceExplorationBrief, parseExplorationBrief, type ExplorationBrief } from "../qa/exploration-brief";
+import type { StructuralPattern } from "../qa/learning/skill-exemplar";
 import { normalizeRoutes, MAX_ROUTES } from "../qa/dom-snapshot";
 import { sanitizeText } from "../orchestrator/sanitizer";
 import { ActivityRouter } from "./agent-activity";
@@ -548,6 +549,11 @@ export interface OpencodeRunInput {
   // Surfaces the structural shape of the change as a ONE-LINE hint to the generator so it can
   // prioritise archetype-appropriate tests (e.g. "auth-flow, data-list"). Absent or empty = no hint.
   diffArchetypes?: string[];
+  // sdd/migration-wiring-phase-2 Slice 4 (D-E skill-exemplar restore): the FULL detected structural
+  // shapes (restored src/qa/learning/structural-pattern.ts's detectStructuralPatterns) — a richer
+  // sibling of diffArchetypes above. Fed into prompts.ts's matchExemplars/renderExemplarsForPrompt
+  // loop to render a "Skill exemplars" section. Absent or empty = no section (never fabricated).
+  structuralPatterns?: StructuralPattern[];
   // Seam b: deterministic list of existing spec file paths under e2eRelDir/**/*.spec.ts, enumerated
   // by the orchestrator from the filesystem before the session starts. When non-empty and mode is
   // diff or manual, rendered as an "existing-suite-manifest" semi-stable section so the generator
