@@ -161,6 +161,18 @@ export class WriteConfinementService {
   // staged deletion in place, destroying the file. If EITHER side is a stray under the target's
   // rules, BOTH sides go into the revert bucket; a rename fully inside the allowed area (neither
   // side a stray) is a legitimate agent write and is left untouched.
+  //
+  // KNOWN LIMITATION (Judgment Day round 2, pre-existing, legacy-parity): this pairing relies on
+  // git's own R/C rename DETECTION, which only fires for a STAGED move. The agent has no git access
+  // (read-only on watched repos), so its file moves surface as two INDEPENDENT lines — an in-area
+  // unstaged deletion (` D e2e/old.spec.ts`) plus an out-of-area untracked stray (`?? stray.spec.ts`)
+  // — with no renameCounterpart to pair them. The out-of-area stray IS still cleaned by the untracked
+  // path below (content destroyed, correct), but the in-area unstaged deletion is NOT restored here:
+  // unconditionally reverting every in-area unstaged deletion would over-revert a legitimate agent
+  // deletion (e.g. exhaustive mode deliberately deletes stale specs) — pairing without git's own
+  // rename detection is guesswork. Deferred as a Phase 2 DESIGN item (see the decisions doc's
+  // Judgment Day round 2 register): content-similarity pairing, restore-then-let-reviewer-arbitrate,
+  // or publish-time deletion review are the candidate approaches, not decided here.
   classifyStrays(changes: ParsedChange[], isCode: boolean): ClassifiedStrays {
     const isStray = isCode ? this.isCodeDenied.bind(this) : this.isE2eStray.bind(this);
     const tracked: string[] = [];

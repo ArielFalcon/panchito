@@ -350,9 +350,11 @@ someone confirms (as this document just did) that nothing imports them.
 **Commit count correction**: this section previously claimed "18 commits" —
 `git rev-list --count main..HEAD` at the end of Slice 9 (before the Judgment
 Day round documented below) actually counts **17**. With the 2 fix commits
-from the Judgment Day round 1 review appended, the branch now stands at
-**19 commits** on `remediation/migration-phase-1`, every one gated green
-independently (`npm test` + `npm run typecheck`, Node v24.11.0):
+from the Judgment Day round 1 review appended, the branch stood at
+**19 commits** on `remediation/migration-phase-1`. With the 2 fix commits +
+this docs commit from the Judgment Day round 2 review (below) appended, the
+branch now stands at **22 commits**, every one gated green independently
+(`npm test` + `npm run typecheck`, Node v24.11.0):
 
 | Slice | Content | Commit(s) |
 |---|---|---|
@@ -365,7 +367,8 @@ independently (`npm test` + `npm run typecheck`, Node v24.11.0):
 | 7 | `fitRulesToBudget` parity + context-mode publish scope | `3632e3c`, `3bae1b2` |
 | 8 | Tier-0 dead-code cleanup, 6 batches (A1/A2 split, B, C, D, E, F) | `9bef64c`, `5b423f9`, `3b59b90`, `c3f6d3f`, `2f614e4`, `989e401`, `34cb08c` |
 | 9 | Closeout — CLAUDE.md accuracy pass, triage doc status flips, this section | `c367b8d` |
-| 10 | Judgment Day round 1 — rename over-revert fix + docs/tsconfig cleanup | `04a2f42`, (this commit) |
+| 10 | Judgment Day round 1 — rename over-revert fix + docs/tsconfig cleanup | `04a2f42`, `74524bf` |
+| 11 | Judgment Day round 2 — escape-scan rename-awareness fix, quote-aware parser fix, docs register | `3802521`, `66adf3e`, (this commit) |
 
 ### Judgment Day round 1
 
@@ -396,7 +399,77 @@ alongside their dead source, consistent with the volume of Slice 8 deletions.
 Never committed red at any point; every deviation below was caught by `rg`
 pre-checks or `npm run typecheck` before the commit, not after.
 
-### Consolidated deferred/blocked register (12 items, all flagged for the same follow-up `migration-cleanup` change)
+### Judgment Day round 2
+
+A second adversarial review (two independent blind judges, round-2 pass over
+the round-1 fix) found one CRITICAL reproduced defect confirmed by BOTH
+judges and one additional confirmed-by-both parser defect, plus a set of
+pre-existing/deliberate items the judges surfaced that were investigated and
+resolved as documentation, not code changes:
+
+- **Escape-scan not renameCounterpart-aware** (CRITICAL, confirmed by both
+  judges, reproduced): `write-confinement.adapter.ts`'s symlink-escape scan
+  destructured only `{ xy, path }` from each parsed change, dropping the
+  `renameCounterpart` field the round-1 fix added (`04a2f42`). When an
+  escape-detected path was one side of a staged rename fully inside the
+  allowed area (e.g. a committed symlink inside `e2e/` whose target escapes
+  the mirror, staged-renamed to another name still inside `e2e/` —
+  `classifyStrays` correctly leaves such a pair alone since neither side is a
+  stray under the allowlist), the scan pushed ONLY the escape-detected path
+  into the revert bucket. Reverting that one path orphaned the other side's
+  staged half — the identical destructive pattern round 1 fixed, reopened via
+  the escape scan's own separate code path. Reproduced with real git fixtures
+  (a staged rename of an escaping symlink, both e2e- and code-target) and
+  fixed by extracting `WriteConfinementService.revertUnit` as the single
+  source of truth for "which paths revert together", shared by both
+  `classifyStrays` and the escape scan so the two mechanisms cannot drift
+  apart again (commit `3802521`).
+- **Non-quote-aware rename-arrow parsing** (confirmed by both judges):
+  `parseStatusOutput`'s `rest.indexOf(" -> ")` first-match split broke when
+  the OLD path of a rename was itself C-style-quoted by git AND that quoted
+  path literally contained `" -> "` (git quotes such a path specifically to
+  disambiguate it from the porcelain rename separator — confirmed against
+  real git output before fixing). The naive search split inside the quoted
+  span instead of at the real separator after it, garbling both sides and
+  producing an invalid pathspec at revert time. Fixed by making the split
+  quote-aware: when the line opens with a quote, scan for its matching
+  unescaped closing quote first (respecting backslash escapes), then require
+  the arrow immediately after it (commit `66adf3e`).
+
+**Items investigated and resolved as documentation (no code change; contradictions
+resolved by orchestrator reproduction against a real git fixture, not by judge
+consensus alone)**:
+
+1. **KNOWN LIMITATION** (pre-existing, legacy-parity): an UNSTAGED fs-level
+   rename — the shape the agent's own moves take, since it has no git access —
+   surfaces as two independent porcelain lines (` D e2e/old.spec.ts` in-area,
+   `?? stray.spec.ts` out-of-area) with no `renameCounterpart` to pair them.
+   The out-of-area stray is correctly cleaned (content destroyed); the in-area
+   unstaged deletion is NOT restored, so it survives to `git add -- e2e` at
+   publish. Deliberately NOT fixed in this change: unconditionally restoring
+   every in-area unstaged deletion would over-revert a legitimate agent
+   deletion (exhaustive mode deliberately deletes stale specs) — pairing
+   without git's own rename detection is guesswork, not a safe default.
+   Registered as a Phase 2 DESIGN item below (options: content-similarity
+   pairing, restore-then-let-reviewer-arbitrate, or publish-time deletion
+   review) and documented in `write-confinement.service.ts`'s `classifyStrays`
+   doc comment.
+2. **DELIBERATE**: a reverse-direction stray rename (old side already an
+   out-of-area stray, new side in-area) reverts BOTH sides, not just the old
+   one — a conservative whole-transaction discard. Agent-authored in-area
+   content is reconstructible by a re-run; committed content is not, so the
+   asymmetry favors the side that can't be regenerated.
+3. **DELIBERATE**: `strays`/`reverted` count BOTH halves of a reverted rename
+   pair (2, not 1) — this is a telemetry-only field; no gate or decision logic
+   reads it, so double-counting a rename's two filesystem effects is accurate
+   bookkeeping, not a bug.
+4. **INFO**: `C` (copy) status lines are unreachable under this deployment's
+   default git config — no `status.renames=copies` setting exists anywhere in
+   the codebase or Docker images. The unit-revert logic (`revertUnit`,
+   `classifyStrays`) already covers `C` lines identically to `R` lines should
+   that config ever be enabled; no action needed today.
+
+### Consolidated deferred/blocked register (13 items, all flagged for the same follow-up `migration-cleanup` change)
 
 **7 originally-deferred DELETE items** (triage §1 DELETE list, intentionally
 excluded from this change's Slice 8 batch list — see the register above):
@@ -442,11 +515,24 @@ while auditing D3 for this closeout):
    threading a parent run's ID into `RunQaInput` for regeneration/continuation
    runs) is follow-up scope, not this change's.
 
+**1 newly-identified pairing gap** (Judgment Day round 2, investigated and
+deliberately not fixed in this change — see that section's item 1 above):
+
+6. Unstaged fs-level renames (the shape the agent's own moves take, since it
+   has no git access) are not paired by `classifyStrays`: they surface as an
+   independent in-area unstaged deletion plus an out-of-area untracked stray,
+   with no `renameCounterpart`. The out-of-area stray is cleaned; the in-area
+   deletion survives to `git add -- e2e` at publish. Candidate approaches for
+   the follow-up change: content-similarity pairing, restore-then-let-
+   reviewer-arbitrate, or publish-time deletion review — not decided here,
+   since a wrong default risks over-reverting a legitimate agent deletion
+   (e.g. exhaustive mode's deliberate stale-spec cleanup).
+
 ### Phase 2 roadmap pointer
 
 The remaining migration scope for live `src/` code (triage doc §4, Tiers 1-4)
 and the still-open items in §5 (`context-cache`/contextMap read-back,
-`run.aggregate.ts`, skill-exemplar catalog) — plus the 11-item deferred/blocked
+`run.aggregate.ts`, skill-exemplar catalog) — plus the 13-item deferred/blocked
 register above — are the input backlog for a future `migration-cleanup` (Phase
 2) SDD change. This stabilization change's job was fixing the P0-P2 regression
 backlog and reconnecting existing sinks (done, table above); restructuring
