@@ -525,7 +525,8 @@ embedded space plus a literal non-ASCII char) proving the file is actually
 deleted from disk, plus parser unit tests for a literal non-ASCII char, a
 literal 4-byte/astral character, and the unrecognized-escape throw.
 
-Test count: 3873/3874 pass (1 pre-existing skip) — 4 new unit tests
+Test count: 3873/3874 pass (1 pre-existing skip) after round 3;
+3877/3878 after round 4's four additional tests — 4 new unit tests
 (octal decode, embedded-quote/backslash decode, unquoted-unchanged, rename
 sides decoded independently) plus 3 new real-git-fixture end-to-end tests
 (untracked non-ASCII stray, tracked non-ASCII rename-out-of-`e2e/`, and the
