@@ -55,7 +55,57 @@ export class WriteConfinementService {
   // the legitimate old path); git-quoted paths with spaces/unicode (core.quotePath — strips
   // surrounding `"`, applied independently to each side of a rename).
   parseStatusOutput(out: string): ParsedChange[] {
-    const stripQuotes = (p: string): string => (p.startsWith('"') && p.endsWith('"') ? p.slice(1, -1) : p);
+    // Strip the surrounding C-style quotes git adds (core.quotePath, ON by default) AND fully
+    // decode the C-style escaping inside them — NOT just the outer quotes. Under the default
+    // core.quotePath=true, git octal-escapes every non-ASCII byte (`café.spec.ts` ->
+    // `"caf\303\251.spec.ts"`) and backslash-escapes an embedded literal `"` or `\` in the name
+    // itself. Leaving those escapes undecoded means the returned path string is NOT the real
+    // on-disk path — a revert built from it (`git clean -f --`, `git restore -- ...`) then matches
+    // NOTHING, and enforce() silently reports the stray as reverted while the file survives on
+    // disk (Judgment Day round 3, CRITICAL: silent confinement-bypass on any accented filename).
+    // Decode by accumulating raw BYTES (a literal char contributes its own byte, `\NNN` an octal
+    // byte, `\"`/`\\`/`\t`/`\n`/`\r`/etc. their single-byte meaning) and interpreting the byte
+    // sequence as UTF-8 — this is what git itself does when writing the octal escapes, so decoding
+    // byte-by-byte (not char-by-char) is required to reconstruct multi-byte UTF-8 sequences.
+    const SIMPLE_ESCAPES: Record<string, number> = {
+      '"': 0x22,
+      "\\": 0x5c,
+      a: 0x07,
+      b: 0x08,
+      f: 0x0c,
+      n: 0x0a,
+      r: 0x0d,
+      t: 0x09,
+      v: 0x0b,
+    };
+    const decodeQuoted = (inner: string): string => {
+      const bytes: number[] = [];
+      for (let i = 0; i < inner.length; i++) {
+        const ch = inner[i] ?? "";
+        if (ch !== "\\") {
+          bytes.push(ch.charCodeAt(0));
+          continue;
+        }
+        const octal = inner.slice(i + 1, i + 4);
+        if (/^[0-7]{3}$/.test(octal)) {
+          bytes.push(Number.parseInt(octal, 8));
+          i += 3;
+          continue;
+        }
+        const next = inner[i + 1];
+        if (next !== undefined && next in SIMPLE_ESCAPES) {
+          bytes.push(SIMPLE_ESCAPES[next] as number);
+          i += 1;
+          continue;
+        }
+        // Unrecognized escape shape — keep the backslash literally (defensive fallback; never
+        // reached against real git output, which only ever emits the escapes handled above).
+        bytes.push(ch.charCodeAt(0));
+      }
+      return Buffer.from(bytes).toString("utf8");
+    };
+    const stripQuotes = (p: string): string =>
+      p.startsWith('"') && p.endsWith('"') ? decodeQuoted(p.slice(1, -1)) : p;
     // Quote-aware arrow-split index: a plain `rest.indexOf(" -> ")` first-match breaks when the
     // OLD path is itself C-style-quoted (git quotes it whenever it literally contains " -> ", to
     // disambiguate from the rename separator) AND that quoted path also contains " -> " — the

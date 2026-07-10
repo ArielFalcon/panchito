@@ -32,6 +32,40 @@ test("parseStatusOutput is quote-aware when the OLD path itself literally contai
   ]);
 });
 
+// ── C-style quote decoding regression (Judgment Day round 3) ───────────────────────────────────
+//
+// stripQuotes only stripped the surrounding `"` — it never decoded git's C-style quoting content.
+// With the git DEFAULT core.quotePath=true, a non-ASCII byte in a path is octal-escaped
+// (`\NNN` per byte); `\"` and `\\` escape a literal quote/backslash embedded in the name itself.
+// Leaving those escapes undecoded means the returned path is not the real on-disk path, so a
+// revert built from it (`git clean -f --`, `git restore -- ...`) silently matches nothing.
+
+test("parseStatusOutput decodes git's octal byte-escaping for a non-ASCII path (core.quotePath default)", () => {
+  // Raw git porcelain output for `café.spec.ts` under core.quotePath=true: é (U+00E9) is UTF-8
+  // bytes 0xC3 0xA9 = octal 303 251, so git emits the literal 8 characters `\303\251` in the quoted
+  // path — the JS source below uses `\\` to produce that single literal backslash per escape.
+  const parsed = svc.parseStatusOutput('?? "caf\\303\\251.spec.ts"\n');
+  assert.deepEqual(parsed.map((p) => p.path), ["café.spec.ts"]);
+});
+
+test("parseStatusOutput decodes an embedded escaped quote and backslash inside a git-quoted path", () => {
+  const parsed = svc.parseStatusOutput('?? "weird\\"quote.spec.ts"\n?? "back\\\\slash.spec.ts"\n');
+  assert.deepEqual(parsed.map((p) => p.path), ['weird"quote.spec.ts', "back\\slash.spec.ts"]);
+});
+
+test("parseStatusOutput leaves an unquoted path unchanged", () => {
+  const parsed = svc.parseStatusOutput(" M e2e/plain.spec.ts\n");
+  assert.deepEqual(parsed.map((p) => p.path), ["e2e/plain.spec.ts"]);
+});
+
+test("parseStatusOutput decodes octal-escaped quoted paths independently on each side of a rename", () => {
+  const parsed = svc.parseStatusOutput('R  "caf\\303\\251-old.spec.ts" -> "caf\\303\\251-new.spec.ts"\n');
+  assert.deepEqual(parsed, [
+    { xy: "R ", path: "café-old.spec.ts", renameCounterpart: "café-new.spec.ts" },
+    { xy: "R ", path: "café-new.spec.ts", renameCounterpart: "café-old.spec.ts" },
+  ]);
+});
+
 test("parseStatusOutput: an UNSTAGED rename shows as an independent D + ?? pair (git only emits R when staged/detected) — parsing does not merge them", () => {
   const parsed = svc.parseStatusOutput(" D e2e/existing.spec.ts\n?? stray.spec.ts");
   assert.deepEqual(parsed, [

@@ -368,7 +368,8 @@ branch now stands at **22 commits**, every one gated green independently
 | 8 | Tier-0 dead-code cleanup, 6 batches (A1/A2 split, B, C, D, E, F) | `9bef64c`, `5b423f9`, `3b59b90`, `c3f6d3f`, `2f614e4`, `989e401`, `34cb08c` |
 | 9 | Closeout — CLAUDE.md accuracy pass, triage doc status flips, this section | `c367b8d` |
 | 10 | Judgment Day round 1 — rename over-revert fix + docs/tsconfig cleanup | `04a2f42`, `74524bf` |
-| 11 | Judgment Day round 2 — escape-scan rename-awareness fix, quote-aware parser fix, docs register | `3802521`, `66adf3e`, (this commit) |
+| 11 | Judgment Day round 2 — escape-scan rename-awareness fix, quote-aware parser fix, docs register | `3802521`, `66adf3e`, `44894b3` |
+| 12 | Judgment Day round 3 — C-style quote-decoding fix (non-ASCII silent bypass) | (this commit) |
 
 ### Judgment Day round 1
 
@@ -468,6 +469,48 @@ consensus alone)**:
    the codebase or Docker images. The unit-revert logic (`revertUnit`,
    `classifyStrays`) already covers `C` lines identically to `R` lines should
    that config ever be enabled; no action needed today.
+
+### Judgment Day round 3
+
+A third adversarial review (two independent blind judges, round-3 pass over
+the round-2 fixes) found one CRITICAL reproduced defect confirmed by both
+judges: `stripQuotes` (`write-confinement.service.ts`'s `parseStatusOutput`)
+stripped only the surrounding `"` git adds under `core.quotePath` (ON by
+default) — it never decoded the C-style escaping *inside* those quotes. Under
+the default config, `git status --porcelain` octal-escapes every non-ASCII
+byte (`café.spec.ts` → `"caf\303\251.spec.ts"`) and backslash-escapes an
+embedded literal `"` or `\` in the filename itself. The undecoded escape
+sequence was then handed straight to the revert git calls
+(`git clean -f -- "caf\303\251-leak.ts"`, `git restore -- ...`), which match
+NOTHING on disk — `enforce()` reported the stray as reverted while the file
+silently survived: a security-boundary bypass, reachable with any accented
+filename, under git's own default configuration. Reproduced end-to-end with
+real git fixtures (an untracked non-ASCII stray at repo root, and a tracked
+non-ASCII file inside `e2e/` staged-renamed out of it) before fixing — both
+showed the revert git call throwing an unmatched-pathspec error or silently
+no-opping while the stray remained on disk. Fixed by decoding the full
+C-style quoting inside `stripQuotes`: accumulate raw bytes (a literal
+character contributes its own byte, `\NNN` an octal byte, `\"`/`\\`/`\t`/
+`\n`/`\r`/etc. their single-byte meaning) and interpret the resulting byte
+sequence as UTF-8 via `Buffer` — matching how git itself constructs the
+escapes, so multi-byte UTF-8 sequences reconstruct correctly. An unquoted
+path passes through unchanged. All three `stripQuotes` call sites (both
+rename sides and the plain-path fallback) route through the same function,
+so the fix covers every consumer with no additional wiring. Judge A's
+round-3 pass separately flagged an embedded-literal-quote filename (a
+different escape shape than the octal non-ASCII case — git backslash-escapes
+the `"` itself rather than octal-escaping a byte) as a variant of the same
+class; an end-to-end real-git fixture confirms it too now reverts correctly
+with the decoded literal path.
+
+Test count: 3873/3874 pass (1 pre-existing skip) — 4 new unit tests
+(octal decode, embedded-quote/backslash decode, unquoted-unchanged, rename
+sides decoded independently) plus 3 new real-git-fixture end-to-end tests
+(untracked non-ASCII stray, tracked non-ASCII rename-out-of-`e2e/`, and the
+embedded-quote judge-A variant). Never committed red: the new tests were
+written and confirmed failing against the pre-fix `stripQuotes` first
+(reproducing the exact silent-survival bug), then the fix turned them green,
+per this branch's Strict TDD gate.
 
 ### Consolidated deferred/blocked register (13 items, all flagged for the same follow-up `migration-cleanup` change)
 
