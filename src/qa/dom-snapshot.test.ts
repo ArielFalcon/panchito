@@ -276,14 +276,15 @@ test("4.5d parseAriaSnapshot: alert/status/progressbar NOT structural — unname
 });
 
 // Task 4.8 RED: selector-check.ts parseLine state-strip. This test is independent of the functions
-// this file exports (it dynamically imports selector-check.ts and hardcodes its input tree) — kept
-// here because it is a cross-file drift guard between the two files' "role: name [state]" grammar.
-// parseLine is private in selector-check.ts — we test via selectorPresent (the public API)
-// which calls parseLine internally. If parseLine strips the suffix, selectorPresent
+// this file exports (it dynamically imports the qa-engine port of selector-check.ts and hardcodes
+// its input tree) — kept here because it is a cross-file drift guard between the two files'
+// "role: name [state]" grammar. src/qa/selector-check.ts was deleted (migration-wiring-phase-2,
+// Slice 8b-4); parseLine is private in the qa-engine port too — we test via selectorPresent (the
+// public API) which calls parseLine internally. If parseLine strips the suffix, selectorPresent
 // will correctly match "button: Submit" even when the line has "[disabled]" suffix.
 test("4.8 [RED→GREEN] selectorPresent: correctly matches node line with state suffix", async () => {
   // If parseLine strips "[disabled]", role=button name=Submit matches "button: Submit [disabled]"
-  const { selectorPresent: sp } = await import("./selector-check");
+  const { selectorPresent: sp } = await import("@contexts/qa-run-orchestration/domain/helpers/selector-check");
   const tree = ["button: Submit [disabled]"];
   const sel = { kind: "role" as const, role: "button", name: "Submit" };
   const result = sp(sel, tree);

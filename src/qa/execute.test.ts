@@ -22,7 +22,10 @@ import {
   type FailureDump,
 } from "./execute";
 import { QaCase } from "../types";
-import { selectorPresent } from "./selector-check";
+// src/qa/selector-check.ts was deleted (migration-wiring-phase-2, Slice 8b-4) — selectorPresent now
+// comes from the already-ported qa-engine module (same function, verified parity in
+// selector-check-parity.test.ts).
+import { selectorPresent } from "@contexts/qa-run-orchestration/domain/helpers/selector-check";
 import { parseAriaSnapshot } from "./dom-snapshot";
 
 // Plan 7.6 (cutover finale): src/pipeline.ts is deleted. This is a verbatim, test-local copy of its
