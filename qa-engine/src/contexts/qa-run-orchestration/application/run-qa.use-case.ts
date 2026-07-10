@@ -533,7 +533,10 @@ export class RunQaUseCase {
       generating = classification.action !== "regression";
     }
     if (signal?.aborted) {
-      return this.abortedResult();
+      // sdd/migration-wiring-phase-2 Slice 2 rider (judgment-day round-1 fix): POST-prepare — the
+      // mirror was already checked out above, matching the classify-skip exit's own gc call
+      // immediately above.
+      return this.abortedResult(workspace.mirrorDir);
     }
 
     // Phase: setup (SetupPort) — CLAUDE.md run-flow step 3: bootstraps the config/e2e seed into
@@ -556,11 +559,14 @@ export class RunQaUseCase {
         // bare catch (verdict + nothing else, undiagnosable without live-container instrumentation).
         const msg = err instanceof Error ? err.message : String(err);
         console.error("[qa] setup phase failed:", err);
-        return this.infraErrorResult(`setup failed: ${msg}`);
+        // sdd/migration-wiring-phase-2 Slice 2 rider (judgment-day round-1 fix): POST-prepare — the
+        // mirror was already checked out by workspace.prepare() above.
+        return this.infraErrorResult(`setup failed: ${msg}`, workspace.mirrorDir);
       }
     }
     if (signal?.aborted) {
-      return this.abortedResult();
+      // sdd/migration-wiring-phase-2 Slice 2 rider (judgment-day round-1 fix): POST-prepare.
+      return this.abortedResult(workspace.mirrorDir);
     }
 
     // Phase: cleanup (CleanupPort) — audit CRITICAL (task #33), mirrors legacy's src/pipeline.ts's
@@ -594,7 +600,8 @@ export class RunQaUseCase {
       }
     }
     if (signal?.aborted) {
-      return this.abortedResult();
+      // sdd/migration-wiring-phase-2 Slice 2 rider (judgment-day round-1 fix): POST-prepare.
+      return this.abortedResult(workspace.mirrorDir);
     }
 
     // W2 fix (F5): the base enrichment every generate()/review() call below shares — the run's sha
@@ -660,7 +667,8 @@ export class RunQaUseCase {
       } catch (err) {
         // FIX 1 (judgment-day W4 abort-plumbing): an abort DURING grounding must take the ABORT
         // route, never the degraded-ungrounded-continue route below.
-        if (signal?.aborted) return this.abortedResult();
+        // sdd/migration-wiring-phase-2 Slice 2 rider (judgment-day round-1 fix): POST-prepare.
+        if (signal?.aborted) return this.abortedResult(workspace.mirrorDir);
         console.error("[qa] WARNING: pre-generation grounding failed (non-fatal, generation continues ungrounded):", err);
       }
     }
@@ -668,7 +676,8 @@ export class RunQaUseCase {
     // (it resolves a possibly-partial GroundingResult instead — see the port adapter's own docs),
     // so this is the check that actually catches an abort observed during ground() and routes it
     // to the ABORT path instead of silently continuing into baseEnrichment/generate() below.
-    if (signal?.aborted) return this.abortedResult();
+    // sdd/migration-wiring-phase-2 Slice 2 rider (judgment-day round-1 fix): POST-prepare.
+    if (signal?.aborted) return this.abortedResult(workspace.mirrorDir);
 
     // CodeGraph Phase 4 (design §5.4, ADR-7 — CRITICAL-1): the REAL non-empty BlastRadius, built
     // from classificationIntent.changedFiles (the diff-mode classify() call above ALREADY derived
@@ -835,7 +844,9 @@ export class RunQaUseCase {
           "(provider unavailable, quota exhausted, timeout, or model refusal). Not a code defect and not a " +
           "no-op decision; surfaced as infra-error so it is diagnosable rather than a silent skip.";
       console.error(`[qa] generation runtime failure (empty, unparseable output): ${emptyNote}`);
-      return this.infraErrorResult(emptyNote);
+      // sdd/migration-wiring-phase-2 Slice 2 rider (judgment-day round-1 fix): POST-prepare — the
+      // mirror was already checked out by workspace.prepare() above.
+      return this.infraErrorResult(emptyNote, workspace.mirrorDir);
     }
 
     // Agent no-op: approved + zero specs -> skipped (CLAUDE.md invariant: a VALID skipped, never invalid).
@@ -997,8 +1008,9 @@ export class RunQaUseCase {
       // loop BEFORE burning another generate()+validate() round-trip — without this check the loop
       // would still consume its full remaining repair budget before the next phase-boundary check
       // (post-validate, below) could ever observe the abort.
+      // sdd/migration-wiring-phase-2 Slice 2 rider (judgment-day round-1 fix): POST-prepare.
       if (signal?.aborted) {
-        return this.abortedResult();
+        return this.abortedResult(workspace.mirrorDir);
       }
       staticFixRounds++;
       retries++;
@@ -1224,7 +1236,8 @@ export class RunQaUseCase {
       );
     }
     if (signal?.aborted) {
-      return this.abortedResult();
+      // sdd/migration-wiring-phase-2 Slice 2 rider (judgment-day round-1 fix): POST-prepare.
+      return this.abortedResult(workspace.mirrorDir);
     }
 
     // Phase: execute (ExecutionPort) — SKIPPED entirely for "context" mode.
@@ -1277,7 +1290,8 @@ export class RunQaUseCase {
       ? { verdict: "pass" as const, cases: [] as QaCase[], logs: generated.note ?? "" }
       : await this.deps.execution.execute(workspace.specDir, liveExecutionOpts);
     if (signal?.aborted) {
-      return this.abortedResult();
+      // sdd/migration-wiring-phase-2 Slice 2 rider (judgment-day round-1 fix): POST-prepare.
+      return this.abortedResult(workspace.mirrorDir);
     }
 
     // Phase: FixLoop (Task D.4) — driven only when the initial verdict is "fail". Context mode's
@@ -1705,13 +1719,15 @@ export class RunQaUseCase {
               // FIX 1 (judgment-day W4 abort-plumbing): same ABORT-over-degraded-continue routing
               // as the pre-generation grounding call site above — an abort during capture must stop
               // the run, not silently fall back to an ungrounded review round.
-              if (signal?.aborted) return this.abortedResult();
+              // sdd/migration-wiring-phase-2 Slice 2 rider (judgment-day round-1 fix): POST-prepare.
+              if (signal?.aborted) return this.abortedResult(workspace.mirrorDir);
               console.error("[qa] WARNING: reviewer DOM grounding failed (non-fatal, review continues ungrounded):", err);
               reviewDomSnapshot = undefined;
             }
             lastReviewSpecsKey = specsKey;
           }
-          if (signal?.aborted) return this.abortedResult();
+          // sdd/migration-wiring-phase-2 Slice 2 rider (judgment-day round-1 fix): POST-prepare.
+          if (signal?.aborted) return this.abortedResult(workspace.mirrorDir);
         }
         const reviewResult = await this.deps.review.review(workspace.specDir, reviewCases, classificationDiff, {
           ...baseReviewEnrichment,
@@ -2417,11 +2433,22 @@ export class RunQaUseCase {
   // result"): every infra-error-shaped terminal routes through here with a diagnostic `note` — a
   // silent infra-error (verdict + nothing else) is undiagnosable from the run record alone. Logs
   // loudly via console.error so the failure is visible even when the caller never inspects `note`.
-  private infraErrorResult(note?: string): RunQaResult {
+  //
+  // sdd/migration-wiring-phase-2 Slice 2 rider (extended gc coverage, judgment-day round-1 fix): the
+  // SAME optional-trailing-`mirrorDir` pattern terminalResult() already establishes (below) — a
+  // caller that has already run workspace.prepare() (the mirror was genuinely touched) threads its
+  // real per-run mirrorDir; a caller that fires BEFORE prepare() (the entry-gate deploy-gate
+  // infra-error) omits it, matching pruneMirrorIfWired's own [SWAP]-absent no-op contract. Every
+  // POST-prepare bare infraErrorResult() call site (setup failure, empty/unparseable generation) now
+  // threads it; the one PRE-prepare call site (deploy-gate infra-error) deliberately does not.
+  private async infraErrorResult(note?: string, mirrorDir?: string): Promise<RunQaResult> {
     if (note !== undefined) {
       console.error("[qa] infra-error terminal:", note);
     }
     this.deps.observer?.onStep("done");
+    if (mirrorDir) {
+      await this.pruneMirrorIfWired(mirrorDir);
+    }
     return {
       decision: RunDecision.of("infra-error", "none"),
       // FIX 4 (judgment-day D.7): the entry-gate infra-error never persists (matches the legacy,
@@ -2446,17 +2473,28 @@ export class RunQaUseCase {
   // finalizes a cancellation — threading a note here would clash with (or be silently overwritten
   // by) that operator-facing note. Absent note on THIS specific terminal is intentional, not an
   // oversight of the loud-diagnostics fix applied to every other infra-error-shaped terminal.
-  private abortedResult(): RunQaResult {
-    return this.infraErrorResult();
+  //
+  // sdd/migration-wiring-phase-2 Slice 2 rider (extended gc coverage, judgment-day round-1 fix): a
+  // cancelled run (cancelTrackedRun is a documented feature) can fire at ANY phase-boundary
+  // signal?.aborted check throughout run() — including every POST-prepare one, where the mirror was
+  // already checked out. `mirrorDir` mirrors infraErrorResult()'s own optional param one level up:
+  // every POST-prepare call site now threads workspace.mirrorDir; the two genuinely PRE-prepare call
+  // sites (the already-aborted-before-start short-circuit, and the post-deploy-gate check that fires
+  // before workspace.prepare() has run) correctly omit it — their mirror was never touched.
+  private async abortedResult(mirrorDir?: string): Promise<RunQaResult> {
+    return this.infraErrorResult(undefined, mirrorDir);
   }
 
-  // sdd/migration-wiring-phase-2 Slice 2 rider (extended gc coverage, apply batch 2): shared
-  // fault-isolated gc trigger for every exit that has ALREADY called workspace.prepare() (i.e. the
-  // mirror was genuinely touched) — the mainline exit (pass/fail/flaky), the terminalResult()-routed
-  // exits (invalid/infra-error), and the classify-skip/agent-no-op-skip exits (both verdict
-  // "skipped"). Entry-gate exits that fire BEFORE workspace.prepare() (aborted, deploy-gate
-  // infra-error) never call this — their mirror was never touched, matching spec §2's "GIVEN a run
-  // completes (any verdict) and touched its mirror" scenario guard exactly.
+  // sdd/migration-wiring-phase-2 Slice 2 rider (extended gc coverage, apply batch 2 + judgment-day
+  // round-1 fix): shared fault-isolated gc trigger for every exit that has ALREADY called
+  // workspace.prepare() (i.e. the mirror was genuinely touched) — the mainline exit (pass/fail/
+  // flaky), the terminalResult()-routed exits (invalid/infra-error), the classify-skip/agent-no-op-
+  // skip exits (both verdict "skipped"), every POST-prepare signal-aborted exit routed through
+  // abortedResult(), and the two POST-prepare bare infraErrorResult() exits (setup failure, empty/
+  // unparseable generation). Entry-gate exits that fire BEFORE workspace.prepare() (the already-
+  // aborted-before-start short-circuit, the deploy-gate infra-error) never call this — their mirror
+  // was never touched, matching spec §2's "GIVEN a run completes (any verdict) and touched its
+  // mirror" scenario guard exactly.
   // [SWAP] absent this.deps.mirrorGc -> a no-op. Fault-isolated: a thrown prune() is caught here and
   // logged loudly, never alters the verdict or blocks the run from completing (mirrors
   // enforceConfinement's own fault-isolation contract).

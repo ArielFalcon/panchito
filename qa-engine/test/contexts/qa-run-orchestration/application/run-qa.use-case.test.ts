@@ -5653,6 +5653,86 @@ test("mirrorGc wiring (rider): a thrown prune() on the classify-skip exit is fau
   assert.equal(out.decision.verdict, "skipped", "a mirror-gc failure must never alter the classify-skip exit's verdict");
 });
 
+// ── ORCHESTRATOR RIDER (Batch 3, judgment-day fix): close the remaining mirror-gc coverage gap —
+// abortedResult() mid-run exits (every POST-prepare signal-aborted check) and the two bare
+// infraErrorResult() exits (setup failure, empty/unparseable generation) never called
+// pruneMirrorIfWired, even though workspace.prepare() had already checked out the mirror by the
+// time they fire. Genuinely PRE-prepare exits (an already-aborted signal observed before
+// workspace.prepare() runs, the deploy-gate infra-error) correctly stay excluded — their mirror was
+// never touched. ─────────────────────────────────────────────────────────────────────────────────
+
+test("mirrorGc wiring (batch 3): a post-prepare signal-aborted exit (mid-run, between validate and execute) triggers exactly one prune() with the run's mirrorDir", async () => {
+  const controller = new AbortController();
+  const { ports } = stubPorts({
+    validate: async () => { controller.abort(); return { ok: true, errors: [] }; },
+  });
+  let pruneCallCount = 0;
+  let prunedMirrorDir: string | undefined;
+  const mirrorGc = makeFakeMirrorGc((mirrorDir) => {
+    pruneCallCount++;
+    prunedMirrorDir = mirrorDir;
+  });
+  const useCase = new RunQaUseCase({ ...ports, mirrorGc, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "mirror-gc-batch3-mid-run-abort" }, controller.signal);
+
+  assert.equal(out.decision.verdict, "infra-error");
+  assert.equal(pruneCallCount, 1, "a post-prepare aborted exit must prune its mirror exactly once");
+  assert.equal(prunedMirrorDir, "/tmp/qa-golden");
+});
+
+test("mirrorGc wiring (batch 3): a pre-prepare already-aborted signal does NOT prune — the mirror was never touched", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const { ports } = stubPorts();
+  let pruneCallCount = 0;
+  const mirrorGc = makeFakeMirrorGc(() => { pruneCallCount++; });
+  const useCase = new RunQaUseCase({ ...ports, mirrorGc, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "mirror-gc-batch3-pre-prepare-no-prune" }, controller.signal);
+
+  assert.equal(out.decision.verdict, "infra-error");
+  assert.equal(pruneCallCount, 0, "an already-aborted signal short-circuits BEFORE workspace.prepare() ever runs — nothing to prune");
+});
+
+test("mirrorGc wiring (batch 3): a setup() failure infra-error exit triggers prune() once", async () => {
+  const { ports } = stubPorts({
+    setup: async () => { throw new Error("npm ci in e2e failed (code 1)"); },
+  });
+  let pruneCallCount = 0;
+  let prunedMirrorDir: string | undefined;
+  const mirrorGc = makeFakeMirrorGc((mirrorDir) => {
+    pruneCallCount++;
+    prunedMirrorDir = mirrorDir;
+  });
+  const useCase = new RunQaUseCase({ ...ports, mirrorGc, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "mirror-gc-batch3-setup-failure" });
+
+  assert.equal(out.decision.verdict, "infra-error");
+  assert.equal(pruneCallCount, 1, "a setup() failure fires after workspace.prepare() already checked out the mirror — it must be pruned");
+  assert.equal(prunedMirrorDir, "/tmp/qa-golden");
+});
+
+test("mirrorGc wiring (batch 3): an empty/unparseable generation infra-error exit triggers prune() once", async () => {
+  const { ports } = stubPorts({
+    generate: async () => ({ specs: [], approved: true, parsed: false }),
+  });
+  let pruneCallCount = 0;
+  let prunedMirrorDir: string | undefined;
+  const mirrorGc = makeFakeMirrorGc((mirrorDir) => {
+    pruneCallCount++;
+    prunedMirrorDir = mirrorDir;
+  });
+  const useCase = new RunQaUseCase({ ...ports, mirrorGc, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "mirror-gc-batch3-empty-generation" });
+
+  assert.equal(out.decision.verdict, "infra-error");
+  assert.equal(pruneCallCount, 1, "an empty/unparseable generation fires after workspace.prepare() already checked out the mirror — it must be pruned");
+  assert.equal(prunedMirrorDir, "/tmp/qa-golden");
+});
+
 // ── sdd/migration-wiring-phase-2 Slice 5 (D-F parentRunId producer): RunQaInput.parentRunId, sourced
 // ONLY from the /continue API flow's RunRequest.parentRunId (src/server/runner.ts's own
 // runViaRewrittenEngine -> RunInput construction), threads straight through into the mainline exit's
