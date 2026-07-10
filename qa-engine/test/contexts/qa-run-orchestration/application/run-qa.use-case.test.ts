@@ -5202,6 +5202,27 @@ test("confinement wiring: FixLoop engagement — enforce() runs after EACH FixLo
   assert.ok(calls.length >= 3, `expected at least 3 enforce() calls across the initial generate + FixLoop regen + pre-publish, got ${calls.length}`);
 });
 
+test("confinement wiring: agent-no-op skip still persists confinement telemetry — a stray caught before the skip never vanishes from the saved outcome", async () => {
+  // The initial generate() always runs enforceConfinement() before the approved+zero-specs guard is
+  // evaluated, so a no-op skip can legitimately carry a populated confinementAcc. The skip exit path
+  // must thread it into toRunOutcome like the mainline (1904) and terminal (2459) exits do — a run
+  // that ends "skipped" after the guard reverted a stray must still show that in its audit trail.
+  const { ports, savedOutcomes } = stubPorts({
+    generate: async () => ({ specs: [], approved: true, parsed: true }),
+  });
+  const confinement = makeFakeConfinement(() => ({ strays: 1, dangerous: 0, reverted: ["stray.txt"] }));
+  const useCase = new RunQaUseCase({ ...ports, confinement, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "confinement-noop-skip-telemetry" });
+
+  assert.equal(out.decision.verdict, "skipped");
+  assert.deepEqual(
+    savedOutcomes[0]?.gateSignals.confinement,
+    { strays: 1, dangerous: 0, reverted: ["stray.txt"] },
+    "the agent-no-op skip exit must persist gateSignals.confinement, matching the other toRunOutcome call sites",
+  );
+});
+
 test("confinement wiring: fault isolation — a thrown enforce() is caught, logged, and NEVER alters the verdict or blocks publish", async () => {
   let publishCallCount = 0;
   const { ports, savedOutcomes } = stubPorts({

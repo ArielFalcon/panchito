@@ -824,6 +824,7 @@ export class RunQaUseCase {
       const skipped = this.skippedResult(cfg.needsReview ? generated.approved : undefined);
       const skippedOutcome = this.toRunOutcome(input, skipped.decision, [], 0, null, skipped.errorClass, {
         reviewerApproved: skipped.gateSignals.reviewerApproved,
+        ...(confinementAcc !== undefined ? { confinement: confinementAcc } : {}),
       });
       await this.deps.runHistory.save(skippedOutcome);
       return { ...skipped, outcome: skippedOutcome };
