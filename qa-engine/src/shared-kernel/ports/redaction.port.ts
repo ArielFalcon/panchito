@@ -10,9 +10,13 @@ export const REDACTED = "[REDACTED]";
 export interface RedactionPort {
   // Returns text with every detected secret replaced by REDACTED. Pure and deterministic.
   redact(text: string): string;
-  // True when the text still contains a detectable secret AFTER redaction would run. Available for
-  // a future fail-loud egress guard (rather than ship a leak); no production call site wires it in
-  // yet — every current caller only invokes `redact`.
+  // True when the text still contains a detectable secret AFTER redaction would run. Wired at the
+  // logs→Issue egress boundary: src/server/rewritten-engine-factory.ts supplies
+  // RedactionPortAdapter.containsSecret as CompositionConfig.containsSecret, which
+  // publication-port.adapter.ts's PublicationPortAdapter checks post-redaction before an Issue body
+  // ships — a fail-loud guard rather than shipping a leak. The diff→model boundary uses the same
+  // fail-loud pattern on the src/ side via assertNoSecretLeak (src/orchestrator/sanitizer.ts), which
+  // throws SecretLeakError directly instead of going through this port method.
   containsSecret(text: string): boolean;
 }
 
