@@ -413,7 +413,10 @@ function isLowRelevance(filePath: string): boolean {
 }
 
 // Extracts the file path from a "diff --git a/... b/..." header line.
-function extractDiffFilePath(section: string): string {
+// Exported (judgment-day FIX 1) so prompts.ts's cappedDiffText can key its per-section sanitize
+// MODE (issue vs. model) off the same target path capDiff itself already parses out — one shared
+// extraction, no duplicated regex.
+export function extractDiffFilePath(section: string): string {
   // "diff --git a/src/foo.ts b/src/foo.ts" — take the b/ path (post-rename destination)
   const m = /^diff --git a\/\S+ b\/(\S+)/m.exec(section);
   return m?.[1] ?? "";

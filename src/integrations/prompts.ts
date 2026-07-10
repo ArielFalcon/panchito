@@ -13,7 +13,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { sanitizeText, assertNoSecretLeak, capText, capDiff } from "../orchestrator/sanitizer";
+import { sanitizeText, assertNoSecretLeak, capText, capDiff, extractDiffFilePath, type SanitizeMode } from "../orchestrator/sanitizer";
 import type { ArchitectureContext } from "../qa/context";
 import type { CommitIntent } from "../qa/commit-classify";
 import type { QaCase } from "../types";
@@ -73,10 +73,60 @@ const ACCEPTANCE_CRITERION_RULE =
 // classificationReason DID get "model" mode; the diff embed did not). Fixed to "model" mode + the
 // post-redaction fail-loud guard (AMENDMENT 1's assertNoSecretLeak): a secret that survives
 // model-mode redaction throws SecretLeakError rather than reaching the model silently.
+//
+// judgment-day FIX 1 (file-aware redaction): "model" mode's code-shape narrowing (WS5.4a) is correct
+// for a TS/JS/etc. source hunk (`password: string` reads as a type annotation, not a secret) but WRONG
+// for a config-file hunk (docker-compose.yml, .env, CI YAML), where an unquoted lowercase-key
+// credential IS the norm — applying "model" mode to the WHOLE diff let those leak. cappedDiffText now
+// re-splits the already-capped diff at each `diff --git` header (the same split capDiff itself uses)
+// and picks the sanitize mode PER SECTION from its target file's extension: "model" only for a known
+// CODE extension, "issue" (the aggressive, unnarrowed policy) for everything else — config files,
+// unknown/no extension, and any preamble before the first header. Each section is redacted AND
+// guarded (assertNoSecretLeak) independently, with that section's own mode. A diff with no file header
+// at all (several unit-test fixtures pass raw, header-less snippets as `diff`) has no file to key a
+// mode off, so the whole text keeps the prior "model" mode — unchanged for those callers.
+const CODE_FILE_EXTENSIONS = new Set([
+  // Every language this system's watched apps and self-maintenance target today (see CLAUDE.md's
+  // "Java + JavaScript/TypeScript" scope note) plus common ecosystems, so a diff hunk touching source
+  // code keeps model-mode's narrower, code-aware redaction instead of the config-file default.
+  "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "java", "go", "rs", "kt", "cs", "rb", "php", "swift",
+]);
+
+function diffSectionMode(filePath: string): SanitizeMode {
+  const base = filePath.split("/").pop() ?? filePath;
+  const dot = base.lastIndexOf(".");
+  const ext = dot > 0 ? base.slice(dot + 1).toLowerCase() : "";
+  return CODE_FILE_EXTENSIONS.has(ext) ? "model" : "issue";
+}
+
+const DIFF_HEADER_RE = /^diff --git /;
+
 function cappedDiffText(diff: string): string {
-  const redacted = sanitizeText(capDiff(diff), "model").text;
-  assertNoSecretLeak(redacted, "model", "diff→model");
-  return redacted;
+  const capped = capDiff(diff);
+  // Re-split at each file header — mirrors capDiff's own `diff --git` split so the mode decision is
+  // keyed off the exact same file boundaries the cap already used. NOTE: when the text STARTS with
+  // "diff --git" (the normal case for a real `git diff`), JS split's zero-width lookahead does NOT
+  // yield a leading empty element — sections[0] IS the first file's own section, not a preamble. So
+  // "is this a preamble" is decided per-section (does it start with its own header), never by index.
+  const sections = capped.split(/^(?=diff --git )/m);
+  const hasFileHeader = sections.some((s) => DIFF_HEADER_RE.test(s));
+  if (!hasFileHeader) {
+    // No file header found at all — nothing to key a per-file mode off (see doc above).
+    const redacted = sanitizeText(capped, "model").text;
+    assertNoSecretLeak(redacted, "model", "diff→model");
+    return redacted;
+  }
+  return sections
+    .map((section) => {
+      // A section starting with its own "diff --git a/... b/<path>" header picks mode by that file's
+      // extension; any OTHER content (real preamble before the first header, e.g. a `git log -p`
+      // commit-header prefix) conservatively gets the aggressive "issue" mode.
+      const mode: SanitizeMode = DIFF_HEADER_RE.test(section) ? diffSectionMode(extractDiffFilePath(section)) : "issue";
+      const redacted = sanitizeText(section, mode).text;
+      assertNoSecretLeak(redacted, mode, "diff→model");
+      return redacted;
+    })
+    .join("");
 }
 
 // ── (functions appended below from the original module, verbatim) ────────────────────────────

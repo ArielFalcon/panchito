@@ -1000,9 +1000,46 @@ test("Slice 6b.4: an auth.ts-shaped diff never trips the diff→model guard (fal
 // as an end-to-end prompts.ts fixture: sanitizeText and containsSecrets share ONE pattern table with
 // identical skip/modelSkip logic, so a secret genuinely surviving redaction is not constructible
 // through this real pipeline today (by design — the guard exists as an invariant check against a
-// FUTURE regression, e.g. a pattern added to one function but not the other). cappedDiffText's own
-// wiring (`assertNoSecretLeak(redacted, "model", "diff→model")`, immediately after sanitizeText) is
-// the reviewable proof the guard is actually in the diff→model path.
+// FUTURE regression, e.g. a pattern added to one function but not the other). cappedDiffText is
+// FILE-AWARE (judgment-day FIX 1): it re-splits the capped diff at each `diff --git` header and picks
+// "model" mode only for a section whose target path has a known code extension, "issue" mode for
+// everything else (config files, unknown/no extension, and any preamble before the first header) — and
+// runs `assertNoSecretLeak` per section, immediately after sanitizeText, with THAT section's own mode.
+// This is the reviewable proof the guard is wired into the diff→model path for every section, not just
+// a single whole-text call.
+
+// ── judgment-day FIX 1: file-aware diff redaction (model-mode narrowing applies only to code hunks) ──
+// WS5.4a's "model" mode narrows the api-key-assignment pattern to skip ordinary code shapes (a bare,
+// short, lowercase value like `password: hunter2` reads as a type annotation / call expression, not a
+// secret) — correct for TS/JS source hunks, but this narrowing was applied to the WHOLE diff, so
+// config-file hunks (docker-compose.yml, .env, CI YAML) — where an unquoted lowercase-key credential IS
+// the norm — silently escaped redaction in model mode despite being redacted in issue mode.
+
+test("FIX 1 (file-aware redaction): a .ts hunk stays code-shaped (unredacted) while a docker-compose.yml hunk in the SAME diff gets its unquoted credential redacted", () => {
+  const diff = [
+    "diff --git a/src/server/auth.ts b/src/server/auth.ts",
+    "+function sign(data: string, secret: string): string {",
+    "diff --git a/docker-compose.yml b/docker-compose.yml",
+    "+    environment:",
+    "+      password: hunter2",
+  ].join("\n");
+  const text = buildPrompt(mkInput({ diff }));
+  assert.ok(text.includes("secret: string"), "the .ts hunk must keep model-mode's code-shape narrowing (not over-redacted)");
+  assert.ok(!text.includes("password: hunter2"), "the docker-compose.yml hunk's unquoted credential must be redacted — config files use issue mode");
+  assert.match(text, /\[REDACTED\]/, "the config-file secret must be replaced with the redaction marker");
+});
+
+test("FIX 1 (file-aware redaction): a punctuated unquoted credential in a .env hunk is redacted (config files use issue mode, unaffected by the high-entropy bare-token check)", () => {
+  const diff = ["diff --git a/.env b/.env", "+token=Str0ng!Pass"].join("\n");
+  const text = buildPrompt(mkInput({ diff }));
+  assert.ok(!text.includes("token=Str0ng!Pass"), "the .env hunk's credential must be redacted even though punctuation defeats isHighEntropyBareToken's bare-identifier shape check");
+  assert.match(text, /\[REDACTED\]/);
+});
+
+test("FIX 1 (file-aware redaction, regression): a headerless diff fixture (no 'diff --git' at all) keeps whole-text model mode — existing bare-fixture tests are unaffected", () => {
+  const text = buildPrompt(mkInput({ diff: "password=hunter2" }));
+  assert.match(text, /hunter2/, "with no file header to key a mode off, the whole text must still fall back to model mode (prior behavior, unchanged)");
+});
 
 // ── C2: static-signal rendered in CODE-MODE prompts ──────────────────────────
 
