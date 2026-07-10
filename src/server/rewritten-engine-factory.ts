@@ -203,6 +203,13 @@ export function roleToAgentName(role: AgentRole): string {
 const E2E_PUBLISH_ADD = ["e2e"];
 const E2E_PUBLISH_EXCLUDES = ["node_modules/", "e2e/.qa/coverage/", "e2e/.qa/measured.json", "e2e/.qa/service-context/"];
 const CODE_PUBLISH_ADD = ["."];
+// sdd/migration-remediation Slice 7.2 (verify-first spike -> confirmed fix): context mode stages
+// ONLY the FE<->BE architecture map, never seed fixtures or specs. Legacy oracle: src/integrations/
+// publish.ts's own CONTEXT_ADD = ["e2e/.qa/context.json"]. CONFIRMED DEFECT this closes:
+// buildVcsPublish(isCode) previously dispatched ONLY on isCode — context-mode runs are never
+// isCode (they are e2e-shaped), so a context-mode run reaching "pr" fell through to
+// E2E_PUBLISH_ADD (["e2e"]), staging the WHOLE e2e/ tree instead of just the context artifact.
+const CONTEXT_PUBLISH_ADD = ["e2e/.qa/context.json"];
 // sdd/migration-remediation D2: CONFINEMENT_DENYLIST (write-confinement.service.ts) is spread in
 // here so the code-target commit-time allowlist actually denies the same paths write-confinement
 // denies mid-run (.env*, .github/, Dockerfile, docker-compose*, .gitattributes, .gitmodules) — this
@@ -279,12 +286,23 @@ function withPublishGitDecorations(git: GitFn): GitFn {
 // prefixes instead of only recording bare argv (the gap that let both CRITICALs slip first time).
 export function buildVcsPublish(
   isCode: boolean,
+  // sdd/migration-remediation Slice 7.2: REQUIRED (no default) — every call site must state its
+  // mode explicitly rather than silently falling back, so a future new mode can never reach this
+  // dispatch un-considered. `mode === "context"` OVERRIDES the isCode-based addDir/excludes split
+  // entirely (context runs are never isCode, so without this override they fell through to the
+  // e2e branch — see CONTEXT_PUBLISH_ADD's own doc for the confirmed defect this closes).
+  mode: RunMode,
   git: GitFn = realGit,
   writeExcludesFn: (dir: string, patterns: readonly string[]) => void = writeExcludes,
 ): VcsPublishCollaborator {
   const vcs = new VcsWriteAdapter(withPublishGitDecorations(git), writeExcludesFn);
-  const addDir = isCode ? CODE_PUBLISH_ADD : E2E_PUBLISH_ADD;
-  const excludes = isCode ? CODE_PUBLISH_EXCLUDES : E2E_PUBLISH_EXCLUDES;
+  const isContext = mode === "context";
+  const addDir = isContext ? CONTEXT_PUBLISH_ADD : isCode ? CODE_PUBLISH_ADD : E2E_PUBLISH_ADD;
+  // Legacy parity (src/integrations/publish.ts's publishContext: `excludes: []`): the context
+  // artifact is staged by its OWN exact pathspec, never a directory scan, so exclude patterns have
+  // nothing to filter — an empty list here matches legacy exactly rather than reusing the e2e/code
+  // exclude split, which exists to filter directory-wide `git add`/`git status` scans.
+  const excludes = isContext ? [] : isCode ? CODE_PUBLISH_EXCLUDES : E2E_PUBLISH_EXCLUDES;
   return {
     async publish({ mirrorDir, branch }): Promise<{ changed: boolean }> {
       // Apply local ignore patterns FIRST (same ordering as publish.ts's publishChanges) so both the
@@ -294,7 +312,7 @@ export function buildVcsPublish(
       const changed = await vcs.hasChanges(mirrorDir, addDir);
       if (!changed) return { changed: false };
       await vcs.checkoutBranch(mirrorDir, branch);
-      const commitMsg = isCode ? "test(code): automated QA" : "test(e2e): automated QA";
+      const commitMsg = isContext ? "docs(context): automated QA context map" : isCode ? "test(code): automated QA" : "test(e2e): automated QA";
       await vcs.commit(mirrorDir, commitMsg, addDir);
       await vcs.push(mirrorDir, branch);
       return { changed: true };
@@ -1010,7 +1028,7 @@ export function buildRewrittenCompositionConfig(
     // "pr" route, see that file's own header). Dispatched by isCode exactly like
     // validationStrategies/executionStrategies/setupCollaborators above (e2e publishes only e2e/;
     // code publishes the whole tree minus installed deps/build output).
-    vcsWrite: buildVcsPublish(isCode),
+    vcsWrite: buildVcsPublish(isCode, run.mode),
     // sdd/migration-remediation Slice 3 (P0 write-confinement wiring, D-P0b): wired UNCONDITIONALLY
     // (fail-open fault isolation makes it safe to run on every composition, not gated by app config)
     // — realGit local ops only, no auth decoration (confinement never pushes/commits).

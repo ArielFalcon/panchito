@@ -87,7 +87,7 @@ test("e2e target: cross-repo service-context snapshot is never staged (leak fix,
     writeFile(repo, "e2e/.qa/service-context/other-repo/snapshot.json");
 
     const { git } = realGitNoPush(repo);
-    const vcsWrite = buildVcsPublish(false, git);
+    const vcsWrite = buildVcsPublish(false, "diff", git);
     const result = await vcsWrite.publish({ mirrorDir: repo, branch: "qa-bot/leaktest1", sha: "leaktest1" });
 
     assert.equal(result.changed, true, "the legitimate spec file must still register as a change");
@@ -110,7 +110,7 @@ test("e2e target: coverage dumps and measured.json are excluded from a real stag
     writeFile(repo, "e2e/.qa/measured.json");
 
     const { git } = realGitNoPush(repo);
-    const vcsWrite = buildVcsPublish(false, git);
+    const vcsWrite = buildVcsPublish(false, "diff", git);
     const result = await vcsWrite.publish({ mirrorDir: repo, branch: "qa-bot/covtest1", sha: "covtest1" });
 
     assert.equal(result.changed, true);
@@ -136,7 +136,7 @@ test("e2e target: node_modules/ (unprefixed, no mid-pattern slash) still exclude
     writeFile(repo, "e2e/node_modules/some-pkg/index.js", "module.exports = {};\n");
 
     const { git } = realGitNoPush(repo);
-    const vcsWrite = buildVcsPublish(false, git);
+    const vcsWrite = buildVcsPublish(false, "diff", git);
     const result = await vcsWrite.publish({ mirrorDir: repo, branch: "qa-bot/nmtest1", sha: "nmtest1" });
 
     assert.equal(result.changed, true);
@@ -164,7 +164,7 @@ test("code target: workflow/Dockerfile/compose/gitattributes/gitmodules are neve
     writeFile(repo, ".gitmodules", '[submodule "x"]\n');
 
     const { git } = realGitNoPush(repo);
-    const vcsWrite = buildVcsPublish(true, git);
+    const vcsWrite = buildVcsPublish(true, "diff", git);
     const result = await vcsWrite.publish({ mirrorDir: repo, branch: "qa-bot/codetest1", sha: "codetest1" });
 
     assert.equal(result.changed, true);
@@ -185,7 +185,7 @@ test("code target: cross-repo service-context snapshot is never staged either (s
     writeFile(repo, "e2e/.qa/service-context/other-repo/snapshot.json");
 
     const { git } = realGitNoPush(repo);
-    const vcsWrite = buildVcsPublish(true, git);
+    const vcsWrite = buildVcsPublish(true, "diff", git);
     const result = await vcsWrite.publish({ mirrorDir: repo, branch: "qa-bot/codeleaktest1", sha: "codeleaktest1" });
 
     assert.equal(result.changed, true);
@@ -207,12 +207,53 @@ test("code target: .env* files remain excluded (regression guard — unrelated t
     writeFile(repo, ".env.local", "SECRET=1\n");
 
     const { git } = realGitNoPush(repo);
-    const vcsWrite = buildVcsPublish(true, git);
+    const vcsWrite = buildVcsPublish(true, "diff", git);
     await vcsWrite.publish({ mirrorDir: repo, branch: "qa-bot/envtest1", sha: "envtest1" });
 
     const paths = committedPaths(repo);
     assert.ok(paths.includes("src/orders.test.ts"));
     assert.ok(!paths.includes(".env.local"), `.env.local must remain excluded — committed paths: ${JSON.stringify(paths)}`);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+// ── context target (sdd/migration-remediation Slice 7.2, verify-first spike -> confirmed fix) ─────
+// CONFIRMED DEFECT: buildVcsPublish(isCode) previously dispatched ONLY on isCode. Context-mode runs
+// are never isCode (they are e2e-shaped), so a context-mode run reaching "pr" fell through to
+// E2E_PUBLISH_ADD (["e2e"]), staging the WHOLE e2e/ tree — seed fixtures, specs, everything —
+// instead of just the FE<->BE architecture map. Legacy oracle: src/integrations/publish.ts's
+// publishContext, whose CONTEXT_ADD = ["e2e/.qa/context.json"] stages ONLY that one file.
+
+test("context target: a context-mode publish stages ONLY e2e/.qa/context.json, never e2e specs or seed fixtures (Slice 7.2 fix)", async () => {
+  const repo = initRepo();
+  try {
+    writeFile(repo, "e2e/.qa/context.json", '{"routes":[]}\n'); // the ONLY file a context-mode publish should ever stage
+    writeFile(repo, "e2e/checkout.spec.ts", "test('x', () => {});\n"); // must NOT be staged by a context-mode publish
+    writeFile(repo, "e2e/playwright.config.ts", "export default {};\n"); // seed fixture — must NOT be staged either
+
+    const { git } = realGitNoPush(repo);
+    const vcsWrite = buildVcsPublish(false, "context", git);
+    const result = await vcsWrite.publish({ mirrorDir: repo, branch: "qa-bot/contexttest1", sha: "contexttest1" });
+
+    assert.equal(result.changed, true, "the context.json change must register");
+    const paths = committedPaths(repo);
+    assert.deepEqual(paths, ["e2e/.qa/context.json"], `a context-mode publish must stage ONLY the context artifact — committed paths: ${JSON.stringify(paths)}`);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("context target: no changes to context.json -> reports changed:false even when other e2e/ files changed (scoped status check, not a whole-e2e/ scan)", async () => {
+  const repo = initRepo();
+  try {
+    writeFile(repo, "e2e/checkout.spec.ts", "test('x', () => {});\n"); // an e2e/ change that is NOT the context artifact
+
+    const { git } = realGitNoPush(repo);
+    const vcsWrite = buildVcsPublish(false, "context", git);
+    const result = await vcsWrite.publish({ mirrorDir: repo, branch: "qa-bot/contexttest2", sha: "contexttest2" });
+
+    assert.equal(result.changed, false, "a context-mode publish must only observe changes to e2e/.qa/context.json, not the wider e2e/ tree");
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
