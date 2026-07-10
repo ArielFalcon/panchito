@@ -248,7 +248,16 @@ export interface GenerationPort {
   // the field was silently dropped at this interface boundary and Lever-2's checkSpecSelectors
   // always received specSources:[] no matter what the adapter produced underneath. Absent/empty ->
   // unchanged (no readSpecSource collaborator wired, or nothing was generated) — never fabricated.
-  generate(objectives: readonly Objective[], specDir: string, signal?: AbortSignal, diff?: string, enrichment?: GenerationEnrichment): Promise<{ specs: string[]; approved: boolean; note?: string; specSources?: string[]; parsed?: boolean }>;
+  //
+  // specMetas: sdd/migration-remediation Slice 4 (D-P1a, publication rendering + tested metadata) —
+  // the agent's own per-spec metadata (flow/objective), sourced from GenerateTestsUseCase's
+  // GenerationResult.specMetas (generate-tests.use-case.ts, ManifestEntry[]) and narrowed at this
+  // PORT BOUNDARY to only the two fields ever rendered into a PR/Issue body — the SAME projection
+  // discipline as RetrievedRule below (id/trigger/action/errorClass/confidence/status are the
+  // domain's fuller shape; this port only ever needs flow/objective). Threaded through
+  // RunQaUseCase into PublicationPort.publish()'s `tested` field. Absent/empty -> the caller's
+  // "tested" section is omitted (never fabricated, matches every other optional field on this port).
+  generate(objectives: readonly Objective[], specDir: string, signal?: AbortSignal, diff?: string, enrichment?: GenerationEnrichment): Promise<{ specs: string[]; approved: boolean; note?: string; specSources?: string[]; parsed?: boolean; specMetas?: { flow?: string; objective?: string }[] }>;
 }
 // ReviewPort is the authoritative publish gate's seam. blockingCount distinguishes blocking
 // corrections (must regenerate) from advisory ones (may approve when only advisory remain);
@@ -481,6 +490,29 @@ export interface PublicationPort {
     // write (see that file's own fail-closed comment).
     mirrorDir?: string;
     sha?: string;
+    // sdd/migration-remediation Slice 4 (D-P1a, publication rendering + tested metadata): the agent's
+    // "what was tested" evidence (flow/objective per spec) — see GenerationPort.generate()'s own
+    // specMetas doc for the SAME narrow port-boundary shape and its source. RunQaUseCase prefers the
+    // FixLoop's own final regen's specMetas when the loop engaged and produced any, falling back to
+    // the pre-loop/static-fix-loop generation's own specMetas otherwise (see run-qa.use-case.ts's
+    // resolveTested() for the exact precedence). OPTIONAL, same backward-compat precedent as every
+    // other dynamic field on this port: absent -> the rendered "Covers:"/"What was tested" section is
+    // omitted entirely, never a throw (spec's own negative scenario).
+    tested?: { flow?: string; objective?: string }[];
+    // sdd/migration-remediation Slice 4 (D-P1a): whether this run targeted the code (vs e2e) test
+    // target — the PR body's own wording branches on it ("Source-code tests" vs "E2E tests", and the
+    // validation statement's phrasing). Sourced from RunQaConfig.isCode, the SAME static per-run flag
+    // every other target-branching decision in this use-case already reads. OPTIONAL: absent renders
+    // the e2e-flavored wording (this port's pre-existing implicit default — every prior caller/test
+    // that omits it keeps compiling and behaving identically).
+    isCode?: boolean;
+    // sdd/migration-remediation Slice 4 (D-P1a): continuation provenance — the run this one continues
+    // (legacy parity: src/report/reporter.ts's PrBodyInput.parentRunId, src/server/runner.ts's own
+    // parentRunId chain). OPTIONAL: RunQaInput carries no parentRunId field today (the rewritten
+    // engine's continuation-provenance wiring is a KNOWN GAP, same class of gap as this method's own
+    // documented e2eChanged omission above — no fabricated value here, only the type widened so a
+    // FUTURE caller that DOES have one can thread it). Absent -> no continuation reference rendered.
+    parentRunId?: string;
   }): Promise<{ outcome: string }>;
 }
 // W3 fix (F1, dual-judge round): LearningPort.retrieve() previously returned bare trigger strings

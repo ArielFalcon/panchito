@@ -11,6 +11,20 @@ import { PublishDecisionService } from "@contexts/workspace-and-publication/doma
 import { GitHubPrAdapter } from "@contexts/workspace-and-publication/infrastructure/github-pr.adapter.ts";
 import { GitHubIssueAdapter } from "@contexts/workspace-and-publication/infrastructure/github-issue.adapter.ts";
 import { ShadowLogAdapter } from "@contexts/workspace-and-publication/infrastructure/shadow-log.adapter.ts";
+import { renderIssue, renderPrBody } from "@contexts/workspace-and-publication/domain/render-publication.ts";
+
+// sdd/migration-remediation Slice 4 (D-P1a): `render` is now a REQUIRED collaborator (the SAME
+// fail-closed posture as `sanitize`) — every construction in this file wires one. Tests that only
+// exercise ROUTING (which side effect fires, in what order, with what repo/branch) use this trivial
+// fake — body CONTENT is irrelevant to those assertions (they only check result.outcome, never
+// bodySeen). Tests that DO assert on body content wire the REAL renderIssue/renderPrBody via
+// realRender() below instead — the SAME collaborator composition-root.ts wires in production.
+function fakeRender(): { issue: () => string; prBody: () => string } {
+  return { issue: () => "issue-body", prBody: () => "pr-body" };
+}
+function realRender(): { issue: typeof renderIssue; prBody: typeof renderPrBody } {
+  return { issue: renderIssue, prBody: renderPrBody };
+}
 
 function fakePr(): GitHubPrAdapter {
   return new GitHubPrAdapter({
@@ -49,7 +63,7 @@ test("publish() routes to GitHubPrAdapter when the decision resolves to 'pr' (gr
   const issue = fakeIssue();
   const shadowLog = new ShadowLogAdapter(() => {});
   const vcsWrite = fakeVcsWrite([]);
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite, render: fakeRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -63,7 +77,7 @@ test("publish() routes to GitHubIssueAdapter when the decision resolves to 'issu
   const pr = fakePr();
   const issue = fakeIssue();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, render: fakeRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -78,7 +92,7 @@ test("publish() routes to ShadowLogAdapter when shadow:true, regardless of verdi
   const issue = fakeIssue();
   let logged: string | undefined;
   const shadowLog = new ShadowLogAdapter((msg) => { logged = msg; });
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, render: fakeRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: true, e2eChanged: true,
   });
 
@@ -93,7 +107,7 @@ test("publish() produces a noop outcome with no side effect when verdict is skip
   const pr = fakePr();
   const issue = fakeIssue();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, render: fakeRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: false,
   });
 
@@ -117,7 +131,7 @@ test("publish() prefers decision.reviewerApproved (dynamic) over ctx.reviewerApp
   const shadowLog = new ShadowLogAdapter(() => {});
   // ctx says reviewerApproved:true (the OLD static default), but the decision's dynamic value says
   // the reviewer actually rejected this run — the dynamic value must win, routing to "issue" not "pr".
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, render: fakeRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -132,7 +146,7 @@ test("publish() falls back to ctx.reviewerApproved (static) when the decision om
   const issue = fakeIssue();
   const shadowLog = new ShadowLogAdapter(() => {});
   const vcsWrite = fakeVcsWrite([]);
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite, render: fakeRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -148,7 +162,7 @@ test("publish() prefers decision.coverageBlocks (dynamic) over ctx.coverageBlock
   const shadowLog = new ShadowLogAdapter(() => {});
   // ctx says coverageBlocks:false (the OLD static default), but the dynamic value says an
   // enforce-mode coverage-fail must hold the PR — the dynamic value must win.
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, render: fakeRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -164,7 +178,7 @@ test("publish() prefers decision.e2eChanged (dynamic) over ctx.e2eChanged (stati
   const shadowLog = new ShadowLogAdapter(() => {});
   // ctx says e2eChanged:true (the OLD static default), but the dynamic value says no e2e/ files
   // actually changed this run — publish() should reflect the REAL signal when supplied.
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, render: fakeRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -182,7 +196,7 @@ test("F3: publish() routes Issue creation to decision.issueRepo (the triggering 
   const issue = { open: async (repo: string) => { issueRepoSeen = repo; return { url: "https://github.com/org/orders-svc/issues/9", number: 9 }; } };
   const pr = fakePr();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, render: fakeRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -199,7 +213,7 @@ test("F3: publish() still targets ctx.repo for a PR even when issueRepo is suppl
   const issue = fakeIssue();
   const shadowLog = new ShadowLogAdapter(() => {});
   const vcsWrite = fakeVcsWrite([]);
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite, render: fakeRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -215,7 +229,7 @@ test("F3: publish() falls back to ctx.repo for an Issue when issueRepo is absent
   const issue = { open: async (repo: string) => { issueRepoSeen = repo; return { url: "https://github.com/org/app/issues/2", number: 2 }; } };
   const pr = fakePr();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, render: fakeRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -228,22 +242,28 @@ test("F3: publish() falls back to ctx.repo for an Issue when issueRepo is absent
 // ── F4 (CRITICAL security invariant) — logs + case details + names are sanitized before reaching
 // an Issue/PR body. Absent sanitizer -> identity (backward-compat). ──────────────────────────────
 
-test("F4: publish() applies the injected sanitize() to logs before they reach the Issue body", async () => {
+// sdd/migration-remediation Slice 4 (D-P1a): the OLD version of this test asserted that `logs` (a
+// raw execution-log string) was sanitized INTO the Issue body — that premise is now the exact
+// regression this slice fixes: renderIssue's own input shape carries no `logs` field at all, so a
+// raw log dump structurally cannot reach the body through this adapter anymore (see
+// render-publication.ts's own header). Replaced with the render-content-level assertion: the Issue
+// body never contains raw log text, and the footer points at the run artifacts instead.
+test("F4 (Slice 4 update): publish() never embeds raw execution logs in the Issue body — logs live in the run artifacts", async () => {
   const decide = new PublishDecisionService();
   let bodySeen = "";
   const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/3", number: 3 }; } };
   const pr = fakePr();
   const shadowLog = new ShadowLogAdapter(() => {});
   const sanitize = (text: string) => text.replace(/sk-[A-Za-z0-9]+/g, "[REDACTED_SECRET]");
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize, render: realRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
   const result = await adapter.publish({ verdict: "fail", cases: [], logs: "leaked token sk-abc123XYZ during the run" });
 
   assert.match(result.outcome, /issue/);
-  assert.ok(!bodySeen.includes("sk-abc123XYZ"), `the secret-looking token must be sanitized out of the Issue body — got: ${bodySeen}`);
-  assert.ok(bodySeen.includes("[REDACTED_SECRET]"), "the sanitized replacement must appear in the rendered body");
+  assert.ok(!bodySeen.includes("sk-abc123XYZ"), `raw logs must never reach the Issue body at all — got: ${bodySeen}`);
+  assert.match(bodySeen, /Full trace \+ logs in the run artifacts/, "the body must point at the run artifacts instead of embedding logs");
 });
 
 test("F4: publish() applies the injected sanitize() to each failing case's name and detail", async () => {
@@ -253,7 +273,7 @@ test("F4: publish() applies the injected sanitize() to each failing case's name 
   const pr = fakePr();
   const shadowLog = new ShadowLogAdapter(() => {});
   const sanitize = (text: string) => text.replace(/sk-[A-Za-z0-9]+/g, "[REDACTED_SECRET]");
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize, render: realRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -285,7 +305,7 @@ test("PROD-BLOCKER: publish() invokes vcsWrite BEFORE pr.openWithAutoMerge on th
   const issue = fakeIssue();
   const shadowLog = new ShadowLogAdapter(() => {});
   const vcsWrite = { publish: async () => { order.push("vcsWrite.publish"); return { changed: true }; } };
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite, render: fakeRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -302,7 +322,7 @@ test("PROD-BLOCKER: publish() threads mirrorDir/branch/sha from the decision + c
   const issue = fakeIssue();
   const shadowLog = new ShadowLogAdapter(() => {});
   const vcsWrite = { publish: async (input: { mirrorDir: string; branch: string; sha: string }) => { seen = input; return { changed: true }; } };
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite, render: fakeRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -318,7 +338,7 @@ test("PROD-BLOCKER: publish() never invokes vcsWrite on the 'issue' route (fail 
   const issue = fakeIssue();
   const shadowLog = new ShadowLogAdapter(() => {});
   const vcsWrite = { publish: async () => { vcsWriteCalled = true; return { changed: true }; } };
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite, render: fakeRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -335,7 +355,7 @@ test("PROD-BLOCKER: publish() never invokes vcsWrite on the 'shadow' route, even
   const issue = fakeIssue();
   const shadowLog = new ShadowLogAdapter(() => {});
   const vcsWrite = { publish: async () => { vcsWriteCalled = true; return { changed: true }; } };
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite, render: fakeRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: true, e2eChanged: true,
   });
 
@@ -352,7 +372,7 @@ test("PROD-BLOCKER: publish() never invokes vcsWrite on a 'noop' route (green, n
   const issue = fakeIssue();
   const shadowLog = new ShadowLogAdapter(() => {});
   const vcsWrite = { publish: async () => { vcsWriteCalled = true; return { changed: true }; } };
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite, render: fakeRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -369,7 +389,7 @@ test("PROD-BLOCKER: publish() never invokes vcsWrite on the 'quarantine' route (
   const issue = fakeIssue();
   const shadowLog = new ShadowLogAdapter(() => {});
   const vcsWrite = { publish: async () => { vcsWriteCalled = true; return { changed: true }; } };
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite, render: fakeRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -386,7 +406,7 @@ test("PROD-BLOCKER: publish() short-circuits to a noop-shaped outcome when vcsWr
   const issue = fakeIssue();
   const shadowLog = new ShadowLogAdapter(() => {});
   const vcsWrite = { publish: async () => ({ changed: false }) };
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite, render: fakeRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -404,7 +424,7 @@ test("PROD-BLOCKER: publish() throws loudly on the 'pr' route when vcsWrite is a
   // vcsWrite is deliberately omitted (it is OPTIONAL at the type level — see PublicationPortCollaborators'
   // own doc for why) to prove the fail-closed runtime guard on the "pr" route specifically.
   const adapter = new PublicationPortAdapter(
-    { decide, pr, issue, shadowLog, sanitize: identitySanitize },
+    { decide, pr, issue, shadowLog, sanitize: identitySanitize, render: fakeRender() },
     { repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true },
   );
 
@@ -437,17 +457,42 @@ test("WS5.4b: constructor THROWS when sanitize is omitted (fail-closed, not iden
   );
 });
 
+// sdd/migration-remediation Slice 4 (D-P1a): the SAME fail-closed posture as WS5.4b's sanitize guard
+// immediately above, now also enforced for the `render` collaborator — a composition that forgets to
+// wire the real renderIssue/renderPrBody must throw loudly at construction time, never silently fall
+// back to a raw-log embed (the regression this slice fixes).
+test("Slice 4: constructor THROWS when render is omitted (fail-closed, no raw-log fallback)", () => {
+  const decide = new PublishDecisionService();
+  const pr = fakePr();
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  assert.throws(
+    () =>
+      new PublicationPortAdapter(
+        // @ts-expect-error — render is intentionally omitted to prove the fail-closed constructor guard
+        { decide, pr, issue, shadowLog, sanitize: identitySanitize },
+        { repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true },
+      ),
+    /render/i,
+    "the constructor must throw naming the missing render collaborator, never silently fall back to a raw-log embed",
+  );
+});
+
+// sdd/migration-remediation Slice 4 (D-P1a): the OLD version of this test proved identity-sanitize
+// passthrough via raw `logs` text reaching the body — that channel no longer exists (renderIssue
+// carries no logs field, see F4's own Slice-4-update test above). Re-targeted at a field the render
+// functions DO carry through unchanged with an identity sanitizer: a failing case's own name.
 test("WS5.4b: an explicitly-injected identity sanitize is still a VALID, deliberate choice", async () => {
   const decide = new PublishDecisionService();
   let bodySeen = "";
   const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/5", number: 5 }; } };
   const pr = fakePr();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, render: realRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
-  const result = await adapter.publish({ verdict: "fail", cases: [], logs: "plain text, no secrets" });
+  const result = await adapter.publish({ verdict: "fail", cases: [{ name: "plain text, no secrets", status: "fail" }], logs: "" });
 
   assert.match(result.outcome, /issue/);
   assert.ok(bodySeen.includes("plain text, no secrets"), "an explicitly-injected identity sanitizer passes text through unchanged — this is a deliberate opt-in, not a silent default");
@@ -465,7 +510,7 @@ test("shadow fidelity: a FAIL run's shadow preview logs the would-be ISSUE, not 
   const issue = fakeIssue();
   const logs: string[] = [];
   const shadowLog = new ShadowLogAdapter((msg) => { logs.push(msg); });
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, render: fakeRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: true, e2eChanged: true,
   });
 
@@ -483,7 +528,7 @@ test("shadow fidelity: a PASS run's shadow preview still logs the would-be PR", 
   const issue = fakeIssue();
   const logs: string[] = [];
   const shadowLog = new ShadowLogAdapter((msg) => { logs.push(msg); });
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, render: fakeRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: true, e2eChanged: true,
   });
 
@@ -506,7 +551,7 @@ test("WS3.1: publish() renders an 'Engine adjudication' section in the Issue bod
   const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/6", number: 6 }; } };
   const pr = fakePr();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, render: realRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -530,7 +575,7 @@ test("WS3.1: publish() omits the 'Engine adjudication' section entirely when adj
   const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/7", number: 7 }; } };
   const pr = fakePr();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, render: realRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -546,7 +591,7 @@ test("WS3.1: publish() words a low-confidence adjudication as an engine guess (h
   const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/8", number: 8 }; } };
   const pr = fakePr();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, render: realRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -568,7 +613,7 @@ test("WS3.1: publish() sanitizes the adjudication reason through the SAME inject
   const pr = fakePr();
   const shadowLog = new ShadowLogAdapter(() => {});
   const sanitize = (text: string) => text.replace(/sk-[A-Za-z0-9]+/g, "[REDACTED_SECRET]");
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize, render: realRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -600,7 +645,7 @@ test("reviewer-outage note: publish() renders a 'Reviewer unavailable' section i
   const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/10", number: 10 }; } };
   const pr = fakePr();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, render: realRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: false, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -622,7 +667,7 @@ test("reviewer-outage note: publish() omits the 'Reviewer unavailable' section e
   const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/11", number: 11 }; } };
   const pr = fakePr();
   const shadowLog = new ShadowLogAdapter(() => {});
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, render: realRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -639,7 +684,7 @@ test("reviewer-outage note: publish() sanitizes reviewerNote through the SAME in
   const pr = fakePr();
   const shadowLog = new ShadowLogAdapter(() => {});
   const sanitize = (text: string) => text.replace(/sk-[A-Za-z0-9]+/g, "[REDACTED_SECRET]");
-  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize }, {
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize, render: realRender() }, {
     repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: false, coverageBlocks: false, shadow: false, e2eChanged: true,
   });
 
@@ -653,4 +698,80 @@ test("reviewer-outage note: publish() sanitizes reviewerNote through the SAME in
   assert.match(result.outcome, /issue/);
   assert.ok(!bodySeen.includes("sk-abc123XYZ"), `the reviewerNote's secret must be sanitized — got: ${bodySeen}`);
   assert.ok(bodySeen.includes("[REDACTED_SECRET]"), "the sanitized replacement must appear in the rendered body");
+});
+
+// ── sdd/migration-remediation Slice 4 (D-P1a) — tested/isCode/parentRunId threading ──────────────
+// PublicationPort.publish()'s three new optional fields reach the REAL render functions correctly:
+// `tested` populates "Covers:"/"What was tested", `isCode` selects the PR body's wording, and
+// `parentRunId` renders the continuation reference. Absent -> each degrades gracefully (already
+// pinned at the render-publication.ts unit level; these tests pin the ADAPTER'S OWN threading).
+
+test("Slice 4: publish() threads tested/isCode/parentRunId into the PR body render", async () => {
+  const decide = new PublishDecisionService();
+  let bodySeen = "";
+  const pr = { openWithAutoMerge: async (_repo: string, _branch: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/pull/1", number: 1 }; } };
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const vcsWrite = fakeVcsWrite([]);
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite, render: realRender() }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({
+    verdict: "pass",
+    cases: [],
+    logs: "",
+    mirrorDir: "/mirrors/org/app",
+    sha: "abc1234",
+    isCode: true,
+    tested: [{ flow: "parseConfig", objective: "rejects malformed YAML" }],
+    parentRunId: "run-deadbeef",
+  });
+
+  assert.match(result.outcome, /pr/);
+  assert.match(bodySeen, /Source-code tests generated\/updated by panchito/, "isCode:true must select the code-flavored PR wording");
+  assert.match(bodySeen, /\*\*Covers:\*\*/);
+  assert.match(bodySeen, /\*\*parseConfig\*\*/);
+  assert.match(bodySeen, /Continuation of run-deadbeef/);
+});
+
+test("Slice 4: publish() threads tested into the Issue body render", async () => {
+  const decide = new PublishDecisionService();
+  let bodySeen = "";
+  const issue = { open: async (_repo: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/issues/13", number: 13 }; } };
+  const pr = fakePr();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, render: realRender() }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({
+    verdict: "fail",
+    cases: [{ name: "checkout", status: "fail", detail: "expect failed" }],
+    logs: "",
+    tested: [{ flow: "Checkout", objective: "user can pay" }],
+  });
+
+  assert.match(result.outcome, /issue/);
+  assert.match(bodySeen, /### What was tested/);
+  assert.match(bodySeen, /\*\*Checkout\*\*/);
+});
+
+test("Slice 4: publish() with no tested/isCode/parentRunId supplied still renders a complete PR body (backward-compat, isCode defaults to e2e wording)", async () => {
+  const decide = new PublishDecisionService();
+  let bodySeen = "";
+  const pr = { openWithAutoMerge: async (_repo: string, _branch: string, _title: string, body: string) => { bodySeen = body; return { url: "https://github.com/org/app/pull/2", number: 2 }; } };
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const vcsWrite = fakeVcsWrite([]);
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite, render: realRender() }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "pass", cases: [], logs: "", mirrorDir: "/mirrors/org/app", sha: "abc1234" });
+
+  assert.match(result.outcome, /pr/);
+  assert.match(bodySeen, /E2E tests generated\/updated by panchito/, "absent isCode falls back to the e2e-flavored wording");
+  assert.ok(!bodySeen.includes("Covers:"), "no tested metadata was supplied, so the section must be absent");
+  assert.ok(!bodySeen.includes("Continuation of"), "no parentRunId was supplied, so no continuation reference should render");
 });

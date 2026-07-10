@@ -584,3 +584,77 @@ test("FIX F4: the regen call threads cycleBudget/wallClockBudget to the Generati
   assert.strictEqual(receivedGenerateInputs[0]!.cycleBudget, cycleBudget, "the SAME immutable CycleBudget instance passed into FixLoopInput must reach the generation port call — the port's caller (D.5's composed adapter) is where the legacy's cycleCount/MAX_CYCLES check lives (generateOnce, src/pipeline.ts:1573)");
   assert.strictEqual(receivedGenerateInputs[0]!.wallClockBudget, wallClockBudget, "the SAME immutable WallClockBudget instance must reach the generation port call — matching generateOnce's wall-clock guard at src/pipeline.ts:1564");
 });
+
+// ── sdd/migration-remediation Slice 4 (D-P1a, publication rendering + tested metadata) ───────────
+// FixLoopResult.lastSpecMetas surfaces the LAST regen round's own specMetas — the caller
+// (RunQaUseCase) prefers this over the pre-loop generation's own specMetas once the loop has
+// engaged, since the loop's own final regen is the freshest "what was tested" evidence.
+
+test("Slice 4: lastSpecMetas reflects the FINAL regen round's own specMetas once the loop fixes the run and exits", async () => {
+  const execution: FixLoopExecutionPort = {
+    execute: async () => ({ verdict: "pass" as const, cases: [{ name: "checkout", status: "pass" as const }] }),
+  };
+  const generation: FixLoopGenerationPort = {
+    generate: async () => ({
+      specs: ["checkout.spec.ts"],
+      approved: true,
+      specMetas: [{ flow: "Checkout", objective: "user can pay with a saved card" }],
+    }),
+  };
+  const { cycleBudget, wallClockBudget } = budgets();
+  const loop = new FixLoop({
+    execution,
+    generation,
+    selectorCheck: { check: () => ({ contradictions: [], absentKeys: new Set(), anyVerifiedPresent: true, anyNonExtractable: false, anyUnverifiable: false }) },
+  });
+
+  const result = await loop.run({
+    initialRun: { verdict: "fail", cases: [makeCase()] },
+    isCode: false,
+    generating: true,
+    mode: "diff",
+    objectiveSource: ["src/checkout.ts"],
+    maxRetries: 1,
+    cycleBudget,
+    wallClockBudget,
+    devHealthy: async () => true,
+    namespace: "qa-bot-specmetas",
+  });
+
+  assert.equal(result.run.verdict, "pass");
+  assert.deepEqual(result.lastSpecMetas, [{ flow: "Checkout", objective: "user can pay with a saved card" }]);
+});
+
+test("Slice 4: lastSpecMetas is undefined when the loop never regenerated (already passing on entry)", async () => {
+  const execution: FixLoopExecutionPort = {
+    execute: async () => {
+      throw new Error("execute must not be called — the loop condition is false from the start (verdict already pass)");
+    },
+  };
+  const generation: FixLoopGenerationPort = {
+    generate: async () => {
+      throw new Error("generate must not be called — the loop never engages");
+    },
+  };
+  const { cycleBudget, wallClockBudget } = budgets();
+  const loop = new FixLoop({
+    execution,
+    generation,
+    selectorCheck: { check: () => ({ contradictions: [], absentKeys: new Set(), anyVerifiedPresent: false, anyNonExtractable: false, anyUnverifiable: false }) },
+  });
+
+  const result = await loop.run({
+    initialRun: { verdict: "pass", cases: [{ name: "checkout", status: "pass" }] },
+    isCode: false,
+    generating: true,
+    mode: "diff",
+    objectiveSource: ["src/checkout.ts"],
+    maxRetries: 2,
+    cycleBudget,
+    wallClockBudget,
+    devHealthy: async () => true,
+    namespace: "qa-bot-specmetas-noop",
+  });
+
+  assert.equal(result.lastSpecMetas, undefined);
+});

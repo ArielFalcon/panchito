@@ -848,6 +848,12 @@ export class RunQaUseCase {
     // the engine's own diagnosis, not just a bare class string. Same "never fabricated" contract:
     // stays undefined for every run whose FixLoop never engaged.
     let lastAdjudicatorVerdict: AdjudicatorVerdict | undefined;
+    // sdd/migration-remediation Slice 4 (D-P1a, publication rendering + tested metadata): the
+    // FixLoop's own FINAL regen round's specMetas (FixLoopResult.lastSpecMetas), hoisted + captured
+    // at the SAME site as lastAdjudicatorVerdict above. Stays undefined for every run whose FixLoop
+    // never regenerated (never fabricated) — resolveTested() below (defined once `lastGenerated`
+    // exists) is the SINGLE place that decides which source wins.
+    let fixLoopFinalSpecMetas: { flow?: string; objective?: string }[] | undefined;
 
     // Phase: pre-exec grounding gate (Plan 7-R B5). [SWAP] absent PreExecGroundingPort -> the whole
     // phase (W1 below + the W2 re-check further down) is a no-op; the counters stay the literal 0
@@ -931,6 +937,21 @@ export class RunQaUseCase {
     this.deps.observer?.onStep("validate");
     let validation = await this.deps.validation.validate(workspace.specDir, validateChangedFiles);
     let lastGenerated = generated;
+    // sdd/migration-remediation Slice 4 (D-P1a): resolves the design's own open question ("P1 tested
+    // staleness: specMetas from initial generate may lag FixLoop regens") — binding orchestrator
+    // clarification: prefer the FixLoop's FINAL specMetas when the loop engaged and produced any
+    // (fresher "what was tested" evidence once the loop has rewritten specs), fall back to
+    // `lastGenerated`'s own specMetas otherwise (the latest attempt reaching this point — the initial
+    // generation, or a static-fix repair round's own regen, whichever ran last). Defined here (after
+    // `lastGenerated` exists, before the static-fix loop below can reassign it) so it is safe to call
+    // from EVERY publish-adjacent call site in this method, including both terminalResult() exits
+    // below (~1038/1118) that fire BEFORE the FixLoop block ever runs — at those two call sites
+    // `fixLoopFinalSpecMetas` is still undefined, so this naturally and correctly falls through to
+    // `lastGenerated.specMetas`, never a stale/wrong FixLoop value from a PRIOR run. Never fabricated:
+    // returns undefined when neither source has anything (the caller's own "tested" section is then
+    // omitted, matching the port's own negative scenario).
+    const resolveTested = (): { flow?: string; objective?: string }[] | undefined =>
+      fixLoopFinalSpecMetas?.length ? fixLoopFinalSpecMetas : lastGenerated.specMetas;
     let staticFixRounds = 0;
     while (!validation.ok && !validation.infra && generating && lastGenerated.specs.length > 0 && staticFixRounds < MAX_STATIC_FIX_ROUNDS) {
       // Plan 7.2 (closes the INFO gap in engram #916): a cancel requested mid-repair must stop the
@@ -1063,6 +1084,11 @@ export class RunQaUseCase {
         // sdd/migration-remediation Slice 3: the run's merged confinement accumulator as of the
         // enforceConfinement() call immediately above.
         confinementAcc,
+        // sdd/migration-remediation Slice 4 (D-P1a): this exit fires strictly BEFORE the FixLoop block
+        // ever runs (static-gate invalid is a post-generate/pre-execute exit), so resolveTested()
+        // naturally resolves to `lastGenerated.specMetas` here — the latest generation attempt
+        // reaching this point (the static-fix loop's own repair rounds, if any, above).
+        resolveTested(),
       );
     }
 
@@ -1143,6 +1169,10 @@ export class RunQaUseCase {
         // sdd/migration-remediation Slice 3: the run's merged confinement accumulator as of the
         // enforceConfinement() call immediately above.
         confinementAcc,
+        // sdd/migration-remediation Slice 4 (D-P1a): this exit ALSO fires strictly before the FixLoop
+        // block runs (mid-run health pre-flight is post-generate/post-static-fix-loop, pre-execute) —
+        // resolveTested() naturally resolves to `lastGenerated.specMetas` here too.
+        resolveTested(),
       );
     }
     if (signal?.aborted) {
@@ -1282,7 +1312,17 @@ export class RunQaUseCase {
           // FixLoopGenerateResult.specSources, fresh every round"). Previously dropped here, so every
           // round after the first re-armed Lever-2 with an empty array regardless of what the
           // GenerationPort adapter actually produced.
-          return { specs: r.specs, approved: r.approved, note: r.note, specSources: r.specSources };
+          return {
+            specs: r.specs,
+            approved: r.approved,
+            note: r.note,
+            specSources: r.specSources,
+            // sdd/migration-remediation Slice 4 (D-P1a): forward THIS round's own specMetas back to
+            // the aggregate — stored as FixLoopGenerateResult.specMetas (lastRegenResult's own field),
+            // read once at the END of fixLoop.run() as FixLoopResult.lastSpecMetas. Mirrors this SAME
+            // closure's own specSources-forwarding precedent immediately above.
+            ...(r.specMetas ? { specMetas: r.specMetas } : {}),
+          };
         },
       };
       const fixLoopSelectorCheck: FixLoopSelectorCheckPort = {
@@ -1358,6 +1398,11 @@ export class RunQaUseCase {
       // WS3.1: capture the FULL verdict object (class + confidence + reason) at the SAME site, for
       // the publish() call site below.
       lastAdjudicatorVerdict = fixLoopResult.lastAdjudicatorVerdict;
+      // sdd/migration-remediation Slice 4 (D-P1a): capture the FixLoop's own final regen's specMetas
+      // at the SAME site — resolveTested() (defined above, before the static-fix loop) prefers this
+      // over `lastGenerated.specMetas` once it is non-empty. undefined when the loop never
+      // regenerated, matching FixLoopResult.lastSpecMetas' own "never fabricated" contract.
+      fixLoopFinalSpecMetas = fixLoopResult.lastSpecMetas;
     }
 
     // executedRed override (task #42): captured here, BEFORE the `if (run.verdict === "pass")`
@@ -1799,6 +1844,19 @@ export class RunQaUseCase {
         // service's own decide() switch), so this is the ONLY place these values are needed.
         mirrorDir: workspace.mirrorDir,
         sha: input.sha.toString(),
+        // sdd/migration-remediation Slice 4 (D-P1a): `isCode` selects the PR body's wording
+        // (render-publication.ts's own renderPrBody); `tested` is resolveTested()'s own precedence
+        // (FixLoop-final-over-initial-generation, see that helper's own doc above) — absent/empty
+        // omits the "Covers:"/"What was tested" section entirely, never fabricated.
+        //
+        // parentRunId: deliberately OMITTED — the SAME class of documented gap as e2eChanged above.
+        // RunQaInput carries no parentRunId field today (the rewritten engine's continuation-
+        // provenance wiring — legacy parity: src/report/reporter.ts's PrBodyInput.parentRunId,
+        // src/server/runner.ts's own parentRunId chain — is a KNOWN GAP); PublicationPort.publish()'s
+        // type is already widened to accept one (ports/index.ts) so a FUTURE caller with a real
+        // source can thread it, but fabricating a value here would be worse than omitting it.
+        isCode: cfg.isCode,
+        ...(resolveTested()?.length ? { tested: resolveTested() } : {}),
       });
       publishOutcome = published.outcome;
     }
@@ -2399,6 +2457,12 @@ export class RunQaUseCase {
     // this fix, or a run whose confinement collaborator is unwired / never produced a result — never
     // fabricated, matching every other optional trailing param's own "never ran" convention above.
     confinement?: { strays: number; dangerous: number; reverted: string[] },
+    // sdd/migration-remediation Slice 4 (D-P1a): the caller's own resolveTested() result, captured
+    // immediately before invoking this helper — goes AFTER confinement (Slice 3's own trailing param),
+    // matching Batch 3's own handoff note ("if Slice 4 needs to add its own trailing param to
+    // terminalResult, it goes AFTER confinement, not before"). Undefined for a caller that predates
+    // this fix, or a run with no generation-sourced specMetas to report — never fabricated.
+    tested?: { flow?: string; objective?: string }[],
   ): Promise<RunQaResult> {
     const decision = decide({
       verdict,
@@ -2432,6 +2496,13 @@ export class RunQaUseCase {
         reviewerApproved: reviewerApprovedForOutcome,
         coverageBlocks: false,
         ...(input.triggerRepo ? { issueRepo: input.triggerRepo } : {}),
+        // sdd/migration-remediation Slice 4 (D-P1a): `isCode` is always known here (cfg is a required
+        // param of this helper); `tested` is the caller's own resolveTested() result, threaded
+        // straight through. Both routes this helper can ever reach ("issue"/"shadow"/"quarantine"/
+        // "noop" — decide()'s own switch never resolves "invalid"/"infra-error" to "pr") still render
+        // this metadata into the Issue body's own "What was tested" section when present.
+        isCode: cfg.isCode,
+        ...(tested?.length ? { tested } : {}),
       });
       publishOutcome = published.outcome;
     }

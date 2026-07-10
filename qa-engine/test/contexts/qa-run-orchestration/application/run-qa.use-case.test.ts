@@ -5292,3 +5292,85 @@ test("confinement wiring: a regression run (generating:false) makes no enforce()
 
   assert.equal(calls.length, 1, "a regression run never calls the real GenerationPort, so only the pre-publish enforce() call fires");
 });
+
+// ── sdd/migration-remediation Slice 4 (D-P1a, task 4.4) — `tested` metadata sourcing precedence.
+// resolveTested() prefers the FixLoop's own FINAL regen specMetas when the loop engaged and produced
+// any; falls back to the initial/static-fix-loop generation's own specMetas otherwise. Never throws
+// or fabricates when neither source has anything. ─────────────────────────────────────────────────
+
+test("Slice 4 (task 4.4): tested is sourced from the initial generation's specMetas when the FixLoop never engages (clean first-try pass)", async () => {
+  let publishedTested: { flow?: string; objective?: string }[] | undefined;
+  const { ports } = stubPorts({
+    generate: async () => ({
+      specs: ["checkout.spec.ts"],
+      approved: true,
+      specMetas: [{ flow: "Checkout", objective: "user can pay with a saved card" }],
+    }),
+    publish: async (decision) => { publishedTested = decision.tested; return { outcome: "pr" }; },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "tested-initial-only" });
+
+  assert.equal(out.decision.verdict, "pass", "sanity: no failure, so the FixLoop never engages");
+  assert.deepEqual(publishedTested, [{ flow: "Checkout", objective: "user can pay with a saved card" }]);
+});
+
+test("Slice 4 (task 4.4): tested prefers the FixLoop's FINAL regen specMetas once the loop engages and regenerates", async () => {
+  let publishedTested: { flow?: string; objective?: string }[] | undefined;
+  let executeCalls = 0;
+  const { ports } = stubPorts({
+    // The initial call (no fixCases enrichment) returns the INITIAL specMetas; the FixLoop's own
+    // regen call (fixCases populated by the aggregate) returns the FixLoop's own, DIFFERENT specMetas
+    // — resolveTested() must prefer the latter once it exists.
+    generate: async (_objectives, _specDir, _signal, _diff, enrichment) => {
+      if (enrichment?.fixCases?.length) {
+        return {
+          specs: ["checkout.spec.ts"],
+          approved: true,
+          specMetas: [{ flow: "Checkout (fixed)", objective: "retry with the corrected selector" }],
+        };
+      }
+      return {
+        specs: ["checkout.spec.ts"],
+        approved: true,
+        specMetas: [{ flow: "Checkout (stale)", objective: "the pre-fix, now-superseded objective" }],
+      };
+    },
+    execute: async () => {
+      executeCalls++;
+      if (executeCalls === 1) {
+        return { verdict: "fail", cases: [{ name: "checkout", status: "fail", detail: "boom" }], logs: "" };
+      }
+      return { verdict: "pass", cases: [{ name: "checkout", status: "pass" }], logs: "" };
+    },
+    publish: async (decision) => { publishedTested = decision.tested; return { outcome: "pr" }; },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "tested-fixloop-final" });
+
+  assert.notEqual(out.decision.verdict, "invalid", "sanity: the run must reach the FixLoop");
+  assert.deepEqual(
+    publishedTested,
+    [{ flow: "Checkout (fixed)", objective: "retry with the corrected selector" }],
+    "the FixLoop's own final regen's specMetas must win over the initial (now-stale) generation's specMetas",
+  );
+});
+
+test("Slice 4 (task 4.4): absent specMetas everywhere never throws and publish() receives no tested field", async () => {
+  let publishedDecisionHadTestedKey = true;
+  const { ports } = stubPorts({
+    generate: async () => ({ specs: ["checkout.spec.ts"], approved: true }),
+    publish: async (decision) => {
+      publishedDecisionHadTestedKey = "tested" in decision && decision.tested !== undefined;
+      return { outcome: "pr" };
+    },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "tested-absent-everywhere" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(publishedDecisionHadTestedKey, false, "no specMetas source existed this run, so `tested` must be entirely omitted — never a fabricated empty array");
+});

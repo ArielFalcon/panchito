@@ -71,6 +71,13 @@ import { DecideCoverageService, type CoveragePolicy, type ChangeCoverage } from 
 import type { CoverageCollectorPort, ValueOraclePort } from "@contexts/objective-signal/application/ports/index.ts";
 import { PublishDecisionService } from "@contexts/workspace-and-publication/domain/publish-decision.service.ts";
 import { ShadowLogAdapter } from "@contexts/workspace-and-publication/infrastructure/shadow-log.adapter.ts";
+// sdd/migration-remediation Slice 4 (D-P1a): this composition root is the ONE declared exception to
+// the no-vcs-write-in-agent-contexts arch-lint gate (this file's own header, "the composition root
+// ... its one declared exception") — it may import workspace-and-publication directly, which is how
+// the REAL renderIssue/renderPrBody reach PublicationPortAdapter without that bridge ever importing
+// workspace-and-publication itself (see publication-port.adapter.ts's own PublicationRenderCollaborator
+// doc for the full boundary rationale).
+import { renderIssue, renderPrBody } from "@contexts/workspace-and-publication/domain/render-publication.ts";
 import type { VcsReadPort } from "@contexts/change-analysis/application/ports/index.ts";
 import type { LearningRepositoryPort, ReflectorPort } from "@contexts/cross-run-learning/application/ports/index.ts";
 import { StubLearningRepository } from "@contexts/cross-run-learning/infrastructure/stub-learning-repository.adapter.ts";
@@ -635,6 +642,11 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
       issue: cfg.githubIssue,
       shadowLog: new ShadowLogAdapter(),
       sanitize: cfg.sanitize,
+      // sdd/migration-remediation Slice 4 (D-P1a): the REAL pure render functions — universal, not
+      // app/environment-specific, so (unlike sanitize/vcsWrite) there is no CompositionConfig field
+      // for this: every composition (production AND shadow, which reuses this SAME wireBridges()
+      // call) gets the identical real renderer, unconditionally.
+      render: { issue: renderIssue, prBody: renderPrBody },
       // PROD-BLOCKER fix: threads the composition's real git-write collaborator (constructed in
       // rewritten-engine-factory.ts from VcsWriteAdapter + the CODE_ADD/E2E_ADD pathspec dispatch) —
       // conditionally spread so a composition that never wires one (buildShadow's own override below
