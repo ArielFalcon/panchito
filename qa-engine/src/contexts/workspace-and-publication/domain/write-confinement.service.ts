@@ -47,7 +47,125 @@ export interface ClassifiedStrays {
   dangerousByPath: string[];
 }
 
+// A single rename git itself detected via content-similarity (`git diff --find-renames`), used by
+// pairUnstagedRenames (Slice 9, D-G) to pair an in-area unstaged deletion with an out-of-area
+// untracked stray. `from`/`to` are already fully decoded (git-quote-and-octal-escape-free) paths.
+export interface GitRename {
+  from: string;
+  to: string;
+}
+
+export interface UnstagedRenamePairing {
+  // In-area unstaged-deletion paths confirmed as the OLD side of a real agent file move (matched by
+  // git's own content-similarity rename detection against an out-of-area untracked stray) — the
+  // caller (the adapter) must restore these from HEAD to recover the moved content. A deletion NOT
+  // in this list is a legitimate agent delete (e.g. exhaustive-mode stale-spec cleanup) and MUST be
+  // left alone — over-restoring it would be the over-revert failure mode the spec forbids.
+  restore: string[];
+}
+
+// Escapes git's C-style path quoting uses when writing a quoted path segment (`"..."`) — shared by
+// decodeGitPath's octal-byte and simple-escape branches.
+const SIMPLE_ESCAPES: Record<string, number> = {
+  '"': 0x22,
+  "\\": 0x5c,
+  a: 0x07,
+  b: 0x08,
+  f: 0x0c,
+  n: 0x0a,
+  r: 0x0d,
+  t: 0x09,
+  v: 0x0b,
+};
+
 export class WriteConfinementService {
+  // Decode the CONTENT of a git-quoted path segment (the part between the surrounding `"..."`,
+  // already stripped by the caller) into the real on-disk path. Extracted to a shared private
+  // method so decodeGitPath (below) and parseStatusOutput's rename-arrow handling never drift
+  // apart — the exact class of bug revertUnit already exists to prevent for the pairing-unit logic.
+  // Decode by accumulating raw BYTES: `\NNN` contributes an octal byte, `\"`/`\\`/`\t`/`\n`/`\r`/
+  // etc. their single-byte meaning, and a literal (unescaped) character contributes its REAL UTF-8
+  // bytes (code-point-safe — a surrogate pair is consumed as ONE unit so an astral/4-byte character
+  // isn't split into two invalid lone-surrogate pushes). Interpreting the accumulated byte sequence
+  // as UTF-8 mirrors what git itself does when writing the octal escapes, so multi-byte UTF-8
+  // sequences reconstruct correctly whether they arrive octal-escaped (the default
+  // `core.quotePath=true`) OR literal inside the quotes (`core.quotePath=false` still C-style-
+  // quotes a path for other reasons — e.g. an embedded space — but leaves non-ASCII bytes literal).
+  // Judgment Day round 4: the literal branch used to push `ch.charCodeAt(0)` — a raw UTF-16 code
+  // unit treated as one byte, invalid standalone UTF-8 for any non-ASCII character — which silently
+  // corrupted the decoded path into the same class of revert-matches-nothing bug round 3 fixed for
+  // the octal-escape path.
+  private decodeQuotedSegment(inner: string): string {
+    const bytes: number[] = [];
+    for (let i = 0; i < inner.length; i++) {
+      const ch = inner[i] ?? "";
+      if (ch !== "\\") {
+        // Literal (unescaped) character — encode its REAL UTF-8 bytes, not the raw UTF-16 code
+        // unit. `codePointAt` combines a high+low surrogate pair into the single astral code
+        // point it represents, so a 4-byte character (e.g. an emoji) is consumed as ONE unit —
+        // pushing per-UTF-16-unit would split it into two lone surrogates, each invalid on its
+        // own. Advance the extra index when a pair was consumed.
+        const codePoint = inner.codePointAt(i) as number;
+        bytes.push(...Buffer.from(String.fromCodePoint(codePoint), "utf8"));
+        if (codePoint > 0xffff) i += 1;
+        continue;
+      }
+      const octal = inner.slice(i + 1, i + 4);
+      if (/^[0-7]{3}$/.test(octal)) {
+        bytes.push(Number.parseInt(octal, 8));
+        i += 3;
+        continue;
+      }
+      const next = inner[i + 1];
+      if (next !== undefined && next in SIMPLE_ESCAPES) {
+        bytes.push(SIMPLE_ESCAPES[next] as number);
+        i += 1;
+        continue;
+      }
+      // Unrecognized escape shape — no known git C-style-quoting escape starts this way. Fail
+      // LOUDLY (CLAUDE.md invariant "surface integration errors loudly — never swallow errors
+      // into an empty/degraded result") instead of silently keeping the bare backslash, which
+      // would hand a corrupted path to the revert git calls and reproduce the same
+      // revert-matches-nothing silent bypass this function exists to prevent. enforce()'s caller
+      // (RunQaUseCase's enforceConfinement wrapper) already catches, logs loudly, and records
+      // this in gateSignals — a throw here is fault-isolated, never a run crash.
+      throw new Error(
+        `decodeQuoted: unrecognized escape sequence starting at ${JSON.stringify(inner.slice(i, i + 4))} in quoted path segment ${JSON.stringify(inner)}`,
+      );
+    }
+    return Buffer.from(bytes).toString("utf8");
+  }
+
+  // Public decoder for a single git-emitted path token: strips surrounding C-style quotes (added
+  // whenever core.quotePath — or an embedded space/quote/backslash — requires them) and fully
+  // decodes the escaping inside. Shared by parseStatusOutput (`git status --porcelain`) AND the
+  // write-confinement adapter's rename-pairing diff parse (`git diff --name-status`, Slice 9,
+  // D-G) — both commands quote paths identically, so this decoding logic lives here ONCE.
+  decodeGitPath(raw: string): string {
+    return raw.startsWith('"') && raw.endsWith('"') ? this.decodeQuotedSegment(raw.slice(1, -1)) : raw;
+  }
+
+  // Slice 9 (D-G, AMENDMENT 2): decide which in-area unstaged deletions are actually the OLD side
+  // of an agent fs-level move that landed OUTSIDE the allowed area — closing the KNOWN LIMITATION
+  // documented on classifyStrays below. The agent has no git access, so its `fs.rename` surfaces as
+  // two INDEPENDENT status lines with no git-native renameCounterpart; this pure decision pairs
+  // them using git's OWN content-similarity rename detection (`gitRenames`, computed by the adapter
+  // via a transient `git add -N` + `git diff --find-renames` against the candidate strays), never a
+  // hand-rolled content heuristic. A deleted/stray pair only counts as a MOVE when git itself
+  // reports a rename FROM one of the candidate deletions TO one of the candidate strays — anything
+  // else (an unrelated addition+deletion, a rename below git's similarity threshold, or a rename
+  // whose endpoints aren't in either candidate list) is left unpaired, preserving "a legitimate
+  // in-boundary agent deletion remains possible" (over-reverting it is the failure mode to avoid).
+  pairUnstagedRenames(deleted: string[], strays: string[], gitRenames: GitRename[]): UnstagedRenamePairing {
+    const deletedSet = new Set(deleted);
+    const straySet = new Set(strays);
+    const restore = new Set<string>();
+    for (const { from, to } of gitRenames) {
+      if (deletedSet.has(from) && straySet.has(to)) restore.add(from);
+    }
+    return { restore: [...restore] };
+  }
+
   // Parse `git status --porcelain --untracked-files=all` output into typed records.
   // Handles: 2-char XY status codes; rename/copy lines `R  old -> new` (emits BOTH the old and new
   // path — see ParsedChange.renameCounterpart; collapsing to only the new path is the rename-over-
@@ -55,79 +173,6 @@ export class WriteConfinementService {
   // the legitimate old path); git-quoted paths with spaces/unicode (core.quotePath — strips
   // surrounding `"`, applied independently to each side of a rename).
   parseStatusOutput(out: string): ParsedChange[] {
-    // Strip the surrounding C-style quotes git adds (core.quotePath, ON by default) AND fully
-    // decode the C-style escaping inside them — NOT just the outer quotes. Under the default
-    // core.quotePath=true, git octal-escapes every non-ASCII byte (`café.spec.ts` ->
-    // `"caf\303\251.spec.ts"`) and backslash-escapes an embedded literal `"` or `\` in the name
-    // itself. Leaving those escapes undecoded means the returned path string is NOT the real
-    // on-disk path — a revert built from it (`git clean -f --`, `git restore -- ...`) then matches
-    // NOTHING, and enforce() silently reports the stray as reverted while the file survives on
-    // disk (Judgment Day round 3, CRITICAL: silent confinement-bypass on any accented filename).
-    // Decode by accumulating raw BYTES: `\NNN` contributes an octal byte, `\"`/`\\`/`\t`/`\n`/`\r`/
-    // etc. their single-byte meaning, and a literal (unescaped) character contributes its REAL
-    // UTF-8 bytes (code-point-safe — a surrogate pair is consumed as ONE unit so an astral/4-byte
-    // character isn't split into two invalid lone-surrogate pushes). Interpreting the accumulated
-    // byte sequence as UTF-8 mirrors what git itself does when writing the octal escapes, so
-    // multi-byte UTF-8 sequences reconstruct correctly whether they arrive octal-escaped (the
-    // default `core.quotePath=true`) OR literal inside the quotes (`core.quotePath=false` still
-    // C-style-quotes a path for other reasons — e.g. an embedded space — but leaves non-ASCII bytes
-    // literal). Judgment Day round 4: the literal branch used to push `ch.charCodeAt(0)` — a raw
-    // UTF-16 code unit treated as one byte, invalid standalone UTF-8 for any non-ASCII character —
-    // which silently corrupted the decoded path into the same class of revert-matches-nothing bug
-    // round 3 fixed for the octal-escape path.
-    const SIMPLE_ESCAPES: Record<string, number> = {
-      '"': 0x22,
-      "\\": 0x5c,
-      a: 0x07,
-      b: 0x08,
-      f: 0x0c,
-      n: 0x0a,
-      r: 0x0d,
-      t: 0x09,
-      v: 0x0b,
-    };
-    const decodeQuoted = (inner: string): string => {
-      const bytes: number[] = [];
-      for (let i = 0; i < inner.length; i++) {
-        const ch = inner[i] ?? "";
-        if (ch !== "\\") {
-          // Literal (unescaped) character — encode its REAL UTF-8 bytes, not the raw UTF-16 code
-          // unit. `codePointAt` combines a high+low surrogate pair into the single astral code
-          // point it represents, so a 4-byte character (e.g. an emoji) is consumed as ONE unit —
-          // pushing per-UTF-16-unit would split it into two lone surrogates, each invalid on its
-          // own. Advance the extra index when a pair was consumed.
-          const codePoint = inner.codePointAt(i) as number;
-          bytes.push(...Buffer.from(String.fromCodePoint(codePoint), "utf8"));
-          if (codePoint > 0xffff) i += 1;
-          continue;
-        }
-        const octal = inner.slice(i + 1, i + 4);
-        if (/^[0-7]{3}$/.test(octal)) {
-          bytes.push(Number.parseInt(octal, 8));
-          i += 3;
-          continue;
-        }
-        const next = inner[i + 1];
-        if (next !== undefined && next in SIMPLE_ESCAPES) {
-          bytes.push(SIMPLE_ESCAPES[next] as number);
-          i += 1;
-          continue;
-        }
-        // Unrecognized escape shape — no known git C-style-quoting escape starts this way. Fail
-        // LOUDLY (CLAUDE.md invariant "surface integration errors loudly — never swallow errors
-        // into an empty/degraded result") instead of silently keeping the bare backslash, which
-        // would hand a corrupted path to the revert git calls and reproduce the same
-        // revert-matches-nothing silent bypass this function exists to prevent. enforce()'s caller
-        // (RunQaUseCase's enforceConfinement wrapper) already catches, logs loudly, and records
-        // this in gateSignals — a throw here is fault-isolated, never a run crash.
-        throw new Error(
-          `decodeQuoted: unrecognized escape sequence starting at ${JSON.stringify(inner.slice(i, i + 4))} in quoted path segment ${JSON.stringify(inner)}`,
-        );
-      }
-      return Buffer.from(bytes).toString("utf8");
-    };
-    const stripQuotes = (p: string): string =>
-      p.startsWith('"') && p.endsWith('"') ? decodeQuoted(p.slice(1, -1)) : p;
     // Quote-aware arrow-split index: a plain `rest.indexOf(" -> ")` first-match breaks when the
     // OLD path is itself C-style-quoted (git quotes it whenever it literally contains " -> ", to
     // disambiguate from the rename separator) AND that quoted path also contains " -> " — the
@@ -162,15 +207,15 @@ export class WriteConfinementService {
         if (xy[0] === "R" || xy[0] === "C") {
           const arrowIdx = findArrowSplit(rest);
           if (arrowIdx !== -1) {
-            const oldPath = stripQuotes(rest.slice(0, arrowIdx));
-            const newPath = stripQuotes(rest.slice(arrowIdx + 4));
+            const oldPath = this.decodeGitPath(rest.slice(0, arrowIdx));
+            const newPath = this.decodeGitPath(rest.slice(arrowIdx + 4));
             return [
               { xy, path: oldPath, renameCounterpart: newPath },
               { xy, path: newPath, renameCounterpart: oldPath },
             ];
           }
         }
-        return [{ xy, path: stripQuotes(rest) }];
+        return [{ xy, path: this.decodeGitPath(rest) }];
       });
   }
 
@@ -234,17 +279,20 @@ export class WriteConfinementService {
   // rules, BOTH sides go into the revert bucket; a rename fully inside the allowed area (neither
   // side a stray) is a legitimate agent write and is left untouched.
   //
-  // KNOWN LIMITATION (Judgment Day round 2, pre-existing, legacy-parity): this pairing relies on
-  // git's own R/C rename DETECTION, which only fires for a STAGED move. The agent has no git access
-  // (read-only on watched repos), so its file moves surface as two INDEPENDENT lines — an in-area
-  // unstaged deletion (` D e2e/old.spec.ts`) plus an out-of-area untracked stray (`?? stray.spec.ts`)
-  // — with no renameCounterpart to pair them. The out-of-area stray IS still cleaned by the untracked
-  // path below (content destroyed, correct), but the in-area unstaged deletion is NOT restored here:
-  // unconditionally reverting every in-area unstaged deletion would over-revert a legitimate agent
-  // deletion (e.g. exhaustive mode deliberately deletes stale specs) — pairing without git's own
-  // rename detection is guesswork. Deferred as a Phase 2 DESIGN item (see the decisions doc's
-  // Judgment Day round 2 register): content-similarity pairing, restore-then-let-reviewer-arbitrate,
-  // or publish-time deletion review are the candidate approaches, not decided here.
+  // FORMER KNOWN LIMITATION (Judgment Day round 2) — CLOSED in Slice 9 (D-G, AMENDMENT 2, see the
+  // decisions doc's Phase 2 outcome register): this pairing relies on git's own R/C rename
+  // DETECTION, which only fires for a STAGED move. The agent has no git access (read-only on
+  // watched repos), so its file moves surface HERE as two INDEPENDENT lines — an in-area unstaged
+  // deletion (` D e2e/old.spec.ts`) plus an out-of-area untracked stray (`?? stray.spec.ts`) — with
+  // no renameCounterpart to pair them; classifyStrays itself still does NOT merge them (it stays a
+  // PURE, git-call-free classifier). The out-of-area stray still lands in the untracked bucket below
+  // (cleaned by the caller, correct either way). The FIX lives one layer up, in
+  // write-confinement.adapter.ts's enforce(): it transiently `git add -N`s the untracked candidates,
+  // asks git's OWN content-similarity detector (`git diff --find-renames`) whether any of them is
+  // actually the new side of one of these in-area deletions, and only THEN calls the pure
+  // pairUnstagedRenames(...) below to decide which deletions to restore — a deletion git does NOT
+  // confirm as a move is left alone, so a legitimate agent deletion (e.g. exhaustive mode
+  // deliberately deleting a stale spec) still survives untouched.
   classifyStrays(changes: ParsedChange[], isCode: boolean): ClassifiedStrays {
     const isStray = isCode ? this.isCodeDenied.bind(this) : this.isE2eStray.bind(this);
     const tracked: string[] = [];

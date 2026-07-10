@@ -143,3 +143,52 @@ test("classifyStrays: a rename INTO a denylisted destination reverts BOTH sides 
 
   assert.deepEqual(tracked.slice().sort(), [".github/workflows/x.yml", "src/legit.ts"]);
 });
+
+// ── decodeGitPath (Slice 9, D-G): the quote/octal-escape decoder made public ───────────────────
+//
+// Previously a local closure inside parseStatusOutput (unreachable from outside). Slice 9's
+// rename-pairing adapter code must decode `git diff --name-status` output through the SAME
+// decoding logic `git status --porcelain` output already goes through (parseStatusOutput) — a
+// second hand-rolled decoder would be exactly the kind of drift revertUnit already exists to
+// prevent for the pairing-unit logic. Exposed as a method so both callers share one implementation.
+
+test("decodeGitPath strips surrounding quotes and decodes git's octal byte-escaping for a non-ASCII path", () => {
+  assert.equal(svc.decodeGitPath('"caf\\303\\251.spec.ts"'), "café.spec.ts");
+});
+
+test("decodeGitPath leaves an unquoted plain path unchanged", () => {
+  assert.equal(svc.decodeGitPath("e2e/plain.spec.ts"), "e2e/plain.spec.ts");
+});
+
+// ── pairUnstagedRenames (Slice 9, D-G, AMENDMENT 2) — closes the KNOWN LIMITATION on
+// classifyStrays: an fs-level agent move (no git access) surfaces as an independent in-area
+// unstaged deletion + out-of-area untracked stray, with no git-native renameCounterpart. This pure
+// decision pairs them using git's OWN content-similarity rename detection (passed in by the
+// adapter, computed via a transient `git add -N` + `git diff --find-renames`) — never a hand-rolled
+// content heuristic.
+
+test("pairUnstagedRenames: a git-detected rename FROM a candidate deletion TO a candidate stray is paired for restore", () => {
+  const result = svc.pairUnstagedRenames(
+    ["e2e/existing.spec.ts"],
+    ["stray.spec.ts"],
+    [{ from: "e2e/existing.spec.ts", to: "stray.spec.ts" }],
+  );
+
+  assert.deepEqual(result.restore, ["e2e/existing.spec.ts"]);
+});
+
+test("pairUnstagedRenames: a deletion with NO matching git rename is left unpaired — a legitimate agent delete (exhaustive-mode stale-spec cleanup) must survive", () => {
+  const result = svc.pairUnstagedRenames(["e2e/stale.spec.ts"], ["unrelated-stray.ts"], []);
+
+  assert.deepEqual(result.restore, []);
+});
+
+test("pairUnstagedRenames: a git rename that references paths OUTSIDE both candidate lists is ignored (noise filter)", () => {
+  const result = svc.pairUnstagedRenames(
+    ["e2e/real-delete.spec.ts"],
+    ["real-stray.ts"],
+    [{ from: "some/other/deleted.ts", to: "some/other/stray.ts" }],
+  );
+
+  assert.deepEqual(result.restore, []);
+});

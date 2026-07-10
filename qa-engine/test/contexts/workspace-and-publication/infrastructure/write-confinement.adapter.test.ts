@@ -11,7 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, symlinkSync, realpathSync, lstatSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, symlinkSync, realpathSync, lstatSync, renameSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WriteConfinementAdapter, type WriteConfinementAdapterDeps } from "@contexts/workspace-and-publication/infrastructure/write-confinement.adapter.ts";
@@ -706,6 +706,224 @@ test("real git fixture: an untracked stray whose filename contains an embedded q
     assert.equal(existsSync(join(repo, strayName)), false, "the stray must actually be gone from disk");
     const status = execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" });
     assert.equal(status.trim(), "", "the tree must be fully clean");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+// ── unstaged fs-level rename pairing (Slice 9, D-G, AMENDMENT 2) — closes the Phase-1 KNOWN
+// LIMITATION ───────────────────────────────────────────────────────────────────────────────────
+//
+// The agent has no git access (read-only on watched repos), so an `fs.rename` it performs (not
+// `git mv`) surfaces as two INDEPENDENT status lines: an in-area unstaged deletion (` D e2e/x`)
+// plus an out-of-area untracked stray (`?? y`) — the exact shape the staged-rename fixtures above
+// do NOT cover (those all use `git mv`, which git detects as a staged R line on its own). These
+// fixtures prove the adapter now pairs the two via git's own content-similarity rename detection
+// (a transient `git add -N` on the untracked candidates, then `git diff --find-renames` against
+// HEAD), restoring the deleted side only when git itself confirms the move.
+
+function realGitFnWithFailure(repo: string, failOn: (args: string[]) => boolean): (args: string[], cwd?: string) => Promise<string> {
+  return async (args, cwd = repo) => {
+    if (failOn(args)) {
+      throw new Error(`simulated failure: git ${args.join(" ")}`);
+    }
+    try {
+      return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).toString();
+    } catch (e) {
+      const err = e as { stdout?: string; stderr?: string };
+      throw new Error(`git ${args.join(" ")} failed: ${err.stderr ?? err.stdout ?? String(e)}`);
+    }
+  };
+}
+
+test("real git fixture: an UNSTAGED fs-level rename OUT of e2e/ (mv done via fs.rename, no git access) is paired via git's own rename detection — BOTH sides reverted, origin restored intact (e2e target) — the Phase-1 known limitation, now fixed", async () => {
+  const repo = initRepo();
+  try {
+    renameSync(join(repo, "e2e", "existing.spec.ts"), join(repo, "stray.spec.ts"));
+    const preStatus = execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" });
+    assert.ok(preStatus.includes(" D e2e/existing.spec.ts"), "precondition: an unstaged fs-level move shows as an independent deletion line, not a git-detected R line");
+    assert.ok(preStatus.includes("?? stray.spec.ts"), "precondition: the destination is an independent untracked line");
+
+    const adapter = new WriteConfinementAdapter({
+      git: realGitFn(repo),
+      realpath: realpathSync,
+      isSymlink: (p) => {
+        try {
+          return lstatSync(p).isSymbolicLink();
+        } catch {
+          return false;
+        }
+      },
+    });
+    const result = await adapter.enforce(repo, false);
+
+    assert.deepEqual(result.reverted.slice().sort(), ["e2e/existing.spec.ts", "stray.spec.ts"]);
+    const status = execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" });
+    assert.equal(status.trim(), "", "the tree must be fully clean — no orphaned unstaged deletion of the legitimate origin");
+    assert.equal(existsSync(join(repo, "stray.spec.ts")), false, "the stray destination must be gone");
+    assert.equal(
+      readFileSync(join(repo, "e2e", "existing.spec.ts"), "utf8"),
+      "test('x', () => {});\n",
+      "the legitimate origin must be restored on disk with its original content, not left missing",
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("real git fixture (negative): a legitimate in-area unstaged deletion with NO out-of-area counterpart survives untouched (exhaustive-mode stale-spec cleanup must not be blocked)", async () => {
+  const repo = initRepo();
+  try {
+    unlinkSync(join(repo, "e2e", "existing.spec.ts"));
+
+    const adapter = new WriteConfinementAdapter({
+      git: realGitFn(repo),
+      realpath: realpathSync,
+      isSymlink: (p) => {
+        try {
+          return lstatSync(p).isSymbolicLink();
+        } catch {
+          return false;
+        }
+      },
+    });
+    const result = await adapter.enforce(repo, false);
+
+    assert.deepEqual(result.reverted, [], "the deletion must NOT be restored — over-revert is the failure mode the spec forbids");
+    const status = execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" });
+    // NOTE: do not use status.trim() here — the leading space in " D" is the meaningful XY status
+    // code (unstaged deletion), and .trim() on the whole string would strip it from the start.
+    assert.equal(status.replace(/\n+$/, ""), " D e2e/existing.spec.ts", "the legitimate deletion must survive exactly as the agent left it");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("real git fixture (negative): an UNSTAGED fs-level rename fully INSIDE e2e/ is never pairing-eligible — neither side is a stray candidate, so neither is touched", async () => {
+  const repo = initRepo();
+  try {
+    renameSync(join(repo, "e2e", "existing.spec.ts"), join(repo, "e2e", "renamed.spec.ts"));
+
+    const adapter = new WriteConfinementAdapter({
+      git: realGitFn(repo),
+      realpath: realpathSync,
+      isSymlink: (p) => {
+        try {
+          return lstatSync(p).isSymbolicLink();
+        } catch {
+          return false;
+        }
+      },
+    });
+    const result = await adapter.enforce(repo, false);
+
+    assert.deepEqual(result.reverted, []);
+    const status = execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" });
+    assert.ok(status.includes(" D e2e/existing.spec.ts"), "the unstaged deletion side must survive untouched");
+    assert.ok(status.includes("?? e2e/renamed.spec.ts"), "the untracked new side must survive untouched (it was never a stray candidate)");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("real git fixture: an UNSTAGED fs-level rename of a NON-ASCII filename OUT of e2e/ is paired and reverted — the Phase-1 C-style decode composes with the pairing diff parse (e2e target)", async () => {
+  const repo = initRepo();
+  try {
+    writeFileSync(join(repo, "e2e", "café.spec.ts"), "test('café', () => {});\n");
+    execFileSync("git", ["add", "-A"], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "chore: add non-ASCII spec"], { cwd: repo });
+
+    renameSync(join(repo, "e2e", "café.spec.ts"), join(repo, "café-stray.spec.ts"));
+    const preStatus = execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: repo, encoding: "utf8" });
+    assert.ok(preStatus.includes("\\303\\251"), "precondition: git must octal-escape the non-ASCII byte under core.quotePath=true");
+
+    const adapter = new WriteConfinementAdapter({
+      git: realGitFn(repo),
+      realpath: realpathSync,
+      isSymlink: (p) => {
+        try {
+          return lstatSync(p).isSymbolicLink();
+        } catch {
+          return false;
+        }
+      },
+    });
+    const result = await adapter.enforce(repo, false);
+
+    assert.deepEqual(result.reverted.slice().sort(), ["café-stray.spec.ts", "e2e/café.spec.ts"]);
+    const status = execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" });
+    assert.equal(status.trim(), "", "the tree must be fully clean — no orphaned unstaged deletion of the legitimate origin");
+    assert.equal(existsSync(join(repo, "café-stray.spec.ts")), false, "the stray destination must be gone");
+    assert.equal(
+      readFileSync(join(repo, "e2e", "café.spec.ts"), "utf8"),
+      "test('café', () => {});\n",
+      "the legitimate non-ASCII origin must be restored on disk with its original content, via a decoded path git's own rename-diff output can actually match",
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("real git fixture: an UNSTAGED fs-level move of a legitimate code-target file INTO a denylisted destination is paired and reverted — the pairing generalizes beyond the e2e target (code target)", async () => {
+  const repo = initRepo();
+  try {
+    mkdirSync(join(repo, "src"), { recursive: true });
+    writeFileSync(join(repo, "src", "legit.ts"), "export const x = 1;\n");
+    execFileSync("git", ["add", "-A"], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "chore: add legit.ts"], { cwd: repo });
+    mkdirSync(join(repo, ".github", "workflows"), { recursive: true });
+
+    renameSync(join(repo, "src", "legit.ts"), join(repo, ".github", "workflows", "x.yml"));
+
+    const adapter = new WriteConfinementAdapter({
+      git: realGitFn(repo),
+      realpath: realpathSync,
+      isSymlink: (p) => {
+        try {
+          return lstatSync(p).isSymbolicLink();
+        } catch {
+          return false;
+        }
+      },
+    });
+    const result = await adapter.enforce(repo, true);
+
+    assert.deepEqual(result.reverted.slice().sort(), [".github/workflows/x.yml", "src/legit.ts"]);
+    const status = execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" });
+    assert.equal(status.trim(), "", "the tree must be fully clean");
+    assert.equal(existsSync(join(repo, ".github", "workflows", "x.yml")), false, "the denylisted destination must be gone");
+    assert.equal(
+      readFileSync(join(repo, "src", "legit.ts"), "utf8"),
+      "export const x = 1;\n",
+      "the legitimate origin must be restored intact",
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("real git fixture: a thrown error mid-pairing (git diff fails right after git add -N) still resets the index via finally — the stray stays untracked, never left staged as intent-to-add", async () => {
+  const repo = initRepo();
+  try {
+    renameSync(join(repo, "e2e", "existing.spec.ts"), join(repo, "stray.spec.ts"));
+
+    const adapter = new WriteConfinementAdapter({
+      git: realGitFnWithFailure(repo, (args) => args[0] === "diff"),
+      realpath: realpathSync,
+      isSymlink: (p) => {
+        try {
+          return lstatSync(p).isSymbolicLink();
+        } catch {
+          return false;
+        }
+      },
+    });
+
+    await assert.rejects(() => adapter.enforce(repo, false), /simulated failure: git diff/);
+
+    const status = execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: repo, encoding: "utf8" });
+    assert.ok(status.includes("?? stray.spec.ts"), "the stray must be back to untracked (??), not left staged as intent-to-add by a mid-sequence failure — the try/finally reset must always fire");
+    assert.ok(status.includes(" D e2e/existing.spec.ts"), "the deletion must be untouched — the throw happened before the restore step ever ran");
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
