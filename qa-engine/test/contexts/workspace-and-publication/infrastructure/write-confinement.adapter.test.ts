@@ -11,7 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync, realpathSync, lstatSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, symlinkSync, realpathSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WriteConfinementAdapter, type WriteConfinementAdapterDeps } from "@contexts/workspace-and-publication/infrastructure/write-confinement.adapter.ts";
@@ -309,6 +309,114 @@ test("real git fixture: legitimate writes (e2e spec + e2e/.qa/manifest.json) sur
     const status = execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: repo, encoding: "utf8" });
     assert.ok(status.includes("e2e/checkout.spec.ts"), "the legitimate spec must remain on disk (untouched)");
     assert.ok(status.includes("e2e/.qa/manifest.json"), "the manifest must remain on disk (untouched)");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+// ── staged-rename over-revert regression (Judgment Day round 1) ────────────────────────────────
+//
+// A `git status --porcelain` rename/copy line (`R  old -> new`) used to collapse into ONE
+// ParsedChange keeping only the NEW path. enforce() then reverted only that path via
+// `git restore --staged --worktree --source=HEAD -- <new>`; since HEAD has no <new>, the staged
+// rename degraded to an ORPHANED staged deletion of <old> — the legitimate file vanished from disk
+// and would have been committed as deleted by the next publish. These tests pin the fix: both
+// sides of a reverted rename must be restored/removed TOGETHER, and a rename fully inside the
+// allowed area must survive untouched.
+
+test("real git fixture: staged rename out of e2e/ reverts BOTH sides — stray removed, legitimate origin restored intact (e2e target)", async () => {
+  const repo = initRepo();
+  try {
+    execFileSync("git", ["mv", "e2e/existing.spec.ts", "stray.spec.ts"], { cwd: repo });
+    const preStatus = execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" });
+    assert.ok(preStatus.startsWith("R "), "precondition: git must report a staged rename, not two independent D/A lines");
+
+    const adapter = new WriteConfinementAdapter({
+      git: realGitFn(repo),
+      realpath: realpathSync,
+      isSymlink: (p) => {
+        try {
+          return lstatSync(p).isSymbolicLink();
+        } catch {
+          return false;
+        }
+      },
+    });
+    const result = await adapter.enforce(repo, false);
+
+    assert.deepEqual(result.reverted.slice().sort(), ["e2e/existing.spec.ts", "stray.spec.ts"]);
+    const status = execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" });
+    assert.equal(status.trim(), "", "the tree must be fully clean — no orphaned staged deletion of the legitimate origin");
+    assert.equal(existsSync(join(repo, "stray.spec.ts")), false, "the stray destination must be gone");
+    assert.equal(
+      readFileSync(join(repo, "e2e", "existing.spec.ts"), "utf8"),
+      "test('x', () => {});\n",
+      "the legitimate origin must be restored on disk with its original content, not left missing or re-added empty",
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("real git fixture (negative): a rename fully INSIDE e2e/ is not a stray — neither side reverted", async () => {
+  const repo = initRepo();
+  try {
+    execFileSync("git", ["mv", "e2e/existing.spec.ts", "e2e/renamed.spec.ts"], { cwd: repo });
+
+    const adapter = new WriteConfinementAdapter({
+      git: realGitFn(repo),
+      realpath: realpathSync,
+      isSymlink: (p) => {
+        try {
+          return lstatSync(p).isSymbolicLink();
+        } catch {
+          return false;
+        }
+      },
+    });
+    const result = await adapter.enforce(repo, false);
+
+    assert.equal(result.strays, 0, "a rename entirely within the allowed e2e/ area is a legitimate agent write, not a stray");
+    assert.deepEqual(result.reverted, []);
+    const status = execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" });
+    assert.equal(status.trim(), "R  e2e/existing.spec.ts -> e2e/renamed.spec.ts", "the rename must survive untouched");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("real git fixture: rename INTO a denylisted destination reverts BOTH sides — destination removed, legitimate origin restored (code target)", async () => {
+  const repo = initRepo();
+  try {
+    mkdirSync(join(repo, "src"), { recursive: true });
+    writeFileSync(join(repo, "src", "legit.ts"), "export const x = 1;\n");
+    execFileSync("git", ["add", "-A"], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "chore: add legit.ts"], { cwd: repo });
+    mkdirSync(join(repo, ".github", "workflows"), { recursive: true });
+    execFileSync("git", ["mv", "src/legit.ts", ".github/workflows/x.yml"], { cwd: repo });
+
+    const adapter = new WriteConfinementAdapter({
+      git: realGitFn(repo),
+      realpath: realpathSync,
+      isSymlink: (p) => {
+        try {
+          return lstatSync(p).isSymbolicLink();
+        } catch {
+          return false;
+        }
+      },
+    });
+    const result = await adapter.enforce(repo, true);
+
+    assert.deepEqual(result.reverted.slice().sort(), [".github/workflows/x.yml", "src/legit.ts"]);
+    const status = execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" });
+    assert.equal(status.trim(), "", "the tree must be fully clean");
+    assert.equal(existsSync(join(repo, ".github", "workflows", "x.yml")), false, "the denylisted destination must be gone");
+    assert.equal(
+      readFileSync(join(repo, "src", "legit.ts"), "utf8"),
+      "export const x = 1;\n",
+      "the legitimate origin must be restored intact",
+    );
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

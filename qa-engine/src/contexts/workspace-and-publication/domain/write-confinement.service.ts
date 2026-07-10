@@ -1,11 +1,12 @@
-// Pure confinement classifiers lifted from src/qa/confinement.ts — copy+parity.
-// Lifts parseStatusOutput, isE2eStray, isCodeDenied, isDangerousPath, classifyStrays
-// (all pure, no I/O) into a domain service. The effectful runConfinement stays in the
-// VcsWrite adapter wiring (Plan 6); this class is fully unit-testable without git.
+// Pure confinement classifiers, originally lifted from src/qa/confinement.ts (now deleted; this
+// domain service is the sole implementation). Hosts parseStatusOutput, isE2eStray, isCodeDenied,
+// isDangerousPath, classifyStrays (all pure, no I/O). The effectful runConfinement stays in the
+// VcsWrite adapter wiring; this class is fully unit-testable without git.
 //
-// PARITY: every method body is copied VERBATIM from confinement.ts. The parity test
-// (write-confinement-parity.test.ts) pins the copy to the legacy originals until Plan 7
-// deletes them. Do NOT "improve" the logic here — the parity test is the guard.
+// parseStatusOutput and classifyStrays diverge intentionally from the original legacy behavior:
+// a rename/copy status line is expanded into BOTH sides (old + new) and reverted as a unit — see
+// ParsedChange.renameCounterpart — fixing a bug where the legacy single-record shape degraded a
+// reverted staged rename into an orphaned staged deletion of the legitimate old path.
 
 // Code-target denylist: paths (or glob patterns) the agent must NOT write.
 // e2e-target uses an allowlist (only `e2e/` is permitted), not this list.
@@ -32,6 +33,12 @@ export const CONFINEMENT_DENYLIST: string[] = [
 export interface ParsedChange {
   xy: string; // 2-char porcelain status code, e.g. "M ", "??", "R "
   path: string; // repo-relative path (after rename resolution and quote-stripping)
+  // For a rename/copy (`R`/`C`) status line ONLY: the other side's path (old<->new). A rename is
+  // two independent filesystem effects — the old path is a deletion of a file that exists in HEAD
+  // (reverting it restores the content), the new path is an addition with no HEAD counterpart
+  // (reverting it removes it). Both records carry this so classifyStrays can revert them as a
+  // unit and never leave one half orphaned. Absent for every non-rename status line.
+  renameCounterpart?: string;
 }
 
 export interface ClassifiedStrays {
@@ -42,26 +49,34 @@ export interface ClassifiedStrays {
 
 export class WriteConfinementService {
   // Parse `git status --porcelain --untracked-files=all` output into typed records.
-  // Handles: 2-char XY status codes; rename/copy lines `R  old -> new` (takes new path);
-  // git-quoted paths with spaces/unicode (core.quotePath — strips surrounding `"`).
-  // VERBATIM from confinement.ts parseStatusOutput.
+  // Handles: 2-char XY status codes; rename/copy lines `R  old -> new` (emits BOTH the old and new
+  // path — see ParsedChange.renameCounterpart; collapsing to only the new path is the rename-over-
+  // revert bug: enforce() would then degrade a staged rename into an orphaned staged deletion of
+  // the legitimate old path); git-quoted paths with spaces/unicode (core.quotePath — strips
+  // surrounding `"`, applied independently to each side of a rename).
   parseStatusOutput(out: string): ParsedChange[] {
+    const stripQuotes = (p: string): string => (p.startsWith('"') && p.endsWith('"') ? p.slice(1, -1) : p);
     return out
       .split("\n")
       .filter((l) => l.length > 3)
-      .map((l) => {
+      .flatMap((l): ParsedChange[] => {
         const xy = l.slice(0, 2);
-        let path = l.slice(3);
+        const rest = l.slice(3);
         // The ` -> ` split applies ONLY to rename/copy entries (status X is R or C). A non-rename
         // file whose name literally contains " -> " must keep its full path, not be truncated to a
         // phantom suffix (which would then make `git checkout` throw on a bogus pathspec).
         if (xy[0] === "R" || xy[0] === "C") {
-          const arrowIdx = path.indexOf(" -> ");
-          if (arrowIdx !== -1) path = path.slice(arrowIdx + 4);
+          const arrowIdx = rest.indexOf(" -> ");
+          if (arrowIdx !== -1) {
+            const oldPath = stripQuotes(rest.slice(0, arrowIdx));
+            const newPath = stripQuotes(rest.slice(arrowIdx + 4));
+            return [
+              { xy, path: oldPath, renameCounterpart: newPath },
+              { xy, path: newPath, renameCounterpart: oldPath },
+            ];
+          }
         }
-        // Strip surrounding git quotes added for paths with spaces/unicode.
-        if (path.startsWith('"') && path.endsWith('"')) path = path.slice(1, -1);
-        return { xy, path };
+        return [{ xy, path: stripQuotes(rest) }];
       });
   }
 
@@ -106,14 +121,37 @@ export class WriteConfinementService {
 
   // Classify every changed path: apply the run-target predicate (e2e allowlist or
   // code denylist), split by tracked vs. untracked (XY `??`), and flag dangerous paths.
-  // VERBATIM from confinement.ts classifyStrays.
+  // Rename/copy pairs (renameCounterpart set) are classified and reverted as a UNIT, not
+  // independently: git stores a rename as a plain delete+add (there is no rename metadata; `R`/`C`
+  // in `git status` is only inferred by content similarity), so reverting just one side leaves the
+  // other half orphaned — e.g. reverting only a stray new path leaves the legitimate old path's
+  // staged deletion in place, destroying the file. If EITHER side is a stray under the target's
+  // rules, BOTH sides go into the revert bucket; a rename fully inside the allowed area (neither
+  // side a stray) is a legitimate agent write and is left untouched.
   classifyStrays(changes: ParsedChange[], isCode: boolean): ClassifiedStrays {
     const isStray = isCode ? this.isCodeDenied.bind(this) : this.isE2eStray.bind(this);
     const tracked: string[] = [];
     const untracked: string[] = [];
     const dangerousByPath: string[] = [];
+    const renameHandled = new Set<string>();
 
-    for (const { xy, path } of changes) {
+    for (const { xy, path, renameCounterpart } of changes) {
+      if (renameCounterpart !== undefined) {
+        if (renameHandled.has(path)) continue; // already handled together with its counterpart
+        renameHandled.add(path);
+        renameHandled.add(renameCounterpart);
+        if (isStray(path) || isStray(renameCounterpart)) {
+          for (const p of [path, renameCounterpart]) {
+            // A rename is always staged (git only emits R/C once a rename is staged/detected — an
+            // unstaged rename shows as separate D + ?? lines, handled by the branch below), so both
+            // sides always belong in the tracked bucket.
+            tracked.push(p);
+            if (this.isDangerousPath(p)) dangerousByPath.push(p);
+          }
+        }
+        continue;
+      }
+
       if (!isStray(path)) continue;
       if (xy === "??") {
         untracked.push(path);
