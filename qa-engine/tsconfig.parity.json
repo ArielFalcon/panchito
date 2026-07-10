@@ -31,8 +31,6 @@
     "test/contexts/test-execution/domain/adjudicate-parity.test.ts",
     "test/contexts/objective-signal/infrastructure/fault-injection-oracle-parity.test.ts",
     "test/contexts/workspace-and-publication/domain/write-confinement-parity.test.ts",
-    "test/contexts/agent-runtime/infrastructure/codex-error-to-infra-parity.test.ts",
-    "test/contexts/agent-runtime/infrastructure/config.adapter-parity.test.ts",
     "test/contexts/generation/infrastructure/context-assembler.adapter-parity.test.ts",
     "test/contexts/generation/infrastructure/exploration-brief.adapter-parity.test.ts",
     "test/contexts/generation/infrastructure/verdict-parser.adapter-parity.test.ts",
