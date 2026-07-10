@@ -115,11 +115,14 @@ each parity test in the same change that deletes its oracle.
   contracts component). Decision: restore contextMap wiring (then re-port this
   38-line cache alongside) or drop the context.json-consumption feature and
   delete.
-- `src/qa/nav-gate.ts` — never wired on EITHER side; its enforcement point ("MCP
-  proxy, Section C") exists in no doc or code. A softer shipped mitigation
-  covers the same failure mode (`progress-gate`'s `reexploreNavigations`
-  threshold). Decision: build the deterministic block (MIGRATE + build the
-  proxy) or accept the threshold mitigation (DELETE both copies).
+- `src/qa/nav-gate.ts` — **DECIDED (D9, `sdd/migration-remediation` Slice
+  8.C, commit c3f6d3f)**: accepted the threshold mitigation
+  (`progress-gate`'s `reexploreNavigations`) as sufficient coverage; no MCP
+  proxy was built. Deleted both copies — `src/qa/nav-gate.ts` and the
+  qa-engine `test-execution/domain/nav-gate.service.ts` — with no canonical
+  `helpers/nav-gate.ts` successor needed, since the mitigation already lives
+  in `pre-exec-grounding.service.ts`. Retired the `nav-gate-parity` pin. See
+  `docs/superpowers/2026-07-10-migration-remediation-decisions.md` D9.
 
 ---
 
@@ -139,11 +142,11 @@ each parity test in the same change that deletes its oracle.
 
 | Cluster | Lean | Why |
 |---|---|---|
-| `contexts/agent-runtime/**` (9 files) | — | audit-remediation Track C4 required "re-home OR declare `src/agent-runtime` survivor — decision recorded in Plan 7.6" and 7.6 shipped WITHOUT recording it. Files are faithful WRAPs of live `src/agent-runtime/*`. Either finish wiring (health/restart/facade/config) or declare src the permanent survivor and delete these |
-| `change-analysis/{application/analyze-change.use-case.ts, infrastructure/extractors/*}` (15) | DELETE | doc said keep-as-fallback ≥2 release cycles, but NOTHING ever consumed the abstraction (not even pre-graph); the leaner `StructuralSignalPort`→codebase-memory route won in production. If deleted, formally accept the narrowed signal (complexity/cosmetic-diff/pattern detection dropped from prompt) or file it as a capability gap |
-| `qa-run-orchestration/domain/run.aggregate.ts` | DELETE | built once (Plan 6) to satisfy the DDD checklist; zero references in the live use-case; the `RunRecord` it "replaces" is alive and central |
-| `test-execution/domain/{nav-gate,progress-gate,selector-check}.service.ts` | DELETE/consolidate | accepted "zero-value wrapper" residue (phase2-backlog TE-08); selector-check.service is an OLDER copy — a trap for future imports. Consolidate to the canonical `helpers/` copies, retire the duplicate parity pins |
-| `shared-kernel/ports/clock.port.ts` | DELETE | zero adapter/consumer, no traced urgency |
+| `contexts/agent-runtime/**` (9 files) | **DECIDED — src/agent-runtime/\* is the survivor** | audit-remediation Track C4 required "re-home OR declare `src/agent-runtime` survivor — decision recorded in Plan 7.6" and 7.6 shipped WITHOUT recording it. Files are faithful WRAPs of live `src/agent-runtime/*`. **Resolved in `sdd/migration-remediation` Slice 8.D (commit 2f614e4)**: declared `src/agent-runtime/*` the permanent survivor and deleted 8 of the 9 qa-engine WRAP files. Kept `agent-runtime/application/ports/index.ts` — a live compile-time dependency of `ports-compile.test.ts` and `agent-session-telemetry.port.test.ts`, unrelated to the 8 deleted adapters |
+| `change-analysis/{application/analyze-change.use-case.ts, infrastructure/extractors/*}` (15) | **DECIDED — DELETE, executed** | doc said keep-as-fallback ≥2 release cycles, but NOTHING ever consumed the abstraction (not even pre-graph); the leaner `StructuralSignalPort`→codebase-memory route won in production. **Resolved in `sdd/migration-remediation` Slice 8.A1 (commit 9bef64c)**: deleted (17 files incl. 3 `.scm` grammars); the narrowed signal is formally accepted, not filed as a capability gap |
+| `qa-run-orchestration/domain/run.aggregate.ts` | DELETE — **not actioned, still open** | built once (Plan 6) to satisfy the DDD checklist; zero references in the live use-case; the `RunRecord` it "replaces" is alive and central. Out of scope for `migration-remediation`'s Slice 8 batch list |
+| `test-execution/domain/{nav-gate,progress-gate,selector-check}.service.ts` | **DECIDED — DELETE/consolidate, executed** | accepted "zero-value wrapper" residue (phase2-backlog TE-08); selector-check.service is an OLDER copy — a trap for future imports. **Resolved in `sdd/migration-remediation` Slice 8.C (commit c3f6d3f)**: consolidated onto the canonical `helpers/` copies, retired the 3 old-copy parity pins. The legacy `src/qa/{progress-gate,selector-check}.ts` *source* files themselves were NOT deleted (deviation) — see decisions doc D9 |
+| `shared-kernel/ports/clock.port.ts` | DELETE — **not actioned, still open** | zero adapter/consumer, no traced urgency. Out of scope for `migration-remediation`'s Slice 8 batch list |
 
 ### NOT dead
 
@@ -159,16 +162,20 @@ each parity test in the same change that deletes its oracle.
 
 | P | Fix | Size | Status |
 |---|---|---|---|
-| P0 | Add `e2e/.qa/service-context/` to publish excludes (data-leak into PRs) | tiny | in remediation — see sdd/migration-remediation (2026-07-10) |
-| P0 | Wire write-confinement (mid-run stray revert + symlink-escape) into the live path | medium | in remediation — see sdd/migration-remediation (2026-07-10) |
-| P1 | Restore Issue/PR rendering (split bodies, drop raw-log dump, thread `tested` metadata) | medium | in remediation — see sdd/migration-remediation (2026-07-10) |
-| P1 | Reconnect process-audit self-healing loop (sinks already live) | medium | in remediation — see sdd/migration-remediation (2026-07-10) |
-| P2 | Implement `RedactionPort` adapter; unify the two sanitizers | small-medium | in remediation — see sdd/migration-remediation (2026-07-10) |
-| P2 | Verify `fitRulesToBudget` parity (unbounded rules → prompt?) and context-mode publish scope | verify-first | in remediation — see sdd/migration-remediation (2026-07-10) |
+| P0 | Add `e2e/.qa/service-context/` to publish excludes (data-leak into PRs) | tiny | done — Slice 2, commit b0cf28f |
+| P0 | Wire write-confinement (mid-run stray revert + symlink-escape) into the live path | medium | done — Slice 3, commits 8f8a9f3, 2d937d1 |
+| P1 | Restore Issue/PR rendering (split bodies, drop raw-log dump, thread `tested` metadata) | medium | done — Slice 4, commit 895180e |
+| P1 | Reconnect process-audit self-healing loop (sinks already live) | medium | done — Slice 5, commit edebb92 |
+| P2 | Implement `RedactionPort` adapter; unify the two sanitizers | small-medium | done — Slice 6, commit b775fd9 |
+| P2 | Verify `fitRulesToBudget` parity (unbounded rules → prompt?) and context-mode publish scope | verify-first | done — Slice 7, commits 3632e3c, 3bae1b2 |
 
-Note: "in remediation" tracks that `sdd/migration-remediation` has an active
-plan/design/tasks covering this row; it is **not** flipped to "done" until the
-corresponding slice actually lands (Slice 9 flips these to "done" at closeout).
+Note: all 6 rows landed via `sdd/migration-remediation` Slices 1-7 (Phase 1
+stabilization, closed out 2026-07-10). Slice 8 additionally executed the Tier-0
+dead-code cleanup batches (A1/A2/B/C/D/E/F, commits 9bef64c..34cb08c) from §1/§2
+below, with 4 items discovered blocked-in-place along the way. Full decision
+record, gate evidence, and the deferred/blocked register: see
+`docs/superpowers/2026-07-10-migration-remediation-decisions.md` (D1-D10 plus
+its Outcome section).
 
 ---
 
@@ -225,18 +232,20 @@ by nothing.
 
 ## 5. Open decisions (owner call required)
 
-1. `src/agent-runtime` — re-home into qa-engine's agent-runtime context, or
-   declare it a permanent shell survivor and delete the qa-engine WRAPs
-   (the un-recorded Track C4 decision).
-2. change-analysis extractor pipeline — wire as fallback per the original
-   codebase-memory integration doc, or delete both sides and formally accept the
-   narrowed structural signal.
-3. nav-gate — build the deterministic MCP-proxy block, or accept the
-   `reexploreNavigations` threshold and delete both copies.
+1. **RESOLVED** — `src/agent-runtime` declared the permanent shell survivor;
+   the qa-engine WRAPs deleted (`sdd/migration-remediation` Slice 8.D, commit
+   2f614e4).
+2. **RESOLVED** — change-analysis extractor pipeline deleted; the narrowed
+   structural signal (codebase-memory route) formally accepted
+   (`sdd/migration-remediation` Slice 8.A1, commit 9bef64c).
+3. **RESOLVED** — nav-gate: accepted the `reexploreNavigations` threshold,
+   deleted both copies, no MCP-proxy block built (`sdd/migration-remediation`
+   Slice 8.C, commit c3f6d3f; decisions doc D9).
 4. contextMap read-back (`context-cache` + context-pack contracts component) —
-   restore or drop the feature.
-5. `run.aggregate.ts` — adopt in the use-case or delete.
-6. Learning-store duality — converge `history.ts` learning CRUD with
-   `SqliteLearningRepository`, or document the split.
-7. skill-exemplar catalog — re-port into prompt assembly, or accept the
-   one-line archetype hint.
+   still open. Not actioned by `migration-remediation`.
+5. `run.aggregate.ts` — still open. Not actioned by `migration-remediation`.
+6. **RESOLVED (documented, not converged)** — learning-store duality:
+   `history.ts` and `SqliteLearningRepository` remain two separate stores by
+   deliberate decision, not silent drift (`sdd/migration-remediation`
+   decisions doc D8).
+7. skill-exemplar catalog — still open. Not actioned by `migration-remediation`.

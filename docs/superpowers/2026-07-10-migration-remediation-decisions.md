@@ -319,3 +319,71 @@ because an active compiled guard blocks their deletion today. This distinction
 matters for the follow-up change: `labeler.ts` needs its parity test
 retired/re-pointed before deletion; the other six can be deleted directly once
 someone confirms (as this document just did) that nothing imports them.
+
+## Outcome (Slice 9 closeout, 2026-07-10)
+
+### What landed
+
+18 commits on `remediation/migration-phase-1`, every one gated green
+independently (`npm test` + `npm run typecheck`, Node v24.11.0):
+
+| Slice | Content | Commit(s) |
+|---|---|---|
+| 1 | This decisions doc (D1-D8) | `5568f2b` |
+| 2 | Publish-excludes leak + anchoring fix (D1) | `b0cf28f` |
+| 3 | Write-confinement wiring (D2) | `8f8a9f3`, `2d937d1` |
+| 4 | Publication rendering restore + `tested` metadata (D3) | `895180e` |
+| 5 | Process-audit reconnect (D4, D5) | `edebb92` |
+| 6 | RedactionPort unification, canonical `[REDACTED]` (D6, D7) | `b775fd9` |
+| 7 | `fitRulesToBudget` parity + context-mode publish scope | `3632e3c`, `3bae1b2` |
+| 8 | Tier-0 dead-code cleanup, 6 batches (A1/A2 split, B, C, D, E, F) | `9bef64c`, `5b423f9`, `3b59b90`, `c3f6d3f`, `2f614e4`, `989e401`, `34cb08c` |
+| 9 | Closeout — CLAUDE.md accuracy pass, triage doc status flips, this section | (this commit) |
+
+Test count: 4303/4304 pass (1 pre-existing skip) at the end of Slice 7 →
+3853/3854 pass (1 skip) at the end of Slice 8 — net -450 dead tests retired
+alongside their dead source, consistent with the volume of Slice 8 deletions.
+Never committed red at any point; every deviation below was caught by `rg`
+pre-checks or `npm run typecheck` before the commit, not after.
+
+### Consolidated deferred/blocked register (11 items, all flagged for the same follow-up `migration-cleanup` change)
+
+**7 originally-deferred DELETE items** (triage §1 DELETE list, intentionally
+excluded from this change's Slice 8 batch list — see the register above):
+`src/qa/source-map.ts`, `src/qa/measured.ts`, `src/qa/learning/labeler.ts`
+(the one genuine parity-pinned oracle — needs `error-class-parity.test.ts`
+retired/re-pointed before deletion), `src/qa/learning/reflector.ts`,
+`src/qa/learning/retrieval.ts`, `src/qa/learning/best-effort.ts`,
+`src/integrations/publish.ts`.
+
+**4 newly-discovered blocked-in-place deletions** (Slice 8's task list called
+for deleting these; each survived with a documented reason found while
+executing):
+
+1. `src/qa/learning/distiller.ts` (Slice 8.B) — kept; `src/qa/learning/
+   ledger-report.ts` imports `isWellFormedTrigger` from it via a same-directory
+   relative import, invisible to a cross-file substring grep. Not previously
+   assigned a D-number; recorded here.
+2. `src/qa/progress-gate.ts` (Slice 8.C) — kept; the surviving canonical
+   `helpers/progress-gate-parity.test.ts` pin imports it as its legacy
+   comparison target. See D9.
+3. `src/qa/selector-check.ts` (Slice 8.C) — kept; same canonical-pin reason as
+   #2, plus `src/qa/execute.test.ts` imports `selectorPresent` from it
+   directly. See D9.
+4. `src/report/reporter.ts` (Slice 8.F) — kept; `src/integrations/publish.ts`
+   (deferred item #7 above) has a real compiled import of it. See D10.
+
+**Dependency note for the follow-up change**: deleting `publish.ts` (deferred)
+unblocks `reporter.ts` (blocked) — delete them together, `publish.ts` first,
+so `npm run typecheck` never sees a dangling import mid-sequence.
+
+### Phase 2 roadmap pointer
+
+The remaining migration scope for live `src/` code (triage doc §4, Tiers 1-4)
+and the still-open items in §5 (`context-cache`/contextMap read-back,
+`run.aggregate.ts`, skill-exemplar catalog) — plus the 11-item deferred/blocked
+register above — are the input backlog for a future `migration-cleanup` (Phase
+2) SDD change. This stabilization change's job was fixing the P0-P2 regression
+backlog and reconnecting existing sinks (done, table above); restructuring
+persistence, finishing the Tier 1-4 migration, or reopening the still-open
+`src/` DECIDE items is deliberately out of scope here (see D8's reasoning,
+which generalizes to the rest of this register).
