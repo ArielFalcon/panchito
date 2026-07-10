@@ -11,7 +11,7 @@ import { loadAppConfig, listAppConfigs } from "./orchestrator/config-loader";
 // unchanged) instead of the legacy loadAppConfigsByRepo direct scan. See resolveWebhookDispatch's
 // own header for the byte-identical-output contract this swap preserves.
 import { YamlAppConfigAdapter } from "../qa-engine/src/contexts/app-catalog/infrastructure/yaml-app-config.adapter";
-import { resolveWebhookDispatch } from "./server/webhook-routing";
+import { resolveWebhookDispatch, type WebhookDispatch } from "./server/webhook-routing";
 import { handleApi, ApiDeps } from "./server/api";
 import { authorizeBearer, issueSession } from "./server/auth";
 import { verifyGithubIdentity, authorizeUser } from "./server/github-auth";
@@ -711,7 +711,21 @@ const server = createServer(async (req, res) => {
         // sdd/migration-wiring-phase-2 Slice 1 (D-A): routed through the app-catalog context's
         // resolveByRepo (byte-identical to the legacy loadAppConfigsByRepo-driven dispatch it
         // replaces — see webhook-routing.ts's own test for the pinned equivalence).
-        const dispatch = await resolveWebhookDispatch(appCatalog, repo, { mode, guidance, baseSha });
+        //
+        // judgment-day fix: this await had NO error boundary — a throw here (e.g. a catalog-level
+        // fault the per-config isolation below does not cover) became an unhandled rejection inside
+        // this "end" listener: res never ends, GitHub's webhook delivery hangs to its own timeout,
+        // and no run is ever enqueued. Mirrors the adjacent per-dispatch enqueueApiRun try/catch
+        // immediately below (log + 500 + return), one call earlier.
+        let dispatch: WebhookDispatch[];
+        try {
+          dispatch = await resolveWebhookDispatch(appCatalog, repo, { mode, guidance, baseSha });
+        } catch (err) {
+          logJson("error", "webhook dispatch resolution failed", { error: err instanceof Error ? err.message : String(err), repo, sha });
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ message: "internal error — could not resolve webhook dispatch" }));
+          return;
+        }
         if (dispatch.length === 0) logJson("warn", "no config/apps entry for repo; event ignored", { repo });
         for (const d of dispatch) {
           try {

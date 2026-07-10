@@ -55,3 +55,43 @@ test("resolveByRepo fans out a repo that is primary of one app AND service of an
   const roles = matches.map((m) => `${m.app.name}:${m.role}`).sort();
   assert.deepEqual(roles, ["orders:primary", "shop:service"]);
 });
+
+// ── judgment-day fix: per-config fault isolation inside resolveByRepo. A config that already
+// passed the shell's zod schema (config-loader.ts's own listAppConfigs already isolates THAT layer,
+// per-file) can still fail App.fromConfig's OWN aggregate invariants (app.aggregate.ts's RIDER 3
+// explicitly warns these can drift from the zod refine rules) — or, as exercised here, a
+// ConfigLoaders implementation that never went through zod at all (exactly what these hand-crafted
+// test doubles already are). Before this fix, `.map()` threw on the FIRST such config and
+// resolveByRepo — hence the webhook dispatch for EVERY app sharing this catalog — failed. Mirrors
+// config-loader.ts's own skip-and-log posture, one layer up. ──────────────────────────────────────
+
+test("resolveByRepo: an App.fromConfig-level invariant failure on ONE config is skipped — the healthy app still resolves", async () => {
+  const healthy = { name: "shop", repo: "org/shop-front", dev: { versionUrl: "https://dev" } };
+  // Fails App.fromConfig's Invariant 3a (a service repo must not equal the primary repo) — a shape
+  // that never went through the zod refine at all (this ConfigLoaders test double bypasses it
+  // entirely, exactly like every other test in this file).
+  const broken = { name: "broken-app", repo: "org/broken", services: [{ repo: "org/broken" }], dev: { versionUrl: "https://dev" } };
+  const skipped: Array<{ name: string; err: unknown }> = [];
+  const adapter = new YamlAppConfigAdapter(
+    { load: () => healthy, list: () => [healthy, broken] },
+    (name, err) => { skipped.push({ name, err }); },
+  );
+
+  const matches = await adapter.resolveByRepo("org/shop-front");
+
+  assert.equal(matches.length, 1, "the healthy app must still resolve even though ANOTHER config fails App.fromConfig's own aggregate invariant");
+  assert.equal(matches[0]?.app.name, "shop");
+  assert.equal(skipped.length, 1, "the skip callback must fire exactly once, naming the offending config");
+  assert.equal(skipped[0]?.name, "broken-app");
+});
+
+test("resolveByRepo: with no injected skip-logger, an invalid config is still skipped (default logger), never crashing the whole catalog", async () => {
+  const healthy = { name: "shop", repo: "org/shop-front", dev: { versionUrl: "https://dev" } };
+  const broken = { name: "broken-app", repo: "org/broken", services: [{ repo: "org/broken" }], dev: { versionUrl: "https://dev" } };
+  const adapter = new YamlAppConfigAdapter({ load: () => healthy, list: () => [healthy, broken] });
+
+  const matches = await adapter.resolveByRepo("org/shop-front");
+
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0]?.app.name, "shop");
+});
