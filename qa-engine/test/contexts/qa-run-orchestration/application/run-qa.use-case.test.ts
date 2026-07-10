@@ -26,6 +26,7 @@ import type {
   ServiceLink,
   CrossRepoImpactPort,
   ConfinementPort,
+  MirrorGcPort,
 } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 // reflector-rewire (design ADR-1/ADR-4/ADR-5): ReflectorPort/ReflectionInput are declared in
 // cross-run-learning (co-located with StructuredReflection/LearningRepositoryPort), NOT in this
@@ -5471,4 +5472,77 @@ test("Slice 4 (task 4.4): absent specMetas everywhere never throws and publish()
 
   assert.equal(out.decision.verdict, "pass");
   assert.equal(publishedDecisionHadTestedKey, false, "no specMetas source existed this run, so `tested` must be entirely omitted — never a fabricated empty array");
+});
+
+// ── sdd/migration-wiring-phase-2 Slice 2 (D-B mirror-gc): MirrorGcPort wiring. [SWAP]-optional —
+// absent means the mainline exit's gc call is a no-op (backward compatible, the SAME posture every
+// other optional collaborator on this barrel establishes). Fires ONCE, at the tail of the mainline
+// exit, strictly AFTER the pre-publish confinement enforcement + the publish() call itself have both
+// resolved (spec §2 "successful run triggers gc": "after publish/confinement git calls returned").
+// Fault-isolated: a thrown prune() is caught, logged loudly, and never alters the verdict or blocks
+// the run from completing (mirrors confinement's own fault-isolation contract above). ─────────────
+
+function makeFakeMirrorGc(onPrune: (mirrorDir: string) => void | Error): MirrorGcPort {
+  return {
+    prune: async (mirrorDir) => {
+      const result = onPrune(mirrorDir);
+      if (result instanceof Error) throw result;
+    },
+  };
+}
+
+test("mirrorGc wiring: successful run triggers prune() exactly once, against the run's real mirrorDir, AFTER publish() resolves", async () => {
+  const order: string[] = [];
+  const { ports } = stubPorts({
+    publish: async () => { order.push("publish"); return { outcome: "pr" }; },
+  });
+  const mirrorGc = makeFakeMirrorGc((mirrorDir) => {
+    order.push(`prune:${mirrorDir}`);
+  });
+  const useCase = new RunQaUseCase({ ...ports, mirrorGc, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "mirror-gc-green-pr" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.deepEqual(order, ["publish", "prune:/tmp/qa-golden"], "prune() must fire exactly once, strictly after publish() resolves, against the run's real mirrorDir");
+});
+
+test("mirrorGc wiring: [SWAP] absent — no collaborator wired means zero prune() calls (backward compatible)", async () => {
+  const { ports } = stubPorts();
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig }); // no `mirrorGc` key at all
+
+  const out = await useCase.run({ ...baseInput, runId: "mirror-gc-absent-no-op" });
+
+  assert.equal(out.decision.verdict, "pass");
+});
+
+test("mirrorGc wiring: fault isolation — a thrown prune() is caught, logged, and NEVER alters the verdict or blocks the run from completing", async () => {
+  let publishCallCount = 0;
+  const { ports } = stubPorts({
+    publish: async () => { publishCallCount++; return { outcome: "pr: https://example.test/pr/1" }; },
+  });
+  const mirrorGc = makeFakeMirrorGc(() => new Error("git gc failed: index.lock exists"));
+  const useCase = new RunQaUseCase({ ...ports, mirrorGc, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "mirror-gc-fault-isolated" });
+
+  assert.equal(out.decision.verdict, "pass", "a mirror-gc failure must never alter the run's verdict");
+  assert.equal(publishCallCount, 1, "publish() must have already completed — prune() runs strictly after it");
+});
+
+test("mirrorGc wiring: a non-pr verdict (fail/issue) also triggers prune() once, after publish() resolves", async () => {
+  const order: string[] = [];
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "fail", cases: [{ name: "owners", status: "fail", detail: "boom" }], logs: "" }),
+    publish: async () => { order.push("publish"); return { outcome: "issue: https://example.test/issues/1" }; },
+  });
+  const mirrorGc = makeFakeMirrorGc((mirrorDir) => {
+    order.push(`prune:${mirrorDir}`);
+  });
+  const useCase = new RunQaUseCase({ ...ports, mirrorGc, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "mirror-gc-fail-issue" });
+
+  assert.equal(out.decision.verdict, "fail");
+  assert.deepEqual(order, ["publish", "prune:/tmp/qa-golden"], "prune() must fire once for a fail/issue-routed run too, strictly after publish()");
 });

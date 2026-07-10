@@ -58,6 +58,7 @@ import type {
   CrossRepoImpactPort,
   CrossRepoImpact,
   ConfinementPort,
+  MirrorGcPort,
 } from "./ports/index.ts";
 import { REVIEWER_UNAVAILABLE_MARKER } from "./ports/index.ts";
 import { decide, type RunEvidence } from "../domain/run-decision.service.ts";
@@ -286,6 +287,16 @@ export interface RunQaUseCaseDeps {
   // documented contract, mirrors ReflectorPortAdapter's) — this use-case awaits audit() with no
   // extra try/catch of its own, trusting that contract exactly like it trusts reflector's.
   processAudit?: ProcessAuditPort;
+  // [SWAP] absent -> the mainline exit's gc call is a no-op; no `git gc`, the SAME backward-
+  // compatible posture reflector/confinement/processAudit already establish. sdd/migration-wiring-
+  // phase-2 Slice 2 (D-B mirror-gc): fires ONCE, at the tail of the mainline exit, strictly AFTER
+  // the pre-publish confinement enforcement + the publish() call itself have both resolved (never
+  // races an in-flight git write from THIS run; the sequential queue already guarantees no OTHER
+  // run's git ops overlap it). Fault-isolated: a thrown prune() is caught by THIS use-case (never
+  // the adapter, see MirrorGcPort's own header), logged LOUDLY via console.error, and never alters
+  // the verdict or blocks the run from completing (mirrors enforceConfinement's own fault-isolation
+  // contract, immediately above).
+  mirrorGc?: MirrorGcPort;
   config?: Partial<RunQaConfig>;
 }
 
@@ -1872,6 +1883,23 @@ export class RunQaUseCase {
         ...(resolveTested()?.length ? { tested: resolveTested() } : {}),
       });
       publishOutcome = published.outcome;
+    }
+
+    // sdd/migration-wiring-phase-2 Slice 2 (D-B mirror-gc): [SWAP] absent this.deps.mirrorGc -> a
+    // no-op. Fires ONCE, here, at the tail of the mainline exit — strictly AFTER the pre-publish
+    // confinement enforcement (enforceConfinement() immediately above, before the publish() call)
+    // AND the publish() call itself have both resolved, so gc never races an in-flight git write
+    // from THIS run (the sequential queue already guarantees no OTHER run's git ops overlap it).
+    // Fault-isolated: a thrown prune() is caught here and logged loudly, never alters the verdict
+    // or blocks the run from completing (mirrors enforceConfinement's own fault-isolation contract).
+    if (this.deps.mirrorGc) {
+      try {
+        await this.deps.mirrorGc.prune(workspace.mirrorDir);
+      } catch (err) {
+        console.error(
+          `[qa] mirror gc FAILED (fault-isolated — run continues, never blocks publish): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
 
     // Phase: persist (RunHistoryPort) + fold (LearningPort).

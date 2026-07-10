@@ -599,6 +599,11 @@ describe("seam-parity: COMPOSITION (CompositionConfig vs buildRewrittenCompositi
     // fault isolation, not app-config gated), the SAME "IS supplied" precedent confinement/
     // reflectorPort establish immediately above. Asserted below as a present case.
     processAudit: "IS supplied (ProcessAuditPortAdapter wrapping history.ts reads + recordIncident/setRuleStatusByHuman/markContextStale sinks) — asserted below as a present case.",
+    // sdd/migration-wiring-phase-2 Slice 2 (D-B mirror-gc, task 2.3): IS supplied (a MirrorGcAdapter
+    // wrapping realGit's own local `git gc --auto --quiet`, no auth decoration) — wired
+    // UNCONDITIONALLY (fail-open fault isolation, not app-config gated), the SAME "IS supplied"
+    // precedent confinement/processAudit establish immediately above. Asserted below as a present case.
+    mirrorGc: "IS supplied (MirrorGcAdapter wrapping realGit's local `git gc --auto --quiet`) — asserted below as a present case.",
   };
 
   function fakeAppConfig(overrides: Partial<AppConfig> = {}): AppConfig {
@@ -667,6 +672,10 @@ describe("seam-parity: COMPOSITION (CompositionConfig vs buildRewrittenCompositi
     // open fault isolation, not app-config gated) — the SAME "IS supplied" assertion pattern as
     // confinement immediately above.
     assert.notEqual(cfg.processAudit, undefined, `processAudit (process-audit reconnect, D-P1b) dropped at ${dyingLayer}`);
+    // sdd/migration-wiring-phase-2 Slice 2 (task 2.3): mirrorGc must be wired unconditionally
+    // (fail-open fault isolation, not app-config gated) — the SAME "IS supplied" assertion pattern
+    // as confinement/processAudit immediately above.
+    assert.notEqual(cfg.mirrorGc, undefined, `mirrorGc (mirror-lifecycle wiring, D-B) dropped at ${dyingLayer}`);
     // W5 fix (seam-parity FIXME, flipped): readSpecSource IS wired now — assert it's a real file-read
     // collaborator, not just a truthy stub, by reading this very test file back through it.
     assert.equal(typeof cfg.readSpecSource, "function", `readSpecSource dropped at ${dyingLayer} (Lever-2 selector-contradiction check starves without it)`);

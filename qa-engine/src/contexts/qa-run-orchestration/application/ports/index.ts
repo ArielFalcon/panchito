@@ -858,3 +858,20 @@ export interface ConfinementPort {
   enforce(mirrorDir: string, isCode: boolean, signal?: AbortSignal): Promise<ConfinementResult>;
 }
 
+// MirrorGcPort — sdd/migration-wiring-phase-2 Slice 2 (D-B mirror-gc). Keeps the mirror working
+// copies lean (orphaned object packs accumulate over time — `git gc` compacts them). The real
+// adapter (workspace-and-publication/infrastructure/mirror-gc.adapter.ts) wraps an injected git gc
+// fn. Local, duck-typed (this barrel's own "no cross-context import" rule) — the adapter never
+// imports this interface, it just matches its shape structurally.
+//
+// [SWAP] absent -> RunQaUseCase never calls prune(); no gc, the SAME backward-compatible posture
+// every other optional collaborator on this barrel establishes.
+//
+// Fault isolation (design D-B): a thrown prune() MUST be caught by the CALLER (RunQaUseCase),
+// logged loudly, and MUST NEVER alter the verdict or block the run from completing. This adapter
+// itself does NOT swallow errors (mirrors ConfinementPort's own "adapter throws, use-case catches"
+// split, immediately above).
+export interface MirrorGcPort {
+  prune(mirrorDir: string): Promise<void>;
+}
+

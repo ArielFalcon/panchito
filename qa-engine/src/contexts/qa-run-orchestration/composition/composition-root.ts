@@ -28,7 +28,7 @@
 import { join } from "node:path";
 import type { Sha } from "@kernel/sha.ts";
 import type { RunMode, TestTarget } from "@kernel/run-mode.ts";
-import type { RunPipelinePort, ObserverPort, RunHistoryPort, ConfinementPort } from "../application/ports/index.ts";
+import type { RunPipelinePort, ObserverPort, RunHistoryPort, ConfinementPort, MirrorGcPort } from "../application/ports/index.ts";
 import { RewrittenOrchestratorAdapter, type RewrittenOrchestratorAdapterDeps } from "../infrastructure/rewritten-orchestrator.adapter.ts";
 import { selectEngine } from "./pipeline-engine-flag.ts";
 
@@ -321,6 +321,16 @@ export interface CompositionConfig {
   // inside workspace-and-publication/infrastructure). Threaded straight through to
   // RunQaUseCaseDeps.confinement below — no default, no wrapping (same posture as reflectorPort).
   confinement?: ConfinementPort;
+
+  // MirrorGcPort collaborator (sdd/migration-wiring-phase-2 Slice 2, D-B mirror-gc) —
+  // [SWAP]-optional, mirrors confinement's own "absent -> no-op" precedent immediately above.
+  // Unlike learningRepo, there is no stub default constructed here: the production factory
+  // (src/server/rewritten-engine-factory.ts, the ONE module permitted to import both qa-engine's
+  // aliases AND root src/) is the ONLY place that can construct a real MirrorGcAdapter (it needs
+  // realGit — local `git gc --auto --quiet`, no auth decoration — a src-only collaborator this
+  // composition root must never import). Threaded straight through to RunQaUseCaseDeps.mirrorGc
+  // below — no default, no wrapping (same posture as confinement).
+  mirrorGc?: MirrorGcPort;
 
   // ProcessAuditPort collaborator (sdd/migration-remediation Slice 5, P1 process-audit reconnect,
   // D-P1b) — [SWAP]-optional, mirrors reflectorPort's own "absent -> no-op" precedent immediately
@@ -710,6 +720,10 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
     // own conditional-spread precedent immediately above — absent cfg.confinement means
     // RunQaUseCaseDeps.confinement is omitted entirely (never a fabricated no-op stub).
     ...(cfg.confinement ? { confinement: cfg.confinement } : {}),
+    // sdd/migration-wiring-phase-2 Slice 2 (D-B mirror-gc): mirrors confinement's own
+    // conditional-spread precedent immediately above — absent cfg.mirrorGc means
+    // RunQaUseCaseDeps.mirrorGc is omitted entirely (never a fabricated no-op stub).
+    ...(cfg.mirrorGc ? { mirrorGc: cfg.mirrorGc } : {}),
     // sdd/migration-remediation Slice 5 (P1 process-audit reconnect, D-P1b): mirrors reflectorPort's/
     // confinement's own conditional-spread precedent immediately above — absent cfg.processAudit
     // means RunQaUseCaseDeps.processAudit is omitted entirely (never a fabricated no-op stub).
