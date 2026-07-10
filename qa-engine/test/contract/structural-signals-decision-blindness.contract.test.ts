@@ -40,8 +40,6 @@ const DECISION_PATH_FILES = [
   "src/contexts/workspace-and-publication/domain/publish-decision.service.ts",
   "src/contexts/qa-run-orchestration/domain/fix-loop.aggregate.ts",
   "src/contexts/qa-run-orchestration/domain/helpers/progress-gate.ts",
-  "src/contexts/test-execution/domain/progress-gate.service.ts",
-  "src/contexts/test-execution/domain/nav-gate.service.ts",
   "src/contexts/test-execution/infrastructure/static-gate.adapter.ts",
   "src/contexts/generation/infrastructure/catalog-gate.ts",
   "src/contexts/generation/infrastructure/verdict-parser.adapter.ts",

@@ -203,6 +203,38 @@ existing `learning_rules`/`history` data) that is out of scope for a
 stabilization change whose job is to fix regressions and reconnect existing
 sinks, not restructure persistence.
 
+## D9 — nav-gate triage DECIDE resolved as DELETE (Slice 8.C)
+
+**Decision**: resolves triage doc §1's nav-gate DECIDE item. Accept the
+`reexploreNavigations` threshold mitigation already live in
+`qa-run-orchestration/domain/pre-exec-grounding.service.ts` as sufficient
+coverage, and delete both legacy nav-gate copies — `src/qa/nav-gate.ts` and
+the qa-engine `test-execution/domain/nav-gate.service.ts` — with no
+canonical `qa-run-orchestration/domain/helpers/nav-gate.ts` port needed.
+Unlike progress-gate/selector-check, nav-gate has no helpers/ successor
+because the mitigating logic already lives in `pre-exec-grounding.service.ts`
+rather than a standalone gate module. Retires `nav-gate-parity` (the
+test-execution/domain pin) from `tsconfig.parity.json`.
+
+**Deviation discovered while executing Slice 8.C**: the design's Batch C plan
+assumed `src/qa/progress-gate.ts` and `src/qa/selector-check.ts` could be
+deleted while their **canonical** `qa-run-orchestration/domain/helpers/
+{progress-gate,selector-check}-parity.test.ts` pins "STAY" — but those
+surviving canonical parity tests themselves import the legacy `src/qa/
+{progress-gate,selector-check}.ts` files as their byte-for-byte comparison
+target (`legacyProgressGate`/legacy selector-check exports). Deleting the
+legacy files would have broken the very pins the design says must survive.
+Resolution: `src/qa/progress-gate.ts` and `src/qa/selector-check.ts` (plus
+their colocated tests) are **not deleted** in this batch — only the OLD
+qa-engine `test-execution/domain/{progress-gate,selector-check}.service.ts`
+copies and their own OLD parity/unit tests are removed, matching what the
+design actually intends by "consolidate to canonical helpers/ copies." A
+future cleanup can re-point `helpers/{progress-gate,selector-check}-parity
+.test.ts` onto an inline/frozen legacy snapshot (or retire them once nothing
+else needs the byte-for-byte guarantee) before deleting the `src/qa/` files.
+`src/qa/selector-check.ts` has a second, independent reason to survive:
+`src/qa/execute.test.ts` imports `selectorPresent` from it directly.
+
 ## Deferred deletions — triage DELETE items intentionally excluded from this change
 
 This change's deletion batches (Slice 8, A–F) do **not** cover every item on the
