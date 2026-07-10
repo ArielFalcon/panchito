@@ -605,3 +605,145 @@ backlog and reconnecting existing sinks (done, table above); restructuring
 persistence, finishing the Tier 1-4 migration, or reopening the still-open
 `src/` DECIDE items is deliberately out of scope here (see D8's reasoning,
 which generalizes to the rest of this register).
+
+Executed as `sdd/migration-wiring-phase-2` — see the outcome register below.
+
+## migration-wiring-phase-2 — Outcome (closeout, 2026-07-10)
+
+The Phase 2 roadmap pointer above named its input backlog: this change
+(`sdd/migration-wiring-phase-2`, branch `fix/migration-wiring-phase-2`)
+worked that backlog down to 9 slices, 25 commits, gated green (`npm test` +
+`npm run typecheck`, Node v24.11.0) after every commit, never committed red.
+
+### Slices landed
+
+| Slice | Content | Commit(s) |
+|---|---|---|
+| 1 | App-catalog wiring — webhook cross-repo resolution routed through `YamlAppConfigAdapter.resolveByRepo` (D-A) | `f0a77bf` |
+| 2 | Mirror-gc — per-run bounded `git gc --auto` wired post-run (D-B) | `efddc19`, `bccd975` |
+| 3 | contextMap read-back — per-run `e2e/.qa/context.json` read in `PreGenerationGroundingPortAdapter.ground()`, un-inerting the contracts component (D-C) | `0cc096d` |
+| 4 | Skill-exemplar catalog restored into the generation prompt (D-E) | `8379da0`, rider `9e825a2` |
+| 5 | `parentRunId` producer — threaded from `/continue`'s `RunRequest.parentRunId` into `publish()` (D-F) | `e16cf62` |
+| 6 | `containsSecrets` made mode-aware (AMENDMENT 1) + both egress guards (diff→model, logs→Issue) wired | `0b4ae8d`, `9e825a2`, `e9cd6d8` |
+| 7 | Redaction migration — env-value detection ported to the canonical adapter, all ~12 `util/redact.ts` shell consumers migrated, `redact.ts` deleted (D-D) | `e5c129a`, `f7472ea`, `f08e940`, `e075e30`, `7bd9b22` |
+| 8 | Dead-code deletions — 22 files removed across 6 sub-batches (direct delete, re-point-then-delete, import-unblock-then-delete) | `381edef`, `33082dc`, `9f56e12`, `a3e522f`, `43d1332`, `c29c0e8`, `70e97d8` |
+| 9 | Unstaged fs-level rename pairing (D-G, AMENDMENT 2) — closes the Judgment Day round 2 KNOWN LIMITATION | `518df70` |
+
+### The security-gate round (post-apply adversarial pass, landed between Slice 7 and Slice 8)
+
+A post-apply security review over the redaction migration's own surface
+(Slice 7) surfaced and fixed one CRITICAL:
+
+- **File-aware diff redaction (CRITICAL, fixed)**: `cappedDiffText` applied
+  "model" mode's code-shape narrowing (`modelSkip`, WS5.4a) to the WHOLE
+  diff, not per file. A diff touching a config file (`docker-compose.yml`,
+  `.env`, CI YAML) alongside code files let unquoted lowercase-key
+  credentials in the config hunk (`password: hunter2`, `token=Str0ng!Pass`)
+  silently escape redaction that "issue" mode's aggressive, unnarrowed
+  pattern would have caught. Fixed by splitting the capped diff at each
+  `diff --git` header and picking the sanitize mode per file: "model" only
+  for a known code extension, "issue" for everything else — each section
+  guarded by `assertNoSecretLeak` under its own mode. `extractDiffFilePath`
+  exported from `sanitizer.ts` so `prompts.ts` keys the mode off the same
+  file-path parsing `capDiff` already does. Commit `f7ad67d`.
+- **SecretLeakError swallow fix**: the best-effort explorer wrapper was
+  catching and discarding every thrown error uniformly, including a thrown
+  `SecretLeakError` from the egress guard (Slice 6) — silently laundering
+  the exact fail-loud signal that guard exists to produce. Fixed to
+  re-throw `SecretLeakError` specifically, never treating a blocked-secret
+  event as an ordinary best-effort failure. Commit `924f2a4`.
+- Doc correction: a stale `containsSecret` doc comment claimed no production
+  call site existed — no longer true once Slice 6 wired it. Commit `55a612b`.
+
+### Deferred-deletions completion
+
+Both registers this document flagged as deferred/blocked-in-place at the
+Phase 1 closeout are now **fully closed** by Slice 8:
+
+- **7 originally-deferred DELETE items** (triage §1 DELETE list): `src/qa/
+  source-map.ts`, `src/qa/measured.ts`, `src/qa/learning/labeler.ts` (parity
+  test re-pointed to a frozen fixture snapshot before deletion, per its
+  documented requirement), `src/qa/learning/reflector.ts`, `src/qa/learning/
+  retrieval.ts`, `src/qa/learning/best-effort.ts`, `src/integrations/
+  publish.ts` — all deleted.
+- **4 newly-discovered blocked-in-place deletions**: `src/qa/learning/
+  distiller.ts` (re-pointed — `isWellFormedTrigger` re-homed into `ledger-
+  report.ts`), `src/qa/progress-gate.ts` (re-pointed — 13-sample fixture
+  snapshot, fully retired from the parity tsconfig), `src/qa/selector-
+  check.ts` (re-pointed — 39 samples across TWO independent parity pins, a
+  third live importer discovered mid-batch beyond the documented one,
+  flagged `size:exception`), `src/report/reporter.ts` (deleted after
+  `publish.ts` unblocked it, per the documented dependency order) — all
+  deleted/re-pointed.
+
+Net: 22 files deleted, 9 files modified for re-pointing, 4580 lines removed /
+224 inserted, 228 dead tests retired alongside their dead source
+(3947→3719 passing, both gates green after every sub-batch).
+
+### Register items — closed vs still open
+
+**Closed by Phase 2**:
+- Triage §2 WIRE: `contexts/app-catalog/**` (Slice 1), `workspace-and-
+  publication/infrastructure/mirror-gc.adapter.ts` (Slice 2).
+- Triage §5 open item 4: contextMap read-back (Slice 3) — the `context-pack`
+  contracts component is no longer permanently inert.
+- Triage §5 open item 7: skill-exemplar catalog (Slice 4).
+- This document's "1 newly-identified producer gap" (item 5, `parentRunId`,
+  Slice 5).
+- This document's "1 newly-identified pairing gap" (item 6, unstaged
+  fs-level rename pairing, Slice 9) — see `write-confinement.service.ts`'s
+  `classifyStrays` doc comment, now updated to describe the fix.
+- D6's deferred `util/redact.ts` unification (Slice 7) — the duplicate
+  mechanism no longer exists; every consumer migrated to the canonical
+  `RedactionPortAdapter`, placeholder collapsed to `[REDACTED]` per D7.
+
+**Still open (out of Phase 2's scope, unchanged)**:
+- Triage §2 DECIDE: `qa-run-orchestration/domain/run.aggregate.ts` (DELETE,
+  not actioned) and `shared-kernel/ports/clock.port.ts` (DELETE, not
+  actioned).
+- Triage §2 WIRE: `generation/infrastructure/{context-assembler,
+  exploration-brief,plan-parser}.adapter.ts` — still gated on the reserved
+  `workerId` parallel fan-out (documented in CLAUDE.md as future, not
+  abandoned); Phase 2 did not touch this cluster.
+- D8 — learning-store duality (`src/server/history.ts` vs. qa-engine's
+  native `SqliteLearningRepository`) remains two separate stores by
+  deliberate decision; Phase 2 did not converge them.
+- Triage doc §4 Tiers 1-4 (the bulk of remaining `src/` migration scope) —
+  entirely out of Phase 2's scope, which targeted wiring gaps and
+  Tier-0-adjacent cleanup, not the tiered migration itself.
+- `context-cache.ts` (the 38-line read-back cache) — design D-C deliberately
+  descoped re-porting it: `context.json` is committed to the app repo's
+  `e2e/` in context-mode PRs, so a normal `git checkout` already restores it
+  for free; the cache only helps shadow apps where `context.json` is never
+  committed. Recommendation stands: measure residual shadow-rebuild waste
+  before re-porting a speculative cache.
+
+**New follow-up flagged (not fixed in Phase 2 — docs-only closeout, no code
+change)**:
+
+- **Typed-declaration-initializer sanitizer gap**. `NAMED_SECRET_PATTERNS`'s
+  `api-key-assignment` pattern (`sanitizer.ts`) is `(?:api[_-]?key|token|
+  secret|password|passwd|pwd)[\"']?\s*[:=]\s*\S+`, global. On a TypeScript
+  typed declaration with an initializer on ONE line — e.g.
+  `const secret: string = "hunter2ActualSecretValue123";` — the match
+  consumes only up through the type token (`secret: string`), since `\S+`
+  stops at the first whitespace; the regex engine's `lastIndex` then resumes
+  scanning AFTER that match, and the real initializer (`= "hunter2..."`)
+  is never re-matched because no keyword immediately precedes it. Verified
+  empirically against the live adapter: in `"issue"` mode, the (harmless)
+  type-annotation span is redacted to `[REDACTED]` while the actual secret
+  value survives verbatim in the output text; in `"model"` mode, `modelSkip`
+  additionally recognizes `string` as a type (not a secret value) and skips
+  the match entirely, leaving the WHOLE line — secret included — completely
+  untouched. The Slice 6 post-redaction `containsSecrets` egress guard does
+  **not** catch this either: it re-runs the identical pattern set against
+  the already-redacted text, and the leaked value has no adjacent keyword
+  left to re-trigger the pattern (confirmed:
+  `containsSecrets(sanitizeText(line, "issue").text, "issue")` returns
+  `false` even though the raw secret is present verbatim in that text).
+  Scope for the fix: extend the pattern (or add a dedicated typed-
+  declaration-initializer pattern) to also scan past a type annotation for
+  a trailing `= <value>` on the same match, in both `sanitizeText` and
+  `containsSecrets` so they stay symmetric. Flagged here as a follow-up for
+  the next `migration-cleanup`-class change — not actioned in this
+  docs-only closeout slice.

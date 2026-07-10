@@ -132,11 +132,11 @@ each parity test in the same change that deletes its oracle.
 
 | Cluster | Evidence |
 |---|---|
-| `contexts/app-catalog/**` (4 files) | plain wrap-ahead-of-wiring (Plan 4); `src/index.ts:697` still calls `config-loader.ts` directly; no doc flags ambiguity |
-| `generation/infrastructure/{context-assembler,exploration-brief,plan-parser}.adapter.ts` | design doc §2.3 C4: "depth deferred... YAGNI until stage 2"; plan-parser feeds the reserved `workerId` parallel fan-out (documented in CLAUDE.md as future) — deferred by design, not abandoned |
+| `contexts/app-catalog/**` (4 files) | **RESOLVED — `sdd/migration-wiring-phase-2` Slice 1 (commit `f0a77bf`)**: webhook cross-repo resolution now routes through `YamlAppConfigAdapter.resolveByRepo`; `config-loader.ts` stays the raw+`expandEnv` shell loader underneath it |
+| `generation/infrastructure/{context-assembler,exploration-brief,plan-parser}.adapter.ts` | design doc §2.3 C4: "depth deferred... YAGNI until stage 2"; plan-parser feeds the reserved `workerId` parallel fan-out (documented in CLAUDE.md as future) — deferred by design, not abandoned. Still open — `migration-wiring-phase-2` did not action this cluster |
 | `workspace-and-publication/domain/write-confinement.service.ts` | the Plan-6 wiring into VcsWriteAdapter never happened → this IS regression §1.1's fix vehicle |
-| `workspace-and-publication/infrastructure/mirror-gc.adapter.ts` | per-run `git gc --auto`; complementary to (not duplicated by) `src/server/mirror-prune.ts` |
-| `shared-kernel/ports/redaction.port.ts` | two divergent sanitizers live in production TODAY (`sanitizer.ts` `[REDACTED_SECRET]` vs `util/redact.ts` `[REDACTED_CREDENTIAL]`, 7+ live consumers); implement the adapter, unify |
+| `workspace-and-publication/infrastructure/mirror-gc.adapter.ts` | **RESOLVED — `sdd/migration-wiring-phase-2` Slice 2 (commits `efddc19`, `bccd975`)**: injected as an optional `RunQaUseCaseDeps.mirrorGc`, fired once post-run against the real per-run `mirrorDir`, fault-isolated |
+| `shared-kernel/ports/redaction.port.ts` | **RESOLVED — the adapter + both egress boundaries landed in Phase 1 (D6/D7, Slice 6, commit `b775fd9`); the full `util/redact.ts` unification named here (env-value detection, all ~12 shell consumers, deletion) completed in `sdd/migration-wiring-phase-2` Slice 7 (commits `e5c129a`..`7bd9b22`)** — `util/redact.ts` no longer exists, `[REDACTED_CREDENTIAL]` collapsed to the canonical `[REDACTED]` everywhere |
 
 ### DECIDE
 
@@ -176,6 +176,20 @@ below, with 4 items discovered blocked-in-place along the way. Full decision
 record, gate evidence, and the deferred/blocked register: see
 `docs/superpowers/2026-07-10-migration-remediation-decisions.md` (D1-D10 plus
 its Outcome section).
+
+**Phase 2 update (`sdd/migration-wiring-phase-2`, closed out 2026-07-10)**: the
+13-item deferred/blocked register that Phase 1 handed off is now closed —
+all 7 originally-deferred DELETE items (`source-map.ts`, `measured.ts`,
+`labeler.ts`, `reflector.ts`, `retrieval.ts`, `best-effort.ts`, `publish.ts`)
+plus the 4 newly-discovered blocked-in-place deletions (`distiller.ts`,
+`progress-gate.ts`, `selector-check.ts`, `reporter.ts`) are deleted; the
+`parentRunId` producer gap and the unstaged-fs-level-rename pairing gap are
+both closed; app-catalog and mirror-gc are wired; contextMap read-back and
+the skill-exemplar catalog are restored (§2/§5 below, flipped to RESOLVED).
+Full register, commit list, and one new follow-up discovered along the way
+(a typed-declaration-initializer sanitizer gap): see
+`docs/superpowers/2026-07-10-migration-remediation-decisions.md`'s
+"migration-wiring-phase-2 — Outcome" section.
 
 ---
 
@@ -241,11 +255,22 @@ by nothing.
 3. **RESOLVED** — nav-gate: accepted the `reexploreNavigations` threshold,
    deleted both copies, no MCP-proxy block built (`sdd/migration-remediation`
    Slice 8.C, commit c3f6d3f; decisions doc D9).
-4. contextMap read-back (`context-cache` + context-pack contracts component) —
-   still open. Not actioned by `migration-remediation`.
-5. `run.aggregate.ts` — still open. Not actioned by `migration-remediation`.
+4. **RESOLVED (partially — read-back only)** — contextMap read-back: the
+   `e2e/.qa/context.json` per-run read now lives in
+   `PreGenerationGroundingPortAdapter.ground()`, un-inerting context-pack's
+   contracts component (`sdd/migration-wiring-phase-2` Slice 3, commit
+   `0cc096d`; decisions doc D-C). The `context-cache.ts` re-port itself was
+   deliberately **descoped** — `context.json` is committed to the app repo's
+   `e2e/` in context-mode PRs, so a normal `git checkout` restores it for
+   free; the cache would only help shadow apps, and the recommendation is to
+   measure residual shadow-rebuild waste before building it.
+5. `run.aggregate.ts` — still open. Not actioned by `migration-remediation`
+   or `migration-wiring-phase-2`.
 6. **RESOLVED (documented, not converged)** — learning-store duality:
    `history.ts` and `SqliteLearningRepository` remain two separate stores by
    deliberate decision, not silent drift (`sdd/migration-remediation`
-   decisions doc D8).
-7. skill-exemplar catalog — still open. Not actioned by `migration-remediation`.
+   decisions doc D8). Unchanged by `migration-wiring-phase-2`.
+7. **RESOLVED** — skill-exemplar catalog: restored into the generation
+   prompt as a budgeted "Skill exemplars" section, keyed off
+   `detectStructuralPatterns`'s `StructuralPattern[]` (`sdd/migration-wiring-
+   phase-2` Slice 4, commit `8379da0`, rider `9e825a2`; decisions doc D-E).
