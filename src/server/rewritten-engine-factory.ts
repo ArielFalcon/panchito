@@ -53,7 +53,7 @@
 //      straight into prompt assembly).
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
-import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, realpathSync, lstatSync } from "node:fs";
 import type { AppConfig } from "../orchestrator/config-loader";
 import type { AgentDeps } from "../integrations/opencode-client";
 // WS6.1 (full-flow remediation, timeouts & operational observability): the purpose-built reviewer
@@ -89,6 +89,7 @@ import { GitHubPrAdapter } from "@contexts/workspace-and-publication/infrastruct
 import { GitHubIssueAdapter } from "@contexts/workspace-and-publication/infrastructure/github-issue.adapter";
 import { VcsWriteAdapter } from "@contexts/workspace-and-publication/infrastructure/vcs-write.adapter";
 import { CONFINEMENT_DENYLIST } from "@contexts/workspace-and-publication/domain/write-confinement.service";
+import { WriteConfinementAdapter } from "@contexts/workspace-and-publication/infrastructure/write-confinement.adapter";
 import type { VcsPublishCollaborator } from "@contexts/qa-run-orchestration/infrastructure/bridges/publication-port.adapter";
 import { makeTargetCoverageCollector } from "@contexts/objective-signal/infrastructure/target-coverage-collector";
 import { assembleChangeCoverage } from "@contexts/objective-signal/domain/assemble-change-coverage";
@@ -297,6 +298,28 @@ export function buildVcsPublish(
       return { changed: true };
     },
   };
+}
+
+// sdd/migration-remediation Slice 3 (P0 write-confinement wiring, D-P0b): constructs the REAL
+// ConfinementPort collaborator — realGit (LOCAL ops only: git status/restore/clean; deliberately NOT
+// wrapped in withPublishGitDecorations, since confinement never pushes or commits, so no auth/
+// identity decoration is needed) + node:fs realpathSync + an isSymlink probe built on lstatSync
+// (a failed lstat means the path was deleted mid-check, not a symlink — never thrown past this probe,
+// matching WriteConfinementAdapter's own "lstat pre-filter" contract). Exported for direct unit
+// testing (same precedent as buildVcsPublish above) — a test can inject a fake git/realpath/isSymlink
+// to pin the exact real-git-fixture behavior without touching this host's actual filesystem.
+export function buildConfinement(
+  git: GitFn = realGit,
+  realpath: (p: string) => string = realpathSync,
+  isSymlink: (p: string) => boolean = (p) => {
+    try {
+      return lstatSync(p).isSymbolicLink();
+    } catch {
+      return false; // deleted mid-check or otherwise unreadable — never a symlink escape
+    }
+  },
+): WriteConfinementAdapter {
+  return new WriteConfinementAdapter({ git, realpath, isSymlink });
 }
 
 // One-shot /version fetch + sha/health match — VersionPollFn's contract is a SINGLE probe per
@@ -980,6 +1003,10 @@ export function buildRewrittenCompositionConfig(
     // validationStrategies/executionStrategies/setupCollaborators above (e2e publishes only e2e/;
     // code publishes the whole tree minus installed deps/build output).
     vcsWrite: buildVcsPublish(isCode),
+    // sdd/migration-remediation Slice 3 (P0 write-confinement wiring, D-P0b): wired UNCONDITIONALLY
+    // (fail-open fault isolation makes it safe to run on every composition, not gated by app config)
+    // — realGit local ops only, no auth decoration (confinement never pushes/commits).
+    confinement: buildConfinement(),
     reviewerApprovedForPublish: true,
     coverageBlocksForPublish: false,
     e2eChangedForPublish: true,

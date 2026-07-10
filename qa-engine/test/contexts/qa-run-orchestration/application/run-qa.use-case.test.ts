@@ -25,6 +25,7 @@ import type {
   ServiceLinksPort,
   ServiceLink,
   CrossRepoImpactPort,
+  ConfinementPort,
 } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 // reflector-rewire (design ADR-1/ADR-4/ADR-5): ReflectorPort/ReflectionInput are declared in
 // cross-run-learning (co-located with StructuredReflection/LearningRepositoryPort), NOT in this
@@ -5127,4 +5128,146 @@ test("no-op honored: a genuine agent no-op (parsed:true + approved + zero specs)
   const out = await useCase.run({ ...baseInput, runId: "genuine-no-op-parsed-true-skips" });
 
   assert.equal(out.decision.verdict, "skipped", "a genuine parsed no-op is a valid skip, never infra-error");
+});
+
+// ── sdd/migration-remediation Slice 3 (P0 write-confinement wiring, D-P0b amended for multi-point
+// enforcement — see RunQaUseCaseDeps.confinement's own header + apply-progress for the deviation
+// rationale from the design's own "once, immediately before publish" text) ─────────────────────────
+
+function makeFakeConfinement(
+  onEnforce: (mirrorDir: string, isCode: boolean) => { strays: number; dangerous: number; reverted: string[] } | Error,
+): ConfinementPort {
+  return {
+    enforce: async (mirrorDir, isCode) => {
+      const result = onEnforce(mirrorDir, isCode);
+      if (result instanceof Error) throw result;
+      return result;
+    },
+  };
+}
+
+test("confinement wiring: green-pr — enforce() is called at least twice (after the initial generate() AND once more immediately before publish), not just once", async () => {
+  const calls: Array<{ mirrorDir: string; isCode: boolean }> = [];
+  const { ports } = stubPorts();
+  const confinement = makeFakeConfinement((mirrorDir, isCode) => {
+    calls.push({ mirrorDir, isCode });
+    return { strays: 0, dangerous: 0, reverted: [] };
+  });
+  const useCase = new RunQaUseCase({ ...ports, confinement, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "confinement-green-pr-multi-point" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.ok(calls.length >= 2, `expected at least 2 enforce() calls (after generate + before publish), got ${calls.length}`);
+  for (const call of calls) {
+    assert.equal(call.mirrorDir, "/tmp/qa-golden", "enforce() must receive this run's REAL mirrorDir");
+    assert.equal(call.isCode, false, "enforce() must receive this run's REAL isCode target");
+  }
+});
+
+test("confinement wiring: [SWAP] absent — no collaborator wired means zero enforce() calls and no gateSignals.confinement field (never fabricated)", async () => {
+  const { ports, savedOutcomes } = stubPorts();
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig }); // no `confinement` key at all
+
+  const out = await useCase.run({ ...baseInput, runId: "confinement-absent-no-op" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(savedOutcomes[0]?.gateSignals.confinement, undefined, "gateSignals.confinement must be entirely absent, never a fabricated {strays:0,...}");
+});
+
+test("confinement wiring: FixLoop engagement — enforce() runs after EACH FixLoop regeneration round, not only once", async () => {
+  let executeCalls = 0;
+  const calls: Array<{ mirrorDir: string; isCode: boolean }> = [];
+  const { ports } = stubPorts({
+    execute: async () => {
+      executeCalls++;
+      // First execute (post static-gate) fails -> engages the FixLoop; the retry passes so the loop
+      // terminates promptly — mirrors this file's own pre-existing FixLoop-trigger fixture.
+      if (executeCalls === 1) {
+        return { verdict: "fail", cases: [{ name: "owners", status: "fail", detail: "boom" }], logs: "" };
+      }
+      return { verdict: "pass", cases: [{ name: "owners", status: "pass" }], logs: "" };
+    },
+  });
+  const confinement = makeFakeConfinement((mirrorDir, isCode) => {
+    calls.push({ mirrorDir, isCode });
+    return { strays: 0, dangerous: 0, reverted: [] };
+  });
+  const useCase = new RunQaUseCase({ ...ports, confinement, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "confinement-fixloop-multi-point" });
+
+  assert.notEqual(out.decision.verdict, "invalid", "sanity: the run must reach the FixLoop, not hold invalid earlier");
+  // Initial generate() (1) + the FixLoop's own regen round (1) + the pre-publish call (1) = at least 3.
+  assert.ok(calls.length >= 3, `expected at least 3 enforce() calls across the initial generate + FixLoop regen + pre-publish, got ${calls.length}`);
+});
+
+test("confinement wiring: fault isolation — a thrown enforce() is caught, logged, and NEVER alters the verdict or blocks publish", async () => {
+  let publishCallCount = 0;
+  const { ports, savedOutcomes } = stubPorts({
+    publish: async () => { publishCallCount++; return { outcome: "pr: https://example.test/pr/1" }; },
+  });
+  const confinement = makeFakeConfinement(() => new Error("git restore failed: permission denied"));
+  const useCase = new RunQaUseCase({ ...ports, confinement, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "confinement-fault-isolated" });
+
+  assert.equal(out.decision.verdict, "pass", "a confinement failure must never alter the run's verdict");
+  assert.equal(publishCallCount, 1, "publish() must still be called despite every enforce() call throwing");
+  assert.ok(
+    (savedOutcomes[0]?.gateSignals.confinement?.dangerous ?? 0) > 0,
+    "a fault-isolated enforce() failure must still be recorded — dangerous is the most prominent signal the existing gate-signal shape allows",
+  );
+});
+
+test("confinement wiring: successful results across every enforce() call are MERGED into one gateSignals.confinement summary (summed/concatenated, never overwritten)", async () => {
+  let callIndex = 0;
+  const { ports, savedOutcomes } = stubPorts();
+  const confinement = makeFakeConfinement(() => {
+    callIndex++;
+    return callIndex === 1
+      ? { strays: 1, dangerous: 0, reverted: ["stray-a.ts"] }
+      : { strays: 0, dangerous: 1, reverted: ["stray-b.env"] };
+  });
+  const useCase = new RunQaUseCase({ ...ports, confinement, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "confinement-merge-summary" });
+
+  assert.equal(out.decision.verdict, "pass");
+  const persisted = savedOutcomes[0]?.gateSignals.confinement;
+  assert.ok(persisted, "gateSignals.confinement must be present when confinement is wired and ran");
+  assert.equal(persisted?.strays, 1, "strays must be SUMMED across calls, not overwritten by the last call");
+  assert.equal(persisted?.dangerous, 1, "dangerous must be SUMMED across calls");
+  assert.deepEqual(persisted?.reverted, ["stray-a.ts", "stray-b.env"], "reverted must be CONCATENATED across calls, not replaced");
+});
+
+test("confinement wiring: code target — enforce() receives isCode:true", async () => {
+  const calls: Array<{ mirrorDir: string; isCode: boolean }> = [];
+  const { ports } = stubPorts();
+  const confinement = makeFakeConfinement((mirrorDir, isCode) => {
+    calls.push({ mirrorDir, isCode });
+    return { strays: 0, dangerous: 0, reverted: [] };
+  });
+  const useCase = new RunQaUseCase({ ...ports, confinement, config: { ...baseConfig, isCode: true } });
+
+  await useCase.run({ ...baseInput, runId: "confinement-code-target", target: "code" });
+
+  assert.ok(calls.length >= 1);
+  for (const call of calls) assert.equal(call.isCode, true);
+});
+
+test("confinement wiring: a regression run (generating:false) makes no enforce() call for the (never-invoked) initial generate, but still enforces once before publish", async () => {
+  const calls: Array<{ mirrorDir: string; isCode: boolean }> = [];
+  const { ports } = stubPorts({
+    classify: async () => ({ action: "regression", reason: "docs-only change", diff: "" }),
+  });
+  const confinement = makeFakeConfinement((mirrorDir, isCode) => {
+    calls.push({ mirrorDir, isCode });
+    return { strays: 0, dangerous: 0, reverted: [] };
+  });
+  const useCase = new RunQaUseCase({ ...ports, confinement, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "confinement-regression-run" });
+
+  assert.equal(calls.length, 1, "a regression run never calls the real GenerationPort, so only the pre-publish enforce() call fires");
 });

@@ -28,7 +28,7 @@
 import { join } from "node:path";
 import type { Sha } from "@kernel/sha.ts";
 import type { RunMode, TestTarget } from "@kernel/run-mode.ts";
-import type { RunPipelinePort, ObserverPort, RunHistoryPort } from "../application/ports/index.ts";
+import type { RunPipelinePort, ObserverPort, RunHistoryPort, ConfinementPort } from "../application/ports/index.ts";
 import { RewrittenOrchestratorAdapter, type RewrittenOrchestratorAdapterDeps } from "../infrastructure/rewritten-orchestrator.adapter.ts";
 import { selectEngine } from "./pipeline-engine-flag.ts";
 
@@ -302,6 +302,18 @@ export interface CompositionConfig {
   // updateRunOutcomeReflection backfill, both src/-only collaborators this composition root must
   // never import). Threaded straight through to RunQaUseCaseDeps.reflector — no default, no wrapping.
   reflectorPort?: ReflectorPort;
+
+  // ConfinementPort collaborator (sdd/migration-remediation Slice 3, P0 write-confinement wiring,
+  // D-P0b) — [SWAP]-optional, mirrors reflectorPort's own "absent -> no-op" precedent immediately
+  // above. Unlike learningRepo, there is no stub default constructed here: the production factory
+  // (src/server/rewritten-engine-factory.ts, the ONE module permitted to import both qa-engine's
+  // aliases AND root src/) is the ONLY place that can construct a real WriteConfinementAdapter (it
+  // needs realGit — local ops, NO auth decoration — + node:fs realpathSync/lstatSync, both src-only
+  // collaborators this composition root must never import; dependency-cruiser's own
+  // no-vcs-write-in-agent-contexts gate also confines the concrete adapter class itself to living
+  // inside workspace-and-publication/infrastructure). Threaded straight through to
+  // RunQaUseCaseDeps.confinement below — no default, no wrapping (same posture as reflectorPort).
+  confinement?: ConfinementPort;
 
   // WorkspacePort collaborator — resolves a Sha to its working-copy mirrorDir. Cross-repo routing
   // stays OPAQUE inside this fn (the bridge's own documented scope for Plan 6).
@@ -671,6 +683,10 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
     // entirely (never a fabricated no-op stub), matching the [SWAP]-optional contract this port
     // documents at its own declaration site above.
     ...(cfg.reflectorPort ? { reflector: cfg.reflectorPort } : {}),
+    // sdd/migration-remediation Slice 3 (P0 write-confinement wiring, D-P0b): mirrors reflectorPort's
+    // own conditional-spread precedent immediately above — absent cfg.confinement means
+    // RunQaUseCaseDeps.confinement is omitted entirely (never a fabricated no-op stub).
+    ...(cfg.confinement ? { confinement: cfg.confinement } : {}),
     config: {
       needsReview: cfg.needsReview,
       shadow: cfg.shadow,

@@ -798,3 +798,31 @@ export interface CrossRepoImpactPort {
   resolve(triggerRepo: string, triggerSha: string, resolvedLinks: readonly ServiceLink[]): Promise<CrossRepoImpact | null>;
 }
 
+// ConfinementPort — sdd/migration-remediation Slice 3 (P0 write-confinement wiring, D-P0b). Detects
+// and reverts agent writes that fall outside the run's permitted area (e2e-target: only `e2e/`
+// survives; code-target: any path except CONFINEMENT_DENYLIST survives) and any changed path that is
+// a symlink whose realpath escapes the mirror root (both targets). The pure classifiers already live
+// in workspace-and-publication/domain/write-confinement.service.ts; this port's real adapter
+// (workspace-and-publication/infrastructure/write-confinement.adapter.ts) wraps them over an injected
+// Git + realpath/isSymlink — the ONLY context permitted vcs writes (dependency-cruiser's
+// no-vcs-write-in-agent-contexts gate). Local, duck-typed (this barrel's own "no cross-context
+// import" rule) — the adapter never imports this interface, it just matches its shape structurally.
+//
+// [SWAP] absent -> RunQaUseCase never calls enforce(); no revert, no gateSignals.confinement — the
+// SAME backward-compatible posture every other optional collaborator on this barrel establishes.
+//
+// Fault isolation (design D-P0b): a thrown enforce() (including a failed revert) MUST be caught by
+// the CALLER (RunQaUseCase), logged loudly, and best-effort recorded in gateSignals.confinement — it
+// MUST NEVER alter the verdict or block publish. This adapter itself does NOT swallow errors (mirrors
+// the legacy src/qa/confinement.ts::runConfinement's own "never swallows git errors" contract) — the
+// use-case owns fault isolation, matching every other [SWAP]-optional port's own established split
+// (adapter throws, use-case catches — see structuralSignal/serviceLinks/crossRepoImpact above).
+export interface ConfinementResult {
+  strays: number;
+  dangerous: number;
+  reverted: string[];
+}
+export interface ConfinementPort {
+  enforce(mirrorDir: string, isCode: boolean, signal?: AbortSignal): Promise<ConfinementResult>;
+}
+

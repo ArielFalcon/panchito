@@ -588,6 +588,11 @@ describe("seam-parity: COMPOSITION (CompositionConfig vs buildRewrittenCompositi
     reviewerApprovedForPublish: "IS supplied (true) — asserted below as a present case.",
     sanitize: "IS supplied (the real sanitizeText, F4 CRITICAL security invariant) — asserted below as a present case.",
     learningRepo: "IS supplied (SqliteLearningRepository) — asserted below as a present case.",
+    // sdd/migration-remediation Slice 3 (P0 write-confinement wiring, D-P0b, task 3.6): IS supplied
+    // (a WriteConfinementAdapter wrapping realGit — local ops, NO auth decoration — + node:fs
+    // realpathSync/lstatSync) — asserted below as a present case, the SAME "IS supplied" precedent as
+    // sanitize/learningRepo/assembleChangeCoverage immediately above.
+    confinement: "IS supplied (WriteConfinementAdapter wrapping realGit + realpathSync/lstatSync) — asserted below as a present case.",
   };
 
   function fakeAppConfig(overrides: Partial<AppConfig> = {}): AppConfig {
@@ -648,6 +653,10 @@ describe("seam-parity: COMPOSITION (CompositionConfig vs buildRewrittenCompositi
     assert.equal(cfg.reviewerApprovedForPublish, true, `reviewerApprovedForPublish dropped at ${dyingLayer}`);
     assert.notEqual(cfg.sanitize, undefined, `sanitize (F4 CRITICAL security invariant) dropped at ${dyingLayer}`);
     assert.notEqual(cfg.learningRepo, undefined, `learningRepo dropped at ${dyingLayer}`);
+    // sdd/migration-remediation Slice 3 (task 3.6): confinement must be wired unconditionally (fail-open
+    // fault isolation, not app-config gated) — the SAME "IS supplied" assertion pattern as sanitize/
+    // learningRepo immediately above.
+    assert.notEqual(cfg.confinement, undefined, `confinement (write-confinement wiring, D-P0b) dropped at ${dyingLayer}`);
     // W5 fix (seam-parity FIXME, flipped): readSpecSource IS wired now — assert it's a real file-read
     // collaborator, not just a truthy stub, by reading this very test file back through it.
     assert.equal(typeof cfg.readSpecSource, "function", `readSpecSource dropped at ${dyingLayer} (Lever-2 selector-contradiction check starves without it)`);
