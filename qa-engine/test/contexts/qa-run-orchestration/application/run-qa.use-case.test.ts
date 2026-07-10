@@ -5546,3 +5546,109 @@ test("mirrorGc wiring: a non-pr verdict (fail/issue) also triggers prune() once,
   assert.equal(out.decision.verdict, "fail");
   assert.deepEqual(order, ["publish", "prune:/tmp/qa-golden"], "prune() must fire once for a fail/issue-routed run too, strictly after publish()");
 });
+
+// ── ORCHESTRATOR RIDER (Batch 2): extend mirrorGc coverage beyond the mainline exit to every OTHER
+// exit that touched its mirror (workspace.prepare() already ran) — the terminalResult()-routed exits
+// (invalid, infra-error) and the classify-skip/agent-no-op-skip exits (both verdict "skipped"). Spec
+// §2's "successful run triggers gc" scenario literally reads "GIVEN a run completes (any verdict)".
+// Entry-gate exits that fire BEFORE workspace.prepare() (aborted, deploy-gate infra-error) never
+// touch a mirror and correctly stay excluded. ──────────────────────────────────────────────────────
+
+test("mirrorGc wiring (rider): a static-gate invalid verdict (terminalResult exit) also triggers prune() once, after that exit's own publish() resolves", async () => {
+  const order: string[] = [];
+  const { ports } = stubPorts({
+    validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }),
+    publish: async () => { order.push("publish"); return { outcome: "issue: https://example.test/issues/2" }; },
+  });
+  const mirrorGc = makeFakeMirrorGc((mirrorDir) => {
+    order.push(`prune:${mirrorDir}`);
+  });
+  const useCase = new RunQaUseCase({ ...ports, mirrorGc, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "mirror-gc-invalid" });
+
+  assert.equal(out.decision.verdict, "invalid");
+  assert.deepEqual(order, ["publish", "prune:/tmp/qa-golden"], "prune() must fire once for the static-gate invalid terminal exit, strictly after its own publish()");
+});
+
+test("mirrorGc wiring (rider): a mid-run health-preflight infra-error verdict (terminalResult exit, sideEffect none) also triggers prune() once", async () => {
+  let waitUntilServingCall = 0;
+  const { ports } = stubPorts({
+    waitUntilServing: async () => {
+      waitUntilServingCall++;
+      return waitUntilServingCall === 1 ? ok(true) : { ok: false as const, error: new Error("DEV went down mid-run") };
+    },
+  });
+  let pruneCallCount = 0;
+  let prunedMirrorDir: string | undefined;
+  const mirrorGc = makeFakeMirrorGc((mirrorDir) => {
+    pruneCallCount++;
+    prunedMirrorDir = mirrorDir;
+  });
+  const useCase = new RunQaUseCase({ ...ports, mirrorGc, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "mirror-gc-infra-error-midrun" });
+
+  assert.equal(out.decision.verdict, "infra-error");
+  assert.equal(pruneCallCount, 1, "prune() must fire once for the health-preflight infra-error terminal exit even though sideEffect is none (no publish() call on this path)");
+  assert.equal(prunedMirrorDir, "/tmp/qa-golden");
+});
+
+test("mirrorGc wiring (rider): a classify-skip verdict (bare-return skip, no persistence) also triggers prune() once — the mirror was touched by checkout before classify runs", async () => {
+  let pruneCallCount = 0;
+  let prunedMirrorDir: string | undefined;
+  const { ports } = stubPorts({ classify: async () => ({ action: "skip", reason: "docs-only commit", diff: "" }) });
+  const mirrorGc = makeFakeMirrorGc((mirrorDir) => {
+    pruneCallCount++;
+    prunedMirrorDir = mirrorDir;
+  });
+  const useCase = new RunQaUseCase({ ...ports, mirrorGc, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "mirror-gc-classify-skip" });
+
+  assert.equal(out.decision.verdict, "skipped");
+  assert.equal(pruneCallCount, 1, "prune() must fire once for the classify-skip bare-return exit");
+  assert.equal(prunedMirrorDir, "/tmp/qa-golden");
+});
+
+test("mirrorGc wiring (rider): an agent-no-op skip verdict (approved + zero specs) also triggers prune() once, after this exit's own runHistory.save()", async () => {
+  const order: string[] = [];
+  const { ports } = stubPorts({
+    generate: async () => ({ specs: [], approved: true }),
+    save: async () => { order.push("save"); },
+  });
+  const mirrorGc = makeFakeMirrorGc((mirrorDir) => {
+    order.push(`prune:${mirrorDir}`);
+  });
+  const useCase = new RunQaUseCase({ ...ports, mirrorGc, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "mirror-gc-agent-no-op-skip" });
+
+  assert.equal(out.decision.verdict, "skipped");
+  assert.deepEqual(order, ["save", "prune:/tmp/qa-golden"], "prune() must fire once for the agent-no-op skip exit, after its own runHistory.save()");
+});
+
+test("mirrorGc wiring (rider): a thrown prune() on the invalid terminal exit is fault-isolated — never alters the verdict or blocks publish", async () => {
+  let publishCallCount = 0;
+  const { ports } = stubPorts({
+    validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }),
+    publish: async () => { publishCallCount++; return { outcome: "issue: https://example.test/issues/3" }; },
+  });
+  const mirrorGc = makeFakeMirrorGc(() => new Error("git gc failed: index.lock exists"));
+  const useCase = new RunQaUseCase({ ...ports, mirrorGc, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "mirror-gc-invalid-fault-isolated" });
+
+  assert.equal(out.decision.verdict, "invalid", "a mirror-gc failure must never alter the invalid terminal exit's verdict");
+  assert.equal(publishCallCount, 1);
+});
+
+test("mirrorGc wiring (rider): a thrown prune() on the classify-skip exit is fault-isolated — never alters the verdict", async () => {
+  const { ports } = stubPorts({ classify: async () => ({ action: "skip", reason: "docs-only commit", diff: "" }) });
+  const mirrorGc = makeFakeMirrorGc(() => new Error("git gc failed: index.lock exists"));
+  const useCase = new RunQaUseCase({ ...ports, mirrorGc, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "mirror-gc-skip-fault-isolated" });
+
+  assert.equal(out.decision.verdict, "skipped", "a mirror-gc failure must never alter the classify-skip exit's verdict");
+});

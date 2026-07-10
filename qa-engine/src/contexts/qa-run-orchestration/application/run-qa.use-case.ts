@@ -517,6 +517,11 @@ export class RunQaUseCase {
       classificationReason = classification.reason;
       classificationContradiction = classification.contradiction;
       if (classification.action === "skip") {
+        // sdd/migration-wiring-phase-2 Slice 2 rider (extended gc coverage, apply batch 2): the
+        // mirror was already touched by workspace.prepare()'s checkout above (per-run flow: checkout
+        // happens BEFORE classify — CLAUDE.md's own run-flow ordering), even though this bare-return
+        // skip never reaches persistOutcome (FIX E's own no-persist convention, unchanged).
+        await this.pruneMirrorIfWired(workspace.mirrorDir);
         return this.skippedResult();
       }
       generating = classification.action !== "regression";
@@ -851,6 +856,10 @@ export class RunQaUseCase {
         ...(confinementAcc !== undefined ? { confinement: confinementAcc } : {}),
       });
       await this.deps.runHistory.save(skippedOutcome);
+      // sdd/migration-wiring-phase-2 Slice 2 rider (extended gc coverage, apply batch 2): fires
+      // AFTER this exit's own persist call, mirroring the mainline/terminalResult exits' own
+      // "gc after this exit's own side effects resolve" ordering.
+      await this.pruneMirrorIfWired(workspace.mirrorDir);
       return { ...skipped, outcome: skippedOutcome };
     }
 
@@ -1113,6 +1122,10 @@ export class RunQaUseCase {
         // naturally resolves to `lastGenerated.specMetas` here — the latest generation attempt
         // reaching this point (the static-fix loop's own repair rounds, if any, above).
         resolveTested(),
+        // sdd/migration-wiring-phase-2 Slice 2 rider (extended gc coverage, apply batch 2): the run's
+        // real per-run mirrorDir, captured by workspace.prepare() above — this exit fires strictly
+        // after checkout, so its mirror is genuinely touched and must be pruned like every other exit.
+        workspace.mirrorDir,
       );
     }
 
@@ -1197,6 +1210,11 @@ export class RunQaUseCase {
         // block runs (mid-run health pre-flight is post-generate/post-static-fix-loop, pre-execute) —
         // resolveTested() naturally resolves to `lastGenerated.specMetas` here too.
         resolveTested(),
+        // sdd/migration-wiring-phase-2 Slice 2 rider (extended gc coverage, apply batch 2): the run's
+        // real per-run mirrorDir, captured by workspace.prepare() above — this exit's sideEffect is
+        // "none" (no publish() call), but the mirror was still genuinely touched (checkout + setup +
+        // generate all ran before this mid-run health check), so it must still be pruned.
+        workspace.mirrorDir,
       );
     }
     if (signal?.aborted) {
@@ -1885,22 +1903,13 @@ export class RunQaUseCase {
       publishOutcome = published.outcome;
     }
 
-    // sdd/migration-wiring-phase-2 Slice 2 (D-B mirror-gc): [SWAP] absent this.deps.mirrorGc -> a
-    // no-op. Fires ONCE, here, at the tail of the mainline exit — strictly AFTER the pre-publish
-    // confinement enforcement (enforceConfinement() immediately above, before the publish() call)
-    // AND the publish() call itself have both resolved, so gc never races an in-flight git write
-    // from THIS run (the sequential queue already guarantees no OTHER run's git ops overlap it).
-    // Fault-isolated: a thrown prune() is caught here and logged loudly, never alters the verdict
-    // or blocks the run from completing (mirrors enforceConfinement's own fault-isolation contract).
-    if (this.deps.mirrorGc) {
-      try {
-        await this.deps.mirrorGc.prune(workspace.mirrorDir);
-      } catch (err) {
-        console.error(
-          `[qa] mirror gc FAILED (fault-isolated — run continues, never blocks publish): ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
+    // sdd/migration-wiring-phase-2 Slice 2 (D-B mirror-gc): fires ONCE, here, at the tail of the
+    // mainline exit — strictly AFTER the pre-publish confinement enforcement (enforceConfinement()
+    // immediately above, before the publish() call) AND the publish() call itself have both
+    // resolved, so gc never races an in-flight git write from THIS run (the sequential queue
+    // already guarantees no OTHER run's git ops overlap it). See pruneMirrorIfWired's own header
+    // for the [SWAP]/fault-isolation contract shared with every other exit that touches a mirror.
+    await this.pruneMirrorIfWired(workspace.mirrorDir);
 
     // Phase: persist (RunHistoryPort) + fold (LearningPort).
     //
@@ -2433,6 +2442,27 @@ export class RunQaUseCase {
     return this.infraErrorResult();
   }
 
+  // sdd/migration-wiring-phase-2 Slice 2 rider (extended gc coverage, apply batch 2): shared
+  // fault-isolated gc trigger for every exit that has ALREADY called workspace.prepare() (i.e. the
+  // mirror was genuinely touched) — the mainline exit (pass/fail/flaky), the terminalResult()-routed
+  // exits (invalid/infra-error), and the classify-skip/agent-no-op-skip exits (both verdict
+  // "skipped"). Entry-gate exits that fire BEFORE workspace.prepare() (aborted, deploy-gate
+  // infra-error) never call this — their mirror was never touched, matching spec §2's "GIVEN a run
+  // completes (any verdict) and touched its mirror" scenario guard exactly.
+  // [SWAP] absent this.deps.mirrorGc -> a no-op. Fault-isolated: a thrown prune() is caught here and
+  // logged loudly, never alters the verdict or blocks the run from completing (mirrors
+  // enforceConfinement's own fault-isolation contract).
+  private async pruneMirrorIfWired(mirrorDir: string): Promise<void> {
+    if (!this.deps.mirrorGc) return;
+    try {
+      await this.deps.mirrorGc.prune(mirrorDir);
+    } catch (err) {
+      console.error(
+        `[qa] mirror gc FAILED (fault-isolated — run continues, never blocks publish): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   // FIX E (judgment-day): persist/fold on the two terminal early-exits this helper serves,
   // matching each legacy source EXACTLY (both save; only "invalid" also folds):
   //   invalid     (src/pipeline.ts:2313-2325) -> persistOutcome save YES, foldRunLearning save YES
@@ -2530,6 +2560,14 @@ export class RunQaUseCase {
     // terminalResult, it goes AFTER confinement, not before"). Undefined for a caller that predates
     // this fix, or a run with no generation-sourced specMetas to report — never fabricated.
     tested?: { flow?: string; objective?: string }[],
+    // sdd/migration-wiring-phase-2 Slice 2 rider (extended gc coverage, apply batch 2): the run's
+    // real per-run mirrorDir (workspace.prepare()'s own return value, captured by BOTH callers of
+    // this helper — static-gate invalid and mid-run health-preflight infra-error, both of which fire
+    // strictly after workspace.prepare() already ran) — goes AFTER tested (Slice 4's own trailing
+    // param), matching this signature's own established "new params append at the end" convention.
+    // Undefined for a caller that predates this fix — pruneMirrorIfWired is only invoked when present,
+    // never fabricated.
+    mirrorDir?: string,
   ): Promise<RunQaResult> {
     const decision = decide({
       verdict,
@@ -2572,6 +2610,15 @@ export class RunQaUseCase {
         ...(tested?.length ? { tested } : {}),
       });
       publishOutcome = published.outcome;
+    }
+    // sdd/migration-wiring-phase-2 Slice 2 rider (extended gc coverage, apply batch 2): mirrors the
+    // mainline exit's own gc trigger (pruneMirrorIfWired's header) — fires after THIS exit's own
+    // publish() call resolves (or immediately, when sideEffect is "none" and publish never ran, e.g.
+    // the mid-run health-preflight infra-error exit), so this exit's mirror is pruned exactly like
+    // every other completed run that touched it. Absent mirrorDir -> a structural no-op (a caller
+    // that predates this fix, or fires before workspace.prepare()).
+    if (mirrorDir) {
+      await this.pruneMirrorIfWired(mirrorDir);
     }
     // Thread the publish outcome into the note (append, never clobber an existing diagnostic note
     // such as the static-gate's joined validation errors or the health pre-flight's captured
