@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sanitizeText, containsSecrets, SECRET_AUDIT, recordAudit, capText, MAX_PROMPT_BODY_CHARS, capDiff, MAX_PROMPT_DIFF_CHARS } from "./sanitizer";
+import { sanitizeText, containsSecrets, assertNoSecretLeak, SecretLeakError, SECRET_AUDIT, recordAudit, capText, MAX_PROMPT_BODY_CHARS, capDiff, MAX_PROMPT_DIFF_CHARS } from "./sanitizer";
 
 test("redacts secrets (api key, token)", () => {
   const { text: out } = sanitizeText("const apiKey = sk-abc123XYZ\ntoken: ghs_supersecretvalue");
@@ -44,6 +44,95 @@ test("issue mode (explicit): identical to default — aggressive public-surface 
   const withDefault = sanitizeText("token = getToken();");
   const withExplicit = sanitizeText("token = getToken();", "issue");
   assert.deepEqual(withExplicit, withDefault);
+});
+
+// ── sdd/migration-wiring-phase-2 Slice 6a (AMENDMENT 1, mode-aware containsSecrets) ──────────────
+// As shipped, containsSecrets() never consulted modelSkip at all — every call behaved like "issue"
+// mode, re-flagging text sanitizeText(text,"model") had deliberately left untouched. This is the
+// EXACT false positive that would have thrown SecretLeakError on any diff touching ordinary
+// auth-shaped code once the Slice 6b guard is wired — this repo's own src/server/auth.ts carries
+// these shapes and this repo runs code-mode QA on itself. The regression fixtures below mirror
+// auth.ts's real signatures verbatim (function sign(data: string, secret: string): string,
+// issueSession(username: string, secret: string, ttlSeconds: number, ...), validateSession(token:
+// string, secret: string, now = Date.now())).
+test("containsSecrets: model mode does NOT flag auth.ts-shaped type annotations after model-mode redaction (regression, the guard's own safety gate)", () => {
+  const authShapes = [
+    "function sign(data: string, secret: string): string {",
+    "export function issueSession(username: string, secret: string, ttlSeconds: number, now = Date.now()): string {",
+    "export function validateSession(token: string, secret: string, now = Date.now()): string | null {",
+  ].join("\n");
+  const redacted = sanitizeText(authShapes, "model").text;
+  assert.equal(
+    containsSecrets(redacted, "model"),
+    false,
+    "a type annotation carries no secret value — model mode must not flag it (this would have thrown SecretLeakError on this repo's own auth.ts)",
+  );
+});
+
+test("containsSecrets: model mode does NOT flag a bare call expression assigned to a credential-named variable", () => {
+  const redacted = sanitizeText("const token = getToken();", "model").text;
+  assert.equal(containsSecrets(redacted, "model"), false, "a call expression carries no literal secret value");
+});
+
+test("containsSecrets: model mode STILL flags a quoted string literal assigned to a credential field", () => {
+  assert.equal(
+    containsSecrets('const password = "hunter2";', "model"),
+    true,
+    "a quoted literal is the real secret shape and model mode must still flag it (never redacted -> guard must fire)",
+  );
+});
+
+test("containsSecrets: model mode STILL flags a high-entropy bare token value", () => {
+  assert.equal(containsSecrets("token = aZ9kP2mQ7xR4tL6vB8nH1cJ3s", "model"), true, "a high-entropy bare token is still a real secret shape");
+});
+
+test("containsSecrets: issue mode (default) is byte-identical to pre-AMENDMENT-1 behavior — still flags a type annotation", () => {
+  assert.equal(containsSecrets("password: string;"), true, "issue mode (default) must keep the existing aggressive behavior unchanged");
+  assert.equal(containsSecrets("password: string;", "issue"), true, "issue mode (explicit) identical to default");
+});
+
+test("containsSecrets: issue mode never regresses on a genuine secret (byte-identical existing behavior)", () => {
+  assert.equal(containsSecrets("const apiKey = sk-abc123XYZsecretvalue"), true);
+});
+
+test("containsSecrets: false-positive tolerance — a git SHA covered by the base64-secret skip predicate never trips, in either mode", () => {
+  const sha = "a".repeat(40); // pure-hex run, the base64-secret pattern's own `skip` predicate
+  assert.equal(containsSecrets(sha), false, "issue mode must not flag a git SHA");
+  assert.equal(containsSecrets(sha, "model"), false, "model mode must not flag a git SHA either");
+});
+
+// ── sdd/migration-wiring-phase-2 Slice 6b — the post-redaction fail-loud guard ────────────────────
+// assertNoSecretLeak is the shared enforcement primitive both egress boundaries build on (diff→model
+// directly; logs→Issue via its own local mirror in publication-port.adapter.ts, which cannot import
+// this module — see SecretLeakError's own doc). Testing it directly proves the THROW mechanism
+// itself: sanitizeText/containsSecrets already share one pattern table with identical skip/modelSkip
+// logic, so a secret genuinely surviving THIS module's own redaction is not constructible today — the
+// guard exists as an invariant check against a FUTURE regression (a pattern added to one function but
+// not the other), and this is the test that would catch it.
+test("assertNoSecretLeak: throws SecretLeakError when the text still contains a detectable secret", () => {
+  assert.throws(
+    () => assertNoSecretLeak('const apiKey = "sk-live-abc123XYZsecretvalue"', "issue", "diff→model"),
+    SecretLeakError,
+  );
+});
+
+test("assertNoSecretLeak: the thrown error names the boundary (greppable, never a generic message)", () => {
+  try {
+    assertNoSecretLeak('const apiKey = "sk-live-abc123XYZsecretvalue"', "issue", "diff→model");
+    assert.fail("expected assertNoSecretLeak to throw");
+  } catch (err) {
+    assert.ok(err instanceof SecretLeakError);
+    assert.match((err as Error).message, /diff→model/);
+  }
+});
+
+test("assertNoSecretLeak: does NOT throw when the text is already clean (fully redacted diffs/logs pass through)", () => {
+  assert.doesNotThrow(() => assertNoSecretLeak(sanitizeText("const apiKey = sk-abc123XYZsecretvalue", "model").text, "model", "diff→model"));
+});
+
+test("assertNoSecretLeak: does NOT throw on an auth.ts-shaped diff in model mode (the guard's own false-positive gate)", () => {
+  const redacted = sanitizeText("password: string;\ntoken: string;", "model").text;
+  assert.doesNotThrow(() => assertNoSecretLeak(redacted, "model", "diff→model"));
 });
 
 test("capText passes short prose through unchanged", () => {

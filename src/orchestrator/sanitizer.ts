@@ -16,7 +16,12 @@
 // the port's own contract. `src/util/redact.ts`'s `[REDACTED_CREDENTIAL]` is a DIFFERENT mechanism
 // (env-value-driven shell-layer scrubbing) and is explicitly OUT of scope — see the spec's Phase 2
 // follow-up requirement.
-import { REDACTED, type RedactionPort } from "../../qa-engine/src/shared-kernel/ports/redaction.port";
+import { REDACTED, SecretLeakError, type RedactionPort } from "../../qa-engine/src/shared-kernel/ports/redaction.port";
+
+// Re-exported so src/ callers (prompts.ts, opencode-client.ts) import it from this module alongside
+// sanitizeText/containsSecrets, matching the design's own placement — see SecretLeakError's own doc
+// (qa-engine/src/shared-kernel/ports/redaction.port.ts) for why it is DEFINED in the shared kernel.
+export { SecretLeakError };
 
 export interface SecretDetection {
   redacted: boolean;
@@ -233,22 +238,50 @@ export function sanitizeText(input: string, mode: SanitizeMode = "issue"): { tex
   };
 }
 
-export function containsSecrets(text: string): boolean {
+// AMENDMENT 1 (migration-wiring-phase-2 Slice 6a, mode-aware guard fix): as originally shipped this
+// function destructured only `{ p, skip }` and never consulted `modelSkip` at all — every call
+// behaved like "issue" mode regardless of what boundary it guarded. That re-applied the aggressive
+// issue-mode api-key-assignment pattern to model-mode-sanitized text: `sanitizeText("secret: string",
+// "model")` correctly leaves a type annotation untouched (modelSkip, by design), but the old
+// `containsSecrets()` then flagged it anyway — a false positive on ordinary auth-shaped code (this
+// repo's own src/server/auth.ts carries these exact shapes, and runs code-mode QA on itself). Now
+// mode-aware: mirrors sanitizeText's own skip decision exactly — `mode` defaults to "issue" so every
+// pre-existing caller (execute.ts:274, code-runner.ts:638, RedactionPortAdapter.containsSecret) is
+// byte-identical; only an explicit "model" mode additionally consults modelSkip, the SAME two-tier
+// policy sanitizeText already implements.
+export function containsSecrets(text: string, mode: SanitizeMode = "issue"): boolean {
   if (!text) return false;
-  let masked = text.replace(/data:[^;]+;base64,[A-Za-z0-9+/=]+/gi, "");
-  for (const { p, skip } of NAMED_SECRET_PATTERNS) {
+  const masked = text.replace(/data:[^;]+;base64,[A-Za-z0-9+/=]+/gi, "");
+  for (const { p, skip, modelSkip } of NAMED_SECRET_PATTERNS) {
     // These are module-level /g regexes; .test()/.exec() advance and persist lastIndex,
     // which would make repeated calls alternate — reset so detection is deterministic.
     p.lastIndex = 0;
-    if (skip) {
-      // Only a non-skipped match counts as a real secret (a git SHA must not trip this).
+    const hasConditionalSkip = Boolean(skip) || (mode === "model" && Boolean(modelSkip));
+    if (hasConditionalSkip) {
+      // Only a match that neither `skip` (a recognised non-secret, e.g. a git SHA) nor, in "model"
+      // mode, `modelSkip` (an ordinary code shape — a type annotation, a bare call expression)
+      // excuses counts as a real secret.
       const ms = masked.match(p);
-      if (ms?.some((m) => !skip(m))) return true;
+      const isRealSecret = (m: string): boolean => !(skip?.(m) ?? false) && !(mode === "model" && modelSkip?.(m));
+      if (ms?.some(isRealSecret)) return true;
     } else if (p.test(masked)) {
       return true;
     }
   }
   return false;
+}
+
+// diff→model boundary (Slice 6b): the post-redaction fail-loud guard. Runs AFTER sanitizeText/redact
+// has already scrubbed the text; if a secret is STILL detectable, that is an invariant violation the
+// caller must never launder into a silent send — throw loudly rather than proceed. `boundary` is a
+// short label for the error message only (e.g. "diff→model"), so the two egress boundaries (this
+// one, and logs→Issue's own local mirror in publication-port.adapter.ts — qa-engine cannot import
+// this function, see SecretLeakError's own doc) produce distinguishable, greppable failures.
+export function assertNoSecretLeak(redactedText: string, mode: SanitizeMode, boundary: string): void {
+  if (containsSecrets(redactedText, mode)) {
+    console.error(`[sanitizer] ${boundary}: a secret survived redaction — refusing to proceed`);
+    throw new SecretLeakError(`${boundary}: a secret survived redaction — refusing to proceed`);
+  }
 }
 
 export const SECRET_AUDIT = new Map<string, number>();
