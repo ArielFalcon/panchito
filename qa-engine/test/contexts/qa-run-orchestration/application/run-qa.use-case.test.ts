@@ -31,7 +31,7 @@ import type {
 // cross-run-learning (co-located with StructuredReflection/LearningRepositoryPort), NOT in this
 // context's own ports barrel — same cross-context import precedent as LearningRepositoryPort
 // (composition-root.ts / learning-port.adapter.ts).
-import type { ReflectorPort, ReflectionInput } from "@contexts/cross-run-learning/application/ports/index.ts";
+import type { ReflectorPort, ReflectionInput, ProcessAuditPort } from "@contexts/cross-run-learning/application/ports/index.ts";
 import { BlastRadius } from "@kernel/blast-radius.ts";
 import { ok, err } from "@kernel/result.ts";
 import type { RunOutcome } from "@kernel/run-outcome.ts";
@@ -1980,6 +1980,104 @@ test("reflector-rewire: RunOutcome.reflection stays undefined on the use-case's 
   // tests (reflector-port.adapter.test.ts), not re-tested here.
   assert.equal(reflectCallCount, 1, "reflector.reflect() must have been called (static-gate invalid is gate-true)");
   assert.equal(savedReflection, undefined, "RunOutcome.reflection is NOT populated by this use-case's own save() call — back-fill happens host-side via updateRunOutcomeReflection (ADR-2), never inside RunQaUseCase");
+});
+
+// ── sdd/migration-remediation Slice 5 (P1 process-audit reconnect, D-P1b): ProcessAuditPort is
+// [SWAP]-optional and invoked at BOTH fold sites (mirrors reflector) under the EXACT SAME gate as
+// reflector — shouldDistillLearning(...) AND verdict !== "flaky" AND errorClass not in
+// {E-INFRA, E-FLAKY}. Fault isolation/timeouts are the ADAPTER's own contract (see
+// process-audit-port.adapter.test.ts) — this use-case awaits audit() with no extra try/catch of its
+// own, exactly like it does for reflector.reflect(). ──────────────────────────────────────────────
+
+function makeFakeProcessAudit(onAudit: (outcome: RunOutcome) => void): ProcessAuditPort {
+  return {
+    audit: async (outcome) => { onAudit(outcome); },
+  };
+}
+
+test("process-audit: flaky verdict — learning.fold() IS called (fold gate unchanged), processAudit.audit() is NOT called (stricter gate, mirrors reflector)", async () => {
+  let foldCallCount = 0;
+  let auditCallCount = 0;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "flaky", cases: [{ name: "checkout", status: "flaky" as const }], logs: "" }),
+  });
+  ports.learning.fold = async () => { foldCallCount++; };
+  const processAudit = makeFakeProcessAudit(() => { auditCallCount++; });
+  const useCase = new RunQaUseCase({ ...ports, processAudit, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "process-audit-flaky-fold-yes-audit-no" });
+
+  assert.equal(out.decision.verdict, "flaky");
+  assert.equal(foldCallCount, 1, "learning.fold() must still be called on a flaky verdict");
+  assert.equal(auditCallCount, 0, "processAudit.audit() must NOT be called on a flaky verdict — same stricter gate as reflector");
+});
+
+test("process-audit: static-gate invalid (errorClass=E-STATIC, TERMINAL fold site) — learning.fold() AND processAudit.audit() are BOTH called with the persisted outcome", async () => {
+  let foldCallCount = 0;
+  let capturedOutcome: RunOutcome | undefined;
+  const { ports } = stubPorts({ validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }) });
+  ports.learning.fold = async () => { foldCallCount++; };
+  const processAudit = makeFakeProcessAudit((outcome) => { capturedOutcome = outcome; });
+  const useCase = new RunQaUseCase({ ...ports, processAudit, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "process-audit-static-invalid-terminal-both-called" });
+
+  assert.equal(out.decision.verdict, "invalid");
+  assert.equal(out.errorClass, "E-STATIC");
+  assert.equal(foldCallCount, 1, "learning.fold() must be called on a static-gate invalid");
+  assert.ok(capturedOutcome, "processAudit.audit() must be called on a static-gate invalid (the TERMINAL fold site)");
+  assert.equal(capturedOutcome?.verdict, "invalid");
+  assert.equal(capturedOutcome?.errorClass, "E-STATIC");
+  assert.equal(capturedOutcome?.runId, "process-audit-static-invalid-terminal-both-called");
+});
+
+test("process-audit: fail run with a real errorClass (E-EXEC-FAIL, MAINLINE fold site) — learning.fold() AND processAudit.audit() are BOTH called", async () => {
+  let foldCallCount = 0;
+  let auditCallCount = 0;
+  let capturedOutcome: RunOutcome | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "fail" as const, cases: [{ name: "checkout", status: "fail" as const, detail: "assertion failed" }], logs: "x" }),
+  });
+  ports.learning.fold = async () => { foldCallCount++; };
+  const processAudit = makeFakeProcessAudit((outcome) => { auditCallCount++; capturedOutcome = outcome; });
+  const useCase = new RunQaUseCase({ ...ports, processAudit, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "process-audit-mainline-real-errorclass" });
+
+  assert.equal(out.decision.verdict, "fail");
+  assert.equal(out.errorClass, "E-EXEC-FAIL");
+  assert.equal(foldCallCount, 1, "learning.fold() must be called on a genuine failure (MAINLINE fold site)");
+  assert.equal(auditCallCount, 1, "processAudit.audit() must be called on a genuine failure (MAINLINE fold site)");
+  assert.equal(capturedOutcome?.errorClass, "E-EXEC-FAIL");
+});
+
+test("process-audit: a clean green run (errorClass:null) — learning.fold() IS called, processAudit.audit() is NOT called (same WS1.2 null-guard reflect shares)", async () => {
+  let foldCallCount = 0;
+  let auditCallCount = 0;
+  const { ports } = stubPorts(); // default execute() => clean pass, coverageRatio stays null
+  ports.learning.fold = async () => { foldCallCount++; };
+  const processAudit = makeFakeProcessAudit(() => { auditCallCount++; });
+  const useCase = new RunQaUseCase({ ...ports, processAudit, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "process-audit-clean-pass-fold-yes-audit-no" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(out.errorClass, null);
+  assert.equal(foldCallCount, 1, "learning.fold() must still be called on a clean pass");
+  assert.equal(auditCallCount, 0, "processAudit.audit() must NOT be called on a clean pass — no qualifying failure to audit");
+});
+
+test("process-audit: processAudit dep ABSENT ([SWAP]-optional) — a gate-true outcome still runs fold, audit is skipped without error", async () => {
+  let foldCallCount = 0;
+  const { ports } = stubPorts({ validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }) });
+  ports.learning.fold = async () => { foldCallCount++; };
+  // No `processAudit` key at all — mirrors every pre-existing composition that has not wired one yet.
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "process-audit-absent-no-behavior-change" });
+
+  assert.equal(out.decision.verdict, "invalid");
+  assert.equal(foldCallCount, 1, "learning.fold() must still run when processAudit is unwired — dormant, pre-cutover-equivalent behavior");
 });
 
 // ── SETUP phase (CLAUDE.md run-flow step 3): "bootstrap the config/e2e seed into e2e/, then npm ci;

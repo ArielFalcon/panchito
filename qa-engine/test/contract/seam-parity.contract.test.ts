@@ -593,6 +593,12 @@ describe("seam-parity: COMPOSITION (CompositionConfig vs buildRewrittenCompositi
     // realpathSync/lstatSync) — asserted below as a present case, the SAME "IS supplied" precedent as
     // sanitize/learningRepo/assembleChangeCoverage immediately above.
     confinement: "IS supplied (WriteConfinementAdapter wrapping realGit + realpathSync/lstatSync) — asserted below as a present case.",
+    // sdd/migration-remediation Slice 5 (P1 process-audit reconnect, D-P1b, task 5.7): IS supplied
+    // (a ProcessAuditPortAdapter wrapping history.ts's listRunOutcomes/listLearningRules reads + the
+    // 3 sinks recordIncident/setRuleStatusByHuman/markContextStale) — wired UNCONDITIONALLY (fail-open
+    // fault isolation, not app-config gated), the SAME "IS supplied" precedent confinement/
+    // reflectorPort establish immediately above. Asserted below as a present case.
+    processAudit: "IS supplied (ProcessAuditPortAdapter wrapping history.ts reads + recordIncident/setRuleStatusByHuman/markContextStale sinks) — asserted below as a present case.",
   };
 
   function fakeAppConfig(overrides: Partial<AppConfig> = {}): AppConfig {
@@ -657,6 +663,10 @@ describe("seam-parity: COMPOSITION (CompositionConfig vs buildRewrittenCompositi
     // fault isolation, not app-config gated) — the SAME "IS supplied" assertion pattern as sanitize/
     // learningRepo immediately above.
     assert.notEqual(cfg.confinement, undefined, `confinement (write-confinement wiring, D-P0b) dropped at ${dyingLayer}`);
+    // sdd/migration-remediation Slice 5 (task 5.7): processAudit must be wired unconditionally (fail-
+    // open fault isolation, not app-config gated) — the SAME "IS supplied" assertion pattern as
+    // confinement immediately above.
+    assert.notEqual(cfg.processAudit, undefined, `processAudit (process-audit reconnect, D-P1b) dropped at ${dyingLayer}`);
     // W5 fix (seam-parity FIXME, flipped): readSpecSource IS wired now — assert it's a real file-read
     // collaborator, not just a truthy stub, by reading this very test file back through it.
     assert.equal(typeof cfg.readSpecSource, "function", `readSpecSource dropped at ${dyingLayer} (Lever-2 selector-contradiction check starves without it)`);

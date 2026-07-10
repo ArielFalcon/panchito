@@ -61,6 +61,9 @@ test("buildRewrittenCompositionConfig maps an e2e AppConfig into a complete Comp
   assert.ok(config.githubIssue, "githubIssue collaborator must be wired");
   assert.ok(config.vcsWrite, "PROD-BLOCKER fix: vcsWrite collaborator must be wired — without it the 'pr' route throws at publish() time instead of silently opening a PR against an unpushed branch");
   assert.equal(typeof config.checkout, "function");
+  assert.ok(config.confinement, "sdd/migration-remediation Slice 3: ConfinementPort collaborator must be wired");
+  assert.ok(config.reflectorPort, "reflector-rewire: ReflectorPort collaborator must be wired");
+  assert.ok(config.processAudit, "sdd/migration-remediation Slice 5: ProcessAuditPort collaborator must be wired");
 });
 
 // ── follow-up #27: bounded contract-repair (RepairPort) wired into the rewritten production path ──

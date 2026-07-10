@@ -75,7 +75,7 @@ import { checkPreExecGrounding, checkPersistingAmbiguity } from "../domain/pre-e
 // (co-located with StructuredReflection/LearningRepositoryPort), not in this context's own ports
 // barrel — same cross-context import precedent as LearningRepositoryPort (composition-root.ts /
 // learning-port.adapter.ts already import from @contexts/cross-run-learning/application/ports).
-import type { ReflectorPort, ReflectionInput } from "@contexts/cross-run-learning/application/ports/index.ts";
+import type { ReflectorPort, ReflectionInput, ProcessAuditPort } from "@contexts/cross-run-learning/application/ports/index.ts";
 // WS1.5 (full-flow remediation): detectArchetype is the diff's structural-shape detector (pure
 // domain logic, same cross-context import precedent as ReflectorPort/ReflectionInput above).
 import { detectArchetype } from "@contexts/cross-run-learning/domain/distill-rule.ts";
@@ -273,6 +273,19 @@ export interface RunQaUseCaseDeps {
   // this run makes is MERGED (summed/concatenated) into one gateSignals.confinement value — see
   // this method's own confinementAcc/enforceConfinement local for the merge contract.
   confinement?: ConfinementPort;
+  // [SWAP] absent -> audit() is never invoked at either fold site; learning.fold() is UNAFFECTED
+  // (dormant, pre-cutover-equivalent — the SAME backward-compatible posture reflector/confinement/
+  // crossRepoImpact/serviceLinks/structuralSignal already establish). sdd/migration-remediation
+  // Slice 5 (P1 process-audit reconnect, D-P1b): when present, invoked AFTER learning.fold() at
+  // EACH fold site, under the EXACT SAME condition this use-case already computes for reflector
+  // (shouldDistillLearning(...) AND verdict !== "flaky" AND errorClass not in {E-INFRA, E-FLAKY}) —
+  // see this use-case's own reflect/audit call sites for the literal duplicated condition (kept as a
+  // separate, independently-optional check rather than a shared boolean, so processAudit and
+  // reflector stay fully independent [SWAP] collaborators — one being absent never affects the
+  // other). Fault-isolated + timeout-capped by the adapter itself (ProcessAuditPortAdapter's own
+  // documented contract, mirrors ReflectorPortAdapter's) — this use-case awaits audit() with no
+  // extra try/catch of its own, trusting that contract exactly like it trusts reflector's.
+  processAudit?: ProcessAuditPort;
   config?: Partial<RunQaConfig>;
 }
 
@@ -2028,6 +2041,32 @@ export class RunQaUseCase {
           text: `[qa] reflect() for run ${mainlineOutcome.runId} took ${reflectMs}ms`,
         });
       }
+
+      // sdd/migration-remediation Slice 5 (P1 process-audit reconnect, D-P1b): mirrors the reflect
+      // block immediately above — the EXACT SAME gate condition, duplicated rather than shared, so
+      // processAudit and reflector remain fully independent [SWAP] collaborators (RunQaUseCaseDeps.
+      // processAudit's own header explains why). Fault-isolated + timeout-capped by the adapter
+      // itself — no extra try/catch here, mirroring the reflect call immediately above.
+      if (
+        this.deps.processAudit &&
+        shouldDistillLearning(cfg.isCode, decision.verdict, mainlineOutcome.adjudication?.class) &&
+        decision.verdict !== "flaky" &&
+        mainlineOutcome.errorClass !== "E-INFRA" &&
+        mainlineOutcome.errorClass !== "E-FLAKY" &&
+        mainlineOutcome.errorClass != null &&
+        mainlineOutcome.errorClass !== ""
+      ) {
+        // WS6.3-style duration telemetry, mirrors the reflect call's own convention immediately
+        // above — makes the audit's own cost visible on the existing run-event "log.line" channel.
+        const auditStartedAt = Date.now();
+        await this.deps.processAudit.audit(mainlineOutcome);
+        const auditMs = Date.now() - auditStartedAt;
+        this.deps.observer?.onEvent({
+          type: "log.line",
+          level: "info",
+          text: `[qa] processAudit.audit() for run ${mainlineOutcome.runId} took ${auditMs}ms`,
+        });
+      }
     }
 
     this.deps.observer?.onStep("done");
@@ -2581,6 +2620,28 @@ export class RunQaUseCase {
           type: "log.line",
           level: "info",
           text: `[qa] reflect() for run ${terminalOutcome.runId} took ${reflectMs}ms`,
+        });
+      }
+
+      // sdd/migration-remediation Slice 5 (P1 process-audit reconnect, D-P1b): mirrors the terminal
+      // reflect block immediately above — same duplicated-gate rationale as the mainline site (see
+      // RunQaUseCaseDeps.processAudit's own header). Structural belt-and-braces on
+      // errorClass!=="E-INFRA"/"E-FLAKY" for the SAME reason the reflect block above documents (this
+      // path's `verdict==="invalid"` narrowing makes it currently unreachable, kept for parity).
+      if (
+        this.deps.processAudit &&
+        verdict === "invalid" &&
+        shouldDistillLearning(cfg.isCode, verdict, terminalOutcome.adjudication?.class) &&
+        terminalOutcome.errorClass !== "E-INFRA" &&
+        terminalOutcome.errorClass !== "E-FLAKY"
+      ) {
+        const auditStartedAt = Date.now();
+        await this.deps.processAudit.audit(terminalOutcome);
+        const auditMs = Date.now() - auditStartedAt;
+        this.deps.observer?.onEvent({
+          type: "log.line",
+          level: "info",
+          text: `[qa] processAudit.audit() for run ${terminalOutcome.runId} took ${auditMs}ms`,
         });
       }
     }

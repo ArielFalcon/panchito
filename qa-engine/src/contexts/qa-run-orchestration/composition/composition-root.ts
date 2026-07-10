@@ -79,7 +79,7 @@ import { ShadowLogAdapter } from "@contexts/workspace-and-publication/infrastruc
 // doc for the full boundary rationale).
 import { renderIssue, renderPrBody } from "@contexts/workspace-and-publication/domain/render-publication.ts";
 import type { VcsReadPort } from "@contexts/change-analysis/application/ports/index.ts";
-import type { LearningRepositoryPort, ReflectorPort } from "@contexts/cross-run-learning/application/ports/index.ts";
+import type { LearningRepositoryPort, ReflectorPort, ProcessAuditPort } from "@contexts/cross-run-learning/application/ports/index.ts";
 import { StubLearningRepository } from "@contexts/cross-run-learning/infrastructure/stub-learning-repository.adapter.ts";
 
 // The static per-run + collaborator surface every bridge needs. Real construction of each
@@ -321,6 +321,17 @@ export interface CompositionConfig {
   // inside workspace-and-publication/infrastructure). Threaded straight through to
   // RunQaUseCaseDeps.confinement below — no default, no wrapping (same posture as reflectorPort).
   confinement?: ConfinementPort;
+
+  // ProcessAuditPort collaborator (sdd/migration-remediation Slice 5, P1 process-audit reconnect,
+  // D-P1b) — [SWAP]-optional, mirrors reflectorPort's own "absent -> no-op" precedent immediately
+  // above. Unlike learningRepo, there is no stub default constructed here: the production factory
+  // (src/server/rewritten-engine-factory.ts, the ONE module permitted to import both qa-engine's
+  // aliases AND root src/) is the ONLY place that can construct a real ProcessAuditPortAdapter (it
+  // needs the recent-outcomes/rules reads + the 3 sinks — recordIncident/setRuleStatusByHuman/
+  // markContextStale — all src-only collaborators this composition root must never import).
+  // Threaded straight through to RunQaUseCaseDeps.processAudit below — no default, no wrapping (same
+  // posture as reflectorPort/confinement).
+  processAudit?: ProcessAuditPort;
 
   // WorkspacePort collaborator — resolves a Sha to its working-copy mirrorDir. Cross-repo routing
   // stays OPAQUE inside this fn (the bridge's own documented scope for Plan 6).
@@ -699,6 +710,10 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
     // own conditional-spread precedent immediately above — absent cfg.confinement means
     // RunQaUseCaseDeps.confinement is omitted entirely (never a fabricated no-op stub).
     ...(cfg.confinement ? { confinement: cfg.confinement } : {}),
+    // sdd/migration-remediation Slice 5 (P1 process-audit reconnect, D-P1b): mirrors reflectorPort's/
+    // confinement's own conditional-spread precedent immediately above — absent cfg.processAudit
+    // means RunQaUseCaseDeps.processAudit is omitted entirely (never a fabricated no-op stub).
+    ...(cfg.processAudit ? { processAudit: cfg.processAudit } : {}),
     config: {
       needsReview: cfg.needsReview,
       shadow: cfg.shadow,

@@ -139,9 +139,11 @@ import { ensureMirror, ensureMirrorAtBranch, defaultMirrorDeps, workdirRoot, rea
 import { stageServiceContext, serviceContextDir } from "./service-context";
 import { SqliteRunHistoryAdapter } from "./run-history-sqlite-adapter";
 import { SqliteLearningRepository, type LearningStore } from "@contexts/cross-run-learning/infrastructure/sqlite-learning-repository.adapter";
-import { listLearningRules, listAllLearningRules, upsertLearningRule, incrementRuleUsage, recordRuleOutcome, updateRunOutcomeReflection } from "./history";
+import { listLearningRules, listAllLearningRules, upsertLearningRule, incrementRuleUsage, recordRuleOutcome, updateRunOutcomeReflection, listRunOutcomes, setRuleStatusByHuman, markContextStale } from "./history";
+import { recordIncident } from "./maintainer";
 import { preventionOutcome } from "@contexts/cross-run-learning/domain/rule-fold";
 import { ReflectorPortAdapter, REFLECT_TIMEOUT_MS } from "@contexts/cross-run-learning/infrastructure/reflector-port.adapter";
+import { ProcessAuditPortAdapter } from "@contexts/cross-run-learning/infrastructure/process-audit-port.adapter";
 import { YamlBoundaryProfileAdapter } from "@contexts/service-topology/infrastructure/yaml-boundary-profile.adapter";
 import { expandEnv } from "../orchestrator/config-loader";
 
@@ -1081,6 +1083,40 @@ export function buildRewrittenCompositionConfig(
       cwd: mirrorDir,
       app: app.name,
       timeoutMs: Number((deps.env ?? process.env).REFLECTOR_TIMEOUT_MS) || REFLECT_TIMEOUT_MS,
+    }),
+    // sdd/migration-remediation Slice 5 (P1 process-audit reconnect, D-P1b): this factory is the ONE
+    // module permitted to import both qa-engine's @contexts aliases AND root src/, so it is the ONLY
+    // place that can construct a real ProcessAuditPortAdapter — the 2 factory-injected READS
+    // (history.ts's listRunOutcomes/listLearningRules, the SAME SQLite table reflectorPort/
+    // learningRepo above already read) and the 3 SINKS (recordEngineIncident -> maintainer.ts's
+    // recordIncident; deprecateRule -> history.ts's setRuleStatusByHuman(id,"deprecated"), the
+    // `reason` argument discarded exactly like legacy's own pipeline.ts wiring did; invalidateContext
+    // -> history.ts's markContextStale, true on success matching legacy's try/catch-and-return
+    // shape) are all src-only collaborators qa-engine itself must never import.
+    processAudit: new ProcessAuditPortAdapter({
+      app: app.name,
+      readRecentOutcomes: (a, limit) => listRunOutcomes(a, limit),
+      readRules: (a, limit) => listLearningRules(a, limit),
+      deprecateRule: (ruleId) => { setRuleStatusByHuman(ruleId, "deprecated"); },
+      recordEngineIncident: (finding) =>
+        recordIncident({
+          source: "process-audit",
+          severity: finding.severity === "error" ? "error" : "warn",
+          summary: finding.summary,
+          // finding.diagnosis is never populated by this port today (Layer 2 LLM root-cause
+          // diagnosis is deferred — see process-audit.ts's own SCOPE NOTE); kept conditional so a
+          // future diagnosis producer needs no change here.
+          detail: [finding.evidence, finding.diagnosis ? `\nLIKELY ROOT CAUSE: ${finding.diagnosis}` : ""].join(""),
+        }),
+      invalidateContext: (reason) => {
+        try {
+          markContextStale(app.name);
+          console.log(`[audit] marked context stale for ${app.name} — rebuilds next run (${reason})`);
+          return true;
+        } catch {
+          return false; // best-effort — mirrors legacy's own try/catch-and-return-false shape
+        }
+      },
     }),
     ...(observer ? { observer } : {}),
   };
