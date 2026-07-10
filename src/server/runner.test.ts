@@ -471,6 +471,54 @@ test("PIPELINE_ENGINE=rewritten — RunInput.baseSha is absent (not fabricated) 
   }
 });
 
+// ── sdd/migration-wiring-phase-2 Slice 5 (D-F parentRunId producer) ────────────────────────────
+// req.parentRunId was ALREADY set correctly by src/index.ts's continueRun (the ONLY real producer,
+// the /continue API flow) — but runViaRewrittenEngine's own RunInput construction (this file)
+// dropped it before it ever reached the engine, the SAME class of gap WS7.1 closed for baseSha
+// above. These tests pin the exact seam that fix closes.
+
+test("PIPELINE_ENGINE=rewritten — the runner threads req.parentRunId into port.run's RunInput when present (a /continue-driven run)", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const { port, calls } = fakePort({ verdict: "pass" });
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-parent-run-id", sha: "def5678", target: "e2e", mode: "diff", source: "manual", parentRunId: "prior-run-abc123" },
+      { loadApp: cfg, engineFactory: () => port },
+    );
+    await queue.drain();
+    assert.equal(getRecord(id)!.verdict, "pass");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.parentRunId, "prior-run-abc123", "RunInput.parentRunId must carry req.parentRunId through to port.run — this is the exact seam Slice 5 restores");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
+test("PIPELINE_ENGINE=rewritten — RunInput.parentRunId is absent (not fabricated) when req.parentRunId is omitted", async () => {
+  const prev = process.env.PIPELINE_ENGINE;
+  process.env.PIPELINE_ENGINE = "rewritten";
+  try {
+    const queue = new JobQueue();
+    const { port, calls } = fakePort({ verdict: "pass" });
+    const id = enqueueTrackedRun(
+      queue,
+      { app: "runner-parent-run-id-absent", sha: "def5678", target: "e2e", mode: "diff", source: "webhook" },
+      { loadApp: cfg, engineFactory: () => port },
+    );
+    await queue.drain();
+    assert.equal(getRecord(id)!.verdict, "pass");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.parentRunId, undefined, "an ordinary webhook run must never fabricate a parentRunId — backward compatible with today's behavior");
+  } finally {
+    if (prev === undefined) delete process.env.PIPELINE_ENGINE;
+    else process.env.PIPELINE_ENGINE = prev;
+  }
+});
+
 // ── Bug fix (cross-repo composition threading) — engineFactory's `run` param must ALSO carry
 // triggerRepo, not just mode/guidance. Prior to this fix, req.triggerRepo reached RunInput (pinned
 // above) but never reached the engineFactory's `run` object, so rewritten-engine-factory.ts had no

@@ -321,6 +321,13 @@ async function runViaRewrittenEngine(
     // forwarded it. A push of N commits tested only the head commit's own diff; this restores the
     // full range. Absent -> unchanged (RunQaUseCase falls back to single-commit classification).
     ...(req.baseSha ? { baseSha: Sha.of(req.baseSha) } : {}),
+    // sdd/migration-wiring-phase-2 Slice 5 (D-F parentRunId producer): the SAME class of gap as
+    // baseSha immediately above — RunRequest.parentRunId (this file's own type, above) was already
+    // set correctly by src/index.ts's continueRun (the ONLY real producer, the /continue API flow),
+    // but this RunInput construction never forwarded it, so the rewritten engine's publish() call
+    // (run-qa.use-case.ts) never saw it and no "Continuation of {parentRunId}" line ever rendered
+    // for a rewritten-engine continuation run. Absent -> unchanged (ordinary run, no continuation).
+    ...(req.parentRunId ? { parentRunId: req.parentRunId } : {}),
   };
   const outcome = await port.run(input, signal);
   // W3 F3: thread the real per-case results into history.addCase (the single source of truth for

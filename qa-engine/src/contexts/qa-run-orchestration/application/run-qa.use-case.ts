@@ -327,6 +327,12 @@ export interface RunQaInput {
   // Threaded straight through by RewrittenOrchestratorAdapter (structural cast, no remapping)
   // into this run()'s own classify() call in diff mode. Absent -> single-commit classification.
   baseSha?: Sha;
+  // sdd/migration-wiring-phase-2 Slice 5 (D-F parentRunId producer): mirrors RunInput.parentRunId
+  // (../ports/index.ts) exactly — continuation provenance from the /continue API flow, the ONLY
+  // real producer. Threaded straight through by RewrittenOrchestratorAdapter (structural cast, no
+  // remapping) into this run()'s own publish() call (mainline exit). Absent -> no continuation
+  // reference rendered, never fabricated — see PublicationPort.publish()'s own parentRunId doc.
+  parentRunId?: string;
 }
 
 export interface RunQaResult {
@@ -1891,12 +1897,14 @@ export class RunQaUseCase {
         // (FixLoop-final-over-initial-generation, see that helper's own doc above) — absent/empty
         // omits the "Covers:"/"What was tested" section entirely, never fabricated.
         //
-        // parentRunId: deliberately OMITTED — the SAME class of documented gap as e2eChanged above.
-        // RunQaInput carries no parentRunId field today (the rewritten engine's continuation-
-        // provenance wiring — legacy parity: src/report/reporter.ts's PrBodyInput.parentRunId,
-        // src/server/runner.ts's own parentRunId chain — is a KNOWN GAP); PublicationPort.publish()'s
-        // type is already widened to accept one (ports/index.ts) so a FUTURE caller with a real
-        // source can thread it, but fabricating a value here would be worse than omitting it.
+        // sdd/migration-wiring-phase-2 Slice 5 (D-F parentRunId producer): RunQaInput.parentRunId,
+        // sourced ONLY from the /continue API flow (src/index.ts's continueRun -> RunRequest ->
+        // runner.ts's RunInput -> RewrittenOrchestratorAdapter, structurally threaded through
+        // unchanged). Absent for every ordinary webhook/manual/CLI run -> no continuation reference
+        // renders (render-publication.ts's own "Continuation of {parentRunId}" line stays inert) —
+        // never fabricated. Intra-run regenerations (coverage-regen, FixLoop rounds) reuse this SAME
+        // `input` object for this SAME publish() call — they structurally cannot invent their own.
+        ...(input.parentRunId ? { parentRunId: input.parentRunId } : {}),
         isCode: cfg.isCode,
         ...(resolveTested()?.length ? { tested: resolveTested() } : {}),
       });

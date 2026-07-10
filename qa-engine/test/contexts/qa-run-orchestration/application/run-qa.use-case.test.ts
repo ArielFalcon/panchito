@@ -5652,3 +5652,73 @@ test("mirrorGc wiring (rider): a thrown prune() on the classify-skip exit is fau
 
   assert.equal(out.decision.verdict, "skipped", "a mirror-gc failure must never alter the classify-skip exit's verdict");
 });
+
+// ── sdd/migration-wiring-phase-2 Slice 5 (D-F parentRunId producer): RunQaInput.parentRunId, sourced
+// ONLY from the /continue API flow's RunRequest.parentRunId (src/server/runner.ts's own
+// runViaRewrittenEngine -> RunInput construction), threads straight through into the mainline exit's
+// publish() call (run-qa.use-case.ts's own "Phase: publish" block). Absent for every ordinary
+// webhook/manual/CLI run — never fabricated. An enforce-mode coverage-regen reuses the SAME `input`
+// object for its final publish() call (it never constructs a fresh RunQaInput), so it structurally
+// cannot invent its own parentRunId — spec §6's "coverage-regen is not mistaken for a continuation"
+// scenario is a corollary of this, not a separate code path. ──────────────────────────────────────
+
+test("parentRunId (Slice 5): a continuation run threads input.parentRunId into publish()'s decision", async () => {
+  let publishedParentRunId: string | undefined;
+  const { ports } = stubPorts({
+    publish: async (decision) => {
+      publishedParentRunId = decision.parentRunId;
+      return { outcome: "pr" };
+    },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "parent-run-id-continuation", parentRunId: "prior-run-abc123" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(publishedParentRunId, "prior-run-abc123");
+});
+
+test("parentRunId (Slice 5): an ordinary run omits parentRunId from publish()'s decision entirely (never fabricated)", async () => {
+  let publishedDecisionHadParentRunIdKey = true;
+  const { ports } = stubPorts({
+    publish: async (decision) => {
+      publishedDecisionHadParentRunIdKey = "parentRunId" in decision && decision.parentRunId !== undefined;
+      return { outcome: "pr" };
+    },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "parent-run-id-ordinary" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(publishedDecisionHadParentRunIdKey, false, "no /continue source exists this run, so parentRunId must be entirely omitted — never a fabricated empty string");
+});
+
+test("parentRunId (Slice 5): an enforce-mode coverage-regen never fabricates its own parentRunId — the final publish() still reflects only the ORIGINAL run's input.parentRunId", async () => {
+  let measureCallCount = 0;
+  let publishedParentRunId: string | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "pass" as const, cases: [], logs: "" }),
+    measure: async () => {
+      measureCallCount++;
+      return measureCallCount === 1
+        ? { status: "fail" as const, ratio: 0.2, uncovered: [{ file: "src/a.ts", lines: [1, 2] }] }
+        : { status: "pass" as const, ratio: 0.95 };
+    },
+    blocks: (status) => status === "fail",
+    publish: async (decision) => {
+      publishedParentRunId = decision.parentRunId;
+      return { outcome: "pr" };
+    },
+  });
+  const useCase = new RunQaUseCase({
+    ...ports,
+    config: { ...baseConfig, needsReview: false, coveragePolicyMode: "enforce" },
+  });
+
+  const out = await useCase.run({ ...baseInput, runId: "parent-run-id-coverage-regen", parentRunId: "prior-run-xyz789" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(measureCallCount, 2, "the regen genuinely fired");
+  assert.equal(publishedParentRunId, "prior-run-xyz789", "the regen must never invent its own parentRunId — only the original run's input carries one");
+});

@@ -60,6 +60,16 @@ export interface RunInput {
   // structurally what RunQaInput expects), which forwards it to ChangeAnalysisPort.classify(sha,
   // {baseSha}) in diff mode. Absent (the common case) -> single-commit classification, unchanged.
   baseSha?: Sha;
+  // sdd/migration-wiring-phase-2 Slice 5 (D-F parentRunId producer): continuation provenance — the
+  // run this one continues. Sourced ONLY from the /continue API flow (src/server/api.ts
+  // handleContinue -> deps.continueRun -> src/index.ts's continueRun -> RunRequest.parentRunId,
+  // src/server/runner.ts). Threaded straight through by RewrittenOrchestratorAdapter.run(input) into
+  // RunQaUseCase.run(input) unchanged (this type is structurally what RunQaInput expects), which
+  // forwards it into PublicationPort.publish()'s own parentRunId field (already widened, Phase 1).
+  // Absent (the common case: webhook/manual/CLI runs) -> no continuation reference rendered, never
+  // fabricated. Intra-run regenerations (coverage-regen, FixLoop rounds) reuse this SAME `input`
+  // object for their own publish() calls — they structurally cannot invent a different parentRunId.
+  parentRunId?: string;
 }
 export interface RunPipelinePort {
   // signal is a SEPARATE transport arg (mirrors legacy runPipeline's own trailing signal
