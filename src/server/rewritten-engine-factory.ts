@@ -88,6 +88,7 @@ import { FaultInjectionOracleAdapter } from "@contexts/objective-signal/infrastr
 import { GitHubPrAdapter } from "@contexts/workspace-and-publication/infrastructure/github-pr.adapter";
 import { GitHubIssueAdapter } from "@contexts/workspace-and-publication/infrastructure/github-issue.adapter";
 import { VcsWriteAdapter } from "@contexts/workspace-and-publication/infrastructure/vcs-write.adapter";
+import { CONFINEMENT_DENYLIST } from "@contexts/workspace-and-publication/domain/write-confinement.service";
 import type { VcsPublishCollaborator } from "@contexts/qa-run-orchestration/infrastructure/bridges/publication-port.adapter";
 import { makeTargetCoverageCollector } from "@contexts/objective-signal/infrastructure/target-coverage-collector";
 import { assembleChangeCoverage } from "@contexts/objective-signal/domain/assemble-change-coverage";
@@ -180,14 +181,34 @@ export function roleToAgentName(role: AgentRole): string {
 // exactly: e2e publishes only the `e2e/` dir (publishE2e-shaped); code publishes the whole tree minus
 // installed deps/build output/run artifacts (publishCode-shaped) — the SAME split Execution/Setup/
 // Validation adapters already make on `cfg.isCode` elsewhere in this factory.
+//
+// sdd/migration-remediation D1 (docs/superpowers/2026-07-10-migration-remediation-decisions.md):
+// - `e2e/.qa/service-context/` is excluded on BOTH targets — src/server/service-context.ts writes
+//   cross-repo service snapshots there, and CODE_PUBLISH_ADD=["."] stages the whole tree, so a
+//   code-target run would leak another repo's staged context into the PR just as readily as an
+//   e2e-target run would.
+// - The e2e entries for coverage/measured.json are anchored with an `e2e/` prefix. A gitignore-style
+//   pattern with a slash NOT at the very end (a "mid-pattern slash") is anchored to the directory of
+//   the exclude file itself — for `.git/info/exclude` that is the repo root, never `e2e/`. The
+//   PRE-FIX entries `.qa/coverage/` / `.qa/measured.json` therefore excluded NOTHING (they looked for
+//   `<root>/.qa/coverage/`, never the real `<root>/e2e/.qa/coverage/`) — verified with a real
+//   git-status fixture test (rewritten-engine-factory.publish-excludes.test.ts), not an
+//   array-membership assertion (membership would have passed on the broken anchoring).
+// - `node_modules/` stays UNPREFIXED deliberately: a pattern with no slash at all (only a trailing
+//   one) is NOT anchored and matches at any depth — prefixing it would narrow it to only the
+//   top-level `e2e/node_modules/` and stop matching nested occurrences.
 const E2E_PUBLISH_ADD = ["e2e"];
-const E2E_PUBLISH_EXCLUDES = ["node_modules/", ".qa/coverage/", ".qa/measured.json"];
+const E2E_PUBLISH_EXCLUDES = ["node_modules/", "e2e/.qa/coverage/", "e2e/.qa/measured.json", "e2e/.qa/service-context/"];
 const CODE_PUBLISH_ADD = ["."];
+// sdd/migration-remediation D2: CONFINEMENT_DENYLIST (write-confinement.service.ts) is spread in
+// here so the code-target commit-time allowlist actually denies the same paths write-confinement
+// denies mid-run (.env*, .github/, Dockerfile, docker-compose*, .gitattributes, .gitmodules) — this
+// makes confinement's fault-isolated fail-open posture genuine defense-in-depth over a real
+// deterministic guard for the code target, not the only guard (CODE_PUBLISH_ADD=["."] stages the
+// whole tree, unlike the e2e target's hard `e2e/` allowlist).
 const CODE_PUBLISH_EXCLUDES = [
   "node_modules/",
-  ".env",
-  ".env.*",
-  "*.env",
+  ...CONFINEMENT_DENYLIST,
   "dist/",
   "build/",
   "__pycache__/",
@@ -198,6 +219,7 @@ const CODE_PUBLISH_EXCLUDES = [
   ".next/",
   "coverage/",
   "e2e/.qa/coverage/",
+  "e2e/.qa/service-context/",
   ".stryker-tmp/",
   "stryker.conf.json",
   "reports/mutation/",
