@@ -56,6 +56,28 @@ export class WriteConfinementService {
   // surrounding `"`, applied independently to each side of a rename).
   parseStatusOutput(out: string): ParsedChange[] {
     const stripQuotes = (p: string): string => (p.startsWith('"') && p.endsWith('"') ? p.slice(1, -1) : p);
+    // Quote-aware arrow-split index: a plain `rest.indexOf(" -> ")` first-match breaks when the
+    // OLD path is itself C-style-quoted (git quotes it whenever it literally contains " -> ", to
+    // disambiguate from the rename separator) AND that quoted path also contains " -> " — the
+    // naive search would split inside the quoted span instead of at the real separator after it.
+    // When `rest` opens with a quote, scan for its matching unescaped closing quote first (git's
+    // C-style quoting backslash-escapes embedded `"` and `\`), then require the arrow immediately
+    // after it; any other shape falls back to the plain search.
+    const findArrowSplit = (rest: string): number => {
+      if (rest[0] === '"') {
+        let i = 1;
+        while (i < rest.length) {
+          if (rest[i] === "\\") {
+            i += 2;
+            continue;
+          }
+          if (rest[i] === '"') break;
+          i++;
+        }
+        if (i < rest.length && rest.startsWith(" -> ", i + 1)) return i + 1;
+      }
+      return rest.indexOf(" -> ");
+    };
     return out
       .split("\n")
       .filter((l) => l.length > 3)
@@ -66,7 +88,7 @@ export class WriteConfinementService {
         // file whose name literally contains " -> " must keep its full path, not be truncated to a
         // phantom suffix (which would then make `git checkout` throw on a bogus pathspec).
         if (xy[0] === "R" || xy[0] === "C") {
-          const arrowIdx = rest.indexOf(" -> ");
+          const arrowIdx = findArrowSplit(rest);
           if (arrowIdx !== -1) {
             const oldPath = stripQuotes(rest.slice(0, arrowIdx));
             const newPath = stripQuotes(rest.slice(arrowIdx + 4));

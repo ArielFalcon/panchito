@@ -512,3 +512,50 @@ test("real git fixture: rename INTO a denylisted destination reverts BOTH sides 
     rmSync(repo, { recursive: true, force: true });
   }
 });
+
+// ── quote-aware rename-arrow parsing regression (Judgment Day round 2) ─────────────────────────
+//
+// git C-style-quotes a rename's OLD path whenever it literally contains " -> " (to disambiguate
+// from the rename separator). parseStatusOutput's arrow split used a first-match `indexOf`, which
+// broke inside such a quoted span. This end-to-end fixture proves the adapter still reverts BOTH
+// sides of a real staged rename whose origin filename contains " -> ", not just the unit test on
+// the parser in isolation.
+
+test("real git fixture: staged rename OUT of e2e/ whose origin filename contains ' -> ' reverts BOTH sides intact (e2e target)", async () => {
+  const repo = initRepo();
+  try {
+    writeFileSync(join(repo, "e2e", "weird -> name.spec.ts"), "test('weird', () => {});\n");
+    execFileSync("git", ["add", "-A"], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "chore: add weirdly named spec"], { cwd: repo });
+
+    execFileSync("git", ["mv", "e2e/weird -> name.spec.ts", "stray.spec.ts"], { cwd: repo });
+    const preStatus = execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" });
+    assert.ok(preStatus.startsWith("R "), "precondition: git must report a staged rename");
+    assert.ok(preStatus.includes('"e2e/weird -> name.spec.ts"'), "precondition: git must C-style-quote the origin path");
+
+    const adapter = new WriteConfinementAdapter({
+      git: realGitFn(repo),
+      realpath: realpathSync,
+      isSymlink: (p) => {
+        try {
+          return lstatSync(p).isSymbolicLink();
+        } catch {
+          return false;
+        }
+      },
+    });
+    const result = await adapter.enforce(repo, false);
+
+    assert.deepEqual(result.reverted.slice().sort(), ["e2e/weird -> name.spec.ts", "stray.spec.ts"]);
+    const status = execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" });
+    assert.equal(status.trim(), "", "the tree must be fully clean — no orphaned staged deletion of the legitimate origin");
+    assert.equal(existsSync(join(repo, "stray.spec.ts")), false, "the stray destination must be gone");
+    assert.equal(
+      readFileSync(join(repo, "e2e", "weird -> name.spec.ts"), "utf8"),
+      "test('weird', () => {});\n",
+      "the legitimate origin (whose name literally contains ' -> ') must be restored on disk with its original content",
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
