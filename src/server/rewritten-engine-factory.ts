@@ -1069,6 +1069,11 @@ export function buildRewrittenCompositionConfig(
     // shared-kernel redaction.port.ts. PublicationPortCollaborators.sanitize's own type (`(text:
     // string) => string`) is unchanged (duck-typed) — only the implementation is formalized.
     sanitize: (text: string) => redactionPort.redact(text),
+    // sdd/migration-wiring-phase-2 Slice 6b (logs→Issue egress boundary): wired UNCONDITIONALLY,
+    // alongside sanitize above — the SAME RedactionPortAdapter instance, so production is never
+    // silently unguarded (PublicationPortCollaborators.containsSecret's own doc has the full
+    // contract). Post-redaction fail-loud check on the "issue" route only.
+    containsSecret: (text: string) => redactionPort.containsSecret(text),
 
     checkout,
     // Cross-repo composition (bug fix): a cross-repo run gates on the SERVICE's own versionUrl —

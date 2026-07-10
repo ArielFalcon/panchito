@@ -23,6 +23,7 @@
 // interfaces with ZERO import edge into workspace-and-publication from this file.
 import type { RunVerdict } from "@kernel/run-verdict.ts";
 import type { QaCase } from "@kernel/qa-case.ts";
+import { SecretLeakError } from "@kernel/ports/redaction.port.ts";
 import type { PublicationPort } from "../../application/ports/index.ts";
 
 // Local structural mirror of workspace-and-publication's PublishContext/PublishDecision
@@ -124,6 +125,15 @@ export interface PublicationPortCollaborators {
   // branch — the same fail-closed OUTCOME as WS5.4b's sanitize guard, just gated on the route that
   // actually needs it instead of every route.
   vcsWrite?: VcsPublishCollaborator;
+  // sdd/migration-wiring-phase-2 Slice 6b (logs→Issue egress boundary): the post-redaction fail-loud
+  // guard — checked AFTER `sanitize` has already scrubbed the rendered Issue body, on the "issue"
+  // route only (the spec's own named boundary; the "pr"/"shadow" routes are out of this guard's
+  // scope). OPTIONAL at the type level, the SAME "vcsWrite" precedent immediately above (not every
+  // routing/rendering test in this file needs to wire it), but the REAL composition
+  // (src/server/rewritten-engine-factory.ts, via CompositionConfig.containsSecret) always supplies
+  // the real RedactionPort.containsSecret so production is never silently unguarded. Absent -> the
+  // "issue" route publishes without this extra check (today's pre-Slice-6 behavior, unchanged).
+  containsSecret?: (text: string) => boolean;
 }
 
 export interface PublicationPortStaticContext {
@@ -327,7 +337,20 @@ export class PublicationPortAdapter implements PublicationPort {
         return { outcome: `pr: ${pr.url}` };
       }
       case "issue": {
-        const issue = await this.deps.issue.open(issueRepo, title, issueBody());
+        const body = issueBody();
+        // sdd/migration-wiring-phase-2 Slice 6b (logs→Issue egress boundary): post-redaction
+        // fail-loud guard — `body` was already produced by `sanitize` above (issueBody() wraps the
+        // rendered Issue text in `sanitize`); if a secret is STILL detectable after that, refuse to
+        // publish rather than let it ship (CLAUDE.md "sanitize data leaving the system... never
+        // silently ship"). Re-redacting the same text a second time is a no-op (sanitize is
+        // deterministic), so refuse-and-record is the only meaningful response — the SAME fail-loud
+        // posture as the diff→model boundary's assertNoSecretLeak (sanitizer.ts), local-mirrored
+        // here because this file cannot import src/ (see the header's arch-lint note).
+        if (this.deps.containsSecret?.(body)) {
+          console.error("[publication] logs→Issue: a secret survived redaction — refusing to open the Issue");
+          throw new SecretLeakError("logs→Issue: a secret survived redaction — refusing to open the Issue");
+        }
+        const issue = await this.deps.issue.open(issueRepo, title, body);
         return { outcome: `issue: ${issue.url}` };
       }
       case "quarantine":

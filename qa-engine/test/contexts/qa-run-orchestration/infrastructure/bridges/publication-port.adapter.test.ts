@@ -12,6 +12,7 @@ import { GitHubPrAdapter } from "@contexts/workspace-and-publication/infrastruct
 import { GitHubIssueAdapter } from "@contexts/workspace-and-publication/infrastructure/github-issue.adapter.ts";
 import { ShadowLogAdapter } from "@contexts/workspace-and-publication/infrastructure/shadow-log.adapter.ts";
 import { renderIssue, renderPrBody } from "@contexts/workspace-and-publication/domain/render-publication.ts";
+import { SecretLeakError } from "@kernel/ports/redaction.port.ts";
 
 // sdd/migration-remediation Slice 4 (D-P1a): `render` is now a REQUIRED collaborator (the SAME
 // fail-closed posture as `sanitize`) — every construction in this file wires one. Tests that only
@@ -84,6 +85,75 @@ test("publish() routes to GitHubIssueAdapter when the decision resolves to 'issu
   const result = await adapter.publish({ verdict: "fail", cases: [{ name: "checkout", status: "fail" }], logs: "boom" });
 
   assert.match(result.outcome, /issue/);
+});
+
+// ── sdd/migration-wiring-phase-2 Slice 6b (logs→Issue egress boundary) ────────────────────────────
+// The post-redaction fail-loud guard on the "issue" route: containsSecret is checked AFTER sanitize
+// has already run over the rendered Issue body. Absent (every routing/rendering test above) — no
+// guard, today's pre-Slice-6 behavior unchanged; present + still-flagged — refuse to publish, loudly.
+
+test("publish() 'issue' route: containsSecret absent (not wired) never blocks — today's pre-Slice-6 behavior unchanged", async () => {
+  const decide = new PublishDecisionService();
+  const pr = fakePr();
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, render: fakeRender() }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "fail", cases: [{ name: "checkout", status: "fail" }], logs: "boom" });
+
+  assert.match(result.outcome, /issue/);
+});
+
+test("publish() 'issue' route: a clean rendered body passes through when containsSecret is wired (false-positive tolerance)", async () => {
+  const decide = new PublishDecisionService();
+  const pr = fakePr();
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const adapter = new PublicationPortAdapter(
+    { decide, pr, issue, shadowLog, sanitize: identitySanitize, render: fakeRender(), containsSecret: () => false },
+    { repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true },
+  );
+
+  const result = await adapter.publish({ verdict: "fail", cases: [{ name: "checkout", status: "fail" }], logs: "boom" });
+
+  assert.match(result.outcome, /issue/, "a clean body (containsSecret -> false) must publish normally");
+});
+
+test("publish() 'issue' route: a secret detected AFTER redaction refuses to publish (SecretLeakError, never a silent ship)", async () => {
+  const decide = new PublishDecisionService();
+  const pr = fakePr();
+  let opened = false;
+  const issue = new GitHubIssueAdapter(async () => { opened = true; return { url: "https://github.com/org/app/issues/5" }; });
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const adapter = new PublicationPortAdapter(
+    { decide, pr, issue, shadowLog, sanitize: identitySanitize, render: fakeRender(), containsSecret: () => true },
+    { repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true },
+  );
+
+  await assert.rejects(
+    () => adapter.publish({ verdict: "fail", cases: [{ name: "checkout", status: "fail" }], logs: "boom" }),
+    SecretLeakError,
+  );
+  assert.equal(opened, false, "the Issue must never actually open when a secret survives redaction");
+});
+
+test("publish() 'issue' route: containsSecret is never consulted on the 'pr'/'shadow' routes (scoped to the spec's own named boundary)", async () => {
+  const decide = new PublishDecisionService();
+  const pr = fakePr();
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const vcsWrite = fakeVcsWrite([]);
+  // containsSecret unconditionally true — if it were consulted on the 'pr' route this would throw.
+  const adapter = new PublicationPortAdapter(
+    { decide, pr, issue, shadowLog, sanitize: identitySanitize, render: fakeRender(), vcsWrite, containsSecret: () => true },
+    { repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true },
+  );
+
+  const result = await adapter.publish({ verdict: "pass", cases: [], logs: "", mirrorDir: "/mirrors/org/app", sha: "abc1234" });
+
+  assert.match(result.outcome, /pr/, "the 'pr' route must never be blocked by containsSecret — the spec names logs→Issue as the boundary, not pr");
 });
 
 test("publish() routes to ShadowLogAdapter when shadow:true, regardless of verdict", async () => {

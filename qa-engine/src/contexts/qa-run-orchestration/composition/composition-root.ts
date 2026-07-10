@@ -296,6 +296,12 @@ export interface CompositionConfig {
   // composition root that owns a src/ import (src/server/rewritten-engine-factory.ts) wires the REAL
   // sanitizeText here; qa-engine/src stays src/-free — the sanitizer is injected, never imported.
   sanitize?: (text: string) => string;
+  // sdd/migration-wiring-phase-2 Slice 6b (logs→Issue egress boundary): the post-redaction fail-loud
+  // guard PublicationPortCollaborators.containsSecret consumes on the "issue" route (that file's own
+  // doc has the full contract). OPTIONAL here — mirrors sanitize's own precedent immediately above —
+  // but the REAL composition (rewritten-engine-factory.ts) always wires the SAME RedactionPort
+  // instance's containsSecret alongside sanitize's redact, so production is never silently unguarded.
+  containsSecret?: (text: string) => boolean;
 
   // LearningPort collaborator. v1 default: StubLearningRepository (a provable no-op) when absent.
   learningRepo?: LearningRepositoryPort;
@@ -674,6 +680,10 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
       // ALSO never needs it — shadow mode's "pr"-shaped decisions log through shadowLog, never reach
       // this adapter's "pr" case at all) does not carry an explicit `vcsWrite: undefined` key.
       ...(cfg.vcsWrite ? { vcsWrite: cfg.vcsWrite } : {}),
+      // sdd/migration-wiring-phase-2 Slice 6b (logs→Issue egress boundary): conditionally spread,
+      // the SAME "not every test needs to wire it" precedent as vcsWrite immediately above — the
+      // REAL production composition always supplies it (rewritten-engine-factory.ts).
+      ...(cfg.containsSecret ? { containsSecret: cfg.containsSecret } : {}),
     },
     {
       repo: cfg.repo,
