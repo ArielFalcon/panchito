@@ -235,6 +235,24 @@ else needs the byte-for-byte guarantee) before deleting the `src/qa/` files.
 `src/qa/selector-check.ts` has a second, independent reason to survive:
 `src/qa/execute.test.ts` imports `selectorPresent` from it directly.
 
+## D10 — src/report/reporter.ts survives Slice 8.F (deviation)
+
+**Decision**: `src/qa/confinement.ts` is deleted as designed (superseded by
+Slice 3's `write-confinement.adapter.ts`; its only pin,
+`write-confinement-parity.test.ts`, is retired in the same commit). But
+`src/report/reporter.ts` — the other file Batch F's plan called for deleting
+— is **not deleted**. `src/integrations/publish.ts` (itself dead code: no
+importers anywhere, confirmed in the "Deferred deletions" register below)
+still has a real, compiled import: `import { renderPrBody, type TestedItem }
+from "../report/reporter"`. `publish.ts` is explicitly out of this change's
+scope (deferred to the same follow-up migration-cleanup change as the other
+six items below) — deleting `reporter.ts` while leaving `publish.ts` in the
+tree would break `npm run typecheck` on a dangling import, violating the
+"never commit red" rule. `src/report/reporter.test.ts` stays for the same
+reason. `sanitize-text-parity` is unaffected either way (it does not pin
+`reporter.ts`). The follow-up cleanup change should delete `publish.ts` and
+`reporter.ts`/`reporter.test.ts` together, in that dependency order.
+
 ## Deferred deletions — triage DELETE items intentionally excluded from this change
 
 This change's deletion batches (Slice 8, A–F) do **not** cover every item on the
