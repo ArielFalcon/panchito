@@ -909,6 +909,101 @@ test("Slice 4: duplicate exemplar matches across multiple patterns are deduped b
   assert.equal(occurrences, 1, "a duplicate exemplar match across patterns must render exactly once, never duplicated");
 });
 
+// ── sdd/migration-wiring-phase-2 apply-batch-3 rider (orchestrator-directed) ──────────────────────
+// Slice 4 wired structuralPatterns[] end-to-end but nothing on the live path ever populated it
+// (verified: zero references in run-qa.use-case.ts, generation-port.adapter.ts,
+// rewritten-engine-factory.ts) — the "archetype-matched templates re-enter the generation prompt"
+// scenario went unmet for a real run. Fixed by deriving structuralPatterns from input.diff (the SAME
+// diff cappedDiffText already reads) when the caller supplies none — no new qa-engine plumbing.
+
+test("rider: a diff matching a structural archetype re-enters the generation prompt (structuralPatterns derived from the diff, never explicitly supplied)", () => {
+  const text = buildPrompt(mkInput({
+    diff: [
+      "diff --git a/src/api.ts b/src/api.ts",
+      "+export async function submitOrder(payload: OrderPayload) {",
+      "+  try {",
+      '+    const res = await fetch("/api/orders", { method: "POST", body: JSON.stringify(payload) });',
+      '+    if (!res.ok) throw new Error("failed");',
+      "+    return res.json();",
+      "+  } catch (error) {",
+      "+    console.error(error);",
+      "+  }",
+      "+}",
+    ].join("\n"),
+  }));
+  assert.ok(
+    text.includes("## Skill exemplars for the detected structural patterns"),
+    "a diff matching the api-call archetype must derive structuralPatterns and render the exemplar section, even though structuralPatterns was never supplied",
+  );
+  assert.ok(
+    text.includes("API error handling"),
+    "the derived pattern must match the same catalog entry an explicitly-supplied pattern would",
+  );
+});
+
+test("rider: a shape-less diff derives only the generic pattern — no exemplar section (never fabricated)", () => {
+  // mkInput()'s default diff ("export function foo() {}") matches no archetype.
+  const text = buildPrompt(mkInput());
+  assert.ok(
+    !text.includes("## Skill exemplars for the detected structural patterns"),
+    "a diff matching no archetype must derive only the generic pattern, which matches no exemplar",
+  );
+});
+
+test("rider: an explicitly-supplied structuralPatterns still wins over derivation from the diff", () => {
+  // The diff here would derive an api-call pattern if it were consulted; the explicit
+  // structuralPatterns (form) must win instead — proves the derivation is a FALLBACK, not an override.
+  const text = buildPrompt(mkInput({
+    diff: 'diff --git a/src/api.ts b/src/api.ts\n+fetch("/x", { body: x, method: "POST" });\n try { } catch (error) {}\n',
+    structuralPatterns: [{ kind: "form", hasOnSubmit: true, hasValidation: true }],
+  }));
+  assert.ok(text.includes("Form invalid input"), "an explicitly-supplied structuralPatterns must take precedence over diff-derived ones");
+  assert.ok(!text.includes("API error handling"), "the diff-derived api-call pattern must NOT also render when structuralPatterns was explicitly supplied");
+});
+
+// ── sdd/migration-wiring-phase-2 Slice 6b (diff→model egress boundary) ────────────────────────────
+// cappedDiffText — THE single way every prompt embeds a commit diff — now sanitizes in "model" mode
+// (previously "issue" mode, silently defeating WS5.4a's own stated intent for the diff itself) and
+// runs the post-redaction fail-loud guard (assertNoSecretLeak) immediately after.
+
+test("Slice 6b (mode fix): the diff embedded in the generator prompt uses 'model' mode — an auth-shaped type annotation is NOT over-redacted", () => {
+  const text = buildPrompt(mkInput({
+    diff: "diff --git a/src/server/auth.ts b/src/server/auth.ts\n+function sign(data: string, secret: string): string {\n",
+  }));
+  assert.ok(
+    text.includes("secret: string"),
+    "model-mode sanitization must leave an ordinary type annotation intact in the diff sent to the model (WS5.4a's own stated intent, previously unwired for the diff itself)",
+  );
+});
+
+test("Slice 6b.1: a diff with a genuine secret is fully redacted before reaching the generator prompt — never sent raw", () => {
+  const text = buildPrompt(mkInput({
+    diff: 'diff --git a/src/config.ts b/src/config.ts\n+const apiKey = "sk-live-abc123XYZsecretvalue";\n',
+  }));
+  assert.ok(!text.includes("sk-live-abc123XYZsecretvalue"), "a real secret must never reach the model unredacted, even in model mode");
+  assert.match(text, /\[REDACTED\]/, "the redaction marker must appear in its place");
+});
+
+test("Slice 6b.4: an auth.ts-shaped diff never trips the diff→model guard (false-positive tolerance, never throws)", () => {
+  assert.doesNotThrow(() => buildPrompt(mkInput({
+    diff: [
+      "diff --git a/src/server/auth.ts b/src/server/auth.ts",
+      "+function sign(data: string, secret: string): string {",
+      "+export function issueSession(username: string, secret: string, ttlSeconds: number, now = Date.now()): string {",
+      "+export function validateSession(token: string, secret: string, now = Date.now()): string | null {",
+    ].join("\n"),
+  })));
+});
+
+// 6b.2 ("a secret survives redaction at diff→model → SecretLeakError thrown") is covered at the unit
+// level in src/orchestrator/sanitizer.test.ts (assertNoSecretLeak's own dedicated tests) rather than
+// as an end-to-end prompts.ts fixture: sanitizeText and containsSecrets share ONE pattern table with
+// identical skip/modelSkip logic, so a secret genuinely surviving redaction is not constructible
+// through this real pipeline today (by design — the guard exists as an invariant check against a
+// FUTURE regression, e.g. a pattern added to one function but not the other). cappedDiffText's own
+// wiring (`assertNoSecretLeak(redacted, "model", "diff→model")`, immediately after sanitizeText) is
+// the reviewable proof the guard is actually in the diff→model path.
+
 // ── C2: static-signal rendered in CODE-MODE prompts ──────────────────────────
 
 // C2-1: a code-mode generation input WITH staticSignal renders the static-signal section.

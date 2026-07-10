@@ -13,7 +13,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { sanitizeText, capText, capDiff } from "../orchestrator/sanitizer";
+import { sanitizeText, assertNoSecretLeak, capText, capDiff } from "../orchestrator/sanitizer";
 import type { ArchitectureContext } from "../qa/context";
 import type { CommitIntent } from "../qa/commit-classify";
 import type { QaCase } from "../types";
@@ -23,6 +23,7 @@ import type { QaCase } from "../types";
 import type { OpencodeRunInput, ParallelWorkerInput, ReviewInput } from "@contexts/generation/application/ports/generation-ports.ts";
 import { renderExplorationBrief } from "../qa/exploration-brief";
 import { matchExemplars, renderExemplarsForPrompt } from "../qa/learning/skill-exemplar";
+import { detectStructuralPatterns } from "../qa/learning/structural-pattern";
 import { assemble, section, type AssembledPrompt } from "./context-assembler";
 import { roleWindowBytes } from "./model-window-catalog";
 
@@ -62,8 +63,20 @@ const ACCEPTANCE_CRITERION_RULE =
 // `diff --git` boundaries to split/rank files), then secret-scrubbed. Every render site MUST
 // use this — history shows per-site discipline does not scale (WS5.1 fixed 3 sites, the
 // reviewer fix found a 4th, judgment-day found a 5th in the planner).
+//
+// sdd/migration-wiring-phase-2 Slice 6b (diff→model egress boundary): this is THE diff→model site —
+// every call site below feeds a generator/explorer/reviewer prompt, never an Issue body (verified:
+// all 5 callers are buildPromptAssembled/buildCodeTask/buildExplorerPrompt/buildPlanPromptAssembled/
+// reviewObjective). WS5.4a ("model-bound diffs keep auth-shaped code that the aggressive Issue-bound
+// pattern would redact") was never actually wired here — this function sanitized with the default
+// "issue" mode, silently defeating WS5.4a's own stated purpose for the diff itself (domSnapshot/
+// classificationReason DID get "model" mode; the diff embed did not). Fixed to "model" mode + the
+// post-redaction fail-loud guard (AMENDMENT 1's assertNoSecretLeak): a secret that survives
+// model-mode redaction throws SecretLeakError rather than reaching the model silently.
 function cappedDiffText(diff: string): string {
-  return sanitizeText(capDiff(diff)).text;
+  const redacted = sanitizeText(capDiff(diff), "model").text;
+  assertNoSecretLeak(redacted, "model", "diff→model");
+  return redacted;
 }
 
 // ── (functions appended below from the original module, verbatim) ────────────────────────────
@@ -1001,9 +1014,22 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
   // CHANGE-COVERAGE OBSERVATION marker (design D-E rationale): no deterministic oracle exists for
   // "did the rich exemplar template change generation quality" — flagging here (+ engram) so a
   // future audit can measure rich-exemplar vs one-line-diffArchetypes-hint defect-catch rate.
+  //
+  // apply-batch-3 rider (orchestrator-directed): Slice 4 wired structuralPatterns[] end-to-end but
+  // nothing on the live path ever populated it (verified: zero references in run-qa.use-case.ts,
+  // generation-port.adapter.ts, rewritten-engine-factory.ts — see seam-parity.contract.test.ts's own
+  // ALLOWLIST entry for this field) — so the spec's "archetype-matched templates re-enter the
+  // generation prompt" scenario went unmet for a real run. Derived HERE instead, at the layer that
+  // already holds the diff (this function already reads input.diff for cappedDiffText above), rather
+  // than adding new qa-engine plumbing: an explicitly-supplied input.structuralPatterns (every
+  // existing test, and any future enrichment path) still wins; only a genuinely absent/empty one
+  // falls back to a local derivation from the diff already in scope.
   const skillExemplarsContent = (() => {
-    if (!input.structuralPatterns?.length || !isGenerationMode) return "";
-    const matched = input.structuralPatterns.flatMap((p) => matchExemplars(p));
+    if (!isGenerationMode) return "";
+    const patterns = input.structuralPatterns?.length
+      ? input.structuralPatterns
+      : detectStructuralPatterns(input.diff, input.intent?.changedFiles ?? []);
+    const matched = patterns.flatMap((p) => matchExemplars(p));
     const seenNames = new Set<string>();
     const deduped = matched.filter((e) => {
       if (seenNames.has(e.name)) return false;
