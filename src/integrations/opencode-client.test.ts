@@ -48,6 +48,7 @@ import { isInfraError } from "../errors";
 import type { ArchitectureContext } from "../qa/context";
 import type { ExplorationBrief } from "../qa/exploration-brief";
 import { roleWindowBytes } from "./model-window-catalog";
+import { SecretLeakError } from "../orchestrator/sanitizer";
 
 // context.json is read from the WATCHED repo and committed by this system's own PRs, so it
 // is attacker-influenceable. It must be sanitized before reaching the test-writing agent.
@@ -700,6 +701,42 @@ test("FIX 2: maybeExplore still no-ops for manual REGEN passes (fix/review/cover
   );
   assert.equal(brief, null, "a regen pass must not re-explore");
   assert.deepEqual(opened, [], "no explorer session on a manual regen pass");
+});
+
+// ── judgment-day FIX 3: maybeExplore's best-effort catch must never swallow a SecretLeakError ──
+// The catch around the explorer prompt degrades ANY error to `null` (best-effort: the generator
+// explores inline instead). That masked a SecretLeakError from buildExplorerPrompt's cappedDiffText
+// call — the fail-loud egress guard is pointless if a wrapper silently launders it into "no brief".
+
+test("FIX 3: a SecretLeakError thrown inside the explorer path propagates — never swallowed by the best-effort wrapper", async () => {
+  const stub: AgentDeps = {
+    open: async () => ({
+      id: "s",
+      prompt: async () => {
+        throw new SecretLeakError("diff→model: a secret survived redaction — refusing to proceed");
+      },
+      dispose: async () => {},
+    }),
+  };
+  await assert.rejects(
+    () => maybeExplore({ ...input, explorer: true }, stub),
+    (err: unknown) => err instanceof SecretLeakError,
+    "a SecretLeakError raised while exploring must propagate, not degrade to a null brief",
+  );
+});
+
+test("FIX 3: a generic error inside the explorer path still degrades to null (best-effort behavior unaffected)", async () => {
+  const stub: AgentDeps = {
+    open: async () => ({
+      id: "s",
+      prompt: async () => {
+        throw new Error("network blip");
+      },
+      dispose: async () => {},
+    }),
+  };
+  const brief = await maybeExplore({ ...input, explorer: true }, stub);
+  assert.equal(brief, null, "a generic (non-secret-leak) error must still degrade to null — best-effort explorer is otherwise unchanged");
 });
 
 // ── Judgment-day fixes ───────────────────────────────────────────────────────

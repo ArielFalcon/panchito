@@ -19,7 +19,7 @@ import type { ArchitectureContext } from "../qa/context";
 import { coerceExplorationBrief, parseExplorationBrief, type ExplorationBrief } from "../qa/exploration-brief";
 import type { StructuralPattern } from "../qa/learning/skill-exemplar";
 import { normalizeRoutes, MAX_ROUTES } from "../qa/dom-snapshot";
-import { sanitizeText } from "../orchestrator/sanitizer";
+import { sanitizeText, SecretLeakError } from "../orchestrator/sanitizer";
 import { ActivityRouter } from "./agent-activity";
 import { mapOpencodeEvent, eventRunId } from "./activity-mapper";
 import { reexploreKindFromEvent, reexploreTracker } from "./reexplore";
@@ -713,6 +713,12 @@ export async function maybeExplore(
     );
     return usable;
   } catch (err) {
+    // judgment-day FIX 3: this catch is a BEST-EFFORT degrade (explorer failure → generator explores
+    // inline) for ordinary failures — it must never launder a SecretLeakError from buildExplorerPrompt's
+    // cappedDiffText call into a silent null. That guard exists specifically to fail loud when a secret
+    // survives redaction; swallowing it here would defeat it (currently masked only incidentally,
+    // because the main generation path re-derives and re-checks the same diff text later).
+    if (err instanceof SecretLeakError) throw err;
     console.warn(`[qa] explorer pass failed (${err instanceof Error ? err.message : String(err)}) — generator will explore inline.`);
     return null;
   } finally {
