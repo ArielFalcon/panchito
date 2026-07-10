@@ -198,6 +198,12 @@ test("buildRewrittenCompositionConfig still wires groundingCollaborators for a c
   assert.equal(config.isCode, true, "isCode is what composition-root.ts's wireBridges() reads to skip both grounding ports on this target");
 });
 
+// sdd/migration-wiring-phase-2 Slice 3 (D-C contextMap read-back, RIDER 4): this pin's assertions
+// are UNCHANGED by that slice — `config.contextMap` stays absent at composition-BUILD time, exactly
+// as before. What changed is WHERE the per-run read now happens: PreGenerationGroundingPortAdapter.
+// ground(specDir, ...) reads `${specDir}/.qa/context.json` fresh on every run (the real per-run
+// mirrorDir, only known post-checkout), NOT via this composition config's static contextMap field.
+// This honors the pin's own rationale below verbatim — "never fabricate at composition [build] time".
 test("buildRewrittenCompositionConfig leaves contextMap and prChangedFiles absent (no real per-run source at composition-build time)", () => {
   const app = cfg("factory-grounding-contextmap-absent");
   const config = buildRewrittenCompositionConfig(app, { getAgentDeps: stubAgentDeps }, "qa-bot-abc1234-run1", { mode: "diff" });

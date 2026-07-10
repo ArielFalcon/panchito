@@ -17,7 +17,7 @@
 // :2104-2137, and the Seam b try/catch at :1849-1872): every collaborator call is wrapped so a
 // throw here NEVER propagates — ground() always resolves, never rejects.
 import type { PreGenerationGroundingPort, GroundingResult } from "../../application/ports/index.ts";
-import { readdirSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { buildContextPack, defaultContextPackDeps } from "@contexts/generation/infrastructure/context-pack.ts";
 import type { ContextPackDeps } from "@contexts/generation/infrastructure/context-pack.ts";
@@ -43,6 +43,83 @@ export interface PreGenerationGroundingCollaborators {
   // testing (existence-level: this bridge is exercised without a real Playwright/browser).
   buildContextPack?: typeof buildContextPack;
   contextPackDeps?: ContextPackDeps;
+  // sdd/migration-wiring-phase-2 Slice 3 (D-C contextMap read-back): defaults to
+  // loadContextMapFromDisk (below) — a real fs+JSON.parse+form-validate read of
+  // `${specDir}/.qa/context.json`. Overridable for tests; [SWAP]-style: an omitted collaborator
+  // still resolves to the REAL production fn (`this.collaborators.loadContextMap ??
+  // loadContextMapFromDisk`), the SAME posture buildContextPack above already establishes — so
+  // CompositionConfig.groundingCollaborators stays `{}` in production, unaffected by this field.
+  loadContextMap?: (specDir: string) => ArchitectureContext | undefined;
+}
+
+// sdd/migration-wiring-phase-2 Slice 3 (D-C contextMap read-back): a minimal, faithful structural
+// port of src/qa/context.ts's validateContext() — SAME rules (routes/api/feBe well-formed, every
+// feBe link resolves to a declared route + operationId) — re-implemented natively here because
+// qa-engine may not import from src/ (this file's own ArchitectureContext import already follows
+// generation-ports.ts's "faithful structural alias" precedent for this exact type family). Only the
+// FORM is validated (internal consistency), never truth against the code — mirrors src/qa/context.ts's
+// own documented safety argument: a stale/incomplete map only degrades recall, never precision.
+function isValidArchitectureContext(raw: unknown): raw is ArchitectureContext {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
+  const c = raw as Partial<ArchitectureContext>;
+  if (typeof c.builtAtSha !== "string" || c.builtAtSha.trim().length === 0) return false;
+  if (!Array.isArray(c.routes) || !Array.isArray(c.api) || !Array.isArray(c.feBe)) return false;
+
+  const routePaths = new Set<string>();
+  for (const entry of c.routes) {
+    const path = (entry as { path?: unknown } | undefined)?.path;
+    if (typeof path !== "string" || path.trim().length === 0) return false;
+    if (routePaths.has(path)) return false; // duplicate path
+    routePaths.add(path);
+  }
+
+  const opIds = new Set<string>();
+  for (const entry of c.api) {
+    const o = entry as { operationId?: unknown; method?: unknown; path?: unknown } | undefined;
+    if (typeof o?.operationId !== "string" || o.operationId.trim().length === 0) return false;
+    if (opIds.has(o.operationId)) return false; // duplicate operationId
+    opIds.add(o.operationId);
+    if (typeof o?.method !== "string" || o.method.trim().length === 0) return false;
+    if (typeof o?.path !== "string" || o.path.trim().length === 0) return false;
+  }
+
+  for (const entry of c.feBe) {
+    const l = entry as { route?: unknown; operationId?: unknown } | undefined;
+    if (typeof l?.route !== "string" || !routePaths.has(l.route)) return false;
+    if (typeof l?.operationId !== "string" || !opIds.has(l.operationId)) return false;
+  }
+
+  if (c.flows !== undefined && !Array.isArray(c.flows)) return false;
+
+  return true;
+}
+
+// sdd/migration-wiring-phase-2 Slice 3 (D-C contextMap read-back): a faithful port of the deleted
+// legacy pipeline's loadContextMap() closure (src/pipeline.ts:1307-1320, preserved in git history at
+// 1228ea7^) — reads `${specDir}/.qa/context.json`, form-validates it, and returns the parsed map when
+// valid. Graceful at every failure mode: a missing file, malformed JSON, or a form-invalid map all
+// degrade to `undefined` (never throw) — the caller falls back to whatever static ctx.contextMap it
+// already had (always absent in production today, per rewritten-engine-factory.ts's own documented
+// gap), identical to today's always-absent behavior. Never a crash, never a fabricated partial map.
+export function loadContextMapFromDisk(specDir: string): ArchitectureContext | undefined {
+  const ctxJsonPath = join(specDir, ".qa", "context.json");
+  let raw: string;
+  try {
+    raw = readFileSync(ctxJsonPath, "utf8");
+  } catch {
+    return undefined; // no committed context.json for this run (first run, or app never ran context mode) — graceful.
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isValidArchitectureContext(parsed)) {
+      console.warn(`[qa] WARNING: ${ctxJsonPath} exists but failed form-validation; contextMap stays absent this run (contracts component degrades gracefully).`);
+      return undefined;
+    }
+    return parsed;
+  } catch (err) {
+    console.warn(`[qa] WARNING: could not parse ${ctxJsonPath} (non-blocking, contextMap stays absent this run): ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
+  }
 }
 
 // Enumerate every "*.spec.ts" under `dir`, recursively, returning paths RELATIVE to `dir` — a
@@ -83,7 +160,12 @@ export class PreGenerationGroundingPortAdapter implements PreGenerationGrounding
   // the grounding call site (diff mode only — non-diff modes never classify, so this stays absent
   // there, matching every other diff-mode-only enrichment). Absent -> changedElements stays absent,
   // byte-identical to before this field existed.
-  async ground(_specDir: string, signal?: AbortSignal, diff?: string): Promise<GroundingResult> {
+  //
+  // sdd/migration-wiring-phase-2 Slice 3 (D-C contextMap read-back): `specDir` is no longer ignored —
+  // it is the run's REAL per-run workspace.specDir (run-qa.use-case.ts's own call site), used below
+  // to read `${specDir}/.qa/context.json` fresh on every run instead of relying solely on the static
+  // ctx.contextMap (which stays permanently absent in production).
+  async ground(specDir: string, signal?: AbortSignal, diff?: string): Promise<GroundingResult> {
     // Cheap, exact pre-check (FIX 1a, judgment-day W4 abort-plumbing): an already-aborted signal
     // skips BOTH collaborator calls entirely — no point starting a capture/build the caller has
     // already given up on. Mirrors the use-case's own `if (signal?.aborted) return` posture at
@@ -91,6 +173,20 @@ export class PreGenerationGroundingPortAdapter implements PreGenerationGrounding
     if (signal?.aborted) return {};
 
     const result: GroundingResult = {};
+
+    // sdd/migration-wiring-phase-2 Slice 3 (D-C contextMap read-back): per-run read takes priority
+    // over the static ctx value when present; a missing/invalid file (or a throwing collaborator)
+    // degrades to the static ctx.contextMap (always undefined in production today), identical to
+    // today's always-absent behavior — never a crash. [SWAP]: an omitted collaborator still resolves
+    // to the REAL production fn, mirroring buildContextPack's own default-resolution posture above.
+    let contextMap = this.ctx.contextMap;
+    try {
+      const loadContextMap = this.collaborators.loadContextMap ?? loadContextMapFromDisk;
+      const loaded = loadContextMap(specDir);
+      if (loaded) contextMap = loaded;
+    } catch (err) {
+      console.warn(`[qa] WARNING: contextMap read-back failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+    }
 
     // Seam b: enumerate existing specs BEFORE the pack build (mirrors legacy's own ordering —
     // both run before the first generate() call; order between them is not load-bearing).
@@ -145,8 +241,10 @@ export class PreGenerationGroundingPortAdapter implements PreGenerationGrounding
       // WS5.3 (option c): deterministic route feed — contextMap.routes is built ONCE by the
       // context-mode LLM pass and persisted to context.json; every diff-mode run afterward reuses it
       // here with ZERO further LLM cost. No brief required (the explorer pass stays unwired).
-      const deterministicRoutes = this.ctx.contextMap?.routes?.length
-        ? this.ctx.contextMap.routes.map((r) => r.path).filter(Boolean)
+      // sdd/migration-wiring-phase-2 Slice 3: `contextMap` here is the per-run-read-or-static-ctx
+      // value resolved above, not the raw static ctx field directly.
+      const deterministicRoutes = contextMap?.routes?.length
+        ? contextMap.routes.map((r) => r.path).filter(Boolean)
         : undefined;
       // WS5.3: [CHANGED] markers — pure, deterministic extraction from the run's actual diff (no
       // LLM). Absent when no diff was threaded (non-diff modes, or the caller omitted it).
@@ -155,7 +253,7 @@ export class PreGenerationGroundingPortAdapter implements PreGenerationGrounding
         {
           baseUrl: this.ctx.baseUrl,
           e2eDir: this.ctx.e2eDir,
-          contextMap: this.ctx.contextMap,
+          contextMap,
           prChangedFiles: this.ctx.prChangedFiles,
           testIdAttribute: this.ctx.testIdAttribute,
           ...(deterministicRoutes?.length ? { routes: deterministicRoutes } : {}),

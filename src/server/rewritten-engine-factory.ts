@@ -952,6 +952,13 @@ export function buildRewrittenCompositionConfig(
     // context.json/the brief is absent. A future fix can thread these dynamically once
     // GenerationPortAdapter/ReviewPortAdapter grow the SAME "dynamic diff" seam pattern the diff
     // field already uses (composition-root.ts's own precedent for this class of gap).
+    //
+    // sdd/migration-wiring-phase-2 Slice 3 (D-C, RIDER 4) update: contextMap's per-run read-back IS
+    // now wired — but NOT here. PreGenerationGroundingPortAdapter.ground(specDir, ...) reads
+    // `${specDir}/.qa/context.json` fresh on every run (specDir = the REAL per-run mirrorDir, only
+    // known post-checkout — the composition-build-time gap this comment describes still holds for
+    // THIS field). `config.contextMap` genuinely stays absent here, by design, unchanged. prChangedFiles
+    // remains the one still-open gap this comment describes.
     // CRITICAL fix (live crash, judgment-day audit): baseUrl is app-static (the live DEV URL from
     // config), so it is correct to set it once here at composition time — unlike diff/mode/guidance,
     // there is no per-run value to thread. Without this, E2eExecutionStrategy.run() (wired via
