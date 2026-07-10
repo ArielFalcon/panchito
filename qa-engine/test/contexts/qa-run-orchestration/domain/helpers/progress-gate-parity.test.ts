@@ -6,6 +6,15 @@ import assert from "node:assert/strict";
 // expectations the live import used to assert against. This file no longer imports src/, so it was
 // removed from qa-engine/tsconfig.json's "exclude" list and qa-engine/tsconfig.parity.json's
 // "include" list in the same commit — it now typechecks under the normal qa-engine project.
+//
+// WARNING (judgment-day round-1, frozen-snapshot discipline): every expected value below is a
+// FROZEN oracle — the legacy source it was captured from (progress-gate.ts) no longer exists, so
+// there is no live re-derivation possible. A failing assertion here is signaling a REAL behavioral
+// divergence in the live progress-gate.ts helpers this file imports, not a stale fixture. Editing a
+// sample's expected value to make a failing test pass silently rebaselines away that regression
+// instead of fixing it — never do that without a written justification (in the commit message or a
+// comment here) for why the NEW value is the correct behavior, checked against the surviving live
+// logic this snapshot was pinned against.
 import {
   classifyFailure,
   bestRound,

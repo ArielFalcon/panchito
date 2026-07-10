@@ -21,6 +21,15 @@ import {
 // exported labelRunOutcome()) is no longer available to import live. The expected outputs below
 // were captured by running the legacy labelRunOutcome() against these exact samples BEFORE
 // deletion; they pin the same fixed outcomes the live import used to assert against.
+//
+// WARNING (judgment-day round-1, frozen-snapshot discipline): LEGACY_RESOLVE_ERROR_CLASS_SNAPSHOT
+// below is a FROZEN oracle — the legacy source it was captured from (labeler.ts) no longer exists,
+// so there is no live re-derivation possible. If a change to error-class.ts's own resolveErrorClass
+// makes one of these assertions fail, that failure is signaling a REAL behavioral divergence from
+// the legacy oracle, not a stale fixture. Editing a snapshot VALUE here to make a failing test pass
+// silently rebaselines away that regression instead of fixing it — never do that without a written
+// justification (in the commit message or a comment here) for why the NEW value is the correct
+// behavior, checked against the surviving live logic this snapshot was pinned against.
 function legacyResolveErrorClass(input: {
   verdict: string;
   coverageRatio: number | null;

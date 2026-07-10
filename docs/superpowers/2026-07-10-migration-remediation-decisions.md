@@ -697,6 +697,29 @@ Net: 22 files deleted, 9 files modified for re-pointing, 4580 lines removed /
   mechanism no longer exists; every consumer migrated to the canonical
   `RedactionPortAdapter`, placeholder collapsed to `[REDACTED]` per D7.
 
+**Annotation (judgment-day round 1, scoping the "no detection class lost"
+claim)**: `sanitizer.ts`'s comment above `envSecretValues`/
+`MIN_ENV_SECRET_LEN` ("nothing redact.ts already caught is lost when a
+consumer migrates") is accurate **only** for the env-value-driven mechanism
+it describes — env-value stripping catches an own-process secret verbatim
+regardless of length, matching `redact.ts`'s `MIN_SECRET_LEN` floor exactly
+(6). It does **not** extend to the STRUCTURAL bare-token patterns in
+`NAMED_SECRET_PATTERNS`: `github-token`/`github-token-fg` require `{36,}`
+chars where `redact.ts`'s equivalent patterns required only `{10,}`, and
+`llm-api-key` requires `{20,}` where `redact.ts` required `{10,}`
+(`slack-token` is unchanged at `{10,}`). This narrowing is deliberate, not
+accidental: every real GitHub token is 40 chars and every real OpenAI/
+Anthropic key is far longer than 20, so the wider floors keep the patterns
+off short hyphenated identifiers that would otherwise false-positive.
+Nothing is lost for any real token of either class — the only thing the
+structural pattern no longer flags is the theoretical space of
+implausibly-short 10–19-char strings that happen to start with `ghp_`/`sk-`
+but match no real credential shape either provider issues. Env-value
+stripping remains the floor-independent backstop for the migrated shell
+consumers' own-process tokens of any length, so the egress boundary is not
+weakened — only the structural pattern's blast radius for hypothetical
+short strings is narrower than `redact.ts`'s, by design.
+
 **Still open (out of Phase 2's scope, unchanged)**:
 - Triage §2 DECIDE: `qa-run-orchestration/domain/run.aggregate.ts` (DELETE,
   not actioned) and `shared-kernel/ports/clock.port.ts` (DELETE, not
@@ -747,3 +770,57 @@ change)**:
   `containsSecrets` so they stay symmetric. Flagged here as a follow-up for
   the next `migration-cleanup`-class change — not actioned in this
   docs-only closeout slice.
+
+### Judgment Day round 1
+
+An adversarial review of `sdd/migration-wiring-phase-2` (two independent
+blind judges) found two confirmed defects (both judges agreed on each) and
+fixed both on `fix/migration-wiring-phase-2`, gated green after every
+commit (`npm test` + `npm run typecheck`, Node v24.11.0), never committed
+red:
+
+- **Mirror-gc coverage gap** (confirmed by both judges): Slice 2's
+  `pruneMirrorIfWired` wiring covered the mainline exit, the
+  `terminalResult()`-routed exits (invalid/infra-error), and both skip
+  exits (classify-skip, agent-no-op) — but every POST-prepare
+  `abortedResult()` exit (10 call sites throughout `run()` — a cancelled
+  run, `cancelTrackedRun` is a documented feature, can be observed mid-run
+  at ANY phase-boundary `signal?.aborted` check) and the two bare
+  `infraErrorResult()` exits (setup failure, empty/unparseable generation)
+  never pruned their mirror, even though `workspace.prepare()` had already
+  checked it out by the time they fire. Fixed by threading an optional
+  trailing `mirrorDir` through both `abortedResult()`/`infraErrorResult()`,
+  mirroring `terminalResult()`'s existing pattern: every POST-prepare call
+  site now threads `workspace.mirrorDir`; the two genuinely PRE-prepare call
+  sites (the already-aborted-before-start short-circuit, the deploy-gate
+  infra-error) correctly stay excluded — their mirror was never touched.
+  4 new TDD tests (`run-qa.use-case.test.ts`, "mirrorGc wiring (batch 3)").
+  Commit `ad2d567`.
+- **Webhook robustness gap** (confirmed by both judges, two independent
+  sub-findings): (a) `src/index.ts`'s `req.on("end")` handler awaited
+  `resolveWebhookDispatch` with no try/catch — a throw became an unhandled
+  rejection inside the listener, `res` never ended, and GitHub's webhook
+  delivery hung to its own timeout with zero runs enqueued (the adjacent
+  per-dispatch `enqueueApiRun` call already had this error boundary; the
+  dispatch-resolution call one line earlier did not). (b)
+  `YamlAppConfigAdapter.resolveByRepo`'s `configs.map(App.fromConfig)` had
+  no per-config fault isolation — one config failing the `App` aggregate's
+  own invariants (which `app.aggregate.ts`'s own RIDER 3 comment documents
+  can drift from the mirrored zod refine rules, and the adapter's
+  `ConfigLoaders` interface has no compiler guarantee every implementation
+  even routes through zod) threw for the ENTIRE catalog, blocking webhook
+  dispatch for every OTHER, healthy app — the layer above
+  `config-loader.ts`'s existing per-FILE isolation had none of its own.
+  Fixed (a) by wrapping the dispatch resolution in a try/catch mirroring
+  the adjacent `enqueueApiRun` pattern (log + 500 + return); (b) by
+  isolating `App.fromConfig` per-config inside `resolveByRepo` with an
+  injected skip-and-log callback (`ConfigSkipLogger`, defaulting to a
+  qa-engine-local `console.warn` since qa-engine cannot import `src/`),
+  mirroring `config-loader.ts`'s own per-file skip-and-log posture one
+  layer up. 2 new TDD tests (`yaml-app-config.adapter.test.ts`). The HTTP
+  500 path added in `src/index.ts` itself has no test coverage — `index.ts`
+  runs side effects at import time (HTTP server creation, API-token file
+  writes) and has never had test coverage for exactly that reason (see
+  `webhook-routing.ts`'s own header comment, which is why the dispatch
+  *resolution* logic was already extracted into a separately-testable
+  module before this fix). Commit `3bf85a6`.
