@@ -8,6 +8,15 @@
 // v2: Structured detection with per‑pattern counting, a containsSecrets() gate
 // and a SECRET_AUDIT map for post‑mortem analysis. Fail‑closed: if secrets are
 // found the caller is warned and the audit is recorded.
+//
+// sdd/migration-remediation Slice 6 (D-P2, RedactionPort unification): the replacement placeholder
+// is imported from qa-engine's shared-kernel redaction.port.ts (`REDACTED`, `[REDACTED]`) — the ONE
+// canonical placeholder for every egress-path redaction. This file previously hardcoded THREE
+// divergent placeholders ([REDACTED_SECRET]/[REDACTED_HOST]/[REDACTED_PII]); collapsed to one, per
+// the port's own contract. `src/util/redact.ts`'s `[REDACTED_CREDENTIAL]` is a DIFFERENT mechanism
+// (env-value-driven shell-layer scrubbing) and is explicitly OUT of scope — see the spec's Phase 2
+// follow-up requirement.
+import { REDACTED, type RedactionPort } from "../../qa-engine/src/shared-kernel/ports/redaction.port";
 
 export interface SecretDetection {
   redacted: boolean;
@@ -199,7 +208,7 @@ export function sanitizeText(input: string, mode: SanitizeMode = "issue"): { tex
       if (skip?.(m)) return m; // a recognised non-secret (e.g. a git SHA) — leave it intact
       if (mode === "model" && modelSkip?.(m)) return m; // model-mode-only: not a real secret shape
       redactions++;
-      return "[REDACTED_SECRET]";
+      return REDACTED;
     });
     if (redactions > 0) {
       matchedPatterns.push(name);
@@ -211,8 +220,8 @@ export function sanitizeText(input: string, mode: SanitizeMode = "issue"): { tex
   out = out.replace(/__SANITIZER_DATAURI_(\d+)__/g, (_, i) => dataUris[Number(i)] ?? "");
 
   // host / PII
-  for (const p of INTERNAL_HOST_PATTERNS) out = out.replace(p, "[REDACTED_HOST]");
-  for (const p of PII_PATTERNS) out = out.replace(p, "[REDACTED_PII]");
+  for (const p of INTERNAL_HOST_PATTERNS) out = out.replace(p, REDACTED);
+  for (const p of PII_PATTERNS) out = out.replace(p, REDACTED);
 
   return {
     text: out,
@@ -255,6 +264,23 @@ export function recordAudit(runId: string, detection: SecretDetection): void {
       if (oldest === undefined) break;
       SECRET_AUDIT.delete(oldest);
     }
+  }
+}
+
+// sdd/migration-remediation Slice 6 (D-P2, RedactionPort unification): the formal port adapter for
+// the two egress boundaries (diff → model, logs → Issue). Wraps this module's own sanitizeText/
+// containsSecrets ("issue" mode — the aggressive, public-surface policy every existing caller of
+// this class expects) so the composition root (src/server/rewritten-engine-factory.ts) can inject
+// ONE canonical collaborator instead of an ad hoc `(text) => sanitizeText(text).text` lambda.
+// Callers that need the diff→model "model"-mode narrowing keep calling `sanitizeText(text, "model")`
+// directly — this adapter's `redact` always uses the default "issue" mode, matching what
+// PublicationPortAdapter.sanitize (the logs→Issue boundary) has always used.
+export class RedactionPortAdapter implements RedactionPort {
+  redact(text: string): string {
+    return sanitizeText(text).text;
+  }
+  containsSecret(text: string): boolean {
+    return containsSecrets(text);
   }
 }
 

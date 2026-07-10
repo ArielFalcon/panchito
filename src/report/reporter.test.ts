@@ -51,7 +51,7 @@ test("sanitizes secrets in case details and the note before they reach a public 
   assert.doesNotMatch(body, /hunter2/);
   assert.doesNotMatch(body, /ghp_secretvalue/);
   assert.doesNotMatch(body, /AKIAIOSFODNN7EXAMPLE/);
-  assert.match(body, /\[REDACTED_SECRET\]/);
+  assert.match(body, /\[REDACTED\]/);
 });
 
 test("a run with no cases, no note and no logs still renders a valid headline", () => {

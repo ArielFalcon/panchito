@@ -12,6 +12,17 @@
 // pipeline-boundary concerns (Issue-body / diff-to-model gates) with no caller in the grounding
 // context-assembly path this sub-plan covers. If a future qa-engine slice needs them, port them
 // then, at their own call site — do not widen this module's scope speculatively.
+//
+// sdd/migration-remediation Slice 6 (D-P2, RedactionPort unification): the replacement placeholder
+// is imported from THIS module's own shared-kernel sibling (`@kernel/ports/redaction.port.ts`'s
+// `REDACTED`, `[REDACTED]`) — the SAME canonical constant src/orchestrator/sanitizer.ts's twin
+// implementation now also imports (from its own side of the src/qa-engine boundary; qa-engine
+// cannot import src/, so the regex pattern set itself necessarily stays duplicated here — see
+// sanitize-text-parity.test.ts, which keeps verifying the two stay behaviorally in lockstep). This
+// module also exports `redactionAdapter`, a `RedactionPort`-conforming object, for any future
+// qa-engine caller that wants the port abstraction instead of this file's own `sanitizeText` shape.
+
+import { REDACTED, type RedactionPort } from "@kernel/ports/redaction.port.ts";
 
 export interface SecretDetection {
   redacted: boolean;
@@ -184,7 +195,7 @@ export function sanitizeText(input: string, mode: SanitizeMode = "issue"): { tex
       if (skip?.(m)) return m; // a recognised non-secret (e.g. a git SHA) — leave it intact
       if (mode === "model" && modelSkip?.(m)) return m; // model-mode-only: not a real secret shape
       redactions++;
-      return "[REDACTED_SECRET]";
+      return REDACTED;
     });
     if (redactions > 0) {
       matchedPatterns.push(name);
@@ -196,8 +207,8 @@ export function sanitizeText(input: string, mode: SanitizeMode = "issue"): { tex
   out = out.replace(/__SANITIZER_DATAURI_(\d+)__/g, (_, i) => dataUris[Number(i)] ?? "");
 
   // host / PII
-  for (const p of INTERNAL_HOST_PATTERNS) out = out.replace(p, "[REDACTED_HOST]");
-  for (const p of PII_PATTERNS) out = out.replace(p, "[REDACTED_PII]");
+  for (const p of INTERNAL_HOST_PATTERNS) out = out.replace(p, REDACTED);
+  for (const p of PII_PATTERNS) out = out.replace(p, REDACTED);
 
   return {
     text: out,
@@ -208,3 +219,16 @@ export function sanitizeText(input: string, mode: SanitizeMode = "issue"): { tex
     },
   };
 }
+
+// sdd/migration-remediation Slice 6 (D-P2, RedactionPort unification): this file's own
+// `RedactionPort`-conforming adapter — the "SAME port" (the shared-kernel type, not shared runtime
+// code across the src/qa-engine boundary) this module's twin (src/orchestrator/sanitizer.ts's
+// RedactionPortAdapter) also implements. `containsSecret` reuses `sanitizeText`'s own detection
+// result (the SAME matching pass, not a second independent regex loop) rather than re-porting
+// sanitizer.ts's separate `containsSecrets` function — this module's header already documents the
+// deliberate decision NOT to widen scope by porting `containsSecrets` speculatively; deriving it
+// from `sanitizeText`'s own detection avoids a second copy of the matching logic entirely.
+export const redactionAdapter: RedactionPort = {
+  redact: (text: string): string => sanitizeText(text).text,
+  containsSecret: (text: string): boolean => sanitizeText(text).detection.redacted,
+};

@@ -993,7 +993,7 @@ test("S2.4(6): serviceLinks string fields pass through the local s() sanitize wr
   };
   const text = buildPrompt(mkInput({ serviceLinks: [dirtyLink] }));
   assert.ok(!text.includes("sk-abc123XYZsecretvalue"), "a secret-shaped string in a serviceLinks field must be redacted by the sanitize wrapper, never passed through raw");
-  assert.match(text, /REDACTED_SECRET/, "the sanitize wrapper must have actually redacted the secret pattern");
+  assert.match(text, /REDACTED/, "the sanitize wrapper must have actually redacted the secret pattern");
 });
 
 // ── Slice C (structural-signals-expansion, design §3.6/C-R6): inline "[IMPACTED:<tier>]" markers on
@@ -1289,7 +1289,7 @@ test("A-R3(6): worker prompt serviceLinks string fields pass through the local s
   };
   const text = buildWorkerPrompt(mkWorkerInput({ serviceLinks: [dirtyLink] }));
   assert.ok(!text.includes("sk-abc123XYZsecretvalue"), "a secret-shaped string in a worker serviceLinks field must be redacted, never passed through raw");
-  assert.match(text, /REDACTED_SECRET/, "the sanitize wrapper must have actually redacted the secret pattern");
+  assert.match(text, /REDACTED/, "the sanitize wrapper must have actually redacted the secret pattern");
 });
 
 // ── WS5.1: capDiff is wired at every render boundary that embeds the raw diff ───────────────────

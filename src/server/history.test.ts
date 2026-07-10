@@ -411,7 +411,7 @@ test("Phase 0 A.2: saveAgentTurn stores sanitized output — caller must pre-san
   // The store accepts whatever it receives; the DI contract requires the caller (defaultAgentDeps
   // funnel) to sanitize before calling saveAgentTurn. We test that round-trip is faithful.
   const runId = "run-sanitize-rt-" + Date.now();
-  const sanitizedText = "[REDACTED_SECRET] was in the output";
+  const sanitizedText = "[REDACTED] was in the output";
   saveAgentTurn(makeTurn({ runId, outputText: sanitizedText }));
   const rows = getAgentTurns(runId);
   assert.equal(rows[0]!.outputText, sanitizedText);

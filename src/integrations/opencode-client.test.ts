@@ -130,7 +130,7 @@ test("buildPrompt includes the commit intent and specMetas instruction for deter
 test("buildPrompt sanitizes the diff (defense in depth)", () => {
   const p = buildPrompt({ ...input, diff: "password=hunter2" });
   assert.doesNotMatch(p, /hunter2/);
-  assert.match(p, /\[REDACTED_SECRET\]/);
+  assert.match(p, /\[REDACTED\]/);
 });
 
 test("buildPrompt without review omits the reviewer instruction", () => {
@@ -173,7 +173,7 @@ test("A' buildPrompt sanitizes the commit body (defense in depth — the body is
   const withSecret = { ...input, intent: { ...input.intent!, body: "deploy with token=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } };
   const p = buildPrompt(withSecret);
   assert.doesNotMatch(p, /ghp_aaaaaaaaaaaa/);
-  assert.match(p, /\[REDACTED_SECRET\]/);
+  assert.match(p, /\[REDACTED\]/);
 });
 
 test("A' buildPrompt caps a huge commit body so it cannot blow the prompt budget", () => {

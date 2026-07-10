@@ -131,7 +131,7 @@ import { runCodeTests, defaultCodeExecuteDeps, runCodeCoverage } from "../qa/cod
 import { setupE2eProject, defaultSetupDeps } from "../qa/setup";
 import { setupCodeProject, defaultCodeSetupDeps } from "../qa/code-runner";
 import { github } from "../integrations/github";
-import { sanitizeText } from "../orchestrator/sanitizer";
+import { RedactionPortAdapter } from "../orchestrator/sanitizer";
 import { runMutationOracle, realMutationDeps } from "../qa/learning/mutation-code";
 import { runFaultInjectionOracle, defaultFaultInjectionDeps } from "../qa/learning/fault-injection-e2e";
 import { shaMatches } from "../env/deploy-gate";
@@ -557,6 +557,12 @@ export function buildRewrittenCompositionConfig(
   const isCode = app.code === true;
   const target: "e2e" | "code" = isCode ? "code" : "e2e";
   const e2eRelDir = "e2e";
+  // sdd/migration-remediation Slice 6 (D-P2, RedactionPort unification): the ONE canonical
+  // redaction collaborator for both egress boundaries this factory wires (logs → Issue via
+  // `sanitize` below; diff → model is wired directly in src/integrations/prompts.ts and
+  // opencode-client.ts, which import sanitizer.ts's sanitizeText themselves). Stateless — safe to
+  // construct once per composition.
+  const redactionPort = new RedactionPortAdapter();
   // P2b (post-cutover-remediation) Constraint 3: SINGLE source for the coverage policy. Previously
   // `coveragePolicyMode` (below) and `coveragePolicy` (further down, feeding DecideCoverageService)
   // independently re-read `app.qa.changeCoverage?.mode ?? "signal"` — two copies of the same value
@@ -1012,11 +1018,16 @@ export function buildRewrittenCompositionConfig(
     reviewerApprovedForPublish: true,
     coverageBlocksForPublish: false,
     e2eChangedForPublish: true,
-    // F4 fix (CRITICAL security invariant): the REAL sanitizeText (this module is the E.3 seam
+    // F4 fix (CRITICAL security invariant): the REAL redaction adapter (this module is the E.3 seam
     // permitted to import src/ — see this file's own header) — PublicationPortAdapter's renderBody/
     // renderTitle apply it to every log/case-detail/note reaching an Issue/PR body, matching
     // src/report/reporter.ts's own `s = (v) => sanitizeText(v).text` precedent for the legacy engine.
-    sanitize: (text: string) => sanitizeText(text).text,
+    // sdd/migration-remediation Slice 6 (D-P2, RedactionPort unification): formalized as
+    // RedactionPortAdapter (wraps sanitizer.ts's sanitizeText/containsSecrets, "issue" mode) instead
+    // of an ad hoc lambda — the canonical placeholder is `[REDACTED]`, sourced from qa-engine's
+    // shared-kernel redaction.port.ts. PublicationPortCollaborators.sanitize's own type (`(text:
+    // string) => string`) is unchanged (duck-typed) — only the implementation is formalized.
+    sanitize: (text: string) => redactionPort.redact(text),
 
     checkout,
     // Cross-repo composition (bug fix): a cross-repo run gates on the SERVICE's own versionUrl —
