@@ -157,6 +157,13 @@ export const AppConfigSchema = z
       onFailure: z.string().min(1),
     }),
   })
+  // RIDER 3 (sdd/migration-wiring-phase-2 Slice 1, D-A drift-risk note): these first two `dev`/
+  // `services` invariants are duplicated, word-for-word equivalent, in App.fromConfig
+  // (qa-engine/src/contexts/app-catalog/domain/app.aggregate.ts) — the app-catalog context's own
+  // domain aggregate re-validates the SAME two rules over the config projection it receives.
+  // Today they cannot silently diverge because both are hand-maintained against the same shipped
+  // config shape, but there is no compiler/test tie between them — if you change either invariant
+  // here, update App.fromConfig's matching check (and vice versa), or the two validators will drift.
   .refine((c) => c.code === true || c.dev !== undefined, {
     error: "dev is required unless code: true (code mode has no web environment)",
     path: ["dev"],

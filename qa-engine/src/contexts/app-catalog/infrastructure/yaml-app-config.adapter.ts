@@ -7,10 +7,13 @@ import { App } from "../domain/app.aggregate.ts";
 import { RepoResolutionService } from "../domain/repo-resolution.service.ts";
 
 // Structural shape of the legacy ValidatedAppConfig fields this adapter reads (declared locally so
-// the adapter does not import from src/; the real loaders are injected at wiring time).
+// the adapter does not import from src/; the real loaders are injected at wiring time). services[].
+// openapi mirrors AppConfigSchema (src/orchestrator/schemas.ts) exactly — a service may declare
+// either one glob or several — widened (sdd/migration-wiring-phase-2 Slice 1, task 1.2) so the real
+// loadAppConfig/listAppConfigs shell loaders (ValidatedAppConfig) satisfy this shape structurally.
 interface LegacyConfig {
   name: string; repo: string; baseBranch?: string; code?: boolean;
-  qa?: { shadow?: boolean }; services?: { repo: string; openapi?: string; versionUrl?: string }[];
+  qa?: { shadow?: boolean }; services?: { repo: string; openapi?: string | string[]; versionUrl?: string }[];
   dev?: { versionUrl?: string };
 }
 export interface ConfigLoaders {
