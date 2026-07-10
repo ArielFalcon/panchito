@@ -58,9 +58,23 @@ as an optional `RunQaUseCaseDeps.confinement?` collaborator, backed by a new
 `workspace-and-publication/infrastructure/write-confinement.adapter.ts` wrapping
 the already-ported, unwired `WriteConfinementService` pure classifiers over an
 injected Git + `realpathSync`/`lstatSync`. Constructed in
-`rewritten-engine-factory.ts` (local git ops only, no auth decoration), called
-**once**, immediately **before** the publish phase (git status is cumulative, so
-one check after all agent + FixLoop turns catches everything).
+`rewritten-engine-factory.ts` (local git ops only, no auth decoration).
+
+**Amended for multi-point enforcement** (the original design called `enforce()`
+once, immediately before publish, on the assumption that `git status` is
+cumulative and one check after all agent + FixLoop turns catches everything —
+that single-point call has since been superseded by the shipped behavior
+below and this paragraph documents the actual, current contract, not the
+earlier draft). `RunQaUseCaseDeps.confinement.enforce()` is now invoked after
+EVERY agent-write-capable turn — after the initial `generate()` call, after the
+W1 corrective regen, after each static-fix repair round, after each FixLoop
+regeneration round, after the enforce-mode coverage-gap regen, and after the
+reviewer-correction regen — **in addition to** immediately before both publish
+sites (e2e and code). Each call's result is merged (summed counts, concatenated
+`reverted` list) into one `gateSignals.confinement` for the run
+(`confinementAcc` in `run-qa.use-case.ts`), so the reported signal still
+reflects the run's cumulative confinement activity even though enforcement now
+runs at many points instead of one.
 
 **Failure semantics — fail-open, but only where a real deterministic guard backs
 it up.** Confinement is fault-isolated best-effort: a git error during
@@ -112,6 +126,15 @@ call site).
 port for something the agent's already-produced `specMetas` already gives us
 (and is what legacy used). Rendering stays pure-in-domain (unit-testable
 without a fake adapter) rather than inline in the adapter.
+
+**Sanitize placement**: `render-publication.ts` is PURE and has no sanitizer
+dependency — every field it composes markdown from is caller-supplied,
+already-untrusted text. The caller (`publication-port.adapter.ts`) sanitizes
+the WHOLE composed body string returned by `renderIssue`/`renderPrBody` in one
+pass before it reaches GitHub, rather than threading a sanitize callback
+through every render helper — this satisfies the spec's "every rendered field
+passes the injected sanitizer" requirement while keeping the domain file
+testable with zero collaborators.
 
 ## D4 — Process-audit reconnect call sites (D-P1b)
 
@@ -324,7 +347,11 @@ someone confirms (as this document just did) that nothing imports them.
 
 ### What landed
 
-18 commits on `remediation/migration-phase-1`, every one gated green
+**Commit count correction**: this section previously claimed "18 commits" —
+`git rev-list --count main..HEAD` at the end of Slice 9 (before the Judgment
+Day round documented below) actually counts **17**. With the 2 fix commits
+from the Judgment Day round 1 review appended, the branch now stands at
+**19 commits** on `remediation/migration-phase-1`, every one gated green
 independently (`npm test` + `npm run typecheck`, Node v24.11.0):
 
 | Slice | Content | Commit(s) |
@@ -337,7 +364,31 @@ independently (`npm test` + `npm run typecheck`, Node v24.11.0):
 | 6 | RedactionPort unification, canonical `[REDACTED]` (D6, D7) | `b775fd9` |
 | 7 | `fitRulesToBudget` parity + context-mode publish scope | `3632e3c`, `3bae1b2` |
 | 8 | Tier-0 dead-code cleanup, 6 batches (A1/A2 split, B, C, D, E, F) | `9bef64c`, `5b423f9`, `3b59b90`, `c3f6d3f`, `2f614e4`, `989e401`, `34cb08c` |
-| 9 | Closeout — CLAUDE.md accuracy pass, triage doc status flips, this section | (this commit) |
+| 9 | Closeout — CLAUDE.md accuracy pass, triage doc status flips, this section | `c367b8d` |
+| 10 | Judgment Day round 1 — rename over-revert fix + docs/tsconfig cleanup | `04a2f42`, (this commit) |
+
+### Judgment Day round 1
+
+An adversarial review (two independent judges + `sdd-verify`) found one
+CRITICAL, reproduced defect and a confirmed documentation/cleanup batch:
+
+- **Staged-rename over-revert** (CRITICAL): `write-confinement.service.ts`'s
+  `parseStatusOutput` collapsed a `git status --porcelain` rename/copy line
+  (`R  old -> new`) into ONE record keeping only the new path.
+  `write-confinement.adapter.ts`'s `enforce()` then reverted only that path,
+  and since HEAD has no `<new>`, the staged rename degraded into an orphaned
+  staged DELETION of `<old>` — the legitimate file vanished from disk and
+  would have been committed as deleted by the next publish. Reproduced with a
+  real git fixture (`git mv e2e/foo.spec.ts stray.spec.ts` → `enforce()` →
+  `D  e2e/foo.spec.ts`, file missing from disk). Fixed by emitting BOTH sides
+  of a rename as independent, cross-referenced records and reverting them as a
+  unit when either side is a stray (commit `04a2f42`).
+- **Documentation/cleanup batch**: stale illustrative comments
+  (`[REDACTED_SECRET].java` → `[REDACTED].java`), a present-tense
+  `containsSecret` doc claim with no production call site, dead `tsconfig.json`
+  exclude entries for deleted parity tests, and the corrections recorded
+  throughout this section (D2 multi-point enforcement, the `parentRunId`
+  producer gap, the commit-count recount, the D3 sanitize-placement note).
 
 Test count: 4303/4304 pass (1 pre-existing skip) at the end of Slice 7 →
 3853/3854 pass (1 skip) at the end of Slice 8 — net -450 dead tests retired
@@ -345,7 +396,7 @@ alongside their dead source, consistent with the volume of Slice 8 deletions.
 Never committed red at any point; every deviation below was caught by `rg`
 pre-checks or `npm run typecheck` before the commit, not after.
 
-### Consolidated deferred/blocked register (11 items, all flagged for the same follow-up `migration-cleanup` change)
+### Consolidated deferred/blocked register (12 items, all flagged for the same follow-up `migration-cleanup` change)
 
 **7 originally-deferred DELETE items** (triage §1 DELETE list, intentionally
 excluded from this change's Slice 8 batch list — see the register above):
@@ -375,6 +426,21 @@ executing):
 **Dependency note for the follow-up change**: deleting `publish.ts` (deferred)
 unblocks `reporter.ts` (blocked) — delete them together, `publish.ts` first,
 so `npm run typecheck` never sees a dangling import mid-sequence.
+
+**1 newly-identified producer gap** (not a deletion — a wiring gap surfaced
+while auditing D3 for this closeout):
+
+5. `parentRunId` has a consumer but no producer. `render-publication.ts` and
+   `PublicationPort.publish()` (`qa-run-orchestration/application/ports/
+   index.ts`) both accept an optional `parentRunId` for continuation
+   provenance, and `publication-port.adapter.ts` forwards it when present —
+   but `RunQaInput` carries no `parentRunId` field today, so nothing upstream
+   ever sources one; every call site passes it as omitted (see the "KNOWN GAP"
+   comments at `run-qa.use-case.ts` and `ports/index.ts`, legacy parity:
+   `src/report/reporter.ts`'s `PrBodyInput.parentRunId`, `src/server/
+   runner.ts`'s own parentRunId chain). Wiring a real producer (deriving or
+   threading a parent run's ID into `RunQaInput` for regeneration/continuation
+   runs) is follow-up scope, not this change's.
 
 ### Phase 2 roadmap pointer
 

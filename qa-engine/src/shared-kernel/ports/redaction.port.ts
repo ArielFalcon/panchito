@@ -10,7 +10,8 @@ export const REDACTED = "[REDACTED]";
 export interface RedactionPort {
   // Returns text with every detected secret replaced by REDACTED. Pure and deterministic.
   redact(text: string): string;
-  // True when the text still contains a detectable secret AFTER redaction would run — used by the
-  // egress guard to fail loudly rather than ship a leak.
+  // True when the text still contains a detectable secret AFTER redaction would run. Available for
+  // a future fail-loud egress guard (rather than ship a leak); no production call site wires it in
+  // yet — every current caller only invokes `redact`.
   containsSecret(text: string): boolean;
 }

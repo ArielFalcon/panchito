@@ -129,7 +129,7 @@ const NAMED_SECRET_PATTERNS: Array<{ name: string; p: RegExp; skip?: (m: string)
 // A >=40-char run of [A-Za-z0-9+/=] is ALSO exactly what real CODE looks like — the base64
 // alphabet contains "/", so `src/main/java/es/.../CourseApplicationServiceImpl` matched
 // base64-secret and was redacted, mangling real paths in diffs sent to the model AND in the
-// structural blast-radius signal ("[REDACTED_SECRET].java"); long Java identifiers
+// structural blast-radius signal ("[REDACTED].java"); long Java identifiers
 // (`populateCoursesDescriptionMultilingualUseCase`, 45 letters) matched it too. Two code-shaped
 // escapes, both requiring no "+"/"=" (code never carries them; base64 blobs usually do):
 //   - a PATH: >=3 slashes, every segment 1..80 chars (a genuine base64 blob hits >=3 slashes
