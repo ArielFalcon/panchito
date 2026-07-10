@@ -771,7 +771,7 @@ test("app onboarding error responses redact credentials from thrown errors", asy
 
   assert.equal(res.status, 500);
   assert.doesNotMatch(res.body, /secret-token/);
-  assert.match(res.body, /\[REDACTED_CREDENTIAL\]/);
+  assert.match(res.body, /\[REDACTED\]/);
 });
 
 test("POST /api/apps with dryRun or validateOnly returns 200 (not 201)", async () => {
