@@ -493,15 +493,37 @@ C-style quoting inside `stripQuotes`: accumulate raw bytes (a literal
 character contributes its own byte, `\NNN` an octal byte, `\"`/`\\`/`\t`/
 `\n`/`\r`/etc. their single-byte meaning) and interpret the resulting byte
 sequence as UTF-8 via `Buffer` — matching how git itself constructs the
-escapes, so multi-byte UTF-8 sequences reconstruct correctly. An unquoted
-path passes through unchanged. All three `stripQuotes` call sites (both
-rename sides and the plain-path fallback) route through the same function,
-so the fix covers every consumer with no additional wiring. Judge A's
-round-3 pass separately flagged an embedded-literal-quote filename (a
-different escape shape than the octal non-ASCII case — git backslash-escapes
-the `"` itself rather than octal-escaping a byte) as a variant of the same
-class; an end-to-end real-git fixture confirms it too now reverts correctly
-with the decoded literal path.
+escapes, so multi-byte UTF-8 sequences reconstruct correctly[^round3-claim].
+An unquoted path passes through unchanged. All three `stripQuotes` call
+sites (both rename sides and the plain-path fallback) route through the
+same function, so the fix covers every consumer with no additional wiring.
+Judge A's round-3 pass separately flagged an embedded-literal-quote filename
+(a different escape shape than the octal non-ASCII case — git
+backslash-escapes the `"` itself rather than octal-escaping a byte) as a
+variant of the same class; an end-to-end real-git fixture confirms it too
+now reverts correctly with the decoded literal path.
+
+[^round3-claim]: **Correction (round 4 below):** this claim held only for
+the octal-escaped path (`\NNN`); the literal-character branch still pushed
+`ch.charCodeAt(0)` — a raw UTF-16 code unit as one byte — which is invalid
+standalone UTF-8 for any non-ASCII character. A fourth adversarial pass
+found this reachable under `core.quotePath=false` (git still quotes a path
+for other reasons, e.g. an embedded space, but leaves non-ASCII bytes
+literal inside the quotes instead of octal-escaping them), reproducing the
+same revert-matches-nothing silent bypass. Fixed by encoding the literal
+branch's real UTF-8 bytes (code-point-safe, so a surrogate pair isn't split
+into two invalid lone-surrogate pushes); the "multi-byte UTF-8 sequences
+reconstruct correctly" claim above is now actually unconditional. The
+adjacent unrecognized-escape fallback (previously a silent best-effort byte
+push, "never reached against real git output") was also converted to a
+thrown, descriptive error per the CLAUDE.md "surface integration errors
+loudly" invariant — `enforce()`'s existing fault-isolation catch
+(`run-qa.use-case.ts`'s `enforceConfinement`) already logs it loudly and
+records it in `gateSignals` without blocking the run. Regression tests: a
+real-git fixture (`core.quotePath=false`, a stray needing quoting for an
+embedded space plus a literal non-ASCII char) proving the file is actually
+deleted from disk, plus parser unit tests for a literal non-ASCII char, a
+literal 4-byte/astral character, and the unrecognized-escape throw.
 
 Test count: 3873/3874 pass (1 pre-existing skip) — 4 new unit tests
 (octal decode, embedded-quote/backslash decode, unquoted-unchanged, rename

@@ -66,6 +66,34 @@ test("parseStatusOutput decodes octal-escaped quoted paths independently on each
   ]);
 });
 
+// ── literal-byte corruption regression (Judgment Day round 4) ──────────────────────────────────
+//
+// Under `core.quotePath=false`, git still C-style-quotes a path for OTHER reasons (an embedded
+// space, an embedded `"`/`\`), but leaves non-ASCII bytes LITERAL inside the quotes instead of
+// octal-escaping them. decodeQuoted's literal-character branch pushed `ch.charCodeAt(0)` — a raw
+// UTF-16 code unit treated as one byte — which is invalid standalone UTF-8 for any non-ASCII char
+// (a lone byte >= 0x80 has no continuation bytes), so Buffer decoded it to U+FFFD and the revert
+// pathspec built from the corrupted string matched nothing on disk. Fixed by encoding the literal
+// branch's REAL UTF-8 bytes, iterating by code point so a surrogate pair (an astral/4-byte
+// character) is consumed as one unit rather than split into two invalid lone-surrogate pushes.
+
+test("parseStatusOutput decodes a literal (unescaped) non-ASCII character inside a quoted path — core.quotePath=false leaves the byte literal instead of octal-escaping it", () => {
+  const parsed = svc.parseStatusOutput('?? "café.spec.ts"\n');
+  assert.deepEqual(parsed.map((p) => p.path), ["café.spec.ts"]);
+});
+
+test("parseStatusOutput decodes a literal 4-byte (astral, surrogate-pair) UTF-8 character inside a quoted path without splitting the surrogate pair", () => {
+  const parsed = svc.parseStatusOutput('?? "leak-🎉.ts"\n');
+  assert.deepEqual(parsed.map((p) => p.path), ["leak-🎉.ts"]);
+});
+
+test("parseStatusOutput throws a descriptive error on an unrecognized escape shape instead of silently degrading the path", () => {
+  assert.throws(
+    () => svc.parseStatusOutput('?? "bad\\qescape.ts"\n'),
+    (err: unknown) => err instanceof Error && /unrecognized escape/i.test(err.message) && err.message.includes("\\q"),
+  );
+});
+
 test("parseStatusOutput: an UNSTAGED rename shows as an independent D + ?? pair (git only emits R when staged/detected) — parsing does not merge them", () => {
   const parsed = svc.parseStatusOutput(" D e2e/existing.spec.ts\n?? stray.spec.ts");
   assert.deepEqual(parsed, [

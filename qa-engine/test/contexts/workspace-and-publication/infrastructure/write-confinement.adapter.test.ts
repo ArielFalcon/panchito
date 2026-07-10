@@ -639,6 +639,47 @@ test("real git fixture: a tracked non-ASCII file inside e2e/ staged-renamed OUT 
 // C-style-escaped by git (`"` -> `\"`) inside the surrounding quotes — a DIFFERENT escape shape
 // than the octal non-ASCII case above, exercised here end-to-end to confirm the decoded literal
 // path (containing a real `"` character) is what actually reaches git, not the still-escaped form.
+// ── literal-byte corruption regression (Judgment Day round 4) ──────────────────────────────────
+//
+// Under `core.quotePath=false`, git still C-style-quotes a path for reasons OTHER than non-ASCII
+// bytes (here: an embedded space) but leaves the non-ASCII bytes literal inside the quotes instead
+// of octal-escaping them (as it would under the default core.quotePath=true, round 3's fix). The
+// old literal-character branch of decodeQuoted pushed a raw UTF-16 code unit as a single byte —
+// invalid standalone UTF-8 for a non-ASCII char — corrupting the decoded path so the revert
+// pathspec matched nothing on disk, the same silent-bypass class as round 3.
+test("real git fixture: an untracked stray needing quoting for an embedded space AND a literal non-ASCII char is ACTUALLY deleted from disk under core.quotePath=false (e2e target)", async () => {
+  const repo = initRepo();
+  try {
+    execFileSync("git", ["config", "core.quotePath", "false"], { cwd: repo });
+    const strayName = "weird café file.ts";
+    writeFileSync(join(repo, strayName), "export const leaked = true;\n");
+    const preStatus = execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: repo, encoding: "utf8" });
+    assert.ok(preStatus.startsWith('?? "'), "precondition: git must still quote this path (embedded space) under core.quotePath=false");
+    assert.ok(preStatus.includes("café"), "precondition: the non-ASCII bytes must be literal (not octal-escaped) under core.quotePath=false");
+
+    const adapter = new WriteConfinementAdapter({
+      git: realGitFn(repo),
+      realpath: realpathSync,
+      isSymlink: (p) => {
+        try {
+          return lstatSync(p).isSymbolicLink();
+        } catch {
+          return false;
+        }
+      },
+    });
+
+    const result = await adapter.enforce(repo, false);
+
+    assert.deepEqual(result.reverted, [strayName], "reverted[] must carry the true decoded name, not a corrupted one");
+    assert.equal(existsSync(join(repo, strayName)), false, "the stray must actually be gone from disk, not just reported as reverted");
+    const status = execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" });
+    assert.equal(status.trim(), "", "the tree must be fully clean");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("real git fixture: an untracked stray whose filename contains an embedded quote is ACTUALLY deleted from disk (e2e target)", async () => {
   const repo = initRepo();
   try {

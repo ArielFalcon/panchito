@@ -63,10 +63,18 @@ export class WriteConfinementService {
     // on-disk path — a revert built from it (`git clean -f --`, `git restore -- ...`) then matches
     // NOTHING, and enforce() silently reports the stray as reverted while the file survives on
     // disk (Judgment Day round 3, CRITICAL: silent confinement-bypass on any accented filename).
-    // Decode by accumulating raw BYTES (a literal char contributes its own byte, `\NNN` an octal
-    // byte, `\"`/`\\`/`\t`/`\n`/`\r`/etc. their single-byte meaning) and interpreting the byte
-    // sequence as UTF-8 — this is what git itself does when writing the octal escapes, so decoding
-    // byte-by-byte (not char-by-char) is required to reconstruct multi-byte UTF-8 sequences.
+    // Decode by accumulating raw BYTES: `\NNN` contributes an octal byte, `\"`/`\\`/`\t`/`\n`/`\r`/
+    // etc. their single-byte meaning, and a literal (unescaped) character contributes its REAL
+    // UTF-8 bytes (code-point-safe — a surrogate pair is consumed as ONE unit so an astral/4-byte
+    // character isn't split into two invalid lone-surrogate pushes). Interpreting the accumulated
+    // byte sequence as UTF-8 mirrors what git itself does when writing the octal escapes, so
+    // multi-byte UTF-8 sequences reconstruct correctly whether they arrive octal-escaped (the
+    // default `core.quotePath=true`) OR literal inside the quotes (`core.quotePath=false` still
+    // C-style-quotes a path for other reasons — e.g. an embedded space — but leaves non-ASCII bytes
+    // literal). Judgment Day round 4: the literal branch used to push `ch.charCodeAt(0)` — a raw
+    // UTF-16 code unit treated as one byte, invalid standalone UTF-8 for any non-ASCII character —
+    // which silently corrupted the decoded path into the same class of revert-matches-nothing bug
+    // round 3 fixed for the octal-escape path.
     const SIMPLE_ESCAPES: Record<string, number> = {
       '"': 0x22,
       "\\": 0x5c,
@@ -83,7 +91,14 @@ export class WriteConfinementService {
       for (let i = 0; i < inner.length; i++) {
         const ch = inner[i] ?? "";
         if (ch !== "\\") {
-          bytes.push(ch.charCodeAt(0));
+          // Literal (unescaped) character — encode its REAL UTF-8 bytes, not the raw UTF-16 code
+          // unit. `codePointAt` combines a high+low surrogate pair into the single astral code
+          // point it represents, so a 4-byte character (e.g. an emoji) is consumed as ONE unit —
+          // pushing per-UTF-16-unit would split it into two lone surrogates, each invalid on its
+          // own. Advance the extra index when a pair was consumed.
+          const codePoint = inner.codePointAt(i) as number;
+          bytes.push(...Buffer.from(String.fromCodePoint(codePoint), "utf8"));
+          if (codePoint > 0xffff) i += 1;
           continue;
         }
         const octal = inner.slice(i + 1, i + 4);
@@ -98,9 +113,16 @@ export class WriteConfinementService {
           i += 1;
           continue;
         }
-        // Unrecognized escape shape — keep the backslash literally (defensive fallback; never
-        // reached against real git output, which only ever emits the escapes handled above).
-        bytes.push(ch.charCodeAt(0));
+        // Unrecognized escape shape — no known git C-style-quoting escape starts this way. Fail
+        // LOUDLY (CLAUDE.md invariant "surface integration errors loudly — never swallow errors
+        // into an empty/degraded result") instead of silently keeping the bare backslash, which
+        // would hand a corrupted path to the revert git calls and reproduce the same
+        // revert-matches-nothing silent bypass this function exists to prevent. enforce()'s caller
+        // (RunQaUseCase's enforceConfinement wrapper) already catches, logs loudly, and records
+        // this in gateSignals — a throw here is fault-isolated, never a run crash.
+        throw new Error(
+          `decodeQuoted: unrecognized escape sequence starting at ${JSON.stringify(inner.slice(i, i + 4))} in quoted path segment ${JSON.stringify(inner)}`,
+        );
       }
       return Buffer.from(bytes).toString("utf8");
     };
