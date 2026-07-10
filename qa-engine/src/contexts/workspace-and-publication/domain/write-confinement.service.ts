@@ -119,6 +119,17 @@ export class WriteConfinementService {
     return f === ".env" || f.startsWith(".env.") || f.endsWith(".env");
   }
 
+  // The paths that must be reverted TOGETHER as a single unit for a change, given its optional
+  // rename counterpart — shared by classifyStrays and the adapter's own escape-scan
+  // (write-confinement.adapter.ts) so the two mechanisms cannot drift apart again. Judgment Day
+  // round 2: the escape-scan loop destructured only `{ xy, path }`, dropping renameCounterpart —
+  // an escape-detected path that was one side of a staged rename got reverted alone, orphaning the
+  // other side's staged half exactly like the round-1 rename-over-revert bug this method already
+  // fixes for classifyStrays.
+  revertUnit(path: string, renameCounterpart?: string): string[] {
+    return renameCounterpart !== undefined ? [path, renameCounterpart] : [path];
+  }
+
   // Classify every changed path: apply the run-target predicate (e2e allowlist or
   // code denylist), split by tracked vs. untracked (XY `??`), and flag dangerous paths.
   // Rename/copy pairs (renameCounterpart set) are classified and reverted as a UNIT, not
@@ -141,7 +152,7 @@ export class WriteConfinementService {
         renameHandled.add(path);
         renameHandled.add(renameCounterpart);
         if (isStray(path) || isStray(renameCounterpart)) {
-          for (const p of [path, renameCounterpart]) {
+          for (const p of this.revertUnit(path, renameCounterpart)) {
             // A rename is always staged (git only emits R/C once a rename is staged/detected — an
             // unstaged rename shows as separate D + ?? lines, handled by the branch below), so both
             // sides always belong in the tracked bucket.

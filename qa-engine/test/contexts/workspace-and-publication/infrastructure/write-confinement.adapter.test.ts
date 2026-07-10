@@ -385,6 +385,97 @@ test("real git fixture (negative): a rename fully INSIDE e2e/ is not a stray —
   }
 });
 
+// ── escape-scan rename-awareness regression (Judgment Day round 2) ─────────────────────────────
+//
+// The escape-scan loop (BOTH targets) destructured only `{ xy, path }`, dropping
+// `renameCounterpart`. A rename fully inside the allowed area (both sides pass classifyStrays
+// untouched) whose NEW side is a symlink escaping the mirror only pushed the new side into the
+// revert bucket: `git restore --staged --worktree --source=HEAD -- <new>` then leaves the old
+// side's staged deletion orphaned — the exact destructive pattern the round-1 fix closed via
+// classifyStrays, reopened here via the second code path that never got the same treatment.
+
+test("real git fixture: staged rename of an escaping symlink INSIDE e2e/ reverts BOTH sides — rename fully undone (e2e target)", async () => {
+  const repo = initRepo();
+  const outsideDir = mkdtempSync(join(tmpdir(), "qa-confinement-outside-"));
+  try {
+    const outsideTarget = join(outsideDir, "secret.txt");
+    writeFileSync(outsideTarget, "outside\n");
+    symlinkSync(outsideTarget, join(repo, "e2e", "link-old"));
+    execFileSync("git", ["add", "-A"], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "chore: add escaping symlink"], { cwd: repo });
+
+    execFileSync("git", ["mv", "e2e/link-old", "e2e/link-new"], { cwd: repo });
+    const preStatus = execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" });
+    assert.ok(preStatus.startsWith("R "), "precondition: git must report a staged rename, not two independent D/A lines");
+
+    const adapter = new WriteConfinementAdapter({
+      git: realGitFn(repo),
+      realpath: realpathSync,
+      isSymlink: (p) => {
+        try {
+          return lstatSync(p).isSymbolicLink();
+        } catch {
+          return false;
+        }
+      },
+    });
+    const result = await adapter.enforce(repo, false);
+
+    assert.deepEqual(result.reverted.slice().sort(), ["e2e/link-new", "e2e/link-old"].sort());
+    const status = execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" });
+    assert.equal(status.trim(), "", "the tree must be fully clean — no orphaned staged deletion of the legitimate origin");
+    assert.equal(existsSync(join(repo, "e2e", "link-new")), false, "the renamed destination must be gone");
+    assert.ok(
+      lstatSync(join(repo, "e2e", "link-old")).isSymbolicLink(),
+      "the original symlink must be restored intact at its original path, not left missing",
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(outsideDir, { recursive: true, force: true });
+  }
+});
+
+test("real git fixture: staged rename of an escaping symlink reverts BOTH sides — rename fully undone (code target)", async () => {
+  const repo = initRepo();
+  const outsideDir = mkdtempSync(join(tmpdir(), "qa-confinement-outside-"));
+  try {
+    const outsideTarget = join(outsideDir, "secret.txt");
+    writeFileSync(outsideTarget, "outside\n");
+    symlinkSync(outsideTarget, join(repo, "link-old"));
+    execFileSync("git", ["add", "-A"], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "chore: add escaping symlink"], { cwd: repo });
+
+    execFileSync("git", ["mv", "link-old", "link-new"], { cwd: repo });
+    const preStatus = execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" });
+    assert.ok(preStatus.startsWith("R "), "precondition: git must report a staged rename, not two independent D/A lines");
+
+    const adapter = new WriteConfinementAdapter({
+      git: realGitFn(repo),
+      realpath: realpathSync,
+      isSymlink: (p) => {
+        try {
+          return lstatSync(p).isSymbolicLink();
+        } catch {
+          return false;
+        }
+      },
+    });
+    const result = await adapter.enforce(repo, true);
+
+    assert.deepEqual(result.reverted.slice().sort(), ["link-new", "link-old"].sort());
+    const status = execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" });
+    assert.equal(status.trim(), "", "the tree must be fully clean — no orphaned staged deletion of the legitimate origin");
+    assert.equal(existsSync(join(repo, "link-new")), false, "the renamed destination must be gone");
+    assert.ok(
+      lstatSync(join(repo, "link-old")).isSymbolicLink(),
+      "the original symlink must be restored intact at its original path, not left missing",
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(outsideDir, { recursive: true, force: true });
+  }
+});
+
 test("real git fixture: rename INTO a denylisted destination reverts BOTH sides — destination removed, legitimate origin restored (code target)", async () => {
   const repo = initRepo();
   try {

@@ -68,7 +68,7 @@ export class WriteConfinementAdapter {
 
     const escapes: string[] = [];
     const mirrorReal = this.deps.realpath(mirrorDir) + sep;
-    for (const { xy, path } of changes) {
+    for (const { xy, path, renameCounterpart } of changes) {
       // e2e-target restricts the escape scan to the in-area paths (out-of-area paths are already
       // strays, handled above); code-target scans every changed path.
       if (!isCode && path !== "e2e" && !path.startsWith("e2e/")) continue;
@@ -84,11 +84,17 @@ export class WriteConfinementAdapter {
       }
       if (resolved.startsWith(mirrorReal)) continue;
       escapes.push(path);
-      // Add to the right revert bucket if not already there (an in-area e2e escape was skipped by
-      // classifyStrays; a code-target escape may already be a denied stray).
-      if (!tracked.includes(path) && !untracked.includes(path)) {
-        if (xy === "??") untracked.push(path);
-        else tracked.push(path);
+      // Add the FULL revert unit if not already there (an in-area e2e escape was skipped by
+      // classifyStrays; a code-target escape may already be a denied stray). Judgment Day round 2:
+      // an escape-detected path that is one side of a staged rename must revert its counterpart
+      // too (this.classifier.revertUnit, shared with classifyStrays) — pushing only the
+      // escape-detected side orphans the other half's staged deletion, the same destructive
+      // pattern the round-1 rename-over-revert fix closed for classifyStrays.
+      for (const p of this.classifier.revertUnit(path, renameCounterpart)) {
+        if (!tracked.includes(p) && !untracked.includes(p)) {
+          if (xy === "??") untracked.push(p);
+          else tracked.push(p);
+        }
       }
     }
 
