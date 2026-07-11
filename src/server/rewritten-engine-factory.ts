@@ -54,6 +54,7 @@
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
 import { readdirSync, readFileSync, mkdirSync, writeFileSync, realpathSync, lstatSync } from "node:fs";
+import { spawn } from "node:child_process";
 import type { AppConfig } from "../orchestrator/config-loader";
 import type { AgentDeps } from "../integrations/opencode-client";
 // WS6.1 (full-flow remediation, timeouts & operational observability): the purpose-built reviewer
@@ -128,12 +129,11 @@ import type { RepairPort } from "@contexts/generation/application/generate-tests
 import { validateSpecs, defaultValidateDeps } from "../qa/validate";
 import { validateCodeProject, defaultCodeValidateDeps } from "../qa/code-validate";
 import { runE2E, defaultExecuteDeps, defaultCleanupDeps } from "../qa/execute";
-import { runCodeTests, defaultCodeExecuteDeps, runCodeCoverage } from "../qa/code-runner";
+import { runCodeTests, defaultCodeExecuteDeps, runCodeCoverage, detectCodeProject, scrubEnv } from "../qa/code-runner";
 import { setupE2eProject, defaultSetupDeps } from "../qa/setup";
 import { setupCodeProject, defaultCodeSetupDeps } from "../qa/code-runner";
 import { github } from "../integrations/github";
 import { RedactionPortAdapter } from "../orchestrator/sanitizer";
-import { runMutationOracle, realMutationDeps } from "../qa/learning/mutation-code";
 import { shaMatches } from "../env/deploy-gate";
 import { ensureMirror, ensureMirrorAtBranch, defaultMirrorDeps, workdirRoot, realGit, authHeaderArgs } from "../integrations/repo-mirror";
 import { stageServiceContext, serviceContextDir } from "./service-context";
@@ -788,8 +788,14 @@ export function buildRewrittenCompositionConfig(
     }
   };
 
+  // Mutation oracle collaborators (migration-tier-1-2, Slice 3): the node-stdlib/Stryker
+  // orchestration moved into StrykerMutationOracleAdapter itself (qa-engine, src-free); the three
+  // effectful collaborators it needs stay HERE, src-bound, and are injected as one bundle — the
+  // adapter never imports src/ directly.
+  const mutationOracleDeps = { spawn, detectCodeProject, scrubEnv };
+
   const oracle = isCode
-    ? new StrykerMutationOracleAdapter((input) => runMutationOracle(input, realMutationDeps))
+    ? new StrykerMutationOracleAdapter(mutationOracleDeps)
     : new FaultInjectionOracleAdapter(runCorruptedFaultInjection, countInjectedFaultInjectionResponses, app.dev?.baseUrl ?? "");
 
   // WorkspacePort's checkout(sha) resolves the REAL per-run mirrorDir. Same-repo: the single

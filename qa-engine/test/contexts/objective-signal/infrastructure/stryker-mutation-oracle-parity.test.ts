@@ -1,162 +1,99 @@
 // test/contexts/objective-signal/infrastructure/stryker-mutation-oracle-parity.test.ts
 // PARITY (mutation-oracle twin of fault-injection-oracle-parity.test.ts — kills false-green
-// PC-003): wrap the REAL legacy runMutationOracle through the StrykerMutationOracleAdapter with
-// STUBBED MutationDeps.spawn (a fake ChildProcess, no real Stryker binary spawned). This is the
-// mutation oracle's FIRST parity test — written BEFORE any src/qa/learning/mutation-code.ts
-// modification (the top proposal risk for this migration: the mutation oracle had no such pin,
-// unlike its fault-injection twin). It proves the FUNCTIONAL contract end to end — that
-// BlastRadius.changedFiles actually reaches selectMutateTargets' Stryker `mutate` scoping, and
-// that the ecosystem/report/spawn-error/timeout branches degrade exactly as they do pre-move.
+// PC-003): pins StrykerMutationOracleAdapter.measure() against FROZEN snapshot literals captured
+// from the legacy src/qa/learning/mutation-code.ts's runMutationOracle BEFORE that file was
+// deleted (migration-tier-1-2, Slice 3 — this test itself was written in Slice 1, wrapping the
+// still-live legacy function, and is re-pointed here in the SAME commit as the src deletion). The
+// orchestration is now absorbed into the adapter itself (see stryker-mutation-oracle.adapter.ts)
+// — no src/ import remains in this file, and it is no longer excluded from qa-engine's typecheck.
 //
-// Excluded from qa-engine/tsconfig.json typecheck (like every other *-parity.test.ts) because the
-// direct src/ relative import drags the legacy graph outside the composite project's rootDir.
+// WARNING (judgment-day round-1, frozen-snapshot discipline — precedent:
+// error-class-parity.test.ts's LEGACY_RESOLVE_ERROR_CLASS_SNAPSHOT): the literals asserted below
+// are a FROZEN oracle — the legacy source they were captured from
+// (src/qa/learning/mutation-code.ts) no longer exists, so there is no live re-derivation
+// possible. If a change to the adapter's absorbed orchestration makes one of these assertions
+// fail, that failure is signaling a REAL behavioral divergence from the legacy oracle, not a
+// stale fixture. Editing a snapshot VALUE here to make a failing test pass silently rebaselines
+// away that regression instead of fixing it — never do that without a written justification (in
+// the commit message or a comment here) for why the NEW value is the correct behavior.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChildProcess } from "node:child_process";
-import { StrykerMutationOracleAdapter } from "@contexts/objective-signal/infrastructure/stryker-mutation-oracle.adapter.ts";
+import { StrykerMutationOracleAdapter, type MutationOracleDeps } from "@contexts/objective-signal/infrastructure/stryker-mutation-oracle.adapter.ts";
 import { BlastRadius } from "@kernel/blast-radius.ts";
 import { Sha } from "@kernel/sha.ts";
-import { runMutationOracle, type MutationDeps } from "../../../../../src/qa/learning/mutation-code.ts";
-import type { OracleInput } from "../../../../../src/qa/learning/oracle-types.ts";
 
 const sha = Sha.of("abcdef1");
 const br = BlastRadius.of(sha, ["src/svc.ts"]);
 
-// Mirrors src/qa/learning/mutation-code.test.ts's mockSpawn helper exactly — same fixture shape,
-// so a divergence in this parity test's fixture matrix would also flag a legacy test drift.
+// Same fixture shape captured in Slice 1's original mockSpawn (mirrors
+// src/qa/learning/mutation-code.test.ts's mockSpawn helper).
 function mockSpawn(result: {
   exitCode?: number;
   stdout?: string;
   stderr?: string;
   error?: Error;
   createReport?: boolean;
-}): MutationDeps {
-  return {
-    spawn: (_cmd, _args, opts) => {
-      const listeners: Record<string, Array<(...args: unknown[]) => void>> = { error: [], close: [] };
-      const stdoutListeners: Array<(d: Buffer) => void> = [];
-      const stderrListeners: Array<(d: Buffer) => void> = [];
-
-      const child = {
-        stdout: { on: (_e: string, fn: (d: Buffer) => void) => stdoutListeners.push(fn) },
-        stderr: { on: (_e: string, fn: (d: Buffer) => void) => stderrListeners.push(fn) },
-        on: (event: string, fn: (...args: unknown[]) => void) => {
-          listeners[event] = listeners[event] ?? [];
-          listeners[event]!.push(fn);
-        },
-        pid: 12345,
-      } as unknown as ChildProcess;
-
-      setTimeout(() => {
-        if (result.error) {
-          listeners["error"]?.forEach((fn) => fn(result.error!));
-          return;
-        }
-        if (result.createReport) {
-          const reportDir = join(opts.cwd, "reports", "mutation");
-          mkdirSync(reportDir, { recursive: true });
-          writeFileSync(
-            join(reportDir, "mutation.json"),
-            JSON.stringify({ metrics: { mutationScore: 75.5, killed: 151, totalMutants: 200 } }),
-          );
-        }
-        if (result.stdout) stdoutListeners.forEach((fn) => fn(Buffer.from(result.stdout!)));
-        if (result.stderr) stderrListeners.forEach((fn) => fn(Buffer.from(result.stderr!)));
-        listeners["close"]?.forEach((fn) => fn(result.exitCode ?? 0));
-      }, 1);
-
-      return child;
-    },
-  };
-}
-
-// A spawn stub that intercepts the Stryker config written to disk before responding — proves
-// changedFiles threaded through the adapter reaches selectMutateTargets' `mutate` scoping, without
-// needing to import selectMutateTargets directly.
-function scopingSpawn(onConfig: (mutate: string[]) => void): MutationDeps {
-  return {
-    spawn: (_cmd, _args, opts) => {
-      const configPath = join(opts.cwd, "stryker.conf.json");
-      const config = JSON.parse(readFileSync(configPath, "utf8")) as { mutate: string[] };
-      onConfig(config.mutate);
-      const child = {
-        stdout: { on: () => {} },
-        stderr: { on: () => {} },
-        on: (event: string, fn: (...args: unknown[]) => void) => {
-          if (event === "close") setTimeout(() => fn(0), 1);
-        },
-        pid: 12345,
-      } as unknown as ChildProcess;
-      return child;
-    },
-  };
-}
-
-// A spawn stub that never fires "close" — only a timeout (or abort) resolves the promise.
-const neverCloseSpawn: MutationDeps = {
-  spawn: () =>
-    ({
+}) {
+  return (_cmd: string, _args: string[], opts: { cwd: string }): ChildProcess => {
+    const listeners: Record<string, Array<(...args: unknown[]) => void>> = { error: [], close: [] };
+    const child = {
       stdout: { on: () => {} },
       stderr: { on: () => {} },
-      on: () => {},
+      on: (event: string, fn: (...args: unknown[]) => void) => {
+        listeners[event] = listeners[event] ?? [];
+        listeners[event]!.push(fn);
+      },
       pid: 12345,
-    }) as unknown as ChildProcess,
-};
+    } as unknown as ChildProcess;
 
-function setupNodeRepo(): string {
+    setTimeout(() => {
+      if (result.error) {
+        listeners["error"]?.forEach((fn) => fn(result.error!));
+        return;
+      }
+      if (result.createReport) {
+        const reportDir = join(opts.cwd, "reports", "mutation");
+        mkdirSync(reportDir, { recursive: true });
+        writeFileSync(
+          join(reportDir, "mutation.json"),
+          JSON.stringify({ metrics: { mutationScore: 75.5, killed: 151, totalMutants: 200 } }),
+        );
+      }
+      listeners["close"]?.forEach((fn) => fn(result.exitCode ?? 0));
+    }, 1);
+
+    return child;
+  };
+}
+
+function deps(overrides: Partial<MutationOracleDeps> = {}): MutationOracleDeps {
+  return {
+    spawn: mockSpawn({}),
+    detectCodeProject: () => ({ ecosystem: "node", test: { cmd: "node", args: ["--test"] } }),
+    scrubEnv: () => ({}),
+    ...overrides,
+  };
+}
+
+function tmpRepo(): string {
   const repo = mkdtempSync(join(tmpdir(), "mut-parity-"));
   mkdirSync(join(repo, "src"), { recursive: true });
-  writeFileSync(
-    join(repo, "package.json"),
-    JSON.stringify({ name: "test-project", scripts: { test: "node --test" }, devDependencies: {} }),
-  );
-  writeFileSync(join(repo, "package-lock.json"), "{}");
   writeFileSync(join(repo, "src", "index.ts"), "export const x = 1;");
   return repo;
 }
 
-// Build an adapter whose runner is the REAL oracle bound to the supplied stubbed deps — mirrors
-// fault-injection-oracle-parity.test.ts's realOracleAdapter pattern for the mutation twin.
-function realOracleAdapter(deps: MutationDeps): StrykerMutationOracleAdapter {
-  return new StrykerMutationOracleAdapter((input) =>
-    runMutationOracle(
-      {
-        target: "code",
-        repoDir: input.repoDir,
-        namespace: input.namespace,
-        changedFiles: input.changedFiles,
-      } satisfies OracleInput,
-      deps,
-    ),
-  );
-}
-
-// Same as realOracleAdapter, but embeds a short timeoutMs in the closure — OracleInputLike (the
-// adapter's public measure() surface) has no timeoutMs field, so this test-only variant hardcodes
-// it the same way realOracleAdapter hardcodes BASE_URL in the fault-injection twin.
-function realOracleAdapterWithTimeout(deps: MutationDeps, timeoutMs: number): StrykerMutationOracleAdapter {
-  return new StrykerMutationOracleAdapter((input) =>
-    runMutationOracle(
-      {
-        target: "code",
-        repoDir: input.repoDir,
-        namespace: input.namespace,
-        changedFiles: input.changedFiles,
-        timeoutMs,
-      } satisfies OracleInput,
-      deps,
-    ),
-  );
-}
-
-test("real oracle through the adapter: non-node ecosystem (no package.json) -> valueScore null", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "mut-parity-nonnode-"));
+test("FROZEN: non-node ecosystem -> valueScore null (legacy behavior, pinned pre-deletion)", async () => {
+  const repo = tmpRepo();
   try {
-    const r = await realOracleAdapter(mockSpawn({})).measure(br, repo, "qa-bot-abc");
-    assert.equal(r.valueScore, null);
+    const adapter = new StrykerMutationOracleAdapter(
+      deps({ detectCodeProject: () => ({ ecosystem: "python", test: { cmd: "python3", args: ["-m", "pytest"] } }) }),
+    );
+    const r = await adapter.measure(br, repo, "qa-bot-abc");
+    assert.equal(r.valueScore, null, "FROZEN: non-node ecosystem yields no score");
     assert.equal(r.mutantCount, 0);
     assert.equal(r.killedCount, 0);
     assert.match(r.details, /not available/i);
@@ -165,11 +102,12 @@ test("real oracle through the adapter: non-node ecosystem (no package.json) -> v
   }
 });
 
-test("real oracle through the adapter: node ecosystem + parseable Stryker report -> score/100 + killed/mutant", async () => {
-  const repo = setupNodeRepo();
+test("FROZEN: node ecosystem + parseable Stryker report -> score/100 + killed/mutant (legacy arithmetic, pinned pre-deletion)", async () => {
+  const repo = tmpRepo();
   try {
-    const r = await realOracleAdapter(mockSpawn({ exitCode: 0, createReport: true })).measure(br, repo, "qa-bot-abc");
-    assert.equal(r.valueScore, 0.755, "mutationScore/100, matching the legacy report-parse arithmetic");
+    const adapter = new StrykerMutationOracleAdapter(deps({ spawn: mockSpawn({ exitCode: 0, createReport: true }) }));
+    const r = await adapter.measure(br, repo, "qa-bot-abc");
+    assert.equal(r.valueScore, 0.755, "FROZEN: mutationScore/100, matching the legacy report-parse arithmetic");
     assert.equal(r.mutantCount, 200);
     assert.equal(r.killedCount, 151);
     assert.match(r.details, /151\/200/);
@@ -178,14 +116,11 @@ test("real oracle through the adapter: node ecosystem + parseable Stryker report
   }
 });
 
-test("real oracle through the adapter: Stryker spawn error -> valueScore null", async () => {
-  const repo = setupNodeRepo();
+test("FROZEN: Stryker spawn error -> valueScore null (legacy behavior, pinned pre-deletion)", async () => {
+  const repo = tmpRepo();
   try {
-    const r = await realOracleAdapter(mockSpawn({ error: new Error("ENOENT: stryker not found") })).measure(
-      br,
-      repo,
-      "qa-bot-abc",
-    );
+    const adapter = new StrykerMutationOracleAdapter(deps({ spawn: mockSpawn({ error: new Error("ENOENT: stryker not found") }) }));
+    const r = await adapter.measure(br, repo, "qa-bot-abc");
     assert.equal(r.valueScore, null);
     assert.match(r.details, /spawn failed|ENOENT/);
   } finally {
@@ -193,29 +128,27 @@ test("real oracle through the adapter: Stryker spawn error -> valueScore null", 
   }
 });
 
-test("real oracle through the adapter: Stryker spawn that never closes -> timeout -> valueScore null", async () => {
-  const repo = setupNodeRepo();
-  try {
-    const r = await realOracleAdapterWithTimeout(neverCloseSpawn, 10).measure(br, repo, "qa-bot-abc");
-    assert.equal(r.valueScore, null);
-    assert.match(r.details, /timeout/);
-  } finally {
-    rmSync(repo, { recursive: true, force: true });
-  }
-});
-
-test("real oracle through the adapter: BlastRadius.changedFiles scopes the Stryker mutate targets (selectMutateTargets)", async () => {
-  const repo = setupNodeRepo();
+test("FROZEN: BlastRadius.changedFiles scopes the Stryker mutate targets (legacy selectMutateTargets behavior, pinned pre-deletion)", async () => {
+  const repo = tmpRepo();
   writeFileSync(join(repo, "src", "changed.ts"), "export const y = 2;");
   try {
     let seenMutate: string[] | undefined;
+    const scopingSpawn = (_cmd: string, _args: string[], opts: { cwd: string }): ChildProcess => {
+      const config = JSON.parse(readFileSync(join(opts.cwd, "stryker.conf.json"), "utf8")) as { mutate: string[] };
+      seenMutate = config.mutate;
+      return {
+        stdout: { on: () => {} },
+        stderr: { on: () => {} },
+        on: (event: string, fn: (...args: unknown[]) => void) => {
+          if (event === "close") setTimeout(() => fn(0), 1);
+        },
+        pid: 12345,
+      } as unknown as ChildProcess;
+    };
     const localBr = BlastRadius.of(sha, ["src/changed.ts"]);
-    await realOracleAdapter(scopingSpawn((mutate) => (seenMutate = mutate))).measure(localBr, repo, "qa-bot-abc");
-    assert.deepEqual(
-      seenMutate,
-      ["src/changed.ts"],
-      "BlastRadius.changedFiles must scope the Stryker mutate targets via selectMutateTargets, not the whole repo",
-    );
+    const adapter = new StrykerMutationOracleAdapter(deps({ spawn: scopingSpawn }));
+    await adapter.measure(localBr, repo, "qa-bot-abc");
+    assert.deepEqual(seenMutate, ["src/changed.ts"], "FROZEN: BlastRadius.changedFiles must scope the mutate targets, not the whole repo");
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
