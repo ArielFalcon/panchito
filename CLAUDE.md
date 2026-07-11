@@ -25,8 +25,8 @@ npm test                    # node:test via tsx; 900+ tests, network/OpenCode/Co
 npm run typecheck           # tsc --noEmit (strict, noUncheckedIndexedAccess)
 
 # Run a single test file or filter by name:
-node --import tsx --test src/qa/commit-classify.test.ts
-node --import tsx --test --test-name-pattern="skip" src/qa/commit-classify.test.ts
+node --import tsx --test src/server/webhook-routing.test.ts
+node --import tsx --test --test-name-pattern="skip" src/server/webhook-routing.test.ts
 
 # Trigger one run manually (runs the SAME pipeline as the webhook). --mode defaults
 # to "diff"; complete/exhaustive scan the whole repo, manual is guidance-driven:

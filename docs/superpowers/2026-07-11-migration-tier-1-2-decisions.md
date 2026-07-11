@@ -104,3 +104,64 @@ Slice 4's deletion:
 - **`Scorecard`/`ScorecardEntry`/`updateScorecard`** stayed in `src/qa/learning/oracle-types.ts`
   (D8 learning-store boundary) — the file is REDUCED (survives as a shell-only module), not
   deleted. Zero importer churn for `history.ts`, `signals-view.ts`, `intelligence-view.ts`.
+
+---
+
+### Judgment Day round 1
+
+An adversarial review of `sdd/migration-tier-1-2` (two independent blind judges) found two
+confirmed defects (both judges agreed on each) and fixed both on `fix/migration-tier-1-2`, gated
+green after every commit (`npm test` + `npm run typecheck`, Node v24.11.0), never committed red:
+
+- **Mutation-oracle timeout/abort testability regression** (confirmed by both judges — one
+  coherent fix covering two related defects): Slice 3 (`8cabc58`) privatized `runMutationOracle`
+  and hardcoded `measure()`'s input, closing the seam that let a test inject a short
+  `timeoutMs`/`AbortSignal`. This silently dropped ALL coverage of the `setTimeout`/`killTree`/
+  abort branches — live production paths (a hanging Stryker run must still resolve, not hang the
+  whole QA run forever) — with zero test replacement. **This was a previously-undocumented
+  deviation**: the apply-progress record (engram `sdd/migration-tier-1-2/apply-progress`) noted the
+  dropped "timeout" fixture as "not a regression" because `timeoutMs` was "structurally
+  unreachable via the adapter's public `measure()` surface" — true, but that framing never made it
+  into this decisions doc, and it elided that the coverage LOSS itself (not just the fixture) was
+  real: the hang/timeout code path stayed live in production with no test exercising it at all.
+  Separately, the adapter's local `killTree` was a byte-copy of the one
+  `qa-engine/src/shared-kernel/process-sandbox/process-kill.port.ts` explicitly names as a
+  consolidation target (the last of 4 duplicates), while `ProcessKillAdapter` was already live
+  elsewhere (`sandboxed-binary-runner.adapter.ts`). **RESOLVED**: `MutationOracleDeps` now carries
+  a required `processKill: ProcessKillPort` (wired to the real `ProcessKillAdapter` in
+  `rewritten-engine-factory.ts`, local `killTree` deleted) and an optional ctor-level `timeoutMs`
+  override (defaulting to `DEFAULT_MUTATION_TIMEOUT_MS`), restoring a real "returns null valueScore
+  on timeout, delegates to the injected ProcessKillPort" test against the actual adapter. The
+  "aborts on signal" seam was deliberately NOT restored — `ValueOraclePort.measure()` takes no
+  per-call cancellation token, and the composition factory builds this adapter's deps bundle
+  BEFORE the run's real `AbortSignal` exists in the `engineFactory(...)`/`RunQaUseCase.run(signal)`
+  call chain, so a ctor-level `signal` field would never be populated by real production wiring —
+  a test for it would cover dead code, not real behavior. Commit `cf2851c`.
+- **depcruise `baseDir` cwd-fragility** (confirmed by both judges, reproduced): both forbidden
+  rules in `qa-engine/.dependency-cruiser.cjs` (`no-src-import-in-qa-engine`, added this change's
+  Slice 5, and the pre-existing `no-vcs-write-in-agent-contexts`) resolve their `from`/`to` path
+  regexes against module ids that default to being relative to `process.cwd()`. Invoking depcruise
+  from `cwd=qa-engine/` (a plausible mistake — e.g. `cd qa-engine && npx depcruise --config
+  .dependency-cruiser.cjs src`) either silently reported zero violations (the patterns, anchored to
+  `"qa-engine/src/"`/`"^src/"`, never matched cwd-relative ids like `"src/foo.ts"`) or errored
+  outright looking for a directory that doesn't exist — both a silent boundary-gate no-op,
+  reproduced directly against a synthetic violation probe before the fix. **RESOLVED**: pinned
+  `options.baseDir` to the repo root (`path.resolve(__dirname, "..")`), making the same
+  baseDir-relative target (`"qa-engine/src"`) resolve identically regardless of invocation cwd.
+  `qa-engine/test/arch/no-src-import.test.ts` extended with a `cwd=qa-engine/` synthetic-violation
+  regression; `vcs-write-confinement.test.ts` re-verified green (unaffected — same rule mechanism,
+  same fix). Commit `170bdd2`.
+
+Docs/hygiene cleanup in the same round (no behavior change): `CLAUDE.md`/`AGENTS.md`'s single-test
+command example referenced the deleted `src/qa/commit-classify.test.ts` (removed in this change's
+own Slice 4) — replaced with the still-live `src/server/webhook-routing.test.ts`; `AGENTS.md`'s
+file-map table's `src/qa/commit-classify.ts` row removed for the same reason.
+`qa-engine/tsconfig.parity.json` pruned 2 stale entries (`commit-classification-parity.test.ts`,
+`fault-injection-oracle-parity.test.ts`) — both dropped their `src/` import in Slice 4/Slice 2
+respectively and are already covered by `qa-engine/tsconfig.json`'s normal include, so listing them
+in the parity config double-typechecked them for no reason (`stryker-mutation-oracle-parity.test.ts`
+was NOT pruned — same absorption happened in Slice 3, but it was never added to
+`tsconfig.parity.json` in the first place, only to `qa-engine/tsconfig.json`'s own exclude list
+pre-Slice-3). `objective-signal/application/ports/index.ts`'s header comment referencing the
+dissolved `OracleInput.repoDir` (§4 above) updated to point at each adapter's own local
+`*InputLike` type instead.
