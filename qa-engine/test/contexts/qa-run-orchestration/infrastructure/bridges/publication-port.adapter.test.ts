@@ -10,6 +10,7 @@ import { PublicationPortAdapter } from "@contexts/qa-run-orchestration/infrastru
 import { PublishDecisionService } from "@contexts/workspace-and-publication/domain/publish-decision.service.ts";
 import { GitHubPrAdapter } from "@contexts/workspace-and-publication/infrastructure/github-pr.adapter.ts";
 import { GitHubIssueAdapter } from "@contexts/workspace-and-publication/infrastructure/github-issue.adapter.ts";
+import type { GitHubHttpDeps } from "@contexts/workspace-and-publication/infrastructure/github-http.ts";
 import { ShadowLogAdapter } from "@contexts/workspace-and-publication/infrastructure/shadow-log.adapter.ts";
 import { renderIssue, renderPrBody } from "@contexts/workspace-and-publication/domain/render-publication.ts";
 import { SecretLeakError } from "@kernel/ports/redaction.port.ts";
@@ -27,15 +28,21 @@ function realRender(): { issue: typeof renderIssue; prBody: typeof renderPrBody 
   return { issue: renderIssue, prBody: renderPrBody };
 }
 
+// migration-tier-4a: GitHubPrAdapter/GitHubIssueAdapter now own their HTTP directly — these fakes
+// play the fetch/authHeaders boundary instead of the retired per-call closures. Only routing
+// (which side effect fires) matters here, so every fetch call resolves the same canned response
+// regardless of endpoint.
+function fakeHttp(json: unknown): GitHubHttpDeps {
+  return {
+    authHeaders: () => ({}),
+    fetch: async () => ({ ok: true, status: 200, text: async () => "", json: async () => json }) as unknown as Response,
+  };
+}
 function fakePr(): GitHubPrAdapter {
-  return new GitHubPrAdapter({
-    createPullRequest: async () => ({ url: "https://github.com/org/app/pull/1", nodeId: "n1", number: 1 }),
-    enableAutoMerge: async () => {},
-    mergePullRequest: async () => {},
-  });
+  return new GitHubPrAdapter(fakeHttp({ html_url: "https://github.com/org/app/pull/1", node_id: "n1", number: 1 }));
 }
 function fakeIssue(): GitHubIssueAdapter {
-  return new GitHubIssueAdapter(async () => ({ url: "https://github.com/org/app/issues/5" }));
+  return new GitHubIssueAdapter(fakeHttp({ html_url: "https://github.com/org/app/issues/5" }));
 }
 // WS5.4b — sanitize is now a REQUIRED collaborator (fail-closed default): every construction site in
 // this file wires an explicit identity sanitizer unless it is specifically testing a REAL sanitizer's
@@ -125,7 +132,10 @@ test("publish() 'issue' route: a secret detected AFTER redaction refuses to publ
   const decide = new PublishDecisionService();
   const pr = fakePr();
   let opened = false;
-  const issue = new GitHubIssueAdapter(async () => { opened = true; return { url: "https://github.com/org/app/issues/5" }; });
+  const issue = new GitHubIssueAdapter({
+    authHeaders: () => ({}),
+    fetch: async () => { opened = true; return { ok: true, status: 200, text: async () => "", json: async () => ({ html_url: "https://github.com/org/app/issues/5" }) } as unknown as Response; },
+  });
   const shadowLog = new ShadowLogAdapter(() => {});
   const adapter = new PublicationPortAdapter(
     { decide, pr, issue, shadowLog, sanitize: identitySanitize, render: fakeRender(), containsSecret: () => true },

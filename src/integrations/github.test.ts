@@ -85,16 +85,6 @@ test("getPrStatus(requiredContext): only the named 'ci' decides — an unrelated
   assert.equal(s.checks, "success"); // 'ci' passed; the unrelated preview-deploy failure does not block
 });
 
-test("openIssue throws on GitHub 500 error", async () => {
-  const deps = mockDeps({ ok: false, status: 500, statusText: "Internal Server Error", json: { message: "boom" } });
-  await assert.rejects(() => github.openIssue("org/app", "title", "body", deps), /GitHub error 500/);
-});
-
-test("openIssue throws on GitHub 401 auth failure", async () => {
-  const deps = mockDeps({ ok: false, status: 401, statusText: "Unauthorized" });
-  await assert.rejects(() => github.openIssue("org/app", "title", "body", deps), /GitHub error 401/);
-});
-
 test("createPullRequest throws on GitHub 422 validation error", async () => {
   const deps = mockDeps({ ok: false, status: 422, json: { message: "Validation Failed" } });
   await assert.rejects(

@@ -88,6 +88,7 @@ import { StrykerMutationOracleAdapter } from "@contexts/objective-signal/infrast
 import { FaultInjectionOracleAdapter } from "@contexts/objective-signal/infrastructure/fault-injection-oracle.adapter";
 import { GitHubPrAdapter } from "@contexts/workspace-and-publication/infrastructure/github-pr.adapter";
 import { GitHubIssueAdapter } from "@contexts/workspace-and-publication/infrastructure/github-issue.adapter";
+import type { GitHubHttpDeps } from "@contexts/workspace-and-publication/infrastructure/github-http";
 import { VcsWriteAdapter } from "@contexts/workspace-and-publication/infrastructure/vcs-write.adapter";
 import { CONFINEMENT_DENYLIST } from "@contexts/workspace-and-publication/domain/write-confinement.service";
 import { WriteConfinementAdapter } from "@contexts/workspace-and-publication/infrastructure/write-confinement.adapter";
@@ -132,7 +133,7 @@ import { runE2E, defaultExecuteDeps, defaultCleanupDeps } from "../qa/execute";
 import { runCodeTests, defaultCodeExecuteDeps, runCodeCoverage, detectCodeProject, scrubEnv } from "../qa/code-runner";
 import { setupE2eProject, defaultSetupDeps } from "../qa/setup";
 import { setupCodeProject, defaultCodeSetupDeps } from "../qa/code-runner";
-import { github } from "../integrations/github";
+import { requireEnv } from "../util/env";
 import { RedactionPortAdapter } from "../orchestrator/sanitizer";
 import { ensureMirror, ensureMirrorAtBranch, defaultMirrorDeps, workdirRoot, realGit, authHeaderArgs } from "../integrations/repo-mirror";
 import { stageServiceContext, serviceContextDir } from "./service-context";
@@ -349,6 +350,19 @@ export function buildConfinement(
 // own signature. Exported for direct unit testing (same precedent as buildConfinement above).
 export function buildMirrorGc(git: GitFn = realGit): MirrorGcAdapter {
   return new MirrorGcAdapter((dir) => git(["gc", "--auto", "--quiet"], dir).then(() => {}));
+}
+
+// migration-tier-4a: the REAL GitHubHttpDeps collaborator GitHubPrAdapter/GitHubIssueAdapter consume
+// — the global fetch + an authHeaders() closure built from requireEnv("GITHUB_TOKEN"), read at CALL
+// time (same "env read per call, not at construction" precedent authHeaderArgs()/withPublishGitDecorations
+// above already follow for git auth). This is the ONLY place GITHUB_TOKEN is read for the
+// watched-repo publish path — qa-engine's adapters never read env or import src/. Exported for direct
+// unit testing (same precedent as buildVcsPublish/buildConfinement/buildMirrorGc above).
+export function githubHttpDeps(fetchFn: typeof fetch = fetch): GitHubHttpDeps {
+  return {
+    fetch: (url, init) => fetchFn(url, init),
+    authHeaders: () => ({ Authorization: `Bearer ${requireEnv("GITHUB_TOKEN")}` }),
+  };
 }
 
 // One-shot /version fetch + sha/health match — VersionPollFn's contract is a SINGLE probe per
@@ -1059,19 +1073,16 @@ export function buildRewrittenCompositionConfig(
     // cfg.shadow is true (composition-root.ts wireBridges() wires that unconditionally), so a
     // shadow-mode app never fires these even on this REAL path.
     // F5 fix (HIGH): GitHubPrAdapter defaults its own `base` param to "main" when omitted
-    // (github-pr.adapter.ts:14) — this call previously never passed app.baseBranch at all, so every
+    // (github-pr.adapter.ts) — this call previously never passed app.baseBranch at all, so every
     // app with a non-"main" default branch (mirrors legacy's own `app.baseBranch ?? "main"` used
     // throughout src/pipeline.ts, e.g. :1214/:1430/:3138/:3222) would silently target the wrong base
     // branch for its suite PR.
-    githubPr: new GitHubPrAdapter(
-      {
-        createPullRequest: (repo, args) => github.createPullRequest(repo, args),
-        enableAutoMerge: (nodeId) => github.enableAutoMerge(nodeId),
-        mergePullRequest: (repo, number) => github.mergePullRequest(repo, number),
-      },
-      app.baseBranch ?? "main",
-    ),
-    githubIssue: new GitHubIssueAdapter((repo, title, body) => github.openIssue(repo, title, body)),
+    // migration-tier-4a: GitHubPrAdapter/GitHubIssueAdapter now own their GitHub HTTP directly — no
+    // more closures wrapping src/integrations/github.ts's `github` object. githubHttpDeps() (below)
+    // is the ONLY place GITHUB_TOKEN is read for this watched-repo publish path (requireEnv, same
+    // env-agnostic-adapter invariant every other injected secret in this file follows).
+    githubPr: new GitHubPrAdapter(githubHttpDeps(), app.baseBranch ?? "main"),
+    githubIssue: new GitHubIssueAdapter(githubHttpDeps()),
     // PROD-BLOCKER fix: the REAL git-write collaborator — stages/commits/pushes the agent's generated
     // tests to the PR branch BEFORE githubPr.openWithAutoMerge() is called (PublicationPortAdapter's
     // "pr" route, see that file's own header). Dispatched by isCode exactly like

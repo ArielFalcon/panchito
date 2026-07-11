@@ -510,11 +510,11 @@ test("two calls to buildRewrittenCompositionConfig with DIFFERENT namespaces pro
 });
 
 // ── F5 (HIGH) — GitHubPrAdapter's own `base` param defaults to "main" when the caller omits it
-// (github-pr.adapter.ts:14); this factory previously never passed app.baseBranch at all, so every
+// (github-pr.adapter.ts); this factory previously never passed app.baseBranch at all, so every
 // app with a non-"main" default branch silently targeted the wrong PR base branch. Verified via
 // structural introspection of the constructed GitHubPrAdapter's own private `base` field — the
-// collaborator cannot be invoked directly in this test file (its injected createPullRequest wraps
-// the REAL github.createPullRequest, which requires GITHUB_TOKEN + real network), so pinning the
+// collaborator cannot be invoked directly in this test file (its injected fetch/authHeaders build
+// the REAL HTTP call, which requires GITHUB_TOKEN + real network), so pinning the
 // constructor-injected value is the faithful, side-effect-free way to assert this wiring.
 
 test("F5: buildRewrittenCompositionConfig wires githubPr with app.baseBranch as the PR base", () => {

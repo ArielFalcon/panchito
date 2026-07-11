@@ -1,15 +1,21 @@
-// GitHub integration: open Issues (failure/invalid) and open PRs with the
-// generated E2E tests (auto-merge when the harness passed). On green with no
-// failures, nothing is done (no noise).
+// GitHub integration for the maintainer/onboarding/admin trust domain: PR read/write for the
+// self-maintainer (createPullRequest/enableAutoMerge/mergePullRequest/getPrStatus/getPullRequest)
+// and repo discovery for onboarding (getRepo/listRepos). These stay byte-identical — consumed by
+// src/server/maintainer-runtime.ts and src/server/app-admin.ts.
+//
+// migration-tier-4a: the watched-repo publish path's Issue/PR opening
+// (createPullRequest+enableAutoMerge+mergePullRequest+openIssue, called from the rewritten engine's
+// publish flow) moved to qa-engine's GitHubPrAdapter/GitHubIssueAdapter, which now own their HTTP
+// directly (qa-engine/.../workspace-and-publication/infrastructure/github-http.ts). `openIssue` was
+// removed here — it had zero remaining production callers once the factory closure retired (only
+// this module's own now-deleted closure and github.test.ts referenced it).
 
 import { requireEnv } from "../util/env";
 
 // GitHub's documented hard limits for Issue/PR fields. Exceeding either is a 422
-// ("title/body is too long"). This module is the single boundary every Issue/PR
-// passes through, so we clamp here UNCONDITIONALLY — no caller (reporter, publish,
-// maintainer, or any future one) can produce a rejected request. Callers should
-// still budget their content for graceful truncation; this is the last-ditch net
-// that closes the whole failure class.
+// ("title/body is too long"). This module is the single boundary every PR this trust domain opens
+// passes through, so we clamp here UNCONDITIONALLY. Callers should still budget their content for
+// graceful truncation; this is the last-ditch net that closes the whole failure class.
 export const GITHUB_MAX_TITLE = 256;
 export const GITHUB_MAX_BODY = 65536;
 
@@ -60,22 +66,6 @@ function ghHeaders(): Record<string, string> {
 }
 
 export const github = {
-  async openIssue(
-    repo: string,
-    title: string,
-    body: string,
-    deps: GitHubDeps = defaultGitHubDeps,
-  ): Promise<{ url: string }> {
-    const res = await deps.fetch(`https://api.github.com/repos/${repo}/issues`, {
-      method: "POST",
-      headers: ghHeaders(),
-      body: JSON.stringify({ title: clampTitle(title), body: clampBody(body) }),
-    });
-    if (!res.ok) throw new Error(`GitHub error ${res.status}: ${await res.text()}`);
-    const data = (await res.json()) as { html_url: string };
-    return { url: data.html_url };
-  },
-
   async createPullRequest(
     repo: string,
     args: { title: string; head: string; base: string; body: string },
