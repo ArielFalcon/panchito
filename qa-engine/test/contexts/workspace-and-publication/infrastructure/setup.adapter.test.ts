@@ -197,6 +197,32 @@ test("a runner-signaled timeout (timedOut:true, never rejects per SandboxedRunRe
   );
 });
 
+// A mid-install operator cancel collapses to the SAME timedOut:true result shape as an internal
+// timeout (SandboxedBinaryRunnerAdapter's onAbort branch resolves timedOut:true on operator
+// cancel, mirroring its own timeout branch — see that module's header note). Without a consumer-
+// level check, install() could not tell the two apart and always threw the generic "timed out
+// after Xms — killed" message, masking the distinct operator-cancel message the deleted
+// src/qa/setup.ts original always threw for this path. Fixed at the consumer level (this method),
+// same pattern as stryker-mutation-oracle.adapter.ts's own signal check.
+test("a mid-install operator cancel (signal aborts DURING the run) throws the distinct operator-cancel message, not the generic timeout message", async () => {
+  const controller = new AbortController();
+  const fs = orchestrationFs({ hasPackageJson: true });
+  const runner = fakeRunner(async () => {
+    // Simulate the abort firing WHILE the install is in flight: by the time the runner settles,
+    // the signal is already aborted — matching SandboxedBinaryRunnerAdapter's onAbort resolution.
+    controller.abort();
+    return okResult({ exitCode: null, timedOut: true });
+  });
+  await assert.rejects(
+    () => new SetupAdapter({ fs, runner, seedDir: "/seed" }).setup("/mirror/e2e", { signal: controller.signal, timeoutMs: 5_000 }),
+    (err: Error) => {
+      assert.match(err.message, /e2e dependency install aborted by operator cancel/);
+      assert.doesNotMatch(err.message, /timed out after/, "the generic timeout message must not mask the distinct operator-cancel message");
+      return true;
+    },
+  );
+});
+
 // ── ensureFailureCapture (Unit 2 — Task 2.6) ────────────────────────────────
 // Tests run against real temp dirs so append-only and idempotency are provable without mocking the
 // FS. SetupAdapter's own ensureFailureCapture (nodeFsDeps-backed) is the production code under test.
