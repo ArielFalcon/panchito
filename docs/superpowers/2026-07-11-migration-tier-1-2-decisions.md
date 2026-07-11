@@ -167,10 +167,13 @@ v24.11.0), never committed red:
   modules) instead of `qa-engine/src` (172 modules) — a silent false-clean on a real planted
   violation, since none of the root tree's module ids match the `^qa-engine/src/` `from` pattern.
   The CI-enforced gate (`npm test`'s arch tests, always cwd-pinned to the repo root) was never
-  exposed to this; the risk was purely ad-hoc human CLI invocation. **RESOLVED**: added a canonical,
-  cwd-independent root `package.json` script, `"arch:check": "depcruise --config
-  qa-engine/.dependency-cruiser.cjs qa-engine/src"` (npm scripts always run from the package root,
-  so the bare-target ambiguity cannot occur) — verified passing on HEAD (172 modules, 0 violations)
+  exposed to this; the risk was purely ad-hoc human CLI invocation. **RESOLVED**: added a canonical
+  root `package.json` script, `"arch:check": "depcruise --config
+  qa-engine/.dependency-cruiser.cjs qa-engine/src"`, run FROM THE REPO ROOT. Round-3 judges noted
+  the script is not literally cwd-independent: from a subtree with its own package.json
+  (`qa-engine/`, `web/`, `packages/*`) npm resolves the nearest manifest and fails LOUDLY with
+  "Missing script" — an error, never a silent wrong-tree scan, so the false-clean class stays
+  closed. Verified passing on HEAD (172 modules, 0 violations)
   and failing on a planted probe (176 modules, 1 violation, probe removed after). The config header
   comment's inaccurate "fixed" framing was corrected to state the real contract: target arguments
   must be baseDir-relative (`qa-engine/src`), the bare-`src`-from-`cwd=qa-engine/` form is a

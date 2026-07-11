@@ -44,7 +44,7 @@ test("SYNTHETIC VIOLATION: a qa-engine production file importing src/ is caught 
   // can be observed mid-write by that concurrent scan and produce a flaky cross-file failure) that
   // imports a real, still-present src/ module. Proves the guard actually FIRES on a real violation,
   // not just that depcruise runs clean by omission.
-  const probePath = join(root, "qa-engine", "src", "__no_src_import_probe__.ts");
+  const probePath = join(root, "qa-engine", "src", "__no_src_import_probe_1__.ts");
   writeFileSync(
     probePath,
     'import type { TestTarget } from "../../src/types.ts";\nexport type Probe = TestTarget;\n',
@@ -75,7 +75,7 @@ test("KNOWN PITFALL, documented and out-of-gate (judgment-day round-2): a bare '
   // `npm run arch:check`, asserted as the CLEAN ON HEAD / SYNTHETIC VIOLATION tests above. This
   // test documents the pitfall as known-and-out-of-gate: it must keep reporting a false "ok" so a
   // future accidental fix here doesn't silently hide the still-real ad-hoc CLI foot-gun untested.
-  const probePath = join(root, "qa-engine", "src", "__no_src_import_probe__.ts");
+  const probePath = join(root, "qa-engine", "src", "__no_src_import_probe_2__.ts");
   writeFileSync(
     probePath,
     'import type { TestTarget } from "../../src/types.ts";\nexport type Probe = TestTarget;\n',
@@ -99,7 +99,7 @@ test("SYNTHETIC VIOLATION, invoked with cwd=qa-engine/: the boundary rule still 
   // rule silently never fired, reporting a false "clean" even on a real violation. Same probe/target
   // as the root-cwd SYNTHETIC VIOLATION test above, only `cwd` differs — proving the SAME
   // baseDir-relative target ("qa-engine/src") now resolves identically regardless of invocation cwd.
-  const probePath = join(root, "qa-engine", "src", "__no_src_import_probe__.ts");
+  const probePath = join(root, "qa-engine", "src", "__no_src_import_probe_3__.ts");
   writeFileSync(
     probePath,
     'import type { TestTarget } from "../../src/types.ts";\nexport type Probe = TestTarget;\n',

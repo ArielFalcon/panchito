@@ -31,9 +31,11 @@
 // it silently scans the wrong tree and reports a false "clean" even with a real qa-engine/src/
 // violation present, because none of that tree's module ids match the `^qa-engine/src/` `from`
 // pattern. Reproduced: 392 modules cruised (root src/) vs. 172 modules (qa-engine/src) on
-// otherwise-identical HEAD. The canonical, cwd-independent invocation is `npm run arch:check`
-// (root package.json), which always runs from the package root and passes the correct
-// baseDir-relative target.
+// otherwise-identical HEAD. The canonical invocation is `npm run arch:check` FROM THE REPO ROOT
+// (root package.json); from a subtree with its own package.json (qa-engine/, web/, packages/*)
+// npm resolves the nearest manifest and fails LOUDLY with "Missing script" — an error, never a
+// silent wrong-tree scan. The always-enforced gate is qa-engine/test/arch/ inside `npm test`,
+// which pins its own cwd and is invocation-independent.
 const path = require("node:path");
 
 module.exports = {
