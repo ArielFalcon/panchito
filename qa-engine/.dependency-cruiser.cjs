@@ -16,15 +16,24 @@
 // Known limitation: dependency-cruiser may miss dynamic import() — flagged for manual audit.
 //
 // options.baseDir (judgment-day round-1): pinned to the repo root, NOT left to default to
-// process.cwd(). Without this, dependency-cruiser resolves both rules' `from`/`to` path regexes
-// against module ids that are relative to whatever directory the command was invoked FROM, not to
-// this config file's own location — so a completely ordinary invocation from inside qa-engine/
-// (e.g. `cd qa-engine && npx depcruise --config .dependency-cruiser.cjs src`) either silently
-// reports zero violations (the from/to patterns, anchored to "qa-engine/src/"/"^src/", never match
-// ids like "src/foo.ts") or errors outright looking for a directory that doesn't exist — both a
-// SILENT boundary-gate no-op, the opposite of "secure by default". Pinning baseDir makes the SAME
-// baseDir-relative target argument ("qa-engine/src") resolve identically no matter which directory
-// the command is run from (see qa-engine/test/arch/no-src-import.test.ts's cwd=qa-engine/ variant).
+// process.cwd(). This fixes the `from`/`to` RULE-MATCHING regexes (anchored to
+// "qa-engine/src/"/"^src/") so they resolve against repo-root-relative module ids no matter which
+// directory the command is invoked from — see qa-engine/test/arch/no-src-import.test.ts's
+// cwd=qa-engine/ variant.
+//
+// CONTRACT (judgment-day round-2 — the round-1 fix did NOT make every invocation form safe, only
+// baseDir-relative ones): because baseDir is pinned to the repo root, dependency-cruiser ALSO
+// resolves the CLI's own TARGET ARGUMENT against that same baseDir, not against the invoking cwd —
+// so the target must itself be baseDir-relative ("qa-engine/src"), regardless of cwd. A bare
+// relative target like `src`, run from inside qa-engine/ (e.g. `cd qa-engine && npx depcruise
+// --config .dependency-cruiser.cjs src`), resolves as `<repo-root>/src` — the LEGACY root src/
+// tree, a completely different, still-existing directory — not qa-engine/src. This does not error;
+// it silently scans the wrong tree and reports a false "clean" even with a real qa-engine/src/
+// violation present, because none of that tree's module ids match the `^qa-engine/src/` `from`
+// pattern. Reproduced: 392 modules cruised (root src/) vs. 172 modules (qa-engine/src) on
+// otherwise-identical HEAD. The canonical, cwd-independent invocation is `npm run arch:check`
+// (root package.json), which always runs from the package root and passes the correct
+// baseDir-relative target.
 const path = require("node:path");
 
 module.exports = {

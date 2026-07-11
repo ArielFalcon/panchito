@@ -64,6 +64,34 @@ test("CLEAN ON HEAD: no qa-engine production file imports src/ today", () => {
   assert.equal(ok, true, `dependency-cruiser reported a src/ boundary violation on HEAD:\n${output}`);
 });
 
+test("KNOWN PITFALL, documented and out-of-gate (judgment-day round-2): a bare 'src' TARGET ARGUMENT invoked from cwd=qa-engine/ silently scans the wrong tree and misses a real violation", () => {
+  // Pinning options.baseDir (round-1) fixed rule-MATCHING, but baseDir also governs how the CLI's
+  // own target argument resolves: a bare `src` target from cwd=qa-engine/ resolves against baseDir
+  // (the repo root) as "<repo-root>/src" — the LEGACY root src/ tree — NOT qa-engine/src. This does
+  // not error; it silently reports clean because none of that tree's module ids match the
+  // `^qa-engine/src/` `from` pattern, even with the SAME real probe violation present. This is the
+  // exact invocation form quoted (as "now fixed") in the round-1 commit message/header — it is
+  // NOT fixed for this bare-target form; the canonical fix is the baseDir-relative target used by
+  // `npm run arch:check`, asserted as the CLEAN ON HEAD / SYNTHETIC VIOLATION tests above. This
+  // test documents the pitfall as known-and-out-of-gate: it must keep reporting a false "ok" so a
+  // future accidental fix here doesn't silently hide the still-real ad-hoc CLI foot-gun untested.
+  const probePath = join(root, "qa-engine", "src", "__no_src_import_probe__.ts");
+  writeFileSync(
+    probePath,
+    'import type { TestTarget } from "../../src/types.ts";\nexport type Probe = TestTarget;\n',
+  );
+  try {
+    const { ok } = runDepcruise("src", join(root, "qa-engine"));
+    assert.equal(
+      ok,
+      true,
+      "documented pitfall: a bare 'src' target from cwd=qa-engine/ is expected to silently scan the wrong (root) tree and miss the probe violation",
+    );
+  } finally {
+    rmSync(probePath, { force: true });
+  }
+});
+
 test("SYNTHETIC VIOLATION, invoked with cwd=qa-engine/: the boundary rule still fires (judgment-day round-1 — was a silent false-clean no-op before options.baseDir was pinned)", () => {
   // Reproduced false-clean: before pinning `options.baseDir` in .dependency-cruiser.cjs, running
   // depcruise from ANY cwd other than the repo root made the from/to path regexes (anchored to

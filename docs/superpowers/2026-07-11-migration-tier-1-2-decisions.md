@@ -152,6 +152,37 @@ green after every commit (`npm test` + `npm run typecheck`, Node v24.11.0), neve
   regression; `vcs-write-confinement.test.ts` re-verified green (unaffected — same rule mechanism,
   same fix). Commit `170bdd2`.
 
+### Judgment Day round 2
+
+A second adversarial review (blind judge B) reproduced one confirmed defect, fixed on
+`fix/migration-tier-1-2`, gated green after the commit (`npm test` + `npm run typecheck`, Node
+v24.11.0), never committed red:
+
+- **The depcruise CLI target argument resolves against the pinned baseDir, not cwd** (reproduced):
+  round-1's `options.baseDir` pin fixed rule-MATCHING (the `from`/`to` path regexes), but baseDir
+  also governs how the CLI's own TARGET ARGUMENT resolves — so `cd qa-engine && npx depcruise
+  --config .dependency-cruiser.cjs src` (the exact command quoted as the round-1 repro/"now fixed"
+  example, in both `qa-engine/.dependency-cruiser.cjs`'s header and the `170bdd2` commit message)
+  resolves the bare `src` target against the repo root, scanning the LEGACY root `src/` tree (392
+  modules) instead of `qa-engine/src` (172 modules) — a silent false-clean on a real planted
+  violation, since none of the root tree's module ids match the `^qa-engine/src/` `from` pattern.
+  The CI-enforced gate (`npm test`'s arch tests, always cwd-pinned to the repo root) was never
+  exposed to this; the risk was purely ad-hoc human CLI invocation. **RESOLVED**: added a canonical,
+  cwd-independent root `package.json` script, `"arch:check": "depcruise --config
+  qa-engine/.dependency-cruiser.cjs qa-engine/src"` (npm scripts always run from the package root,
+  so the bare-target ambiguity cannot occur) — verified passing on HEAD (172 modules, 0 violations)
+  and failing on a planted probe (176 modules, 1 violation, probe removed after). The config header
+  comment's inaccurate "fixed" framing was corrected to state the real contract: target arguments
+  must be baseDir-relative (`qa-engine/src`), the bare-`src`-from-`cwd=qa-engine/` form is a
+  documented pitfall, and the canonical invocation is `npm run arch:check`.
+  `qa-engine/test/arch/no-src-import.test.ts` gained one micro-test documenting the bare-target
+  pitfall as known-and-out-of-gate (asserts the bare `src` target from `cwd=qa-engine/` still
+  reports a false "clean" against the same probe the sibling `cwd=qa-engine/` test — baseDir-relative
+  target — correctly catches). `CLAUDE.md`/`AGENTS.md` carry no depcruise invocation examples, so no
+  correction was needed there.
+
+---
+
 Docs/hygiene cleanup in the same round (no behavior change): `CLAUDE.md`/`AGENTS.md`'s single-test
 command example referenced the deleted `src/qa/commit-classify.test.ts` (removed in this change's
 own Slice 4) — replaced with the still-live `src/server/webhook-routing.test.ts`; `AGENTS.md`'s
