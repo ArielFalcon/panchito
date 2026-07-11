@@ -12,8 +12,16 @@
 // src/qa/execute.ts's killTree + the ad hoc spawn/timeout/abort wiring src/qa/setup.ts's
 // defaultSetupDeps.install used to hand-roll). `seedDir` is injected as a plain resolved STRING — the
 // composition factory (the sole src<->qa-engine seam) inlines src/qa/setup.ts's old seedDir()
-// (`PANCHITO_ROOT` env read), so this module never reads env directly (env-agnostic-adapter
-// invariant, same precedent as the mirror-provisioning and github-publication slices).
+// (`PANCHITO_ROOT` env read), so this ADAPTER'S OWN CODE never reads env directly (env-agnostic-
+// adapter invariant, same precedent as the mirror-provisioning and github-publication slices).
+//
+// TEMPLATE-STRING EXEMPTION: FAILURE_CAPTURE_BLOCK (below) contains literal `process.env.
+// QA_FAILURE_CAPTURE_DIR` reads (judgment-day round-1 flagged these as adapter-code env reads —
+// they are not). That text is DATA, not code this module executes: the block is byte-identical
+// content injected/appended into a WATCHED APP's e2e/fixtures.ts and later run by Playwright
+// INSIDE THAT APP'S OWN test process, never by this adapter's Node process. The env-agnostic
+// invariant above governs this module's own reads only; a data string this module merely carries
+// is out of scope by construction, same as config/e2e/fixtures.ts's own seed copy of the block.
 //
 // The managed-block constants (FAILURE_CAPTURE_MARKER/FAILURE_CAPTURE_BLOCK/
 // PLAYWRIGHT_CONFIG_SEED_MARKER) move here as pure data, BYTE-IDENTICAL to the original — the FIX4/D2
