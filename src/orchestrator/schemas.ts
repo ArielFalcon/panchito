@@ -190,57 +190,21 @@ export type ServiceConfig = NonNullable<ValidatedAppConfig["services"]>[number];
 // ── Manifest entry schema ─────────────────────────────────────────────────────
 // Per-test metadata that lives in e2e/.qa/manifest.json. Validates the day-one
 // fields written by the agent; measured/derived fields are optional.
-export const ManifestEntrySchema = z.object({
-  id: z.string().min(1, { error: "manifest entry missing 'id'" }),
-  objective: z.string().min(1, { error: "manifest entry missing 'objective'" }),
-  flow: z.string().min(1, { error: "manifest entry missing 'flow'" }),
-  useCase: z.string().optional(),
-  targets: z.array(z.string()).min(1, { error: "manifest entry has empty 'targets'" }),
-  changeRef: z.object({
-    sha: z.string().min(1),
-    type: z.string().min(1),
-    pr: z.number().optional(),
-    ticket: z.string().optional(),
-  }),
-  // Content checksum of the spec file, written by the orchestrator at manifest time for
-  // integrity verification. Declared here (optional) so the schema matches what the write
-  // path actually emits and the read path preserves it instead of silently stripping it
-  // (post-ADR-001, Phase 3.1 — write↔read expressed as one schema).
-  sha256: z.string().optional(),
-  criticality: z.enum(["critical", "normal"]).optional(),
-  owner: z.string().optional(),
-  createdAt: z.string().optional(),
-  coverage: z
-    .object({
-      files: z.array(z.string()).optional(),
-      functions: z.array(z.string()).optional(),
-    })
-    .optional(),
-  sensitivity: z
-    .object({
-      status: z.enum(["pass", "fail", "unknown"]),
-      method: z.string().optional(),
-      at: z.string().optional(),
-    })
-    .optional(),
-  stability: z
-    .object({
-      runs: z.number(),
-      flakyRuns: z.number(),
-    })
-    .optional(),
-  ledger: z
-    .object({
-      caughtRegressions: z.number(),
-      falsePositives: z.number(),
-    })
-    .optional(),
-  merit: z.number().optional(),
-});
-
-export const ManifestSchema = z.array(ManifestEntrySchema);
-
-export type ValidatedManifestEntry = z.infer<typeof ManifestEntrySchema>;
+//
+// migration-tier-4b Slice 2 (THE manifest reconciliation): THIN RE-EXPORT of the canonical schema
+// (qa-engine/src/shared-kernel/manifest/manifest-entry.ts) — the two independently-maintained
+// validators that existed before this slice (this schema, enforced at read time by
+// src/qa/metadata.ts's validateManifest / Filter B's checkManifest; and manifest-fs.ts's hand-rolled
+// write-time twin) now collapse into ONE. This is the shell -> qa-engine direction (open by design;
+// see qa-engine/.dependency-cruiser.cjs's own rule comment) — the "contract-shim" precedent already
+// used elsewhere in this file. Kept as re-exports (not a direct `export { ... } from "..."` re-point
+// of every import site) so src/integrations/opencode-client.ts (:58/:858, dead-but-compiled on the
+// qa-engine-driven production path) and src/qa/metadata.ts (unmigrated until Slice 3) keep compiling
+// against these EXACT names with zero caller changes. Field set is a superset of the pre-4b shape
+// (adds the optional `file` field the qa-engine port side needs) — a harmless widening, never a
+// narrowing: every field this schema already required stays required.
+export { ManifestEntrySchema, ManifestSchema } from "../../qa-engine/src/shared-kernel/manifest/manifest-entry";
+export type { ManifestEntry as ValidatedManifestEntry } from "../../qa-engine/src/shared-kernel/manifest/manifest-entry";
 
 // ── Webhook payload schema ────────────────────────────────────────────────────
 // Validates the incoming POST body from GitHub / manual triggers.

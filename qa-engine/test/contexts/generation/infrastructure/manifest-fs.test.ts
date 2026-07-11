@@ -9,6 +9,7 @@ import { mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { readManifest, reconcileManifest } from "@contexts/generation/infrastructure/manifest-fs.ts";
+import type { ManifestEntry } from "@contexts/generation/application/ports/index.ts";
 
 function makeSpecDir(): string {
   return mkdtempSync(join(tmpdir(), "qa-engine-manifest-fs-"));
@@ -289,6 +290,65 @@ test("reconcileManifest drops a malformed entry (empty targets) with a warning",
     ]);
     assert.deepEqual(out, []);
     assert.ok(warnings.some((w) => w.includes("bad") && w.includes("schema")));
+  } finally {
+    console.warn = originalWarn;
+    rmSync(specDir, { recursive: true, force: true });
+  }
+});
+
+// ── migration-tier-4b Slice 2 (THE manifest reconciliation) ────────────────────────────────────
+
+// GIVEN a manifest entry missing `file` (a hypothetical pre-4b or hand-edited entry) — `file` is
+// now OPTIONAL on the canonical ManifestEntry. It must NOT be silently dropped as a phantom (the
+// pre-Slice-2 shape, where `file` was type-required, never had to distinguish "no file declared"
+// from "file declared but not on disk" — collapsing both into "no sha256 => drop" would now
+// falsely flag every file-less entry).
+test("reconcileManifest does NOT drop an entry with no 'file' field as a false phantom", async () => {
+  const specDir = makeSpecDir();
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (msg: string) => { warnings.push(String(msg)); };
+  try {
+    const out = await reconcileManifest(specDir, [
+      { id: "no-file", flow: "checkout", objective: "user can checkout", targets: ["CheckoutService.pay"], changeRef: { sha: "s", type: "feat" } },
+    ]);
+    assert.deepEqual(out.map((e) => e.id), ["no-file"], "a file-less entry survives — it is not a phantom");
+    assert.equal(out[0]?.sha256, undefined, "sha256 is never fabricated for an entry with no file to hash");
+    assert.ok(
+      !warnings.some((w) => w.includes("phantom")),
+      "no phantom warning must fire for an entry that never declared a file",
+    );
+  } finally {
+    console.warn = originalWarn;
+    rmSync(specDir, { recursive: true, force: true });
+  }
+});
+
+// GIVEN an entry with criticality:"urgent" (not in the enum) WHEN written via reconcile THEN it is
+// rejected AT WRITE TIME — the write path (manifestEntryViolation, now canonical-schema-backed)
+// validates enum fields for the first time (the pre-Slice-2 hand-rolled manifestEntryViolation only
+// checked the 5 required-field presences, never enum shapes).
+test("reconcileManifest rejects criticality:\"urgent\" (not in the enum) at WRITE time, with a warning", async () => {
+  const specDir = makeSpecDir();
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (msg: string) => { warnings.push(String(msg)); };
+  try {
+    writeSpecFile(specDir, "e2e/bad-enum.spec.ts");
+    // A runtime-only value (e.g. a hand-edited on-disk entry) can carry an out-of-enum
+    // criticality even though the TYPE forbids it — cast through `unknown` to exercise the
+    // runtime zod check, mirroring how a real malformed value would arrive (JSON.parse, not a
+    // typed literal).
+    const badEntry = {
+      id: "bad-enum", file: "e2e/bad-enum.spec.ts", flow: "checkout", objective: "o",
+      targets: ["t"], changeRef: { sha: "s", type: "feat" }, criticality: "urgent",
+    } as unknown as ManifestEntry;
+    const out = await reconcileManifest(specDir, [badEntry]);
+    assert.deepEqual(out, [], "the enum-violating entry is dropped — never silently written");
+    assert.ok(
+      warnings.some((w) => w.includes("bad-enum") && w.includes("schema")),
+      "a warning names the dropped entry — never silent",
+    );
   } finally {
     console.warn = originalWarn;
     rmSync(specDir, { recursive: true, force: true });

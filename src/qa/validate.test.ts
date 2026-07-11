@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { validateSpecs, ValidateDeps, runCheck } from "./validate";
+import { validateSpecs, ValidateDeps, runCheck, defaultValidateDeps } from "./validate";
 
 const ok = async () => ({ ok: true, output: "" });
 
@@ -217,6 +217,68 @@ test("B2: a zero-assertion GENERATED spec under flows/ IS flagged", async () => 
     const res = await validateSpecs(dir, deps);
     assert.equal(res.ok, false, "a generated spec under flows/ with no expect must be flagged");
     assert.ok(res.errors.some((e) => /zero.assertion|trivial\.spec\.ts/i.test(e)), `expected a zero-assertion error; got ${JSON.stringify(res.errors)}`);
+  } finally {
+    _rmSync(dir, { recursive: true });
+  }
+});
+
+// ── migration-tier-4b Slice 2 (gate DEFECT-1 fix): checkManifest is a DISTINCT strict read from
+// generation's manifest-fs.ts::readManifest (fail-open-to-[]). checkManifest itself relocates in
+// Slice 3 (unmodified here), but the canonical schema underneath it (via metadata.ts's
+// validateManifest -> schemas.ts -> @kernel/manifest) changes THIS slice — this pins today's byte-
+// matching strict-read behavior BEFORE that relocation, against the REAL defaultValidateDeps
+// implementation (not a stub), with real fs fixtures.
+test("defaultValidateDeps.checkManifest: a MISSING manifest.json is ok:false (never a fail-open pass)", async () => {
+  const dir = _mkdtempSync(_join(_tmpdir(), "qa-validate-checkmanifest-missing-"));
+  try {
+    const res = await defaultValidateDeps.checkManifest(dir);
+    assert.equal(res.ok, false);
+    assert.match(res.output, /unreadable or missing/);
+  } finally {
+    _rmSync(dir, { recursive: true });
+  }
+});
+
+test("defaultValidateDeps.checkManifest: a CORRUPT (non-JSON) manifest.json is ok:false", async () => {
+  const dir = _mkdtempSync(_join(_tmpdir(), "qa-validate-checkmanifest-corrupt-"));
+  try {
+    _mkdirSync(_join(dir, ".qa"));
+    _writeFileSync(_join(dir, ".qa", "manifest.json"), "{ not valid json ][");
+    const res = await defaultValidateDeps.checkManifest(dir);
+    assert.equal(res.ok, false);
+  } finally {
+    _rmSync(dir, { recursive: true });
+  }
+});
+
+test("defaultValidateDeps.checkManifest: a well-formed manifest.json is ok:true (byte-matching today)", async () => {
+  const dir = _mkdtempSync(_join(_tmpdir(), "qa-validate-checkmanifest-ok-"));
+  try {
+    _mkdirSync(_join(dir, ".qa"));
+    const entry = {
+      id: "checkout", objective: "o", flow: "checkout",
+      targets: ["CheckoutService.pay"], changeRef: { sha: "s", type: "feat" },
+    };
+    _writeFileSync(_join(dir, ".qa", "manifest.json"), JSON.stringify([entry]));
+    const res = await defaultValidateDeps.checkManifest(dir);
+    assert.equal(res.ok, true);
+  } finally {
+    _rmSync(dir, { recursive: true });
+  }
+});
+
+test("defaultValidateDeps.checkManifest: an entry with criticality:\"urgent\" (not in the enum) is ok:false — write-time and read-time now share the SAME canonical validator", async () => {
+  const dir = _mkdtempSync(_join(_tmpdir(), "qa-validate-checkmanifest-enum-"));
+  try {
+    _mkdirSync(_join(dir, ".qa"));
+    const entry = {
+      id: "checkout", objective: "o", flow: "checkout",
+      targets: ["CheckoutService.pay"], changeRef: { sha: "s", type: "feat" },
+      criticality: "urgent",
+    };
+    _writeFileSync(_join(dir, ".qa", "manifest.json"), JSON.stringify([entry]));
+    const res = await defaultValidateDeps.checkManifest(dir);
+    assert.equal(res.ok, false);
   } finally {
     _rmSync(dir, { recursive: true });
   }
