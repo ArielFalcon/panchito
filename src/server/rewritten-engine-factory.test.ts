@@ -605,8 +605,9 @@ test("buildVcsPublish (e2e target): changes under e2e/ -> checkout -B, add, comm
 // that the first round's fakes only recorded argv without pinning the auth/identity prefixes.
 // realGit (src/integrations/repo-mirror.ts:203-208) is a BARE execFile wrapper: it applies
 // hardenGitArgs (hooks/safe.directory) + GIT_TERMINAL_PROMPT=0 but NEVER prepends authHeaderArgs()
-// — auth in this codebase is per CALL SITE (syncMirror :73/:78, resolveRef :221, legacy publish
-// :124 `[...authHeaderArgs(), "push", ...]`). Likewise fresh mirrors have NO git identity (nothing
+// — auth in this codebase is per CALL SITE (repo-mirror's ensureMirror/ensureMirrorAtBranch
+// wrappers, resolveRef :221, legacy publish :124 `[...authHeaderArgs(), "push", ...]`). Likewise
+// fresh mirrors have NO git identity (nothing
 // in Dockerfile/compose/repo-mirror configures one), which is why legacy committed with
 // `-c user.name=<GIT_AUTHOR_NAME ?? "panchito"> -c user.email=<GIT_AUTHOR_EMAIL ?? "panchito@users.
 // noreply.github.com">` (publish.ts:107-108,120-123). buildVcsPublish now decorates the injected

@@ -247,8 +247,9 @@ type GitFn = (args: string[], cwd?: string) => Promise<string>;
 
 // Adversarial-review CRITICALs (auth-on-push + commit identity): realGit is a BARE execFile wrapper
 // — it applies hardenGitArgs (hooks/safe.directory) + GIT_TERMINAL_PROMPT=0 but NEVER prepends
-// authHeaderArgs(); auth in this codebase is applied per CALL SITE (repo-mirror's own syncMirror/
-// resolveRef, legacy publish.ts:124 `[...authHeaderArgs(), "push", ...]`). Likewise a fresh mirror
+// authHeaderArgs(); auth in this codebase is applied per CALL SITE (repo-mirror's own
+// ensureMirror/ensureMirrorAtBranch wrappers + resolveRef, legacy publish.ts:124
+// `[...authHeaderArgs(), "push", ...]`). Likewise a fresh mirror
 // has NO git identity configured anywhere (Dockerfile/compose/repo-mirror set none), which is why
 // legacy committed with `-c user.name=<GIT_AUTHOR_NAME ?? "panchito"> -c user.email=
 // <GIT_AUTHOR_EMAIL ?? "panchito@users.noreply.github.com">` (publish.ts:107-108,120-123). Without
