@@ -78,8 +78,21 @@ function deps(overrides: Partial<MutationOracleDeps> = {}): MutationOracleDeps {
     spawn: mockSpawn({}),
     detectCodeProject: () => ({ ecosystem: "node", test: { cmd: "node", args: ["--test"] } }),
     scrubEnv: () => ({}),
+    processKill: { killTree: () => {} },
     ...overrides,
   };
+}
+
+// A spawn stub that NEVER fires "close" — only the ctor-injected short `timeoutMs` (or an abort)
+// resolves the promise. Mirrors the legacy src/qa/learning/mutation-code.test.ts "aborts"/"timeout"
+// fixtures' neverResolve shape (git show 06444c2's stryker-mutation-oracle-parity.test.ts).
+function neverCloseSpawn(): ChildProcess {
+  return {
+    stdout: { on: () => {} },
+    stderr: { on: () => {} },
+    on: () => {},
+    pid: 12345,
+  } as unknown as ChildProcess;
 }
 
 describe("StrykerMutationOracleAdapter.measure", () => {
@@ -145,6 +158,30 @@ describe("StrykerMutationOracleAdapter.measure", () => {
       await adapter.measure(br, repo, "qa-bot-abc");
       assert.equal(existsSync(join(repo, "stryker.conf.json")), false);
       assert.equal(existsSync(join(repo, "reports")), false);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null valueScore on timeout and delegates to the injected ProcessKillPort", async () => {
+    const repo = tmpRepo();
+    let killed: ChildProcess | undefined;
+    try {
+      const adapter = new StrykerMutationOracleAdapter(
+        deps({
+          spawn: neverCloseSpawn,
+          timeoutMs: 10,
+          processKill: {
+            killTree: (child) => {
+              killed = child;
+            },
+          },
+        }),
+      );
+      const r = await adapter.measure(br, repo, "qa-bot-abc");
+      assert.equal(r.valueScore, null);
+      assert.match(r.details, /timeout/);
+      assert.ok(killed, "expected the timeout branch to delegate to the injected ProcessKillPort");
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }

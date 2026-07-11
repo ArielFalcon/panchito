@@ -789,10 +789,12 @@ export function buildRewrittenCompositionConfig(
   };
 
   // Mutation oracle collaborators (migration-tier-1-2, Slice 3): the node-stdlib/Stryker
-  // orchestration moved into StrykerMutationOracleAdapter itself (qa-engine, src-free); the three
+  // orchestration moved into StrykerMutationOracleAdapter itself (qa-engine, src-free); the
   // effectful collaborators it needs stay HERE, src-bound, and are injected as one bundle — the
-  // adapter never imports src/ directly.
-  const mutationOracleDeps = { spawn, detectCodeProject, scrubEnv };
+  // adapter never imports src/ directly. `processKill` is the same ProcessKillAdapter instance
+  // shape already used by the SandboxedBinaryRunnerAdapter wiring above (judgment-day round-1:
+  // retires this adapter's own local killTree byte-copy in favor of the shared-kernel port).
+  const mutationOracleDeps = { spawn, detectCodeProject, scrubEnv, processKill: new ProcessKillAdapter() };
 
   const oracle = isCode
     ? new StrykerMutationOracleAdapter(mutationOracleDeps)

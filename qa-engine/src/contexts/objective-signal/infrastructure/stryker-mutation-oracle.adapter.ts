@@ -7,29 +7,22 @@
 // Ctor collaborators stay effectful and src-bound (child_process spawn, ecosystem/command
 // detection, env scrubbing) — injected as one bundle by the composition factory
 // (rewritten-engine-factory.ts), which is the only src<->qa-engine bridge for this adapter.
+//
+// The process-tree kill on the hang/timeout path is injected via ProcessKillPort (shared-kernel)
+// rather than a local byte-copy — this was the last of the 4 killTree duplicates named in
+// process-kill.port.ts's consolidation note (execute.ts, code-runner.ts, static-signal/exec.ts,
+// learning/mutation-code.ts); ProcessKillAdapter (shared-infrastructure) is the one concrete
+// implementation, same as sandboxed-binary-runner.adapter.ts's usage. `timeoutMs` is also injected
+// (ctor-level, defaulting to DEFAULT_MUTATION_TIMEOUT_MS) so the hang/timeout path is testable
+// against the real adapter without waiting out the 600s production default.
 import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import type { ValueOraclePort, ValueOracleResult } from "../application/ports/index.ts";
 import type { BlastRadius } from "@kernel/blast-radius.ts";
+import type { ProcessKillPort } from "@kernel/process-sandbox/process-kill.port.ts";
 
 const DEFAULT_MUTATION_TIMEOUT_MS = 600_000;
-
-// Kills the spawned process AND its descendants. Spawns are `detached: true` so the child is its
-// own process-group leader; `process.kill(-pid)` signals the whole group. Falls back to a direct
-// kill if the group send fails (e.g. the child already exited).
-function killTree(child: ChildProcess): void {
-  try {
-    if (child.pid) process.kill(-child.pid, "SIGKILL");
-    else child.kill("SIGKILL");
-  } catch {
-    try {
-      child.kill("SIGKILL");
-    } catch {
-      /* already gone */
-    }
-  }
-}
 
 // Resolve the Stryker binary. We ship @stryker-mutator/core in the ORCHESTRATOR image, so the
 // oracle works for ANY watched JS/TS repo even when the repo doesn't depend on Stryker — and we
@@ -126,9 +119,19 @@ function cleanupStryker(repoDir: string): void {
 }
 
 // The OracleInput fields this adapter's absorbed orchestration reads (local structural type — no
-// src/ import at runtime). ecosystem/signal/timeoutMs/onProgress are widened in from the legacy
-// OracleInput shape: measure() (the ValueOraclePort surface) never populates them today, but the
-// absorbed orchestration logic still branches on them, so the local type keeps them optional.
+// src/ import at runtime). ecosystem/signal/onProgress are widened in from the legacy OracleInput
+// shape: measure() (the ValueOraclePort surface) never populates them today, but the absorbed
+// orchestration logic still branches on them, so the local type keeps them optional.
+// `timeoutMs` IS now threaded through by measure() (from `deps.timeoutMs`, see MutationOracleDeps)
+// — restored as a ctor-level injectable seam so the hang/timeout path is testable against the real
+// adapter (judgment-day round-1: this coverage was dropped, undocumented, when Slice 3 absorbed
+// the orchestration). `signal` stays structurally present but deliberately UNWIRED: ValueOraclePort
+// .measure() takes no per-call cancellation token, and the composition factory
+// (rewritten-engine-factory.ts) builds this adapter's MutationOracleDeps bundle BEFORE the run's
+// real AbortSignal exists in the engineFactory(...)/RunQaUseCase.run(signal) call chain — so a
+// ctor-level `signal` field would never be populated by real production wiring today. Adding a test
+// for it would cover dead code, not real behavior; not restored (see the timeout test's own
+// neighbor for what WAS restored).
 interface OracleInputLike {
   target: "code";
   repoDir: string;
@@ -153,6 +156,14 @@ export interface MutationOracleDeps {
   ): ChildProcess;
   detectCodeProject(repoDir: string): CodeProjectLike;
   scrubEnv(): Record<string, string>;
+  // The consolidated killTree seam (shared-kernel ProcessKillPort) — required, not optional: every
+  // caller (production via rewritten-engine-factory.ts, tests via the adapter test's `deps()`
+  // builder) supplies a real implementation, matching sandboxed-binary-runner.adapter.ts's pattern.
+  processKill: ProcessKillPort;
+  // Ctor-level timeout override — defaults to DEFAULT_MUTATION_TIMEOUT_MS when absent. Restores the
+  // testability the public measure() surface alone can't provide (measure()'s signature is fixed by
+  // ValueOraclePort and carries no timeout param).
+  timeoutMs?: number;
 }
 
 export class StrykerMutationOracleAdapter implements ValueOraclePort {
@@ -166,6 +177,7 @@ export class StrykerMutationOracleAdapter implements ValueOraclePort {
       repoDir,
       namespace,
       changedFiles: [...br.changedFiles],
+      timeoutMs: this.deps.timeoutMs,
     });
   }
 
@@ -238,7 +250,7 @@ export class StrykerMutationOracleAdapter implements ValueOraclePort {
       };
 
       const timer = setTimeout(() => {
-        killTree(child);
+        this.deps.processKill.killTree(child);
         finish({
           valueScore: null,
           mutantCount: 0,
@@ -251,7 +263,7 @@ export class StrykerMutationOracleAdapter implements ValueOraclePort {
         input.signal.addEventListener(
           "abort",
           () => {
-            killTree(child);
+            this.deps.processKill.killTree(child);
             finish({
               valueScore: null,
               mutantCount: 0,

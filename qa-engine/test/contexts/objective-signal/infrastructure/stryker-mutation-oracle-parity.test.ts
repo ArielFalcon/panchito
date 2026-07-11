@@ -75,6 +75,7 @@ function deps(overrides: Partial<MutationOracleDeps> = {}): MutationOracleDeps {
     spawn: mockSpawn({}),
     detectCodeProject: () => ({ ecosystem: "node", test: { cmd: "node", args: ["--test"] } }),
     scrubEnv: () => ({}),
+    processKill: { killTree: () => {} },
     ...overrides,
   };
 }
