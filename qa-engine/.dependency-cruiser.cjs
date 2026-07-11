@@ -64,7 +64,7 @@ module.exports = {
       // `from` scope (qa-engine/src/ only), so none of the above ever trips this gate.
       name: "no-src-import-in-qa-engine",
       severity: "error",
-      comment: "No qa-engine production module may import src/ — qa-engine stays src-free by construction; the composition factory in src/server/ is the sole bridge.",
+      comment: "No qa-engine production module may import src/ — qa-engine stays src-free by construction. The opposite direction (src/ importing qa-engine/src/) is open by design: the shell consumes the engine, never the reverse.",
       from: { path: "^qa-engine/src/" },
       to: { path: "^src/" },
     },

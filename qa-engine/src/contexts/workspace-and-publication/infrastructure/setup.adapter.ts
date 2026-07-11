@@ -367,9 +367,12 @@ export class SetupAdapter {
     if (result.timedOut) {
       // The runner collapses BOTH its own internal timeout and an operator abort into the same
       // timedOut:true result shape (sandboxed-binary-runner.adapter.ts's onAbort branch mirrors
-      // its timeout branch). Disambiguate at this consumer level — same pattern as
-      // stryker-mutation-oracle.adapter.ts's own input.signal check — so a mid-install operator
-      // cancel still reports the distinct legacy message instead of the generic timeout one.
+      // its timeout branch). Disambiguate here via the signal's post-hoc state: a genuine timeout
+      // cannot be misreported as a cancel because there is no `await` between the runner promise
+      // settling and this check — the continuation runs as one microtask, so an externally-arriving
+      // abort() (always a separate macrotask, e.g. an HTTP cancel handler) cannot interleave.
+      // (stryker-mutation-oracle.adapter.ts disambiguates at the race site instead; this consumer
+      // -level heuristic is the lighter equivalent given the runner's discriminator-free v1 shape.)
       if (opts?.signal?.aborted) {
         throw new Error("e2e dependency install aborted by operator cancel");
       }
