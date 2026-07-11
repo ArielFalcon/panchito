@@ -26,6 +26,19 @@ module.exports = {
       },
       to: { path: "contexts/workspace-and-publication" },
     },
+    {
+      // migration-tier-1-2, Slice 5: qa-engine is meant to be src-free — the composition factory
+      // (src/server/rewritten-engine-factory.ts) is the ONLY sanctioned src<->qa-engine bridge, and
+      // it lives in src/, outside this rule's `from` scope. The only other sanctioned, TEMPORARY
+      // src/ importers are `*-parity.test.ts` files (pre-deletion pins) — those live under
+      // qa-engine/test/, also outside this rule's `from` scope (qa-engine/src/ only), so they never
+      // trip this gate.
+      name: "no-src-import-in-qa-engine",
+      severity: "error",
+      comment: "No qa-engine production module may import src/ — qa-engine stays src-free by construction; the composition factory in src/server/ is the sole bridge.",
+      from: { path: "^qa-engine/src/" },
+      to: { path: "^src/" },
+    },
   ],
   options: {
     // Use the root tsconfig (no composite flag) so the run works from the repo root.
