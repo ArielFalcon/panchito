@@ -28,6 +28,7 @@
     "test/contexts/change-analysis/domain/commit-classification-parity.test.ts",
     "test/contexts/test-execution/domain/adjudicate-parity.test.ts",
     "test/contexts/objective-signal/infrastructure/fault-injection-oracle-parity.test.ts",
+    "test/contexts/objective-signal/infrastructure/stryker-mutation-oracle-parity.test.ts",
     "test/contexts/generation/application/ports/generation-ports-parity.test.ts",
     "test/contexts/generation/infrastructure/context-assembler.adapter-parity.test.ts",
     "test/contexts/generation/infrastructure/exploration-brief.adapter-parity.test.ts",
