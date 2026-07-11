@@ -1,7 +1,11 @@
+// test/contexts/objective-signal/domain/fault-injection-score.test.ts
+// Unit tests moved/adapted from src/qa/learning/fault-injection-e2e.test.ts's scoring cases
+// (migration-tier-1-2, Slice 2) — the pure computeFaultInjectionScore/isFlowBreak half now lives
+// in objective-signal/domain/fault-injection-score.ts.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { computeFaultInjectionScore, runFaultInjectionOracle } from "./fault-injection-e2e";
-import type { QaCase } from "../../types";
+import { computeFaultInjectionScore, isFlowBreak, FLOW_BREAK } from "@contexts/objective-signal/domain/fault-injection-score.ts";
+import type { QaCase } from "@kernel/qa-case.ts";
 
 describe("computeFaultInjectionScore", () => {
   it("counts baseline-passing specs that flipped to fail under corruption (caught it)", () => {
@@ -46,39 +50,20 @@ describe("computeFaultInjectionScore", () => {
   });
 });
 
-describe("runFaultInjectionOracle", () => {
-  it("returns null valueScore when required inputs are missing", async () => {
-    const r = await runFaultInjectionOracle({ target: "e2e", repoDir: "/x", namespace: "ns" });
-    assert.equal(r.valueScore, null);
+describe("isFlowBreak / FLOW_BREAK", () => {
+  it("matches a navigation/network flow-break signature", () => {
+    assert.equal(isFlowBreak({ name: "a", status: "fail", detail: "page.goto: net::ERR_CONNECTION_REFUSED" }), true);
   });
 
-  it("computes the response-oracle catch-rate from a corrupted re-run", async () => {
-    const r = await runFaultInjectionOracle(
-      { target: "e2e", repoDir: "/x", e2eDir: "/x/e2e", baseUrl: "http://dev", namespace: "ns", baselineCases: ["a", "b"] },
-      {
-        runCorrupted: async () => ({
-          sha: "ns-fi",
-          verdict: "fail",
-          passed: false,
-          cases: [{ name: "a", status: "fail" }, { name: "b", status: "pass" }],
-          logs: "",
-        }),
-        countInjected: () => 3,
-      },
-    );
-    assert.equal(r.valueScore, 0.5);
-    assert.equal(r.killedCount, 1);
-    assert.equal(r.mutantCount, 2);
+  it("does not match a plain assertion timeout", () => {
+    assert.equal(isFlowBreak({ name: "a", status: "fail", detail: "expect(locator).toBeVisible timed out" }), false);
   });
 
-  it("returns null when the corrupted re-run is inconclusive (infra-error)", async () => {
-    const r = await runFaultInjectionOracle(
-      { target: "e2e", repoDir: "/x", e2eDir: "/x/e2e", baseUrl: "http://dev", namespace: "ns", baselineCases: ["a"] },
-      {
-        runCorrupted: async () => ({ sha: "ns-fi", verdict: "infra-error", passed: false, cases: [], logs: "" }),
-        countInjected: () => 0,
-      },
-    );
-    assert.equal(r.valueScore, null);
+  it("checks both detail and reason fields", () => {
+    assert.equal(isFlowBreak({ name: "a", status: "fail", reason: "ECONNREFUSED" }), true);
+  });
+
+  it("FLOW_BREAK is exported for direct inspection", () => {
+    assert.ok(FLOW_BREAK instanceof RegExp);
   });
 });

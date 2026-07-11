@@ -53,7 +53,7 @@
 //      straight into prompt assembly).
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
-import { readFileSync, mkdirSync, writeFileSync, realpathSync, lstatSync } from "node:fs";
+import { readdirSync, readFileSync, mkdirSync, writeFileSync, realpathSync, lstatSync } from "node:fs";
 import type { AppConfig } from "../orchestrator/config-loader";
 import type { AgentDeps } from "../integrations/opencode-client";
 // WS6.1 (full-flow remediation, timeouts & operational observability): the purpose-built reviewer
@@ -134,7 +134,6 @@ import { setupCodeProject, defaultCodeSetupDeps } from "../qa/code-runner";
 import { github } from "../integrations/github";
 import { RedactionPortAdapter } from "../orchestrator/sanitizer";
 import { runMutationOracle, realMutationDeps } from "../qa/learning/mutation-code";
-import { runFaultInjectionOracle, defaultFaultInjectionDeps } from "../qa/learning/fault-injection-e2e";
 import { shaMatches } from "../env/deploy-gate";
 import { ensureMirror, ensureMirrorAtBranch, defaultMirrorDeps, workdirRoot, realGit, authHeaderArgs } from "../integrations/repo-mirror";
 import { stageServiceContext, serviceContextDir } from "./service-context";
@@ -761,12 +760,37 @@ export function buildRewrittenCompositionConfig(
         },
       }
     : rawCollector;
+  // Fault-injection oracle collaborators (migration-tier-1-2, Slice 2): the orchestration body
+  // moved into FaultInjectionOracleAdapter itself (qa-engine, src-free); the two effectful
+  // collaborators it needs stay HERE, src-bound, and are injected — the adapter never imports
+  // src/ directly. Ported verbatim from the deleted src/qa/learning/fault-injection-e2e.ts
+  // defaultFaultInjectionDeps.
+  const runCorruptedFaultInjection = ({ dir, baseUrl, namespace }: { dir: string; baseUrl: string; namespace: string }) =>
+    // Desktop-only on purpose: the oracle measures assertion strength, not viewport behavior, and
+    // the seed runs every spec in BOTH projects — one project halves the re-run cost. A repo whose
+    // config renamed the seed's "desktop" project fails the pass → infra-error → valueScore null
+    // (inconclusive), never a wrong score.
+    runE2E(dir, { baseUrl, namespace, faultInject: true, project: "desktop" }, defaultExecuteDeps);
+  const countInjectedFaultInjectionResponses = (e2eDir: string, namespace: string): number => {
+    try {
+      const dir = join(e2eDir, ".qa", "fault-injection", namespace);
+      let total = 0;
+      for (const f of readdirSync(dir)) {
+        try {
+          total += Number((JSON.parse(readFileSync(join(dir, f), "utf8")) as { corrupted?: unknown }).corrupted) || 0;
+        } catch {
+          /* unreadable dump — skip */
+        }
+      }
+      return total;
+    } catch {
+      return 0; // no marker dir — nothing was corrupted
+    }
+  };
+
   const oracle = isCode
     ? new StrykerMutationOracleAdapter((input) => runMutationOracle(input, realMutationDeps))
-    : new FaultInjectionOracleAdapter(
-        (input) => runFaultInjectionOracle({ ...input, repoDir: input.e2eDir }, defaultFaultInjectionDeps),
-        app.dev?.baseUrl ?? "",
-      );
+    : new FaultInjectionOracleAdapter(runCorruptedFaultInjection, countInjectedFaultInjectionResponses, app.dev?.baseUrl ?? "");
 
   // WorkspacePort's checkout(sha) resolves the REAL per-run mirrorDir. Same-repo: the single
   // ensureMirror the legacy runPipeline's `prepare` step calls, so both engines checkout identically.

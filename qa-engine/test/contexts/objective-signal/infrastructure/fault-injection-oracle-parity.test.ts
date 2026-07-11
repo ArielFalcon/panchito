@@ -1,83 +1,62 @@
 // test/contexts/objective-signal/infrastructure/fault-injection-oracle-parity.test.ts
-// PARITY (kills false-green PC-003): wrap the REAL legacy runFaultInjectionOracle through the
-// FaultInjectionOracleAdapter with STUBBED FaultInjectionDeps (no Playwright). This proves the
-// FUNCTIONAL contract — that the baselineCases channel actually reaches the legacy null-guard
-// (fault-injection-e2e.ts: returns valueScore:null when baselineCases is absent/empty) — not just
-// adapter wiring. A gutted adapter that drops baselineCases makes the WITH-baseline test fail
-// (the real guard fires and the score never becomes defined).
+// PARITY (kills false-green PC-003): pins FaultInjectionOracleAdapter.measure() against FROZEN
+// snapshot literals captured from the legacy src/qa/learning/fault-injection-e2e.ts's
+// runFaultInjectionOracle BEFORE that file was deleted (migration-tier-1-2, Slice 2). The
+// orchestration is now absorbed into the adapter itself (see fault-injection-oracle.adapter.ts) —
+// no src/ import remains in this file, and it is no longer excluded from qa-engine's typecheck.
 //
-// Excluded from qa-engine/tsconfig.json typecheck (like every other *-parity.test.ts) because the
-// direct src/ relative import drags the legacy graph outside the composite project's rootDir.
+// WARNING (judgment-day round-1, frozen-snapshot discipline — precedent:
+// error-class-parity.test.ts's LEGACY_RESOLVE_ERROR_CLASS_SNAPSHOT): the two literals asserted
+// below are a FROZEN oracle — the legacy source they were captured from
+// (src/qa/learning/fault-injection-e2e.ts) no longer exists, so there is no live re-derivation
+// possible. If a change to the adapter's absorbed orchestration makes one of these assertions
+// fail, that failure is signaling a REAL behavioral divergence from the legacy oracle, not a
+// stale fixture. Editing a snapshot VALUE here to make a failing test pass silently rebaselines
+// away that regression instead of fixing it — never do that without a written justification (in
+// the commit message or a comment here) for why the NEW value is the correct behavior.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { FaultInjectionOracleAdapter } from "@contexts/objective-signal/infrastructure/fault-injection-oracle.adapter.ts";
 import { BlastRadius } from "@kernel/blast-radius.ts";
 import { Sha } from "@kernel/sha.ts";
-import {
-  runFaultInjectionOracle,
-  type FaultInjectionDeps,
-} from "../../../../../src/qa/learning/fault-injection-e2e.ts";
-import type { QaRunResult } from "../../../../../src/types.ts";
 
 const sha = Sha.of("abcdef1");
 const br = BlastRadius.of(sha, ["src/svc.ts"]);
 const BASE_URL = "https://dev.example.com";
 
-// Build an adapter whose runner is the REAL oracle bound to the supplied stubbed deps.
-function realOracleAdapter(deps: FaultInjectionDeps): FaultInjectionOracleAdapter {
-  return new FaultInjectionOracleAdapter(
-    (input) =>
-      runFaultInjectionOracle(
-        {
-          target: "e2e",
-          repoDir: input.e2eDir,
-          e2eDir: input.e2eDir,
-          baseUrl: input.baseUrl,
-          namespace: input.namespace,
-          baselineCases: input.baselineCases,
-        },
-        deps,
-      ),
-    BASE_URL,
-  );
-}
-
-test("real oracle through the adapter: WITHOUT baselineCases -> valueScore null (the legacy guard fires)", async () => {
+test("FROZEN: WITHOUT baselineCases -> valueScore null (legacy guard behavior, pinned pre-deletion)", async () => {
   // runCorrupted must NOT run: the legacy guard short-circuits before it because baselineCases is
   // absent. A regression that injected baselineCases anyway would skip the guard and throw here.
-  const stubDeps: FaultInjectionDeps = {
-    runCorrupted: async () => {
+  const adapter = new FaultInjectionOracleAdapter(
+    async () => {
       throw new Error("runCorrupted must not run when baselineCases is absent (guard should short-circuit)");
     },
-    countInjected: () => 0,
-  };
-  const r = await realOracleAdapter(stubDeps).measure(br, "/m/repo", "qa-bot-abc"); // no 4th arg
-  assert.equal(r.valueScore, null, "real oracle returns null with no baseline-passing specs");
+    () => 0,
+    BASE_URL,
+  );
+  const r = await adapter.measure(br, "/m/repo", "qa-bot-abc"); // no 4th arg
+  assert.equal(r.valueScore, null, "FROZEN: legacy oracle returns null with no baseline-passing specs");
   assert.equal(typeof r.details, "string");
-  assert.ok(r.details.length > 0, "details must describe why no score was recorded");
+  assert.ok(r.details.length > 0, "FROZEN: details must describe why no score was recorded");
 });
 
-test("real oracle through the adapter: WITH baselineCases + stubbed green path -> a defined score", async () => {
-  const baseline = ["login.spec.ts", "checkout.spec.ts"];
+test("FROZEN: WITH baselineCases + stubbed corrupted run -> 0.5 / killed 1 / mutant 2 (legacy arithmetic, pinned pre-deletion)", async () => {
   // Corrupted re-run: login STAYS green (weak oracle) and checkout FLIPS to fail via a plain
   // assertion timeout (a genuine catch, not a flow-break) -> catch-rate 1/2 = 0.5.
-  const corruptedRun: QaRunResult = {
-    sha: sha.value,
-    verdict: "fail",
-    passed: false,
-    cases: [
-      { name: "login.spec.ts", status: "pass" },
-      { name: "checkout.spec.ts", status: "fail", detail: "expect(locator).toBeVisible timed out" },
-    ],
-    logs: "",
-  };
-  const stubDeps: FaultInjectionDeps = {
-    runCorrupted: async () => corruptedRun,
-    countInjected: () => 3, // some JSON was intercepted -> oracle is applicable
-  };
-  const r = await realOracleAdapter(stubDeps).measure(br, "/m/repo", "qa-bot-abc", baseline);
-  assert.notEqual(r.valueScore, null, "a defined result when baseline specs are threaded through");
-  assert.equal(r.valueScore, 0.5, "1 of 2 baseline-passing specs noticed the corruption");
+  const adapter = new FaultInjectionOracleAdapter(
+    async () => ({
+      verdict: "fail",
+      cases: [
+        { name: "login.spec.ts", status: "pass" as const },
+        { name: "checkout.spec.ts", status: "fail" as const, detail: "expect(locator).toBeVisible timed out" },
+      ],
+    }),
+    () => 3, // some JSON was intercepted -> oracle is applicable
+    BASE_URL,
+  );
+  const r = await adapter.measure(br, "/m/repo", "qa-bot-abc", ["login.spec.ts", "checkout.spec.ts"]);
+  assert.notEqual(r.valueScore, null, "FROZEN: a defined result when baseline specs are threaded through");
+  assert.equal(r.valueScore, 0.5, "FROZEN: 1 of 2 baseline-passing specs noticed the corruption");
   assert.equal(r.killedCount, 1);
   assert.equal(r.mutantCount, 2);
 });
