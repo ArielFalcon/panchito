@@ -347,12 +347,12 @@ export class SetupAdapter {
   }
 
   // `npm ci` when there is a lockfile; otherwise `npm install`. The e2e install runs the seed + repo
-  // lifecycle scripts: scrubEnv(/^DEV_/) keeps the app's DEV_* login creds while dropping the
-  // orchestrator's own secrets. A hung install must not block the sequential queue: the runner's own
-  // timeoutMs kills the tree and resolves timedOut:true (never rejects on a timeout — see
-  // SandboxedRunResult's own contract), so this method throws explicitly on that signal, matching the
-  // original throw-based contract (`setup()`'s outer race above is the SAME defense-in-depth layer
-  // src/qa/setup.ts always had; this is the inner layer, now runner-owned).
+  // lifecycle scripts: scrubEnv({ extraAllowed: /^DEV_/ }) keeps the app's DEV_* login creds while
+  // dropping the orchestrator's own secrets. A hung install must not block the sequential queue: the
+  // runner's own timeoutMs kills the tree and resolves timedOut:true (never rejects on a timeout —
+  // see SandboxedRunResult's own contract), so this method throws explicitly on that signal, matching
+  // the original throw-based contract (`setup()`'s outer race above is the SAME defense-in-depth
+  // layer src/qa/setup.ts always had; this is the inner layer, now runner-owned).
   private async install(e2eDir: string, opts?: SetupOptions): Promise<void> {
     const useCi = this.deps.fs.exists(join(e2eDir, "package-lock.json"));
     const timeoutMs = opts?.timeoutMs ?? DEFAULT_E2E_INSTALL_TIMEOUT_MS;
@@ -360,7 +360,7 @@ export class SetupAdapter {
       command: "npm",
       args: [useCi ? "ci" : "install"],
       cwd: e2eDir,
-      env: scrubEnv(/^DEV_/),
+      env: scrubEnv({ extraAllowed: /^DEV_/ }),
       timeoutMs,
       ...(opts?.signal ? { signal: opts.signal } : {}),
     });

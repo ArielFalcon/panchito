@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { compileCommand, isToolchainFailure, validateCodeProject, type CodeValidateDeps } from "./code-validate";
-import type { CodeProject } from "./code-runner";
+// migration-tier-4b Slice 1: src/qa/code-runner.ts (CodeProject's prior home) is deleted this slice.
+import type { CodeProject } from "../../qa-engine/src/contexts/test-execution/infrastructure/code-execution.runner";
 import type { CheckResult } from "./validate";
 
 const maven: CodeProject = { ecosystem: "maven", install: null, test: { cmd: "mvn", args: ["-B", "test"] } };

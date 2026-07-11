@@ -12,7 +12,13 @@
 import { spawn } from "node:child_process";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { scrubEnv } from "./code-runner";
+// migration-tier-4b Slice 1: src/qa/code-runner.ts (scrubEnv's prior home) is deleted this slice.
+// validate.ts itself does not relocate until Slice 3 (its code-validate.ts sibling still needs
+// code-runner.ts's OTHER exports, which land in qa-engine's test-execution context in Slice 1) — but
+// this import must re-point now or the file fails to compile the moment code-runner.ts is gone.
+// Not called out in the design's own Slice-1 consumer sweep (a real gap, caught here); see the
+// apply-progress artifact's Deviations section.
+import { scrubEnv } from "../../qa-engine/src/shared-infrastructure/process-sandbox/scrub-env";
 import { killTree } from "./execute";
 import { validateManifest } from "./metadata";
 

@@ -10,6 +10,12 @@
 
 import { join } from "node:path";
 import { runCheck, type CheckResult, type ValidationResult } from "./validate";
+// migration-tier-4b Slice 1: src/qa/code-runner.ts (the prior home of these 9 symbols) is deleted
+// this slice. code-validate.ts itself does not relocate until Slice 3 (it is HARD-blocked on THIS
+// re-point landing first — see the design's own slice-ordering note), but this import must move now
+// or the file fails to compile the moment code-runner.ts is gone. Not called out in the design's own
+// Slice-1 consumer sweep (a real gap, caught here); see the apply-progress artifact's Deviations
+// section.
 import {
   detectCodeProject,
   realDetectDeps,
@@ -20,7 +26,7 @@ import {
   type CodeProject,
   type Command,
   type DetectDeps,
-} from "./code-runner";
+} from "../../qa-engine/src/contexts/test-execution/infrastructure/code-execution.runner";
 import { sanitizeText } from "../orchestrator/sanitizer";
 
 // A present-but-broken JVM toolchain (missing/incorrect JAVA_HOME, a JRE instead of a JDK) makes the

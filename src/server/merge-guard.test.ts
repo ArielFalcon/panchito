@@ -33,7 +33,11 @@ test("isProtectedPath flags the gate-integrity surface (the fix must not weaken 
   // the typecheck gate config, the safety-layer entrypoint, and the untrusted-code runner.
   assert.equal(isProtectedPath("tsconfig.json"), true);
   assert.equal(isProtectedPath("src/index.ts"), true);
-  assert.equal(isProtectedPath("src/qa/code-runner.ts"), true);
+  // migration-tier-4b Slice 1: src/qa/code-runner.ts is deleted — replaced by these three qa-engine
+  // homes (the design's gate CORRECTION 3).
+  assert.equal(isProtectedPath("qa-engine/src/contexts/test-execution/infrastructure/code-execution.runner.ts"), true);
+  assert.equal(isProtectedPath("qa-engine/src/contexts/test-execution/infrastructure/code-setup.ts"), true);
+  assert.equal(isProtectedPath("qa-engine/src/shared-infrastructure/process-sandbox/sandbox.ts"), true);
   // a non-test source file next to tests is still editable (glob is a strict .test.ts suffix).
   assert.equal(isProtectedPath("src/qa/change-coverage.ts"), false);
 });

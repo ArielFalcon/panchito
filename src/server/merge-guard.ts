@@ -24,9 +24,11 @@ import { dirname } from "node:path";
 //  3. The gate integrity surface — the maintainer's OWN pre-deploy gate is `npm test` +
 //     `npm run typecheck`. If a fix could edit the test suite or the tsconfig, a BROKEN fix could
 //     make itself "pass" by weakening the very gate that is supposed to reject it. The entrypoint
-//     (index.ts) sequences the safety layers + the canary swap, and code-runner.ts executes
-//     untrusted (agent-authored) code; an autonomous rewrite of either is too dangerous to ship
-//     unreviewed. A fix that legitimately needs to touch these is significant enough for a human.
+//     (index.ts) sequences the safety layers + the canary swap, and code-execution.runner.ts/
+//     code-setup.ts/sandbox.ts (migration-tier-4b Slice 1 — the qa-engine home that replaced
+//     src/qa/code-runner.ts) execute untrusted (agent-authored) code; an autonomous rewrite of
+//     either is too dangerous to ship unreviewed. A fix that legitimately needs to touch these is
+//     significant enough for a human.
 //  4. Build/topology the in-process canary cannot verify — the hot-swap only replaces src/ +
 //     package files; a Dockerfile/compose change takes effect only on an image rebuild, so
 //     the canary would pass while the real effect ships unverified.
@@ -46,7 +48,11 @@ export const PROTECTED_PATHS: string[] = [
   "*.test.ts",
   "tsconfig.json",
   "src/index.ts",
-  "src/qa/code-runner.ts",
+  // migration-tier-4b Slice 1: src/qa/code-runner.ts is deleted — replaced by these three qa-engine
+  // homes (the design's gate CORRECTION 3: the exact new paths, not a single literal).
+  "qa-engine/src/contexts/test-execution/infrastructure/code-execution.runner.ts",
+  "qa-engine/src/contexts/test-execution/infrastructure/code-setup.ts",
+  "qa-engine/src/shared-infrastructure/process-sandbox/sandbox.ts",
   // 4. build/topology the canary cannot verify (image rebuild only)
   ".github/",
   "Dockerfile",
