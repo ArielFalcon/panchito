@@ -73,7 +73,7 @@ after this slice.
 | Module | Sole HEAD consumer | Class | Revisit condition |
 |---|---|---|---|
 | `src/qa/validate.ts` | `rewritten-engine-factory.ts` (`StaticGateAdapter` wiring) + `code-validate.ts` | DEFER-Tier-4 | With `code-runner.ts` migration + `schemas.ts` decomposition + the manifest-shape reconcile (§4) |
-| `src/qa/code-validate.ts` | `rewritten-engine-factory.ts:733` (`CodeValidationStrategy` ctor) | DEFER-Tier-4 | With `code-runner.ts` migration |
+| `src/qa/code-validate.ts` | `rewritten-engine-factory.ts:732` (`CodeValidationStrategy` ctor) | DEFER-Tier-4 | With `code-runner.ts` migration |
 | `src/qa/metadata.ts` | `src/qa/validate.ts` (`checkManifest` → `validateManifest`) | DEFER-Tier-4 | With `schemas.ts` decomposition; reconcile `QaTestMeta`/`ManifestEntrySchema` vs qa-engine's local `ManifestEntry` (§4) |
 | `src/qa/playwright-report.ts` | `src/qa/execute.ts:13` (`parsePlaywrightReport`) | DEFER-Tier-4 | `execute.ts` decomposition |
 | `src/integrations/reexplore.ts` | `src/integrations/opencode-client.ts:25` | DEFER-Tier-4 | `opencode-client.ts` decomposition |

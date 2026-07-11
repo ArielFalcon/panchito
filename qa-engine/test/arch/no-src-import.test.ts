@@ -9,10 +9,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { writeFileSync, rmSync } from "node:fs";
+import { writeFileSync, rmSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 const root = join(import.meta.dirname, "..", "..", "..");
+
+// A prior INTERRUPTED run (SIGINT before a test's finally-cleanup fired) can leave a stale probe
+// file under qa-engine/src/, which would make the CLEAN ON HEAD assertion below report a false
+// violation on an untouched tree. Sweep any leftover probes once, before any test runs.
+for (const entry of readdirSync(join(root, "qa-engine", "src"))) {
+  if (/^__(no_src_import|arch_check)_probe.*__\.ts$/.test(entry)) {
+    rmSync(join(root, "qa-engine", "src", entry), { force: true });
+  }
+}
 
 // The --config argument is always resolved as an ABSOLUTE path (not root-relative) so this helper
 // works identically regardless of the invoking `cwd` — the CLI resolves --config off process.cwd()

@@ -230,11 +230,13 @@ small pure ports → domain logic → heavy leaf-IO):
   `sdd/migration-tier-1-2` (commits `06444c2`, `8cabc58`, `3e4668d`; decisions
   doc `2026-07-11-migration-tier-1-2-decisions.md`). Remaining, re-verified
   **DEFERRED** against HEAD (same discovery #1240 register): `test-data.ts`,
-  `metadata.ts`, `circuit-breaker.ts`, `codex-circuit-breaker.ts` (inside the
+  `circuit-breaker.ts`, `codex-circuit-breaker.ts` (inside the
   DECLARED `src/agent-runtime` shell survivor — not a migration candidate at
   all), `model-window-catalog.ts` (still carries the known C4 split-brain
   config bug, unfixed), `context.ts`, `learning/curriculum.ts` (D8
-  learning-store entanglement).
+  learning-store entanglement). `metadata.ts` moved OUT of this bullet — its
+  authoritative classification is now the Tier-3 gate decision below
+  (DEFER-Tier-4, co-deferred with the validate cluster).
 - **Tier 3 — medium domain logic**: ~~`deploy-gate.ts`~~ **DONE (REDUCE)** —
   `shaMatches` relocated byte-identical to `qa-engine/src/shared-kernel/sha.ts`;
   the rest of the module (`waitForDeploy`/`DeployTarget`/`VersionInfo`/
