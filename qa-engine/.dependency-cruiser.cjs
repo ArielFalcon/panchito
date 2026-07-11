@@ -14,6 +14,19 @@
 // (the bridges, the domain, the application layer) remains DENIED — only the single composition
 // file is excepted, so a future bridge/domain/use-case addition is still secure by default.
 // Known limitation: dependency-cruiser may miss dynamic import() — flagged for manual audit.
+//
+// options.baseDir (judgment-day round-1): pinned to the repo root, NOT left to default to
+// process.cwd(). Without this, dependency-cruiser resolves both rules' `from`/`to` path regexes
+// against module ids that are relative to whatever directory the command was invoked FROM, not to
+// this config file's own location — so a completely ordinary invocation from inside qa-engine/
+// (e.g. `cd qa-engine && npx depcruise --config .dependency-cruiser.cjs src`) either silently
+// reports zero violations (the from/to patterns, anchored to "qa-engine/src/"/"^src/", never match
+// ids like "src/foo.ts") or errors outright looking for a directory that doesn't exist — both a
+// SILENT boundary-gate no-op, the opposite of "secure by default". Pinning baseDir makes the SAME
+// baseDir-relative target argument ("qa-engine/src") resolve identically no matter which directory
+// the command is run from (see qa-engine/test/arch/no-src-import.test.ts's cwd=qa-engine/ variant).
+const path = require("node:path");
+
 module.exports = {
   forbidden: [
     {
@@ -41,6 +54,8 @@ module.exports = {
     },
   ],
   options: {
+    // Repo root, regardless of the invoking cwd — see the header note above.
+    baseDir: path.resolve(__dirname, ".."),
     // Use the root tsconfig (no composite flag) so the run works from the repo root.
     // The root tsconfig carries the same @kernel/@contexts/@interface path aliases as
     // qa-engine/tsconfig.json, so alias-based imports are resolved correctly.
