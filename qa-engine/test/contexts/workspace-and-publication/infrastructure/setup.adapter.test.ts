@@ -1,12 +1,21 @@
 // test/contexts/workspace-and-publication/infrastructure/setup.adapter.test.ts
-// migration-tier-4a: parity port of src/qa/setup.test.ts's 42 tests (now deleted along with
-// src/qa/setup.ts). The orchestration-layer tests (bootstrap/install/ensureSpecDir ordering,
-// install timeout/abort) are re-expressed against SetupAdapter's injected fs/runner seam instead of
-// the original SetupDeps function-slot seam (SetupAdapter bakes hasProject/bootstrap/ensureSpecDir/
-// install-caching logic internally — see setup.adapter.ts's own header). The ensureFailureCapture/
-// ensurePlaywrightEnvKeys real-fs tests, and every FIX4/D2/C1/Feature-B constant/twin test, port
-// near-verbatim — only the relative path to config/e2e/{fixtures,playwright.config}.ts is
-// RECOMPUTED for this file's new directory depth (rider 3: mechanical, fails RED if wrong).
+// migration-tier-4a: parity port of src/qa/setup.test.ts (now deleted along with src/qa/setup.ts),
+// NOT a 1:1 port of its 42 tests (judgment-day round-1 corrected this claim). Precise accounting:
+// 42 original - 2 dropped (SetupDeps's optional ensureFailureCapture/ensurePlaywrightEnvKeys
+// function-slot stubs became SetupAdapter's own always-present class methods, so the "older stubs
+// absent" no-op tests no longer apply) + 1 added (SandboxedBinaryRunner.run() resolves a
+// runner-signaled timeout as a `{timedOut: true}` RESULT rather than throwing, unlike the original
+// SetupDeps.install's throw-based contract — a new test proves install() still throws on that
+// result) = 41 net at the original port. Judgment-day round-1 (FIX 1, below) added a 42nd test for
+// the mid-install-abort path, so this file's current count is 42 again — coincidentally equal to
+// the original, but via a different composition. The orchestration-layer tests (bootstrap/install/
+// ensureSpecDir ordering, install timeout/abort) are re-expressed against SetupAdapter's injected
+// fs/runner seam instead of the original SetupDeps function-slot seam (SetupAdapter bakes
+// hasProject/bootstrap/ensureSpecDir/install-caching logic internally — see setup.adapter.ts's own
+// header). The ensureFailureCapture/ensurePlaywrightEnvKeys real-fs tests, and every FIX4/D2/C1/
+// Feature-B constant/twin test, port near-verbatim — only the relative path to config/e2e/
+// {fixtures,playwright.config}.ts is RECOMPUTED for this file's new directory depth (rider 3:
+// mechanical, fails RED if wrong).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";

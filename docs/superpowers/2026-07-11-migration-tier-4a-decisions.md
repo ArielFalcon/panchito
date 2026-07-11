@@ -69,8 +69,10 @@ this slice:
 
 - **`src/integrations/repo-mirror.ts`** — the credentialed-git supplier: `realGit`,
   `authHeaderArgs`, `tokenlessUrl`, `hardenGitArgs`, `scrubGitError`, `assertHexSha`,
-  `assertBranchName`, `workdirRoot`, `defaultMirrorDeps`, plus every READ-side helper
-  (`getCommitDiff`, `getCommitMessage`, `listChangedSpecs`, `getCommitsBehind`,
+  ~~`assertBranchName`~~ (removed, judgment-day round-1 — orphaned once `ensureMirrorAtBranch`
+  became a thin wrapper delegating branch validation to `MirrorProvisionAdapter`'s own duplicated
+  copy; see the round-1 section below), `workdirRoot`, `defaultMirrorDeps`, plus every READ-side
+  helper (`getCommitDiff`, `getCommitMessage`, `listChangedSpecs`, `getCommitsBehind`,
   `getChangedFilesInRange`, `getRangeDiff`, `resolveRef`). `GITHUB_TOKEN`/`GIT_REMOTE_BASE`/
   `MIRROR_DIR` env reads never leave this module. `ensureMirror`/`ensureMirrorAtBranch` stay
   exported here too (see §5 — NOT a clean move) but their provisioning ARGV now lives in
@@ -122,3 +124,63 @@ replaced), and `setup.ts` move to DONE (this change, §1 above). Remaining Tier-
 (`code-runner.ts`, `execute.ts`, `src/agent-runtime/*`, `prompts.ts`, `opencode-client.ts`, plus
 the composition/seam-parity dissolution) are unchanged, carried forward to `migration-tier-4b`/
 `4c`/`4d` per the program's chained-sub-change plan.
+
+---
+
+### Judgment Day round 1
+
+An adversarial review of `sdd/migration-tier-4a` (two independent blind judges) found two
+confirmed defects and one hygiene batch, fixed on `fix/migration-tier-4a`, gated green after every
+commit (`npm test` + `npm run typecheck` + `npm run arch:check`, Node v24.11.0), never committed
+red:
+
+- **Abort-vs-timeout message collapse** (confirmed by both judges): `sandboxed-binary-runner.
+  adapter.ts` resolves `timedOut: true` for BOTH its own internal timeout AND an operator abort
+  (its `onAbort` branch mirrors its timeout branch — see that module's own header note). Because
+  `SetupAdapter.install()` consumes `SandboxedBinaryRunner` and only checked `result.timedOut`, a
+  mid-install operator cancel now reported the generic `"npm ci in e2e timed out after Xms —
+  killed"` instead of the deleted `src/qa/setup.ts` original's distinct `"e2e dependency install
+  aborted by operator cancel"`. **RESOLVED** at the consumer level (`install()` now checks
+  `opts?.signal?.aborted` after a `timedOut` result before falling back to the generic message) —
+  the same pattern already used by `stryker-mutation-oracle.adapter.ts`'s own `input.signal` check.
+  TDD: a new failing-first test covers the mid-install-abort path (signal aborts DURING the run,
+  the fake runner resolves `timedOut: true` with the signal already aborted); the pre-aborted
+  path's existing test is untouched. Commit `3d368bb`.
+- **Env-read honesty in `setup.adapter.ts`** (raised by judge B, one judge dissented): judge B
+  flagged `process.env.QA_FAILURE_CAPTURE_DIR` reads at lines 78/101 as adapter-code env reads
+  contradicting the file's own env-agnostic header. **Verified NOT a defect**: both reads live
+  inside `FAILURE_CAPTURE_BLOCK`, a byte-identical template string injected/appended into a
+  watched app's `e2e/fixtures.ts` and executed by Playwright INSIDE THAT APP'S OWN test process —
+  never by this adapter's own Node process (same exemption `config/e2e/fixtures.ts`'s seed copy of
+  the block already has). No env read moves through `SetupAdapterDeps`; the adapter's own code
+  still never touches `process.env` directly. **RESOLVED** by correcting the header comment
+  instead of adding dead plumbing: it now explicitly carves out the template-string exemption so a
+  naive `rg process.env` scan cannot misread it as a violation again. Commit `bb56067`.
+
+Docs/hygiene cleanup in the same round (no behavior change):
+
+- `src/integrations/repo-mirror.ts`'s `assertBranchName`/`BRANCH_RE` were orphaned by this change's
+  own §5 deviation: `ensureMirrorAtBranch`'s thin wrapper delegates branch validation entirely to
+  `MirrorProvisionAdapter`'s own deliberately-duplicated copy (qa-engine may not import `src/`), so
+  the local copy here lost its only caller. `rg`-confirmed zero callers (production or test)
+  repo-wide before deleting; the module header's shell-survivor list and this doc's §4 no longer
+  name it as a surviving export.
+- `qa-engine/.dependency-cruiser.cjs`'s `no-src-import-in-qa-engine` rule comment claimed the
+  composition factory was "the ONLY sanctioned src<->qa-engine bridge" — stale: `src/integrations/
+  repo-mirror.ts` now imports `MirrorProvisionAdapter` deliberately (this change's §1 slice 2), and
+  `src/orchestrator/sanitizer.ts`, `src/server/webhook-routing.ts`, and `src/contract/{commands,
+  events}.ts` already imported qa-engine independently, predating it. Corrected to describe the
+  actual enforced rule: the `src/` → `qa-engine/src/` direction is open by design (the shell
+  consumes the engine) and NOT machine-enforced by this rule at all; only the reverse
+  (`qa-engine/src/` → `src/`) is denied.
+- `qa-engine/test/contexts/workspace-and-publication/infrastructure/setup.adapter.test.ts`'s header
+  claimed a straight "parity port of src/qa/setup.test.ts's 42 tests" — imprecise: the original
+  port dropped 2 tests (SetupDeps's optional `ensureFailureCapture`/`ensurePlaywrightEnvKeys`
+  function-slot stubs became `SetupAdapter`'s own always-present class methods, so the "older stubs
+  absent" no-op tests no longer apply) and added 1 (`SandboxedBinaryRunner.run()` resolves a
+  runner-signaled timeout as a `{timedOut: true}` RESULT rather than throwing, unlike the original
+  `SetupDeps.install`'s throw-based contract, so a new test proves `install()` still throws on that
+  result) — net 41 at the original port, verified against the deleted original file's actual
+  `test(` count (`git show f467f71~1:src/qa/setup.test.ts`). This round's abort-vs-timeout fix
+  (above) added a 42nd test, so the file's current count of 42 is coincidental, not the original
+  claim. Header corrected to state the precise accounting.

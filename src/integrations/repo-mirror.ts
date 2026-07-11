@@ -7,8 +7,8 @@
 // migration-tier-4a: the provisioning ARGV ensureMirror/ensureMirrorAtBranch actually RUN (clone/
 // fetch/checkout-f/clean, index.lock+set-url self-heal) now lives in qa-engine's src-free
 // MirrorProvisionAdapter. This module stays the credentialed-git supplier — realGit/authHeaderArgs/
-// tokenlessUrl/hardenGitArgs/scrubGitError/assertHexSha/assertBranchName never leave src — and keeps
-// exporting `ensureMirror`/`ensureMirrorAtBranch` with their ORIGINAL byte-identical public signature
+// tokenlessUrl/hardenGitArgs/scrubGitError/assertHexSha never leave src — and keeps exporting
+// `ensureMirror`/`ensureMirrorAtBranch` with their ORIGINAL byte-identical public signature
 // `(repo, sha|branch, deps: MirrorDeps): Promise<string>` as THIN WRAPPERS that adapt MirrorDeps into
 // MirrorProvisionDeps and delegate. The wrapper is required, not cosmetic: src/index.ts's onboarding
 // job calls `ensureMirrorAtBranch` directly (a SECOND production consumer beyond the composition
@@ -17,6 +17,9 @@
 // authHeaderArgs() for clone/fetch only, mirroring rewritten-engine-factory.ts's own
 // withPublishGitDecorations precedent for push/commit — so the RELOCATED adapter's own argv never
 // carries a credential, while every existing caller/test here observes byte-identical behavior.
+// judgment-day round-1: this module's own assertBranchName (branch-name validation) was removed as
+// orphaned — the provisioning delegate (MirrorProvisionAdapter) validates the branch itself via its
+// own deliberately-duplicated copy (qa-engine may not import src/), so no caller here ever needed it.
 
 import { execFile } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
@@ -70,16 +73,6 @@ export function authHeaderArgs(): string[] {
   return token
     ? ["-c", `url.https://x-access-token:${token}@github.com/.insteadOf=https://github.com/`]
     : [];
-}
-
-// A branch name passed to git as a positional arg must never be parseable as an
-// option (no leading '-') nor as a rev range ('..'). Same injection-closing rationale
-// as assertHexSha for SHAs coming from an attacker-controlled webhook.
-const BRANCH_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
-export function assertBranchName(branch: string): void {
-  if (!BRANCH_RE.test(branch) || branch.includes("..")) {
-    throw new Error(`invalid branch name: ${JSON.stringify(branch)}`);
-  }
 }
 
 // Adapts this module's MirrorDeps (git/exists/removeFile/root, the shape every existing caller and
