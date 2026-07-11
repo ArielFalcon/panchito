@@ -67,7 +67,7 @@ import { REVIEWER_TIMEOUT_MS } from "../integrations/opencode-client";
 import { withUsageSink, withStallWatchdog, withSessionRegistration } from "../integrations/opencode-client";
 import type { RunPipelinePort, ObserverPort } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 import { buildProduction, type CompositionConfig } from "@contexts/qa-run-orchestration/composition/composition-root";
-import { Sha } from "@kernel/sha";
+import { Sha, shaMatches } from "@kernel/sha";
 import type { AgentRole } from "@kernel/agent-role";
 import type { RunMode } from "@kernel/run-mode";
 
@@ -134,7 +134,6 @@ import { setupE2eProject, defaultSetupDeps } from "../qa/setup";
 import { setupCodeProject, defaultCodeSetupDeps } from "../qa/code-runner";
 import { github } from "../integrations/github";
 import { RedactionPortAdapter } from "../orchestrator/sanitizer";
-import { shaMatches } from "../env/deploy-gate";
 import { ensureMirror, ensureMirrorAtBranch, defaultMirrorDeps, workdirRoot, realGit, authHeaderArgs } from "../integrations/repo-mirror";
 import { stageServiceContext, serviceContextDir } from "./service-context";
 import { SqliteRunHistoryAdapter } from "./run-history-sqlite-adapter";
@@ -354,11 +353,11 @@ export function buildMirrorGc(git: GitFn = realGit): MirrorGcAdapter {
 
 // One-shot /version fetch + sha/health match — VersionPollFn's contract is a SINGLE probe per
 // call (DeployGatePortAdapter.waitUntilServing owns the outer poll-until-deadline loop itself,
-// calling this repeatedly at cfg.intervalMs). This intentionally does NOT delegate to
-// src/env/deploy-gate.ts's waitForDeploy, which runs its OWN internal poll-until-deadline loop —
-// composing two nested poll loops would multiply the effective timeout instead of bounding it once
-// at the adapter's own cfg.timeoutMs. shaMatches is reused verbatim from that same module (the
-// short-sha / full-sha / 7-char-prefix equivalence legacy already relies on).
+// calling this repeatedly at cfg.intervalMs). This intentionally does NOT run its own internal
+// poll-until-deadline loop here — composing two nested poll loops would multiply the effective
+// timeout instead of bounding it once at the adapter's own cfg.timeoutMs. shaMatches is imported
+// from qa-engine's kernel (@kernel/sha) — the short-sha / full-sha / 7-char-prefix equivalence
+// legacy already relies on (migrated from the now-deleted src/env/deploy-gate.ts).
 async function fetchVersion(url: string): Promise<{ sha?: string; healthy?: boolean } | null> {
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
