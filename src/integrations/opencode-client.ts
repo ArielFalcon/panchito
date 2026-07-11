@@ -14,7 +14,7 @@ import { join, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { AgentResult, QaCase, RunMode, TestTarget, SpecMeta, ActivityKind, PLANNER_OBJECTIVE } from "../types";
 import type { UsageSnapshot } from "../qa/usage";
-import { CommitIntent } from "../qa/commit-classify";
+import type { CommitIntent } from "@contexts/generation/application/ports/generation-ports.ts";
 import type { ArchitectureContext } from "../qa/context";
 import { coerceExplorationBrief, parseExplorationBrief, type ExplorationBrief } from "../qa/exploration-brief";
 import type { StructuralPattern } from "../qa/learning/skill-exemplar";

@@ -10,12 +10,15 @@ import type { QaCase } from "@kernel/qa-case.ts";
 // Imported here so OpencodeRunInput.serviceLinks / .contractDrift are strongly typed.
 import type { ServiceLink, ContractDrift } from "@contexts/service-topology/domain/index.ts";
 
-// Supporting authoring-context types. NOT yet kernel-resident (CommitIntent lives in src/qa/commit-classify.ts,
-// ArchitectureContext in src/qa/context.ts, ExplorationBrief in src/qa/exploration-brief.ts). Declared here as
-// faithful structural aliases — importing them from src/ would recreate the cross-tree coupling the qa-engine
-// typecheck rejects. Structural shape mirrors the legacy definitions so a legacy value is assignable to the
-// canonical input (the generation-ports-parity.test.ts round-trip proves no field was dropped).
-// Plan-6: re-home to kernel.
+// Supporting authoring-context types. CommitIntent is now the canonical home for that type
+// (migration-tier-1-2, Slice 4: src/qa/commit-classify.ts was deleted and its two importers,
+// opencode-client.ts and prompts.ts, flipped their type-only import here). ArchitectureContext
+// (src/qa/context.ts) and ExplorationBrief (src/qa/exploration-brief.ts) are NOT yet kernel-resident
+// and stay declared here as faithful structural aliases — importing them from src/ would recreate
+// the cross-tree coupling the qa-engine typecheck rejects. Structural shape mirrors the legacy
+// definitions so a legacy value is assignable to the canonical input (the
+// generation-ports-parity.test.ts round-trip proves no field was dropped).
+// Plan-6: re-home the remaining two to kernel.
 
 export type CommitType =
   | "feat" | "fix" | "perf" | "refactor" | "chore"
