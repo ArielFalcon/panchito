@@ -235,9 +235,22 @@ small pure ports → domain logic → heavy leaf-IO):
   all), `model-window-catalog.ts` (still carries the known C4 split-brain
   config bug, unfixed), `context.ts`, `learning/curriculum.ts` (D8
   learning-store entanglement).
-- **Tier 3 — medium domain logic**: `playwright-report.ts`, `reexplore.ts`,
-  `learning/learning-rule.ts`, `validate.ts`/`code-validate.ts` (check
-  `StaticGateAdapter` overlap first), `deploy-gate.ts` (needs a new port).
+- **Tier 3 — medium domain logic**: ~~`deploy-gate.ts`~~ **DONE (REDUCE)** —
+  `shaMatches` relocated byte-identical to `qa-engine/src/shared-kernel/sha.ts`;
+  the rest of the module (`waitForDeploy`/`DeployTarget`/`VersionInfo`/
+  `DeployTimeoutError`/`GateDeps`/`defaultDeps`) was fully dead (the live gate
+  was already `DeployGatePortAdapter.waitUntilServing`, its own independent
+  poll loop — no new port was needed after all) and deleted along with its
+  test. Migrated in `sdd/migration-tier-3` (commit `73ce0a1`; decisions doc
+  `2026-07-11-migration-tier-3-decisions.md`). Remaining, re-classified
+  **DEFER-Tier-4** by that same change's gate decision (co-defer the whole
+  validate cluster — see that decisions doc §2): `playwright-report.ts`,
+  `reexplore.ts`, `learning/learning-rule.ts` (D8), `validate.ts`,
+  `code-validate.ts`, `metadata.ts` — the `StaticGateAdapter` overlap check
+  resolved to "co-defer", not "migrate now"; `validate.ts`/`metadata.ts` also
+  carry a confirmed manifest-shape divergence against qa-engine's own
+  generation-side `ManifestEntry` (same decisions doc §4) that makes them
+  Tier-4 design work, not a Tier-3 relocation.
 - **Tier 4 — heavy leaf-IO, last**: `repo-mirror.ts` (write side),
   `github.ts` (adapters exist; replace closures), `setup.ts`, `code-runner.ts`,
   `execute.ts`, `src/agent-runtime/*` (blocked on the DECIDE above),
