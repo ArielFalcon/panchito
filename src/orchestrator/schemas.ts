@@ -41,7 +41,10 @@ const BoundarySchema = z.discriminatedUnion("transport", [HttpBoundarySchema, Ev
 export const AppConfigSchema = z
   .object({
     name: z.string().min(1, { error: "app name is required" }),
-    repo: z.string().min(1, { error: "repo is required (e.g. 'org/repo')" }),
+    repo: z
+      .string()
+      .min(1, { error: "repo is required (e.g. 'org/repo')" })
+      .regex(/^[^/]+\/[^/]+$/, { message: "repo must be in 'owner/repo' format (e.g. 'org/repo')" }),
     baseBranch: z.string().optional(),
     openapi: z.union([z.string(), z.array(z.string())]).optional(),
     // `services` (e2e apps only): the microservice repos that participate in this
@@ -51,7 +54,10 @@ export const AppConfigSchema = z
     services: z
       .array(
         z.object({
-          repo: z.string().min(1, { error: "service repo is required (e.g. 'org/svc')" }),
+          repo: z
+            .string()
+            .min(1, { error: "service repo is required (e.g. 'org/svc')" })
+            .regex(/^[^/]+\/[^/]+$/, { message: "service repo must be in 'owner/repo' format (e.g. 'org/svc')" }),
           baseBranch: z.string().optional(),
           openapi: z.union([z.string(), z.array(z.string())]).optional(),
           versionUrl: z.url().optional(),

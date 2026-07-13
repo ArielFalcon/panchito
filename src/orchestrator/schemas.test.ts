@@ -54,6 +54,17 @@ test("rejects duplicate service repos", () => {
   );
 });
 
+test("rejects a bare repo name (must be 'owner/repo')", () => {
+  assert.throws(() => AppConfigSchema.parse({ ...base, repo: "jhipster-store" }), /owner\/repo/);
+});
+
+test("rejects a bare service repo name (must be 'owner/repo')", () => {
+  assert.throws(
+    () => AppConfigSchema.parse({ ...base, services: [{ repo: "orders-svc" }] }),
+    /owner\/repo/,
+  );
+});
+
 test("qa.parallelDiff parses and defaults to undefined", () => {
   const on = AppConfigSchema.parse({ ...base, qa: { ...base.qa, parallelDiff: true } });
   assert.equal(on.qa.parallelDiff, true);
