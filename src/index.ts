@@ -356,6 +356,7 @@ function finalizeInterruptedRuns(): void {
       severity: "warn",
       summary: `run ${r.id} (${r.app}@${r.sha.slice(0, 7)}) was interrupted by process restart`,
       detail: `Previous status: ${r.status}, step: ${r.step ?? "unknown"}`,
+      status: "dismissed",
     });
     console.log(`[qa]   finalized ${r.id} (${r.app}@${r.sha.slice(0, 7)}) as infra-error`);
   }
