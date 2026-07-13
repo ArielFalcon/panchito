@@ -1,0 +1,3 @@
+- `src/index.ts`: `finalizeInterruptedRuns()` and `cleanupOrphanedSessions()` must record health-check observations with status `dismissed`, not `pending`.
+- Reason: the health poller auto-triggers the maintainer on any pending incident, so routine restart/session cleanup otherwise becomes a false-positive self-maintenance run.
+- `src/server/maintainer.ts`: `recordIncident()` accepts an optional explicit status; default remains `pending` for actionable incidents.

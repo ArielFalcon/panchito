@@ -231,7 +231,12 @@ async function cleanupOrphanedSessions(): Promise<void> {
   try {
     const cleaned = await deps.cleanupOrphans(MAX_SESSION_AGE_MS);
     if (cleaned > 0) {
-      recordIncident({ source: "health-check", severity: "warn", summary: `cleaned up ${cleaned} orphaned OpenCode session(s)` });
+      recordIncident({
+        source: "health-check",
+        severity: "warn",
+        summary: `cleaned up ${cleaned} orphaned OpenCode session(s)`,
+        status: "dismissed",
+      });
     }
   } catch (err) {
     console.warn(`[qa] orphan session cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -356,6 +361,7 @@ function finalizeInterruptedRuns(): void {
       severity: "warn",
       summary: `run ${r.id} (${r.app}@${r.sha.slice(0, 7)}) was interrupted by process restart`,
       detail: `Previous status: ${r.status}, step: ${r.step ?? "unknown"}`,
+      status: "dismissed",
     });
     console.log(`[qa]   finalized ${r.id} (${r.app}@${r.sha.slice(0, 7)}) as infra-error`);
   }
