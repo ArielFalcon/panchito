@@ -1,6 +1,40 @@
+// qa-engine/test/contexts/test-execution/infrastructure/static-gate.checks.test.ts
+// Behavioral tests for the static gate (e2e checks + code-mode compile gate + manifest-entry
+// validation), moved from src/qa/validate.test.ts + src/qa/code-validate.test.ts +
+// src/qa/metadata.test.ts (migration-tier-4b, Slice 3 — validate cluster migration). Byte-identical
+// assertions to the three legacy files; only the import paths change (all three now live in ONE
+// module, static-gate.checks.ts, mirroring code-execution.runner.ts's own consolidation in Slice 1).
+//
+// PARITY RETIREMENT (spec's static-gate-validate-parity requirement — folded into THIS slice, not
+// deferred, because the spec MUST retire the pin in the SAME SLICE that deletes src/qa/validate.ts):
+// the former qa-engine/test/.../static-gate-validate-parity.test.ts (TE-04) existed to prove the
+// REAL, non-stubbed validateSpecs (imported across the src/qa-engine boundary) still catches the
+// WF-02 zero-assertion gap — a Plan-6-style no-op validateAll wiring that would pass every STUB test
+// but not a real one. That coverage is NOT lost: the "B2 RED"/"B2 GREEN" tests below already exercise
+// the SAME real, non-stubbed zero-assertion scan (checkZeroAssertionSpecs is baked into validateSpecs
+// itself, never injectable) against real temp-dir fixtures — now against the qa-engine-native
+// validateSpecs directly, with no cross-boundary import left to retire. The old parity file, its
+// qa-engine/tsconfig.json exclude entry, and its qa-engine/tsconfig.parity.json include entry are all
+// removed in this same commit.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { validateSpecs, ValidateDeps, runCheck, defaultValidateDeps } from "./validate";
+import {
+  validateSpecs,
+  type ValidateDeps,
+  runCheck,
+  defaultValidateDeps,
+  validateManifest,
+  compileCommand,
+  isToolchainFailure,
+  validateCodeProject,
+  type CodeValidateDeps,
+} from "@contexts/test-execution/infrastructure/static-gate.checks.ts";
+import type { CheckResult } from "@contexts/test-execution/application/ports/index.ts";
+import type { CodeProject } from "@contexts/test-execution/infrastructure/code-execution.runner.ts";
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+// Part 1 — validateSpecs / runCheck / checkManifest (moved from src/qa/validate.test.ts)
+// ══════════════════════════════════════════════════════════════════════════════════════════════
 
 const ok = async () => ({ ok: true, output: "" });
 
@@ -37,7 +71,7 @@ test("infra failures (spawn ENOENT, signal-kill) are flagged separately from rea
   const res = await validateSpecs("/dir", deps);
   assert.equal(res.ok, false);
   // There are non-infra errors → not a pure infra failure.
-  assert.equal(res.infra, false);  // lint error makes it a real validation failure
+  assert.equal(res.infra, false); // lint error makes it a real validation failure
 });
 
 test("a pure-infra validation failure is flagged as infra, not invalid", async () => {
@@ -223,11 +257,9 @@ test("B2: a zero-assertion GENERATED spec under flows/ IS flagged", async () => 
 });
 
 // ── migration-tier-4b Slice 2 (gate DEFECT-1 fix): checkManifest is a DISTINCT strict read from
-// generation's manifest-fs.ts::readManifest (fail-open-to-[]). checkManifest itself relocates in
-// Slice 3 (unmodified here), but the canonical schema underneath it (via metadata.ts's
-// validateManifest -> schemas.ts -> @kernel/manifest) changes THIS slice — this pins today's byte-
-// matching strict-read behavior BEFORE that relocation, against the REAL defaultValidateDeps
-// implementation (not a stub), with real fs fixtures.
+// generation's manifest-fs.ts::readManifest (fail-open-to-[]). This pins the byte-matching strict-
+// read behavior against the REAL defaultValidateDeps implementation (not a stub), with real fs
+// fixtures — now against the qa-engine-native home (Slice 3 relocated checkManifest itself).
 test("defaultValidateDeps.checkManifest: a MISSING manifest.json is ok:false (never a fail-open pass)", async () => {
   const dir = _mkdtempSync(_join(_tmpdir(), "qa-validate-checkmanifest-missing-"));
   try {
@@ -282,4 +314,154 @@ test("defaultValidateDeps.checkManifest: an entry with criticality:\"urgent\" (n
   } finally {
     _rmSync(dir, { recursive: true });
   }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+// Part 2 — validateManifest (moved from src/qa/metadata.test.ts)
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+
+const validManifestEntry = {
+  id: "checkout/over-10-items",
+  objective: "With >10 items, checkout completes the payment",
+  flow: "checkout",
+  targets: ["CheckoutService.validateCart"],
+  changeRef: { sha: "abc1234", type: "fix" },
+};
+
+test("an empty manifest is valid (repo with no tests yet)", () => {
+  assert.equal(validateManifest([]).ok, true);
+});
+
+test("a complete entry is valid", () => {
+  assert.equal(validateManifest([validManifestEntry]).ok, true);
+});
+
+test("rejects a non-array", () => {
+  assert.equal(validateManifest({}).ok, false);
+});
+
+test("requires objective, flow, targets and changeRef", () => {
+  const r = validateManifest([{ id: "x" }]);
+  assert.equal(r.ok, false);
+  assert.match(r.errors.join(" "), /objective/);
+  assert.match(r.errors.join(" "), /flow/);
+  assert.match(r.errors.join(" "), /targets/);
+  assert.match(r.errors.join(" "), /changeRef/);
+});
+
+test("detects duplicate ids", () => {
+  const r = validateManifest([validManifestEntry, validManifestEntry]);
+  assert.equal(r.ok, false);
+  assert.match(r.errors.join(" "), /duplicate id/);
+});
+
+test("empty targets is not allowed", () => {
+  const r = validateManifest([{ ...validManifestEntry, targets: [] }]);
+  assert.equal(r.ok, false);
+  assert.match(r.errors.join(" "), /targets/);
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+// Part 3 — compileCommand / isToolchainFailure / validateCodeProject (moved from
+// src/qa/code-validate.test.ts)
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+
+const maven: CodeProject = { ecosystem: "maven", install: null, test: { cmd: "mvn", args: ["-B", "test"] } };
+const gradle: CodeProject = { ecosystem: "gradle", install: null, test: { cmd: "./gradlew", args: ["test"] } };
+const go: CodeProject = { ecosystem: "go", install: null, test: { cmd: "go", args: ["test", "./..."] } };
+const rust: CodeProject = { ecosystem: "rust", install: null, test: { cmd: "cargo", args: ["test"] } };
+const node: CodeProject = { ecosystem: "node", install: null, test: { cmd: "npm", args: ["test"] } };
+const python: CodeProject = { ecosystem: "python", install: null, test: { cmd: "python3", args: ["-m", "pytest"] } };
+
+// ── compileCommand: compiles TEST sources without running them, scoped when possible ──────────────
+test("compileCommand: maven test-compile, scoped to the changed module when it resolves", () => {
+  const exists = (p: string) => p === "/repo/customers-service/pom.xml" || p === "/repo/pom.xml";
+  assert.deepEqual(compileCommand(maven, "/repo", ["customers-service/src/main/java/X.java"], { exists }), {
+    cmd: "mvn",
+    args: ["-B", "-pl", "customers-service", "-am", "test-compile"],
+  });
+});
+
+test("compileCommand: maven whole-reactor test-compile when nothing scopes", () => {
+  assert.deepEqual(compileCommand(maven, "/repo", [], { exists: () => true }), { cmd: "mvn", args: ["-B", "test-compile"] });
+});
+
+test("compileCommand: gradle testClasses", () => {
+  assert.deepEqual(compileCommand(gradle, "/repo", [], { exists: () => false }), { cmd: "./gradlew", args: ["testClasses"] });
+});
+
+test("compileCommand: go vet (compiles _test.go which go build skips), rust cargo check --tests", () => {
+  assert.deepEqual(compileCommand(go, "/repo", [], { exists: () => false }), { cmd: "go", args: ["vet", "./..."] });
+  assert.deepEqual(compileCommand(rust, "/repo", [], { exists: () => false }), { cmd: "cargo", args: ["check", "--tests"] });
+});
+
+test("compileCommand: node tsc --noEmit only with a tsconfig; plain JS has no compile step", () => {
+  assert.deepEqual(compileCommand(node, "/repo", [], { exists: (p) => p === "/repo/tsconfig.json" }), { cmd: "npx", args: ["tsc", "--noEmit"] });
+  assert.equal(compileCommand(node, "/repo", [], { exists: () => false }), null);
+});
+
+test("compileCommand: unknown ecosystem has no compile gate (null)", () => {
+  const unknown: CodeProject = { ecosystem: "unknown", install: null, test: { cmd: "npm", args: ["test"] } };
+  assert.equal(compileCommand(unknown, "/repo", ["x.py"], { exists: () => true }), null);
+});
+
+test("compileCommand: python byte-compiles the changed .py files (syntax gate); none → null", () => {
+  assert.deepEqual(compileCommand(python, "/repo", ["pkg/test_owner.py", "README.md"], { exists: () => true }), {
+    cmd: "python3",
+    args: ["-m", "compileall", "-q", "pkg/test_owner.py"],
+  });
+  assert.equal(compileCommand(python, "/repo", ["README.md"], { exists: () => true }), null);
+  assert.equal(compileCommand(python, "/repo", [], { exists: () => true }), null);
+});
+
+// ── isToolchainFailure: a broken JVM toolchain is infra, not a code defect ─────────────────────────
+test("isToolchainFailure: matches the REAL JDK/JAVA_HOME misconfig messages, not a normal compile error", () => {
+  assert.equal(isToolchainFailure("Error: JAVA_HOME is not set and could not be found."), true);
+  assert.equal(isToolchainFailure("The JAVA_HOME environment variable is not correctly set"), true);
+  assert.equal(isToolchainFailure("No compiler is provided in this environment. Perhaps you are running on a JRE rather than a JDK?"), true);
+  assert.equal(isToolchainFailure("[ERROR] /src/X.java:[12,5] cannot find symbol"), false);
+});
+
+// ── validateCodeProject: the orchestration (runCheck injected) ─────────────────────────────────────
+function deps(project: CodeProject, result: CheckResult, onRun?: () => void): CodeValidateDeps {
+  return {
+    detect: () => project,
+    runCheck: async () => {
+      onRun?.();
+      return result;
+    },
+  };
+}
+
+test("validateCodeProject: a clean compile is ok with no errors", async () => {
+  const r = await validateCodeProject("/repo", deps(maven, { ok: true, output: "BUILD SUCCESS" }), {});
+  assert.deepEqual(r, { ok: true, errors: [], infra: false });
+});
+
+test("validateCodeProject: a real compile error is invalid (not infra), with the error fed back", async () => {
+  const r = await validateCodeProject("/repo", deps(maven, { ok: false, output: "[ERROR] cannot find symbol method map()" }), {});
+  assert.equal(r.ok, false);
+  assert.equal(r.infra, false);
+  assert.match(r.errors[0]!, /compile/);
+  assert.match(r.errors[0]!, /cannot find symbol/);
+});
+
+test("validateCodeProject: a missing/broken toolchain is infra, never blamed on the agent", async () => {
+  const enoent = await validateCodeProject("/repo", deps(maven, { ok: false, output: "spawn mvn ENOENT", infra: true }), {});
+  assert.equal(enoent.infra, true);
+  const jdk = await validateCodeProject("/repo", deps(maven, { ok: false, output: "Error: JAVA_HOME is not set and could not be found." }), {});
+  assert.equal(jdk.infra, true);
+});
+
+test("validateCodeProject: interpreted ecosystems are a no-op — the gate never spawns", async () => {
+  let ran = false;
+  const r = await validateCodeProject("/repo", deps(python, { ok: false, output: "x" }, () => (ran = true)), {});
+  assert.deepEqual(r, { ok: true, errors: [], infra: false });
+  assert.equal(ran, false);
+});
+
+test("validateCodeProject: secrets in the compile output are sanitized before the agent sees them", async () => {
+  const r = await validateCodeProject("/repo", deps(maven, { ok: false, output: "aws.key=AKIAIOSFODNN7EXAMPLE [ERROR] boom" }), {});
+  assert.equal(r.ok, false);
+  assert.doesNotMatch(r.errors[0]!, /AKIAIOSFODNN7EXAMPLE/);
 });

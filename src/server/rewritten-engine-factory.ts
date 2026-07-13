@@ -128,8 +128,6 @@ import { parseVerdict } from "../integrations/verdict-parse";
 import { parseReviewerVerdict, checkGeneratorVerdict, repairInstruction } from "../integrations/verdict-validate";
 import { roleWindowBytes } from "../integrations/model-window-catalog";
 import type { RepairPort } from "@contexts/generation/application/generate-tests.use-case.ts";
-import { validateSpecs, defaultValidateDeps } from "../qa/validate";
-import { validateCodeProject, defaultCodeValidateDeps } from "../qa/code-validate";
 import { runE2E, defaultExecuteDeps, defaultCleanupDeps } from "../qa/execute";
 // migration-tier-4b Slice 1: code-execution migration — src/qa/code-runner.ts is deleted; qa-engine
 // now owns the real body directly (code-execution.runner.ts / code-setup.ts / sandbox.ts). This
@@ -141,6 +139,15 @@ import {
   runCodeCoverage,
   detectCodeProject,
 } from "../../qa-engine/src/contexts/test-execution/infrastructure/code-execution.runner";
+// migration-tier-4b Slice 3: validate cluster migration — src/qa/validate.ts + code-validate.ts +
+// metadata.ts are deleted; qa-engine now owns the static gate's real body directly (both the e2e
+// checks and the code target's compile-feedback gate live in ONE relocated module).
+import {
+  validateSpecs,
+  defaultValidateDeps,
+  validateCodeProject,
+  defaultCodeValidateDeps,
+} from "../../qa-engine/src/contexts/test-execution/infrastructure/static-gate.checks";
 import { scrubEnv } from "../../qa-engine/src/shared-infrastructure/process-sandbox/scrub-env";
 import { resolveSandbox } from "../../qa-engine/src/shared-infrastructure/process-sandbox/sandbox";
 import { setupCodeProject, createDefaultCodeSetupDeps } from "../../qa-engine/src/contexts/test-execution/infrastructure/code-setup";
@@ -765,6 +772,10 @@ export function buildRewrittenCompositionConfig(
     repair,
   });
 
+  // migration-tier-4b Slice 3: both staticGate and codeValidate now bind qa-engine's OWN
+  // static-gate.checks.ts body directly (validateSpecs/validateCodeProject) — StaticGateAdapter/
+  // CodeValidationStrategy no longer wrap a closure that calls back into src/qa/{validate,
+  // code-validate}.ts (both deleted this slice).
   const staticGate = new StaticGateAdapter({
     typecheck: defaultValidateDeps.typecheck,
     lint: defaultValidateDeps.lint,
@@ -773,10 +784,9 @@ export function buildRewrittenCompositionConfig(
     validateAll: (specDir) => validateSpecs(specDir, defaultValidateDeps),
   });
   // WS2.2 (full-flow remediation, code-mode restoration): Filter B for the CODE target — the
-  // compile-feedback gate ported from src/qa/code-validate.ts, wired here for the first time
-  // (previously the code target had NO pre-execution feedback at all; a compile error surfaced
-  // only as an opaque whole-build failure at execution). Mirrors the e2e staticGate's own
-  // construction immediately above.
+  // compile-feedback gate (previously the code target had NO pre-execution feedback at all; a
+  // compile error surfaced only as an opaque whole-build failure at execution). Mirrors the e2e
+  // staticGate's own construction immediately above.
   const codeValidate = new CodeValidationStrategy((repoDir, opts) => validateCodeProject(repoDir, defaultCodeValidateDeps, opts));
 
   const e2e = new E2eExecutionStrategy((specDir, opts) => runE2E(specDir, opts, defaultExecuteDeps));

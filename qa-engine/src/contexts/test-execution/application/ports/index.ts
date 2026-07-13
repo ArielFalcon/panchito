@@ -1,9 +1,11 @@
 // qa-engine/src/contexts/test-execution/application/ports/index.ts
-// The deterministic harness ports. ExecutionStrategyPort [SWAP — two adapters: e2e/code] is lifted
-// from execute.ts ExecuteDeps; the static gate from validate.ts ValidateDeps. DeployGatePort is
-// kernel-resident (Task 8) — consumed here via @kernel, not defined locally. ProcessKillPort is
-// consumed FROM the kernel (breaks the execute ⇄ dom-snapshot cycle). CheckResult is a local result
-// type (mirrors src/qa CheckResult).
+// The deterministic harness ports. ExecutionStrategyPort [SWAP — two adapters: e2e/code] and the
+// static gate's ValidateDeps are both owned by this directory's own infrastructure/
+// static-gate.checks.ts (migration-tier-4b Slice 3 — body-moved from src/qa/{validate,
+// code-validate}.ts, which are now deleted). DeployGatePort is kernel-resident (Task 8) — consumed
+// here via @kernel, not defined locally. ProcessKillPort is consumed FROM the kernel (breaks the
+// execute ⇄ dom-snapshot cycle). CheckResult is the canonical result type this port and
+// static-gate.checks.ts both share.
 
 import type { RunVerdict } from "@kernel/run-verdict.ts";
 import type { QaCase } from "@kernel/qa-case.ts";
@@ -12,10 +14,11 @@ import type { QaCase } from "@kernel/qa-case.ts";
 // static sites and the code target (returns ok(true) immediately).
 export type { DeployGatePort } from "@kernel/ports/deploy-gate.port.ts";
 
-export interface CheckResult { ok: boolean; output: string; infra?: boolean; } // infra optional: mirrors src/qa/validate.ts CheckResult (infra?: boolean)
+export interface CheckResult { ok: boolean; output: string; infra?: boolean; } // infra optional: shared with static-gate.checks.ts's CheckResult usage
 
-// ValidationResult mirrors src/qa/validate.ts ValidationResult. Re-exported here so that
-// consumers of the port (Plan-6 orchestration layer) import from the port, not from src/.
+// ValidationResult is the canonical shape static-gate.checks.ts's validateSpecs/validateCodeProject
+// both return. Re-exported here so that consumers of the port (the orchestration layer) import from
+// the port, not from the infrastructure module directly.
 export interface ValidationResult {
   ok: boolean;
   errors: string[]; // one error per failed check, with its output (for the agent)

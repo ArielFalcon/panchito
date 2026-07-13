@@ -199,10 +199,13 @@ export type ServiceConfig = NonNullable<ValidatedAppConfig["services"]>[number];
 // see qa-engine/.dependency-cruiser.cjs's own rule comment) — the "contract-shim" precedent already
 // used elsewhere in this file. Kept as re-exports (not a direct `export { ... } from "..."` re-point
 // of every import site) so src/integrations/opencode-client.ts (:58/:858, dead-but-compiled on the
-// qa-engine-driven production path) and src/qa/metadata.ts (unmigrated until Slice 3) keep compiling
-// against these EXACT names with zero caller changes. Field set is a superset of the pre-4b shape
-// (adds the optional `file` field the qa-engine port side needs) — a harmless widening, never a
-// narrowing: every field this schema already required stays required.
+// qa-engine-driven production path) keeps compiling against these EXACT names with zero caller
+// changes. Slice 3 relocated src/qa/metadata.ts's validateManifest (formerly the other consumer of
+// this re-export) into qa-engine's own static-gate.checks.ts, which now imports the canonical
+// ManifestSchema DIRECTLY from @kernel/manifest/manifest-entry.ts — this re-export's remaining
+// reason to exist is opencode-client.ts + this file's own consumers. Field set is a superset of the
+// pre-4b shape (adds the optional `file` field the qa-engine port side needs) — a harmless
+// widening, never a narrowing: every field this schema already required stays required.
 export { ManifestEntrySchema, ManifestSchema } from "../../qa-engine/src/shared-kernel/manifest/manifest-entry";
 export type { ManifestEntry as ValidatedManifestEntry } from "../../qa-engine/src/shared-kernel/manifest/manifest-entry";
 

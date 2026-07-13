@@ -1,12 +1,14 @@
 // src/contexts/test-execution/infrastructure/static-gate.adapter.ts
-// WRAP of src/qa/validate.ts — the static gate (tsc / eslint-playwright / playwright --list /
-// manifest validity / zero-assertion guard). Each check is injected so the adapter test runs
-// without spawning tsc, eslint, or playwright. Delegates — does not reimplement validation.
-// Plan-6 wiring passes the real validateSpecs (from src/qa/validate.ts) as validateAll so the
-// zero-assertion gate (checkZeroAssertionSpecs, internal to validateSpecs) is carried across the
-// port boundary. The previous comment "inherited for free — no adapter changes needed" was wrong:
-// without validateAll on the port, a consumer calling the 4 granular methods silently skipped the
-// zero-assertion guard (WF-02 fix).
+// The static gate (tsc / eslint-playwright / playwright --list / manifest validity /
+// zero-assertion guard). Each check is injected so the adapter test runs without spawning tsc,
+// eslint, or playwright. Delegates — does not reimplement validation; the real body lives in this
+// directory's own static-gate.checks.ts sibling (migration-tier-4b Slice 3 — body-moved from
+// src/qa/validate.ts, which is now deleted; qa-engine owns the checks directly).
+// Composition wiring passes the real validateSpecs as validateAll so the zero-assertion gate
+// (checkZeroAssertionSpecs, internal to validateSpecs) is carried across the port boundary. A prior
+// comment here ("inherited for free — no adapter changes needed") was wrong: without validateAll on
+// the port, a consumer calling the 4 granular methods silently skipped the zero-assertion guard
+// (WF-02 fix).
 import type { StaticGatePort, CheckResult, ValidationResult } from "../application/ports/index.ts";
 
 export interface StaticGateChecks {
