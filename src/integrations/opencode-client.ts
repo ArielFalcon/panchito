@@ -1820,7 +1820,13 @@ export async function defaultAgentDeps(): Promise<AgentDeps> {
     // `opencode` container, so the path is valid on both sides.
     open: async (agent, cwd, opts) => {
       const created = await client.session.create({ query: { directory: cwd } });
-      if (created.error) throw new Error(`OpenCode session.create failed: ${JSON.stringify(created.error)}`);
+      if (created.error) {
+        const errPayload = created.error as AgentErrorPayload | undefined;
+        if (errPayload?.name) {
+          throw agentErrorToInfra(errPayload);
+        }
+        throw new Error(`OpenCode session.create failed: ${JSON.stringify(created.error)}`);
+      }
       const id = created.data?.id;
       if (!id) throw new Error("OpenCode: the session returned no id");
       const entry: SessionEntry = { id, agent, cwd, openedAt: Date.now() };
@@ -1904,6 +1910,14 @@ export async function defaultAgentDeps(): Promise<AgentDeps> {
                   })
                   .then((res) => {
                     if (res.error) {
+                      // ROOT-CAUSE FIX: the SDK can surface provider/server faults at the HTTP
+                      // level (res.error) as well as inside the assistant message (res.data.info.error).
+                      // Both must be classified as AgentUnavailableError so the runner labels the
+                      // run `infra-error` instead of treating it as an internal orchestrator crash.
+                      const errPayload = res.error as AgentErrorPayload | undefined;
+                      if (errPayload?.name) {
+                        throw agentErrorToInfra(errPayload);
+                      }
                       throw new Error(`OpenCode session.prompt failed: ${JSON.stringify(res.error)}`);
                     }
                     // ROOT-CAUSE FIX: a provider/agent fault (out of credits, auth, rate-limit,
