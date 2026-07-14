@@ -12,6 +12,9 @@
 // double that renders the same "FE↔BE links" marker is the correct-layer fake, not a shortcut.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   buildPrompt,
   buildPromptAssembled,
@@ -1759,4 +1762,57 @@ test("buildContextTask: describes each microservice path as a staged contract sn
   assert.doesNotMatch(text, /mirrored READ-ONLY|working copy/i);
   assert.match(text, /contracts\/openapi\/orders\.yaml/);
   assert.match(text, /staged contract snapshots are local paths you can read/i);
+});
+
+// ── migration-tier-4c Slice 5b: the qa-worker budget bug fix ─────────────────────────────────
+//
+// BEFORE this fix: buildWorkerPromptAssembled hardcoded `roleWindowBytes("qa-worker")` regardless
+// of `w.needsUi` — a code-only worker (needsUi:false, opens its session as "qa-worker-code" per
+// rewritten-engine-factory.ts's own role map) had its PROMPT BUDGET computed against "qa-worker"'s
+// catalog entry, not the role it actually runs as. Latent-correct today only because the current
+// roster happens to assign both roles the same model; a real bug in the code regardless, and one
+// that silently breaks the moment the roster diverges.
+//
+// AFTER this fix: the budget role selection mirrors w.needsUi, exactly like the session-open role
+// mapping already does: needsUi ? "qa-worker" : "qa-worker-code".
+test("qa-worker budget fix: buildWorkerPromptAssembled selects the budget role by w.needsUi (qa-worker for UI, qa-worker-code for code-only workers)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "worker-budget-fix-test-"));
+  mkdirSync(join(dir, "agents"), { recursive: true });
+  writeFileSync(
+    join(dir, "agents", "opencode.json"),
+    JSON.stringify({
+      agent: {
+        // Deliberately DIFFERENT catalog windows so the two roles are observably distinguishable —
+        // kimi-k2.7-code (64K tokens -> 192,000 byte budget) vs minimax-m3 (32K tokens -> 96,000 byte
+        // budget). The real production roster happens to assign the SAME model to both roles today,
+        // which is exactly why this bug was silent; this test proves the CALL SITE picks the right
+        // role regardless of what the roster currently happens to configure.
+        "qa-worker": { model: "opencode-go/kimi-k2.7-code" },
+        "qa-worker-code": { model: "opencode-go/minimax-m3" },
+      },
+    }),
+    "utf8",
+  );
+
+  const originalCwd = process.cwd();
+  process.chdir(dir);
+  try {
+    // Sized to fit under qa-worker's 192,000-byte budget but exceed qa-worker-code's 96,000-byte
+    // budget (learned-rules is the sole VOLATILE content here — no domSnapshot — so it is the ONLY
+    // section budget shedding can act on; overflow defaults to "drop", giving a clean present/absent
+    // signal instead of a partial truncation).
+    const learnedRules = "x".repeat(150_000);
+    const uiText = buildWorkerPrompt(mkWorkerInput({ needsUi: true, learnedRules }));
+    const codeText = buildWorkerPrompt(mkWorkerInput({ needsUi: false, learnedRules }));
+    assert.ok(
+      uiText.includes(learnedRules),
+      "needsUi:true must use qa-worker's LARGER budget (192,000 bytes) — the oversized learnedRules section must survive",
+    );
+    assert.ok(
+      !codeText.includes(learnedRules),
+      "needsUi:false must use qa-worker-code's SMALLER budget (96,000 bytes) — the oversized learnedRules section must be shed, proving the budget role is NOT hardcoded to 'qa-worker'",
+    );
+  } finally {
+    process.chdir(originalCwd);
+  }
 });

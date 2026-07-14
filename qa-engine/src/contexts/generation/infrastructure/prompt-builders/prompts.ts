@@ -365,7 +365,13 @@ export function buildWorkerPromptAssembled(w: ParallelWorkerInput): AssembledPro
     section("worker-task", "task", taskHeader, { priority: 1 }),
     // CRITICAL recap: output contract at the end so it is the last thing the agent sees before replying.
     section("worker-output-contract", "critical-recap", outputContract, { priority: 1 }),
-  ], { budgetBytes: roleWindowBytes("qa-worker") });
+  // migration-tier-4c Slice 5b (qa-worker budget bug fix): the budget role must mirror w.needsUi,
+  // exactly like the session-open role mapping already does (rewritten-engine-factory.ts's
+  // worker/workerCode -> "qa-worker"/"qa-worker-code"). BEFORE this fix, a code-only worker
+  // (needsUi:false, opens its session as "qa-worker-code") had its prompt budget computed against
+  // "qa-worker"'s catalog entry regardless — latent-correct only because the current roster happens
+  // to assign both roles the same model.
+  ], { budgetBytes: roleWindowBytes(w.needsUi ? "qa-worker" : "qa-worker-code") });
 }
 
 export function buildWorkerPrompt(w: ParallelWorkerInput): string {
