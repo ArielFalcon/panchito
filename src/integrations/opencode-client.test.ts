@@ -27,7 +27,8 @@ import {
 import type { ArchitectureContext } from "../qa/context";
 import type { ExplorationBrief } from "../qa/exploration-brief";
 import type { ParallelWorkerInput } from "@contexts/generation/application/ports/generation-ports.ts";
-import { roleWindowBytes } from "./model-window-catalog";
+// migration-tier-4c Slice 5a: model-window-catalog.ts relocated to qa-engine (a prompts.ts sibling).
+import { roleWindowBytes } from "@contexts/generation/infrastructure/prompt-builders/model-window-catalog";
 
 // context.json is read from the WATCHED repo and committed by this system's own PRs, so it
 // is attacker-influenceable. It must be sanitized before reaching the test-writing agent.

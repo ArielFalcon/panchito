@@ -1,11 +1,45 @@
+// migration-tier-4c Slice 5a: relocated from src/integrations/prompts.test.ts (pure relocation — no
+// assertion changes; only import paths were re-pointed). `OpencodeRunInput`/`QaCase` now resolve to
+// their existing canonical qa-engine mirrors.
+//
+// `setExplorationBriefCollaborators` is wired here with a LOCAL test double, not the real
+// src/qa/exploration-brief.ts functions — qa-engine's tsconfig.json is a COMPOSITE project with
+// rootDir pinned to qa-engine/ (`tsc -b`), so a qa-engine test file cannot import a src/ path at
+// type-check time without being excluded from that project entirely (the `-parity.test.ts`
+// convention). This file is the main behavioral suite for prompts.ts (not a parity comparison), so
+// it stays IN the main project; the D3 FE↔BE-suppression tests below only exercise prompts.ts's OWN
+// suppression logic (suppressFeBe), never exploration-brief.ts's rendering details — a minimal
+// double that renders the same "FE↔BE links" marker is the correct-layer fake, not a shortcut.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPrompt, buildPromptAssembled, buildFollowupPrompt, buildWorkerPrompt, buildReviewerPrompt, buildReviewerPromptAssembled, buildExplorerPrompt, buildContextTask } from "./prompts";
-import { assemble as caAssemble, section as caSection } from "./context-assembler";
-import { roleWindowBytes } from "./model-window-catalog";
-import type { OpencodeRunInput } from "./opencode-client";
-import type { ParallelWorkerInput, ReviewInput } from "@contexts/generation/application/ports/generation-ports.ts";
-import type { QaCase } from "../types";
+import {
+  buildPrompt,
+  buildPromptAssembled,
+  buildFollowupPrompt,
+  buildWorkerPrompt,
+  buildReviewerPrompt,
+  buildReviewerPromptAssembled,
+  buildExplorerPrompt,
+  buildContextTask,
+  setExplorationBriefCollaborators,
+} from "@contexts/generation/infrastructure/prompt-builders/prompts.ts";
+import { assemble as caAssemble, section as caSection } from "@contexts/generation/infrastructure/prompt-builders/context-assembler.ts";
+import { roleWindowBytes } from "@contexts/generation/infrastructure/prompt-builders/model-window-catalog.ts";
+import type { OpencodeRunInput, ParallelWorkerInput, ReviewInput, ExplorationBrief } from "@contexts/generation/application/ports/generation-ports.ts";
+import type { QaCase } from "@kernel/qa-case.ts";
+
+setExplorationBriefCollaborators({
+  parseExplorationBrief: () => null,
+  coerceExplorationBrief: () => null,
+  renderExplorationBrief: (brief: ExplorationBrief, opts?: { suppressFeBe?: boolean }) => {
+    const lines = [`## Exploration brief`, `Objective: ${brief.objective}`];
+    if (brief.feBe?.length && !opts?.suppressFeBe) {
+      lines.push("### FE↔BE links");
+      for (const l of brief.feBe) lines.push(`- Route ${l.route} -> ${l.operationId}`);
+    }
+    return lines.join("\n");
+  },
+});
 
 // RE-1 — the orchestrator's regeneration prompts must NOT command the agent to re-navigate /
 // re-snapshot / re-activate serena when authoritative grounding (a Context Pack DOM slice or an

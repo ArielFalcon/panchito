@@ -14,8 +14,11 @@ import { join } from "node:path";
 import { QaCase, RunMode, TestTarget, SpecMeta } from "../types";
 import type { CommitIntent } from "@contexts/generation/application/ports/generation-ports.ts";
 import type { ArchitectureContext } from "../qa/context";
-import { type ExplorationBrief } from "../qa/exploration-brief";
-import type { StructuralPattern } from "../qa/learning/skill-exemplar";
+import { type ExplorationBrief, parseExplorationBrief, coerceExplorationBrief, renderExplorationBrief } from "../qa/exploration-brief";
+// migration-tier-4c Slice 5a: skill-exemplar.ts relocated to qa-engine (a prompts.ts rider) — this
+// type-only import re-points there. Shell importing qa-engine is open by design (the shell consumes
+// the engine, never the reverse).
+import type { StructuralPattern } from "@contexts/generation/infrastructure/prompt-builders/skill-exemplar.ts";
 import { saveAgentTurn } from "../server/history";
 import { installHttpDispatcher } from "../util/net";
 
@@ -48,9 +51,41 @@ export { extractJsonObjects, parseVerdict };
 // so callers that need sectionSizes for telemetry can import directly from this module.
 // migration-tier-4c Slice 1: buildPlanPrompt/buildPlanPromptAssembled deleted (dead — the fan-out
 // planner they served was never called on the rewritten qa-engine path); no longer re-exported here.
-import { specFileForFlow, buildWorkerPrompt, buildWorkerPromptAssembled, buildPrompt, buildPromptAssembled, buildExplorerPrompt, buildContextTask, renderArchitectureContext, buildReviewerPrompt, buildReviewerPromptAssembled, reviewObjective, renderReviewSpecs, renderExecutionResult } from "./prompts";
+// migration-tier-4c Slice 5a: prompts.ts (+ its riders skill-exemplar.ts/structural-pattern.ts/
+// context-assembler.ts/model-window-catalog.ts) relocated to qa-engine's generation/infrastructure/
+// prompt-builders/ — re-pointed below, re-export contract unchanged so every existing importer keeps
+// resolving these names from this module (same BND-08 re-export convention as the verdict-parse
+// import above).
+import {
+  specFileForFlow,
+  buildWorkerPrompt,
+  buildWorkerPromptAssembled,
+  buildPrompt,
+  buildPromptAssembled,
+  buildExplorerPrompt,
+  buildContextTask,
+  renderArchitectureContext,
+  buildReviewerPrompt,
+  buildReviewerPromptAssembled,
+  reviewObjective,
+  renderReviewSpecs,
+  renderExecutionResult,
+  setExplorationBriefCollaborators,
+} from "@contexts/generation/infrastructure/prompt-builders/prompts";
 export { specFileForFlow, buildWorkerPrompt, buildWorkerPromptAssembled, buildPrompt, buildPromptAssembled, buildExplorerPrompt, buildContextTask, renderArchitectureContext, buildReviewerPrompt, buildReviewerPromptAssembled, reviewObjective, renderReviewSpecs, renderExecutionResult };
-export type { AssembledPrompt, ExecutionResultCase } from "./prompts";
+export type { AssembledPrompt, ExecutionResultCase } from "@contexts/generation/infrastructure/prompt-builders/prompts";
+
+// migration-tier-4c Slice 5a (D-4c-6 twin wiring): the previously-dormant ExplorationBriefAdapter
+// (qa-engine/.../exploration-brief.adapter.ts) needed a genuine production call path once prompts.ts
+// relocated to qa-engine (its `renderExplorationBrief` collaborator can no longer reach
+// src/qa/exploration-brief.ts directly). Wired HERE, at THIS module's load, mirroring
+// `setRawEventStreamOpener` below (Slice 3) exactly — same "shell resolves the real, shell-resident
+// implementation once and injects it" discipline. This module is imported both directly (every
+// existing consumer of buildPrompt/buildWorkerPrompt/etc. via "./opencode-client") and transitively
+// by src/server/rewritten-engine-factory.ts (which imports REVIEWER_TIMEOUT_MS/withUsageSink/etc.
+// from here already), so wiring it in ONE place covers every real production and test entry point —
+// no duplicate wiring needed at the composition-root file.
+setExplorationBriefCollaborators({ parseExplorationBrief, coerceExplorationBrief, renderExplorationBrief });
 
 // migration-tier-4c Slice 2 (D-4c-1, two-tier transport split): circuit-breaker.ts, stall-watchdog.ts,
 // the AgentDeps open/prompt POLICY (fallback-model retry, circuit-breaker gating, turn/usage

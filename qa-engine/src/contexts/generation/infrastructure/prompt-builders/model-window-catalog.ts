@@ -1,5 +1,14 @@
 // Model-window catalog for per-role byte budget enforcement (Phase 2 / Slice F).
 //
+// migration-tier-4c Slice 5a: relocated verbatim from src/integrations/model-window-catalog.ts
+// (prompts.ts's own sibling — both moved together). This module's own `existsSync`/`readFileSync`
+// fs read of `agents/opencode.json` is NOT a CLAUDE.md env-read-confinement violation: that
+// invariant forbids a NEW `process.env` read inside qa-engine/src, not a filesystem read — qa-engine
+// already reads the filesystem freely elsewhere (manifest-fs.ts, context-pack.ts, etc.). Pure
+// relocation in THIS commit — D-4c-6's roleWindowBytes split-brain fix (resolving the role's model
+// from AgentRuntimeConfig.assignments FIRST) lands as its own follow-up commit, once this file is
+// already in its new home.
+//
 // This module resolves the per-role byte budget the ContextAssembler enforces on
 // every boundary prompt. The budget is expressed in BYTES using the documented
 // approximation: 1 token ≈ 4 bytes (≈ 4 chars in typical English/code content).

@@ -7,8 +7,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { sanitizeText as ported } from "@contexts/generation/infrastructure/sanitize-text.ts";
-import { sanitizeText as legacy } from "../../../../../src/orchestrator/sanitizer.ts";
+import {
+  sanitizeText as ported,
+  containsSecrets as portedContainsSecrets,
+  assertNoSecretLeak as portedAssertNoSecretLeak,
+} from "@contexts/generation/infrastructure/sanitize-text.ts";
+import {
+  sanitizeText as legacy,
+  containsSecrets as legacyContainsSecrets,
+  assertNoSecretLeak as legacyAssertNoSecretLeak,
+} from "../../../../../src/orchestrator/sanitizer.ts";
 
 test("PARITY: redacts a mixed secret + PII + private-IP line identically", () => {
   const input = "apiKey=sk-abc123XYZ host=10.0.3.14 email leaker@example.com token: ghs_supersecretvalue";
@@ -67,4 +75,38 @@ test("PARITY: issue mode (default) unchanged, identically in both twins", () => 
   const input = "password: string; token = getToken();";
   assert.deepEqual(ported(input), legacy(input));
   assert.deepEqual(ported(input, "issue"), legacy(input, "issue"));
+});
+
+// migration-tier-4c Slice 5a: containsSecrets/assertNoSecretLeak now have a genuine qa-engine caller
+// (prompts.ts's cappedDiffText, relocated from src/integrations/prompts.ts) — ported here per this
+// file's own header policy ("if a future qa-engine slice needs them, port them then, at their own
+// call site"). Same parity discipline as sanitizeText above.
+test("PARITY: containsSecrets detects a real secret identically in both twins", () => {
+  const input = "token: ghs_supersecretvalue123456789012345678";
+  assert.equal(portedContainsSecrets(input), legacyContainsSecrets(input));
+  assert.equal(portedContainsSecrets(input), true);
+});
+
+test("PARITY: containsSecrets returns false for clean text identically in both twins", () => {
+  const input = "fetch('https://api.example.com/v1/users?page=2')";
+  assert.equal(portedContainsSecrets(input), legacyContainsSecrets(input));
+  assert.equal(portedContainsSecrets(input), false);
+});
+
+test("PARITY: containsSecrets model mode does NOT flag a type annotation, identically in both twins", () => {
+  const input = "password: string;";
+  assert.equal(portedContainsSecrets(input, "model"), legacyContainsSecrets(input, "model"));
+  assert.equal(portedContainsSecrets(input, "model"), false);
+});
+
+test("PARITY: assertNoSecretLeak throws SecretLeakError when a secret survives redaction, identically in both twins", () => {
+  const leaked = "token: ghs_supersecretvalue123456789012345678";
+  assert.throws(() => portedAssertNoSecretLeak(leaked, "issue", "diff→model"), /a secret survived redaction/);
+  assert.throws(() => legacyAssertNoSecretLeak(leaked, "issue", "diff→model"), /a secret survived redaction/);
+});
+
+test("PARITY: assertNoSecretLeak does not throw on clean redacted text, identically in both twins", () => {
+  const clean = "no secrets here";
+  assert.doesNotThrow(() => portedAssertNoSecretLeak(clean, "issue", "diff→model"));
+  assert.doesNotThrow(() => legacyAssertNoSecretLeak(clean, "issue", "diff→model"));
 });

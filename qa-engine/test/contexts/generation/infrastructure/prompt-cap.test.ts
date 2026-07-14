@@ -6,7 +6,7 @@
 // header comment in prompt-cap.ts for the full rationale.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { capDiff, capText } from "@contexts/generation/infrastructure/prompt-cap.ts";
+import { capDiff, capText, extractDiffFilePath } from "@contexts/generation/infrastructure/prompt-cap.ts";
 
 test("capDiff returns the diff unchanged when it is within the budget", () => {
   const diff = "diff --git a/src/foo.ts b/src/foo.ts\n@@ -1,1 +1,1 @@\n-old\n+new\n";
@@ -60,6 +60,18 @@ test("capDiff — a genuinely single-file diff over budget drops ALL content wit
   assert.ok(!out.includes("+line"), "ALL of the huge file's real content is gone — not even hard-truncated");
   assert.ok(out.includes("0 file(s) omitted"), "the marker still falsely reports zero omissions");
   assert.ok(out.length < 200, "the output is just the marker text — the degenerate fallback never fired");
+});
+
+// migration-tier-4c Slice 5a: extractDiffFilePath was module-private; exported so prompts.ts's
+// relocated cappedDiffText can pick a per-file-section sanitize mode by extension. Same parsing
+// capDiff already uses internally — no new logic.
+test("extractDiffFilePath extracts the post-rename (b/) path from a diff --git header", () => {
+  const section = "diff --git a/src/old-name.ts b/src/new-name.ts\n@@ -1,1 +1,1 @@\n-old\n+new\n";
+  assert.equal(extractDiffFilePath(section), "src/new-name.ts");
+});
+
+test("extractDiffFilePath returns an empty string when the section has no diff --git header", () => {
+  assert.equal(extractDiffFilePath("no header here\n+just content\n"), "");
 });
 
 test("capText returns text unchanged when within the budget", () => {

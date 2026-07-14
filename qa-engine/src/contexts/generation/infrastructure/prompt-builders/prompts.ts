@@ -10,25 +10,88 @@
 //
 // The input types are imported TYPE-ONLY from opencode-client (erased at runtime), so although
 // opencode-client imports these functions as values, there is no runtime import cycle.
+//
+// migration-tier-4c Slice 5a: relocated from src/integrations/prompts.ts (pure relocation — the
+// string-assembly logic below is byte-for-byte unchanged; only imports were re-pointed, per a fresh
+// dependency audit run before this move):
+//   - sanitizeText/assertNoSecretLeak/SanitizeMode + capText/capDiff/extractDiffFilePath now resolve
+//     to their qa-engine ports (sanitize-text.ts / prompt-cap.ts) instead of src/orchestrator/
+//     sanitizer.ts — containsSecrets/assertNoSecretLeak were ADDED to sanitize-text.ts and
+//     extractDiffFilePath was newly EXPORTED from prompt-cap.ts (both were src/-only before; this is
+//     this migration's genuine new call site, per those modules' own "port it at its own call site
+//     when needed" policy) — extractDiffFilePath is otherwise UNCHANGED, verbatim.
+//   - ArchitectureContext/QaCase re-point to their EXISTING canonical qa-engine mirrors
+//     (generation-ports.ts / @kernel/qa-case.ts) — no new type, no shape change.
+//   - renderExplorationBrief now resolves through the (previously dormant) ExplorationBriefAdapter —
+//     REQUIRED, not optional: src/qa/exploration-brief.ts stays in shell (other, unrelated production
+//     value-consumers of parseExplorationBrief/coerceExplorationBrief were confirmed absent, but the
+//     design's own D-4c-6 explicitly calls for wiring this twin, not relocating its source), so this
+//     module needs an injection seam to keep working post-move without importing src/. See
+//     `setExplorationBriefCollaborators` below — wired from rewritten-engine-factory.ts (the
+//     composition root) at module load, mirroring the RawAgentTransport/RawEventStreamOpener
+//     late-bound-injection discipline already established in Slices 2/3.
+//   - matchExemplars/renderExemplarsForPrompt (skill-exemplar.ts) and detectStructuralPatterns
+//     (structural-pattern.ts) moved alongside this file as RIDERS (this file was their only
+//     production value-consumer) — same "riders move with the file they serve" precedent as Slice
+//     1/3's activity-mapper.ts/agent-activity.ts.
+//   - assemble/section/AssembledPrompt (context-assembler.ts) and roleWindowBytes
+//     (model-window-catalog.ts) moved alongside this file too (mechanically required: both are
+//     imported as plain siblings, `./context-assembler`/`./model-window-catalog`, which could not
+//     resolve if either stayed in src/ while this file moved to qa-engine).
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { sanitizeText, assertNoSecretLeak, capText, capDiff, extractDiffFilePath, type SanitizeMode } from "../orchestrator/sanitizer";
-import type { ArchitectureContext } from "../qa/context";
-import type { CommitIntent } from "@contexts/generation/application/ports/generation-ports.ts";
-import type { QaCase } from "../types";
+import { sanitizeText, assertNoSecretLeak, type SanitizeMode } from "../sanitize-text.ts";
+import { capText, capDiff, extractDiffFilePath } from "../prompt-cap.ts";
+import type { QaCase } from "@kernel/qa-case.ts";
 // Seam-2 break: these input contracts are canonical in the qa-engine generation context. Re-rooting
 // this type-only import off ./opencode-client dissolves the opencode-client ⇄ prompts cycle (the
 // generation-ports parity test keeps the legacy opencode-client copies structurally in sync).
-import type { OpencodeRunInput, ParallelWorkerInput, ReviewInput } from "@contexts/generation/application/ports/generation-ports.ts";
-import { renderExplorationBrief } from "../qa/exploration-brief";
-import { matchExemplars, renderExemplarsForPrompt } from "../qa/learning/skill-exemplar";
-import { detectStructuralPatterns } from "../qa/learning/structural-pattern";
-import { assemble, section, type AssembledPrompt } from "./context-assembler";
-import { roleWindowBytes } from "./model-window-catalog";
+// ArchitectureContext re-points here too (migration-tier-4c Slice 5a) — the SAME canonical mirror,
+// no shape change.
+import type {
+  ArchitectureContext,
+  CommitIntent,
+  OpencodeRunInput,
+  ParallelWorkerInput,
+  ReviewInput,
+  ExplorationBrief,
+} from "@contexts/generation/application/ports/generation-ports.ts";
+import { ExplorationBriefAdapter, type BriefFns } from "../exploration-brief.adapter.ts";
+import { matchExemplars, renderExemplarsForPrompt } from "./skill-exemplar.ts";
+import { detectStructuralPatterns } from "./structural-pattern.ts";
+import { assemble, section, type AssembledPrompt } from "./context-assembler.ts";
+import { roleWindowBytes } from "./model-window-catalog.ts";
 
 // Re-export AssembledPrompt so callers that use the assembled variants only need one import.
 export type { AssembledPrompt };
+
+// migration-tier-4c Slice 5a (D-4c-6 twin wiring): the previously-dormant ExplorationBriefAdapter
+// (built ahead of this relocation, parity-tested against src/qa/exploration-brief.ts — see that
+// adapter's own header) now gets a genuine production call path. `renderExplorationBrief`'s
+// underlying implementation stays in shell (src/qa/exploration-brief.ts has other internal
+// concerns and is not itself part of this migration's scope), so this module needs an injected
+// seam to keep calling it without importing src/ (arch:check's one-way rule). Mirrors the
+// RawAgentTransport (Slice 2) / RawEventStreamOpener (Slice 3) late-bound-injection pattern: a
+// module-level mutable slot + setter, wired ONCE by the composition root (rewritten-engine-factory.ts)
+// at module load. Throws loudly if a brief render is attempted before wiring — never a silent no-op
+// (CLAUDE.md's "surface integration errors loudly" invariant) — but every real production path wires
+// this before any run starts, and every test either wires it locally or never exercises `w.brief`/
+// `input.contextBrief` (renderBrief is only called when a brief is actually present).
+let explorationBriefAdapter: ExplorationBriefAdapter | undefined;
+
+export function setExplorationBriefCollaborators(fns: BriefFns): void {
+  explorationBriefAdapter = new ExplorationBriefAdapter(fns);
+}
+
+function renderBrief(brief: ExplorationBrief, opts?: { suppressFeBe?: boolean }): string {
+  if (!explorationBriefAdapter) {
+    throw new Error(
+      "prompts: renderExplorationBrief collaborator not wired — call setExplorationBriefCollaborators() at composition time (see rewritten-engine-factory.ts)",
+    );
+  }
+  return explorationBriefAdapter.render(brief, opts);
+}
 
 // The author's commit message as ONE block: subject + (optionally) body. The body is the richest
 // statement of intent; the subject alone is often too terse to derive a concrete objective from. The
@@ -203,7 +266,7 @@ export function buildWorkerPromptAssembled(w: ParallelWorkerInput): AssembledPro
     `- Namespace prefix for any data you create: ${w.namespace}`,
     `- Write EXACTLY this file: ${w.e2eRelDir}/${w.specFile}  — do not create or edit any other file.`,
     ...(w.needsUi ? [`- Import the shared harness: import { test, expect } from "../fixtures"`] : []),
-    ...(w.brief ? [``, renderExplorationBrief(w.brief)] : []),
+    ...(w.brief ? [``, renderBrief(w.brief)] : []),
   ].join("\n");
 
   // VOLATILE: injected a11y tree (changes per worker assignment based on route capture).
@@ -511,7 +574,7 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
   // freed for other signal. When only the brief is present, feBe renders normally.
   const contextBriefContent = input.contextBrief
     ? [
-        renderExplorationBrief(input.contextBrief, { suppressFeBe: !!input.contextPack }),
+        renderBrief(input.contextBrief, { suppressFeBe: !!input.contextPack }),
         `(The brief above distilled the blast radius — do NOT re-read that code. Verify selectors against the live DOM.)`,
         ``,
       ].join("\n")

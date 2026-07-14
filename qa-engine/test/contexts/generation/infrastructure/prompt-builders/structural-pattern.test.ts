@@ -1,12 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { detectStructuralPatterns } from "./structural-pattern";
+import { detectStructuralPatterns } from "@contexts/generation/infrastructure/prompt-builders/structural-pattern.ts";
 
 // sdd/migration-wiring-phase-2 Slice 4 (D-E skill-exemplar restore): this file was deleted in Phase 1
 // as dead code (zero production callers — no caller ever threaded detectStructuralPatterns' output
 // anywhere). Restored VERBATIM (git history: 3b59b90^) because this slice gives it a genuine caller —
-// the generation prompt's new "skill-exemplars" section (src/integrations/prompts.ts), fed via
+// the generation prompt's new "skill-exemplars" section (prompts.ts), fed via
 // OpencodeRunInput.structuralPatterns. These are the FIRST dedicated tests this function has ever had.
+//
+// migration-tier-4c Slice 5a: relocated (alongside its source) from src/qa/learning/ to qa-engine.
 
 test("detectStructuralPatterns: an HTML form diff detects a 'form' pattern", () => {
   const diff = "diff --git a/src/checkout.html b/src/checkout.html\n+<form onsubmit=\"submit()\">\n+  <input required minlength=\"3\" />\n+</form>\n";

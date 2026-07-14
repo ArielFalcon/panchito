@@ -129,16 +129,22 @@ import { CodebaseMemoryClient } from "../../qa-engine/src/shared-infrastructure/
 // (not qa-engine/test/), so it is NOT subject to qa-engine/tsconfig.json's exclude list or the
 // tsconfig.parity.json split — it is covered by the root tsconfig.json project (which already
 // references qa-engine via TS project references) like any other src/ module.
+// migration-tier-4c Slice 5a/5b: prompts.ts + model-window-catalog.ts relocated to qa-engine's
+// generation/infrastructure/prompt-builders/ — re-pointed below. The ExplorationBriefAdapter twin
+// (D-4c-6) is wired in ../integrations/opencode-client.ts at ITS OWN module load (this file already
+// transitively imports that module below, for REVIEWER_TIMEOUT_MS/withUsageSink/etc.), so wiring it
+// there once covers both this composition root AND every other opencode-client.ts consumer — no
+// duplicate wiring needed here.
 import {
   buildPromptAssembled,
   buildWorkerPromptAssembled,
   buildReviewerPromptAssembled,
   buildExplorerPrompt,
   specFileForFlow,
-} from "../integrations/prompts";
+} from "@contexts/generation/infrastructure/prompt-builders/prompts";
 import { parseVerdict } from "../integrations/verdict-parse";
 import { parseReviewerVerdict, checkGeneratorVerdict, repairInstruction } from "../integrations/verdict-validate";
-import { roleWindowBytes } from "../integrations/model-window-catalog";
+import { roleWindowBytes } from "@contexts/generation/infrastructure/prompt-builders/model-window-catalog";
 import type { RepairPort } from "@contexts/generation/application/generate-tests.use-case.ts";
 import { runE2E, defaultExecuteDeps, defaultCleanupDeps } from "../qa/execute";
 // migration-tier-4b Slice 1: code-execution migration — src/qa/code-runner.ts is deleted; qa-engine

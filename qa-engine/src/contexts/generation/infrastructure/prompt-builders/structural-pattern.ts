@@ -2,8 +2,11 @@
 // Phase 1's dead-code cleanup (migration-remediation 8.B, commit 3b59b90) because it had ZERO
 // production callers — nothing ever threaded detectStructuralPatterns' output anywhere. Restored
 // VERBATIM from git history (3b59b90^) because THIS slice gives it a genuine caller: the generation
-// prompt's "skill-exemplars" section (src/integrations/prompts.ts), fed through
-// OpencodeRunInput.structuralPatterns. Detection logic is byte-for-byte unchanged from the original.
+// prompt's "skill-exemplars" section (prompts.ts), fed through OpencodeRunInput.structuralPatterns.
+// Detection logic is byte-for-byte unchanged from the original.
+//
+// migration-tier-4c Slice 5a: relocated (as a prompts.ts rider, alongside skill-exemplar.ts) from
+// src/qa/learning/structural-pattern.ts to qa-engine — prompts.ts is its only production consumer.
 import type { StructuralPattern } from "./skill-exemplar";
 
 export function detectStructuralPatterns(diff: string, changedFiles: string[]): StructuralPattern[] {

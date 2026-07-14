@@ -8,10 +8,17 @@
 // capDiff/capText into a SEPARATE module and explicitly deferred sanitizeText/containsSecrets/
 // SECRET_AUDIT as "a security boundary concern outside PromptBudgetPort's contract"): this module
 // ports ONLY `sanitizeText`, the one function context-pack.ts's renderers actually call. It does
-// NOT port `containsSecrets`, `recordAudit`, or the `SECRET_AUDIT` diagnostic map — those are
-// pipeline-boundary concerns (Issue-body / diff-to-model gates) with no caller in the grounding
-// context-assembly path this sub-plan covers. If a future qa-engine slice needs them, port them
-// then, at their own call site — do not widen this module's scope speculatively.
+// NOT port `recordAudit` or the `SECRET_AUDIT` diagnostic map — those are pipeline-boundary
+// diagnostics (post-mortem only, no caller reads them back into a decision) with no caller in the
+// grounding context-assembly path this sub-plan covers. If a future qa-engine slice needs them,
+// port them then, at their own call site — do not widen this module's scope speculatively.
+//
+// migration-tier-4c Slice 5a: `containsSecrets` + `assertNoSecretLeak` ARE now ported (verbatim
+// behavior) — exactly the "future qa-engine slice" this header anticipated. Their genuine new call
+// site is prompts.ts's `cappedDiffText` (relocated from src/integrations/prompts.ts), which needs
+// the post-redaction fail-loud guard at the diff→model boundary. `SecretLeakError` itself needed no
+// porting — it already lives in `@kernel/ports/redaction.port.ts`, the SAME canonical class both
+// src/orchestrator/sanitizer.ts and this module import (see that shared-kernel file's own header).
 //
 // sdd/migration-remediation Slice 6 (D-P2, RedactionPort unification): the replacement placeholder
 // is imported from THIS module's own shared-kernel sibling (`@kernel/ports/redaction.port.ts`'s
@@ -22,7 +29,7 @@
 // module also exports `redactionAdapter`, a `RedactionPort`-conforming object, for any future
 // qa-engine caller that wants the port abstraction instead of this file's own `sanitizeText` shape.
 
-import { REDACTED, type RedactionPort } from "@kernel/ports/redaction.port.ts";
+import { REDACTED, SecretLeakError, type RedactionPort } from "@kernel/ports/redaction.port.ts";
 
 export interface SecretDetection {
   redacted: boolean;
@@ -218,6 +225,39 @@ export function sanitizeText(input: string, mode: SanitizeMode = "issue"): { tex
       count: totalRedactions,
     },
   };
+}
+
+// migration-tier-4c Slice 5a: ported verbatim from src/orchestrator/sanitizer.ts's containsSecrets
+// (AMENDMENT 1, mode-aware guard fix — mirrors sanitizeText's own skip decision exactly, including
+// resetting the module-level /g regexes' lastIndex so repeated calls stay deterministic).
+export function containsSecrets(text: string, mode: SanitizeMode = "issue"): boolean {
+  if (!text) return false;
+  const masked = text.replace(/data:[^;]+;base64,[A-Za-z0-9+/=]+/gi, "");
+  for (const { p, skip, modelSkip } of NAMED_SECRET_PATTERNS) {
+    p.lastIndex = 0;
+    const hasConditionalSkip = Boolean(skip) || (mode === "model" && Boolean(modelSkip));
+    if (hasConditionalSkip) {
+      const ms = masked.match(p);
+      const isRealSecret = (m: string): boolean => !(skip?.(m) ?? false) && !(mode === "model" && modelSkip?.(m));
+      if (ms?.some(isRealSecret)) return true;
+    } else if (p.test(masked)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// migration-tier-4c Slice 5a: ported verbatim from src/orchestrator/sanitizer.ts's assertNoSecretLeak
+// — the diff→model boundary's post-redaction fail-loud guard. Runs AFTER sanitizeText/redact has
+// already scrubbed the text; if a secret is STILL detectable, that is an invariant violation the
+// caller must never launder into a silent send. `SecretLeakError` is the SAME shared-kernel class
+// (imported above), so a caller on either side of the src/⇄qa-engine boundary throws/catches the
+// identical error type.
+export function assertNoSecretLeak(redactedText: string, mode: SanitizeMode, boundary: string): void {
+  if (containsSecrets(redactedText, mode)) {
+    console.error(`[sanitizer] ${boundary}: a secret survived redaction — refusing to proceed`);
+    throw new SecretLeakError(`${boundary}: a secret survived redaction — refusing to proceed`);
+  }
 }
 
 // sdd/migration-remediation Slice 6 (D-P2, RedactionPort unification): this file's own

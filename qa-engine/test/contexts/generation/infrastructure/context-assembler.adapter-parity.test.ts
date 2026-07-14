@@ -1,11 +1,18 @@
 // test/contexts/generation/infrastructure/context-assembler.adapter-parity.test.ts
 // PARITY: call BOTH the wrapper and the legacy assemble/section on a shared section table;
 // deepEqual the assembled text + sectionSizes, proving no field was dropped.
-// Imports from src/ — excluded from qa-engine typecheck; runs via tsx.
+//
+// migration-tier-4c Slice 5a: context-assembler.ts relocated from src/integrations/ into THIS SAME
+// qa-engine tree (prompt-builders/) — there is no longer a separate "legacy src/" implementation to
+// compare against; both imports below now resolve to the identical qa-engine module. This test is
+// left in place (still green, still exercises the adapter) rather than deleted here — parity-test
+// RETIREMENT is Slice 6's declared job (generation-ports-parity.test.ts and friends), not this
+// relocation slice's. Kept excluded from the main qa-engine typecheck project (tsconfig.parity.json)
+// per its pre-existing convention.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ContextAssemblerAdapter } from "@contexts/generation/infrastructure/context-assembler.adapter.ts";
-import { assemble as legacyAssemble, section as legacySection } from "../../../../../src/integrations/context-assembler.ts";
+import { assemble as legacyAssemble, section as legacySection } from "@contexts/generation/infrastructure/prompt-builders/context-assembler.ts";
 
 test("PARITY: assemble + section wrapper produces identical result to the legacy fn", () => {
   const adapter = new ContextAssemblerAdapter(legacyAssemble, legacySection);

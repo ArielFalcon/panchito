@@ -52,7 +52,11 @@ function isLowRelevance(filePath: string): boolean {
 }
 
 // Extracts the file path from a "diff --git a/... b/..." header line.
-function extractDiffFilePath(section: string): string {
+// migration-tier-4c Slice 5a: exported (was module-private) — prompts.ts's cappedDiffText
+// (relocated from src/integrations/prompts.ts) needs this to pick a per-file-section sanitize mode
+// (see prompts.ts's own diffSectionMode doc), the SAME file-header parsing capDiff already does
+// internally below. No behavior change — this is the identical function, just no longer private.
+export function extractDiffFilePath(section: string): string {
   // "diff --git a/src/foo.ts b/src/foo.ts" — take the b/ path (post-rename destination)
   const m = /^diff --git a\/\S+ b\/(\S+)/m.exec(section);
   return m?.[1] ?? "";

@@ -15,7 +15,7 @@ import {
   modelWindowBytes,
   normalizeModelName,
   roleWindowBytes,
-} from "./model-window-catalog";
+} from "@contexts/generation/infrastructure/prompt-builders/model-window-catalog.ts";
 
 // ── BYTES_PER_TOKEN approximation ────────────────────────────────────────────
 
