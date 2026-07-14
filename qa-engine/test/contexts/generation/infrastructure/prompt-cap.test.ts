@@ -13,53 +13,57 @@ test("capDiff returns the diff unchanged when it is within the budget", () => {
   assert.equal(capDiff(diff, 10_000), diff);
 });
 
-// KNOWN BUG (parity-preserved, NOT fixed here — engram bugfix "sanitizer.ts capDiff silently drops
-// first-file diff section when oversized"): `diff.split(/^(?=diff --git )/m)` treats rawSections[0]
-// as an unconditional "preamble" even when the diff starts immediately with `diff --git` (the normal
-// case) — so rawSections[0] IS the first file's section, never subjected to the budget check or the
-// omitted-list. This is verified byte-for-byte identical against the REAL src/orchestrator/
-// sanitizer.ts capDiff (a verbatim port), so these tests assert the REAL current behavior for parity,
-// not the theoretically-correct behavior. A fix ships as its own declared change per the migration's
-// bug-register protocol (Plan 6 addendum §3 / carried invariant), touching both sanitizer.ts and
-// this port together — never silently inside a behavior-identical port.
-test("capDiff — the FIRST file section is always kept regardless of budget (ported preamble quirk)", () => {
+// migration-tier-4c Slice 5b (task 5b.5 — re-deriving the "second known prompts.ts bug" fresh at
+// HEAD): the ONLY concretely-documented candidate found (engram bugfix #919, registered 2026-07-02 —
+// predates the 2026-07-09 triage doc's un-detailed "2 known live bugs" note by a week, and sits
+// directly on prompts.ts's diff-capping hot path via cappedDiffText -> capDiff). Per the project's
+// own bug-register protocol ("fixes ship as separate declared changes with their own tests"), this
+// task (5b.5) IS that declared change.
+//
+// BEFORE this fix: `diff.split(/^(?=diff --git )/m)` treats rawSections[0] as an unconditional
+// "preamble" even when the diff starts immediately with `diff --git` (the normal case for a real git
+// diff — the split's zero-width lookahead never yields a leading empty element) — so rawSections[0]
+// IS the first file's real section, never subjected to the budget check or the omitted-list. Two
+// compounding failure modes: (1) a multi-file diff whose first file is oversized vanishes with ZERO
+// trace while a smaller second file survives "for free"; (2) a genuinely single-file diff over budget
+// produces JUST the truncation marker with ZERO real content, falsely claiming "0 file(s) omitted"
+// (the degenerate hard-truncate fallback never fires because `fileSections` stayed empty).
+//
+// AFTER this fix: rawSections[0] is treated as a REAL file section (folded into `fileSections` for
+// relevance-sorting, budget-checking, and omission-naming) whenever it itself starts with its own
+// "diff --git " header — a TRUE preamble (content before any file header, e.g. a `git log -p` prefix)
+// is the only case still unconditionally kept.
+test("capDiff FIX (2nd known bug): the first file section is now REAL — an oversized first file sheds and is correctly NAMED in the omitted list, not silently kept", () => {
   const fileA = "diff --git a/src/a.ts b/src/a.ts\n@@ -1,1 +1,1 @@\n-oldA\n+newA\n";
   const fileB = "diff --git a/src/b.ts b/src/b.ts\n@@ -1,1 +1,1 @@\n-oldB\n+newB\n";
   const diff = fileA + fileB;
-  // Budget fits fileA's section exactly; the KNOWN quirk keeps fileB too (fileA is treated as an
-  // unconditional "preamble" that never increments `used`, so the budget check never actually bites
-  // fileB here) — asserting the real ported behavior, not the naive "budget enforced" expectation.
+  // Budget fits fileA exactly; fileA is now subject to the SAME budget check as any other file —
+  // fileB no longer survives "for free" once fileA has consumed the whole budget.
   const out = capDiff(diff, fileA.length);
-  assert.ok(out.startsWith(fileA), "fileA's whole section is kept first");
-  assert.ok(out.includes("newB"), "KNOWN QUIRK: fileB is also kept — the budget did not bite it");
-  assert.ok(out.includes("0 file(s) omitted"), "KNOWN QUIRK: the marker reports zero omissions");
+  assert.ok(out.startsWith(fileA), "fileA's whole section is still kept first (relevance-ordered, fits within budget)");
+  assert.ok(!out.includes("newB"), "FIXED: fileB no longer survives for free — the budget now genuinely applies to fileA");
+  assert.ok(out.includes("1 file(s) omitted"), "FIXED: the marker correctly reports the one real omission");
+  assert.ok(out.includes("src/b.ts"), "FIXED: fileB is correctly NAMED in the omitted list");
 });
 
-test("capDiff — a first-file section LARGER than the budget is silently dropped (KNOWN BUG, ported verbatim)", () => {
+test("capDiff FIX (2nd known bug): an oversized FIRST file is now correctly named as omitted — no more silent, untraceable loss", () => {
   const huge1 = "diff --git a/src/huge1.ts b/src/huge1.ts\n" + "+line\n".repeat(2000);
   const small2 = "diff --git a/src/small2.ts b/src/small2.ts\n+x\n";
   const out = capDiff(huge1 + small2, 50);
-  // KNOWN BUG: huge1 (the "preamble") fails the budget check but is `continue`d past the omitted-list
-  // push too — it vanishes with NO trace. small2 (second file) is kept because `used` never moved.
-  assert.ok(!out.includes("+line\n+line"), "huge1's content is gone");
-  assert.ok(!out.includes("huge1"), "huge1 is NOT named as omitted — the bug: silent, untraceable loss");
-  assert.ok(out.includes("small2.ts"), "small2 (the second file) survives, unaffected by the budget");
+  assert.ok(!out.includes("+line\n+line"), "huge1's content is still gone (correctly — it does not fit the budget)");
+  assert.ok(out.includes("huge1"), "FIXED: huge1 IS now named as omitted — no more silent, untraceable loss");
+  assert.ok(out.includes("small2.ts"), "small2 (the second file) still survives — it fits within the remaining budget");
 });
 
-test("capDiff — a genuinely single-file diff over budget drops ALL content with no fallback (KNOWN BUG, ported verbatim)", () => {
+test("capDiff FIX (2nd known bug): a genuinely single-file diff over budget now hard-truncates via the degenerate fallback instead of dropping ALL content", () => {
   const oneHugeFile = "diff --git a/src/huge.ts b/src/huge.ts\n@@ -1,1 +1,1 @@\n" + "+line\n".repeat(5000);
   const out = capDiff(oneHugeFile, 100);
-  // Full trace: a single-file diff produces exactly ONE rawSection (no second "diff --git " boundary
-  // to split on), so `fileSections = rawSections.slice(1)` is EMPTY and the whole file content lives
-  // in `preamble = rawSections[0]`. The loop's `continue` on the preamble means `kept` ends up EMPTY.
-  // The "degenerate single-oversized-file" fallback is GUARDED by `fileSections.length > 0`, which is
-  // FALSE here (fileSections is empty, not populated with the huge file) — so the fallback that is
-  // SUPPOSED to hard-truncate a lone giant file never fires. Net result: the output is JUST the
-  // marker text, zero real diff content, claiming "0 file(s) omitted" — the most severe form of the
-  // same root-cause bug (registered in engram, not fixed here — verbatim parity port).
-  assert.ok(!out.includes("+line"), "ALL of the huge file's real content is gone — not even hard-truncated");
-  assert.ok(out.includes("0 file(s) omitted"), "the marker still falsely reports zero omissions");
-  assert.ok(out.length < 200, "the output is just the marker text — the degenerate fallback never fired");
+  // FIXED: a single-file diff now correctly populates `fileSections` with its one real section
+  // (rawSections[0] is no longer misclassified as an empty-preamble-only case), so the degenerate
+  // "hard-truncate the lone oversized file" fallback fires as originally intended.
+  assert.ok(out.includes("+line"), "FIXED: the degenerate fallback now hard-truncates real content instead of dropping everything");
+  assert.ok(out.startsWith("diff --git a/src/huge.ts"), "the hard-truncated content starts with the real file's own header");
+  assert.ok(out.length >= 100, "the output now carries real (truncated) diff content, not just the marker text");
 });
 
 // migration-tier-4c Slice 5a: extractDiffFilePath was module-private; exported so prompts.ts's
