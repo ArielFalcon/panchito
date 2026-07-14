@@ -15,6 +15,7 @@ import {
   modelWindowBytes,
   normalizeModelName,
   roleWindowBytes,
+  setRuntimeRoleModels,
 } from "@contexts/generation/infrastructure/prompt-builders/model-window-catalog.ts";
 
 // ── BYTES_PER_TOKEN approximation ────────────────────────────────────────────
@@ -208,4 +209,103 @@ test("catalog: roleWindowBytes resolves correctly for all roster roles via a ful
     roleWindowBytes("qa-reviewer", cfgPath) <= roleWindowBytes("qa-generator", cfgPath),
     "reviewer budget must not exceed generator budget",
   );
+});
+
+// ── D-4c-6 (migration-tier-4c Slice 5b): the split-brain fix ─────────────────────────────────
+//
+// BEFORE this fix: roleWindowBytes read agents/opencode.json EXCLUSIVELY for every role — even
+// though the ACTUAL runtime model a role executes under is decided by AgentRuntimeConfig.assignments
+// (src/agent-runtime/config.ts), which is env/dual-mode aware (AGENT_RUNTIME_MODE=dual,
+// AGENT_REVIEWER_PROVIDER=codex, AGENT_REVIEWER_MODEL=gpt-5.5, etc.). In dual mode the reviewer can
+// run on a COMPLETELY DIFFERENT provider/model than opencode.json declares (opencode.json only
+// configures the OpenCode runtime's own roster) — so the prompt budget was computed against the
+// WRONG model's context window whenever dual mode (or an env override) was active. Two independent
+// sources of truth for "what model does this role run" = a split-brain.
+//
+// AFTER this fix: for the three VISIBLE roles with their own AgentRuntimeConfig assignment
+// (qa-generator→primary, qa-reviewer→reviewer, qa-assistant→chat), roleWindowBytes resolves the
+// model from the INJECTED runtime assignment FIRST (via setRuntimeRoleModels, wired by the shell from
+// configFromEnv() at composition time) — opencode.json is consulted only as a disagreement check
+// (warn, not override). Non-visible roles (qa-worker, qa-worker-code, qa-explorer, qa-maintainer,
+// qa-reflector — none of which has its own AgentRuntimeConfig assignment; assignmentForRole aliases
+// them to `primary`, which would be WRONG here since opencode.json genuinely assigns them a cheaper,
+// different model) keep the pre-existing opencode.json-only resolution, UNCHANGED.
+
+test("D-4c-6 BEFORE/AFTER: without the injected runtime assignment (not wired), roleWindowBytes falls back to opencode.json-only resolution — pre-fix behavior preserved", () => {
+  setRuntimeRoleModels(undefined);
+  const cfg = { agent: { "qa-reviewer": { model: "opencode-go/minimax-m3" } } };
+  const cfgPath = writeTempConfig(cfg);
+  assert.equal(roleWindowBytes("qa-reviewer", cfgPath), modelWindowBytes("minimax-m3"));
+});
+
+test("D-4c-6 AFTER (dual-mode reviewer): qa-reviewer resolves via the injected AgentRuntimeConfig.assignments.reviewer model, NOT opencode.json — closes the split-brain", () => {
+  // Simulates dual mode: opencode.json still declares the OpenCode-only roster (minimax-m3), but the
+  // REAL runtime assignment (what config.ts's configFromEnv() resolved, env/dual-mode aware) routed
+  // the reviewer to gpt-5.5 (a Codex model, 128K window) — a completely different provider/model.
+  const cfg = { agent: { "qa-reviewer": { model: "opencode-go/minimax-m3" } } };
+  const cfgPath = writeTempConfig(cfg);
+  setRuntimeRoleModels({ primary: "opencode-go/deepseek-v4-pro", reviewer: "gpt-5.5", chat: "opencode-go/deepseek-v4-flash" });
+  try {
+    const bytes = roleWindowBytes("qa-reviewer", cfgPath);
+    assert.equal(bytes, modelWindowBytes("gpt-5.5"), "must resolve gpt-5.5's window (128K), not minimax-m3's (32K)");
+    assert.notEqual(bytes, modelWindowBytes("minimax-m3"), "must NOT use opencode.json's declared model when a runtime assignment is injected");
+  } finally {
+    setRuntimeRoleModels(undefined);
+  }
+});
+
+test("D-4c-6 AFTER (env-override): a different injected primary model changes qa-generator's budget accordingly", () => {
+  const cfgPath = writeTempConfig({ agent: { "qa-generator": { model: "opencode-go/deepseek-v4-pro" } } });
+  setRuntimeRoleModels({ primary: "gpt-5.4", reviewer: "gpt-5.5", chat: "gpt-5.4-mini" });
+  try {
+    assert.equal(roleWindowBytes("qa-generator", cfgPath), modelWindowBytes("gpt-5.4"));
+  } finally {
+    setRuntimeRoleModels(undefined);
+  }
+});
+
+test("D-4c-6 AFTER: qa-assistant (chat role) resolves via the injected assignments.chat model", () => {
+  const cfgPath = writeTempConfig({ agent: { "qa-assistant": { model: "opencode-go/deepseek-v4-flash" } } });
+  setRuntimeRoleModels({ primary: "opencode-go/deepseek-v4-pro", reviewer: "opencode-go/minimax-m3", chat: "gpt-5.4-mini" });
+  try {
+    assert.equal(roleWindowBytes("qa-assistant", cfgPath), modelWindowBytes("gpt-5.4-mini"));
+  } finally {
+    setRuntimeRoleModels(undefined);
+  }
+});
+
+test("D-4c-6 AFTER: non-visible worker roles (qa-worker) keep the opencode.json-only fallback even when a runtime assignment IS injected — never hijacked by assignments.primary", () => {
+  // qa-worker has no AgentRuntimeConfig assignment of its own (assignmentForRole aliases it to
+  // `primary`, which is WRONG for budget purposes — opencode.json genuinely assigns a cheaper,
+  // different model to workers). The fix must NOT resolve qa-worker via the injected primary model.
+  const cfgPath = writeTempConfig({ agent: { "qa-worker": { model: "opencode-go/deepseek-v4-flash" } } });
+  setRuntimeRoleModels({ primary: "gpt-5.4", reviewer: "gpt-5.5", chat: "gpt-5.4-mini" });
+  try {
+    const bytes = roleWindowBytes("qa-worker", cfgPath);
+    assert.equal(bytes, modelWindowBytes("deepseek-v4-flash"), "qa-worker must still resolve from opencode.json, not the injected primary model");
+    assert.notEqual(bytes, modelWindowBytes("gpt-5.4"), "qa-worker must NOT be hijacked by assignments.primary");
+  } finally {
+    setRuntimeRoleModels(undefined);
+  }
+});
+
+test("D-4c-6 AFTER: cross-source disagreement warns once (console.warn) without throwing, and the runtime assignment still wins", () => {
+  const cfgPath = writeTempConfig({ agent: { "qa-reviewer": { model: "opencode-go/minimax-m3" } } });
+  setRuntimeRoleModels({ primary: "opencode-go/deepseek-v4-pro", reviewer: "gpt-5.5", chat: "opencode-go/deepseek-v4-flash" });
+  const originalWarn = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...args: unknown[]) => { warnings.push(args.join(" ")); };
+  try {
+    const bytes = roleWindowBytes("qa-reviewer-disagreement-probe", cfgPath);
+    void bytes; // role absent from cfg entirely — exercises the ordinary fallback warn, not the disagreement path
+    const bytes2 = roleWindowBytes("qa-reviewer", cfgPath);
+    assert.equal(bytes2, modelWindowBytes("gpt-5.5"));
+    assert.ok(
+      warnings.some((w) => /disagree|does not match|configures/i.test(w)),
+      `expected a cross-source disagreement warning; got: ${JSON.stringify(warnings)}`,
+    );
+  } finally {
+    console.warn = originalWarn;
+    setRuntimeRoleModels(undefined);
+  }
 });

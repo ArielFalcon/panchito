@@ -20,6 +20,15 @@ import { type ExplorationBrief, parseExplorationBrief, coerceExplorationBrief, r
 // the engine, never the reverse).
 import type { StructuralPattern } from "@contexts/generation/infrastructure/prompt-builders/skill-exemplar.ts";
 import { saveAgentTurn } from "../server/history";
+// migration-tier-4c Slice 5b (D-4c-6 split-brain fix): configFromEnv resolves the REAL, env/dual-mode
+// aware runtime model assignments (src/agent-runtime/config.ts) — the source of truth for what model
+// each visible role (primary/reviewer/chat) actually executes under, as opposed to agents/
+// opencode.json's own OpenCode-only roster. Type-only imports already cross this same file<->
+// agent-runtime boundary in the opposite direction (agent-runtime/types.ts imports AgentDeps etc.
+// from here); this VALUE import does not create a runtime cycle since config.ts itself has no value
+// dependency back on this module.
+import { configFromEnv } from "../agent-runtime/config";
+import { setRuntimeRoleModels } from "@contexts/generation/infrastructure/prompt-builders/model-window-catalog";
 import { installHttpDispatcher } from "../util/net";
 
 // migration-tier-4c Slice 3 (D-4c-2, SSE two-tier split): activityRouter/registerRunSession/
@@ -86,6 +95,20 @@ export type { AssembledPrompt, ExecutionResultCase } from "@contexts/generation/
 // from here already), so wiring it in ONE place covers every real production and test entry point —
 // no duplicate wiring needed at the composition-root file.
 setExplorationBriefCollaborators({ parseExplorationBrief, coerceExplorationBrief, renderExplorationBrief });
+
+// migration-tier-4c Slice 5b (D-4c-6, the split-brain fix): wire the REAL runtime model assignments
+// (env/dual-mode aware) into model-window-catalog's injection seam, ONCE at this module's load — same
+// "shell resolves config once, injects into qa-engine" discipline as the ExplorationBriefAdapter
+// wiring just above. Only the three VISIBLE roles (primary/reviewer/chat) have their own
+// AgentRuntimeConfig assignment; roleWindowBytes falls back to agents/opencode.json for every other
+// role (workers, explorer, maintainer, reflector), unchanged. See model-window-catalog.ts's own
+// header for the full before/after rationale.
+const runtimeConfig = configFromEnv();
+setRuntimeRoleModels({
+  primary: runtimeConfig.assignments.primary.model,
+  reviewer: runtimeConfig.assignments.reviewer.model,
+  chat: runtimeConfig.assignments.chat.model,
+});
 
 // migration-tier-4c Slice 2 (D-4c-1, two-tier transport split): circuit-breaker.ts, stall-watchdog.ts,
 // the AgentDeps open/prompt POLICY (fallback-model retry, circuit-breaker gating, turn/usage

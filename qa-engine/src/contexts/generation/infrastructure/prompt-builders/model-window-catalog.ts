@@ -146,19 +146,107 @@ function warnFallbackOnce(role: string, reason: string): void {
   );
 }
 
-// Resolve the byte budget for a ROLE. Reads the role's model from
-// `agents/opencode.json` at `agentsConfigPath` (defaults to the process-cwd
-// relative path used by the rest of `src/`). Falls back gracefully at every step
-// (logging ONCE per role/reason so a mismatch is observable, FIX 8c):
-//   1. Config file missing or unparseable → DEFAULT_WINDOW_TOKENS
-//   2. Role absent from agents.agent map → DEFAULT_WINDOW_TOKENS
-//   3. Model not in catalog → DEFAULT_WINDOW_TOKENS
-// Never throws; always returns a positive byte count.
+// migration-tier-4c Slice 5b (D-4c-6, the split-brain fix). BEFORE this fix, roleWindowBytes read
+// agents/opencode.json EXCLUSIVELY for every role — but the model a role ACTUALLY executes under at
+// runtime is decided by AgentRuntimeConfig.assignments (src/agent-runtime/config.ts), which is
+// env/dual-mode aware (AGENT_RUNTIME_MODE=dual, AGENT_REVIEWER_PROVIDER/AGENT_REVIEWER_MODEL env
+// overrides, etc.) — opencode.json only ever configures the OpenCode runtime's OWN roster, which in
+// dual mode can differ entirely from what the reviewer/chat role is actually running on (a Codex
+// model, a different provider). Two independent sources of truth for "what model does this role
+// run" is a split-brain: the byte budget was silently computed against the WRONG model's context
+// window whenever dual mode or an env override was active.
+//
+// AFTER this fix: for the three VISIBLE roles that have their OWN AgentRuntimeConfig assignment
+// (qa-generator↔primary, qa-reviewer↔reviewer, qa-assistant↔chat — the SAME legacy-agent-name→role
+// map `src/agent-runtime/types.ts`'s roleForLegacyAgent already establishes), the model is resolved
+// from the INJECTED runtime assignment FIRST. opencode.json stays the resolution path for every
+// OTHER role (qa-worker, qa-worker-code, qa-explorer, qa-maintainer, qa-reflector — none of these has
+// its own AgentRuntimeConfig assignment; assignmentForRole aliases them to `primary`, which would be
+// WRONG here since opencode.json genuinely assigns them a cheaper, different model) — UNCHANGED. When
+// no runtime assignment has been injected at all (not wired — e.g. a bare unit test, or a process
+// that never called setRuntimeRoleModels), the ENTIRE resolution degrades to the pre-fix
+// opencode.json-only behavior — never a hard failure.
+export interface RuntimeRoleModels {
+  primary: string; // full model ref, e.g. "opencode-go/deepseek-v4-pro" or "gpt-5.4"
+  reviewer: string;
+  chat: string;
+}
+
+// The SAME three legacy-agent-name keys prompts.ts/opencode-client.ts already call roleWindowBytes
+// with (qa-generator/qa-reviewer/qa-assistant) — mirrors src/agent-runtime/types.ts's own
+// LEGACY_AGENT_TO_ROLE map for just these three "visible" entries (qa-engine may not import that
+// src/ file directly; this is the same tiny, stable mapping, structurally mirrored).
+const AGENT_TO_RUNTIME_ROLE: Record<string, keyof RuntimeRoleModels> = {
+  "qa-generator": "primary",
+  "qa-reviewer": "reviewer",
+  "qa-assistant": "chat",
+};
+
+// Module-level injection seam (mirrors the RawAgentTransport/RawEventStreamOpener late-bound-setter
+// discipline from Slices 2/3): the shell resolves configFromEnv() ONCE at composition time and
+// injects the three resolved model refs here. `undefined` (the default) means "not wired" — every
+// existing pre-fix caller/test keeps working via the opencode.json-only fallback below.
+let injectedRuntimeModels: RuntimeRoleModels | undefined;
+
+export function setRuntimeRoleModels(models: RuntimeRoleModels | undefined): void {
+  injectedRuntimeModels = models;
+}
+
+// Best-effort read of a role's model directly from agents/opencode.json — used both by the ordinary
+// fallback path (non-visible roles, or no injected assignment) AND by the disagreement check below.
+// Returns undefined on ANY failure (missing file, unparseable JSON, absent role/model) — never throws.
+function readOpencodeJsonModel(role: string, configPath: string): string | undefined {
+  try {
+    if (!existsSync(configPath)) return undefined;
+    const raw = JSON.parse(readFileSync(configPath, "utf8")) as {
+      agent?: Record<string, { model?: string }>;
+    };
+    return raw.agent?.[role]?.model;
+  } catch {
+    return undefined;
+  }
+}
+
+// Resolve the byte budget for a ROLE.
+//   1. If the role is one of the three VISIBLE roles AND a runtime assignment has been injected
+//      (setRuntimeRoleModels), resolve the model from THAT assignment first (env/dual-mode aware).
+//      A disagreement against opencode.json's own declared model for the same role is warned once
+//      (not a read failure — a real cross-source mismatch), but the runtime assignment always wins.
+//   2. Otherwise, read the role's model from `agents/opencode.json` at `agentsConfigPath` (defaults
+//      to the process-cwd relative path used by the rest of `src/`) — the pre-fix behavior, verbatim.
+// Falls back gracefully at every step (logging ONCE per role/reason so a mismatch is observable,
+// FIX 8c): config missing/unparseable, role absent from agents.agent map, or model not in the
+// catalog all degrade to DEFAULT_WINDOW_TOKENS. Never throws; always returns a positive byte count.
 export function roleWindowBytes(
   role: string,
   agentsConfigPath?: string,
 ): number {
   const configPath = agentsConfigPath ?? join(process.cwd(), "agents", "opencode.json");
+
+  const runtimeRole = AGENT_TO_RUNTIME_ROLE[role];
+  if (runtimeRole && injectedRuntimeModels) {
+    const modelRef = injectedRuntimeModels[runtimeRole];
+    const modelName = normalizeModelName(modelRef);
+
+    // Cross-source disagreement check (D-4c-6): opencode.json may declare a DIFFERENT model for
+    // this role than the injected runtime assignment resolved — this is expected in dual mode or
+    // under an env override, but worth surfacing so an operator can confirm it is intentional.
+    const opencodeModel = readOpencodeJsonModel(role, configPath);
+    if (opencodeModel && normalizeModelName(opencodeModel) !== modelName) {
+      warnFallbackOnce(
+        role,
+        `AgentRuntimeConfig.assignments resolved '${modelName}' but agents/opencode.json configures ` +
+          `'${normalizeModelName(opencodeModel)}' for this role — using the runtime assignment (the source of truth for what actually executes)`,
+      );
+    }
+
+    if (!(modelName in MODEL_WINDOW_TOKENS)) {
+      warnFallbackOnce(role, `runtime-assigned model '${modelName}' not in the catalog`);
+    }
+    return modelWindowBytes(modelName);
+  }
+
+  // Not a visible role, or no runtime assignment injected — the pre-fix opencode.json-only path.
   try {
     if (!existsSync(configPath)) {
       warnFallbackOnce(role, `config not found at ${configPath}`);
