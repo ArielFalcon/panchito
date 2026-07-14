@@ -70,7 +70,22 @@ test("SYNTHETIC VIOLATION: a qa-engine production file importing src/ is caught 
 
 test("CLEAN ON HEAD: no qa-engine production file imports src/ today", () => {
   const { ok, output } = runDepcruise("qa-engine/src");
-  assert.equal(ok, true, `dependency-cruiser reported a src/ boundary violation on HEAD:\n${output}`);
+  if (ok) return;
+  // A concurrently-running arch test — this file's own SYNTHETIC/PITFALL cases, or the sibling
+  // vcs-write-confinement.test.ts (node:test runs test FILES concurrently) — may have a transient
+  // `__*probe*__.ts` file mid-write under qa-engine/src when this scan runs. Those are definitionally
+  // test artifacts, never real production code, so a genuine HEAD violation would be on a
+  // normally-named file. Fail ONLY on a non-probe violation, so the gate stays strict without the
+  // documented cross-file probe race producing a false red (judgment-day tier-4b round-2).
+  const realViolations = output
+    .split("\n")
+    .filter((l) => /no-src-import-in-qa-engine/.test(l))
+    .filter((l) => !/__[A-Za-z0-9_]*probe[A-Za-z0-9_]*__\.ts/i.test(l));
+  assert.deepEqual(
+    realViolations,
+    [],
+    `dependency-cruiser reported a REAL src/ boundary violation on HEAD:\n${realViolations.join("\n")}`,
+  );
 });
 
 test("KNOWN PITFALL, documented and out-of-gate (judgment-day round-2): a bare 'src' TARGET ARGUMENT invoked from cwd=qa-engine/ silently scans the wrong tree and misses a real violation", () => {

@@ -2,7 +2,8 @@
 // THE canonical per-test manifest-entry shape (e2e/.qa/manifest.json), migration-tier-4b Slice 2 —
 // THE MANIFEST RECONCILIATION. Before this slice, two INDEPENDENTLY validated shapes existed for
 // the SAME file: "Shape A" (src/orchestrator/schemas.ts's ManifestEntrySchema, a zod schema — what
-// the static gate's read-path `checkManifest` actually enforces via metadata.ts's validateManifest)
+// the static gate's read-path `checkManifest` enforced, historically via the now-deleted
+// src/qa/metadata.ts::validateManifest; post-tier-4b it delegates to THIS module's validateManifest)
 // and "Shape B" (qa-engine's own generation/application/ports/index.ts ManifestEntry — a bare TS
 // interface, RE-ENFORCED at runtime by manifest-fs.ts's hand-rolled `manifestEntryViolation`, an
 // independently-maintained, already-drifted twin of Shape A's requiredness). This module collapses
