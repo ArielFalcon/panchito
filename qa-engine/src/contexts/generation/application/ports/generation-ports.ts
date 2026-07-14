@@ -15,9 +15,11 @@ import type { ServiceLink, ContractDrift } from "@contexts/service-topology/doma
 // opencode-client.ts and prompts.ts, flipped their type-only import here). ArchitectureContext
 // (src/qa/context.ts) and ExplorationBrief (src/qa/exploration-brief.ts) are NOT yet kernel-resident
 // and stay declared here as faithful structural aliases — importing them from src/ would recreate
-// the cross-tree coupling the qa-engine typecheck rejects. Structural shape mirrors the legacy
-// definitions so a legacy value is assignable to the canonical input (the
-// generation-ports-parity.test.ts round-trip proves no field was dropped).
+// the cross-tree coupling the qa-engine typecheck rejects.
+// migration-tier-4c Slice 6: the legacy OpencodeRunInput/ReviewInput/ParallelWorkerInput
+// declarations in src/integrations/opencode-client.ts (and generation-ports-parity.test.ts, the
+// AssertNever round-trip that pinned this type against them) were deleted once prompts.ts's
+// builders fully migrated to qa-engine — this file is now the ONLY definition, not one twin of two.
 // Plan-6: re-home the remaining two to kernel.
 
 export type CommitType =
@@ -66,8 +68,9 @@ export interface ArchitectureContext {
 // sdd/migration-wiring-phase-2 Slice 4 (D-E skill-exemplar restore): a faithful structural mirror of
 // StructuralPattern (src/qa/learning/skill-exemplar.ts) — NOT imported, per this barrel's own "no
 // cross-context/no src import" rule (same precedent as every other type on this file, e.g.
-// ArchitectureContext above). Kept in lockstep with the legacy union by hand (generation-ports-parity
-// round-trip proves no shape drift).
+// ArchitectureContext above). migration-tier-4c Slice 5a relocated skill-exemplar.ts's OWN copy into
+// qa-engine too (a prompts.ts rider); Slice 6 retired the generation-ports-parity round-trip that
+// used to pin this union against opencode-client.ts's now-deleted local declaration.
 export type StructuralPattern =
   | { kind: "form"; hasOnSubmit: boolean; hasValidation: boolean }
   | { kind: "api-call"; method: string; hasRequestBody: boolean; hasErrorHandling: boolean }

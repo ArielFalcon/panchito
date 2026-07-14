@@ -20,13 +20,14 @@ import {
   renderExecutionResult,
   AgentDeps,
   AgentTurnEvent,
-  OpencodeRunInput,
-  ReviewInput,
   askAssistant,
 } from "./opencode-client";
 import type { ArchitectureContext } from "../qa/context";
 import type { ExplorationBrief } from "../qa/exploration-brief";
-import type { ParallelWorkerInput } from "@contexts/generation/application/ports/generation-ports.ts";
+// migration-tier-4c Slice 6: OpencodeRunInput/ReviewInput's legacy declarations (formerly
+// re-exported from ./opencode-client) were deleted alongside generation-ports-parity.test.ts —
+// this test now imports the SAME canonical qa-engine mirror ParallelWorkerInput already used below.
+import type { OpencodeRunInput, ReviewInput, ParallelWorkerInput } from "@contexts/generation/application/ports/generation-ports.ts";
 // migration-tier-4c Slice 5a: model-window-catalog.ts relocated to qa-engine (a prompts.ts sibling).
 import { roleWindowBytes } from "@contexts/generation/infrastructure/prompt-builders/model-window-catalog";
 

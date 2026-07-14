@@ -11,14 +11,14 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { QaCase, RunMode, TestTarget, SpecMeta } from "../types";
-import type { CommitIntent } from "@contexts/generation/application/ports/generation-ports.ts";
-import type { ArchitectureContext } from "../qa/context";
-import { type ExplorationBrief, parseExplorationBrief, coerceExplorationBrief, renderExplorationBrief } from "../qa/exploration-brief";
-// migration-tier-4c Slice 5a: skill-exemplar.ts relocated to qa-engine (a prompts.ts rider) — this
-// type-only import re-points there. Shell importing qa-engine is open by design (the shell consumes
-// the engine, never the reverse).
-import type { StructuralPattern } from "@contexts/generation/infrastructure/prompt-builders/skill-exemplar.ts";
+// migration-tier-4c Slice 6: QaCase/TestTarget/CommitIntent/ArchitectureContext/ExplorationBrief(type)/
+// StructuralPattern/SpecMeta were only ever consumed by the now-deleted OpencodeRunInput/ReviewInput/
+// ParallelWorkerInput legacy declarations — dropped alongside them (SpecMeta was already unused before
+// this slice, a pre-existing stray import). RunMode survives (TIMEOUT_BY_MODE/agentTimeout below).
+// The exploration-brief VALUE imports (parseExplorationBrief/coerceExplorationBrief/renderExplorationBrief)
+// still feed the ExplorationBriefAdapter wiring a few lines down.
+import { RunMode } from "../types";
+import { parseExplorationBrief, coerceExplorationBrief, renderExplorationBrief } from "../qa/exploration-brief";
 import { saveAgentTurn } from "../server/history";
 // migration-tier-4c Slice 5b (D-4c-6 split-brain fix): configFromEnv resolves the REAL, env/dual-mode
 // aware runtime model assignments (src/agent-runtime/config.ts) — the source of truth for what model
@@ -336,150 +336,8 @@ export async function askAssistant(
   }
 }
 
-export interface OpencodeRunInput {
-  repo: string;
-  sha: string;
-  diff: string;
-  mirrorDir: string; // the agent's cwd: working copy of the repo (holds `e2e/`)
-  e2eRelDir: string; // tests folder relative to mirrorDir (e.g. "e2e")
-  namespace: string; // test-data prefix (qa-bot-<sha>)
-  needsReview: boolean;
-  target: TestTarget; // "e2e" or "code" — what KIND of tests to generate
-  mode: RunMode;
-  appName: string; // engram project — scopes all memory to this app
-  baseUrl?: string; // e2e: the LIVE DEV URL the agent must navigate to (Playwright MCP)
-  intent?: CommitIntent; // diff mode: commit intent (type + message + files)
-  // WS7.4 (full-flow remediation): classifyCommit's own explanation of its action decision, and
-  // whether the message contradicted the diff (an escalated commit) — mirrors intent's own
-  // "diff mode only, sourced from classifyCommit()" contract. Rendered as one line each in the
-  // task section (buildTask, src/integrations/prompts.ts) when present.
-  classificationReason?: string;
-  contradiction?: boolean;
-  guidance?: string; // manual mode: user instructions
-  openapi?: string | string[]; // optional hint (from app config): where the repo's OpenAPI contract(s) live
-  fixCases?: QaCase[]; // re-generation: failed cases from a previous execution to fix
-  reviewCorrections?: string[]; // re-generation: actionable corrections from a reviewer rejection
-  coverageGap?: string; // re-generation: changed lines not yet exercised (change-coverage gap)
-  // Lever-2 deterministic selector contradictions for the fix prompt (W1): each string is a verified
-  // absent/ambiguous finding against the captured failure-point tree ("role:name is NOT in the tree;
-  // present roles: …" or "matches MULTIPLE nodes …"). Rendered as its OWN un-truncated prompt section
-  // (NEVER folded into the 500-char-sliced fixCases detail, where verbose PW errors would cut it off).
-  selectorContradictions?: string[];
-  learnedRules?: string; // retrieval: rules from past runs injected into the agent prompt
-  domSnapshot?: string; // live DEV a11y snapshot of the target routes — grounds the GENERATOR's selectors
-  failureSourced?: boolean; // true when domSnapshot is the failure-point capture — switches to "GROUND TRUTH AT FAILURE" framing
-  runId?: string; // maps the session to a RunRecord for SSE live activity
-  contextMap?: ArchitectureContext; // cross-cutting: the FE↔BE map, injected by the orchestrator
-  explorer?: boolean; // Fase 3: run a read-only explorer pass before the generator (diff single-agent, opt-in)
-  contextBrief?: ExplorationBrief; // the distilled blast radius from the explorer pass (set internally → buildPrompt)
-  // Slice G: the pre-built Context Pack text block (blast-radius + DOM slice + contracts),
-  // assembled by the orchestrator BEFORE the first write and pushed into the VOLATILE band.
-  // When present, the generator transcribes from this pack instead of re-exploring.
-  // When absent, the explore-first mandate remains active (existing behaviour unchanged).
-  contextPack?: string;
-  // Static signal: deterministic pre-computed analysis rendered as a prompt section.
-  // Empty string or absent = no section added. Signal-only, fail-open.
-  staticSignal?: string;
-  // C1: diff archetypes computed by detectStructuralPatterns (deterministic, from the commit diff).
-  // Surfaces the structural shape of the change as a ONE-LINE hint to the generator so it can
-  // prioritise archetype-appropriate tests (e.g. "auth-flow, data-list"). Absent or empty = no hint.
-  diffArchetypes?: string[];
-  // sdd/migration-wiring-phase-2 Slice 4 (D-E skill-exemplar restore): the FULL detected structural
-  // shapes (restored src/qa/learning/structural-pattern.ts's detectStructuralPatterns) — a richer
-  // sibling of diffArchetypes above. Fed into prompts.ts's matchExemplars/renderExemplarsForPrompt
-  // loop to render a "Skill exemplars" section. Absent or empty = no section (never fabricated).
-  structuralPatterns?: StructuralPattern[];
-  // Seam b: deterministic list of existing spec file paths under e2eRelDir/**/*.spec.ts, enumerated
-  // by the orchestrator from the filesystem before the session starts. When non-empty and mode is
-  // diff or manual, rendered as an "existing-suite-manifest" semi-stable section so the generator
-  // knows what flows are already covered without a serena delegation. Absent or empty = no section.
-  existingSpecFiles?: string[];
-  service?: { repo: string; mirrorDir: string; openapi?: string | string[] }; // cross-repo: the triggering microservice (read-only working copy)
-  services?: Array<{ repo: string; mirrorDir: string; openapi?: string | string[] }>; // context mode: every declared service, mirrored read-only
-  // Stitcher→Generation seam (design §0, §3.4 — NET-NEW): this file has no @contexts alias import
-  // (verified against its own import block), so ServiceLink/ContractDrift are structurally MIRRORED
-  // here (copied verbatim, the SAME "copied verbatim from src/" discipline generation-ports.ts
-  // already applies to this whole interface, just mirrored in the other direction) rather than
-  // imported. NOT a fix to a previously-dead field: the qa-engine mirror of OpencodeRunInput
-  // (generation-ports.ts) already declares serviceLinks/contractDrift via a canonical import; this
-  // legacy copy simply never had them until now.
-  serviceLinks?: OcServiceLink[]; // deterministic cross-repo FE→BE links (advisory, from the stitcher)
-  contractDrift?: OcContractDrift[]; // FE↔BE contract drift (advisory warnings)
-  // Slice C (structural-signals-expansion, design §3.7): the advisory cross-repo impact narrowing —
-  // mirrors serviceLinks/contractDrift's own "structurally mirrored, not imported" discipline
-  // immediately above. Structured, not pre-rendered: prompts.ts extends the EXISTING
-  // "Cross-service links" section with inline [IMPACTED:<tier>] markers, never a new subsection.
-  crossRepoImpact?: { impactedLinks: Array<{ link: OcServiceLink; tier: string }> };
-}
-
-// Stitcher→Generation seam (design §3.4, NET-NEW structural mirrors): plain data, copied verbatim
-// from service-topology's domain ServiceLink/ContractDrift shape — see OpencodeRunInput's own
-// serviceLinks/contractDrift doc above for why this file mirrors rather than imports.
-export interface OcServiceSymbolRef {
-  repo: string;
-  file: string;
-  symbol: string;
-}
-export interface OcServiceLink {
-  from: OcServiceSymbolRef;
-  to: OcServiceSymbolRef;
-  transport: "http" | "event" | "rpc";
-  contractRef?: string;
-  confidence: number;
-  source: string;
-}
-export interface OcContractDrift {
-  from: OcServiceSymbolRef;
-  verb: string;
-  path: string;
-}
-
 // AgentTurnEvent/AgentSession/AgentOpenDescriptor/AgentDeps MIGRATED to qa-engine's
 // agent-transport-policy.ts (migration-tier-4c Slice 2) — see this file's header re-export block.
-
-// Independent reviewer invocation. Opens a SEPARATE qa-reviewer session (NOT a
-// subagent of the generator) so the review is genuinely independent — the generator
-// cannot influence the reviewer's verdict by controlling the prompt context. The
-// orchestrator uses THIS verdict, not the generator's self-reported approval, when
-// review is enabled.
-export interface ReviewInput {
-  diff: string;
-  specs: string[]; // relative paths of the specs to review (under e2e/)
-  mirrorDir: string;
-  e2eRelDir: string;
-  baseUrl?: string;
-  intent?: CommitIntent;
-  guidance?: string; // manual mode: the user instruction the tests must satisfy (the review objective)
-  appName: string;
-  mode: RunMode;
-  target?: TestTarget; // "e2e" (default) or "code" — adjusts wording and spec paths
-  // PROVEN learned rules (pre-rendered by the orchestrator) injected as extra reject-on-sight
-  // criteria. This is objective ledger state, NOT the generator's reasoning, so the reviewer's
-  // independence is preserved while the judge gains app-specific anti-patterns earned from failures.
-  learnedRules?: string;
-  // A DETERMINISTIC snapshot of the live DEV DOM (roles + accessible names of the routes the spec
-  // targets), captured by the ORCHESTRATOR — not the generator, so independence holds. It grounds
-  // the reviewer's UI-fact claims (labels, button/link text) in reality instead of its training
-  // memory of "similar apps", which is what made it hallucinate corrections (e.g. "the button says
-  // Add Owner" when DEV says "Submit"). Absent for code mode / when capture is unavailable.
-  domSnapshot?: string;
-  // Phase 0b: threads the parent run's identity into the reviewer session so the resulting
-  // agent_turns row carries a non-null run_id (previously always null for the reviewer).
-  runId?: string;
-  // Phase 0b: the human-readable description of what these tests are supposed to defend
-  // (injected as the reviewer-session objective so telemetry can slice by intent).
-  objective?: string;
-  // Phase 4: the reviewer's OWN corrections from the PREVIOUS round. Injected so the
-  // reviewer can judge convergence: approve once the previously-raised BLOCKING issues
-  // are resolved; do not invent new nits on unchanged specs.
-  priorCorrections?: string[];
-  // D4/D5: runtime execution evidence rendered by renderExecutionResult (sanitized HTTP
-  // statuses + final URLs captured via page.on('response') during Filter C). Injected as
-  // an authoritative VOLATILE section so the reviewer can weigh an objective 5xx server
-  // error before judging the test code. Absent when no execution has run yet (first-time
-  // generate, code mode, cross-repo runs where browser coverage cannot map service lines).
-  executionResult?: string;
-}
 
 // The reviewer is a bounded, read-only judge (10 steps, contents inlined in the prompt) —
 // it must never inherit the generator's 25-minute worst-case budget: a hung reviewer would
@@ -504,39 +362,6 @@ export const EXPLORER_TIMEOUT_MS = Number(process.env.OPENCODE_EXPLORER_TIMEOUT_
 // read+widen and needed that much on petclinic — and folded into the dispatcher Math.max below.
 // complete/exhaustive (whole-repo analysis, no scope) keep the per-mode generator budget.
 const PLANNER_TIMEOUT_MS = Number(process.env.OPENCODE_PLANNER_TIMEOUT_MS) || 240 * 1000;
-
-// ESCALATED FINDING (migration-tier-4c Slice 1 fresh-grep gate): this type has ZERO production
-// callers — generateParallel/runOpencodeParallel/shouldFanOut, its only real consumers, were deleted
-// in this slice as confirmed dead. It is kept ONLY because
-// qa-engine/test/contexts/generation/application/ports/generation-ports-parity.test.ts (a Slice-6-
-// owned parity gate, out of this slice's scope) structurally imports it from this module for its
-// AssertNever key-drift check against the canonical ParallelWorkerInput in generation-ports.ts.
-// Slice 6 (task 6.1) deletes generation-ports-parity.test.ts wholesale alongside OpencodeRunInput/
-// ReviewInput; this declaration MUST be deleted in that same commit, not before.
-export interface ParallelWorkerInput {
-  objective: string;
-  flow: string;
-  symbols: string[];
-  needsUi: boolean; // selects qa-worker (UI — transcribes the injected a11y tree, browserless) vs qa-worker-code (code-only); BOTH are serena-only, neither has Playwright
-  brief?: ExplorationBrief; // Fase 2: the distilled blast radius for this objective (rendered into the worker prompt)
-  specFile: string; // orchestrator-assigned path under e2eRelDir (e.g. "flows/checkout.spec.ts")
-  repo: string;
-  mirrorDir: string;
-  e2eRelDir: string;
-  namespace: string;
-  baseUrl?: string;
-  appName: string;
-  mode: RunMode;
-  learnedRules?: string; // anti-pattern rules from past runs — injected so workers don't repeat them
-  domSnapshot?: string; // live DEV a11y tree of this flow's routes — the worker transcribes, not guesses
-  runId?: string; // set on fan-out so the worker's live activity routes + carries a workerId
-  staticSignal?: string; // deterministic pre-computed analysis (signal-only, fail-open)
-  // Dead on the production path (see the ESCALATED FINDING note above) — kept structurally in sync
-  // with the canonical type solely for the Slice-6-owned parity gate until it retires both together.
-  serviceLinks?: OcServiceLink[];
-  contractDrift?: OcContractDrift[];
-  crossRepoImpact?: { impactedLinks: Array<{ link: OcServiceLink; tier: string }> };
-}
 
 // withTimeout MIGRATED to qa-engine's agent-transport-policy.ts (migration-tier-4c Slice 2) — see
 // this file's header re-export block. TIMEOUT_BY_MODE/agentTimeout/MAX_AGENT_TIMEOUT_MS below STAY
