@@ -13,6 +13,7 @@ import {
   resetCodexCircuit,
 } from "../integrations/codex-circuit-breaker";
 import type { AgentOpenDescriptor, AgentTurnEvent, LiveActivity } from "../integrations/opencode-client";
+import { REVIEWER_TIMEOUT_MS, EXPLORER_TIMEOUT_MS } from "../integrations/opencode-client";
 import { extractJsonObjects } from "../integrations/verdict-parse";
 import type { RunEventBody } from "../contract/events";
 import type {
@@ -28,18 +29,17 @@ import type {
 // watchdog explicitly skips it, since exec-per-prompt Codex gives no mid-turn activity signal to
 // watch) — so without a default here, a wedged `codex exec` is unbounded except by external abort.
 //
-// The FALLBACK values mirror opencode-client.ts's OWN fallbacks exactly (5min diff-mode generator
-// budget, 6min reviewer, 240s explorer) so the two providers share one budget policy by
-// construction, not by coincidence. The env var NAMES are also the same
-// (OPENCODE_REVIEWER_TIMEOUT_MS / OPENCODE_EXPLORER_TIMEOUT_MS / OPENCODE_TIMEOUT_MS) so a single
-// operator-set override tunes both providers at once.
+// migration-tier-4c Slice 2 (D-4c ride-along): the reviewer/explorer FALLBACK values are now
+// IMPORTED DIRECTLY from opencode-client.ts's own REVIEWER_TIMEOUT_MS/EXPLORER_TIMEOUT_MS (this
+// comment previously claimed that but the code kept a locally hardcoded duplicate — dissolved).
+// The env var NAMES stay the same (OPENCODE_REVIEWER_TIMEOUT_MS / OPENCODE_EXPLORER_TIMEOUT_MS /
+// OPENCODE_TIMEOUT_MS) so a single operator-set override tunes both providers at once.
 //
-// Read from the STRATEGY's injected `env` (not the frozen opencode-client.ts module constants,
-// which are evaluated once at import time from the real process.env and are not test-overridable)
-// so this stays independently unit-testable without waiting out multi-minute real defaults.
+// The env LOOKUP itself still reads from the STRATEGY's injected `env` (not opencode-client.ts's own
+// frozen module constants used AS THE FALLBACK NUMBER only) — this stays independently
+// unit-testable without waiting out multi-minute real defaults, while the fallback NUMBER can no
+// longer drift between the two providers.
 const DEFAULT_DIFF_GENERATOR_TIMEOUT_MS = 5 * 60 * 1000;
-const DEFAULT_REVIEWER_TIMEOUT_MS = 6 * 60 * 1000;
-const DEFAULT_EXPLORER_TIMEOUT_MS = 240 * 1000;
 
 function envNumber(env: Record<string, string | undefined>, key: string, fallback: number): number {
   return Number(env[key]) || fallback;
@@ -52,8 +52,8 @@ function envNumber(env: Record<string, string | undefined>, key: string, fallbac
 // either) falls back to the generator's diff-mode budget — the smallest generator ceiling, and a
 // strictly-bounded floor where today there is none at all.
 export function defaultCodexTimeoutMs(role: AgentRole, env: Record<string, string | undefined>): number {
-  if (role === "reviewer") return envNumber(env, "OPENCODE_REVIEWER_TIMEOUT_MS", DEFAULT_REVIEWER_TIMEOUT_MS);
-  if (role === "explorer") return envNumber(env, "OPENCODE_EXPLORER_TIMEOUT_MS", DEFAULT_EXPLORER_TIMEOUT_MS);
+  if (role === "reviewer") return envNumber(env, "OPENCODE_REVIEWER_TIMEOUT_MS", REVIEWER_TIMEOUT_MS);
+  if (role === "explorer") return envNumber(env, "OPENCODE_EXPLORER_TIMEOUT_MS", EXPLORER_TIMEOUT_MS);
   return envNumber(env, "OPENCODE_TIMEOUT_MS", DEFAULT_DIFF_GENERATOR_TIMEOUT_MS);
 }
 

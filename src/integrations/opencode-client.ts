@@ -12,12 +12,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { QaCase, RunMode, TestTarget, SpecMeta, ActivityKind } from "../types";
-import type { UsageSnapshot } from "../qa/usage";
 import type { CommitIntent } from "@contexts/generation/application/ports/generation-ports.ts";
 import type { ArchitectureContext } from "../qa/context";
 import { type ExplorationBrief } from "../qa/exploration-brief";
 import type { StructuralPattern } from "../qa/learning/skill-exemplar";
-import { sanitizeText } from "../orchestrator/sanitizer";
 import { ActivityRouter } from "./agent-activity";
 import { mapOpencodeEvent, eventRunId } from "./activity-mapper";
 import { reexploreKindFromEvent, reexploreTracker } from "./reexplore";
@@ -25,19 +23,6 @@ import type { RunEventBody } from "../contract/events";
 import { saveAgentTurn } from "../server/history";
 import { installHttpDispatcher } from "../util/net";
 
-interface SessionEntry {
-  id: string;
-  agent: string;
-  cwd: string;
-  openedAt: number;
-}
-
-const sessionRegistry = new Map<string, SessionEntry>();
-
-// Circuit breaker (extracted to ./circuit-breaker, BND-08). Re-exported so existing importers of
-// resetCircuit keep working.
-import { checkCircuit, recordCircuitFailure, recordCircuitSuccess, resetCircuit } from "./circuit-breaker";
-export { resetCircuit };
 // Verdict/JSON parsing (extracted to ./verdict-parse, BND-08). Re-exported so existing importers
 // (and tests) keep resolving extractJsonObjects/parseVerdict from this module.
 import { type FinalVerdict, extractJsonObjects, parseVerdict } from "./verdict-parse";
@@ -52,9 +37,57 @@ export { extractJsonObjects, parseVerdict };
 import { specFileForFlow, buildWorkerPrompt, buildWorkerPromptAssembled, buildPrompt, buildPromptAssembled, buildExplorerPrompt, buildContextTask, renderArchitectureContext, buildReviewerPrompt, buildReviewerPromptAssembled, reviewObjective, renderReviewSpecs, renderExecutionResult } from "./prompts";
 export { specFileForFlow, buildWorkerPrompt, buildWorkerPromptAssembled, buildPrompt, buildPromptAssembled, buildExplorerPrompt, buildContextTask, renderArchitectureContext, buildReviewerPrompt, buildReviewerPromptAssembled, reviewObjective, renderReviewSpecs, renderExecutionResult };
 export type { AssembledPrompt, ExecutionResultCase } from "./prompts";
-import { AgentUnavailableError, StalledAgentError, isInfraError } from "../errors";
-import { createStallWatchdog } from "./stall-watchdog";
-import type { StallWatchdog } from "./stall-watchdog";
+
+// migration-tier-4c Slice 2 (D-4c-1, two-tier transport split): circuit-breaker.ts, stall-watchdog.ts,
+// the AgentDeps open/prompt POLICY (fallback-model retry, circuit-breaker gating, turn/usage
+// telemetry assembly, sanitize-before-emit), the AgentDeps/AgentSession/AgentOpenDescriptor/
+// AgentTurnEvent types, and the withStallWatchdog/withUsageSink/withSessionRegistration decorators
+// all MIGRATED to qa-engine (agent-transport-policy.ts + resilience/) — this module keeps ONLY the
+// raw @opencode-ai/sdk I/O closure (client construction, session.create/prompt/abort/delete),
+// injected into qa-engine's createAgentDeps as a RawAgentTransport. Re-exported below so every
+// existing importer of these names from "./opencode-client" keeps working unchanged (same pattern as
+// the verdict-parse/prompts re-exports above).
+import {
+  checkCircuit,
+  recordCircuitSuccess,
+  recordCircuitFailure,
+  resetCircuit,
+} from "@contexts/generation/infrastructure/resilience/circuit-breaker";
+export { resetCircuit };
+import {
+  createAgentDeps,
+  parseModelRef,
+  withTimeout,
+  agentErrorToInfra,
+  withStallWatchdog,
+  withUsageSink,
+  withSessionRegistration,
+  getOpenSessions as engineGetOpenSessions,
+  getOpenSessionCount as engineGetOpenSessionCount,
+  registerSessionWatchdogNotify,
+  unregisterSessionWatchdogNotify,
+  notifySessionActivity,
+  type AgentDeps,
+  type AgentSession,
+  type AgentOpenDescriptor,
+  type AgentTurnEvent,
+  type UsageSnapshot,
+  type RawAgentTransport,
+  type RawPromptResult,
+  type RawAgentErrorPayload,
+} from "@contexts/generation/infrastructure/agent-transport-policy";
+export {
+  parseModelRef,
+  withTimeout,
+  agentErrorToInfra,
+  withStallWatchdog,
+  withUsageSink,
+  withSessionRegistration,
+  registerSessionWatchdogNotify,
+  unregisterSessionWatchdogNotify,
+  notifySessionActivity,
+};
+export type { AgentDeps, AgentSession, AgentOpenDescriptor, AgentTurnEvent, UsageSnapshot };
 
 // Read fallback model mapping from opencode.json (root-level key). Keeps the
 // fallback logic in one place so the orchestrator can retry with a different
@@ -69,16 +102,6 @@ function getFallbackModel(agent: string): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-// The session.prompt SDK takes a structured model override ({providerID, modelID}),
-// not the "provider/model" string opencode.json uses. Parse it; an unparseable ref
-// (no provider segment) yields undefined so the override is skipped rather than sent
-// malformed.
-export function parseModelRef(ref: string): { providerID: string; modelID: string } | undefined {
-  const i = ref.indexOf("/");
-  if (i <= 0 || i >= ref.length - 1) return undefined;
-  return { providerID: ref.slice(0, i), modelID: ref.slice(i + 1) };
 }
 
 // Shared OpenCode SDK client — lazy-initialised once, reused by SSE stream AND
@@ -143,27 +166,10 @@ export function disposeSharedClient(): void {
 // SSE live activity: routes OpenCode events to RunRecord logs in real time.
 export const activityRouter = new ActivityRouter();
 
-// Per-session liveness registry. withStallWatchdog registers a notify() callback keyed by
-// session ID; the SSE event loop calls notifySessionActivity(sessionId) on every event that
-// carries a sessionID so the watchdog can reset its timer. This is the only coupling between
-// the event stream (observability) and the watchdog (resilience) — single-direction, zero
-// verdict risk, and advisory-safe: a missed notify is a watchdog miss, not a data loss.
-const sessionWatchdogNotifiers = new Map<string, () => void>();
-
-/** Called by withStallWatchdog when a session opens. Not part of the public API surface. */
-export function registerSessionWatchdogNotify(sessionId: string, notify: () => void): void {
-  sessionWatchdogNotifiers.set(sessionId, notify);
-}
-
-/** Called by withStallWatchdog when a session is disposed or the watchdog stops. */
-export function unregisterSessionWatchdogNotify(sessionId: string): void {
-  sessionWatchdogNotifiers.delete(sessionId);
-}
-
-/** Notify the watchdog for a session (called from the SSE event loop on each activity). */
-export function notifySessionActivity(sessionId: string): void {
-  sessionWatchdogNotifiers.get(sessionId)?.();
-}
+// Per-session liveness registry (registerSessionWatchdogNotify/unregisterSessionWatchdogNotify/
+// notifySessionActivity) MIGRATED to qa-engine's agent-transport-policy.ts (migration-tier-4c Slice
+// 2) alongside withStallWatchdog, which is its only writer — see this file's header re-export block.
+// notifySessionActivity (used below, in startScopedEventStream) now resolves from that import.
 
 // Maps an OpenCode session to a run so SSE events are routed to the correct RunRecord.
 export function registerRunSession(sessionId: string, runId: string, directory: string, workerId?: string): void {
@@ -425,12 +431,16 @@ export async function startEventStreamWithReconnect(
   }
 }
 
-export function getOpenSessions(): SessionEntry[] {
-  return [...sessionRegistry.values()];
+// migration-tier-4c Slice 2: the session registry backing these two moved to qa-engine alongside the
+// open()/dispose() policy it tracks (agent-transport-policy.ts). Slice 4 (out of this batch's scope)
+// turns these into the declared thin src/-resident wrappers with their own "why shell" comment; for
+// now they simply delegate.
+export function getOpenSessions(): ReturnType<typeof engineGetOpenSessions> {
+  return engineGetOpenSessions();
 }
 
 export function getOpenSessionCount(): number {
-  return sessionRegistry.size;
+  return engineGetOpenSessionCount();
 }
 
 // Read-only Q&A about a run. Opens a short-lived session as the requested role.
@@ -595,83 +605,8 @@ export interface OcContractDrift {
   path: string;
 }
 
-// A single agent prompt/response turn captured at the SDK funnel. Emitted via the
-// `onTurn` callback on `open()` opts at the point where `onUsage` already fires.
-// `outputText` is sanitized BEFORE persist (sanitizer.ts); `runId` is null when the
-// session was opened without a descriptor (maintenance sessions, etc.).
-// Phase 1b: `sectionSizes` carries the per-section byte map from the ContextAssembler
-// when the prompt was assembled via one of the buildXxxAssembled() functions; null for
-// prompts not produced by the assembler (contract-repair re-prompts, explorer, etc.).
-export interface AgentTurnEvent {
-  runId: string | null;
-  sessionId: string;
-  role: string;
-  objective: string | undefined;
-  round: number;
-  isRepair: boolean;
-  promptText: string;
-  promptBytes: number;
-  outputText: string;
-  tokensInput: number | null;
-  tokensOutput: number | null;
-  tokensReasoning: number | null;
-  tokensCacheRead: number | null;
-  tokensCacheWrite: number | null;
-  cost: number | null;
-  ts: string;
-  // Phase 1b: per-section size map from the ContextAssembler. Null when the prompt was not
-  // assembled by one of the buildXxxAssembled() functions (repairs, explorer, etc.).
-  sectionSizes: Record<string, number> | null;
-}
-
-// A session opened against `opencode serve`. prompt() sends the message to the
-// `qa-generator` agent and returns its final text (including the closing JSON).
-// dispose() cleans up the session; call it when the session is no longer needed
-// to avoid memory leaks on the server (sessions are never auto-cleaned).
-export interface AgentSession {
-  id: string;
-  // textOnly returns only the model's final answer (type:"text" parts), excluding
-  // reasoning parts. Default (false) concatenates every text-bearing part — the
-  // generator/reviewer need that so a closing JSON emitted in a reasoning part survives.
-  // round/isRepair are per-call opts so the funnel can distinguish generation rounds
-  // from in-session contract-repair re-prompts when recording agent_turns rows.
-  // Phase 1b: sectionSizes carries the per-section byte map from the ContextAssembler
-  // when the prompt was produced by one of the buildXxxAssembled() functions. It flows
-  // through the funnel into AgentTurnEvent so telemetry records it per turn.
-  prompt(text: string, opts?: { textOnly?: boolean; round?: number; isRepair?: boolean; sectionSizes?: Record<string, number> | null }): Promise<string>;
-  dispose(): Promise<void>;
-  // selfTimed marks a session whose transport manages its own per-prompt timeout (e.g. Codex
-  // exec-per-prompt, which never emits SSE activity). The stall watchdog SKIPS such sessions —
-  // wrapping them would false-positive-kill any prompt slower than the stall threshold.
-  selfTimed?: boolean;
-}
-
-// Session-scoped descriptor forwarded by every open() call-site that has a run context.
-// `role` mirrors the existing `agent` arg (kept for consistency with the agent name).
-// `runId`/`objective` are optional so inapplicable call-sites (maintainer, etc.) can
-// leave them undefined without needing a type cast.
-export interface AgentOpenDescriptor {
-  runId?: string;
-  role?: string;
-  objective?: string;
-}
-
-export interface AgentDeps {
-  open(
-    agent: string,
-    cwd: string,
-    opts?: {
-      signal?: AbortSignal;
-      timeoutMs?: number;
-      model?: string;
-      onUsage?: (u: UsageSnapshot) => void;
-      onTurn?: (t: AgentTurnEvent) => void;
-      // Session-scoped identity descriptor (threaded by call-sites that have a run context).
-      descriptor?: AgentOpenDescriptor;
-    },
-  ): Promise<AgentSession>;
-  cleanupOrphans?(maxAgeMs: number): Promise<number>;
-}
+// AgentTurnEvent/AgentSession/AgentOpenDescriptor/AgentDeps MIGRATED to qa-engine's
+// agent-transport-policy.ts (migration-tier-4c Slice 2) — see this file's header re-export block.
 
 // Independent reviewer invocation. Opens a SEPARATE qa-reviewer session (NOT a
 // subagent of the generator) so the review is genuinely independent — the generator
@@ -774,25 +709,10 @@ export interface ParallelWorkerInput {
   crossRepoImpact?: { impactedLinks: Array<{ link: OcServiceLink; tier: string }> };
 }
 
-// Timeout wrapper for a promise: rejects if it elapses. Prevents a hung agent run
-// from blocking the (sequential) queue, which would block every repo. Verifiable
-// with stubs.
-export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${label}: timed out after ${ms}ms`)), ms);
-    p.then(
-      (v) => {
-        clearTimeout(timer);
-        resolve(v);
-      },
-      (e) => {
-        clearTimeout(timer);
-        reject(e);
-      },
-    );
-  });
-}
-
+// withTimeout MIGRATED to qa-engine's agent-transport-policy.ts (migration-tier-4c Slice 2) — see
+// this file's header re-export block. TIMEOUT_BY_MODE/agentTimeout/MAX_AGENT_TIMEOUT_MS below STAY
+// here (env-read confinement — see agent-transport-policy.ts's own header): they read
+// `process.env.OPENCODE_TIMEOUT_MS`, and qa-engine/src may never read `process.env` directly.
 const TIMEOUT_BY_MODE: Record<RunMode, number> = {
   diff: 5 * 60 * 1000,
   complete: 15 * 60 * 1000,
@@ -807,32 +727,8 @@ export function agentTimeout(mode: RunMode): number {
 
 const MAX_AGENT_TIMEOUT_MS = Math.max(...Object.values(TIMEOUT_BY_MODE));
 
-// Wrap an AgentDeps so EVERY open() injects the per-run usage sink, including internal callers
-// (explorer, reviewer, parallel workers) that never set opts.onUsage themselves. A caller-supplied
-// opts.onUsage still wins (`opts?.onUsage ?? onUsage`). No sink ⇒ baseDeps is returned untouched.
-// Single home for this wrapper so the precedence cannot drift between the entrypoint (index.ts) and
-// the default pipeline factory (pipeline.ts), which both need identical behavior.
-//
-// `onTurn` is TEST-ONLY: production never passes it (both call sites supply onUsage alone, and turn
-// persistence runs via the defaultOnTurn sink inside defaultAgentDeps.open, not through this
-// wrapper). It is retained solely so the colocated tests can exercise the same caller-wins
-// threading contract for onTurn (`opts?.onTurn ?? onTurn`) that onUsage uses.
-export function withUsageSink(
-  baseDeps: AgentDeps,
-  onUsage?: (u: UsageSnapshot) => void,
-  onTurn?: (t: AgentTurnEvent) => void, // TEST-ONLY (see note above); production passes only onUsage.
-): AgentDeps {
-  if (!onUsage && !onTurn) return baseDeps;
-  return {
-    ...baseDeps,
-    open: (agent, cwd, opts) =>
-      baseDeps.open(agent, cwd, {
-        ...opts,
-        ...(onUsage ? { onUsage: opts?.onUsage ?? onUsage } : {}),
-        ...(onTurn ? { onTurn: opts?.onTurn ?? onTurn } : {}),
-      }),
-  };
-}
+// withUsageSink MIGRATED to qa-engine's agent-transport-policy.ts (migration-tier-4c Slice 2) — see
+// this file's header re-export block.
 
 // Default stall threshold: STRICTLY less than the shortest mode timeout (diff = 5 min).
 // Configurable via OPENCODE_STALL_MS. 180 seconds without any agent activity event triggers the
@@ -845,136 +741,12 @@ export function stallMs(): number {
   return Number(process.env.OPENCODE_STALL_MS) || DEFAULT_STALL_MS;
 }
 
-// Factory type for injecting a custom watchdog in tests. Receives onStall; must
-// return a StallWatchdog. The real path uses createStallWatchdog with the real clock.
-export type WatchdogFactory = (onStall: () => void) => StallWatchdog;
-
-// Wrap an AgentDeps so EVERY session gets an inactivity watchdog. If notify() is not
-// called within stallMs, the in-flight prompt() is rejected with StalledAgentError and
-// the session is disposed. notify() must be called from the SSE event stream on each
-// activity event received for this session.
-//
-// `watchdogFactory` is TEST-ONLY: production never passes it. The real path uses
-// createStallWatchdog with the global clock. The `stallMs` option is forwarded from
-// the stallMs() helper (defaulting to OPENCODE_STALL_MS or DEFAULT_STALL_MS).
-export function withStallWatchdog(
-  baseDeps: AgentDeps,
-  opts: {
-    stallMs?: number;
-    watchdogFactory?: WatchdogFactory;
-  } = {},
-): AgentDeps {
-  const threshold = opts.stallMs ?? stallMs();
-  const factory: WatchdogFactory = opts.watchdogFactory ?? ((onStall) => createStallWatchdog({ stallMs: threshold, onStall }));
-
-  return {
-    ...baseDeps,
-    open: async (agent, cwd, openOpts) => {
-      const inner = await baseDeps.open(agent, cwd, openOpts);
-
-      // Self-timed sessions (Codex exec-per-prompt) manage their own timeout in the transport and
-      // never emit SSE activity, so the stall watchdog — which only resets on notifySessionActivity
-      // from the OpenCode SSE loop — would false-positive-kill every prompt slower than the
-      // threshold. Skip wrapping; the transport's own timeout is the real deadline.
-      if (inner.selfTimed) return inner;
-
-      // Track the in-flight prompt's reject handle so the stall callback can surface
-      // StalledAgentError from inside the watchdog (which runs on the timer thread).
-      let rejectInFlight: ((err: unknown) => void) | undefined;
-
-      const watchdog = factory(() => {
-        // The stall callback: reject the in-flight prompt and dispose the session.
-        const err = new StalledAgentError(
-          `Agent session stalled: no activity for ${threshold}ms. Aborting session to free resources.`,
-        );
-        rejectInFlight?.(err);
-        // Clean up the session→notify registry on the stall path too. wrapped.dispose() also
-        // unregisters, but a caller that swallows the rejection without reaching its finally
-        // would otherwise leak the entry for the process lifetime. Idempotent.
-        unregisterSessionWatchdogNotify(inner.id);
-        // Best-effort dispose — do not await (we are inside a timer callback).
-        inner.dispose().catch(() => {});
-      });
-
-      // Register this session's watchdog notify with the SSE event loop so that
-      // every incoming activity event for this session resets the stall timer.
-      registerSessionWatchdogNotify(inner.id, () => watchdog.notify());
-
-      const wrapped: typeof inner = {
-        id: inner.id,
-        prompt: (text, promptOpts) =>
-          new Promise<string>((resolve, reject) => {
-            rejectInFlight = reject;
-            // Arm the watchdog at prompt-start; subsequent SSE events reset it.
-            watchdog.notify();
-            inner.prompt(text, promptOpts).then(
-              (v) => {
-                rejectInFlight = undefined;
-                watchdog.stop();
-                resolve(v);
-              },
-              (e) => {
-                rejectInFlight = undefined;
-                watchdog.stop();
-                reject(e);
-              },
-            );
-          }),
-        dispose: async () => {
-          watchdog.stop();
-          unregisterSessionWatchdogNotify(inner.id);
-          await inner.dispose();
-        },
-      };
-
-      return wrapped;
-    },
-  };
-}
-
-// WS6.2 (full-flow remediation, timeouts & operational observability): registerRunSession/
-// unregisterRunSession existed and were exported, but nothing on the rewritten (qa-engine)
-// production path ever called them (the only call sites were the legacy runOpencode/
-// generateParallel/maybeExplore/maybePlan functions — dead since the cutover deleted
-// src/pipeline.ts). A session opened with a descriptor.runId never got mapped to its run, so SSE
-// live-activity events for that session were never routed to the TUI's live run panel.
-//
-// Wrap AgentDeps at the SAME composition seam withStallWatchdog/withUsageSink already use (see
-// createRewrittenEngineFactory's getAgentDeps wrapping) so every session opened through the
-// rewritten engine — generator, reviewer, or any future role — registers/unregisters automatically
-// whenever the caller supplied a descriptor.runId. Absent runId (e.g. a unit test or an operator
-// script with no run context) -> no registration is attempted, matching every other "absent ->
-// unchanged" optional-field contract in this file.
-//
-// `collaborators` is a testability seam (mirrors withStallWatchdog's watchdogFactory precedent) —
-// defaults to the REAL exported registerRunSession/unregisterRunSession in production.
-export function withSessionRegistration(
-  baseDeps: AgentDeps,
-  collaborators: {
-    register?: typeof registerRunSession;
-    unregister?: typeof unregisterRunSession;
-  } = {},
-): AgentDeps {
-  const register = collaborators.register ?? registerRunSession;
-  const unregister = collaborators.unregister ?? unregisterRunSession;
-
-  return {
-    ...baseDeps,
-    open: async (agent, cwd, opts) => {
-      const inner = await baseDeps.open(agent, cwd, opts);
-      const runId = opts?.descriptor?.runId;
-      if (runId) register(inner.id, runId, cwd);
-
-      return {
-        ...inner,
-        dispose: async () => {
-          if (runId) unregister(inner.id);
-          await inner.dispose();
-        },
-      };
-    },
-  };
-}
+// withStallWatchdog (+ WatchdogFactory) and withSessionRegistration MIGRATED to qa-engine's
+// agent-transport-policy.ts (migration-tier-4c Slice 2) — see this file's header re-export block.
+// withSessionRegistration's `collaborators` is now REQUIRED there (qa-engine cannot reach this file's
+// registerRunSession/unregisterRunSession on its own); the ONE production call site
+// (src/server/rewritten-engine-factory.ts) now injects them explicitly instead of relying on an
+// implicit default.
 
 // Integration boundary: real connection to `opencode serve`. Not covered by unit
 // tests (like the Playwright runner). The SDK is imported lazily so tests do not
@@ -984,6 +756,61 @@ export function withSessionRegistration(
 // Callers that want the snapshots wrap this AgentDeps (via withUsageSink) to inject onUsage into
 // every open() (the runner/pipeline path via the facade). There is no factory-level usage sink (it
 // was dead in the production strategy path, which always constructs this with no argument).
+// Raw transport (genuinely raw @opencode-ai/sdk primitives — client construction,
+// session.create/prompt/abort/delete). Injected into qa-engine's createAgentDeps, which owns ALL
+// policy (circuit-breaker gating, fallback-model retry, telemetry assembly, sanitize-before-emit).
+// Raw response-shape validation (res.error, missing id) is a genuinely raw-transport concern and
+// stays HERE — qa-engine's policy layer only sees a clean RawPromptResult or a rejected promise.
+async function buildRawAgentTransport(): Promise<RawAgentTransport> {
+  const client = await getSharedClient();
+
+  return {
+    createSession: async (cwd) => {
+      const created = await client.session.create({ query: { directory: cwd } });
+      if (created.error) throw new Error(`OpenCode session.create failed: ${JSON.stringify(created.error)}`);
+      const id = created.data?.id;
+      if (!id) throw new Error("OpenCode: the session returned no id");
+      return { id };
+    },
+    promptSession: async ({ id, cwd, agent, text, model }): Promise<RawPromptResult> => {
+      const res = await client.session.prompt({
+        path: { id },
+        query: { directory: cwd },
+        body: { agent, parts: [{ type: "text", text }], ...(model ? { model } : {}) },
+      });
+      if (res.error) {
+        throw new Error(`OpenCode session.prompt failed: ${JSON.stringify(res.error)}`);
+      }
+      // A provider/agent fault (out of credits, auth, rate-limit, output-length) is embedded in the
+      // assistant message (info.error), NOT in res.error — surfaced as data, classified by the
+      // policy layer's agentErrorToInfra.
+      const info = res.data?.info as
+        | { error?: RawAgentErrorPayload; tokens?: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }; cost?: number }
+        | undefined;
+      return {
+        agentError: info?.error,
+        parts: (res.data?.parts ?? []) as Array<{ type: string; text?: string }>,
+        tokens: info?.tokens
+          ? {
+              input: info.tokens.input ?? 0,
+              output: info.tokens.output ?? 0,
+              reasoning: info.tokens.reasoning ?? 0,
+              cacheRead: info.tokens.cache?.read ?? 0,
+              cacheWrite: info.tokens.cache?.write ?? 0,
+            }
+          : undefined,
+        cost: info?.cost,
+      };
+    },
+    abortSession: async (id) => {
+      await client.session.abort({ path: { id } });
+    },
+    deleteSession: async (id) => {
+      await client.session.delete({ path: { id } });
+    },
+  };
+}
+
 export async function defaultAgentDeps(): Promise<AgentDeps> {
   // The undici transport timeout must exceed EVERY per-prompt withTimeout, or it aborts the
   // request before our own deadline fires. The reviewer, the explorer and the planner each have their
@@ -994,289 +821,35 @@ export async function defaultAgentDeps(): Promise<AgentDeps> {
   const dispatcherTimeoutMs = Math.max(generatorMax, REVIEWER_TIMEOUT_MS, EXPLORER_TIMEOUT_MS, PLANNER_TIMEOUT_MS) + 30_000;
   await installHttpDispatcher(dispatcherTimeoutMs);
 
-  const client = await getSharedClient();
+  const raw = await buildRawAgentTransport();
 
-  return {
-    // `directory` (query) positions the session in the repo working copy: the
-    // agent reads/writes there. The working copy is a volume shared with the
-    // `opencode` container, so the path is valid on both sides.
-    open: async (agent, cwd, opts) => {
-      const created = await client.session.create({ query: { directory: cwd } });
-      if (created.error) throw new Error(`OpenCode session.create failed: ${JSON.stringify(created.error)}`);
-      const id = created.data?.id;
-      if (!id) throw new Error("OpenCode: the session returned no id");
-      const entry: SessionEntry = { id, agent, cwd, openedAt: Date.now() };
-      sessionRegistry.set(id, entry);
-
-      // Wire external abort signal (cancel endpoint) to run interruption + session deletion.
-      // session.delete alone does NOT stop a running turn server-side; abort interrupts the
-      // in-flight run so a cancel actually frees the model/session compute, then we dispose.
-      const onAbort = () => {
-        client.session.abort({ path: { id } }).catch(() => {});
-        client.session.delete({ path: { id } }).catch(() => {});
-      };
-      opts?.signal?.addEventListener("abort", onAbort, { once: true });
-
-      const promptTimeoutMs = opts?.timeoutMs ?? dispatcherTimeoutMs;
-
-      // Interrupt the in-flight run on the OpenCode server. withTimeout only rejects the
-      // orchestrator's await; without this, a wedged agent turn keeps running (holding a
-      // session, burning model tokens) until its natural end or the 30-min orphan sweep.
-      const abortRun = () => client.session.abort({ path: { id } }).catch(() => {});
-
-      // Default turn sink: persist to agent_turns when a runId is available and no caller-supplied
-      // onTurn overrides it. Best-effort: a storage failure must not break the agent session.
-      const defaultOnTurn = opts?.descriptor?.runId
-        ? (t: AgentTurnEvent) => {
-            try {
-              saveAgentTurn({
-                runId: t.runId,
-                sessionId: t.sessionId,
-                role: t.role,
-                round: t.round,
-                isRepair: t.isRepair,
-                ts: t.ts,
-                objective: t.objective ?? null,
-                promptText: t.promptText,
-                outputText: t.outputText,
-                promptBytes: t.promptBytes,
-                tokensInput: t.tokensInput,
-                tokensOutput: t.tokensOutput,
-                tokensReasoning: t.tokensReasoning,
-                tokensCacheRead: t.tokensCacheRead,
-                tokensCacheWrite: t.tokensCacheWrite,
-                cost: t.cost,
-              });
-            } catch (err) {
-              console.warn(`[qa] agent_turns persist failed: ${err instanceof Error ? err.message : String(err)}`);
-            }
-          }
-        : undefined;
-      // The effective onTurn: caller-supplied wins; default sink fires when runId is present.
-      const effectiveOnTurn = opts?.onTurn ?? defaultOnTurn;
-
-      // Track the per-call round counter so `onTurn` can report which round produced each output.
-      // The counter starts at 0 for the first prompt() call on this session and increments each
-      // time prompt() is invoked (whether a normal generation round or an in-session repair).
-      //
-      // SEMANTICS: `round` is SESSION-LOCAL — a per-session prompt index, NOT a per-run regeneration
-      // index. Each regeneration pass (fix / reviewer-corrections / coverage) opens a NEW session,
-      // so every main generation turn is round=0; only in-session contract-repair re-prompts push it
-      // to 1, 2, … within the same session. Cross-session regeneration ORDERING is therefore NOT
-      // encoded in `round`; it is reconstructed from the turn `ts` (and run_id) when reading
-      // agent_turns. (Threading a run-level regeneration index is intentionally out of scope here.)
-      let _round = 0;
-
-      return {
-        id,
-        prompt: (text, promptOpts) =>
-          withTimeout(
-            (() => {
-              checkCircuit();
-              // Capture the round for this call (incremented after the closure captures it so
-              // round=0 on the first call, round=1 on the second, etc.).
-              const thisRound = _round++;
-              const runPrompt = (modelOverride?: string) => {
-                const overrideModel = modelOverride ? parseModelRef(modelOverride) : undefined;
-                return client.session
-                  .prompt({
-                    path: { id },
-                    query: { directory: cwd },
-                    body: { agent, parts: [{ type: "text", text }], ...(overrideModel ? { model: overrideModel } : {}) },
-                  })
-                  .then((res) => {
-                    if (res.error) {
-                      throw new Error(`OpenCode session.prompt failed: ${JSON.stringify(res.error)}`);
-                    }
-                    // ROOT-CAUSE FIX: a provider/agent fault (out of credits, auth, rate-limit,
-                    // output-length) is embedded in the assistant message (info.error), NOT in
-                    // res.error. extractText only reads text parts, so without this the fault
-                    // degrades into an EMPTY response that downstream misreads as a code verdict
-                    // (`invalid`/`fail`) — an out-of-credits run then blamed the operator's tests.
-                    // Detect it at the source and throw it as a typed infra error.
-                    const agentErr = (res.data?.info as { error?: AgentErrorPayload } | undefined)?.error;
-                    if (agentErr) {
-                      throw agentErrorToInfra(agentErr);
-                    }
-                    recordCircuitSuccess();
-                    const infoRaw = res.data?.info as
-                      | { tokens?: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }; cost?: number }
-                      | undefined;
-                    // Emit a usage snapshot for the accumulator (observation-only). The ONLY sink is
-                    // opts.onUsage — callers that want capture pre-wrap this AgentDeps to inject it
-                    // into every open() (so internal callers like the explorer/reviewer are covered
-                    // without touching their individual call sites).
-                    if (infoRaw?.tokens) {
-                      const snapshot: UsageSnapshot = {
-                        input: infoRaw.tokens.input ?? 0,
-                        output: infoRaw.tokens.output ?? 0,
-                        reasoning: infoRaw.tokens.reasoning ?? 0,
-                        cacheRead: infoRaw.tokens.cache?.read ?? 0,
-                        cacheWrite: infoRaw.tokens.cache?.write ?? 0,
-                        cost: infoRaw.cost ?? 0,
-                      };
-                      opts?.onUsage?.(snapshot);
-                    }
-                    const outputRaw = extractText(res.data?.parts, promptOpts);
-                    // Emit a per-turn event alongside onUsage. Sanitize output_text before
-                    // emitting so any DEV-environment data in the agent reply is redacted at
-                    // the earliest point (before storage or logging by callers).
-                    if (effectiveOnTurn) {
-                      const sanitizedOutput = sanitizeText(outputRaw).text;
-                      const turnEvent: AgentTurnEvent = {
-                        runId: opts?.descriptor?.runId ?? null,
-                        sessionId: id,
-                        role: opts?.descriptor?.role ?? agent,
-                        objective: opts?.descriptor?.objective,
-                        round: promptOpts?.round ?? thisRound,
-                        isRepair: promptOpts?.isRepair ?? false,
-                        promptText: text,
-                        promptBytes: Buffer.byteLength(text, "utf8"),
-                        outputText: sanitizedOutput,
-                        tokensInput: infoRaw?.tokens?.input ?? null,
-                        tokensOutput: infoRaw?.tokens?.output ?? null,
-                        tokensReasoning: infoRaw?.tokens?.reasoning ?? null,
-                        tokensCacheRead: infoRaw?.tokens?.cache?.read ?? null,
-                        tokensCacheWrite: infoRaw?.tokens?.cache?.write ?? null,
-                        cost: infoRaw?.cost ?? null,
-                        ts: new Date().toISOString(),
-                        // Phase 1b: per-section byte map from the ContextAssembler. Null when
-                        // the prompt was not assembled (repairs, explorer, etc.).
-                        sectionSizes: promptOpts?.sectionSizes ?? null,
-                      };
-                      effectiveOnTurn(turnEvent);
-                    }
-                    return outputRaw;
-                  })
-                  // Record the circuit failure in EXACTLY one place per attempt. The error
-                  // branches above throw without counting; this single trailing catch counts
-                  // the attempt once (a previous double-count opened the breaker after ~3
-                  // instead of CIRCUIT_THRESHOLD failures), then re-throws to the fallback retry.
-                  .catch((err) => {
-                    recordCircuitFailure();
-                    throw err;
-                  });
-              };
-              return runPrompt(opts?.model).catch((err) => {
-                // Only retry a TRANSIENT primary-model fault on the fallback model. Skip the
-                // retry (re-throw) on operator-abort (a cancel must not be defeated by a retry)
-                // and on infra errors like AgentUnavailableError (out-of-credits/auth hits the
-                // SAME OpenCode key — re-spending on the fallback is pointless and surfaces late).
-                if (opts?.signal?.aborted || isInfraError(err)) throw err;
-                const fallback = getFallbackModel(agent);
-                if (fallback) {
-                  console.warn(`[qa] primary model failed for ${agent}, retrying with fallback ${fallback}: ${err instanceof Error ? err.message : String(err)}`);
-                  return runPrompt(fallback);
-                }
-                throw err;
-              });
-            })(),
-            promptTimeoutMs,
-            "OpenCode prompt",
-          ).catch((err: unknown) => {
-            // On timeout (or any failure that left work in flight), interrupt the server run
-            // so it stops consuming compute after the orchestrator has already given up.
-            abortRun();
-            throw err;
-          }),
-        dispose: async () => {
-          try {
-            await client.session.delete({ path: { id } });
-          } catch (err) {
-            console.warn(`[qa] session ${id} dispose failed: ${err instanceof Error ? err.message : String(err)}`);
-          } finally {
-            opts?.signal?.removeEventListener("abort", onAbort);
-            sessionRegistry.delete(id);
-          }
-        },
-      };
+  return createAgentDeps(raw, {
+    defaultPromptTimeoutMs: dispatcherTimeoutMs,
+    getFallbackModel,
+    persistTurn: (t) => {
+      saveAgentTurn({
+        runId: t.runId,
+        sessionId: t.sessionId,
+        role: t.role,
+        round: t.round,
+        isRepair: t.isRepair,
+        ts: t.ts,
+        objective: t.objective ?? null,
+        promptText: t.promptText,
+        outputText: t.outputText,
+        promptBytes: t.promptBytes,
+        tokensInput: t.tokensInput,
+        tokensOutput: t.tokensOutput,
+        tokensReasoning: t.tokensReasoning,
+        tokensCacheRead: t.tokensCacheRead,
+        tokensCacheWrite: t.tokensCacheWrite,
+        cost: t.cost,
+      });
     },
-    cleanupOrphans: async (maxAgeMs: number) => {
-      const now = Date.now();
-      let cleaned = 0;
-      for (const [id, entry] of sessionRegistry) {
-        if (now - entry.openedAt > maxAgeMs) {
-          try {
-            await client.session.delete({ path: { id } });
-          } catch (err) {
-            console.warn(`[qa] orphan cleanup failed for session ${id}: ${err instanceof Error ? err.message : String(err)}`);
-          }
-          sessionRegistry.delete(id);
-          cleaned++;
-        }
-      }
-      return cleaned;
-    },
-  };
+  });
 }
 
-// Minimal shape of an OpenCode AssistantMessage.error (res.data.info.error). A provider/agent
-// fault is embedded HERE, NOT in the HTTP-level res.error — which is exactly why an out-of-credits
-// run slipped past the old res.error-only check and degraded into an empty response.
-type AgentErrorPayload = { name: string; data?: { message?: string; statusCode?: number; providerID?: string } };
-
-// ROOT-CAUSE classifier: map an embedded agent/provider fault to a typed, actionable
-// AgentUnavailableError (an InfraError) so the run surfaces as `infra-error` with a clear operator
-// message — never a code verdict (`invalid`/`fail`) that blames the user's tests. Exported so the
-// classification is unit-tested without standing up the SDK.
-export function agentErrorToInfra(error: AgentErrorPayload): AgentUnavailableError {
-  const d = error.data ?? {};
-  const detail = d.message ? `: ${d.message}` : "";
-  const tail = "INCONCLUSIVE (infrastructure), not a test failure";
-  switch (error.name) {
-    case "ProviderAuthError":
-      return new AgentUnavailableError(
-        `OpenCode provider '${d.providerID ?? "?"}' rejected the request (auth / out of credits)${detail}. ` +
-          `${tail} — check OPENCODE_API_KEY and your OpenCode credit balance.`,
-      );
-    case "APIError": {
-      const code = d.statusCode ? ` ${d.statusCode}` : "";
-      const hint =
-        d.statusCode === 429 ? " — rate-limited, retry later" :
-        d.statusCode === 402 ? " — out of credits / billing" :
-        d.statusCode === 401 || d.statusCode === 403 ? " — auth (check OPENCODE_API_KEY)" :
-        "";
-      return new AgentUnavailableError(`OpenCode API error${code}${detail}${hint}. ${tail}.`);
-    }
-    case "MessageOutputLengthError":
-      return new AgentUnavailableError(`the model hit its output-length limit before finishing the turn. ${tail}.`);
-    case "MessageAbortedError":
-      return new AgentUnavailableError(`the agent turn was aborted${detail}. ${tail}.`);
-    default: // UnknownError, or any future variant
-      return new AgentUnavailableError(`OpenCode agent error (${error.name})${detail}. ${tail}.`);
-  }
-}
-
-// textOf reads the string `text` field of a response part (empty when absent).
-function textOf(p: { type: string }): string {
-  const text = (p as { text?: unknown }).text;
-  return typeof text === "string" ? text : "";
-}
-
-// Strips reasoning wrappers a model may inline in a text part (<think>…</think> etc.) —
-// used only on the textOnly fallback path, so a leaked chain-of-thought is removed.
-function stripReasoningWrappers(s: string): string {
-  return s.replace(/<(think|thought|reasoning)>[\s\S]*?<\/\1>/gi, "").trim();
-}
-
-// Concatenates the text of the text parts in the agent's response.
-function extractText(parts: Array<{ type: string }> | undefined, opts?: { textOnly?: boolean }): string {
-  const all = parts ?? [];
-  // Default: concatenate the text of EVERY part that carries a string `text` field, not
-  // only type === "text". A model can emit its closing verdict in a reasoning/other
-  // text-bearing part; restricting to "text" silently dropped it, so the JSON verdict
-  // extractor saw an empty string and the run failed closed. The downstream
-  // lastJsonMatching picks the LAST valid JSON, so any extra prose concatenated here is
-  // harmless for the generator/reviewer.
-  if (!opts?.textOnly) {
-    return all.map(textOf).join("");
-  }
-  // textOnly: keep ONLY the final answer (type === "text"), excluding reasoning parts —
-  // the assistant returns its text verbatim to the operator, so a concatenated
-  // chain-of-thought would leak into the chat. If the model emitted NO plain text part
-  // (unusual), fall back to the full content with reasoning wrappers stripped rather than
-  // returning a blank answer (never swallow into an empty result).
-  const textOnly = all.filter((p) => p.type === "text").map(textOf).join("");
-  if (textOnly.trim() !== "") return textOnly;
-  return stripReasoningWrappers(all.map(textOf).join(""));
-}
+// agentErrorToInfra/extractText/textOf/stripReasoningWrappers MIGRATED to qa-engine's
+// agent-transport-policy.ts (migration-tier-4c Slice 2) — see this file's header re-export block.
+// The RawAgentErrorPayload type (formerly this file's own private AgentErrorPayload) is imported
+// from that module too, used by buildRawAgentTransport above.

@@ -64,7 +64,19 @@ import type { AgentDeps } from "../integrations/opencode-client";
 import { REVIEWER_TIMEOUT_MS } from "../integrations/opencode-client";
 // WS6.2 (full-flow remediation, timeouts & operational observability): see
 // createRewrittenEngineFactory's own header comment for why these three wrappers are composed here.
-import { withUsageSink, withStallWatchdog, withSessionRegistration } from "../integrations/opencode-client";
+// migration-tier-4c Slice 2: withUsageSink/withStallWatchdog/withSessionRegistration now live in
+// qa-engine (re-exported from opencode-client unchanged); withSessionRegistration's collaborators are
+// no longer defaulted there (qa-engine cannot reach registerRunSession/unregisterRunSession on its
+// own), so this composition root injects them explicitly, and stallMs() is resolved here too (its
+// env read must stay shell-side).
+import {
+  withUsageSink,
+  withStallWatchdog,
+  withSessionRegistration,
+  registerRunSession,
+  unregisterRunSession,
+  stallMs,
+} from "../integrations/opencode-client";
 import type { RunPipelinePort, ObserverPort } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 import { buildProduction, type CompositionConfig } from "@contexts/qa-run-orchestration/composition/composition-root";
 import { Sha, shaMatches } from "@kernel/sha";
@@ -1339,7 +1351,13 @@ export function createRewrittenEngineFactory(
   const env = deps.env ?? process.env;
   const wrappedDeps: RewrittenEngineFactoryDeps = {
     ...deps,
-    getAgentDeps: () => withUsageSink(withStallWatchdog(withSessionRegistration(deps.getAgentDeps()))),
+    getAgentDeps: () =>
+      withUsageSink(
+        withStallWatchdog(
+          withSessionRegistration(deps.getAgentDeps(), { register: registerRunSession, unregister: unregisterRunSession }),
+          { stallMs: stallMs() },
+        ),
+      ),
   };
   return (appConfig: AppConfig, namespace: string, run: { mode: RunMode; guidance?: string; triggerRepo?: string }, observer?: ObserverPort): RunPipelinePort => {
     const cfg = buildRewrittenCompositionConfig(appConfig, wrappedDeps, namespace, run, observer);

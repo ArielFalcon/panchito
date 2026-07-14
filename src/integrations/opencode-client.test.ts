@@ -10,14 +10,11 @@ import {
   buildContextTask,
   parseVerdict,
   extractJsonObjects,
-  withTimeout,
   specFileForFlow,
   agentTimeout,
   buildWorkerPrompt,
   buildExplorerPrompt,
   renderArchitectureContext,
-  parseModelRef,
-  withUsageSink,
   buildReviewerPrompt,
   buildReviewerPromptAssembled,
   renderExecutionResult,
@@ -28,9 +25,7 @@ import {
   askAssistant,
   startEventStreamWithReconnect,
   EventStreamManager,
-  agentErrorToInfra,
 } from "./opencode-client";
-import { isInfraError } from "../errors";
 import type { ArchitectureContext } from "../qa/context";
 import type { ExplorationBrief } from "../qa/exploration-brief";
 import type { ParallelWorkerInput } from "@contexts/generation/application/ports/generation-ports.ts";
@@ -594,26 +589,9 @@ test("Phase 1b E.5: buildWorkerPrompt assembled output preserves all functional 
 });
 
 
-test("parseModelRef splits provider/model and rejects malformed refs", () => {
-  // The fallback model override must reach the SDK as {providerID, modelID}, not a raw string
-  // (the bug that broke typecheck). A model id can itself contain slashes — only the FIRST splits.
-  assert.deepEqual(parseModelRef("opencode-go/deepseek-v4-pro"), { providerID: "opencode-go", modelID: "deepseek-v4-pro" });
-  assert.deepEqual(parseModelRef("a/b/c"), { providerID: "a", modelID: "b/c" });
-  // Unparseable → undefined so the override is skipped, never sent malformed.
-  assert.equal(parseModelRef("noslash"), undefined);
-  assert.equal(parseModelRef("/leading"), undefined);
-  assert.equal(parseModelRef("trailing/"), undefined);
-});
-
-test("withTimeout resolves if the promise arrives in time", async () => {
-  const v = await withTimeout(Promise.resolve("ok"), 1000, "x");
-  assert.equal(v, "ok");
-});
-
-test("withTimeout rejects when the deadline elapses", async () => {
-  const slow = new Promise((r) => setTimeout(() => r("late"), 50));
-  await assert.rejects(() => withTimeout(slow, 5, "agent"), /timed out after 5ms/);
-});
+// parseModelRef/withTimeout/agentErrorToInfra tests MOVED to qa-engine/test/contexts/generation/
+// infrastructure/agent-transport-policy.test.ts (migration-tier-4c Slice 2) — the logic itself
+// migrated there; these symbols are still re-exported from "./opencode-client" for other consumers.
 
 test("buildPrompt renders the cross-repo service section in diff mode", () => {
   const text = buildPrompt({
@@ -756,25 +734,6 @@ test("askAssistant opens the requested agent (reflection runs tool-less as qa-re
   assert.equal(openedAgent, "qa-assistant"); // default unchanged for the TUI chat path
 });
 
-
-test("agentErrorToInfra classifies an embedded provider fault as infrastructure with an actionable message", () => {
-  // ROOT-CAUSE: a provider fault is embedded in res.data.info.error (NOT res.error). It must throw
-  // a typed InfraError so the run is `infra-error`, never a code verdict that blames the tests.
-  const auth = agentErrorToInfra({ name: "ProviderAuthError", data: { providerID: "opencode-go", message: "insufficient credits" } });
-  assert.equal(isInfraError(auth), true);
-  assert.match(auth.message, /out of credits|OPENCODE_API_KEY/i);
-  assert.match(auth.message, /insufficient credits/);
-  assert.match(auth.message, /not a test failure/i);
-
-  const rate = agentErrorToInfra({ name: "APIError", data: { message: "Too Many Requests", statusCode: 429 } });
-  assert.equal(isInfraError(rate), true);
-  assert.match(rate.message, /429|rate-limited/i);
-
-  // An unknown/future variant still classifies as infra, never a code verdict.
-  const unknown = agentErrorToInfra({ name: "UnknownError", data: { message: "boom" } });
-  assert.equal(isInfraError(unknown), true);
-  assert.match(unknown.message, /not a test failure/i);
-});
 
 
 // ── Task 3.11: Prompt-framing tests (Unit 3 — Q2 worker + GROUND TRUTH block + Lever-3 route) ──
