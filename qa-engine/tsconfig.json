@@ -30,8 +30,6 @@
     "test/contexts/generation/infrastructure/context-assembler.adapter-parity.test.ts",
     "test/contexts/generation/infrastructure/exploration-brief.adapter-parity.test.ts",
     "test/contexts/generation/infrastructure/verdict-parser.adapter-parity.test.ts",
-    "test/contexts/generation/infrastructure/plan-parser.adapter-parity.test.ts",
-    "test/contexts/generation/application/generate-tests.characterization.test.ts",
     "test/contexts/qa-run-orchestration/domain/helpers/error-class-parity.test.ts",
     "test/contexts/generation/infrastructure/dom-snapshot-parity.test.ts",
     "test/contexts/generation/infrastructure/sanitize-text-parity.test.ts",
