@@ -30,7 +30,7 @@ import { spawn } from "node:child_process";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { sanitizeText } from "@contexts/generation/infrastructure/sanitize-text.ts";
-import { ManifestSchema, type ManifestValidation } from "@kernel/manifest/manifest-entry.ts";
+import { validateManifest as validateManifestShape, type ManifestValidation } from "@kernel/manifest/manifest-entry.ts";
 import { ProcessKillAdapter } from "../../../shared-infrastructure/process-sandbox/process-kill.adapter.ts";
 import { scrubEnv } from "../../../shared-infrastructure/process-sandbox/scrub-env.ts";
 import type { CheckResult, ValidationResult } from "../application/ports/index.ts";
@@ -199,43 +199,35 @@ export const defaultValidateDeps: ValidateDeps = {
 };
 
 // ── manifest-entry validation (src/qa/metadata.ts body-move) ─────────────────────────────────────
-// Array-level validator: delegates FIELD/SHAPE validation to the canonical @kernel/manifest schema
-// (Slice 2's THE MANIFEST RECONCILIATION) and layers the READ-GATE-specific duplicate-id check on
-// top (zod cannot check cross-entry uniqueness — the write path structurally cannot produce
-// duplicates via its upsert-by-id merge, so this check is read-gate-only, exactly as metadata.ts's
-// original contract documented). `checkManifest` above is the only caller.
+// Array-level validator: delegates FIELD/SHAPE validation to the canonical @kernel/manifest
+// validateManifest (Slice 2's THE MANIFEST RECONCILIATION — imported above as `validateManifestShape`,
+// the ONE structural check, no reimplemented zod-parse here) and layers the READ-GATE-specific
+// duplicate-id check on top (zod cannot check cross-entry uniqueness — the write path structurally
+// cannot produce duplicates via its upsert-by-id merge, so this check is read-gate-only, exactly as
+// the kernel schema's own header documents). `checkManifest` above is the only caller.
 export function validateManifest(raw: unknown): ManifestValidation {
-  if (!Array.isArray(raw)) {
-    return { ok: false, errors: ["the manifest (e2e/.qa/manifest.json) must be an array"] };
-  }
+  const shape = validateManifestShape(raw);
+  const errors = [...shape.errors];
 
-  const result = ManifestSchema.safeParse(raw);
-  const errors: string[] = [];
-
-  if (!result.success) {
-    errors.push(...result.error.issues.map(formatZodIssue));
-  }
-
-  // Zod cannot check for duplicate IDs across array entries — do it manually.
-  const ids = new Set<string>();
-  raw.forEach((entry) => {
-    const m = (entry ?? {}) as Record<string, unknown>;
-    const id = typeof m.id === "string" ? m.id.trim() : "";
-    if (id.length > 0) {
-      if (ids.has(id)) {
-        errors.push(`'${id}': duplicate id`);
-      } else {
-        ids.add(id);
+  // Zod cannot check for duplicate IDs across array entries — do it manually. Guarded by
+  // Array.isArray so a non-array `raw` (already reported by validateManifestShape above) is never
+  // iterated.
+  if (Array.isArray(raw)) {
+    const ids = new Set<string>();
+    raw.forEach((entry) => {
+      const m = (entry ?? {}) as Record<string, unknown>;
+      const id = typeof m.id === "string" ? m.id.trim() : "";
+      if (id.length > 0) {
+        if (ids.has(id)) {
+          errors.push(`'${id}': duplicate id`);
+        } else {
+          ids.add(id);
+        }
       }
-    }
-  });
+    });
+  }
 
   return { ok: errors.length === 0, errors };
-}
-
-function formatZodIssue(issue: { path: PropertyKey[]; message: string }): string {
-  const tag = issue.path.length > 0 ? `entry ${issue.path.join(".")}` : "manifest";
-  return `${tag}: ${issue.message}`;
 }
 
 // ── code target static gate (src/qa/code-validate.ts body-move) ─────────────────────────────────

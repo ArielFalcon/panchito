@@ -90,12 +90,13 @@ function formatZodIssue(issue: { path: PropertyKey[]; message: string }): string
   return `${tag}: ${issue.message}`;
 }
 
-// Array-shape validator — the SAME contract src/qa/metadata.ts's own validateManifest exposes
-// today (structural/field validation only; duplicate-id detection is a READ-GATE-specific concern
-// layered on top by that module, since the write path's upsert-by-id merge structurally cannot
-// produce duplicates). Filter B's checkManifest (validate.ts) delegates to metadata.ts's
-// validateManifest, which in turn calls THIS function via the schemas.ts re-export — see that
-// module's own header for why the two-hop indirection stays until Slice 3 relocates metadata.ts.
+// Array-shape validator — structural/field validation only; duplicate-id detection is a
+// READ-GATE-specific concern layered on top by the caller, since the write path's upsert-by-id
+// merge structurally cannot produce duplicates. Filter B's checkManifest
+// (qa-engine/src/contexts/test-execution/infrastructure/static-gate.checks.ts) calls THIS function
+// directly for the structural check and layers its own duplicate-id check on top — the ONE
+// canonical validator, reused at both consumption sites (this array check and
+// manifestEntryViolation's single-entry write-time check below), with no reimplemented copy.
 export function validateManifest(raw: unknown): ManifestValidation {
   if (!Array.isArray(raw)) {
     return { ok: false, errors: ["the manifest (e2e/.qa/manifest.json) must be an array"] };
