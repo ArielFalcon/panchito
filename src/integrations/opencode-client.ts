@@ -193,10 +193,14 @@ const rawEventStreamOpener: RawEventStreamOpener = {
 };
 setRawEventStreamOpener(rawEventStreamOpener);
 
-// migration-tier-4c Slice 2: the session registry backing these two moved to qa-engine alongside the
-// open()/dispose() policy it tracks (agent-transport-policy.ts). Slice 4 (out of this batch's scope)
-// turns these into the declared thin src/-resident wrappers with their own "why shell" comment; for
-// now they simply delegate.
+// migration-tier-4c Slice 4 (D-4c-4, chat/session-count shell split): why shell — these two are
+// permanent D1-family control-plane surfaces. The session registry itself lives in qa-engine
+// (agent-transport-policy.ts, migrated Slice 2), but the shell keeps a thin re-exported accessor
+// because its callers (src/index.ts's `/ask` + Prometheus metrics, src/cli.ts's `hasOpenSessions`,
+// src/server/api.ts's health/status endpoint) are themselves permanent shell control-plane code —
+// re-pointing them straight at qa-engine would blur the one-way shell→qa-engine dependency direction
+// (arch:check forbids qa-engine importing src/, but shell importing qa-engine is fine and IS this
+// re-export). No policy lives here: both functions are pure delegation, zero logic of their own.
 export function getOpenSessions(): ReturnType<typeof engineGetOpenSessions> {
   return engineGetOpenSessions();
 }
@@ -205,7 +209,12 @@ export function getOpenSessionCount(): number {
   return engineGetOpenSessionCount();
 }
 
-// Read-only Q&A about a run. Opens a short-lived session as the requested role.
+// migration-tier-4c Slice 4 (D-4c-4): why shell — askAssistant is a permanent D1-family control-plane
+// surface (the `/ask` HTTP handler's read-only Q&A entry point, src/index.ts:566). It stays here
+// because it is a thin orchestration wrapper over an injected `AgentDeps` (never touches raw SDK
+// primitives or qa-engine internals directly) — the actual open()/prompt() policy it calls already
+// lives in qa-engine (agent-transport-policy.ts, migrated Slice 2). Read-only Q&A about a run. Opens
+// a short-lived session as the requested role.
 export async function askAssistant(
   // `agent` selects the role this Q&A runs as. It defaults to the read-only chat assistant; the
   // reflection path passes "qa-reflector" — a tool-less role (no MCP) — so a one-shot reflection
