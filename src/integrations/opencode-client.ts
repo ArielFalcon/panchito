@@ -27,7 +27,7 @@ import { saveAgentTurn } from "../server/history";
 // agent-runtime boundary in the opposite direction (agent-runtime/types.ts imports AgentDeps etc.
 // from here); this VALUE import does not create a runtime cycle since config.ts itself has no value
 // dependency back on this module.
-import { configFromEnv } from "../agent-runtime/config";
+import { configFromEnv, runtimeRoleModelsFromConfig } from "../agent-runtime/config";
 import { setRuntimeRoleModels } from "@contexts/generation/infrastructure/prompt-builders/model-window-catalog";
 import { installHttpDispatcher } from "../util/net";
 
@@ -103,12 +103,15 @@ setExplorationBriefCollaborators({ parseExplorationBrief, coerceExplorationBrief
 // AgentRuntimeConfig assignment; roleWindowBytes falls back to agents/opencode.json for every other
 // role (workers, explorer, maintainer, reflector), unchanged. See model-window-catalog.ts's own
 // header for the full before/after rationale.
+//
+// D-4c-6 follow-up: this boot-time wiring alone left a narrower re-opening of the same split-brain —
+// a LIVE role→model reassignment via `src/server/agent-runtime.ts`'s `applyConfig` (PUT
+// /api/agent-config) mutated `AgentRuntimeConfig.assignments` without re-calling
+// `setRuntimeRoleModels`, so the byte budget kept using this boot-time snapshot until process
+// restart. Fixed by re-deriving and re-injecting on every successful `applyConfig` call, via the SAME
+// `runtimeRoleModelsFromConfig` derivation used here — one source of truth, never duplicated.
 const runtimeConfig = configFromEnv();
-setRuntimeRoleModels({
-  primary: runtimeConfig.assignments.primary.model,
-  reviewer: runtimeConfig.assignments.reviewer.model,
-  chat: runtimeConfig.assignments.chat.model,
-});
+setRuntimeRoleModels(runtimeRoleModelsFromConfig(runtimeConfig));
 
 // migration-tier-4c Slice 2 (D-4c-1, two-tier transport split): circuit-breaker.ts, stall-watchdog.ts,
 // the AgentDeps open/prompt POLICY (fallback-model retry, circuit-breaker gating, turn/usage

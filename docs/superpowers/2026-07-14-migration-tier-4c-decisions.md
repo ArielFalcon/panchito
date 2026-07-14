@@ -117,6 +117,22 @@ so wiring only at the composition root left that test file's own module graph un
 wiring to `opencode-client.ts`'s own module load (mirroring its existing `setRawEventStreamOpener`
 precedent) covers every real production AND test entry point in one place.
 
+**Follow-up (judgment-day, triple-confirmed): the live-reconfiguration path is now also covered.**
+The fix above only closed the BOOT-time source of truth — `setRuntimeRoleModels` was wired once, from
+`configFromEnv()`, at `opencode-client.ts`'s module load. But `AgentRuntimeManager.applyConfig`
+(`src/server/agent-runtime.ts`, reachable via the guarded `PUT /api/agent-config` operator endpoint,
+`src/server/api.ts`) mutates the SAME live `AgentRuntimeConfig.assignments` used by session dispatch
+WITHOUT re-calling `setRuntimeRoleModels` — a narrower re-opening of the identical split-brain: after a
+live role→model reassignment, `roleWindowBytes` kept budgeting against the stale boot snapshot until
+process restart (risk direction: reassigning to a SMALLER-window model leaves the budget too generous
+→ real context-overflow risk). Fixed by extracting the boot path's inline mapping into a shared
+`runtimeRoleModelsFromConfig(config)` helper (`src/agent-runtime/config.ts`) and calling it from BOTH
+`opencode-client.ts`'s boot wiring AND `applyConfig`, immediately after the live config mutation
+succeeds — one derivation, two call sites, never duplicated. TDD: one new test in
+`agent-runtime.test.ts` — boot-injects a 32K reviewer model, reassigns it live to a 128K model via
+`applyConfig`, asserts `roleWindowBytes` reflects the new window (confirmed RED against the pre-fix
+code: stale 32K value returned after reconfiguration).
+
 ---
 
 ## 5. The qa-worker budget bug fix (Slice 5b, commit `cc0a4b6`)

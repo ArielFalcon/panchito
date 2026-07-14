@@ -3,6 +3,12 @@ import assert from "node:assert/strict";
 import { createAgentRuntimeManager } from "./agent-runtime";
 import type { EnvStoreFs } from "./env-store";
 import type { AgentProvider, AgentRuntimeStrategy } from "../agent-runtime/types";
+import { configFromEnv, runtimeRoleModelsFromConfig } from "../agent-runtime/config";
+import {
+  modelWindowBytes,
+  roleWindowBytes,
+  setRuntimeRoleModels,
+} from "@contexts/generation/infrastructure/prompt-builders/model-window-catalog";
 
 function memoryFs(initial = ""): EnvStoreFs & { content: string } {
   return {
@@ -199,4 +205,60 @@ test("agent runtime manager rejects a configured model that is not listed by its
     /primary model 'opencode-go\/not-a-real-model' is not available for opencode/,
   );
   assert.deepEqual(restarts, []);
+});
+
+// D-4c-6 follow-up (narrower re-opening): D-4c-6 wired setRuntimeRoleModels ONCE at boot (from
+// configFromEnv() in src/integrations/opencode-client.ts's module load). But applyConfig mutates the
+// LIVE AgentRuntimeConfig.assignments (via the guarded PUT /api/agent-config operator path) WITHOUT
+// re-calling setRuntimeRoleModels — so after a live role→model reassignment, roleWindowBytes keeps
+// budgeting against the STALE boot snapshot until process restart. Reassigning to a SMALLER-window
+// model leaves the budget too generous (real context-overflow risk).
+test("agent runtime manager re-injects runtime role models on applyConfig so roleWindowBytes reflects the NEW model, not the stale boot snapshot", async () => {
+  const restarts: AgentProvider[] = [];
+  const env: Record<string, string | undefined> = {
+    OPENCODE_API_KEY: "open-key",
+    CODEX_API_KEY: "codex-key",
+    AGENT_RUNTIME_MODE: "dual",
+    AGENT_SINGLE_PROVIDER: "opencode",
+    AGENT_REVIEWER_PROVIDER: "opencode",
+    AGENT_REVIEWER_MODEL: "opencode-go/minimax-m3",
+  };
+
+  // (a) boot path: mirrors opencode-client.ts's module-load wiring — resolve the real runtime
+  // assignments once from configFromEnv() and inject them into the qa-engine catalog seam.
+  setRuntimeRoleModels(runtimeRoleModelsFromConfig(configFromEnv(env)));
+
+  try {
+    const bytesBeforeReconfig = roleWindowBytes("qa-reviewer");
+    assert.equal(bytesBeforeReconfig, modelWindowBytes("minimax-m3"), "sanity: boot injected the 32K reviewer model");
+
+    const manager = createAgentRuntimeManager({
+      env,
+      fs: memoryFs(),
+      strategies: { opencode: strategy("opencode", restarts), codex: strategy("codex", restarts) },
+    });
+
+    // (b) live reconfiguration: reassign qa-reviewer to a DIFFERENT-window model via the guarded
+    // operator path (PUT /api/agent-config → applyConfig).
+    await manager.applyConfig({
+      mode: "dual",
+      assignments: { reviewer: { provider: "codex", model: "gpt-5.5" } },
+    });
+
+    // (c) roleWindowBytes must now reflect gpt-5.5's window (128K), not the stale minimax-m3 (32K)
+    // snapshot from boot.
+    const bytesAfterReconfig = roleWindowBytes("qa-reviewer");
+    assert.equal(
+      bytesAfterReconfig,
+      modelWindowBytes("gpt-5.5"),
+      "roleWindowBytes must budget against the newly-assigned model after live reconfiguration",
+    );
+    assert.notEqual(
+      bytesAfterReconfig,
+      modelWindowBytes("minimax-m3"),
+      "must not still budget against the stale boot-time model",
+    );
+  } finally {
+    setRuntimeRoleModels(undefined);
+  }
 });

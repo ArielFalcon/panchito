@@ -88,6 +88,22 @@ export function keyPresence(env: Record<string, string | undefined> = process.en
   return { opencode: Boolean(env.OPENCODE_API_KEY), codex: Boolean(env.CODEX_API_KEY) };
 }
 
+// D-4c-6 follow-up (live-reconfiguration split-brain): the shared derivation from an
+// AgentRuntimeConfig to the plain role→model map the qa-engine model-window-catalog's
+// `setRuntimeRoleModels` seam expects (structurally the same shape as its `RuntimeRoleModels`
+// interface — no cross-import needed, this module stays qa-engine-agnostic). Extracted so BOTH the
+// boot-time wiring (`src/integrations/opencode-client.ts`'s module load, via `configFromEnv()`) and
+// the live-reconfiguration wiring (`src/server/agent-runtime.ts`'s `applyConfig`, after the live
+// `AgentRuntimeConfig.assignments` mutation succeeds) call the SAME mapping — one source of truth,
+// never duplicated.
+export function runtimeRoleModelsFromConfig(config: AgentRuntimeConfig): { primary: string; reviewer: string; chat: string } {
+  return {
+    primary: config.assignments.primary.model,
+    reviewer: config.assignments.reviewer.model,
+    chat: config.assignments.chat.model,
+  };
+}
+
 // Audit C4b (2): runtime-independence guard. reviewer.model must never equal primary.model —
 // two DIFFERENT models are what makes the reviewer's judgment independent of the generator (a
 // generator grading its own homework via an identical model defeats the whole review step). The
