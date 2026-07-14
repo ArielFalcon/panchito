@@ -25,6 +25,14 @@ test("isProtectedPath flags the recovery net and build/topology, exact and prefi
   assert.equal(isProtectedPath("src/server/api.ts"), false);
 });
 
+test("isProtectedPath flags the secret boundary (a fix must never weaken what scrubs data leaving the system)", () => {
+  assert.equal(isProtectedPath("src/orchestrator/sanitizer.ts"), true);
+  // the untrusted-spawn secret allowlist (BLOCKED_ENV_PREFIX/ALLOWED_ENV_EXACT/ALLOWED_ENV_PREFIX) —
+  // every scrubEnv consumer converged on this file; widening it unreviewed would leak secrets to
+  // agent-authored code.
+  assert.equal(isProtectedPath("qa-engine/src/shared-infrastructure/process-sandbox/scrub-env.ts"), true);
+});
+
 test("isProtectedPath flags the gate-integrity surface (the fix must not weaken its own gate)", () => {
   // *.test.ts (suffix glob, anywhere) — the npm-test gate the pre-deploy self-test runs.
   assert.equal(isProtectedPath("src/qa/change-coverage.test.ts"), true);

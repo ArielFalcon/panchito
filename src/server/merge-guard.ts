@@ -44,6 +44,12 @@ export const PROTECTED_PATHS: string[] = [
   // sdd/migration-wiring-phase-2 Slice 7d: src/util/redact.ts is deleted — every consumer migrated
   // to the canonical RedactionPortAdapter (src/orchestrator/sanitizer.ts), the one remaining entry.
   "src/orchestrator/sanitizer.ts",
+  // migration-tier-4b: every scrubEnv consumer (untrusted code-execution spawns, execute.ts,
+  // maintainer-runtime.ts, and others) converged on this file — it holds BLOCKED_ENV_PREFIX/
+  // ALLOWED_ENV_EXACT/ALLOWED_ENV_PREFIX, the secret-leak allowlist for untrusted spawns. An
+  // unreviewed autonomous widening of this allowlist is exactly the failure mode this group exists
+  // to prevent.
+  "qa-engine/src/shared-infrastructure/process-sandbox/scrub-env.ts",
   // 3. gate integrity (the fix must not weaken what decides whether it deploys)
   "*.test.ts",
   "tsconfig.json",
