@@ -1,5 +1,12 @@
+// qa-engine/src/contexts/generation/infrastructure/sse/agent-activity.ts
 // Phase 4 (SSE live activity) — advisory-only routing of OpenCode's global event
 // firehose to per-run structured activity. Now WIRED.
+//
+// migration-tier-4c Slice 3 (D-4c-2, SSE two-tier split): moved WHOLE from
+// src/integrations/agent-activity.ts — zero @opencode-ai/sdk import, a rider alongside the
+// EventStreamManager/startScopedEventStream lifecycle migration (event-stream.ts, this directory).
+// `ActivityKind` is declared locally below (mirrors src/types.ts's own 5-value union) — qa-engine
+// never imports src/.
 //
 // Authoritative event shapes (from @opencode-ai/sdk types):
 //   message.part.updated → { part: Part, delta? }      sessionID lives in part.sessionID
@@ -16,7 +23,8 @@
 // is never surfaced — only clean structured fields (the file written, the command
 // run, the todo the agent is on).
 
-import { ActivityKind } from "../types";
+// Mirrors src/types.ts's own ActivityKind exactly — declared locally (qa-engine never imports src/).
+export type ActivityKind = "file" | "command" | "todo" | "phase" | "error";
 
 // The router's output for one event: the semantic fields plus the run it belongs
 // to. The persisted/TUI `AgentActivity` (types.ts) adds a `ts` stamped at write.

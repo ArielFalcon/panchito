@@ -1,7 +1,9 @@
+// qa-engine/test/contexts/generation/infrastructure/sse/activity-mapper.test.ts
+// Moved from src/integrations/activity-mapper.test.ts (migration-tier-4c Slice 3, D-4c-2).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mapOpencodeEvent, eventRunId, type RawOpencodeEvent } from "./activity-mapper";
-import { RunEventBodySchema } from "../contract/events";
+import { mapOpencodeEvent, eventRunId, type RawOpencodeEvent } from "@contexts/generation/infrastructure/sse/activity-mapper.ts";
+import { RunEventBodySchema } from "@kernel/contract/events.ts";
 
 const SESSIONS = new Map<string, string>([["sess_1", "run_1"]]);
 

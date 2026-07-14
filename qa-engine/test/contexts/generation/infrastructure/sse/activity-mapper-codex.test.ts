@@ -1,3 +1,6 @@
+// qa-engine/test/contexts/generation/infrastructure/sse/activity-mapper-codex.test.ts
+// Moved from src/integrations/activity-mapper-codex.test.ts (migration-tier-4c Slice 3, D-4c-2).
+//
 // Tests for the Codex JSONL event mapper (T-P1-4 / AC1.4.1-2).
 //
 // These tests use SYNTHETIC JSONL fixtures shaped after the defensive 4-field probe
@@ -10,7 +13,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mapCodexExecEvent } from "./activity-mapper";
+import { mapCodexExecEvent } from "@contexts/generation/infrastructure/sse/activity-mapper.ts";
 
 describe("mapCodexExecEvent (T-P1-4 / AC1.4.1-2)", () => {
   it("tool_use event maps to agent.activity (AC1.4.1)", () => {
