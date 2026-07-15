@@ -68,24 +68,81 @@ test("SYNTHETIC VIOLATION: a qa-engine production file importing src/ is caught 
   }
 });
 
+// Anchored to the EXACT probe filenames THIS FILE ITSELF writes (`__no_src_import_probe_1/2/3__.ts`,
+// all under qa-engine/src/, never under src/) — never a generic "contains 'probe'" substring. Matched
+// against the FROM side ONLY (the depcruise output line is
+// "  error no-src-import-in-qa-engine: <from> → <to>"), never the whole line: a generic whole-line
+// substring match would ALSO hit the TO side, so a normally-named, REAL qa-engine production file
+// importing a src/ file that merely happens to be NAMED like a probe artifact would have its entire
+// violation silently dropped — a genuine masking bug the SYNTHETIC MASKING REGRESSION test below
+// reproduces and pins closed.
+const PROBE_FROM_PATTERN = /^qa-engine\/src\/__no_src_import_probe_\d+__\.ts$/;
+
+// Extracts only the REAL (non-probe-FROM) violations from a raw depcruise output. Shared by the
+// CLEAN ON HEAD test and the SYNTHETIC MASKING REGRESSION test below so both exercise the exact same
+// filtering logic — a fix to one is a fix to both, and the regression test is a direct pin on this
+// function's own behavior, not a parallel hand-rolled copy that could drift from the real gate.
+function filterRealViolations(output: string): string[] {
+  return output
+    .split("\n")
+    .filter((l) => /no-src-import-in-qa-engine/.test(l))
+    .filter((l) => {
+      const fromMatch = /no-src-import-in-qa-engine:\s*(\S+)\s*→/.exec(l);
+      const from = fromMatch?.[1];
+      // Unparseable line shape — never silently drop an unrecognized line (CLAUDE.md "surface
+      // integration errors loudly"); treat it as a real violation instead.
+      if (from === undefined) return true;
+      return !PROBE_FROM_PATTERN.test(from);
+    });
+}
+
 test("CLEAN ON HEAD: no qa-engine production file imports src/ today", () => {
   const { ok, output } = runDepcruise("qa-engine/src");
   if (ok) return;
-  // A concurrently-running arch test — this file's own SYNTHETIC/PITFALL cases, or the sibling
-  // vcs-write-confinement.test.ts (node:test runs test FILES concurrently) — may have a transient
-  // `__*probe*__.ts` file mid-write under qa-engine/src when this scan runs. Those are definitionally
-  // test artifacts, never real production code, so a genuine HEAD violation would be on a
-  // normally-named file. Fail ONLY on a non-probe violation, so the gate stays strict without the
-  // documented cross-file probe race producing a false red (judgment-day tier-4b round-2).
-  const realViolations = output
-    .split("\n")
-    .filter((l) => /no-src-import-in-qa-engine/.test(l))
-    .filter((l) => !/__[A-Za-z0-9_]*probe[A-Za-z0-9_]*__\.ts/i.test(l));
+  // This file's OWN probe-writing tests (the SYNTHETIC/PITFALL cases below, ids 1/2/3) each
+  // transiently create a `__no_src_import_probe_N__.ts` file under qa-engine/src for the span of
+  // their own write -> scan -> cleanup. If this scan's own run interleaves with one of those, a
+  // stale/transient probe could surface here too. Those are definitionally test artifacts, never
+  // real production code, so a genuine HEAD violation would be on a normally-named FROM file. Fail
+  // ONLY on a non-probe-FROM violation, so the gate stays strict without this file's own probe
+  // lifecycle producing a false red (judgment-day tier-4b round-2). CORRECTION: an earlier revision
+  // of this comment also blamed the sibling vcs-write-confinement.test.ts — verified false: that
+  // file creates ZERO temp files and scans a disjoint subtree (qa-engine/src/contexts, not
+  // qa-engine/src), so it cannot produce this race at all.
+  const realViolations = filterRealViolations(output);
   assert.deepEqual(
     realViolations,
     [],
     `dependency-cruiser reported a REAL src/ boundary violation on HEAD:\n${realViolations.join("\n")}`,
   );
+});
+
+test("SYNTHETIC MASKING REGRESSION: a real violation is not hidden merely because the imported src/ file's name looks like a probe artifact (the filter must scope to the FROM side only, anchored to this file's own literal probe names)", () => {
+  // A normally-named, REAL production-style qa-engine file (never one of this file's own probe
+  // filenames) importing a src/ file that happens to be NAMED to look like a probe artifact on the
+  // TO side. Reproduced independently before this fix: the prior generic whole-line substring filter
+  // matched "probe" on the TO side and silently dropped the ENTIRE violation line, even though the
+  // FROM side is not a probe at all — all CLEAN ON HEAD-style assertions passed despite a real
+  // violation on disk.
+  const realFromPath = join(root, "qa-engine", "src", "__masking_regression_real_module__.ts");
+  const fakeProbeNamedSrcFile = join(root, "src", "__fake_leaked_probe_9__.ts");
+  writeFileSync(fakeProbeNamedSrcFile, "export type Leaked = string;\n");
+  writeFileSync(
+    realFromPath,
+    'import type { Leaked } from "../../src/__fake_leaked_probe_9__.ts";\nexport type Probe = Leaked;\n',
+  );
+  try {
+    const { ok, output } = runDepcruise("qa-engine/src");
+    assert.equal(ok, false, "depcruise must itself report a violation for this real src/ import");
+    const realViolations = filterRealViolations(output);
+    assert.ok(
+      realViolations.some((l) => l.includes("__masking_regression_real_module__.ts")),
+      `the gate must catch a real violation whose imported (TO-side) file merely looks like a probe artifact — got real violations:\n${realViolations.join("\n")}\nfull depcruise output:\n${output}`,
+    );
+  } finally {
+    rmSync(realFromPath, { force: true });
+    rmSync(fakeProbeNamedSrcFile, { force: true });
+  }
 });
 
 test("KNOWN PITFALL, documented and out-of-gate (judgment-day round-2): a bare 'src' TARGET ARGUMENT invoked from cwd=qa-engine/ silently scans the wrong tree and misses a real violation", () => {
