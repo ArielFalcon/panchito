@@ -1,6 +1,17 @@
 // Loads and validates the configuration of a watched app. All app-specific
 // detail lives here (config/), never in the code. ${VARS} in the YAML are
 // expanded from the environment, so credentials never live in the repo.
+//
+// ── SHELL SURVIVOR (migration-tier-4d, Slice 3) ─────────────────────────────────────────────────
+// DECLARED a permanent shell survivor, not migration debt: this is the real fs/env I/O — reads
+// config/apps/*.yaml off disk (existsSync/readFileSync/readdirSync) and expands ${VARS} from
+// process.env — behind qa-engine's AppRepositoryPort. qa-engine's own app-catalog context
+// (yaml-app-config.adapter.ts's YamlAppConfigAdapter) is a WRAP that DELEGATES to this module's
+// injected loadAppConfig/listAppConfigs functions rather than duplicating the I/O — the exact
+// DI-is-the-testing-strategy pattern (CLAUDE.md) that keeps the port unit-tested via fakes while
+// the real fs/env reads stay shell-side. Moving these reads into qa-engine would violate the
+// env-read/fs-read confinement invariant this migration program enforced everywhere else
+// (execute.ts's env injection, D-4d-3b).
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";

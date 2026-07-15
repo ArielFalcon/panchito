@@ -71,16 +71,23 @@ carries a one-line header at its own file location (Slice 3); this table is the 
 | `src/integrations/opencode-client.ts` (D1-family) | Raw SDK edge | Post-tier-4c residue is ONLY the genuinely-raw `@opencode-ai/sdk` I/O closure (client construction, `session.create/prompt/abort/delete`) — everything with independently-testable policy already migrated in tier-4c. |
 | `src/agent-runtime/*` (D1) | Provider-selection facade | Decided permanent in `migration-remediation` Slice 8.D (commit `2f614e4`) — faithful WRAPs of these files were deleted from qa-engine then. Dispatches each role to the OpenCode/Codex runtime strategy; the policy each strategy delegates to already migrated. |
 | `history.ts`'s learning CRUD (D8) | Shell half of a deliberate two-store duality | Coexists with qa-engine's own `SqliteLearningRepository` by documented decision (`migration-remediation` decisions doc D8), not silent drift — stays because it is the SAME durable SQLite database `history.ts` already owns for run_outcomes/trends. |
+| `src/qa/value-report.ts` (Slice 3) | CLI/TUI presentation | Zero decision logic — renders already-decided signals (verdict, coverage ratio, oracle score, reviewer verdict) into ANSI-styled prose. Sole caller: `src/cli.ts` (a shell entry point); the visual language deliberately mirrors the separate Go TUI. CLI/TUI reporting is a control-plane concern, not qa-engine business logic. |
+| `src/orchestrator/config-loader.ts` (Slice 3) | App-config I/O | Real fs/env I/O — reads `config/apps/*.yaml` off disk and expands `${VARS}` from `process.env`, behind qa-engine's `AppRepositoryPort`. qa-engine's own `yaml-app-config.adapter.ts` (`YamlAppConfigAdapter`) is a WRAP that delegates to this module's injected `loadAppConfig`/`listAppConfigs` rather than duplicating the I/O — the same DI-is-the-testing-strategy pattern used everywhere else. |
 
 `qa-engine/test/contract/seam-parity.contract.test.ts`'s (d) PERSISTENCE and (e) COMPOSITION blocks
 are the permanent boundary-contract tests pinning the two composition/persistence seams above; its
 (a)/(b) blocks (`OpencodeRunInput`/`ReviewInput`) retired in tier-4c Slice 6, its (c) EXECUTION block
 retired in this change's Slice 1b.
 
-**Deliberately left gray-zone, NOT declared this slice** (the design does not name them for Slice 3,
-so declaring them here would be undesigned scope creep): `src/qa/value-report.ts`, `src/orchestrator/
-config-loader.ts`. Both remain open per the 2026-07-09 triage doc's "Gray-zone calls to make explicit"
-list — a legitimate Phase-5 candidate, not a silent drop (see end-state item 11).
+**Correction (this pass, judgment-day finding)**: an earlier draft of this doc claimed `src/qa/
+value-report.ts` and `src/orchestrator/config-loader.ts` were "deliberately left gray-zone... the
+design does not name them for Slice 3." That was false and directly contradicted the design itself:
+`sdd/migration-tier-4d/design` (engram #1331)'s Slices table, row 3, explicitly lists both files in
+Slice 3's scope: *"Shell-survivor declarations (comment-only): ... history.ts, value-report.ts,
+config-loader.ts."* The declarations were simply MISSED during Slice 3's apply pass, not scoped out
+by the design — an omission, not a decision. Both headers are now added (this commit) at their file
+locations, per the two table rows above; end-state item 6 (declaration headers present) now passes
+for all 7 named modules, not 5.
 
 ---
 
@@ -112,6 +119,15 @@ migrated in `migration-tier-4c` Slice 3 (commit `e5e9645`) but that tier's own c
 updated this line. All three corrected in commit `9d41d40`; the "Hard sequencing constraints"
 paragraph is now marked RESOLVED (nothing left in `seam-parity.contract.test.ts` is "migrate LAST"
 debt).
+
+**Follow-up correction (judgment-day finding, this commit)**: the triage doc's separate "Gray-zone
+calls to make explicit" paragraph (§3 of this doc's own predecessor list) still listed
+`activity-mapper.ts`/`agent-activity.ts` and `deploy-gate.ts` placement as OPEN — both proven stale
+by this pass's own HEAD re-verification (`activity-mapper.ts`/`agent-activity.ts` migrated to
+qa-engine in `migration-tier-4c` commit `e5e9645`; `src/env/deploy-gate.ts` deleted whole in
+`migration-tier-3` commit `73ce0a1`). Both corrected in this commit, alongside marking the other 3
+gray-zone entries (`history.ts`, `value-report.ts`, `config-loader.ts`) resolved now that all three
+carry a declared shell-survivor disposition (§3 above).
 
 ---
 
@@ -150,7 +166,7 @@ evidenced deferral — the deferral is what's recorded here).
 | 2 | `fd execute.ts src/qa` = empty + qa-engine tests green | **PASS** — no `execute.ts` under `src/qa`; qa-engine's `e2e-execution.runner.test.ts` (52 tests, moved from `execute.test.ts`) green. |
 | 3 | grep block (c) absent / (d)(e) header text | **PASS** — no `describe`/`ExecuteOptions` reference to block (c) remains (only historical prose); (d)/(e) header explicitly says "PERMANENT boundary-contract tests... not migration debt." |
 | 4 | read `tsconfig.parity.json` | **PASS** — `adjudicate-parity.test.ts` entry removed (Slice 1); `seam-parity.contract.test.ts` entry stays, as designed. |
-| 5-6 | grep declaration headers + triage doc | **PASS** — 5 shell-survivor headers added (Slice 3); triage doc's 3 stale entries corrected (§5) plus the qa-engine-first retirement note. |
+| 5-6 | grep declaration headers + triage doc | **PASS (corrected this pass — judgment-day finding)**: the original claim here — "5 shell-survivor headers added; triage doc's 3 stale entries corrected" — was misleading by omission. Two declaration headers were MISSING (`value-report.ts`, `config-loader.ts` — the design named both for Slice 3; see §3's correction note), now added, bringing the total to 7. Separately, "triage doc's 3 stale entries corrected" referred ONLY to commit `9d41d40`'s fix (the execute.ts/rewritten-engine-factory.ts/run-history-sqlite-adapter.ts "dissolve" framing, playwright-report.ts, reexplore.ts) — a real, valid fix, but a DIFFERENT set from the triage doc's separate "Gray-zone calls to make explicit" paragraph, which still listed `activity-mapper.ts`/`agent-activity.ts` and `deploy-gate.ts` placement as OPEN despite both being stale (migrated in tier-4c / deleted in tier-3 respectively). The original row conflated the two corrections, leaving a reader no way to learn the gray-zone paragraph was never touched. Both gaps are now closed this commit (§5's follow-up correction; triage doc's gray-zone paragraph rewritten). |
 | 7 | `arch:check` 0 violations + D-4d-5 record present | **PASS** — `npm run arch:check`: 0 violations (192 modules, 504 dependencies) after every commit; D-4d-5 recorded in §6 above. |
 | 9 | engram directive marked superseded | **PASS** — engram #1150 (`qa-engine-first directive scopes to...`) updated to mark the directive RETIRED, pointing to the permanent boundary rule and this doc. |
 | 10 | three gates green on Node v24.11.0 | **PASS** — `npm test && npm run typecheck && npm run arch:check` green after EVERY commit this batch, Node v24.11.0 (better-sqlite3 ABI 137). |
@@ -161,7 +177,7 @@ evidenced deferral — the deferral is what's recorded here).
 | # | Check | Result |
 |---|---|---|
 | 8 | CLAUDE.md prose truly describes the settled shape, no in-progress-migration language | **PASS (judgment)** — Architecture section now states the permanent boundary rule and the four declared shell roles as settled fact, not an in-flight migration; two stale cross-references fixed (the deleted `src/qa/code-runner.ts` citation, the "diff→model both pass through sanitizer.ts" claim which tier-4c's decomposition made only half-true). "Current state" section explicitly says the migration program is complete. |
-| 11 | every residual-register item carries a real rationale, none silently dropped | **PASS (judgment)** — all 5 Slice-4 items disposed with rationale (§4); the `capText` sibling discovery is flagged, not silently dropped; `value-report.ts`/`config-loader.ts` are explicitly named gray-zone, not silently declared or silently ignored (§3); D-4d-5's inverse rule deferral carries full evidence (§6). |
+| 11 | every residual-register item carries a real rationale, none silently dropped | **PASS (judgment, corrected this pass)** — all 5 Slice-4 items disposed with rationale (§4); the `capText` sibling discovery is flagged, not silently dropped; `value-report.ts`/`config-loader.ts` now carry a real declared-shell-survivor rationale (§3) — the design named both for Slice 3 all along, and the earlier "deliberately left gray-zone, the design does not name them" claim was itself the item this row should have caught and did not; D-4d-5's inverse rule deferral carries full evidence (§6). |
 
 ---
 

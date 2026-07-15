@@ -22,7 +22,7 @@ now fully dispositioned (DONE/DECIDED/DEFERRED-with-record, no open "migrate
 next" item left) and `src/qa/`/`src/integrations/execute.ts` are empty of
 migratable engine logic. It is superseded by the **permanent boundary rule**,
 which is what actually outlives any one migration program: `qa-engine/src`
-never imports from `src/` (`.dependency-cruiser.cjs`'s `no-src-import` rule
+never imports from `src/` (`.dependency-cruiser.cjs`'s `no-src-import-in-qa-engine` rule
 enforces this mechanically, not just by convention); `src/` is the shell —
 composition root, control plane, provider I/O edges, and persistence — and
 consumes `qa-engine` as a library. See CLAUDE.md's Architecture section and
@@ -341,11 +341,28 @@ small pure ports → domain logic → heavy leaf-IO):
   debt pending a future move — its (a)/(b) blocks (`OpencodeRunInput`/
   `ReviewInput`) were retired in tier-4c Slice 6.
 
-Gray-zone calls to make explicit: `src/server/history.ts` (coexists with
-qa-engine's native `SqliteLearningRepository` — two learning stores in one
-composition), `activity-mapper.ts`/`agent-activity.ts` (engine telemetry vs
-control-plane plumbing — lean shell), `value-report.ts`, `deploy-gate.ts`
-placement, `config-loader.ts` composition-mapping tension.
+Gray-zone calls to make explicit — **all 5 now RESOLVED** (corrected this pass,
+judgment-day finding against migration-tier-4d's HEAD re-verification): this
+paragraph had gone stale in two different ways.
+- **`src/server/history.ts`** — RESOLVED: its learning CRUD is DECLARED the
+  permanent shell half of a deliberate two-store duality (D8, `sdd/
+  migration-tier-4d` Slice 3; decisions doc §3).
+- **`activity-mapper.ts`/`agent-activity.ts`** — STALE, now corrected: this
+  entry was left open after both were already migrated to
+  `qa-engine/src/contexts/generation/infrastructure/sse/` (`sdd/
+  migration-tier-4c` Slice, commit `e5e9645`, "migrate SSE lifecycle policy to
+  qa-engine"). Nothing open here.
+- **`value-report.ts`** — RESOLVED: DECLARED the permanent shell survivor this
+  pass (`sdd/migration-tier-4d` Slice 3, decisions doc §3) — CLI/TUI
+  presentation, zero decision logic, sole caller `src/cli.ts`.
+- **`deploy-gate.ts` placement** — STALE, now corrected: `src/env/deploy-gate.ts`
+  was deleted whole in `sdd/migration-tier-3` (commit `73ce0a1`); the live
+  `shaMatches` helper body-moved to `qa-engine/src/shared-kernel/sha.ts`. There
+  is no `deploy-gate.ts` left in `src/` to place.
+- **`config-loader.ts`** — RESOLVED: DECLARED the permanent shell survivor this
+  pass (`sdd/migration-tier-4d` Slice 3, decisions doc §3) — the real fs/env
+  I/O behind qa-engine's `AppRepositoryPort`, wrapped (not duplicated) by
+  `yaml-app-config.adapter.ts`.
 
 **Hard sequencing constraints (updated post-tier-4d, RESOLVED)**: `seam-parity.contract.test.ts`
 originally pinned `execute.ts`, `opencode-client.ts`, `run-history-sqlite-adapter.ts`,

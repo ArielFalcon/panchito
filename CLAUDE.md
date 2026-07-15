@@ -85,7 +85,7 @@ raw primitives via injection (see
 **The permanent boundary rule** (settled by `migration-tier-4d`, the finale of
 the `src/` → `qa-engine/` migration program that ran from `migration-remediation`
 through `migration-tier-4d`): `qa-engine/src` never imports from `src/` —
-`.dependency-cruiser.cjs`'s `no-src-import` rule enforces this mechanically
+`.dependency-cruiser.cjs`'s `no-src-import-in-qa-engine` rule enforces this mechanically
 (`npm run arch:check`), not just by convention. `src/` is the settled shell
 around the engine, made of four DECLARED, permanent roles — none of these is
 migration debt waiting for a future slice:
