@@ -13,7 +13,11 @@ import { QaRunResult, QaCase, CaseStatus } from "../types";
 // execute.ts is a Slice-1 "survivor" (its own migration is seam-pinned to 4d) and re-points to the
 // qa-engine twin — the NARROW legacy allowlist, unchanged, per the design's consumer sweep.
 import { scrubEnv } from "../../qa-engine/src/shared-infrastructure/process-sandbox/scrub-env";
-import { parsePlaywrightReport } from "./playwright-report";
+// migration-tier-4d Slice 1a (prep step ahead of this file's own Slice 1b body-move): playwright-report.ts
+// relocated to qa-engine's test-execution context; this transitional shell→engine import mirrors the
+// scrubEnv one immediately above (this file itself is the LAST src/qa/execute.ts survivor, seam-pinned
+// to Slice 1b, which deletes it and this import along with it).
+import { parsePlaywrightReport } from "../../qa-engine/src/contexts/test-execution/infrastructure/playwright-report";
 import { sanitizeText, containsSecrets, recordAudit } from "../orchestrator/sanitizer";
 import { parseAriaSnapshot } from "./dom-snapshot";
 

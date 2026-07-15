@@ -1,11 +1,19 @@
+// qa-engine/src/contexts/test-execution/infrastructure/playwright-report.ts
 // Pure parser of the Playwright JSON report → pass/fail/flaky cases. Isolated so
 // it can be verified with a sample report without running browsers.
 //
 // Flaky is Filter C of the harness: Playwright marks a test "flaky" when it fails
 // and then passes on a retry (retries are set in the base config). We treat that
 // instability as NOT trustworthy → quarantine, not a real failure.
-
-import { CaseStatus, QaCase, RunVerdict } from "../types";
+//
+// migration-tier-4d Slice 1a (e2e-execution migration, prep step): body-moved from
+// src/qa/playwright-report.ts — pure, zero side effects, zero src/ deps beyond the legacy
+// src/types.ts CaseStatus/QaCase/RunVerdict, now read from the qa-engine kernel's own canonical
+// copies of the identical shapes (@kernel/qa-case.ts, @kernel/run-verdict.ts). Independently green:
+// src/qa/execute.ts re-points its own import to this file for the remainder of this slice (Slice
+// 1b then deletes execute.ts entirely and this becomes the ONLY caller).
+import type { CaseStatus, QaCase } from "@kernel/qa-case.ts";
+import type { RunVerdict } from "@kernel/run-verdict.ts";
 
 export interface PwCase {
   name: string;
