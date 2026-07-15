@@ -60,6 +60,35 @@ export const PROTECTED_PATHS: string[] = [
   // domain service decides on. Equally load-bearing; the domain service alone deciding correctly
   // is meaningless if this adapter's git calls are weakened.
   "qa-engine/src/contexts/workspace-and-publication/infrastructure/write-confinement.adapter.ts",
+  // judgment-day round 2 (FIX 6, invert-the-default sweep): THE security seam per its own header —
+  // "the ONLY implementation of VcsWritePort" and the SECOND, independent tracked-file denylist
+  // guard (FIX 1/2/3 above). Was absent from this list entirely before this fix.
+  "qa-engine/src/contexts/workspace-and-publication/infrastructure/vcs-write.adapter.ts",
+  // The VcsWritePort/GitHubPrPort/GitHubIssuePort/ShadowPublicationPort interface definitions — an
+  // autonomous narrowing (e.g. dropping commit()'s denyModifiedTracked param or its
+  // revertedDenylisted return) silently disables the guards those types exist to require, without
+  // touching the adapter files themselves.
+  "qa-engine/src/contexts/workspace-and-publication/application/ports/index.ts",
+  // Renders the Issue/PR body text that reaches a PUBLIC GitHub surface — a past regression here
+  // (Slice 4, D-P1a) embedded a raw, unsanitized log dump verbatim; the render functions are the
+  // last stage before egress and must stay reviewed.
+  "qa-engine/src/contexts/workspace-and-publication/domain/render-publication.ts",
+  // Builds the Authorization header from GITHUB_TOKEN — the token-handling boundary for every
+  // GitHub API call this context makes.
+  "qa-engine/src/contexts/workspace-and-publication/infrastructure/github-http.ts",
+  // Clone/fetch auth-header injection (authHeaderArgs) + the tokenless-URL policy that keeps a
+  // credential from being persisted in origin's URL — a credential-leak vector if weakened.
+  "qa-engine/src/contexts/workspace-and-publication/infrastructure/mirror-provision.adapter.ts",
+  // Decides the scrubEnv() invocation (extraAllowed pattern) for the e2e install's npm lifecycle
+  // scripts — an autonomous widening here leaks the orchestrator's own secrets to the WATCHED
+  // repo's own (potentially attacker-influenced) install scripts.
+  "qa-engine/src/contexts/workspace-and-publication/infrastructure/setup.adapter.ts",
+  // The spawn primitives for the untrusted-code-execution sandbox (sandbox.ts, already protected,
+  // delegates the actual spawn to these) — they receive an already-scrubbed env and run untrusted
+  // agent-authored binaries; weakening the spawn/kill contract here is the same class of risk as
+  // scrub-env.ts itself.
+  "qa-engine/src/shared-infrastructure/process-sandbox/sandboxed-binary-runner.ts",
+  "qa-engine/src/shared-infrastructure/process-sandbox/sandboxed-binary-runner.adapter.ts",
   // The composition root — wires RedactionPortAdapter, WriteConfinementAdapter, VcsWriteAdapter,
   // CODE_PUBLISH_EXCLUDES, and every GitHub adapter. An autonomous edit here can rewire ANY security
   // port to a weaker (or fake) implementation without ever touching the port/adapter files
@@ -70,8 +99,10 @@ export const PROTECTED_PATHS: string[] = [
   // weakens redaction for the WHOLE system from one shared-kernel seam.
   "qa-engine/src/shared-kernel/ports/redaction.port.ts",
   // The qa-engine-side model-prompt sanitizer twin (diff/commit-body/reviewer-text → model prompts).
-  // CLAUDE.md names it explicitly as the canonical egress sanitizer for this boundary; it must stay
-  // in lockstep with src/orchestrator/sanitizer.ts, not silently diverge via an autonomous edit.
+  // CLAUDE.md describes it as "a qa-engine-native twin (same redaction patterns, ported so prompt
+  // assembly never imports src/), not the same file" as src/orchestrator/sanitizer.ts — CLAUDE.md
+  // does NOT call either file "canonical". It must stay in lockstep with its twin, not silently
+  // diverge via an autonomous edit.
   "qa-engine/src/contexts/generation/infrastructure/sanitize-text.ts",
   // The logs→Issue containsSecret fail-loud call site — an autonomous fix could remove the guard
   // that refuses to ship a secret-carrying Issue body.
@@ -106,6 +137,58 @@ export function isProtectedPath(file: string): boolean {
     if (p.endsWith("/")) return f.startsWith(p); // directory prefix
     return f === p; // exact repo-relative path
   });
+}
+
+// judgment-day round 2 (FIX 6, both judges): a basename-prefix heuristic (matched against a fixed
+// list of known "sensitive-looking" name fragments) previously stood in for a completeness check —
+// Judge B planted `secret-guard.service.ts` and Judge A planted `secrets.ts`/`confine.ts`/
+// `egress.ts` inside workspace-and-publication/domain/, and the gate stayed green: it is a real
+// REGRESSION gate for names matching existing precedent, but not the completeness gate its own
+// framing claimed. Per the meta-lesson (do not fix an enumeration by replacing it with another
+// enumeration): invert the default instead. Every file under a security-sensitive surface root MUST
+// be either in PROTECTED_PATHS or in the explicit, reviewed NOT_SECURITY_SENSITIVE allowlist below —
+// so a NEW file forces a decision instead of silently defaulting to unprotected, regardless of what
+// it happens to be named.
+//
+// Scoped to the two directories that ARE the genuine security surface by the SAME rationale this
+// module's own header groups already state (not a blanket "everything is sensitive" widening):
+//   - workspace-and-publication/ — "THE security seam" per vcs-write.adapter.ts's own header (the
+//     ONLY VcsWritePort implementation) and write-confinement's revert logic; every file in it
+//     participates in either git-write mechanics, credential/auth-header handling for those writes,
+//     or the rendered text that reaches a public PR/Issue body.
+//   - shared-infrastructure/process-sandbox/ — the untrusted-code-execution boundary (group 2/3's own
+//     "agent-authored code" rationale): scrub-env's secret-leak allowlist plus the spawn primitives
+//     that actually run untrusted binaries with that (already-scrubbed) env.
+export const SECURITY_SENSITIVE_SURFACE_ROOTS: string[] = [
+  "qa-engine/src/contexts/workspace-and-publication/",
+  "qa-engine/src/shared-infrastructure/process-sandbox/",
+];
+
+// Explicit, reviewed allowlist: files under the surface roots above that are NOT security-sensitive.
+// Adding an entry here is a REVIEWED decision (same bar as adding one to PROTECTED_PATHS) — never a
+// default. Each entry states WHY it is safe to leave autonomously editable.
+export const NOT_SECURITY_SENSITIVE: string[] = [
+  // Pure decision logic (verdict/reviewerApproved/coverageBlocks/shadow/e2eChanged -> pr|issue|
+  // shadow|quarantine|noop) — no I/O, no secret handling, no git write; a regression here is caught
+  // by its own heavily-covered *.test.ts (already protected by the gate-integrity group above).
+  "qa-engine/src/contexts/workspace-and-publication/domain/publish-decision.service.ts",
+  // Thin GitHub API callers — both consume the injected github-http.ts client (which IS protected,
+  // it owns the auth-header injection) and carry no credential of their own.
+  "qa-engine/src/contexts/workspace-and-publication/infrastructure/github-issue.adapter.ts",
+  "qa-engine/src/contexts/workspace-and-publication/infrastructure/github-pr.adapter.ts",
+  // `git gc --auto` only — no credential, no write-confinement/publish interaction.
+  "qa-engine/src/contexts/workspace-and-publication/infrastructure/mirror-gc.adapter.ts",
+  // Shadow mode's whole purpose is REPLACING a real side effect with a log line — it never performs
+  // a real git write, PR, or Issue; weakening it degrades observability, not the security boundary.
+  "qa-engine/src/contexts/workspace-and-publication/infrastructure/shadow-log.adapter.ts",
+  // Process-tree kill on timeout/abort — lifecycle utility, no env/secret handling of its own (the
+  // env it's handed is already scrubbed upstream by the caller).
+  "qa-engine/src/shared-infrastructure/process-sandbox/process-kill.adapter.ts",
+];
+
+export function isSecuritySensitiveSurface(file: string): boolean {
+  const f = file.replace(/^\.\//, "").replace(/\\/g, "/");
+  return SECURITY_SENSITIVE_SURFACE_ROOTS.some((root) => f.startsWith(root));
 }
 
 export interface ChangeStat {

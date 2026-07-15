@@ -9,6 +9,8 @@ import {
   recordDeploy,
   LedgerFs,
   DEFAULT_RATE_LIMITS,
+  SECURITY_SENSITIVE_SURFACE_ROOTS,
+  NOT_SECURITY_SENSITIVE,
 } from "./merge-guard";
 
 test("isProtectedPath flags the recovery net and build/topology, exact and prefix", () => {
@@ -49,23 +51,21 @@ test("isProtectedPath flags the secret boundary (a fix must never weaken what sc
   assert.equal(isProtectedPath("qa-engine/src/contexts/qa-run-orchestration/infrastructure/bridges/publication-port.adapter.ts"), true);
 });
 
-test("PROTECTED_PATHS completeness: no file matching the security-sensitive surface is left unprotected (closes the reactive-growth gap)", async () => {
-  // ROOT CAUSE this test closes: PROTECTED_PATHS has only ever grown reactively, one file at a
-  // time, each time someone happened to notice (scrub-env.ts in tier-4b, e2e-execution.runner.ts in
-  // tier-4d — and execute.ts was NEVER protected before that). There was no completeness check, so a
-  // NEW file matching the same security-sensitive surface could ship unprotected indefinitely. This
-  // scans the ACTUAL filesystem for anything matching the real security surface (confinement,
-  // sanitization/redaction, merge-guard itself, the composition root, publication egress,
-  // scrub-env) and fails loudly if isProtectedPath ever misses one.
-  const { readdirSync, statSync } = await import("node:fs");
+// judgment-day round 2 (FIX 6, both judges): the PRIOR version of this test used a basename-prefix
+// heuristic (SENSITIVE_BASENAME_PREFIXES) as a stand-in for completeness — Judge B planted
+// `secret-guard.service.ts` and Judge A planted `secrets.ts`/`confine.ts`/`egress.ts`, all inside
+// workspace-and-publication/domain/, and it stayed GREEN (none of those names matched a known
+// prefix). It IS a real regression gate for known naming patterns (verified: `sanitize-paths.ts`
+// still fails it correctly), but its own "closes the reactive-growth gap" framing overstated it —
+// this is defect #3 of the meta-lesson (an enumeration replacing an enumeration).
+//
+// Fixed by INVERTING the default instead of enumerating better: every file under
+// SECURITY_SENSITIVE_SURFACE_ROOTS must be either in PROTECTED_PATHS or in the explicit, reviewed
+// NOT_SECURITY_SENSITIVE allowlist — a NEW file forces a decision regardless of what it is named.
+test("PROTECTED_PATHS completeness (FIX 6, invert-the-default): every file under the security-sensitive surface is either protected or explicitly reviewed as not-sensitive", async () => {
+  const { readdirSync, statSync, writeFileSync, rmSync, existsSync } = await import("node:fs");
   const { join, relative } = await import("node:path");
   const repoRoot = join(import.meta.dirname, "..", "..");
-
-  // Basename-prefix patterns mirror the glob shapes in the module's own PROTECTED_PATHS comment
-  // ("**/write-confinement*", "**/sanitiz*", "**/redaction*", "**/merge-guard*", "**/publication-port*",
-  // "**/scrub-env*") plus one exact-filename case for the composition root.
-  const SENSITIVE_BASENAME_PREFIXES = ["write-confinement", "sanitiz", "redaction", "merge-guard", "publication-port", "scrub-env"];
-  const SENSITIVE_EXACT_BASENAMES = new Set(["rewritten-engine-factory.ts"]);
   const SKIP_DIR_NAMES = new Set(["node_modules", ".git", "dist", "build", "coverage", ".claude", ".stryker-tmp"]);
 
   function walk(dir: string, out: string[]): void {
@@ -78,25 +78,40 @@ test("PROTECTED_PATHS completeness: no file matching the security-sensitive surf
     }
   }
 
-  const files: string[] = [];
-  walk(join(repoRoot, "src"), files);
-  walk(join(repoRoot, "qa-engine", "src"), files);
-
-  const unprotected: string[] = [];
-  for (const full of files) {
-    const rel = relative(repoRoot, full).replace(/\\/g, "/");
-    const basename = rel.split("/").pop() ?? rel;
-    const isSensitive =
-      SENSITIVE_EXACT_BASENAMES.has(basename) ||
-      SENSITIVE_BASENAME_PREFIXES.some((p) => basename.toLowerCase().startsWith(p));
-    if (isSensitive && !isProtectedPath(rel)) unprotected.push(rel);
+  function unclassified(): string[] {
+    const files: string[] = [];
+    for (const root of SECURITY_SENSITIVE_SURFACE_ROOTS) {
+      const abs = join(repoRoot, root);
+      if (existsSync(abs)) walk(abs, files);
+    }
+    const bad: string[] = [];
+    for (const full of files) {
+      const rel = relative(repoRoot, full).replace(/\\/g, "/");
+      if (!isProtectedPath(rel) && !NOT_SECURITY_SENSITIVE.includes(rel)) bad.push(rel);
+    }
+    return bad;
   }
 
-  assert.deepEqual(
-    unprotected,
-    [],
-    `security-sensitive file(s) found on disk but MISSING from PROTECTED_PATHS: ${JSON.stringify(unprotected)}`,
-  );
+  // Baseline: every file that ACTUALLY exists under the surface today must already be classified.
+  assert.deepEqual(unclassified(), [], `unclassified security-sensitive file(s) — add each to PROTECTED_PATHS or NOT_SECURITY_SENSITIVE: ${JSON.stringify(unclassified())}`);
+
+  // Proof the mechanism forces a decision on a NEW file regardless of its name — reproduces BOTH
+  // judges' exact planted filenames from the live probe that found this gap.
+  const plantDir = join(repoRoot, "qa-engine", "src", "contexts", "workspace-and-publication", "domain");
+  const plants = ["secret-guard.service.ts", "secrets.ts", "confine.ts", "egress.ts"];
+  const plantedFullPaths = plants.map((p) => join(plantDir, p));
+  try {
+    for (const p of plantedFullPaths) writeFileSync(p, "export {};\n");
+    const bad = unclassified();
+    for (const p of plants) {
+      assert.ok(
+        bad.includes(`qa-engine/src/contexts/workspace-and-publication/domain/${p}`),
+        `${p} must be flagged as unclassified the moment it appears — that is the whole point of inverting the default (got: ${JSON.stringify(bad)})`,
+      );
+    }
+  } finally {
+    for (const p of plantedFullPaths) if (existsSync(p)) rmSync(p);
+  }
 });
 
 test("isProtectedPath flags the gate-integrity surface (the fix must not weaken its own gate)", () => {
