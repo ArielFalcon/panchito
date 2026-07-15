@@ -50,6 +50,32 @@ export const PROTECTED_PATHS: string[] = [
   // unreviewed autonomous widening of this allowlist is exactly the failure mode this group exists
   // to prevent.
   "qa-engine/src/shared-infrastructure/process-sandbox/scrub-env.ts",
+  // sdd/security-hardening Slice 2: closes a real gap — these four were absent (grep-confirmed)
+  // despite being squarely inside the secret/confinement boundary this group protects.
+  // The write-confinement DOMAIN service — the SOLE implementation of CONFINEMENT_DENYLIST plus the
+  // classify/revert logic (isCodeDenied/isE2eStray/classifyStrays). An unreviewed fix could silently
+  // narrow the denylist or corrupt revert semantics.
+  "qa-engine/src/contexts/workspace-and-publication/domain/write-confinement.service.ts",
+  // The write-confinement EFFECTFUL adapter — actually runs the git restore/clean revert this
+  // domain service decides on. Equally load-bearing; the domain service alone deciding correctly
+  // is meaningless if this adapter's git calls are weakened.
+  "qa-engine/src/contexts/workspace-and-publication/infrastructure/write-confinement.adapter.ts",
+  // The composition root — wires RedactionPortAdapter, WriteConfinementAdapter, VcsWriteAdapter,
+  // CODE_PUBLISH_EXCLUDES, and every GitHub adapter. An autonomous edit here can rewire ANY security
+  // port to a weaker (or fake) implementation without ever touching the port/adapter files
+  // themselves — the single widest-blast-radius file in the whole security surface.
+  "src/server/rewritten-engine-factory.ts",
+  // The canonical REDACTED placeholder + SecretLeakError, consumed by BOTH sanitizer twins
+  // (src/orchestrator/sanitizer.ts here and qa-engine's own sanitize-text.ts below) — a fix here
+  // weakens redaction for the WHOLE system from one shared-kernel seam.
+  "qa-engine/src/shared-kernel/ports/redaction.port.ts",
+  // The qa-engine-side model-prompt sanitizer twin (diff/commit-body/reviewer-text → model prompts).
+  // CLAUDE.md names it explicitly as the canonical egress sanitizer for this boundary; it must stay
+  // in lockstep with src/orchestrator/sanitizer.ts, not silently diverge via an autonomous edit.
+  "qa-engine/src/contexts/generation/infrastructure/sanitize-text.ts",
+  // The logs→Issue containsSecret fail-loud call site — an autonomous fix could remove the guard
+  // that refuses to ship a secret-carrying Issue body.
+  "qa-engine/src/contexts/qa-run-orchestration/infrastructure/bridges/publication-port.adapter.ts",
   // 3. gate integrity (the fix must not weaken what decides whether it deploys)
   "*.test.ts",
   "tsconfig.json",

@@ -31,6 +31,72 @@ test("isProtectedPath flags the secret boundary (a fix must never weaken what sc
   // every scrubEnv consumer converged on this file; widening it unreviewed would leak secrets to
   // agent-authored code.
   assert.equal(isProtectedPath("qa-engine/src/shared-infrastructure/process-sandbox/scrub-env.ts"), true);
+  // SECURITY CRITICAL (verified by grep — absent before this fix): the write-confinement domain
+  // service is now the SOLE implementation of CONFINEMENT_DENYLIST + the classify/revert logic; an
+  // unreviewed autonomous "fix" here could silently narrow the denylist or break revert semantics.
+  assert.equal(isProtectedPath("qa-engine/src/contexts/workspace-and-publication/domain/write-confinement.service.ts"), true);
+  // the composition root — wires RedactionPortAdapter, WriteConfinementAdapter, VcsWriteAdapter,
+  // CODE_PUBLISH_EXCLUDES, and every GitHub adapter. An autonomous edit here can rewire ANY
+  // security port to a weaker (or fake) implementation without touching the port/adapter files
+  // themselves.
+  assert.equal(isProtectedPath("src/server/rewritten-engine-factory.ts"), true);
+  // the canonical REDACTED placeholder + SecretLeakError, consumed by BOTH sanitizer twins
+  // (src/orchestrator/sanitizer.ts and qa-engine's sanitize-text.ts) — a fix could weaken redaction
+  // for the whole system from this single shared-kernel seam.
+  assert.equal(isProtectedPath("qa-engine/src/shared-kernel/ports/redaction.port.ts"), true);
+  // the logs→Issue containsSecret fail-loud call site — an autonomous fix could remove the guard
+  // that refuses to ship a secret-carrying Issue body.
+  assert.equal(isProtectedPath("qa-engine/src/contexts/qa-run-orchestration/infrastructure/bridges/publication-port.adapter.ts"), true);
+});
+
+test("PROTECTED_PATHS completeness: no file matching the security-sensitive surface is left unprotected (closes the reactive-growth gap)", async () => {
+  // ROOT CAUSE this test closes: PROTECTED_PATHS has only ever grown reactively, one file at a
+  // time, each time someone happened to notice (scrub-env.ts in tier-4b, e2e-execution.runner.ts in
+  // tier-4d — and execute.ts was NEVER protected before that). There was no completeness check, so a
+  // NEW file matching the same security-sensitive surface could ship unprotected indefinitely. This
+  // scans the ACTUAL filesystem for anything matching the real security surface (confinement,
+  // sanitization/redaction, merge-guard itself, the composition root, publication egress,
+  // scrub-env) and fails loudly if isProtectedPath ever misses one.
+  const { readdirSync, statSync } = await import("node:fs");
+  const { join, relative } = await import("node:path");
+  const repoRoot = join(import.meta.dirname, "..", "..");
+
+  // Basename-prefix patterns mirror the glob shapes in the module's own PROTECTED_PATHS comment
+  // ("**/write-confinement*", "**/sanitiz*", "**/redaction*", "**/merge-guard*", "**/publication-port*",
+  // "**/scrub-env*") plus one exact-filename case for the composition root.
+  const SENSITIVE_BASENAME_PREFIXES = ["write-confinement", "sanitiz", "redaction", "merge-guard", "publication-port", "scrub-env"];
+  const SENSITIVE_EXACT_BASENAMES = new Set(["rewritten-engine-factory.ts"]);
+  const SKIP_DIR_NAMES = new Set(["node_modules", ".git", "dist", "build", "coverage", ".claude", ".stryker-tmp"]);
+
+  function walk(dir: string, out: string[]): void {
+    for (const entry of readdirSync(dir)) {
+      if (SKIP_DIR_NAMES.has(entry)) continue;
+      const full = join(dir, entry);
+      const st = statSync(full);
+      if (st.isDirectory()) walk(full, out);
+      else if (st.isFile()) out.push(full);
+    }
+  }
+
+  const files: string[] = [];
+  walk(join(repoRoot, "src"), files);
+  walk(join(repoRoot, "qa-engine", "src"), files);
+
+  const unprotected: string[] = [];
+  for (const full of files) {
+    const rel = relative(repoRoot, full).replace(/\\/g, "/");
+    const basename = rel.split("/").pop() ?? rel;
+    const isSensitive =
+      SENSITIVE_EXACT_BASENAMES.has(basename) ||
+      SENSITIVE_BASENAME_PREFIXES.some((p) => basename.toLowerCase().startsWith(p));
+    if (isSensitive && !isProtectedPath(rel)) unprotected.push(rel);
+  }
+
+  assert.deepEqual(
+    unprotected,
+    [],
+    `security-sensitive file(s) found on disk but MISSING from PROTECTED_PATHS: ${JSON.stringify(unprotected)}`,
+  );
 });
 
 test("isProtectedPath flags the gate-integrity surface (the fix must not weaken its own gate)", () => {
