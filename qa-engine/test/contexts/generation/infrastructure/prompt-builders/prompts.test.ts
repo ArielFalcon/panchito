@@ -160,6 +160,32 @@ test("SECURITY: a secret quoted in a reviewCorrection is redacted in the followu
   assert.match(text, /\[REDACTED\]/, "the redaction placeholder must appear in its place");
 });
 
+// judgment-day round 2 (FIX 4, both judges — Judge A proved it live): selectorContradictions is
+// built by checkSpecSelectors (qa-run-orchestration/domain/helpers/selector-check.ts), which embeds
+// `sel.name` extracted VERBATIM from the agent's own spec source — an agent can write
+// `page.getByRole('button', { name: '<secret it read from a repo file>' })` (a locator guaranteed
+// not to match) and that name is echoed unredacted into the NEXT regen prompt, right next to
+// reviewCorrections (already fixed) but itself never sanitized.
+const SECRET_IN_SELECTOR_CONTRADICTION = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890ABCDEFGH";
+
+test("SECURITY (FIX 4): a secret embedded in a selectorContradiction (agent-authored locator name) is redacted before reaching the generation prompt", () => {
+  const text = buildPrompt(mkInput({
+    mode: "diff",
+    selectorContradictions: [`role:name 'button' with name "${SECRET_IN_SELECTOR_CONTRADICTION}" is NOT in the captured tree; present roles: button:"Save"`],
+  }));
+  assert.ok(!text.includes(SECRET_IN_SELECTOR_CONTRADICTION), "a secret embedded in a selector contradiction must never reach the model prompt unredacted");
+  assert.match(text, /\[REDACTED\]/, "the redaction placeholder must appear in its place");
+});
+
+test("SECURITY (FIX 4): a secret embedded in a selectorContradiction is redacted in the followup (continuation-session) prompt too", () => {
+  const text = buildFollowupPrompt(mkInput({
+    mode: "diff",
+    selectorContradictions: [`role:name 'button' with name "${SECRET_IN_SELECTOR_CONTRADICTION}" is NOT in the captured tree`],
+  }));
+  assert.ok(!text.includes(SECRET_IN_SELECTOR_CONTRADICTION), "a secret embedded in a selector contradiction must never reach the followup prompt unredacted");
+  assert.match(text, /\[REDACTED\]/, "the redaction placeholder must appear in its place");
+});
+
 // ── workingRules: a DOM snapshot (no pack) is still grounding → suppress the explore-first mandate ──
 
 test("RE-1 working-rules: domSnapshot present without a pack suppresses the explore-first mandate", () => {
@@ -328,6 +354,28 @@ test("WS5.4c: buildReviewerPrompt's live-DOM section sanitizes a secret-shaped s
   };
   const text = buildReviewerPrompt(reviewInput);
   assert.ok(!text.includes("sk-liveSECRETVALUE123456"), "the reviewer's captured DOM must be sanitized too");
+});
+
+// judgment-day round 2 (FIX 4 sweep — the 5th unsanitized site): priorCorrections carries the SAME
+// reviewer-authored correction text as reviewCorrections (the W2 "reviewGenerated threads the prior
+// round's own corrections into the NEXT review call" convergence mechanism) — just fed back into
+// the REVIEWER's own next-round prompt instead of the generator's. Same provenance, same risk,
+// same fix.
+const SECRET_IN_PRIOR_CORRECTION = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890ABCDEFGH";
+
+test("SECURITY (FIX 4 sweep): a secret quoted in a priorCorrection is redacted before reaching the reviewer's next-round prompt", () => {
+  const reviewInput: ReviewInput = {
+    diff: "diff --git a/src/foo.ts b/src/foo.ts\n+export function foo() {}\n",
+    specs: ["flows/checkout.spec.ts"],
+    mirrorDir: "/mirrors/org__app",
+    e2eRelDir: "e2e",
+    appName: "testapp",
+    mode: "diff",
+    priorCorrections: [`found ${SECRET_IN_PRIOR_CORRECTION} while reading .env, quoting it here for context`],
+  };
+  const text = buildReviewerPrompt(reviewInput);
+  assert.ok(!text.includes(SECRET_IN_PRIOR_CORRECTION), "a secret in a prior-round correction must never reach the reviewer's next-round prompt unredacted");
+  assert.match(text, /\[REDACTED\]/, "the redaction placeholder must appear in its place");
 });
 
 // ── C1: fix-cases evidence rendering (httpStatus/finalUrl/runtimeErrors) ─────

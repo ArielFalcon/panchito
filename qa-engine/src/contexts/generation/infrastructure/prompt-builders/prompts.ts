@@ -650,6 +650,13 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
   // selector ("role:name is NOT in the captured tree; present roles: …") or an ambiguous one
   // ("matches MULTIPLE nodes …"). Rendered as its OWN section so it is never truncated by the
   // 500-char detail slice. Positioned after the DOM (reads the contradiction against the tree).
+  //
+  // judgment-day round 2 (FIX 4, both judges): each item embeds `sel.name`, extracted VERBATIM from
+  // the agent's own spec source (qa-run-orchestration/domain/helpers/selector-check.ts's
+  // checkSpecSelectors) — an agent can write a locator whose `name` is a secret it read from a repo
+  // file, guaranteed not to match, and have it echoed straight into the NEXT regen prompt. SECURITY:
+  // same sanitization as this file's own reviewCorrections section (immediately below) — a reviewer
+  // rejection carries the identical risk (agent-authored text embedding what it read from the repo).
   const selectorContradictionsContent =
     input.selectorContradictions?.length && isGenerationMode
       ? [
@@ -661,7 +668,7 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
           `that appears in the tree, or a \`getByText\`/scoped locator; for a "matches MULTIPLE" finding,`,
           `scope the locator to a unique parent. You MUST resolve every item before finishing:`,
           ``,
-          ...input.selectorContradictions.map((c) => `- ${c}`),
+          ...input.selectorContradictions.map((c) => `- ${sanitizeText(c, "model").text}`),
           ``,
         ].join("\n")
       : "";
@@ -1039,10 +1046,13 @@ export function buildFollowupPrompt(input: OpencodeRunInput): string {
     );
   }
   if (input.selectorContradictions?.length) {
+    // judgment-day round 2 (FIX 4): same sanitization as buildPromptAssembled's own
+    // selectorContradictions section above — `sel.name` is agent-authored, extracted verbatim from
+    // the spec source, and can carry a secret it read from the actual repo files.
     parts.push(
       `## ⚠ Selector contradictions (DETERMINISTIC — resolve EVERY one)`,
       `Each was checked against the captured tree and FAILED — replace it with a role/name that appears there:`,
-      ...input.selectorContradictions.map((c) => `- ${c}`),
+      ...input.selectorContradictions.map((c) => `- ${sanitizeText(c, "model").text}`),
       ``,
     );
   }
@@ -1741,10 +1751,15 @@ export function buildReviewerPromptAssembled(input: ReviewInput): AssembledPromp
   // converge: approve once the previously-raised BLOCKING issues are resolved; do not invent
   // new nits on specs that were not changed since the last round.
   // Capped at 8,000 bytes: this section is supplementary context, not the primary artifact.
+  //
+  // judgment-day round 2 (FIX 4 sweep — the 5th unsanitized site): priorCorrections is the SAME
+  // reviewer-authored correction text as reviewCorrections (the W2 convergence mechanism threads a
+  // PRIOR round's own corrections back in) — same provenance (the reviewer read arbitrary repo
+  // files last round), same risk, same sanitization.
   const PRIOR_CORRECTIONS_MAX_BYTES = 8_000;
   const priorCorrectionsContent = (() => {
     if (!input.priorCorrections || input.priorCorrections.length === 0) return "";
-    const lines = input.priorCorrections.map((c, i) => `${i + 1}. ${c}`).join("\n");
+    const lines = input.priorCorrections.map((c, i) => `${i + 1}. ${sanitizeText(c, "model").text}`).join("\n");
     const raw = [
       `## Prior-round corrections (from YOUR previous verdict on these specs)`,
       ``,
