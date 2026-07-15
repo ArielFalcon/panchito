@@ -24,7 +24,6 @@
     "test/contexts/generation/infrastructure/sanitize-text-parity.test.ts",
     "src/shared-kernel/contract/index.ts",
     "test/shared-kernel/run-outcome.test.ts",
-    "test/contexts/test-execution/domain/adjudicate-parity.test.ts",
     "test/contexts/generation/infrastructure/context-assembler.adapter-parity.test.ts",
     "test/contexts/generation/infrastructure/exploration-brief.adapter-parity.test.ts",
     "test/contexts/generation/infrastructure/verdict-parser.adapter-parity.test.ts",

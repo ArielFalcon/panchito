@@ -9,6 +9,32 @@ import assert from "node:assert/strict";
 import { ExecutionPortAdapter } from "@contexts/qa-run-orchestration/infrastructure/bridges/execution-port.adapter.ts";
 import { E2eExecutionStrategy } from "@contexts/test-execution/infrastructure/e2e-execution.strategy.ts";
 import { CodeExecutionStrategy } from "@contexts/test-execution/infrastructure/code-execution.strategy.ts";
+import type { E2eExecuteOptions } from "@contexts/test-execution/infrastructure/e2e-execution.runner.ts";
+
+// ── E2eExecuteOptions exhaustiveness (migration-tier-4d Slice 1b) ───────────────────────────────
+// Re-homes qa-engine/test/contract/seam-parity.contract.test.ts's retired block (c) EXECUTION
+// exhaustiveness guard: E2eExecuteOptions (formerly the legacy ExecuteOptions, src/qa/execute.ts,
+// now deleted) no longer straddles the src/qa-engine boundary — both sides of this guard are
+// qa-engine-internal, so it is a NORMAL test here, not a parity pin. A field ADDED to
+// E2eExecuteOptions without a matching mapped/allowlisted entry below FAILS TYPECHECK (the
+// `satisfies` below); a field silently DROPPED by ExecutionPortAdapter FAILS THIS TEST.
+const E2E_EXECUTE_OPTIONS_ALL_FIELDS = {
+  baseUrl: true, namespace: true, onCase: true, onRunning: true, onDiscovered: true,
+  faultInject: true, signal: true, timeoutMs: true, project: true, testIdAttribute: true,
+  specFiles: true,
+} satisfies Record<keyof E2eExecuteOptions, true>;
+
+const E2E_EXECUTE_OPTIONS_ALLOWLIST: Record<string, string> = {
+  baseUrl: "held as ExecutionPortStaticContext (constructor-time, not per-call) — carried through ctx.baseUrl, asserted by the dispatch tests below, not a drop.",
+  namespace: "held as ExecutionPortStaticContext (constructor-time, overridable per-call via opts.namespace) — asserted by the dispatch/override tests below, not a drop.",
+};
+
+test("E2eExecuteOptions' own field list matches the allowlist + ExecutionPortAdapter's mapped set exactly (retired seam-parity block (c))", () => {
+  const mapped = ["onCase", "onRunning", "onDiscovered", "faultInject", "signal", "timeoutMs", "project", "testIdAttribute", "specFiles"];
+  const allFieldNames = Object.keys(E2E_EXECUTE_OPTIONS_ALL_FIELDS).sort();
+  const accountedFor = [...new Set([...mapped, ...Object.keys(E2E_EXECUTE_OPTIONS_ALLOWLIST)])].sort();
+  assert.deepEqual(accountedFor, allFieldNames, "every E2eExecuteOptions field must be either mapped by ExecutionPortAdapter or allowlisted with a reason");
+});
 
 test("execute() dispatches to E2eExecutionStrategy for target 'e2e' and forwards baseUrl/namespace", async () => {
   let capturedOpts: unknown;

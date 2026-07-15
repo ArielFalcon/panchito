@@ -16,18 +16,30 @@
 // tsc --noEmit -p tsconfig.json, THEN tsc --noEmit -p qa-engine/tsconfig.parity.json — three
 // separate programs, each covering a disjoint file set).
 //
-// DESIGN — three describe-blocks, one per audited surface (migration-tier-4c Slice 6 retired the
+// DESIGN — two describe-blocks, one per audited surface (migration-tier-4c Slice 6 retired the
 // former (a) GENERATION PROMPT and (b) REVIEW blocks: OpencodeRunInput/ReviewInput's legacy
 // declarations in src/integrations/opencode-client.ts were deleted once prompts.ts's builders and
 // their canonical ports types fully migrated to qa-engine — see
-// docs/superpowers/2026-07-14-migration-tier-4c-decisions.md):
-//   c) EXECUTION — ExecuteOptions (src/qa/execute.ts) vs ExecutionPortAdapter.execute()'s
-//      ExecutionRequest mapping (ExecutionOpts bag + static ctx, recording strategy fake).
+// docs/superpowers/2026-07-14-migration-tier-4c-decisions.md. migration-tier-4d Slice 1b retired
+// the former (c) EXECUTION block: ExecuteOptions/src/qa/execute.ts no longer exist — the real
+// e2e-runner body moved into qa-engine's own e2e-execution.runner.ts, so there is no more
+// src/-vs-qa-engine seam left to pin for this surface. Its exhaustiveness-guard coverage re-forms
+// as a qa-engine-internal E2eExecuteOptions↔ExecutionRequest test with NO src/ import — see
+// qa-engine/test/contexts/qa-run-orchestration/infrastructure/bridges/execution-port.adapter.test.ts,
+// which already covers the field-forwarding behavior this block used to pin, plus the new
+// exhaustiveness test added there in the same commit that retired this block):
 //   d) PERSISTENCE — kernel RunOutcome vs SqliteRunHistoryAdapter's toLegacyRunOutcome mapping
 //      (fully-populated kernel outcome, real (pure) mapping fn — no fake needed, it's already pure).
 //   e) COMPOSITION — CompositionConfig vs buildRewrittenCompositionConfig's returned object
 //      (a fully-populated AppConfig, asserting every non-optional field is present and every
 //      optional field is either present or in a documented allowlist).
+//
+// Blocks (d)/(e) are PERMANENT boundary-contract tests, not migration debt: rewritten-engine-factory.ts
+// (COMPOSITION) and run-history-sqlite-adapter.ts (PERSISTENCE) are DECLARED permanent shell
+// survivors (migration-tier-4d design D-4d-1/D-4d-2) — arch:check's one-way rule (qa-engine never
+// imports src/) makes their dissolution architecturally impossible, not merely undesirable. This
+// file's own qa-engine/tsconfig.parity.json entry stays for exactly that reason: "anything crossing
+// the boundary," not "anything pending retirement."
 //
 // Each block enumerates its target TYPE's field list via a `keyof`-driven `satisfies`/array
 // construction so that a field ADDED to the type without a matching allowlist/sentinel entry FAILS
@@ -37,12 +49,8 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { ExecutionPortAdapter } from "@contexts/qa-run-orchestration/infrastructure/bridges/execution-port.adapter.ts";
-import { E2eExecutionStrategy } from "@contexts/test-execution/infrastructure/e2e-execution.strategy.ts";
-import { CodeExecutionStrategy } from "@contexts/test-execution/infrastructure/code-execution.strategy.ts";
 import type { RunOutcome as KernelRunOutcome } from "@kernel/run-outcome.ts";
 
-import type { ExecuteOptions } from "../../../src/qa/execute.ts";
 import { toLegacyRunOutcome, type RunHistorySqliteAdapterDeps, SqliteRunHistoryAdapter } from "../../../src/server/run-history-sqlite-adapter.ts";
 import { buildRewrittenCompositionConfig, type RewrittenEngineFactoryDeps } from "../../../src/server/rewritten-engine-factory.ts";
 import type { AppConfig } from "../../../src/orchestrator/config-loader.ts";
@@ -53,80 +61,6 @@ import type { AgentDeps } from "../../../src/integrations/opencode-client.ts";
 // so `assert.equal(captured.field, SENTINEL)` fails loudly if the adapter silently substitutes a
 // default, drops the field, or forwards the wrong one.
 const S = (field: string): string => `__SENTINEL__${field}__`;
-
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-// (c) EXECUTION surface — ExecuteOptions vs ExecutionPortAdapter's ExecutionRequest mapping
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-describe("seam-parity: EXECUTION (legacy ExecuteOptions vs ExecutionPortAdapter)", () => {
-  // Legacy ExecuteOptions bundles baseUrl/namespace WITH the per-call opts; the rewritten split
-  // moves baseUrl/namespace to ExecutionPortStaticContext (constructor-time) — a deliberate re-shape
-  // (documented in execution-port.adapter.ts's own header: "baseUrl/namespace held as static
-  // per-run context"), asserted separately below, not a drop.
-  const ALL_FIELDS = {
-    baseUrl: true, namespace: true, onCase: true, onRunning: true, onDiscovered: true,
-    faultInject: true, signal: true, timeoutMs: true, project: true, testIdAttribute: true,
-    specFiles: true,
-  } satisfies Record<keyof ExecuteOptions, true>;
-
-  const ALLOWLIST: Record<string, string> = {
-    baseUrl: "re-shaped to ExecutionPortStaticContext (constructor-time, not per-call) — asserted directly below, not a drop.",
-    namespace: "re-shaped to ExecutionPortStaticContext (constructor-time, not per-call) — asserted directly below, not a drop.",
-  };
-
-  test("ExecuteOptions' own field list matches the allowlist + the adapter's mapped set exactly", () => {
-    const mapped = ["onCase", "onRunning", "onDiscovered", "faultInject", "signal", "timeoutMs", "project", "testIdAttribute", "specFiles"];
-    const allFieldNames = Object.keys(ALL_FIELDS).sort();
-    const accountedFor = [...new Set([...mapped, ...Object.keys(ALLOWLIST)])].sort();
-    assert.deepEqual(accountedFor, allFieldNames, "every ExecuteOptions field must be either mapped or allowlisted with a reason");
-  });
-
-  test("execute() carries every ExecuteOptions-equivalent field through into the e2e strategy's ExecutionRequest with its sentinel value", async () => {
-    let capturedOpts: Record<string, unknown> | undefined;
-    const e2e = new E2eExecutionStrategy(async (_specDir, opts) => {
-      capturedOpts = opts as unknown as Record<string, unknown>;
-      return { verdict: "pass", cases: [], logs: "" };
-    });
-    const code = new CodeExecutionStrategy(async () => ({ verdict: "pass", cases: [], logs: "" }));
-    const adapter = new ExecutionPortAdapter(
-      { e2e, code },
-      { target: "e2e", baseUrl: S("baseUrl"), namespace: S("namespace"), testIdAttribute: S("testIdAttribute") },
-    );
-
-    const controller = new AbortController();
-    const onCaseCalls: unknown[] = [];
-    const onRunningCalls: string[] = [];
-    const onDiscoveredCalls: [string, string | undefined][] = [];
-
-    await adapter.execute("/specDir", {
-      signal: controller.signal,
-      faultInject: true,
-      specFiles: [S("specFiles")],
-      project: S("project"),
-      timeoutMs: 12345,
-      onCase: (c) => onCaseCalls.push(c),
-      onRunning: (t) => onRunningCalls.push(t),
-      onDiscovered: (t, f) => onDiscoveredCalls.push([t, f]),
-    });
-
-    const dyingLayer = "ExecutionPortAdapter.execute() -> ExecutionRequest (qa-engine/.../bridges/execution-port.adapter.ts)";
-    assert.ok(capturedOpts, "the e2e strategy must have been invoked");
-    assert.equal(capturedOpts!.baseUrl, S("baseUrl"), `baseUrl dropped at ${dyingLayer}`);
-    assert.equal(capturedOpts!.namespace, S("namespace"), `namespace dropped at ${dyingLayer}`);
-    assert.equal(capturedOpts!.testIdAttribute, S("testIdAttribute"), `testIdAttribute dropped at ${dyingLayer} (worst leak in audit-2026-07-flaky-selector-leaks)`);
-    assert.equal(capturedOpts!.signal, controller.signal, `signal dropped at ${dyingLayer}`);
-    assert.equal(capturedOpts!.faultInject, true, `faultInject dropped at ${dyingLayer}`);
-    assert.deepEqual(capturedOpts!.specFiles, [S("specFiles")], `specFiles dropped at ${dyingLayer}`);
-    assert.equal(capturedOpts!.project, S("project"), `project dropped at ${dyingLayer}`);
-    assert.equal(capturedOpts!.timeoutMs, 12345, `timeoutMs dropped at ${dyingLayer}`);
-
-    (capturedOpts!.onCase as (c: unknown) => void)?.({ name: "x", status: "pass" });
-    (capturedOpts!.onRunning as (t: string) => void)?.("running-title");
-    (capturedOpts!.onDiscovered as (t: string, f?: string) => void)?.("discovered-title", "file.spec.ts");
-    assert.equal(onCaseCalls.length, 1, `onCase dropped at ${dyingLayer}`);
-    assert.equal(onRunningCalls[0], "running-title", `onRunning dropped at ${dyingLayer}`);
-    assert.deepEqual(onDiscoveredCalls[0], ["discovered-title", "file.spec.ts"], `onDiscovered dropped at ${dyingLayer}`);
-  });
-});
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // (d) PERSISTENCE surface — kernel RunOutcome vs SqliteRunHistoryAdapter's toLegacyRunOutcome

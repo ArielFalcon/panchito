@@ -1,40 +1,76 @@
-// Harness Filter C: runs the persisted E2E tests against DEV and classifies the
-// outcome (pass/fail/flaky). The runner is injected: the default uses Playwright
-// with the base config (retries → flakiness detection, trace on-first-retry); in
-// tests it is stubbed. The output is SANITIZED before being returned (it may
-// carry PII/DEV data that would later feed an Issue).
+// qa-engine/src/contexts/test-execution/infrastructure/e2e-execution.runner.ts
+// E2E mode (TestTarget "e2e"): runs the persisted Playwright tests against live DEV and classifies
+// the outcome (pass/fail/flaky). The runner is injected via E2eExecuteDeps.runSuite: the default
+// spawns Playwright with the seed config (retries → flakiness detection, trace on-first-retry); in
+// unit tests it is stubbed. The output is SANITIZED before being returned (it may carry PII/DEV data
+// that would later feed an Issue).
+//
+// migration-tier-4d Slice 1b (e2e-execution migration, the src->qa-engine migration program's
+// FINALE): body-moved from src/qa/execute.ts — qa-engine now OWNS this body directly instead of
+// E2eExecutionStrategy injecting a closure that calls back into src/. Behavior-preserving: NDJSON
+// stream parsing, the runner-infra reclassification, the failure-DOM harvest, and the timeout/abort
+// racing are byte-identical to the legacy implementation. Mirrors migration-tier-4b's
+// code-execution.runner.ts migration exactly (the design's own template) — three deliberate,
+// invariant-driven differences from the legacy body:
+//   1. `killTree` (a local, unexported helper at HEAD) is replaced by the canonical
+//      `ProcessKillPort`/`ProcessKillAdapter` (shared-kernel/shared-infrastructure) — the LAST of
+//      the four duplicate killTree copies named in process-kill.port.ts's own header, now retired.
+//   2. The env-derived timeout defaults (QA_E2E_TIMEOUT_MS, PW_ACTION_TIMEOUT_MS) are INJECTED, not
+//      read internally: `e2eTimeoutMs` is a PURE function taking `env` as an explicit parameter
+//      (mirroring sandbox.ts's own `resolveSandbox(env, ...)` precedent) — the composition-root
+//      shell (src/server/rewritten-engine-factory.ts) calls it once with `process.env` and injects
+//      the resolved default + the raw PW_ACTION_TIMEOUT_MS string into createDefaultE2eExecuteDeps.
+//      CLAUDE.md's env-read confinement invariant forbids a NEW `process.env` read inside
+//      qa-engine/src.
+//   3. `recordAudit` is an OPTIONAL injected sink (`E2eExecuteDeps.recordAudit?`) rather than a
+//      direct import of src/orchestrator/sanitizer.ts's `recordAudit` — the SECRET_AUDIT diagnostic
+//      map is a security-boundary concern the shell owns (never imported into qa-engine/src).
+//      Mirrors CodeExecuteDeps.recordAudit? (code-execution.runner.ts) exactly. The single
+//      sanitizeText pass below (checking `sanitized.detection.redacted` instead of a separate
+//      containsSecrets scan) mirrors that same file's own AMENDMENT-1 simplification.
+//
+// E2eExecutionStrategy KEEPS its injected RunE2eFn seam (a correction of the migration-tier-4d
+// proposal, which mis-cited its own 4b precedent — 4b KEPT CodeExecutionStrategy's injected
+// RunCodeFn too): composition re-points the closure to
+// `(specDir, opts) => runE2E(specDir, opts, e2eExecuteDeps)` — the strategy itself never imports
+// this file directly. DI is the testing strategy (CLAUDE.md): the strategy stays Playwright-free in
+// unit tests.
+//
+// Names below are prefixed `E2e` (ExecuteOptions -> E2eExecuteOptions, ExecuteDeps -> E2eExecuteDeps,
+// CleanupDeps -> E2eCleanupDeps, RunOutput -> E2eRunOutput) to disambiguate from this same
+// directory's CodeExecuteOptions/CodeExecuteDeps/CodeRunOutput (code-execution.runner.ts) now that
+// both e2e and code runners live side by side in qa-engine's test-execution context.
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { writeFileSync, readFileSync, readdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { QaRunResult, QaCase, CaseStatus } from "../types";
-// migration-tier-4b Slice 1: src/qa/code-runner.ts (scrubEnv's prior home) is deleted this slice;
-// execute.ts is a Slice-1 "survivor" (its own migration is seam-pinned to 4d) and re-points to the
-// qa-engine twin — the NARROW legacy allowlist, unchanged, per the design's consumer sweep.
-import { scrubEnv } from "../../qa-engine/src/shared-infrastructure/process-sandbox/scrub-env";
-// migration-tier-4d Slice 1a (prep step ahead of this file's own Slice 1b body-move): playwright-report.ts
-// relocated to qa-engine's test-execution context; this transitional shell→engine import mirrors the
-// scrubEnv one immediately above (this file itself is the LAST src/qa/execute.ts survivor, seam-pinned
-// to Slice 1b, which deletes it and this import along with it).
-import { parsePlaywrightReport } from "../../qa-engine/src/contexts/test-execution/infrastructure/playwright-report";
-import { sanitizeText, containsSecrets, recordAudit } from "../orchestrator/sanitizer";
-import { parseAriaSnapshot } from "./dom-snapshot";
+import type { QaCase, CaseStatus } from "@kernel/qa-case.ts";
+import type { RunVerdict } from "@kernel/run-verdict.ts";
+import { sanitizeText, type SecretDetection } from "@contexts/generation/infrastructure/sanitize-text.ts";
+import { parseAriaSnapshot } from "@contexts/generation/infrastructure/dom-snapshot.ts";
+import { ProcessKillAdapter } from "../../../shared-infrastructure/process-sandbox/process-kill.adapter.ts";
+import type { ProcessKillPort } from "@kernel/process-sandbox/process-kill.port.ts";
+import { scrubEnv } from "../../../shared-infrastructure/process-sandbox/scrub-env.ts";
+import { parsePlaywrightReport } from "./playwright-report.ts";
 
 // Default wall-clock budget for one Playwright suite run. A hung browser must never
 // freeze the sequential queue (one run blocks ALL apps); on expiry the whole process
-// TREE is SIGKILLed and the run is classified infra-error, never a test failure.
-// Override per-deploy via the QA_E2E_TIMEOUT_MS env var. The seed playwright config
-// sets globalTimeout to 12 min so Playwright normally exits cleanly on its own first.
+// TREE is killed and the run is classified infra-error, never a test failure.
+// Override per-deploy via the QA_E2E_TIMEOUT_MS env var (resolved by the composition-root
+// shell — see this file's header, difference #2). The seed playwright config sets
+// globalTimeout to 12 min so Playwright normally exits cleanly on its own first.
 export const DEFAULT_E2E_TIMEOUT_MS = 900_000; // 15 min
 
 // Budget for the best-effort orphan-data cleanup pass (a single spec — far shorter).
 export const DEFAULT_CLEANUP_TIMEOUT_MS = 300_000; // 5 min
 
-// Resolves the effective e2e timeout: QA_E2E_TIMEOUT_MS when set to a positive
-// number of milliseconds, the default otherwise.
-export function e2eTimeoutMs(): number {
-  const raw = Number(process.env.QA_E2E_TIMEOUT_MS);
+// Resolves the effective e2e timeout: env.QA_E2E_TIMEOUT_MS when set to a positive number of
+// milliseconds, the default otherwise. `env` is REQUIRED (no default) — the caller (the
+// composition-root shell) must read process.env and pass it in once per composition; see this
+// file's header for why (mirrors sandbox.ts's resolveSandbox(env, ...) precedent exactly).
+export function e2eTimeoutMs(env: NodeJS.ProcessEnv): number {
+  const raw = Number(env.QA_E2E_TIMEOUT_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_E2E_TIMEOUT_MS;
 }
 
@@ -63,21 +99,7 @@ function assertSpecFiles(specFiles: string[]): void {
   }
 }
 
-// Kills a spawned process AND its descendants. Spawns are `detached: true` so the
-// child is its own process-group leader; `process.kill(-pid)` signals the whole group
-// (npx/playwright fork browser grandchildren that a plain `child.kill()` would orphan).
-// Falls back to a direct kill if the group send fails (e.g. the child already exited).
-// Same pattern as the code-mode runner (src/qa/code-runner.ts) — the in-repo standard.
-export function killTree(child: ChildProcess): void {
-  try {
-    if (child.pid) process.kill(-child.pid, "SIGKILL");
-    else child.kill("SIGKILL");
-  } catch {
-    try { child.kill("SIGKILL"); } catch { /* already gone */ }
-  }
-}
-
-export interface ExecuteOptions {
+export interface E2eExecuteOptions {
   baseUrl: string;
   namespace: string;
   onCase?: (c: QaCase) => void;        // called per test as it completes (live bar/history)
@@ -85,7 +107,7 @@ export interface ExecuteOptions {
   onDiscovered?: (title: string, file?: string) => void; // the full test list, up front (the "next" preview)
   faultInject?: boolean;               // response-oracle pass: corrupt JSON response values (QA_FAULT_INJECT)
   signal?: AbortSignal;                // operator cancel: kills the runner's process tree → infra-error
-  timeoutMs?: number;                  // wall-clock budget; defaults to e2eTimeoutMs()
+  timeoutMs?: number;                  // wall-clock budget; defaults to E2eExecuteDeps.defaultTimeoutMs
   project?: string;                    // restrict to one Playwright --project (must match PW_PROJECT_RE)
   testIdAttribute?: string;            // the configured testIdAttribute; injected as PW_TEST_ID_ATTRIBUTE so playwright.config.ts resolves getByTestId correctly
   // Filtered-retry optimization: when present and non-empty, only these spec file basenames
@@ -125,7 +147,7 @@ export function streamStatusToCase(status: string): CaseStatus | null {
 }
 
 // Playwright RUNNER-infrastructure failure signatures: the browser could not launch / is missing /
-// the host lacks deps. These are a `fallo del runner` = INFRASTRUCTURE, NOT a test-logic failure
+// the host lacks deps. These are a runner fault = INFRASTRUCTURE, NOT a test-logic failure
 // (an assertion, or a timeout against DEV). Matched from Playwright's OWN error strings — the only
 // channel it offers — and kept narrow so a genuine failure is never relabeled as infra.
 //
@@ -145,7 +167,7 @@ export function allFailuresAreRunnerInfra(cases: QaCase[]): boolean {
   return failed.length > 0 && failed.every((c) => PLAYWRIGHT_INFRA_RE.test(c.detail ?? ""));
 }
 
-export interface RunOutput {
+export interface E2eRunOutput {
   report: unknown; // Playwright JSON report
   logs: string;
   ran: boolean; // false when the runner did NOT produce a parseable JSON report
@@ -153,7 +175,7 @@ export interface RunOutput {
   exitCode?: number; // the runner process exit code (informational)
 }
 
-export interface ExecuteDeps {
+export interface E2eExecuteDeps {
   // onEvent streams test-lifecycle events as they happen (advisory: the verdict is
   // still decided from the final report). Absent in unit stubs.
   runSuite(args: {
@@ -168,11 +190,35 @@ export interface ExecuteDeps {
     timeoutMs?: number;
     onEvent?: (ev: StreamEvent) => void;
     // Dir where the qa-failure-capture afterEach fixture writes per-case aria snapshots.
-    // Minted by defaultExecuteDeps.runSuite as a temp dir; passed via QA_FAILURE_CAPTURE_DIR
-    // in the child env so the fixture can write to it. The orchestrator reads and parses the
-    // dumps after the run to populate QaCase.failureDom for each failed case.
+    // Minted by createDefaultE2eExecuteDeps's runSuite as a temp dir; passed via
+    // QA_FAILURE_CAPTURE_DIR in the child env so the fixture can write to it. The orchestrator
+    // reads and parses the dumps after the run to populate QaCase.failureDom for each failed case.
     failureCaptureDir?: string;
-  }): Promise<RunOutput>;
+  }): Promise<E2eRunOutput>;
+  // env-derived orchestration-level timeout default (QA_E2E_TIMEOUT_MS, resolved once by the
+  // composition-root shell via e2eTimeoutMs(process.env) — see this file's header, difference #2).
+  // Absent ⇒ DEFAULT_E2E_TIMEOUT_MS (every pre-existing unit-test deps object that omits this field
+  // keeps behaving exactly as before).
+  defaultTimeoutMs?: number;
+  // OPTIONAL diagnostic sink for a secret-redaction audit trail (src/orchestrator/sanitizer.ts's
+  // recordAudit/SECRET_AUDIT — a security-boundary concern this module does not import directly, to
+  // stay src/-free). Absent ⇒ no audit recorded (safe for every unit test that doesn't care about
+  // it). The composition-root shell (rewritten-engine-factory.ts) binds the REAL recordAudit into
+  // createDefaultE2eExecuteDeps's returned object, so production behavior is unchanged.
+  recordAudit?(runId: string, detection: SecretDetection): void;
+}
+
+// The structural shape runE2E returns. Declared locally (not imported from src/types.ts) so this
+// file stays src/-free — the same local-structural-type pattern code-execution.runner.ts's own
+// CodeRunResult establishes; QaCase/RunVerdict are the qa-engine kernel's own canonical copies of
+// the same fields src/types.ts's QaRunResult declares.
+export interface E2eRunResult {
+  sha: string;
+  verdict: RunVerdict;
+  passed: boolean;
+  cases: QaCase[];
+  logs: string;
+  note?: string;
 }
 
 // A Playwright JSON report always carries `suites` and/or `stats`. An empty `{}`
@@ -189,9 +235,9 @@ function isReportShaped(report: unknown): boolean {
 // to undo each entity. Here we only run and classify.
 export async function runE2E(
   specDir: string,
-  opts: ExecuteOptions,
-  deps: ExecuteDeps,
-): Promise<QaRunResult> {
+  opts: E2eExecuteOptions,
+  deps: E2eExecuteDeps,
+): Promise<E2eRunResult> {
   // The project name reaches a child-process argv (`--project=<value>`): reject
   // anything outside the strict allowlist before it gets near a spawn.
   if (opts.project !== undefined && !PW_PROJECT_RE.test(opts.project)) {
@@ -224,15 +270,15 @@ export async function runE2E(
 
   // Mint a temp dir for the qa-failure-capture afterEach to write aria snapshots into.
   // The dir is created here (the orchestration layer) so the harvest logic (below) can
-  // read it after the run without coupling it to the defaultExecuteDeps boundary.
+  // read it after the run without coupling it to the createDefaultE2eExecuteDeps boundary.
   // Best-effort: if mkdtempSync fails (e.g. no /tmp space), we skip capture gracefully.
   let failureCaptureDir: string | undefined;
   try { failureCaptureDir = mkdtempSync(join(tmpdir(), "qa-fail-")); } catch { /* no-op */ }
 
   // W6: the cleanup try is opened HERE — immediately after the dir is minted and BEFORE the
   // runSuite await — so the finally's rmSync also runs when deps.runSuite REJECTS (a spawn error),
-  // not only on the return paths below. Previously the await sat outside this try and a reject
-  // escaped before cleanup, leaking the temp dir.
+  // not only on the return paths below. An await sitting outside this try would let a reject
+  // escape before cleanup, leaking the temp dir.
   try {
   const runPromise = deps.runSuite({
     dir: specDir,
@@ -249,27 +295,27 @@ export async function runE2E(
   });
 
   // Race the suite against timeout and operator cancel at the orchestration level
-  // (defense in depth: defaultExecuteDeps also SIGKILLs the process tree on both —
+  // (defense in depth: createDefaultE2eExecuteDeps also kills the process tree on both —
   // this catch-all covers stubbed runners and edge cases). A `ran: false` output
   // routes through the crashed-runner branch below → infra-error, NEVER a test
   // failure and never a silent pass.
-  const timeoutMs = opts.timeoutMs ?? e2eTimeoutMs();
-  const timedOut: RunOutput = { report: {}, logs: `playwright runner timed out after ${timeoutMs}ms — killed`, ran: false };
-  const abortedOut: RunOutput = { report: {}, logs: "playwright runner aborted by operator cancel — killed", ran: false };
+  const timeoutMs = opts.timeoutMs ?? deps.defaultTimeoutMs ?? DEFAULT_E2E_TIMEOUT_MS;
+  const timedOut: E2eRunOutput = { report: {}, logs: `playwright runner timed out after ${timeoutMs}ms — killed`, ran: false };
+  const abortedOut: E2eRunOutput = { report: {}, logs: "playwright runner aborted by operator cancel — killed", ran: false };
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
-  const racers: Array<Promise<RunOutput>> = [
+  const racers: Array<Promise<E2eRunOutput>> = [
     runPromise,
-    new Promise<RunOutput>((resolve) => { timer = setTimeout(() => resolve(timedOut), timeoutMs); }),
+    new Promise<E2eRunOutput>((resolve) => { timer = setTimeout(() => resolve(timedOut), timeoutMs); }),
   ];
   if (opts.signal) {
-    racers.push(new Promise<RunOutput>((resolve) => {
+    racers.push(new Promise<E2eRunOutput>((resolve) => {
       onAbort = () => resolve(abortedOut);
       opts.signal!.addEventListener("abort", onAbort, { once: true });
     }));
   }
 
-  let out: RunOutput;
+  let out: E2eRunOutput;
   try {
     out = await Promise.race(racers);
   } finally {
@@ -278,11 +324,14 @@ export async function runE2E(
   }
   const { report, logs, ran } = out;
 
-  if (containsSecrets(logs)) {
+  // Single sanitizeText pass: a separate containsSecrets() pre-check is redundant with this SAME
+  // detection result (mirrors code-execution.runner.ts's own AMENDMENT-1 simplification) — the warn
+  // fires under the exact same condition as before, just derived from one call instead of two.
+  const sanitized = sanitizeText(logs);
+  if (sanitized.detection.redacted) {
     console.warn("[sanitizer] Secrets detected in E2E execution logs — redacting before publish");
   }
-  const sanitized = sanitizeText(logs);
-  recordAudit(opts.namespace, sanitized.detection);
+  deps.recordAudit?.(opts.namespace, sanitized.detection);
 
   // The temp capture dir is removed on EVERY exit path — the early infra-error returns below, the
   // main return, a throw from the harvest, AND a runSuite REJECT (W6) — via the finally at the end.
@@ -396,7 +445,7 @@ export async function runE2E(
   }
 
   // Cast to QaCase[] — the harvest above already wrote failureDom onto the runtime objects;
-  // this cast makes the return type correct for QaRunResult.cases.
+  // this cast makes the return type correct for E2eRunResult.cases.
   const qaCases = parsed.cases as QaCase[];
 
   return {
@@ -547,52 +596,55 @@ export function matchFailureDumps(caseName: string, dumps: FailureDump[]): Failu
   return candidates[0]!;
 }
 
-// Default runner: runs Playwright in the repo's `e2e/` project (with its own
-// config/fixtures) and the JSON reporter. Playwright is not a dependency of this
-// template (it would pull in browsers): it lives in the environment where the
-// service runs (the orchestrator image is based on the Playwright image).
+// Runs the repo's `e2e/` project (with its own config/fixtures) with the JSON reporter. Playwright is
+// not a dependency of this template (it would pull in browsers): it lives in the environment where
+// the service runs (the orchestrator image is based on the Playwright image).
 // PW_BASE_URL points to DEV; PW_NAMESPACE is the run's data prefix (read by the fixtures).
 // Orphan-data cleanup: runs ONLY cleanup.spec.ts with PW_CLEANUP=1 and the interrupted
 // run's namespace, so a crashed run's namespaced test data is deleted before the next
 // run. Best-effort: it never throws and never blocks the new run (failures are warnings).
-export interface CleanupDeps {
+export interface E2eCleanupDeps {
   runCleanup(args: { dir: string; baseUrl: string; namespace: string; testIdAttribute?: string; signal?: AbortSignal; timeoutMs?: number }): Promise<void>;
 }
 
-export const defaultCleanupDeps: CleanupDeps = {
-  runCleanup: ({ dir, baseUrl, namespace, testIdAttribute, signal, timeoutMs }) =>
-    new Promise((resolve) => {
-      const child = spawn("npx", ["playwright", "test", "cleanup.spec.ts", "--reporter=line"], {
-        cwd: dir,
-        // Agent-written specs run here: scrub the orchestrator's secrets (GITHUB_TOKEN etc.)
-        // while keeping the app's DEV_* login creds the fixtures need.
-        env: { ...scrubEnv({ extraAllowed: /^DEV_/ }), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PW_CLEANUP: "1", ...(testIdAttribute ? { PW_TEST_ID_ATTRIBUTE: testIdAttribute } : {}) },
-        detached: true, // own process group → killTree can reap browser grandchildren
-      });
-      let settled = false;
-      const settle = () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        if (onAbort) signal?.removeEventListener("abort", onAbort);
-        resolve(); // best-effort: cleanup never throws and never blocks the next run
-      };
-      // Even best-effort cleanup must not wedge the sequential queue: kill the tree
-      // on timeout/cancel and move on (orphan data is reaped by a later run).
-      const ms = timeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS;
-      const timer = setTimeout(() => {
-        console.warn(`[qa] orphan-data cleanup timed out after ${ms}ms — killed (best-effort, continuing)`);
-        killTree(child);
-        settle();
-      }, ms);
-      const onAbort = signal
-        ? () => { killTree(child); settle(); }
-        : undefined;
-      if (onAbort) signal!.addEventListener("abort", onAbort, { once: true });
-      child.on("error", () => settle());
-      child.on("close", () => settle());
-    }),
-};
+// FACTORY (not a plain constant) because `processKill` is injected (mirrors
+// createDefaultCodeExecuteDeps's own factory shape). Defaults to a fresh ProcessKillAdapter.
+export function createDefaultE2eCleanupDeps(processKill: ProcessKillPort = new ProcessKillAdapter()): E2eCleanupDeps {
+  return {
+    runCleanup: ({ dir, baseUrl, namespace, testIdAttribute, signal, timeoutMs }) =>
+      new Promise((resolve) => {
+        const child = spawn("npx", ["playwright", "test", "cleanup.spec.ts", "--reporter=line"], {
+          cwd: dir,
+          // Agent-written specs run here: scrub the orchestrator's secrets (GITHUB_TOKEN etc.)
+          // while keeping the app's DEV_* login creds the fixtures need.
+          env: { ...scrubEnv({ extraAllowed: /^DEV_/ }), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PW_CLEANUP: "1", ...(testIdAttribute ? { PW_TEST_ID_ATTRIBUTE: testIdAttribute } : {}) },
+          detached: true, // own process group → processKill.killTree can reap browser grandchildren
+        });
+        let settled = false;
+        const settle = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (onAbort) signal?.removeEventListener("abort", onAbort);
+          resolve(); // best-effort: cleanup never throws and never blocks the next run
+        };
+        // Even best-effort cleanup must not wedge the sequential queue: kill the tree
+        // on timeout/cancel and move on (orphan data is reaped by a later run).
+        const ms = timeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS;
+        const timer = setTimeout(() => {
+          console.warn(`[qa] orphan-data cleanup timed out after ${ms}ms — killed (best-effort, continuing)`);
+          processKill.killTree(child);
+          settle();
+        }, ms);
+        const onAbort = signal
+          ? () => { processKill.killTree(child); settle(); }
+          : undefined;
+        if (onAbort) signal!.addEventListener("abort", onAbort, { once: true });
+        child.on("error", () => settle());
+        child.on("close", () => settle());
+      }),
+  };
+}
 
 // A tiny Playwright reporter (CJS, no imports) that emits one NDJSON line per test
 // lifecycle event to stdout. Written to a temp dir at run time and passed by
@@ -632,84 +684,97 @@ export function playwrightArgs(reporterPath: string, project?: string, specFiles
   return args;
 }
 
-export const defaultExecuteDeps: ExecuteDeps = {
-  runSuite: ({ dir, baseUrl, namespace, testIdAttribute, faultInject, project, specFiles, signal, timeoutMs, onEvent, failureCaptureDir }) =>
-    new Promise((resolve, reject) => {
-      const work = mkdtempSync(join(tmpdir(), "qa-pw-"));
-      const reporterPath = join(work, "qa-stream-reporter.cjs");
-      const jsonPath = join(work, "report.json");
-      writeFileSync(reporterPath, STREAM_REPORTER);
+// FACTORY (not a plain constant) because both `processKill` AND the two env-derived timeout values
+// (defaultTimeoutMs, actionTimeoutMs) are injected — mirrors createDefaultCodeExecuteDeps's own
+// factory shape (this file's header, differences #1 and #2). The composition-root shell resolves
+// `e2eTimeoutMs(process.env)` and reads `process.env.PW_ACTION_TIMEOUT_MS` ONCE per composition and
+// passes both here — qa-engine/src never reads process.env directly.
+export function createDefaultE2eExecuteDeps(
+  processKill: ProcessKillPort = new ProcessKillAdapter(),
+  defaultTimeoutMs: number = DEFAULT_E2E_TIMEOUT_MS,
+  actionTimeoutMs?: string,
+): E2eExecuteDeps {
+  return {
+    defaultTimeoutMs,
+    runSuite: ({ dir, baseUrl, namespace, testIdAttribute, faultInject, project, specFiles, signal, timeoutMs, onEvent, failureCaptureDir }) =>
+      new Promise((resolve, reject) => {
+        const work = mkdtempSync(join(tmpdir(), "qa-pw-"));
+        const reporterPath = join(work, "qa-stream-reporter.cjs");
+        const jsonPath = join(work, "report.json");
+        writeFileSync(reporterPath, STREAM_REPORTER);
 
-      // JSON → file (authoritative, via PLAYWRIGHT_JSON_OUTPUT_NAME); NDJSON → stdout
-      // (live feed). The two reporters never collide on stdout.
-      const child = spawn("npx", playwrightArgs(reporterPath, project, specFiles), {
-        cwd: dir,
-        // Agent-written specs are untrusted code: scrub orchestrator secrets, keep DEV_* creds.
-        // QA_FAILURE_CAPTURE_DIR: the qa-failure-capture afterEach fixture writes per-case aria
-        // snapshot dumps here on failure; the orchestrator harvests them post-run to populate
-        // QaCase.failureDom for the fix-loop grounding prompt.
-        // PW_TEST_ID_ATTRIBUTE: threads the configured testIdAttribute into the runner so
-        // playwright.config.ts resolves getByTestId correctly for the app's convention.
-        // PW_ACTION_TIMEOUT_MS: optional per-target override of the seed's action auto-wait
-        // bound (default 8000) so a slower DEV can widen it without editing the seed config.
-        env: { ...scrubEnv({ extraAllowed: /^DEV_/ }), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonPath, ...(testIdAttribute ? { PW_TEST_ID_ATTRIBUTE: testIdAttribute } : {}), ...(process.env.PW_ACTION_TIMEOUT_MS ? { PW_ACTION_TIMEOUT_MS: process.env.PW_ACTION_TIMEOUT_MS } : {}), ...(faultInject ? { QA_FAULT_INJECT: "1" } : {}), ...(failureCaptureDir ? { QA_FAILURE_CAPTURE_DIR: failureCaptureDir } : {}) },
-        detached: true, // own process group → killTree reaps npx/playwright/browser grandchildren
-      });
+        // JSON → file (authoritative, via PLAYWRIGHT_JSON_OUTPUT_NAME); NDJSON → stdout
+        // (live feed). The two reporters never collide on stdout.
+        const child = spawn("npx", playwrightArgs(reporterPath, project, specFiles), {
+          cwd: dir,
+          // Agent-written specs are untrusted code: scrub orchestrator secrets, keep DEV_* creds.
+          // QA_FAILURE_CAPTURE_DIR: the qa-failure-capture afterEach fixture writes per-case aria
+          // snapshot dumps here on failure; the orchestrator harvests them post-run to populate
+          // QaCase.failureDom for the fix-loop grounding prompt.
+          // PW_TEST_ID_ATTRIBUTE: threads the configured testIdAttribute into the runner so
+          // playwright.config.ts resolves getByTestId correctly for the app's convention.
+          // PW_ACTION_TIMEOUT_MS: optional per-target override of the seed's action auto-wait
+          // bound (default 8000) so a slower DEV can widen it without editing the seed config —
+          // injected from the composition root (env-read confinement, this file's header).
+          env: { ...scrubEnv({ extraAllowed: /^DEV_/ }), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonPath, ...(testIdAttribute ? { PW_TEST_ID_ATTRIBUTE: testIdAttribute } : {}), ...(actionTimeoutMs ? { PW_ACTION_TIMEOUT_MS: actionTimeoutMs } : {}), ...(faultInject ? { QA_FAULT_INJECT: "1" } : {}), ...(failureCaptureDir ? { QA_FAILURE_CAPTURE_DIR: failureCaptureDir } : {}) },
+          detached: true, // own process group → processKill.killTree reaps npx/playwright/browser grandchildren
+        });
 
-      let stderr = "";
-      let buf = "";
-      let settled = false;
-      const settle = (fn: () => void) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        if (onAbort) signal?.removeEventListener("abort", onAbort);
-        fn();
-      };
+        let stderr = "";
+        let buf = "";
+        let settled = false;
+        const settle = (fn: () => void) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (onAbort) signal?.removeEventListener("abort", onAbort);
+          fn();
+        };
 
-      // Timeout guard: a hung browser must not block the sequential queue forever.
-      // Kill the whole PROCESS TREE and resolve `ran: false` → classified infra-error
-      // by runE2E (a wedged runner, never a test failure and never a pass).
-      const ms = timeoutMs ?? e2eTimeoutMs();
-      const timer = setTimeout(() => {
-        killTree(child);
-        settle(() => resolve({ report: {}, logs: `playwright runner timed out after ${ms}ms — killed\n${stderr}`, ran: false }));
-      }, ms);
+        // Timeout guard: a hung browser must not block the sequential queue forever.
+        // Kill the whole PROCESS TREE and resolve `ran: false` → classified infra-error
+        // by runE2E (a wedged runner, never a test failure and never a pass).
+        const ms = timeoutMs ?? defaultTimeoutMs;
+        const timer = setTimeout(() => {
+          processKill.killTree(child);
+          settle(() => resolve({ report: {}, logs: `playwright runner timed out after ${ms}ms — killed\n${stderr}`, ran: false }));
+        }, ms);
 
-      // Operator cancel: the pipeline's AbortSignal fires → kill the suite immediately.
-      const onAbort = signal
-        ? () => {
-            killTree(child);
-            settle(() => resolve({ report: {}, logs: `playwright runner aborted by operator cancel — killed\n${stderr}`, ran: false }));
+        // Operator cancel: the pipeline's AbortSignal fires → kill the suite immediately.
+        const onAbort = signal
+          ? () => {
+              processKill.killTree(child);
+              settle(() => resolve({ report: {}, logs: `playwright runner aborted by operator cancel — killed\n${stderr}`, ran: false }));
+            }
+          : undefined;
+        if (onAbort) signal!.addEventListener("abort", onAbort, { once: true });
+
+        child.stdout.on("data", (d) => {
+          buf += String(d);
+          let nl: number;
+          while ((nl = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, nl);
+            buf = buf.slice(nl + 1);
+            const ev = parseStreamEvent(line);
+            if (ev && onEvent) { try { onEvent(ev); } catch { /* advisory: never let the feed break the run */ } }
           }
-        : undefined;
-      if (onAbort) signal!.addEventListener("abort", onAbort, { once: true });
-
-      child.stdout.on("data", (d) => {
-        buf += String(d);
-        let nl: number;
-        while ((nl = buf.indexOf("\n")) >= 0) {
-          const line = buf.slice(0, nl);
-          buf = buf.slice(nl + 1);
-          const ev = parseStreamEvent(line);
-          if (ev && onEvent) { try { onEvent(ev); } catch { /* advisory: never let the feed break the run */ } }
-        }
-      });
-      child.stderr.on("data", (d) => (stderr += d));
-      child.on("error", (err) => { try { rmSync(work, { recursive: true, force: true }); } catch { /* best-effort */ } settle(() => reject(err)); });
-      child.on("close", (code) => {
-        let report: unknown = {};
-        let ran = false;
-        try {
-          report = JSON.parse(readFileSync(jsonPath, "utf8"));
-          ran = true; // we got a JSON report file (whatever its verdict)
-        } catch {
-          // No parseable JSON report file → the runner crashed before reporting,
-          // rather than reporting a test failure. `ran:false` forces infra-error.
-          ran = false;
-        }
-        try { rmSync(work, { recursive: true, force: true }); } catch { /* best-effort */ }
-        settle(() => resolve({ report, logs: stderr, ran, exitCode: code ?? undefined }));
-      });
-    }),
-};
+        });
+        child.stderr.on("data", (d) => (stderr += d));
+        child.on("error", (err) => { try { rmSync(work, { recursive: true, force: true }); } catch { /* best-effort */ } settle(() => reject(err)); });
+        child.on("close", (code) => {
+          let report: unknown = {};
+          let ran = false;
+          try {
+            report = JSON.parse(readFileSync(jsonPath, "utf8"));
+            ran = true; // we got a JSON report file (whatever its verdict)
+          } catch {
+            // No parseable JSON report file → the runner crashed before reporting,
+            // rather than reporting a test failure. `ran:false` forces infra-error.
+            ran = false;
+          }
+          try { rmSync(work, { recursive: true, force: true }); } catch { /* best-effort */ }
+          settle(() => resolve({ report, logs: stderr, ran, exitCode: code ?? undefined }));
+        });
+      }),
+  };
+}
