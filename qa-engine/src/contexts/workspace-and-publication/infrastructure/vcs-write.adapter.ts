@@ -120,7 +120,24 @@ export class VcsWriteAdapter implements VcsWritePort {
         await this.git(["restore", "--staged", "--worktree", "--source=HEAD", "--", ...revertedDenylisted], dir);
       }
     }
-    await this.git(["commit", "-m", message], dir);
+    try {
+      await this.git(["commit", "-m", message], dir);
+    } catch (err) {
+      // ALSO (judgment-day round 2, both judges): an all-tamper diff (every staged change was
+      // denylisted and reverted above) leaves nothing for `git commit` to commit — the raw git
+      // error ("nothing to commit, working tree clean") otherwise propagates all the way to
+      // runner.ts's top-level catch as "unexpected internal error (not infrastructure —
+      // investigate)", misdirecting triage toward a code bug instead of naming what actually
+      // happened. Enrich the message (never swallow it) only when we know revertedDenylisted is
+      // the reason — an unrelated commit failure (e.g. a genuine git error) still surfaces as-is.
+      if (revertedDenylisted.length > 0) {
+        const original = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `commit blocked: every staged change was denylisted by the tracked-file security guard and reverted (${revertedDenylisted.join(", ")}) — nothing legitimate remained to commit. Original git error: ${original}`,
+        );
+      }
+      throw err;
+    }
     return { revertedDenylisted };
   }
 
