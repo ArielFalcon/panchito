@@ -137,6 +137,29 @@ test("RE-1 reviewer-corrections: with NO grounding, keep the live-DOM re-verify 
   );
 });
 
+// SECURITY CRITICAL: the reviewer agent has read/bash/glob on the ACTUAL repo files, not just the
+// pre-sanitized diff the orchestrator assembles — a secret it reads and quotes in a rejection
+// rationale must never reach a second model call unredacted. Every sibling field (diff, commit
+// body, guidance, DOM snapshot, classificationReason) already runs through sanitizeText(..., "model");
+// reviewCorrections was the one gap.
+const SECRET_IN_REVIEW_CORRECTION = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890ABCDEFGH";
+
+test("SECURITY: a secret quoted in a reviewCorrection is redacted before reaching the generation prompt", () => {
+  const text = buildPrompt(mkInput({
+    reviewCorrections: [`found ${SECRET_IN_REVIEW_CORRECTION} while reading .env, quoting it here for context`],
+  }));
+  assert.ok(!text.includes(SECRET_IN_REVIEW_CORRECTION), "a secret in a reviewer correction must never reach the model prompt unredacted");
+  assert.match(text, /\[REDACTED\]/, "the redaction placeholder must appear in its place");
+});
+
+test("SECURITY: a secret quoted in a reviewCorrection is redacted in the followup (continuation-session) prompt too", () => {
+  const text = buildFollowupPrompt(mkInput({
+    reviewCorrections: [`found ${SECRET_IN_REVIEW_CORRECTION} while reading .env`],
+  }));
+  assert.ok(!text.includes(SECRET_IN_REVIEW_CORRECTION), "a secret in a reviewer correction must never reach the followup prompt unredacted");
+  assert.match(text, /\[REDACTED\]/, "the redaction placeholder must appear in its place");
+});
+
 // ── workingRules: a DOM snapshot (no pack) is still grounding → suppress the explore-first mandate ──
 
 test("RE-1 working-rules: domSnapshot present without a pack suppresses the explore-first mandate", () => {

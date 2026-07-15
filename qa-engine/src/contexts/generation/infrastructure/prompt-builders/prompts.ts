@@ -754,7 +754,11 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
           ? `Re-verify against the injected grounding above (Context Pack / DOM tree) before editing — do NOT re-navigate a route it already covers. ${GROUNDING_UNCOVERED_ESCAPE}`
           : `Where a fix concerns a selector or an assertion, re-verify it against the live DOM with the Playwright MCP before editing.`,
         ``,
-        ...input.reviewCorrections.map((c) => `- ${c}`),
+        // SECURITY: the reviewer has read/bash/glob on the ACTUAL repo files (not just the
+        // pre-sanitized diff this module assembles) — a secret it quotes in a rejection rationale
+        // must be redacted before this regen call, matching every sibling field in this function
+        // (diff, commit body, guidance, DOM snapshot, classificationReason).
+        ...input.reviewCorrections.map((c) => `- ${sanitizeText(c, "model").text}`),
         ``,
       ].join("\n")
     : "";
@@ -1057,7 +1061,9 @@ export function buildFollowupPrompt(input: OpencodeRunInput): string {
     parts.push(
       `## Apply reviewer corrections (HIGHEST priority)`,
       `An independent reviewer REJECTED the previous specs. Fix EACH item; do NOT rewrite specs not flagged.`,
-      ...input.reviewCorrections.map((c) => `- ${c}`),
+      // SECURITY: same sanitization as buildPromptAssembled's own reviewContent section above — the
+      // reviewer's rejection text can carry a secret it read from the actual repo files.
+      ...input.reviewCorrections.map((c) => `- ${sanitizeText(c, "model").text}`),
       ``,
     );
   }

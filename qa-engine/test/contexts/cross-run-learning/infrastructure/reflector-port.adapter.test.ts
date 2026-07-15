@@ -88,6 +88,37 @@ test("reflect() opens a 'reflector' session, saves a candidate/low rule, and bac
   assert.equal(backfilled?.refl.rootCause, "css class renamed by a refactor");
 });
 
+// SECURITY CRITICAL: gateSignals.reviewerCorrections is agent-authored text (the reviewer has
+// read/bash/glob on the actual repo files) fed straight into buildReflectionPrompt — a secret it
+// quotes in a rejection rationale must be redacted before reaching this second model call, exactly
+// like every sibling field the prompt builders already sanitize.
+const SECRET_IN_REVIEWER_CORRECTION = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890ABCDEFGH";
+
+test("SECURITY: a secret quoted in gateSignals.reviewerCorrections is redacted before reaching the reflection prompt", async () => {
+  let capturedPrompt: string | undefined;
+  const runtime = fakeRuntime({
+    prompt: async (text) => {
+      capturedPrompt = text;
+      return { output: validReflectionJson };
+    },
+  });
+  const repo = fakeRepo();
+  const adapter = new ReflectorPortAdapter({ runtime, repo, backfill: () => {}, cwd: "/mirror/app", app: "app" });
+
+  const input: ReflectionInput = {
+    ...baseInput,
+    gateSignals: { ...baseInput.gateSignals, reviewerCorrections: [`found ${SECRET_IN_REVIEWER_CORRECTION} while reading .env, quoting it here`] },
+  };
+  await adapter.reflect(input);
+
+  assert.ok(capturedPrompt, "expected the reflection prompt to be captured");
+  assert.ok(
+    !capturedPrompt!.includes(SECRET_IN_REVIEWER_CORRECTION),
+    "a secret quoted in a reviewer correction must never reach the reflection prompt unredacted",
+  );
+  assert.match(capturedPrompt!, /\[REDACTED\]/, "the redaction placeholder must appear in its place");
+});
+
 test("reflect() never threads initialStatus — structural ADR-3 pin", async () => {
   let savedRule: LearningRule | undefined;
   const runtime = fakeRuntime({});
