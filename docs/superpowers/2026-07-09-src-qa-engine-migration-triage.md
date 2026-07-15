@@ -273,10 +273,15 @@ small pure ports → domain logic → heavy leaf-IO):
   DONE: ~~`validate.ts`~~/~~`code-validate.ts`~~/~~`metadata.ts`~~ **DONE**
   (`sdd/migration-tier-4b`, commit `038a8a3` — body-moved into qa-engine's
   `static-gate.checks.ts`; decisions doc
-  `2026-07-12-migration-tier-4b-decisions.md`). Remaining **DEFER-Tier-4**:
-  `playwright-report.ts` (revisit: `execute.ts` decomposition, tier-4d),
-  `reexplore.ts` (revisit: `opencode-client.ts` decomposition, tier-4c),
-  `learning/learning-rule.ts` (DEFER D8, learning-store duality).
+  `2026-07-12-migration-tier-4b-decisions.md`). ~~`playwright-report.ts`~~
+  **DONE** — migrated alongside `execute.ts`'s own decomposition, Slice 1a
+  (`sdd/migration-tier-4d`, commit `59280ae`; decisions doc
+  `2026-07-15-migration-tier-4d-decisions.md`). ~~`reexplore.ts`~~ **DONE**
+  (stale entry, corrected here) — it was actually migrated in
+  `sdd/migration-tier-4c` Slice 3 alongside the SSE lifecycle split (commit
+  `e5e9645`); that tier's own closeout pass over this doc never updated this
+  line. Remaining **DEFER-Tier-4**: `learning/learning-rule.ts` (DEFER D8,
+  learning-store duality).
 - **Tier 4 — heavy leaf-IO, last**: ~~`repo-mirror.ts` (write side)~~,
   ~~`github.ts` (adapters exist; replace closures)~~, ~~`setup.ts`~~ — all
   three **DONE** (`sdd/migration-tier-4a`, commits `52eb2a2`/`096e42c`/
@@ -303,13 +308,26 @@ small pure ports → domain logic → heavy leaf-IO):
   decisions doc. `opencode-client.ts` decomposed into a thin raw-SDK-closure
   shell survivor — session transport/SSE policy, resilience, and prompt
   builders all migrated to qa-engine (see the decisions doc for the full
-  two-tier split). Remaining: `execute.ts`, `src/agent-runtime/*` (blocked on
-  the DECIDE above), `verdict-parse.ts`/`verdict-validate.ts` (open design
-  question, explicitly descope-with-record in tier-4c — see the Tier-1
-  deferred bullet above). Final step: dissolve `rewritten-engine-factory.ts`
-  + `run-history-sqlite-adapter.ts` into the composition root and retire the
-  REMAINING (c)/(d)/(e) blocks of `seam-parity.contract.test.ts` — its (a)/(b)
-  blocks (`OpencodeRunInput`/`ReviewInput`) already retired in tier-4c Slice 6.
+  two-tier split). Remaining: `src/agent-runtime/*` (DECIDED already — see §5
+  item 1: declared the permanent survivor), `verdict-parse.ts`/
+  `verdict-validate.ts` (open design question, explicitly descope-with-record
+  in tier-4c — see the Tier-1 deferred bullet above). ~~`execute.ts`~~ **DONE**
+  — body-moved into `qa-engine/.../test-execution/infrastructure/
+  e2e-execution.runner.ts` (`sdd/migration-tier-4d` Slice 1b, commit
+  `b7300c4`), retiring seam-parity's (c) EXECUTION block in the SAME atomic
+  commit (block (c)'s own coverage re-forms qa-engine-internally, no src/
+  import — see `qa-engine/test/contexts/qa-run-orchestration/infrastructure/
+  bridges/execution-port.adapter.test.ts`). This doc's own "final step: dissolve
+  `rewritten-engine-factory.ts` + `run-history-sqlite-adapter.ts`" framing was
+  WRONG — the design corrected it (migration-tier-4d gate finding): `arch:check`'s
+  one-way rule (qa-engine never imports src/) makes dissolving either
+  architecturally impossible, not merely undesirable. Both are instead
+  DECLARED permanent shell survivors (D-4d-1/D-4d-2, `sdd/migration-tier-4d`
+  Slice 3; decisions doc `2026-07-15-migration-tier-4d-decisions.md`), so the
+  (d)/(e) blocks of `seam-parity.contract.test.ts` are PERMANENT
+  boundary-contract tests for those two declared survivors, not migration
+  debt pending a future move — its (a)/(b) blocks (`OpencodeRunInput`/
+  `ReviewInput`) were retired in tier-4c Slice 6.
 
 Gray-zone calls to make explicit: `src/server/history.ts` (coexists with
 qa-engine's native `SqliteLearningRepository` — two learning stores in one
@@ -317,15 +335,20 @@ composition), `activity-mapper.ts`/`agent-activity.ts` (engine telemetry vs
 control-plane plumbing — lean shell), `value-report.ts`, `deploy-gate.ts`
 placement, `config-loader.ts` composition-mapping tension.
 
-**Hard sequencing constraints (updated post-tier-4c)**: `seam-parity.contract.test.ts`
+**Hard sequencing constraints (updated post-tier-4d, RESOLVED)**: `seam-parity.contract.test.ts`
 originally pinned `execute.ts`, `opencode-client.ts`, `run-history-sqlite-adapter.ts`,
 `rewritten-engine-factory.ts` by literal relative path and full field lists,
 requiring all four to migrate LAST in lockstep with the test. `opencode-client.ts`
-is now decomposed (tier-4c) and its own pin — the (a) GENERATION PROMPT / (b)
-REVIEW blocks (`OpencodeRunInput`/`ReviewInput`) — retired in Slice 6; the
-remaining three (`execute.ts`, `run-history-sqlite-adapter.ts`,
-`rewritten-engine-factory.ts`) still migrate LAST, each move in lockstep with
-the surviving (c)/(d)/(e) blocks.
+was decomposed (tier-4c) and its own pin — the (a) GENERATION PROMPT / (b)
+REVIEW blocks (`OpencodeRunInput`/`ReviewInput`) — retired in Slice 6.
+`execute.ts` was body-moved (tier-4d Slice 1b), retiring the (c) EXECUTION
+block in the same atomic commit. `run-history-sqlite-adapter.ts` and
+`rewritten-engine-factory.ts` never migrate at all — both are DECLARED
+permanent shell survivors (D-4d-1/D-4d-2) — so the (d)/(e) blocks they anchor
+are PERMANENT boundary-contract tests, not a lockstep-migration pin waiting on
+a future move. The sequencing constraint this paragraph named is therefore
+fully discharged: nothing left in `seam-parity.contract.test.ts` is "migrate
+LAST" debt.
 `qa-engine/tsconfig.parity.json` is the registry of every boundary-straddling
 file; anything crossing the boundary must be listed there or it is typechecked
 by nothing.
