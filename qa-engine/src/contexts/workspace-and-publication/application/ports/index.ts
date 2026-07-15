@@ -21,7 +21,13 @@ export interface VcsWritePort {
   // deliberately independent of the runtime WriteConfinementAdapter.enforce() step (RunQaUseCase
   // wraps that call in a documented fail-open try/catch, D-P0b) — a modified-tracked stray must never
   // reach a commit even when confinement never ran or itself threw.
-  commit(dir: string, message: string, files: readonly string[], denyModifiedTracked?: (path: string) => boolean): Promise<void>;
+  //
+  // judgment-day round 2 (FIX 3, HIGH): the return value carries `revertedDenylisted` (always an
+  // array, never undefined) so a reverted tamper is never silent — the caller threads it into the
+  // SAME gateSignals.confinement accumulator ConfinementPort.enforce() already feeds, and the
+  // adapter itself ALSO logs loudly at the moment of revert (defense in depth: a trace exists even
+  // if some future caller forgets to read the return value).
+  commit(dir: string, message: string, files: readonly string[], denyModifiedTracked?: (path: string) => boolean): Promise<{ revertedDenylisted: string[] }>;
   push(dir: string, branch: string): Promise<void>;
   // git checkout -B <branch> — (re)creates the publish branch at the mirror's current HEAD.
   checkoutBranch(dir: string, branch: string): Promise<void>;

@@ -523,7 +523,17 @@ export interface PublicationPort {
     // documented e2eChanged omission above — no fabricated value here, only the type widened so a
     // FUTURE caller that DOES have one can thread it). Absent -> no continuation reference rendered.
     parentRunId?: string;
-  }): Promise<{ outcome: string }>;
+  }): Promise<{
+    outcome: string;
+    // judgment-day round 2 (FIX 3, HIGH): surfaces the vcs-write tracked-file denylist guard's own
+    // revert (VcsWritePort.commit's `revertedDenylisted`) up through the "pr" route so the caller
+    // (RunQaUseCase) can merge it into the SAME gateSignals.confinement accumulator
+    // ConfinementPort.enforce() already feeds — a reverted supply-chain tamper must never be visible
+    // only in a container log. OPTIONAL: absent for every route that never reaches "pr" (issue/
+    // shadow/quarantine/noop) and for every pre-existing caller/stub/test, matching this port's own
+    // established backward-compat precedent.
+    revertedDenylisted?: string[];
+  }>;
 }
 // W3 fix (F1, dual-judge round): LearningPort.retrieve() previously returned bare trigger strings
 // (readonly string[]), which starved BOTH prompt renderers of the fields legacy's own LearningRule

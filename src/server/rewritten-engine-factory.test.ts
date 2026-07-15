@@ -602,7 +602,10 @@ test("buildVcsPublish (e2e target): changes under e2e/ -> checkout -B, add, comm
 
   const result = await vcsWrite.publish({ mirrorDir: "/mirrors/org/app", branch: "qa-bot/abc1234", sha: "abc1234" });
 
-  assert.deepEqual(result, { changed: true });
+  // sdd/security-hardening judgment-day round 2 (FIX 3): publish() now also surfaces
+  // revertedDenylisted (always an array, never absent, once a commit actually ran) so the caller
+  // can thread a reverted tamper into gateSignals.confinement — see VcsPublishCollaborator's own doc.
+  assert.deepEqual(result, { changed: true, revertedDenylisted: [] });
   // sdd/security-hardening judgment-day round 2 (FIX 2): the tracked-file denylist guard is now
   // wired for EVERY target (not just isCode — see buildVcsPublish's own denyModifiedTracked doc), so
   // commit() always issues its own `git diff --cached --name-status -M` before committing, even on
@@ -714,7 +717,7 @@ test("buildVcsPublish (code target): changes anywhere -> stages the whole tree p
 
   const result = await vcsWrite.publish({ mirrorDir: "/mirrors/org/panchito", branch: "qa-bot/def5678", sha: "def5678" });
 
-  assert.deepEqual(result, { changed: true });
+  assert.deepEqual(result, { changed: true, revertedDenylisted: [] });
   assert.deepEqual(calls[0], ["status", "--porcelain", "--", "."], "code target's status check scopes to '.', not 'e2e' (the whole tree, per publishCode's own CODE_ADD)");
   assert.deepEqual(calls[2], ["add", "--", "."], "code target stages the whole tree, matching legacy's publishCode(mirrorDir, ...) — never just e2e/");
 });

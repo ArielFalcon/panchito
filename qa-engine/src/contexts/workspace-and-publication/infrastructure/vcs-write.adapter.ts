@@ -44,8 +44,24 @@
 // (no `--diff-filter` at all). A rename/copy is parsed as a UNIT (both the old and new side) so
 // checking either side and reverting BOTH avoids orphaning the legitimate origin as a stray staged
 // deletion — the exact bug class `WriteConfinementService.revertUnit` already exists to prevent.
+//
+// judgment-day round 2 (FIX 3, HIGH, both judges): a reverted tamper used to be completely silent —
+// commit() returned Promise<void>, so a run could reach verdict:pass and auto-merge a PR while a
+// supply-chain tamper attempt was reverted underneath it with ZERO trace in logs, run history, or
+// telemetry. commit() now logs the event loudly (console.error, matching the sibling
+// WriteConfinementAdapter's own fault-isolation logging convention) AND returns the reverted paths
+// so the caller (buildVcsPublish -> PublicationPortAdapter -> RunQaUseCase) can thread them into the
+// SAME gateSignals.confinement accumulator WriteConfinementAdapter.enforce() already feeds — a
+// reviewer must be able to see this from the run record, not just the container log.
 import type { VcsWritePort } from "../application/ports/index.ts";
 import { WriteConfinementService } from "../domain/write-confinement.service.ts";
+
+export interface VcsCommitResult {
+  // Denylisted staged paths reverted before this commit — [] when nothing was denylisted (the
+  // overwhelming common case). Never fabricated: absent `denyModifiedTracked` (no guard wired)
+  // still returns [], never undefined, so callers can always safely read `.length`.
+  revertedDenylisted: string[];
+}
 
 type Git = (args: string[], cwd?: string) => Promise<string>;
 type WriteExcludesFn = (dir: string, patterns: readonly string[]) => void | Promise<void>;
@@ -63,8 +79,9 @@ export class VcsWriteAdapter implements VcsWritePort {
     message: string,
     files: readonly string[],
     denyModifiedTracked?: (path: string) => boolean,
-  ): Promise<void> {
+  ): Promise<VcsCommitResult> {
     await this.git(["add", "--", ...files], dir);
+    let revertedDenylisted: string[] = [];
     if (denyModifiedTracked) {
       // ALL staged paths, regardless of status (A/M/D/T/R/C/…) — see this method's own header for
       // why status-based scoping is the wrong shape here. `-M` forces rename detection deterministically
@@ -90,13 +107,21 @@ export class VcsWriteAdapter implements VcsWritePort {
         if (path.length > 0 && denyModifiedTracked(path)) denied.add(path);
       }
       if (denied.size > 0) {
+        revertedDenylisted = [...denied];
+        // FIX 3: never silent — a reverted supply-chain tamper must leave a trace even before the
+        // caller has a chance to thread it into gateSignals.confinement (e.g. a caller that predates
+        // this fix and never reads the return value at all).
+        console.error(
+          `[qa] vcs-write: a denylisted staged path was detected and reverted before commit: ${revertedDenylisted.join(", ")}`,
+        );
         // Staged-aware AND working-tree revert (matches write-confinement.adapter.ts's own tracked
         // revert exactly) — the tamper must not merely be unstaged (it would resurface on the very
         // next publish attempt), it must be restored to HEAD.
-        await this.git(["restore", "--staged", "--worktree", "--source=HEAD", "--", ...denied], dir);
+        await this.git(["restore", "--staged", "--worktree", "--source=HEAD", "--", ...revertedDenylisted], dir);
       }
     }
     await this.git(["commit", "-m", message], dir);
+    return { revertedDenylisted };
   }
 
   async push(dir: string, branch: string): Promise<void> {

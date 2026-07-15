@@ -64,7 +64,14 @@ export interface ShadowLogCollaborator {
 // false` mirrors that same skip-if-no-changes semantic — publish() must not open a PR when there is
 // nothing to publish (a CLAUDE.md-documented behavior: "Honor the agent's no-op decision").
 export interface VcsPublishCollaborator {
-  publish(input: { mirrorDir: string; branch: string; sha: string }): Promise<{ changed: boolean }>;
+  publish(input: { mirrorDir: string; branch: string; sha: string }): Promise<{
+    changed: boolean;
+    // judgment-day round 2 (FIX 3, HIGH): the tracked-file denylist guard's own revert (see
+    // VcsWritePort.commit's own doc) — threaded straight through to this bridge's own return so
+    // RunQaUseCase can merge it into gateSignals.confinement. OPTIONAL: absent for every
+    // pre-existing collaborator/stub/test, matching this port's own backward-compat precedent.
+    revertedDenylisted?: string[];
+  }>;
 }
 
 // sdd/migration-remediation Slice 4 (D-P1a, publication rendering + tested metadata): the PURE
@@ -222,7 +229,7 @@ export class PublicationPortAdapter implements PublicationPort {
     tested?: { flow?: string; objective?: string }[];
     isCode?: boolean;
     parentRunId?: string;
-  }): Promise<{ outcome: string }> {
+  }): Promise<{ outcome: string; revertedDenylisted?: string[] }> {
     // Audit fix (judgment-day): prefer the REAL per-run decision value when the caller supplies
     // one; fall back to the static composition-time ctx only when absent (backward-compat for
     // pre-existing callers that only ever passed {verdict, cases, logs} — see the port's own doc).
@@ -334,7 +341,13 @@ export class PublicationPortAdapter implements PublicationPort {
           return { outcome: "noop: vcsWrite reported no changes to publish — the suite already covers the change, no PR opened" };
         }
         const pr = await this.deps.pr.openWithAutoMerge(this.ctx.repo, this.ctx.branch, title, prBodyText());
-        return { outcome: `pr: ${pr.url}` };
+        // judgment-day round 2 (FIX 3, HIGH): surface the tracked-file guard's own revert straight
+        // through to this bridge's caller (RunQaUseCase) — see VcsPublishCollaborator's own doc.
+        // Never fabricated: absent/empty stays omitted, matching every other optional field here.
+        return {
+          outcome: `pr: ${pr.url}`,
+          ...(written.revertedDenylisted?.length ? { revertedDenylisted: written.revertedDenylisted } : {}),
+        };
       }
       case "issue": {
         const body = issueBody();

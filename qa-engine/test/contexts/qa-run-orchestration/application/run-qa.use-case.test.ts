@@ -5361,6 +5361,53 @@ test("confinement wiring: successful results across every enforce() call are MER
   assert.deepEqual(persisted?.reverted, ["stray-a.ts", "stray-b.env"], "reverted must be CONCATENATED across calls, not replaced");
 });
 
+// judgment-day round 2 (FIX 3, HIGH, both judges): the vcs-write tracked-file denylist guard
+// (VcsWritePort.commit's own SECOND, independent revert — see that port's header) used to be
+// completely silent to the persisted run record: a reverted supply-chain tamper left zero trace
+// in gateSignals, even though ConfinementPort's OWN reverts are always threaded there. A revert
+// surfaced by PublicationPort.publish()'s "pr" route must merge into the SAME accumulator.
+test("confinement wiring: a reverted denylisted path from PublicationPort.publish() (the vcs-write tracked-file guard) is merged into gateSignals.confinement — never silent (FIX 3)", async () => {
+  const { ports, savedOutcomes } = stubPorts({
+    publish: async () => ({ outcome: "pr: https://example.test/pr/1", revertedDenylisted: ["Dockerfile"] }),
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig }); // no ConfinementPort wired at all
+
+  const out = await useCase.run({ ...baseInput, runId: "confinement-vcswrite-revert-merge" });
+
+  assert.equal(out.decision.verdict, "pass");
+  const persisted = savedOutcomes[0]?.gateSignals.confinement;
+  assert.ok(persisted, "gateSignals.confinement must be populated from the vcs-write revert alone, even with no ConfinementPort ever wired");
+  assert.ok(
+    persisted?.reverted.includes("Dockerfile"),
+    `the vcs-write tracked-file guard's own revert must be visible in gateSignals.confinement — got ${JSON.stringify(persisted)}`,
+  );
+});
+
+test("confinement wiring: a reverted denylisted path from publish() MERGES with prior ConfinementPort.enforce() results, never overwrites them (FIX 3)", async () => {
+  const confinement = makeFakeConfinement(() => ({ strays: 1, dangerous: 0, reverted: ["stray-a.ts"] }));
+  const { ports, savedOutcomes } = stubPorts({
+    publish: async () => ({ outcome: "pr: https://example.test/pr/1", revertedDenylisted: ["Dockerfile"] }),
+  });
+  const useCase = new RunQaUseCase({ ...ports, confinement, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "confinement-vcswrite-revert-merge-with-enforce" });
+
+  const persisted = savedOutcomes[0]?.gateSignals.confinement;
+  assert.ok(persisted?.reverted.includes("stray-a.ts"), "prior enforce() reverts must survive the merge");
+  assert.ok(persisted?.reverted.includes("Dockerfile"), "the publish()-surfaced revert must be added, not replace the existing accumulator");
+});
+
+test("confinement wiring: publish() with no revertedDenylisted (the common case) never fabricates a confinement entry", async () => {
+  const { ports, savedOutcomes } = stubPorts({
+    publish: async () => ({ outcome: "pr: https://example.test/pr/1" }),
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "confinement-vcswrite-no-revert" });
+
+  assert.equal(savedOutcomes[0]?.gateSignals.confinement, undefined, "no ConfinementPort wired and no revertedDenylisted -> gateSignals.confinement must stay entirely absent");
+});
+
 test("confinement wiring: code target — enforce() receives isCode:true", async () => {
   const calls: Array<{ mirrorDir: string; isCode: boolean }> = [];
   const { ports } = stubPorts();
