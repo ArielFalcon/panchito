@@ -1,7 +1,12 @@
 // test/contexts/workspace-and-publication/infrastructure/vcs-write.adapter.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, unlinkSync, symlinkSync, renameSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { VcsWriteAdapter } from "@contexts/workspace-and-publication/infrastructure/vcs-write.adapter.ts";
+import { WriteConfinementService } from "@contexts/workspace-and-publication/domain/write-confinement.service.ts";
 
 test("commit stages the files and commits with the message", async () => {
   const calls: string[][] = [];
@@ -63,4 +68,135 @@ test("writeExcludes writes gitignore-style patterns to .git/info/exclude (local,
   );
   await adapter.writeExcludes("/m", ["node_modules/", ".qa/coverage/"]);
   assert.deepEqual(writes[0], { dir: "/m", patterns: ["node_modules/", ".qa/coverage/"] });
+});
+
+// ── FIX 1 (sdd/security-hardening, judgment-day round 2, CRITICAL) — real git fixture, commit()'s
+// OWN tracked-file guard, in isolation ──────────────────────────────────────────────────────────
+//
+// These fixtures deliberately do NOT go through buildVcsPublish/CODE_PUBLISH_EXCLUDES (see
+// rewritten-engine-factory.publish-excludes.test.ts's own note on why a "rename INTO a denylisted
+// destination" fixture at that composition level would be shadowed by that file's OWN, separate
+// exclude-file defense for a brand-new path) — this file pins commit()'s diff-parsing correctness
+// directly: a denylisted staged path must be reverted regardless of its git status (M/D/T/R/C),
+// never re-enumerated by status code.
+function initRepo(): string {
+  const repo = mkdtempSync(join(tmpdir(), "qa-vcswrite-"));
+  const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t.com" };
+  const git = (...args: string[]): string => execFileSync("git", args, { cwd: repo, encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git("init", "-q");
+  git("config", "user.email", "t@t.com");
+  git("config", "user.name", "t");
+  return repo;
+}
+
+function realGitFn(repo: string): (args: string[], cwd?: string) => Promise<string> {
+  return async (args, cwd = repo) => {
+    try {
+      return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).toString();
+    } catch (e) {
+      const err = e as { stdout?: string; stderr?: string };
+      throw new Error(`git ${args.join(" ")} failed: ${err.stderr ?? err.stdout ?? String(e)}`);
+    }
+  };
+}
+
+const classifier = new WriteConfinementService();
+const denyModifiedTracked = (path: string): boolean => classifier.isCodeDenied(path);
+
+test("real git fixture: a DELETED tracked denylisted file (D status) is reverted, not committed as a deletion", async () => {
+  const originalDockerfile = "FROM node:24\n";
+  const repo = initRepo();
+  try {
+    writeFileSync(join(repo, "Dockerfile"), originalDockerfile);
+    writeFileSync(join(repo, "legit.ts"), "export const x = 1;\n");
+    execFileSync("git", ["add", "-A"], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
+
+    unlinkSync(join(repo, "Dockerfile"));
+    writeFileSync(join(repo, "legit.ts"), "export const x = 2;\n"); // legitimate control
+
+    const adapter = new VcsWriteAdapter(realGitFn(repo));
+    await adapter.commit(repo, "test(code): automated QA", ["."], denyModifiedTracked);
+
+    assert.equal(readFileSync(join(repo, "Dockerfile"), "utf8"), originalDockerfile, "Dockerfile must be restored, not committed as deleted");
+    const tracked = execFileSync("git", ["ls-tree", "-r", "--name-only", "HEAD"], { cwd: repo, encoding: "utf8" }).split("\n");
+    assert.ok(tracked.includes("Dockerfile"), "Dockerfile must still be tracked at HEAD");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("real git fixture: a tracked denylisted file TYPECHANGED into a symlink (T status) is reverted, not committed", async () => {
+  const originalWorkflow = "name: ci\n";
+  const repo = initRepo();
+  try {
+    mkdirSync(join(repo, ".github", "workflows"), { recursive: true });
+    writeFileSync(join(repo, ".github", "workflows", "ci.yml"), originalWorkflow);
+    writeFileSync(join(repo, "legit.ts"), "export const x = 1;\n");
+    execFileSync("git", ["add", "-A"], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
+
+    unlinkSync(join(repo, ".github", "workflows", "ci.yml"));
+    symlinkSync("/etc/passwd", join(repo, ".github", "workflows", "ci.yml"));
+    writeFileSync(join(repo, "legit.ts"), "export const x = 2;\n"); // legitimate control
+
+    const adapter = new VcsWriteAdapter(realGitFn(repo));
+    await adapter.commit(repo, "test(code): automated QA", ["."], denyModifiedTracked);
+
+    assert.equal(
+      readFileSync(join(repo, ".github", "workflows", "ci.yml"), "utf8"),
+      originalWorkflow,
+      "the workflow file must be restored to its tracked content, not committed as a symlink",
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("real git fixture: a legitimate file RENAMED into a denylisted destination (R status) reverts BOTH sides as a unit", async () => {
+  const originalContent = "export const legit = 1;\n";
+  const repo = initRepo();
+  try {
+    writeFileSync(join(repo, "legit.ts"), originalContent);
+    writeFileSync(join(repo, "README.md"), "base\n");
+    execFileSync("git", ["add", "-A"], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
+
+    // No exclude-file layer here (unlike buildVcsPublish's CODE_PUBLISH_EXCLUDES) — "Dockerfile" is
+    // a genuinely NEW, non-ignored path, so git's own content-similarity detection pairs it as a
+    // rename ("R") once staged, exercising commit()'s R/C branch directly.
+    renameSync(join(repo, "legit.ts"), join(repo, "Dockerfile"));
+    writeFileSync(join(repo, "orders.test.ts"), "test('x', () => {});\n"); // legitimate control (survives the revert)
+
+    const adapter = new VcsWriteAdapter(realGitFn(repo));
+    await adapter.commit(repo, "test(code): automated QA", ["."], denyModifiedTracked);
+
+    const tracked = execFileSync("git", ["ls-tree", "-r", "--name-only", "HEAD"], { cwd: repo, encoding: "utf8" }).split("\n");
+    assert.ok(!tracked.includes("Dockerfile"), "the rename destination must never be committed");
+    assert.equal(
+      readFileSync(join(repo, "legit.ts"), "utf8"),
+      originalContent,
+      "the legitimate origin must be restored intact, not left as an orphaned staged deletion",
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("real git fixture: a legitimate tracked-modified (M status) file survives — the guard never over-reverts a non-denylisted path", async () => {
+  const repo = initRepo();
+  try {
+    writeFileSync(join(repo, "legit.ts"), "export const x = 1;\n");
+    execFileSync("git", ["add", "-A"], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
+
+    writeFileSync(join(repo, "legit.ts"), "export const x = 2;\n");
+
+    const adapter = new VcsWriteAdapter(realGitFn(repo));
+    await adapter.commit(repo, "test(code): automated QA", ["."], denyModifiedTracked);
+
+    assert.equal(readFileSync(join(repo, "legit.ts"), "utf8"), "export const x = 2;\n", "a non-denylisted modification must survive untouched");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
 });

