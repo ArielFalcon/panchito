@@ -634,6 +634,14 @@ function safeJsonParse<T>(raw: string, fallback: T): T {
   }
 }
 
+// SHELL SURVIVOR (migration-tier-4d, D8): the learning CRUD below (upsertLearningRule through
+// recordRuleOutcome and their read-side siblings) is DECLARED the permanent shell half of a
+// deliberate two-store duality — `history.ts`'s `learning_rules` table coexists with qa-engine's own
+// `SqliteLearningRepository`, by documented decision (`sdd/migration-remediation` decisions doc D8),
+// not silent drift. It stays here because it is the SAME durable SQLite database `history.ts` already
+// owns for run_outcomes/trends (one store, one lifecycle), bridged into qa-engine's
+// LearningRepositoryPort via `rewritten-engine-factory.ts`'s `historyLearningStore`.
+//
 // Accepts an optional `initialStatus`; defaults to "candidate", which is what ALL current callers
 // get (oracle-born, reflection-born, AND correction-sourced rules all enter as candidates — see the
 // J de-poison in distiller.ts). The "pending" status is retired and no code path passes it anymore;

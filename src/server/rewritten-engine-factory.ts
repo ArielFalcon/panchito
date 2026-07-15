@@ -51,6 +51,19 @@
 //      argument instead of a static "diff" literal — a hardcode here silently mis-prompted every
 //      non-diff run's Generation/Review phase (composition-root.ts:187,199 feed cfg.mode/cfg.guidance
 //      straight into prompt assembly).
+//
+// ── SHELL SURVIVOR (migration-tier-4d, D-4d-1) ──────────────────────────────────────────────────
+// DECLARED a permanent shell survivor, not migration debt: this is the composition root mapping an
+// app-specific AppConfig into qa-engine's CompositionConfig, and AppConfig-shaped config loading is
+// irreducibly app/host-specific — arch:check's one-way rule (qa-engine never imports src/) makes
+// moving the mapping itself into qa-engine architecturally impossible, not merely undesirable.
+// SCOPED CLAIM (do not overclaim "zero policy logic"): `historyLearningStore`'s `recordOutcome`
+// below is a genuine off-path fold implementation — it branches oracle-vs-prevention scoring,
+// derives `coverageCreditConfirmed`, and loops `rulesRetrieved` — but qa-engine's own
+// `LearningRepositoryPort` EXPECTS exactly this kind of injected-store fold to live shell-side (the
+// port calls out to whatever backing store the host wires in); its presence here is not evidence
+// this factory holds engine policy of its own. seam-parity.contract.test.ts's (e) COMPOSITION block
+// is this file's permanent boundary-contract pin.
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
 import { readdirSync, readFileSync, mkdirSync, writeFileSync, realpathSync, lstatSync } from "node:fs";

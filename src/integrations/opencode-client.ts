@@ -8,6 +8,15 @@
 // The SDK is injected via AgentDeps: the verifiable logic (prompt building,
 // verdict parsing, orchestration) is tested with stubs; the real connection to
 // `opencode serve` is the boundary not covered by unit tests.
+//
+// SHELL SURVIVOR (migration-tier-4d, D1-family): DECLARED a permanent shell survivor. Post-tier-4c
+// decomposition left this file a thin raw-`@opencode-ai/sdk` I/O closure (client construction,
+// `session.create/prompt/abort/delete`) — everything with independently-testable POLICY (transport
+// resilience, SSE lifecycle, prompt builders, model-window catalog) already migrated to qa-engine
+// (see `2026-07-14-migration-tier-4c-decisions.md`). What remains here is the literal SDK edge
+// itself: it MUST stay shell-side because qa-engine/src has zero third-party SDK dependencies by
+// design (the hexagonal ports abstract every external call), and importing `@opencode-ai/sdk`
+// directly into qa-engine would violate that boundary for no behavioral gain.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
