@@ -16,6 +16,18 @@ migrate. The C4/"Sub-Plan 7.2bis" inventory that was supposed to enumerate every
 bridge collaborator before cutover was never produced; Plan 7.6 shipped anyway,
 deleting only `src/pipeline.ts`. This document is that missing inventory.
 
+**RETIRED (migration-tier-4d, Slice 6, 2026-07-15)**: the qa-engine-first
+directive's job is done — this document's own Q3/Q4 migration scope (§4) is
+now fully dispositioned (DONE/DECIDED/DEFERRED-with-record, no open "migrate
+next" item left) and `src/qa/`/`src/integrations/execute.ts` are empty of
+migratable engine logic. It is superseded by the **permanent boundary rule**,
+which is what actually outlives any one migration program: `qa-engine/src`
+never imports from `src/` (`.dependency-cruiser.cjs`'s `no-src-import` rule
+enforces this mechanically, not just by convention); `src/` is the shell —
+composition root, control plane, provider I/O edges, and persistence — and
+consumes `qa-engine` as a library. See CLAUDE.md's Architecture section and
+`2026-07-15-migration-tier-4d-decisions.md` for the declared end state.
+
 ---
 
 ## 1. Orphaned `src/` modules — delete vs regression (Q1)

@@ -82,6 +82,35 @@ builders (`prompts.ts` and its riders) — lives in
 raw primitives via injection (see
 `docs/superpowers/2026-07-14-migration-tier-4c-decisions.md`).
 
+**The permanent boundary rule** (settled by `migration-tier-4d`, the finale of
+the `src/` → `qa-engine/` migration program that ran from `migration-remediation`
+through `migration-tier-4d`): `qa-engine/src` never imports from `src/` —
+`.dependency-cruiser.cjs`'s `no-src-import` rule enforces this mechanically
+(`npm run arch:check`), not just by convention. `src/` is the settled shell
+around the engine, made of four DECLARED, permanent roles — none of these is
+migration debt waiting for a future slice:
+  - **Composition root** — `src/server/rewritten-engine-factory.ts` maps each
+    app's `AppConfig` into a qa-engine `CompositionConfig`. `AppConfig`-shaped
+    config loading is irreducibly host-specific; this is NOT "zero policy" —
+    its injected `historyLearningStore.recordOutcome` is a genuine off-path
+    learning fold qa-engine's own `LearningRepositoryPort` expects to live
+    shell-side.
+  - **Control plane** — `src/server/*` (webhook, queue, TUI/API surface,
+    `agent-runtime.ts`'s provider-config operator path) and `client/*`.
+  - **Provider I/O edges** — `src/integrations/opencode-client.ts` (the raw
+    `@opencode-ai/sdk` closure) and `src/agent-runtime/*` (the provider-agnostic
+    facade + OpenCode/Codex runtime strategies) — genuinely raw SDK/process
+    primitives, D1-family by declaration.
+  - **Persistence** — `src/server/run-history-sqlite-adapter.ts` (bridges the
+    kernel `RunOutcome` into `history.ts`'s SQLite store) and `history.ts`'s own
+    learning CRUD (a deliberate two-store duality alongside qa-engine's
+    `SqliteLearningRepository`, not silent drift).
+
+`qa-engine/test/contract/seam-parity.contract.test.ts`'s (d)/(e) blocks are the
+permanent boundary-contract tests pinning the persistence and composition-root
+seams. See `docs/superpowers/2026-07-15-migration-tier-4d-decisions.md` for the
+full declared end state and the program's closing summary.
+
 ### The run flow — start here
 
 `qa-engine/src/contexts/qa-run-orchestration/application/run-qa.use-case.ts`
@@ -154,9 +183,11 @@ tests in the repo's own framework, then the orchestrator installs the repo's dep
 runs its own test suite, classifying by **exit code** (binary pass/fail — no flaky, no
 deploy gate, no static gate). Code-mode apps set `code: true` in their config and omit
 the `dev:` block. The runner auto-detects the ecosystem (node/python/go/…) in
-`src/qa/code-runner.ts`; the orchestrator image ships Node, Python, Go, Rust, Maven
-and Gradle (see root `Dockerfile`). Publish commits the new tests
-anywhere in the repo (`publishCode`), not just `e2e/`.
+`qa-engine/src/contexts/test-execution/infrastructure/code-execution.runner.ts`
+(migrated from the former `src/qa/code-runner.ts` in `migration-tier-4b`); the
+orchestrator image ships Node, Python, Go, Rust, Maven and Gradle (see root
+`Dockerfile`). Publish commits the new tests anywhere in the repo (`publishCode`),
+not just `e2e/`.
 
 ### Dependency injection is the testing strategy
 
@@ -237,8 +268,12 @@ Codex consumes the **provider-neutral** mirror of these under `agent/` (`agent/r
 - **Surface integration errors loudly** — never swallow agent-runtime (OpenCode SDK /
   Codex exec) / runner / git errors into an empty result (a swallowed error once
   looked like "no tests written"). Throw and log.
-- **Sanitize data leaving the system** — diff → model, and execution logs → Issue,
-  both pass through `src/orchestrator/sanitizer.ts`.
+- **Sanitize data leaving the system** — execution logs/audit trails → Issue pass
+  through `src/orchestrator/sanitizer.ts`'s `RedactionPortAdapter` (shell-side,
+  wired unconditionally in `rewritten-engine-factory.ts`). Diff/commit-body →
+  model prompts pass through `qa-engine/src/contexts/generation/infrastructure/
+  sanitize-text.ts` instead — a qa-engine-native twin (same redaction patterns,
+  ported so prompt assembly never imports `src/`), not the same file.
 - Everything in **English**; comments describe the final state, not the process.
 
 ## Conventions & gotchas
@@ -322,3 +357,13 @@ The cross-run LLM failure-reflection flywheel (`qa-reflector` role) is live — 
 qualifying fold, distilling `candidate`/`low`-confidence rules only (never
 active), gated stricter than the deterministic learning fold (flaky/infra-class
 verdicts are excluded).
+
+The `src/` → `qa-engine/` migration program (`migration-remediation` through
+`migration-tier-4d`) is **complete**: every genuine engine-logic-in-exile module
+has migrated, moved, or been deleted as dead code; the remaining `src/` surface
+is the declared, permanent shell (composition root, control plane, provider I/O
+edges, persistence) described above. New engine logic targets `qa-engine/`;
+`src/` changes are shell/composition-root/control-plane work. See
+`docs/superpowers/2026-07-15-migration-tier-4d-decisions.md` for the full
+program summary and `docs/superpowers/2026-07-09-src-qa-engine-migration-triage.md`
+for the historical disposition record.
