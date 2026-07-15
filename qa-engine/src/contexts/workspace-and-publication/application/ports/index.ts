@@ -13,7 +13,15 @@
 // test — the rewritten publish path called straight into GitHubPrAdapter.openWithAutoMerge() with
 // no branch ever created/pushed. checkoutBranch/hasChanges/writeExcludes close that gap.
 export interface VcsWritePort {
-  commit(dir: string, message: string, files: readonly string[]): Promise<void>;
+  // sdd/security-hardening Slice 1: the OPTIONAL 4th arg is a SECOND, independent, deterministic
+  // guard against a modified-TRACKED denylisted path (Dockerfile, .github/workflows/*, …) reaching
+  // the commit — gitignore-style excludes (writeExcludes/.git/info/exclude) only suppress UNTRACKED
+  // paths, so a code-target run (`files` = ["."], the whole tree) staging a real, already-tracked
+  // Dockerfile that an agent tampered with is otherwise invisible to the exclude list. This check is
+  // deliberately independent of the runtime WriteConfinementAdapter.enforce() step (RunQaUseCase
+  // wraps that call in a documented fail-open try/catch, D-P0b) — a modified-tracked stray must never
+  // reach a commit even when confinement never ran or itself threw.
+  commit(dir: string, message: string, files: readonly string[], denyModifiedTracked?: (path: string) => boolean): Promise<void>;
   push(dir: string, branch: string): Promise<void>;
   // git checkout -B <branch> — (re)creates the publish branch at the mirror's current HEAD.
   checkoutBranch(dir: string, branch: string): Promise<void>;

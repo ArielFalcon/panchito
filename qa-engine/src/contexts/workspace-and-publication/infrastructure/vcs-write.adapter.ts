@@ -24,19 +24,52 @@
 // ported when this adapter was first written. writeExcludes is a filesystem write (not a git
 // subprocess call), so it takes its OWN injected fn rather than going through `git` — defaults to a
 // real fs write in the composition root (rewritten-engine-factory.ts), same DI boundary as `git`.
+//
+// sdd/security-hardening Slice 1: commit()'s optional `denyModifiedTracked` predicate is the SECOND,
+// independent, deterministic tracked-file guard — see VcsWritePort's own header for the full
+// rationale (gitignore excludes are untracked-only; the runtime confinement step is documented
+// fail-open). Reuses WriteConfinementService.decodeGitPath so a quoted/escaped path from `git diff`
+// decodes identically to how the sibling write-confinement adapter decodes `git status` output —
+// the two must never drift on path decoding.
 import type { VcsWritePort } from "../application/ports/index.ts";
+import { WriteConfinementService } from "../domain/write-confinement.service.ts";
 
 type Git = (args: string[], cwd?: string) => Promise<string>;
 type WriteExcludesFn = (dir: string, patterns: readonly string[]) => void | Promise<void>;
 
 export class VcsWriteAdapter implements VcsWritePort {
+  private readonly pathDecoder = new WriteConfinementService();
+
   constructor(
     private readonly git: Git,
     private readonly writeExcludesFn?: WriteExcludesFn,
   ) {}
 
-  async commit(dir: string, message: string, files: readonly string[]): Promise<void> {
+  async commit(
+    dir: string,
+    message: string,
+    files: readonly string[],
+    denyModifiedTracked?: (path: string) => boolean,
+  ): Promise<void> {
     await this.git(["add", "--", ...files], dir);
+    if (denyModifiedTracked) {
+      // Scoped to MODIFIED (not added/deleted) staged paths — a newly-added tracked file was, until
+      // this commit, untracked, so it is already caught by the exclude-file guard; the gap this
+      // closes is specifically an already-tracked path an agent modified in place.
+      const diffOut = await this.git(["diff", "--cached", "--name-only", "--diff-filter=M"], dir);
+      const denied = diffOut
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0)
+        .map((l) => this.pathDecoder.decodeGitPath(l))
+        .filter((p) => denyModifiedTracked(p));
+      if (denied.length > 0) {
+        // Staged-aware AND working-tree revert (matches write-confinement.adapter.ts's own tracked
+        // revert exactly) — the tamper must not merely be unstaged (it would resurface on the very
+        // next publish attempt), it must be restored to HEAD.
+        await this.git(["restore", "--staged", "--worktree", "--source=HEAD", "--", ...denied], dir);
+      }
+    }
     await this.git(["commit", "-m", message], dir);
   }
 
