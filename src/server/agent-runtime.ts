@@ -118,6 +118,16 @@ export function createAgentRuntimeManager(opts: CreateAgentRuntimeManagerOptions
       // reassignment through this guarded operator path (PUT /api/agent-config).
       setRuntimeRoleModels(runtimeRoleModelsFromConfig(config));
 
+      // KNOWN GAP, DECLARED not fixed (migration-tier-4d Slice 4, residual iv): `config = next` above
+      // has ALREADY committed the new config before this Promise.all settles. If restarting one
+      // provider throws, Promise.all rejects immediately while any OTHER still-in-flight
+      // restartProvider() call keeps running detached (its result is never awaited or applied) — a
+      // partial-failure split-brain between the committed `config` and each provider's actually-running
+      // process state. A real fix touches applyConfig's rollback semantics (e.g. restart sequentially
+      // and roll `config` back to `previous` on the first failure, or reconcile per-provider outcomes
+      // before returning) — deliberately out of scope here; this comment is the follow-up record, not
+      // the fix. Flag as a dedicated bugfix if a live restart failure is ever observed to strand a
+      // provider on stale config.
       const restarted = changedProviders(previous, next, apiKeyVars);
       await Promise.all(restarted.map((provider) => restartProvider(provider, apiKeyForProvider(input, provider), runtimeVars)));
 
