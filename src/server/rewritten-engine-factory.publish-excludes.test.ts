@@ -151,6 +151,80 @@ test("e2e target: node_modules/ (unprefixed, no mid-pattern slash) still exclude
   }
 });
 
+// ── FIX 2 (sdd/security-hardening, judgment-day round 2, CRITICAL — arbitrated) — the tracked guard
+// was wired ONLY for isCode, reasoning "the e2e target's addDir=['e2e'] can never stage a repo-root
+// denylisted path, so wiring the guard there would be a no-op". TRUE for the root-anchored entries
+// (Dockerfile, .github/, docker-compose*, .gitattributes, .gitmodules) — FALSE for `*.env`, which
+// CONFINEMENT_DENYLIST's own isCodeDenied matches via a tree-wide SUFFIX check
+// (`f.endsWith(".env")`), not a root anchor. A tracked `e2e/fixtures/creds.env` an agent modifies to
+// embed a live secret is denylisted by that suffix rule and must never be published on the e2e
+// target either. ─────────────────────────────────────────────────────────────────────────────────
+
+test("e2e target: a TRACKED, agent-modified e2e/fixtures/creds.env is never published (the guard must be wired for e2e too — *.env is a tree-wide suffix match, not root-anchored)", async () => {
+  const originalEnv = "FIXTURE_BASE_URL=http://localhost:3000\n";
+  const repo = mkdtempSync(join(tmpdir(), "qa-publish-e2e-tracked-env-"));
+  try {
+    const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t.com" };
+    const gitSync = (...args: string[]): string => execFileSync("git", args, { cwd: repo, encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] }).trim();
+    gitSync("init", "-q");
+    gitSync("config", "user.email", "t@t.com");
+    gitSync("config", "user.name", "t");
+    writeFile(repo, "e2e/checkout.spec.ts", "test('x', () => {});\n");
+    writeFile(repo, "e2e/fixtures/creds.env", originalEnv); // already tracked, exactly like a real watched repo's own fixture
+    gitSync("add", "-A");
+    gitSync("commit", "-qm", "chore: base with tracked e2e fixture env");
+
+    // Agent tampers with the already-tracked fixture, embedding a live secret.
+    writeFile(repo, "e2e/fixtures/creds.env", `${originalEnv}AWS_SECRET_ACCESS_KEY=AKIAABCDEFGHIJKLMNOP\n`);
+    writeFile(repo, "e2e/login.spec.ts", "test('y', () => {});\n"); // legitimate control
+
+    const { git } = realGitNoPush(repo);
+    const vcsWrite = buildVcsPublish(false, "diff", git);
+    const result = await vcsWrite.publish({ mirrorDir: repo, branch: "qa-bot/e2eenvtest1", sha: "e2eenvtest1" });
+
+    assert.equal(result.changed, true, "the legitimate new spec must still register as a change");
+    const paths = committedPaths(repo);
+    assert.ok(paths.includes("e2e/login.spec.ts"), "a legitimate new e2e spec must still be staged");
+    assert.ok(
+      !paths.includes("e2e/fixtures/creds.env"),
+      `a tampered TRACKED e2e/fixtures/creds.env must never be published — committed paths: ${JSON.stringify(paths)}`,
+    );
+    assert.equal(
+      readFileSync(join(repo, "e2e/fixtures/creds.env"), "utf8"),
+      originalEnv,
+      "e2e/fixtures/creds.env working-tree content must be restored to HEAD, not left tampered with the embedded secret",
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+// ── no-false-positive checks: every OTHER root-anchored denylist entry, when placed under e2e/,
+// must NOT match (Dockerfile is exact-match, .github/ is a dir-prefix, docker-compose* is a
+// prefix — none of them are tree-wide, so an e2e/-nested path never collides) ─────────────────────
+
+test("e2e target (negative): e2e/Dockerfile, e2e/.github/workflows/x.yml and e2e/docker-compose.yml are legitimate e2e content and are still published (root-anchored entries do not falsely match under e2e/)", async () => {
+  const repo = initRepo();
+  try {
+    writeFile(repo, "e2e/checkout.spec.ts", "test('x', () => {});\n");
+    writeFile(repo, "e2e/Dockerfile", "FROM node:24\n"); // legitimate e2e-owned fixture, not root-anchored
+    writeFile(repo, "e2e/.github/workflows/x.yml", "name: fixture\n");
+    writeFile(repo, "e2e/docker-compose.yml", "services: {}\n");
+
+    const { git } = realGitNoPush(repo);
+    const vcsWrite = buildVcsPublish(false, "diff", git);
+    const result = await vcsWrite.publish({ mirrorDir: repo, branch: "qa-bot/e2enofalsepos1", sha: "e2enofalsepos1" });
+
+    assert.equal(result.changed, true);
+    const paths = committedPaths(repo);
+    for (const legit of ["e2e/checkout.spec.ts", "e2e/Dockerfile", "e2e/.github/workflows/x.yml", "e2e/docker-compose.yml"]) {
+      assert.ok(paths.includes(legit), `${legit} is legitimate e2e content and must still be published — committed paths: ${JSON.stringify(paths)}`);
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 // ── code target ──────────────────────────────────────────────────────────────────────────────────
 
 test("code target: workflow/Dockerfile/compose/gitattributes/gitmodules are never staged (code-denylist mirror, D2)", async () => {

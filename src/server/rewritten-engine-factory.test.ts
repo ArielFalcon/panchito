@@ -603,10 +603,14 @@ test("buildVcsPublish (e2e target): changes under e2e/ -> checkout -B, add, comm
   const result = await vcsWrite.publish({ mirrorDir: "/mirrors/org/app", branch: "qa-bot/abc1234", sha: "abc1234" });
 
   assert.deepEqual(result, { changed: true });
-  assert.deepEqual(calls.map(subcommandOf), ["status", "checkout", "add", "commit", "push"], "git write must follow the legacy contract's exact ordering: status-check -> checkout -B -> add -> commit -> push");
+  // sdd/security-hardening judgment-day round 2 (FIX 2): the tracked-file denylist guard is now
+  // wired for EVERY target (not just isCode — see buildVcsPublish's own denyModifiedTracked doc), so
+  // commit() always issues its own `git diff --cached --name-status -M` before committing, even on
+  // the e2e target — one extra "diff" step in the write sequence.
+  assert.deepEqual(calls.map(subcommandOf), ["status", "checkout", "add", "diff", "commit", "push"], "git write must follow the legacy contract's exact ordering: status-check -> checkout -B -> add -> [tracked-denylist diff] -> commit -> push");
   assert.deepEqual(calls[1], ["checkout", "-B", "qa-bot/abc1234"], "checkout must target the SAME branch the PR will be opened against (ctx.branch, threaded through the vcsWrite.publish() call)");
   assert.deepEqual(calls[2], ["add", "--", "e2e"], "e2e target stages ONLY the e2e/ pathspec, never the whole repo");
-  assert.ok(calls[4]?.includes("--force-with-lease"), "push must force-with-lease (safe concurrent-push guard)");
+  assert.ok(calls[5]?.includes("--force-with-lease"), "push must force-with-lease (safe concurrent-push guard)");
 });
 
 // ── Adversarial-review CRITICALs (auth-on-push + commit identity) — the reason these slipped is

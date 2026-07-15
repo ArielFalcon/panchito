@@ -369,11 +369,17 @@ export function buildVcsPublish(
   // exclude split, which exists to filter directory-wide `git add`/`git status` scans.
   const excludes = isContext ? [] : isCode ? CODE_PUBLISH_EXCLUDES : E2E_PUBLISH_EXCLUDES;
   // sdd/security-hardening Slice 1: the SECOND, independent, deterministic tracked-file guard (see
-  // VcsWritePort.commit's own header). Only the code target needs it — CODE_PUBLISH_ADD=["."] stages
-  // the WHOLE tree, so a modified-tracked Dockerfile/workflow anywhere in the mirror can be staged;
-  // the e2e target's addDir=["e2e"] and the context target's exact single-file addDir can never stage
-  // a repo-root denylisted path in the first place, so wiring the guard there would be a no-op.
-  const denyModifiedTracked = isCode ? (path: string) => confinementClassifier.isCodeDenied(path) : undefined;
+  // VcsWritePort.commit's own header). Wired for EVERY target, not just isCode — an earlier revision
+  // scoped this to isCode only, reasoning "the e2e target's addDir=['e2e'] can never stage a
+  // repo-root denylisted path, so wiring the guard there would be a no-op". TRUE for the
+  // root-anchored CONFINEMENT_DENYLIST entries (Dockerfile exact-match, .github/ dir-prefix,
+  // docker-compose*/.gitattributes/.gitmodules) — an e2e/-nested path never collides with any of
+  // those (see the "no-false-positive" fixtures in rewritten-engine-factory.publish-excludes.test.ts).
+  // FALSE for `*.env`: isCodeDenied matches it via a tree-wide SUFFIX check (`f.endsWith(".env")`),
+  // not a root anchor, so a tracked `e2e/fixtures/creds.env` an agent modifies to embed a live secret
+  // WAS reaching a real publish — write-confinement.service.ts's own "dangerous tier" comment already
+  // states secret-file writes apply "regardless of run target"; this wiring now matches that.
+  const denyModifiedTracked = (path: string) => confinementClassifier.isCodeDenied(path);
   return {
     async publish({ mirrorDir, branch }): Promise<{ changed: boolean }> {
       // Apply local ignore patterns FIRST (same ordering as publish.ts's publishChanges) so both the
