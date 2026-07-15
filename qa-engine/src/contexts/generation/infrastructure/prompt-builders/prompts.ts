@@ -657,6 +657,13 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
   // file, guaranteed not to match, and have it echoed straight into the NEXT regen prompt. SECURITY:
   // same sanitization as this file's own reviewCorrections section (immediately below) — a reviewer
   // rejection carries the identical risk (agent-authored text embedding what it read from the repo).
+  //
+  // judgment-day round 2 (FIX 5, Judge B): sanitized in the DEFAULT ("issue") mode, not "model" —
+  // "model" mode's narrowing exists to keep a full CODE DIFF from being over-redacted (a bare
+  // `password: string` type annotation is legitimate code); a selector-mismatch description is SHORT
+  // AGENT PROSE, not code, so the utility cost of over-redacting here is near zero while the cost of
+  // under-redacting (an ordinary, unquoted credential like `password: hunter2` sails through "model"
+  // mode unredacted — verified by direct probe) is real.
   const selectorContradictionsContent =
     input.selectorContradictions?.length && isGenerationMode
       ? [
@@ -668,7 +675,7 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
           `that appears in the tree, or a \`getByText\`/scoped locator; for a "matches MULTIPLE" finding,`,
           `scope the locator to a unique parent. You MUST resolve every item before finishing:`,
           ``,
-          ...input.selectorContradictions.map((c) => `- ${sanitizeText(c, "model").text}`),
+          ...input.selectorContradictions.map((c) => `- ${sanitizeText(c).text}`),
           ``,
         ].join("\n")
       : "";
@@ -765,7 +772,12 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
         // pre-sanitized diff this module assembles) — a secret it quotes in a rejection rationale
         // must be redacted before this regen call, matching every sibling field in this function
         // (diff, commit body, guidance, DOM snapshot, classificationReason).
-        ...input.reviewCorrections.map((c) => `- ${sanitizeText(c, "model").text}`),
+        //
+        // judgment-day round 2 (FIX 5, Judge B): DEFAULT ("issue") mode, not "model" — see
+        // selectorContradictionsContent's own doc above for the full rationale (short agent prose,
+        // not a code diff; "model" mode's code-shape narrowing let an ordinary, unquoted credential
+        // like `password: hunter2` sail through unredacted).
+        ...input.reviewCorrections.map((c) => `- ${sanitizeText(c).text}`),
         ``,
       ].join("\n")
     : "";
@@ -1049,10 +1061,12 @@ export function buildFollowupPrompt(input: OpencodeRunInput): string {
     // judgment-day round 2 (FIX 4): same sanitization as buildPromptAssembled's own
     // selectorContradictions section above — `sel.name` is agent-authored, extracted verbatim from
     // the spec source, and can carry a secret it read from the actual repo files.
+    // judgment-day round 2 (FIX 5): DEFAULT ("issue") mode, not "model" — see
+    // buildPromptAssembled's own selectorContradictionsContent doc for the full rationale.
     parts.push(
       `## ⚠ Selector contradictions (DETERMINISTIC — resolve EVERY one)`,
       `Each was checked against the captured tree and FAILED — replace it with a role/name that appears there:`,
-      ...input.selectorContradictions.map((c) => `- ${sanitizeText(c, "model").text}`),
+      ...input.selectorContradictions.map((c) => `- ${sanitizeText(c).text}`),
       ``,
     );
   }
@@ -1073,7 +1087,9 @@ export function buildFollowupPrompt(input: OpencodeRunInput): string {
       `An independent reviewer REJECTED the previous specs. Fix EACH item; do NOT rewrite specs not flagged.`,
       // SECURITY: same sanitization as buildPromptAssembled's own reviewContent section above — the
       // reviewer's rejection text can carry a secret it read from the actual repo files.
-      ...input.reviewCorrections.map((c) => `- ${sanitizeText(c, "model").text}`),
+      // judgment-day round 2 (FIX 5): DEFAULT ("issue") mode, not "model" — see
+      // buildPromptAssembled's own reviewContent doc for the full rationale.
+      ...input.reviewCorrections.map((c) => `- ${sanitizeText(c).text}`),
       ``,
     );
   }
@@ -1756,10 +1772,12 @@ export function buildReviewerPromptAssembled(input: ReviewInput): AssembledPromp
   // reviewer-authored correction text as reviewCorrections (the W2 convergence mechanism threads a
   // PRIOR round's own corrections back in) — same provenance (the reviewer read arbitrary repo
   // files last round), same risk, same sanitization.
+  // judgment-day round 2 (FIX 5): DEFAULT ("issue") mode, not "model" — see buildPromptAssembled's
+  // own selectorContradictionsContent doc for the full rationale (short agent prose, not diff code).
   const PRIOR_CORRECTIONS_MAX_BYTES = 8_000;
   const priorCorrectionsContent = (() => {
     if (!input.priorCorrections || input.priorCorrections.length === 0) return "";
-    const lines = input.priorCorrections.map((c, i) => `${i + 1}. ${sanitizeText(c, "model").text}`).join("\n");
+    const lines = input.priorCorrections.map((c, i) => `${i + 1}. ${sanitizeText(c).text}`).join("\n");
     const raw = [
       `## Prior-round corrections (from YOUR previous verdict on these specs)`,
       ``,

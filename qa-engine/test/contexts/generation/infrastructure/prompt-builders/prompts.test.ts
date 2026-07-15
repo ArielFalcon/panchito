@@ -160,6 +160,50 @@ test("SECURITY: a secret quoted in a reviewCorrection is redacted in the followu
   assert.match(text, /\[REDACTED\]/, "the redaction placeholder must appear in its place");
 });
 
+// judgment-day round 2 (FIX 5, Judge B, verified by direct probe): reviewCorrections/
+// selectorContradictions/priorCorrections were all sanitized in "model" mode — the SAME mode used
+// for the diff (deliberately narrowed to avoid over-redacting legitimate code shapes like
+// `password: string`). But these three fields are SHORT AGENT PROSE (a rejection rationale, a
+// selector-mismatch description), not diff code — model mode's narrowing means an ORDINARY,
+// unquoted credential like `password: hunter2` sails through unredacted. Direct probe:
+// sanitizeText("password: hunter2", "model") -> {redacted:false}. DECISION: these three fields move
+// to the stricter default ("issue") mode — the same mode already used for the logs->Issue egress
+// boundary — because the utility cost of over-redacting short agent prose is near zero, unlike a
+// full code diff where model mode's narrowing genuinely protects legitimate type annotations.
+const ORDINARY_CREDENTIAL = "hunter2";
+
+test("SECURITY (FIX 5): an ordinary unquoted credential in a reviewCorrection is redacted (stricter default mode, not model mode — prose is not code)", () => {
+  const text = buildPrompt(mkInput({
+    reviewCorrections: [`password: ${ORDINARY_CREDENTIAL} was hardcoded in the fixture, replace it`],
+  }));
+  assert.ok(!text.includes(ORDINARY_CREDENTIAL), "an ordinary credential in reviewer prose must be redacted, not just LLM-provider-key-shaped secrets");
+  assert.match(text, /\[REDACTED\]/);
+});
+
+test("SECURITY (FIX 5): an ordinary unquoted credential in a selectorContradiction is redacted (stricter default mode)", () => {
+  const text = buildPrompt(mkInput({
+    mode: "diff",
+    selectorContradictions: [`role:name button with name "password: ${ORDINARY_CREDENTIAL}" is NOT in the captured tree`],
+  }));
+  assert.ok(!text.includes(ORDINARY_CREDENTIAL), "an ordinary credential in a selector contradiction must be redacted");
+  assert.match(text, /\[REDACTED\]/);
+});
+
+test("SECURITY (FIX 5): an ordinary unquoted credential in a priorCorrection is redacted (stricter default mode)", () => {
+  const reviewInput: ReviewInput = {
+    diff: "diff --git a/src/foo.ts b/src/foo.ts\n+export function foo() {}\n",
+    specs: ["flows/checkout.spec.ts"],
+    mirrorDir: "/mirrors/org__app",
+    e2eRelDir: "e2e",
+    appName: "testapp",
+    mode: "diff",
+    priorCorrections: [`password: ${ORDINARY_CREDENTIAL} was hardcoded in the fixture`],
+  };
+  const text = buildReviewerPrompt(reviewInput);
+  assert.ok(!text.includes(ORDINARY_CREDENTIAL), "an ordinary credential in a prior-round correction must be redacted");
+  assert.match(text, /\[REDACTED\]/);
+});
+
 // judgment-day round 2 (FIX 4, both judges — Judge A proved it live): selectorContradictions is
 // built by checkSpecSelectors (qa-run-orchestration/domain/helpers/selector-check.ts), which embeds
 // `sel.name` extracted VERBATIM from the agent's own spec source — an agent can write
