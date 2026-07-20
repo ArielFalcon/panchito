@@ -207,15 +207,34 @@ small pure ports → domain logic → heavy leaf-IO):
   `diff-hunks`, dead bulk of `dom-snapshot`. Retire each parity oracle in the
   same commit.
 - **Tier 1 — twin + parity test already exist, finish the wiring**:
-  `verdict-parse.ts`, `commit-classify.ts` (logic already redundant — live path
-  uses `change-analysis/domain/commit-classification.ts::classifyRange`; only the
-  `CommitIntent` type needs a home), `taxonomy.ts`, `exploration-brief.ts`,
-  `learning/fault-injection-e2e.ts`, `context-assembler.ts`.
-- **Tier 2 — small, no twin yet**: `oracle-types.ts`, `test-data.ts`,
-  `metadata.ts`, `circuit-breaker.ts`, `codex-circuit-breaker.ts`,
-  `model-window-catalog.ts` (fix the C4 split-brain config bug in the same
-  slice), `context.ts`, `learning/curriculum.ts`, `learning/mutation-code.ts`
-  (write the missing Stryker parity test BEFORE porting).
+  ~~`commit-classify.ts`~~ **DONE** (logic already redundant — live path uses
+  `change-analysis/domain/commit-classification.ts::classifyRange`; the
+  `CommitIntent` type re-homed to `generation-ports.ts`) and
+  ~~`learning/fault-injection-e2e.ts`~~ **DONE** (body-moved into
+  `objective-signal/{domain/fault-injection-score.ts,
+  infrastructure/fault-injection-oracle.adapter.ts}`) — both migrated in
+  `sdd/migration-tier-1-2` (commits `68f92b8`, `3e4668d`; decisions doc
+  `2026-07-11-migration-tier-1-2-decisions.md`). Remaining, re-verified
+  **DEFERRED** against HEAD (`sdd/migration-tier-1-2/reverify`, discovery
+  #1240 — see that decisions doc §2 for the full register): `verdict-parse.ts`,
+  `taxonomy.ts`, `exploration-brief.ts`, `context-assembler.ts` — each now has
+  a HEAD-verified sole consumer that is itself not yet migration-ready (the
+  Tier-4 monolith, or a deliberately-unconverged wide-alias decoupling).
+- **Tier 2 — small, no twin yet**: ~~`oracle-types.ts`~~ **DONE (split)**
+  (`OracleInput`/`ValueOracleResult` deleted — `ValueOracleResult` already had
+  a byte-identical qa-engine home, `OracleInput` dissolved with no shared
+  replacement; `Scorecard`/`ScorecardEntry`/`updateScorecard` stay shell-only,
+  zero importer churn) and ~~`learning/mutation-code.ts`~~ **DONE** (the
+  missing Stryker parity test was written FIRST, then the body moved into
+  `stryker-mutation-oracle.adapter.ts`) — both migrated in
+  `sdd/migration-tier-1-2` (commits `06444c2`, `8cabc58`, `3e4668d`; decisions
+  doc `2026-07-11-migration-tier-1-2-decisions.md`). Remaining, re-verified
+  **DEFERRED** against HEAD (same discovery #1240 register): `test-data.ts`,
+  `metadata.ts`, `circuit-breaker.ts`, `codex-circuit-breaker.ts` (inside the
+  DECLARED `src/agent-runtime` shell survivor — not a migration candidate at
+  all), `model-window-catalog.ts` (still carries the known C4 split-brain
+  config bug, unfixed), `context.ts`, `learning/curriculum.ts` (D8
+  learning-store entanglement).
 - **Tier 3 — medium domain logic**: `playwright-report.ts`, `reexplore.ts`,
   `learning/learning-rule.ts`, `validate.ts`/`code-validate.ts` (check
   `StaticGateAdapter` overlap first), `deploy-gate.ts` (needs a new port).

@@ -20,7 +20,8 @@
     "start": "node boot-guard.mjs && tsx src/index.ts",
     "test": "node --import ./test-setup.mjs --import tsx --test \"src/**/*.test.ts\" \"qa-engine/test/**/*.test.ts\" \"packages/sdk/**/*.test.ts\" \"agents/**/*.test.mjs\" \"scripts/**/*.test.ts\"",
     "typecheck": "tsc -b qa-engine/tsconfig.json && tsc --noEmit -p tsconfig.json && tsc --noEmit -p qa-engine/tsconfig.json && tsc --noEmit -p qa-engine/tsconfig.parity.json && tsc --noEmit -p scripts/tsconfig.json",
-    "mutate:keystone": "stryker run qa-engine/stryker.conf.json"
+    "mutate:keystone": "stryker run qa-engine/stryker.conf.json",
+    "arch:check": "depcruise --config qa-engine/.dependency-cruiser.cjs qa-engine/src"
   },
   "dependencies": {
     "@opencode-ai/sdk": "1.17.7",

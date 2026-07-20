@@ -1,4 +1,8 @@
 // test/contexts/objective-signal/infrastructure/fault-injection-oracle.adapter.test.ts
+// migration-tier-1-2, Slice 2: the orchestration previously in
+// src/qa/learning/fault-injection-e2e.ts's runFaultInjectionOracle is now absorbed into
+// measure() itself. Ctor is (runCorrupted, countInjected, baseUrl) — the adapter is
+// self-contained, no injected "runner closure" wraps a legacy function anymore.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { FaultInjectionOracleAdapter } from "@contexts/objective-signal/infrastructure/fault-injection-oracle.adapter.ts";
@@ -9,47 +13,72 @@ const sha = Sha.of("abcdef1");
 const br = BlastRadius.of(sha, ["src/svc.ts"]);
 const BASE_URL = "https://dev.example.com";
 
-test("delegates to runFaultInjectionOracle with e2eDir + baseUrl + namespace from measure args", async () => {
-  let seen: { e2eDir: string; baseUrl: string; namespace: string } | null = null;
-  const adapter = new FaultInjectionOracleAdapter(async (input) => {
-    seen = { e2eDir: input.e2eDir, baseUrl: input.baseUrl, namespace: input.namespace };
-    return { valueScore: 0.75, mutantCount: 4, killedCount: 3, details: "3/4 specs noticed corruption" };
-  }, BASE_URL);
-  const r = await adapter.measure(br, "/m/repo", `qa-bot-${sha.value}`);
-  assert.equal(seen!.e2eDir, "/m/repo");
+test("returns valueScore null when baselineCases is missing (guard short-circuits before runCorrupted)", async () => {
+  const adapter = new FaultInjectionOracleAdapter(
+    async () => {
+      throw new Error("runCorrupted must not run when baselineCases is absent (guard should short-circuit)");
+    },
+    () => 0,
+    BASE_URL,
+  );
+  const r = await adapter.measure(br, "/m/repo", "qa-bot-abc"); // no 4th arg
+  assert.equal(r.valueScore, null);
+  assert.match(r.details, /needs e2eDir \+ baseUrl \+ baseline-passing specs/);
+});
+
+test("computes the response-oracle catch-rate from a corrupted re-run, with a -fi namespace suffix", async () => {
+  let seen: { dir: string; baseUrl: string; namespace: string } | null = null;
+  const adapter = new FaultInjectionOracleAdapter(
+    async (args) => {
+      seen = args;
+      return {
+        verdict: "fail",
+        cases: [
+          { name: "a", status: "fail" as const },
+          { name: "b", status: "pass" as const },
+        ],
+      };
+    },
+    () => 3,
+    BASE_URL,
+  );
+  const r = await adapter.measure(br, "/m/repo", "qa-bot-abc", ["a", "b"]);
+  assert.equal(seen!.dir, "/m/repo");
   assert.equal(seen!.baseUrl, BASE_URL);
-  assert.equal(seen!.namespace, `qa-bot-${sha.value}`);
-  assert.equal(r.valueScore, 0.75);
-  assert.equal(r.killedCount, 3);
+  assert.equal(seen!.namespace, "qa-bot-abc-fi", "the fault-injection re-run namespace must be isolated with a -fi suffix");
+  assert.equal(r.valueScore, 0.5);
+  assert.equal(r.killedCount, 1);
+  assert.equal(r.mutantCount, 2);
   assert.equal(typeof r.details, "string", "details field must be present — ValueOracleResult has 4 fields");
 });
 
-test("threads baselineCases (4th measure arg) into the runner input when present", async () => {
-  let seenBaseline: string[] | undefined = ["sentinel"]; // sentinel ≠ what we expect
-  const adapter = new FaultInjectionOracleAdapter(async (input) => {
-    seenBaseline = input.baselineCases;
-    return { valueScore: 0.5, mutantCount: 2, killedCount: 1, details: "1/2" };
-  }, BASE_URL);
-  await adapter.measure(br, "/m/repo", "qa-bot-abc", ["login.spec.ts", "checkout.spec.ts"]);
-  assert.deepEqual(seenBaseline, ["login.spec.ts", "checkout.spec.ts"]);
+test("returns null when the corrupted re-run is inconclusive (infra-error)", async () => {
+  const adapter = new FaultInjectionOracleAdapter(async () => ({ verdict: "infra-error", cases: [] }), () => 0, BASE_URL);
+  const r = await adapter.measure(br, "/m/repo", "qa-bot-abc", ["a"]);
+  assert.equal(r.valueScore, null);
+  assert.match(r.details, /inconclusive \(infra\)/);
 });
 
-test("omits baselineCases from the runner input when measure is called without it (3-arg call)", async () => {
-  let hadBaselineKey = true;
-  const adapter = new FaultInjectionOracleAdapter(async (input) => {
-    hadBaselineKey = "baselineCases" in input;
-    return { valueScore: null, mutantCount: 0, killedCount: 0, details: "no baseline" };
-  }, BASE_URL);
-  await adapter.measure(br, "/m/repo", "qa-bot-abc");
-  assert.equal(hadBaselineKey, false, "no baselineCases key when measure is called without baseline specs");
-});
-
-test("when the runner returns null (no JSON intercepted), returns valueScore:null with a details string (never gates)", async () => {
-  const adapter = new FaultInjectionOracleAdapter(async () => null, BASE_URL);
-  const r = await adapter.measure(br, "/m/repo", "qa-bot-abc");
+test("returns null when no JSON responses were intercepted (not applicable — never gates)", async () => {
+  const adapter = new FaultInjectionOracleAdapter(
+    async () => ({ verdict: "pass", cases: [{ name: "a", status: "pass" as const }] }),
+    () => 0,
+    BASE_URL,
+  );
+  const r = await adapter.measure(br, "/m/repo", "qa-bot-abc", ["a"]);
   assert.equal(r.valueScore, null);
   assert.equal(r.mutantCount, 0);
   assert.equal(r.killedCount, 0);
-  assert.equal(typeof r.details, "string");
-  assert.ok(r.details.length > 0, "details must describe why no score was recorded");
+  assert.match(r.details, /not applicable to this app's flows/);
+});
+
+test("returns null when the corrupted re-run executed none of the baseline-passing specs", async () => {
+  const adapter = new FaultInjectionOracleAdapter(
+    async () => ({ verdict: "fail", cases: [{ name: "other", status: "fail" as const }] }),
+    () => 3,
+    BASE_URL,
+  );
+  const r = await adapter.measure(br, "/m/repo", "qa-bot-abc", ["a"]);
+  assert.equal(r.valueScore, null);
+  assert.match(r.details, /executed none of the baseline-passing specs/);
 });

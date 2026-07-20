@@ -16,8 +16,8 @@ npm test                  # node:test via tsx; 96 tests, network/OpenCode/Playwr
 npm run typecheck         # tsc --noEmit (strict, noUncheckedIndexedAccess)
 
 # Run a single test file or filter by name:
-node --import tsx --test src/qa/commit-classify.test.ts
-node --import tsx --test --test-name-pattern="skip" src/qa/commit-classify.test.ts
+node --import tsx --test src/server/webhook-routing.test.ts
+node --import tsx --test --test-name-pattern="skip" src/server/webhook-routing.test.ts
 
 # Manual QA run (same pipeline as webhook):
 npm run qa -- --app portfolio --sha <sha>
@@ -128,7 +128,6 @@ The quality loop is circular: one LLM generates, another reviews, and the harnes
 | `src/integrations/repo-mirror.ts` | Clone/checkout/copy working mirrors |
 | `src/integrations/publish.ts` | PR + Issue publishing |
 | `src/integrations/github.ts` | GitHub API |
-| `src/qa/commit-classify.ts` | Conventional Commits → skip/regression/generate |
 | `src/qa/setup.ts` | Bootstrap `e2e/` seed + `npm ci` |
 | `src/qa/validate.ts` | Static gate (tsc + lint + list + manifest) |
 | `src/qa/execute.ts` | Playwright runner against DEV |

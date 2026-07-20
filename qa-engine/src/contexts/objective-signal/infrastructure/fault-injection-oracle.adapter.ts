@@ -1,47 +1,84 @@
 // src/contexts/objective-signal/infrastructure/fault-injection-oracle.adapter.ts
-// ValueOraclePort for the E2E target — WRAP of src/qa/learning/fault-injection-e2e.ts
-// runFaultInjectionOracle. The runner is injected so the adapter test needs no Playwright.
-// Implements the 3-param measure(br, repoDir, namespace) signature (port-aligned in B.3 step 1).
-// Signal-only by contract: a null valueScore never gates publish.
+// ValueOraclePort for the E2E target. Self-contained (migration-tier-1-2, Slice 2): the
+// orchestration previously in src/qa/learning/fault-injection-e2e.ts's runFaultInjectionOracle is
+// absorbed directly into measure() — this adapter no longer wraps a legacy runner closure. The
+// pure scoring half (computeFaultInjectionScore/isFlowBreak) lives in
+// ../domain/fault-injection-score.ts. Signal-only by contract: a null valueScore never gates
+// publish.
 //
-// Plan-6 wiring: inject (input) => runFaultInjectionOracle({ ...input, target: "e2e" }, defaultFaultInjectionDeps)
-// and pass the live DEV URL from the App config as baseUrl to the constructor.
+// Ctor collaborators stay effectful and src-bound (Playwright re-run via runE2E, node:fs marker
+// reads) — injected by the composition factory (rewritten-engine-factory.ts), which is the only
+// src<->qa-engine bridge for this adapter.
 import type { ValueOraclePort, ValueOracleResult } from "../application/ports/index.ts";
 import type { BlastRadius } from "@kernel/blast-radius.ts";
+import type { QaCase } from "@kernel/qa-case.ts";
+import { computeFaultInjectionScore } from "../domain/fault-injection-score.ts";
 
-interface FaultInjectionInputLike {
-  target: "e2e";
-  e2eDir: string;         // maps to repoDir (the mirror working copy of the app)
-  baseUrl: string;        // live DEV URL for the injected fault run
-  namespace: string;      // per-run sha-scoped identifier
-  // Green-run passing spec names — legacy OracleInput.baselineCases is string[]. The legacy
-  // runFaultInjectionOracle returns valueScore:null whenever this is absent or empty, so the
-  // adapter MUST thread it through for the oracle to ever produce a score.
-  baselineCases?: string[];
+// Local structural type replacing the legacy src/types.ts QaRunResult import — only the fields
+// this orchestration actually reads.
+interface CorruptedRunResult {
+  verdict: string;
+  cases: QaCase[];
 }
-// The runner may return null when no JSON was intercepted (static site / no API surface).
-// The port contract always returns ValueOracleResult (never null at the port boundary).
-type RunFaultInjection = (input: FaultInjectionInputLike) => Promise<ValueOracleResult | null>;
+
+type RunCorrupted = (args: { dir: string; baseUrl: string; namespace: string }) => Promise<CorruptedRunResult>;
+type CountInjected = (e2eDir: string, namespace: string) => number;
 
 export class FaultInjectionOracleAdapter implements ValueOraclePort {
   constructor(
-    private readonly runFaultInjection: RunFaultInjection,
-    private readonly baseUrl: string,         // live DEV URL (from the App config at wiring time)
+    // Re-runs the suite against DEV with fault-injection enabled (Playwright, src-bound).
+    private readonly runCorrupted: RunCorrupted,
+    // How many JSON responses the seed's `_faultInject` fixture ACTUALLY corrupted during the
+    // re-run. 0 ⇒ the app exposed no JSON API surface to corrupt: the oracle is NOT APPLICABLE
+    // and must score null — scoring 0 would label every green run E-VALUE-SURVIVED on a static
+    // site and systematically demote healthy rules.
+    private readonly countInjected: CountInjected,
+    private readonly baseUrl: string, // live DEV URL (from the App config at wiring time)
   ) {}
 
   async measure(br: BlastRadius, repoDir: string, namespace: string, baselineCases?: string[]): Promise<ValueOracleResult> {
-    const result = await this.runFaultInjection({
-      target: "e2e",
-      e2eDir: repoDir,
-      baseUrl: this.baseUrl,
-      namespace,
-      // The green run's passing spec names — required for the oracle to score (absent ⇒ null forever).
-      // Omit the key entirely when there is no baseline so the runner sees no empty-array noise.
-      ...(baselineCases && baselineCases.length ? { baselineCases } : {}),
-    });
-    // null means no JSON intercepted (inapplicable ecosystem / no fault fired). Return a
-    // signal-only zero-score result so the caller sees a defined shape, not null — the
-    // ValueOraclePort contract always returns ValueOracleResult (never null at the port).
-    return result ?? { valueScore: null, mutantCount: 0, killedCount: 0, details: "no fault data intercepted" };
+    if (!repoDir || !this.baseUrl || !baselineCases || baselineCases.length === 0) {
+      return {
+        valueScore: null,
+        mutantCount: 0,
+        killedCount: 0,
+        details: "fault-injection needs e2eDir + baseUrl + baseline-passing specs",
+      };
+    }
+    // A distinct namespace isolates this pass's (possibly broken) data from the published run's.
+    const fiNamespace = `${namespace}-fi`;
+    const run = await this.runCorrupted({ dir: repoDir, baseUrl: this.baseUrl, namespace: fiNamespace });
+    if (run.verdict === "infra-error") {
+      return { valueScore: null, mutantCount: 0, killedCount: 0, details: "fault-injection re-run inconclusive (infra)" };
+    }
+    // Not applicable ≠ weak: if the fixture intercepted no JSON at all (static site, no API
+    // traffic in these flows), there was nothing to notice and the pass proves nothing.
+    if (this.countInjected(repoDir, fiNamespace) === 0) {
+      return {
+        valueScore: null,
+        mutantCount: 0,
+        killedCount: 0,
+        details: "no JSON responses were intercepted — fault-injection is not applicable to this app's flows (no score)",
+      };
+    }
+    // Score only the baseline-passing specs the corrupted pass actually executed: a spec absent
+    // from the re-run (filtered project, skipped) carries no evidence about its oracle strength.
+    const ranCorrupted = new Set(run.cases.map((c) => c.name));
+    const scoreable = baselineCases.filter((n) => ranCorrupted.has(n));
+    if (scoreable.length === 0) {
+      return {
+        valueScore: null,
+        mutantCount: 0,
+        killedCount: 0,
+        details: "the corrupted re-run executed none of the baseline-passing specs (inconclusive)",
+      };
+    }
+    const { valueScore, killed, total } = computeFaultInjectionScore(scoreable, run.cases);
+    return {
+      valueScore,
+      mutantCount: total,
+      killedCount: killed,
+      details: `${killed}/${total} baseline-passing specs noticed corrupted responses (response-oracle catch-rate)`,
+    };
   }
 }

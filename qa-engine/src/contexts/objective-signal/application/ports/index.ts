@@ -33,7 +33,10 @@ export interface ValueOracleResult {
 }
 // [SWAP — one port, two adapters] mutation (code) vs fault-injection (e2e).
 // measure(br, repoDir, namespace): namespace is per-run (sha-scoped like "qa-bot-<sha>") — it comes
-// from the measure call args, NOT from the constructor; repoDir maps to OracleInput.repoDir.
+// from the measure call args, NOT from the constructor; repoDir maps to each adapter's own local
+// OracleInputLike/FaultInjectionInputLike.repoDir field (migration-tier-1-2, Slice 4: the legacy
+// shared OracleInput type was dissolved — see docs/superpowers/2026-07-11-migration-tier-1-2-
+// decisions.md §4 for why no shared qa-engine home replaced it).
 // baselineCases = the e2e fault-injection oracle's green-run passing spec names (the channel the
 // legacy runFaultInjectionOracle needs, without which it returns valueScore:null forever); the
 // mutation/code oracle ignores it. The keystone invariant (signal-only, null never blocks) is unchanged.

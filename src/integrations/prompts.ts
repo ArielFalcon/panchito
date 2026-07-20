@@ -15,7 +15,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { sanitizeText, assertNoSecretLeak, capText, capDiff, extractDiffFilePath, type SanitizeMode } from "../orchestrator/sanitizer";
 import type { ArchitectureContext } from "../qa/context";
-import type { CommitIntent } from "../qa/commit-classify";
+import type { CommitIntent } from "@contexts/generation/application/ports/generation-ports.ts";
 import type { QaCase } from "../types";
 // Seam-2 break: these input contracts are canonical in the qa-engine generation context. Re-rooting
 // this type-only import off ./opencode-client dissolves the opencode-client ⇄ prompts cycle (the

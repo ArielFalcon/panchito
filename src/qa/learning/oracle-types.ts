@@ -1,25 +1,11 @@
+// OracleInput and ValueOracleResult were removed here in migration-tier-1-2 (Slice 4):
+// ValueOracleResult now has ONE home (qa-engine's objective-signal/application/ports/index.ts —
+// this copy was byte-identical, confirmed against HEAD); OracleInput dissolved entirely — its only
+// consumers were the two oracle modules deleted in Slices 2-3, which each now own a local
+// structural input type instead of a shared one. This file stays SHELL-ONLY (D8 learning-store
+// boundary): Scorecard/ScorecardEntry/updateScorecard keep their existing consumers
+// (src/server/history.ts, signals-view.ts, intelligence-view.ts) with ZERO import churn.
 import type { TestTarget } from "../../types";
-
-export interface OracleInput {
-  target: TestTarget;
-  repoDir: string;
-  e2eDir?: string;
-  namespace: string;
-  ecosystem?: string;
-  signal?: AbortSignal;
-  timeoutMs?: number;
-  changedFiles?: string[]; // code: scope mutation to the diff (not the whole repo)
-  baseUrl?: string; // e2e fault-injection: the live DEV URL to re-run the suite against
-  baselineCases?: string[]; // e2e fault-injection: spec names that passed at baseline (the green run)
-  onProgress?: (msg: string) => void; // heartbeat during long-running oracle (Stryker output)
-}
-
-export interface ValueOracleResult {
-  valueScore: number | null;
-  mutantCount: number;
-  killedCount: number;
-  details: string;
-}
 
 export interface ScorecardEntry {
   runId: string;
