@@ -150,6 +150,20 @@ export const PROTECTED_PATHS: string[] = [
   // turns shadow mode into live-write mode for repos that never opted in, silently, for every test
   // that only regex-matches the log line.
   "qa-engine/src/contexts/workspace-and-publication/infrastructure/shadow-log.adapter.ts",
+  // judgment-day round 4 (FIX II(a), Judge A): three more files verified UNPROTECTED despite being
+  // squarely inside the secret/confinement/review boundary this group protects.
+  // Owns authHeaderArgs() (injects GITHUB_TOKEN into git clone/fetch URLs), hardenGitArgs() (disables
+  // hooksPath — its own comment calls this a root-RCE escape it closes), and scrubGitError() (its own
+  // comment cites a PAST incident of a PAT logged in plaintext through a raw git error).
+  "src/integrations/repo-mirror.ts",
+  // codexExecEnv's env allowlist for untrusted `codex exec` spawns — the same risk class as
+  // scrub-env.ts above (an unreviewed widening leaks the orchestrator's own secrets to untrusted
+  // agent-authored code).
+  "src/agent-runtime/codex-strategy.ts",
+  // reviewerPrimaryCollisionErrors is the SOLE guard that reviewer/primary use different models in
+  // dual mode — deleting or weakening it silently collapses independent-judgment review into a
+  // rubber stamp with no detectable failure.
+  "src/agent-runtime/config.ts",
   // 3. gate integrity (the fix must not weaken what decides whether it deploys)
   "*.test.ts",
   "tsconfig.json",
@@ -216,9 +230,23 @@ export function isProtectedPath(file: string): boolean {
 // SECURITY_SENSITIVE_SURFACE_ROOTS covers the whole repo's security-relevant code — the control-plane
 // auth files (src/server/auth.ts, github-auth.ts, webhook.ts) and the two directories above are
 // covered by PROTECTED_PATHS directly instead, for the reasons stated at each entry.
+// judgment-day round 4 (FIX II(b), Judge B): the two blanket PROTECTED_PATHS directory-prefix entries
+// added in round 3 (generation/infrastructure/, qa-run-orchestration/infrastructure/bridges/) claimed
+// "100% coverage by construction, no allowlist, no judgment call to get wrong" — but neither root was
+// ever added HERE, so nothing walked them for completeness. Judge B proved the claim empirically false:
+// narrowing the generation/infrastructure/ prefix to exclude exactly one file (catalog-gate.ts) left
+// every merge-guard test green, because the completeness backstop only ever scanned the original two
+// roots. Adding both here makes the "100% coverage by construction" claim actually HOLD structurally —
+// a narrowed or dropped blanket-prefix entry for either directory is now caught the same way a
+// misnamed file under the original two roots is. NOT_SECURITY_SENSITIVE stays untouched for these two
+// (no new entries needed): the blanket PROTECTED_PATHS prefix already covers every file under them, so
+// the completeness walk finds nothing unclassified today — only a REGRESSION away from that blanket
+// coverage would show up as unclassified, which is exactly the backstop this closes.
 export const SECURITY_SENSITIVE_SURFACE_ROOTS: string[] = [
   "qa-engine/src/contexts/workspace-and-publication/",
   "qa-engine/src/shared-infrastructure/process-sandbox/",
+  "qa-engine/src/contexts/generation/infrastructure/",
+  "qa-engine/src/contexts/qa-run-orchestration/infrastructure/bridges/",
 ];
 
 // Explicit, reviewed allowlist: files under the surface roots above that are NOT security-sensitive.
