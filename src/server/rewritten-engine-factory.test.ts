@@ -618,6 +618,26 @@ test("buildVcsPublish (e2e target): changes under e2e/ -> checkout -B, add, comm
   assert.ok(calls[5]?.includes("--force-with-lease"), "push must force-with-lease (safe concurrent-push guard)");
 });
 
+// judgment-day round 3 (ALSO, Judge B): denyModifiedTracked is wired UNCONDITIONALLY in buildVcsPublish
+// (see its own header: "wired for EVERY target, not just isCode") — but every existing test above only
+// ever exercises mode: "diff". Structurally guaranteed (the wiring has no branch on `mode`), but that
+// guarantee was previously asserted only by inference, never pinned by a test that actually passes
+// mode: "context". This closes that gap the same way the e2e-target test above pins it for "diff".
+test("buildVcsPublish (context mode): the tracked-file denylist guard is ALSO wired for mode='context', not just diff/e2e/code", async () => {
+  const { git, calls } = fakeGit(" M e2e/.qa/context.json");
+  const vcsWrite = buildVcsPublish(false, "context", git, () => {});
+
+  const result = await vcsWrite.publish({ mirrorDir: "/mirrors/org/app", branch: "qa-bot/abc1234", sha: "abc1234" });
+
+  assert.deepEqual(result, { changed: true, revertedDenylisted: [], revertedDangerous: [] });
+  assert.deepEqual(
+    calls.map(subcommandOf),
+    ["status", "checkout", "add", "diff", "commit", "push"],
+    "context mode must ALSO issue the tracked-denylist diff step before committing, exactly like diff/e2e/code",
+  );
+  assert.deepEqual(calls[2], ["add", "--", "e2e/.qa/context.json"], "context mode stages ONLY the context artifact's exact pathspec");
+});
+
 // ── Adversarial-review CRITICALs (auth-on-push + commit identity) — the reason these slipped is
 // that the first round's fakes only recorded argv without pinning the auth/identity prefixes.
 // realGit (src/integrations/repo-mirror.ts:203-208) is a BARE execFile wrapper: it applies
