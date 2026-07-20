@@ -31,8 +31,15 @@ const qaEngineRoot = join(here, "..", "..");
 // exhaustive allowlist of PATHS (not a glob) so a new decision file added later must be added here
 // explicitly — the same "loud by construction" discipline the design applies to the telemetry
 // fields themselves.
+//
+// migration-tier-4d Slice 7: `run.aggregate.ts` was REMOVED from this list — the module itself was
+// deleted (zero production references anywhere in qa-engine; the live decision path already runs
+// through run-decision.service.ts/adjudicate.service.ts, not this dead-code Run aggregate built once
+// to satisfy a DDD checklist during the original hexagonal rewrite). This file's own `readFileSync`
+// over the list is exactly why the module couldn't just be deleted on its own — dropping it from
+// `src/contexts/qa-run-orchestration/domain/` without removing this entry first would have thrown
+// ENOENT here and turned `npm test` RED.
 const DECISION_PATH_FILES = [
-  "src/contexts/qa-run-orchestration/domain/run.aggregate.ts",
   "src/contexts/qa-run-orchestration/domain/run-decision.service.ts",
   "src/contexts/qa-run-orchestration/domain/adjudicate.service.ts",
   "src/contexts/test-execution/domain/adjudicate.service.ts",

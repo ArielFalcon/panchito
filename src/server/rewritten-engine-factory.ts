@@ -51,6 +51,19 @@
 //      argument instead of a static "diff" literal — a hardcode here silently mis-prompted every
 //      non-diff run's Generation/Review phase (composition-root.ts:187,199 feed cfg.mode/cfg.guidance
 //      straight into prompt assembly).
+//
+// ── SHELL SURVIVOR (migration-tier-4d, D-4d-1) ──────────────────────────────────────────────────
+// DECLARED a permanent shell survivor, not migration debt: this is the composition root mapping an
+// app-specific AppConfig into qa-engine's CompositionConfig, and AppConfig-shaped config loading is
+// irreducibly app/host-specific — arch:check's one-way rule (qa-engine never imports src/) makes
+// moving the mapping itself into qa-engine architecturally impossible, not merely undesirable.
+// SCOPED CLAIM (do not overclaim "zero policy logic"): `historyLearningStore`'s `recordOutcome`
+// below is a genuine off-path fold implementation — it branches oracle-vs-prevention scoring,
+// derives `coverageCreditConfirmed`, and loops `rulesRetrieved` — but qa-engine's own
+// `LearningRepositoryPort` EXPECTS exactly this kind of injected-store fold to live shell-side (the
+// port calls out to whatever backing store the host wires in); its presence here is not evidence
+// this factory holds engine policy of its own. seam-parity.contract.test.ts's (e) COMPOSITION block
+// is this file's permanent boundary-contract pin.
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
 import { readdirSync, readFileSync, mkdirSync, writeFileSync, realpathSync, lstatSync } from "node:fs";
@@ -146,7 +159,18 @@ import { parseVerdict } from "../integrations/verdict-parse";
 import { parseReviewerVerdict, checkGeneratorVerdict, repairInstruction } from "../integrations/verdict-validate";
 import { roleWindowBytes } from "@contexts/generation/infrastructure/prompt-builders/model-window-catalog";
 import type { RepairPort } from "@contexts/generation/application/generate-tests.use-case.ts";
-import { runE2E, defaultExecuteDeps, defaultCleanupDeps } from "../qa/execute";
+// migration-tier-4d Slice 1b (e2e-execution migration, the src->qa-engine migration program's
+// FINALE): src/qa/execute.ts is deleted; qa-engine now owns the real e2e-runner body directly
+// (e2e-execution.runner.ts). This factory is the ONLY place QA_E2E_TIMEOUT_MS/PW_ACTION_TIMEOUT_MS
+// are read from process.env and injected downward (exactly like CODE_SANDBOX*/PANCHITO_ROOT below)
+// — see e2e-execution.runner.ts's own header for why.
+import {
+  runE2E,
+  createDefaultE2eExecuteDeps,
+  createDefaultE2eCleanupDeps,
+  e2eTimeoutMs,
+  type E2eExecuteDeps,
+} from "../../qa-engine/src/contexts/test-execution/infrastructure/e2e-execution.runner";
 // migration-tier-4b Slice 1: code-execution migration — src/qa/code-runner.ts is deleted; qa-engine
 // now owns the real body directly (code-execution.runner.ts / code-setup.ts / sandbox.ts). This
 // factory is the ONLY place CODE_SANDBOX* is read from process.env and injected downward (exactly
@@ -658,6 +682,13 @@ export function buildRewrittenCompositionConfig(
   // opencode-client.ts, which import sanitizer.ts's sanitizeText themselves). Stateless — safe to
   // construct once per composition.
   const redactionPort = new RedactionPortAdapter();
+  // migration-tier-4d Slice 1b (env-read confinement invariant): QA_E2E_TIMEOUT_MS/
+  // PW_ACTION_TIMEOUT_MS are read HERE, in the shell, and injected into
+  // createDefaultE2eExecuteDeps below — qa-engine/src must never read process.env for this (see
+  // e2e-execution.runner.ts's own header). Resolved once per run composition; the env does not
+  // change mid-run (same rationale as codeSandbox immediately below).
+  const e2eDefaultTimeoutMs = e2eTimeoutMs(process.env);
+  const pwActionTimeoutMs = process.env.PW_ACTION_TIMEOUT_MS;
   // migration-tier-4b Slice 1 (env-read confinement invariant): CODE_SANDBOX* is read HERE, in the
   // shell, and the resolved Sandbox|null is injected into every code-mode entry point below
   // (setup/execute/coverage) — qa-engine/src must never read process.env for this (see sandbox.ts's
@@ -807,7 +838,16 @@ export function buildRewrittenCompositionConfig(
   // staticGate's own construction immediately above.
   const codeValidate = new CodeValidationStrategy((repoDir, opts) => validateCodeProject(repoDir, defaultCodeValidateDeps, opts));
 
-  const e2e = new E2eExecutionStrategy((specDir, opts) => runE2E(specDir, opts, defaultExecuteDeps));
+  // migration-tier-4d Slice 1b: createDefaultE2eExecuteDeps/createDefaultE2eCleanupDeps are
+  // FACTORIES (not plain constants) because processKill + the env-derived timeout defaults
+  // (e2eDefaultTimeoutMs, pwActionTimeoutMs, both computed once above) are injected, not resolved
+  // internally. recordAudit is likewise injected — src/orchestrator/sanitizer.ts's SECRET_AUDIT
+  // diagnostic sink stays a security-boundary concern this factory owns, never imported into
+  // qa-engine/src (see e2e-execution.runner.ts's own E2eExecuteDeps.recordAudit doc). Bound once per
+  // composition, reused by the execution strategy and the fault-injection oracle collaborator below.
+  const e2eExecuteDeps: E2eExecuteDeps = { ...createDefaultE2eExecuteDeps(new ProcessKillAdapter(), e2eDefaultTimeoutMs, pwActionTimeoutMs), recordAudit };
+  const e2eCleanupDeps = createDefaultE2eCleanupDeps(new ProcessKillAdapter());
+  const e2e = new E2eExecutionStrategy((specDir, opts) => runE2E(specDir, opts, e2eExecuteDeps));
   // migration-tier-4b Slice 1: createDefaultCodeExecuteDeps/createDefaultCodeSetupDeps are FACTORIES
   // (not plain constants) because the privilege-drop sandbox is injected, not resolved internally
   // (codeSandbox, computed once above). recordAudit is likewise injected — src/orchestrator/
@@ -854,7 +894,7 @@ export function buildRewrittenCompositionConfig(
     // the seed runs every spec in BOTH projects — one project halves the re-run cost. A repo whose
     // config renamed the seed's "desktop" project fails the pass → infra-error → valueScore null
     // (inconclusive), never a wrong score.
-    runE2E(dir, { baseUrl, namespace, faultInject: true, project: "desktop" }, defaultExecuteDeps);
+    runE2E(dir, { baseUrl, namespace, faultInject: true, project: "desktop" }, e2eExecuteDeps);
   const countInjectedFaultInjectionResponses = (e2eDir: string, namespace: string): number => {
     try {
       const dir = join(e2eDir, ".qa", "fault-injection", namespace);
@@ -1002,15 +1042,14 @@ export function buildRewrittenCompositionConfig(
       code: (specDir, opts) => setupCodeProject(specDir, codeSetupDeps, opts),
     },
     // CleanupPort (audit CRITICAL, task #33): orphan test-data cleanup — the SAME real
-    // defaultCleanupDeps.runCleanup src/pipeline.ts's own defaultPipelineDeps() wires for the
-    // legacy engine (src/pipeline.ts:432's `cleanup: (e2eDir, opts) =>
-    // defaultCleanupDeps.runCleanup({ dir: e2eDir, ...opts })`), so both engines clean an
-    // interrupted prior run's DEV data identically. e2e-only by construction (CleanupPortAdapter's
-    // own collaborators shape has no `code` slot — composition-root.ts's wireBridges() also gates
-    // this entire port on `!cfg.isCode`, matching setupCollaborators' own e2e/code split one layer
-    // up here, since code mode has no web test data to clean).
+    // e2eCleanupDeps.runCleanup (migration-tier-4d Slice 1b: now qa-engine's own
+    // createDefaultE2eCleanupDeps, computed once above) legacy's now-deleted src/pipeline.ts used to
+    // wire identically for its own engine. e2e-only by construction (CleanupPortAdapter's own
+    // collaborators shape has no `code` slot — composition-root.ts's wireBridges() also gates this
+    // entire port on `!cfg.isCode`, matching setupCollaborators' own e2e/code split one layer up
+    // here, since code mode has no web test data to clean).
     cleanupCollaborators: {
-      e2e: (args) => defaultCleanupDeps.runCleanup(args),
+      e2e: (args) => e2eCleanupDeps.runCleanup(args),
     },
     // W4 follow-up (Task #37 audit CRITICAL, a9e7dfb's own "KNOWN FOLLOW-UP" note): wire the
     // PreGenerationGroundingPort / ReviewDomGroundingPort collaborators explicitly, mirroring

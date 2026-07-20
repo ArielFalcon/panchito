@@ -30,6 +30,13 @@
 // under kernel gateSignals too — see below) are threaded through unchanged; nothing is invented for
 // a field the upstream RunQaUseCase never populated (e.g. reflection is never set by the rewritten
 // engine yet — stays absent, exactly as legacy's own optional field allows).
+//
+// SHELL SURVIVOR (migration-tier-4d, D-4d-2): DECLARED a permanent shell survivor, not migration
+// debt. This is the persistence bridge into `history.ts`'s SQLite `run_outcomes` table (1101 ln,
+// never itself proposed for migration) — dissolving this adapter into qa-engine would require
+// importing `./history` (a src/-only module) from qa-engine, which arch:check's one-way rule
+// forbids. seam-parity.contract.test.ts's (d) PERSISTENCE block is this file's permanent
+// boundary-contract pin.
 import { saveRunOutcome } from "./history";
 import type { RunHistoryPort } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 import type { RunOutcome as KernelRunOutcome } from "@kernel/run-outcome.ts";

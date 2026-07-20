@@ -1,17 +1,29 @@
+// qa-engine/test/contexts/test-execution/infrastructure/e2e-execution.runner.test.ts
+// Behavioral tests for the e2e-mode runner/parser/harvest body, moved from src/qa/execute.test.ts
+// (migration-tier-4d Slice 1b — e2e-execution migration, the src->qa-engine migration program's
+// FINALE). Byte-identical assertions to the legacy file, with three deliberate changes mirroring
+// the runner's own header:
+//   1. `ExecuteDeps` -> `E2eExecuteDeps` (the rename this file's own new home applies).
+//   2. The real-spawn "killTree SIGKILLs a detached child" integration test is DROPPED — killTree
+//      is retired in favor of the shared ProcessKillAdapter, whose own unit-level test suite
+//      (qa-engine/test/shared-infrastructure/process-sandbox/process-kill.test.ts) already covers
+//      this collaborator; mirrors migration-tier-4b's own code-execution.runner.ts migration, which
+//      dropped the identical test for the same reason (no such test survives there either).
+//   3. `e2eTimeoutMs` is now a pure function taking `env` as an explicit parameter (mirrors
+//      sandbox.ts's resolveSandbox(env, ...) precedent) instead of mutating process.env — the test
+//      is simplified accordingly (no global env mutation / try-finally needed).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import {
   runE2E,
-  ExecuteDeps,
+  type E2eExecuteDeps,
   parseStreamEvent,
   streamStatusToCase,
   allFailuresAreRunnerInfra,
-  killTree,
   playwrightArgs,
   e2eTimeoutMs,
   DEFAULT_E2E_TIMEOUT_MS,
@@ -20,19 +32,19 @@ import {
   titleSegments,
   readFailureDumps,
   type FailureDump,
-} from "./execute";
-import { QaCase } from "../types";
+} from "@contexts/test-execution/infrastructure/e2e-execution.runner.ts";
+import type { QaCase } from "@kernel/qa-case.ts";
 // src/qa/selector-check.ts was deleted (migration-wiring-phase-2, Slice 8b-4) — selectorPresent now
 // comes from the already-ported qa-engine module (same function, verified parity in
 // selector-check-parity.test.ts).
-import { selectorPresent } from "@contexts/qa-run-orchestration/domain/helpers/selector-check";
-import { parseAriaSnapshot } from "./dom-snapshot";
+import { selectorPresent } from "@contexts/qa-run-orchestration/domain/helpers/selector-check.ts";
+import { parseAriaSnapshot } from "@contexts/generation/infrastructure/dom-snapshot.ts";
 
 // Plan 7.6 (cutover finale): src/pipeline.ts is deleted. This is a verbatim, test-local copy of its
 // buildFailureDomLines — splits a case's captured failure-point a11y tree into non-empty lines. Pure,
 // dependency-free. The production copy now lives in qa-engine's
 // contexts/qa-run-orchestration/domain/fix-loop.aggregate.ts (ported there in Plan 6/7); this test
-// only needs the same shape to assert execute.ts's DOM-harvest output is consumable by it.
+// only needs the same shape to assert the runner's DOM-harvest output is consumable by it.
 function buildFailureDomLines(failureDom: string | undefined): string[] {
   if (!failureDom) return [];
   return failureDom.split("\n").filter((l) => l.trim());
@@ -67,7 +79,7 @@ test("allFailuresAreRunnerInfra: a browser-launch failure is infra (runner fault
 });
 
 test("runs, maps cases and SANITIZES the logs", async () => {
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: async () => ({
       report: {
         suites: [
@@ -100,7 +112,7 @@ test("runs, maps cases and SANITIZES the logs", async () => {
 });
 
 test("classifies flaky when there are unstable cases and none fail", async () => {
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: async () => ({
       report: { suites: [{ specs: [{ title: "x", tests: [{ status: "flaky" }] }] }] },
       logs: "ok",
@@ -113,7 +125,7 @@ test("classifies flaky when there are unstable cases and none fail", async () =>
 });
 
 test("all green => verdict pass", async () => {
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: async () => ({ report: { stats: { expected: 2, unexpected: 0 } }, logs: "ok", ran: true }),
   };
   const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-zzz" }, deps);
@@ -124,7 +136,7 @@ test("all green => verdict pass", async () => {
 test("a crashed runner (no parseable report) is infra-error, NEVER pass", async () => {
   // The default runner sets ran:false when stdout is not JSON (Playwright failed
   // to launch / config error). This must not be swallowed into a green run.
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: async () => ({ report: {}, logs: "Error: browserType.launch failed", ran: false }),
   };
   const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-crash" }, deps);
@@ -134,7 +146,7 @@ test("a crashed runner (no parseable report) is infra-error, NEVER pass", async 
 });
 
 test("a ran-but-empty report ({}) is infra-error, not a false pass", async () => {
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: async () => ({ report: {}, logs: "weird", ran: true }),
   };
   const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-empty" }, deps);
@@ -163,7 +175,7 @@ test("streamStatusToCase maps green to pass, skipped to null, everything else fa
 test("runE2E streams testbegin → onRunning and testend → onCase incrementally", async () => {
   const running: string[] = [];
   const cases: QaCase[] = [];
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: async ({ onEvent }) => {
       onEvent?.({ phase: "begin", total: 2 });
       onEvent?.({ phase: "testbegin", title: "home › hero" });
@@ -188,7 +200,7 @@ test("runE2E streams testbegin → onRunning and testend → onCase incrementall
 test("a ran report that executed zero tests is infra-error, not a false pass", async () => {
   // A shaped report (suites present) but with no executed test — e.g. testMatch
   // matched nothing, or every spec was filtered/skipped. Ran, but proved nothing.
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: async () => ({ report: { suites: [], stats: { expected: 0, unexpected: 0, flaky: 0, skipped: 0 } }, logs: "Error: No tests found", ran: true }),
   };
   const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-zero" }, deps);
@@ -199,7 +211,7 @@ test("a ran report that executed zero tests is infra-error, not a false pass", a
 // ── Integration tests: Playwright boundary failure modes ─────────────────────
 
 test("runE2E propagates error when deps.runSuite throws (runner crash / spawn error)", async () => {
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: async () => { throw new Error("Playwright runner crashed: spawn ENOENT"); },
   };
   await assert.rejects(
@@ -215,7 +227,7 @@ test("runE2E propagates error when deps.runSuite throws (runner crash / spawn er
 test("runE2E removes the temp failureCaptureDir on the runSuite REJECT path (no leak)", async () => {
   const { existsSync } = await import("node:fs");
   let handedDir: string | undefined;
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: async (args) => {
       handedDir = args.failureCaptureDir;
       // The dir must exist while the runner holds it (the fixture writes into it).
@@ -232,7 +244,7 @@ test("runE2E removes the temp failureCaptureDir on the runSuite REJECT path (no 
 });
 
 test("runE2E handles a malformed report shape by returning infra-error", async () => {
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: async () => ({ report: { notSuites: "x" }, logs: "weird output", ran: true }),
   };
   const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-malformed" }, deps);
@@ -241,7 +253,7 @@ test("runE2E handles a malformed report shape by returning infra-error", async (
 });
 
 test("runE2E handles a null report by returning infra-error", async () => {
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: async () => ({ report: null, logs: "null report", ran: true }),
   };
   const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-null" }, deps);
@@ -265,7 +277,7 @@ test("runE2E flattens a RAW errorContext aria YAML so the Lever-2 seam can read 
     "    - row \"Name City\"",
   ].join("\n");
 
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: async () => ({
       report: {
         suites: [
@@ -317,7 +329,7 @@ test("runE2E flattens a RAW errorContext aria YAML so the Lever-2 seam can read 
 // (2) the no-dump/no-errorContext case still emits the WARNING.
 test("W2: errorContext fallback + the no-grounding WARNING still fire when the capture dir can't be minted", async () => {
   const rawAriaYaml = "- main:\n  - button \"Add Owner\"";
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: async (args) => {
       // The dir could not be minted, so the runner is handed no capture dir at all.
       assert.equal(args.failureCaptureDir, undefined, "failureCaptureDir must be undefined when mkdtempSync throws");
@@ -373,10 +385,10 @@ test("W2: errorContext fallback + the no-grounding WARNING still fire when the c
   );
 });
 
-// ── Process safeguards: timeout, abort, kill-tree, --project ─────────────────
+// ── Process safeguards: timeout, abort, --project ─────────────────────────────
 
 test("a hung runner is timed out and classified infra-error, never a test failure", async () => {
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: () => new Promise(() => { /* hangs forever, like a wedged browser */ }),
   };
   const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-hang", timeoutMs: 30 }, deps);
@@ -388,7 +400,7 @@ test("a hung runner is timed out and classified infra-error, never a test failur
 
 test("an abort signal kills a hung runner and classifies infra-error", async () => {
   const controller = new AbortController();
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: () => new Promise(() => { /* hangs until aborted */ }),
   };
   setTimeout(() => controller.abort(), 10);
@@ -402,7 +414,7 @@ test("an already-aborted signal returns infra-error without starting the runner"
   const controller = new AbortController();
   controller.abort();
   let started = false;
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: async () => { started = true; return { report: { stats: {} }, logs: "", ran: true }; },
   };
   const run = await runE2E("/dir", { baseUrl: "https://dev", namespace: "qa-bot-preabort", signal: controller.signal }, deps);
@@ -413,7 +425,7 @@ test("an already-aborted signal returns infra-error without starting the runner"
 test("runE2E passes project, signal and timeoutMs through to the runner deps", async () => {
   const controller = new AbortController();
   let seen: { project?: string; signal?: AbortSignal; timeoutMs?: number } = {};
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: async (args) => {
       seen = { project: args.project, signal: args.signal, timeoutMs: args.timeoutMs };
       return { report: { stats: { expected: 1 } }, logs: "ok", ran: true };
@@ -431,7 +443,7 @@ test("runE2E passes project, signal and timeoutMs through to the runner deps", a
 // was never set and getByTestId silently resolved the default data-testid on non-default apps.
 test("runE2E passes testIdAttribute through to the runner deps", async () => {
   let seen: { testIdAttribute?: string } = {};
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: async (args) => {
       seen = { testIdAttribute: args.testIdAttribute };
       return { report: { stats: { expected: 1 } }, logs: "ok", ran: true };
@@ -443,7 +455,7 @@ test("runE2E passes testIdAttribute through to the runner deps", async () => {
 
 test("runE2E rejects a project name outside the allowlist (arg-injection surface)", async () => {
   let started = false;
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: async () => { started = true; return { report: { stats: {} }, logs: "", ran: true }; },
   };
   await assert.rejects(
@@ -467,21 +479,11 @@ test("playwrightArgs appends --project only when set, and validates it", () => {
   assert.throws(() => playwrightArgs("/tmp/rep.cjs", "$(reboot)"), /invalid Playwright project name/);
 });
 
-test("e2eTimeoutMs honors QA_E2E_TIMEOUT_MS and falls back to the default on garbage", () => {
-  const prev = process.env.QA_E2E_TIMEOUT_MS;
-  try {
-    process.env.QA_E2E_TIMEOUT_MS = "123456";
-    assert.equal(e2eTimeoutMs(), 123456);
-    process.env.QA_E2E_TIMEOUT_MS = "not-a-number";
-    assert.equal(e2eTimeoutMs(), DEFAULT_E2E_TIMEOUT_MS);
-    process.env.QA_E2E_TIMEOUT_MS = "-5";
-    assert.equal(e2eTimeoutMs(), DEFAULT_E2E_TIMEOUT_MS);
-    delete process.env.QA_E2E_TIMEOUT_MS;
-    assert.equal(e2eTimeoutMs(), DEFAULT_E2E_TIMEOUT_MS);
-  } finally {
-    if (prev === undefined) delete process.env.QA_E2E_TIMEOUT_MS;
-    else process.env.QA_E2E_TIMEOUT_MS = prev;
-  }
+test("e2eTimeoutMs honors env.QA_E2E_TIMEOUT_MS and falls back to the default on garbage/absent", () => {
+  assert.equal(e2eTimeoutMs({ QA_E2E_TIMEOUT_MS: "123456" }), 123456);
+  assert.equal(e2eTimeoutMs({ QA_E2E_TIMEOUT_MS: "not-a-number" }), DEFAULT_E2E_TIMEOUT_MS);
+  assert.equal(e2eTimeoutMs({ QA_E2E_TIMEOUT_MS: "-5" }), DEFAULT_E2E_TIMEOUT_MS);
+  assert.equal(e2eTimeoutMs({}), DEFAULT_E2E_TIMEOUT_MS);
 });
 
 // ── matchFailureDumps (Unit 2 — Task 2.8) ────────────────────────────────────
@@ -754,15 +756,6 @@ test("playwrightArgs: accepts spec files with subdirectory paths (flows/login.sp
   assert.ok(args.includes("flows/login.spec.ts"), `subdirectory spec should be allowed: ${args.join(" ")}`);
 });
 
-test("killTree SIGKILLs a detached child (the helper behind every QA spawn)", async () => {
-  // A real, cheap child that would otherwise hang forever — same shape as a wedged runner.
-  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true });
-  await new Promise((resolve) => child.once("spawn", resolve));
-  const closed = new Promise<NodeJS.Signals | null>((resolve) => child.on("close", (_code, signal) => resolve(signal)));
-  killTree(child);
-  assert.equal(await closed, "SIGKILL");
-});
-
 // ── T5: Harvest fold — finalUrl + httpStatus onto QaCase (D1) ─────────────────
 // RED test (T5): the harvest must fold dump.finalUrl and dump.httpStatus onto the SAME QaCase
 // object that today receives failureDom. Asserts the carry-through, the absent-warned path being
@@ -776,7 +769,7 @@ test("T5: harvest folds dump.finalUrl and dump.httpStatus onto the failed QaCase
   const file = "owners.spec.ts";
   const hash = createHash("sha1").update(`${file}/${title}`).digest("hex").slice(0, 12);
 
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: async (args) => {
       // Write the dump into the captureDir that runE2E minted.
       if (args.failureCaptureDir) {
@@ -816,7 +809,7 @@ test("T5: harvest leaves httpStatus/finalUrl absent when dump has neither (absen
   const file = "form.spec.ts";
   const hash = createHash("sha1").update(`${file}/${title}`).digest("hex").slice(0, 12);
 
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: async (args) => {
       if (args.failureCaptureDir) {
         writeFileSync(
@@ -858,7 +851,7 @@ test("Feature B: harvest folds dump.runtimeErrors onto the failed QaCase", async
   const file = "owners.spec.ts";
   const hash = createHash("sha1").update(`${file}/${title}`).digest("hex").slice(0, 12);
 
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: async (args) => {
       if (args.failureCaptureDir) {
         writeFileSync(
@@ -904,7 +897,7 @@ test("Feature B: harvest leaves runtimeErrors absent when dump has none (best-ef
   const file = "form.spec.ts";
   const hash = createHash("sha1").update(`${file}/${title}`).digest("hex").slice(0, 12);
 
-  const deps: ExecuteDeps = {
+  const deps: E2eExecuteDeps = {
     runSuite: async (args) => {
       if (args.failureCaptureDir) {
         writeFileSync(

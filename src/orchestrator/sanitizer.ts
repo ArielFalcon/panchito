@@ -370,111 +370,18 @@ export class RedactionPortAdapter implements RedactionPort {
   }
 }
 
-// ── Diff prompt budget ───────────────────────────────────────────────────────
-// The commit diff is the one LLM input with no natural size bound (a lockfile or merge
-// commit can reach megabytes) and it is embedded in up to ~6 prompts per run (generate,
-// plan, review rounds, retry, coverage-enforce). Cap it ONCE at the pipeline boundary:
-// keep whole per-file sections in RELEVANCE ORDER until the budget is spent, then replace
-// the rest with the list of omitted files. The agent always has the full diff available
-// in its working copy (`git show <sha>`), so nothing is lost — only the prompt is bounded.
-// Local consumers (the classifier, parseDiffHunks, change-coverage) keep using the raw diff.
-//
-// Slice G — relevance ordering (P9): changed-source hunks first; lockfiles, generated
-// files, and binary/snapshot artifacts last (or omitted). This ensures that when the diff
-// exceeds the cap, the agent always sees the changed application code, not lock-file noise
-// that happened to sort first alphabetically. The same relevance-ordered form is fed to
-// the generator, the reviewer, and change-coverage so coverage cannot demand lines the
-// agent never saw (the unsatisfiable-coverage-gap).
-export const MAX_PROMPT_DIFF_CHARS = 50_000;
-
-// File patterns that classify a diff section as low-relevance (sorted last / omitted first
-// when the budget is tight). A section matching ANY of these is low-relevance.
-const LOW_RELEVANCE_PATTERNS = [
-  // Lockfiles (npm, yarn, pnpm, pip, cargo, go, composer, poetry, gemfile)
-  /^(package-lock|yarn\.lock|pnpm-lock|Pipfile\.lock|Cargo\.lock|go\.sum|composer\.lock|poetry\.lock|Gemfile\.lock)$/i,
-  // Generated files (conventional suffixes / directory names)
-  /\.(generated|gen|pb|pb\.go|pb_grpc\.go|swagger\.json|openapi\.json|openapi\.yaml)$/i,
-  /\bgenerated?\b/i,
-  // Snapshot / inline-snapshot test files
-  /\.snap$/i,
-  // Binary + media assets
-  /\.(png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|pdf|zip|tar|gz)$/i,
-  // Build artefacts and caches
-  /\/(dist|build|\.cache|__pycache__|\.next|\.nuxt|\.out|target)\/[^/]+\.(js|css|map|ts)$/i,
-  // Source-map files
-  /\.map$/i,
-  // Changelog and migration artefacts
-  /^(CHANGELOG|CHANGES|HISTORY)\.(md|txt)$/i,
-];
-
-function isLowRelevance(filePath: string): boolean {
-  const basename = filePath.split("/").pop() ?? filePath;
-  return LOW_RELEVANCE_PATTERNS.some((p) => p.test(filePath) || p.test(basename));
-}
-
-// Extracts the file path from a "diff --git a/... b/..." header line.
-// Exported (judgment-day FIX 1) so prompts.ts's cappedDiffText can key its per-section sanitize
-// MODE (issue vs. model) off the same target path capDiff itself already parses out — one shared
-// extraction, no duplicated regex.
-export function extractDiffFilePath(section: string): string {
-  // "diff --git a/src/foo.ts b/src/foo.ts" — take the b/ path (post-rename destination)
-  const m = /^diff --git a\/\S+ b\/(\S+)/m.exec(section);
-  return m?.[1] ?? "";
-}
-
-export function capDiff(diff: string, maxChars: number = MAX_PROMPT_DIFF_CHARS): string {
-  if (diff.length <= maxChars) return diff;
-  // Split into per-file sections; the leading chunk (before the first header) stays first.
-  const rawSections = diff.split(/^(?=diff --git )/m);
-
-  // Relevance-order: high-relevance (changed source) first, low-relevance last.
-  // Stable sort preserves the original file order within each group.
-  const preamble = rawSections[0] ?? "";
-  const fileSections = rawSections.slice(1);
-  const highRelevance: string[] = [];
-  const lowRelevance: string[] = [];
-  for (const s of fileSections) {
-    const filePath = extractDiffFilePath(s);
-    if (isLowRelevance(filePath)) {
-      lowRelevance.push(s);
-    } else {
-      highRelevance.push(s);
-    }
-  }
-  // Ordered: preamble + high-relevance sections + low-relevance sections.
-  const ordered = [preamble, ...highRelevance, ...lowRelevance];
-
-  const kept: string[] = [];
-  const omitted: string[] = [];
-  let used = 0;
-  for (const section of ordered) {
-    if (omitted.length === 0 && used + section.length <= maxChars) {
-      kept.push(section);
-      used += section.length;
-    } else {
-      if (section === preamble) continue; // preamble has no file header to name
-      const file = extractDiffFilePath(section) || (/^diff --git a\/(\S+)/.exec(section)?.[1] ?? "(unnamed section)");
-      omitted.push(file);
-    }
-  }
-  // Degenerate single-section overflow (one giant file): hard-truncate the first section.
-  if (kept.filter((s) => s !== preamble).length === 0 && fileSections.length > 0) {
-    const firstFile = highRelevance[0] ?? lowRelevance[0] ?? fileSections[0]!;
-    kept.push(firstFile.slice(0, maxChars));
-    const name = extractDiffFilePath(firstFile);
-    omitted.splice(omitted.indexOf(name), 1);
-  }
-  return (
-    kept.join("") +
-    `\n[diff truncated for the prompt: ${omitted.length} file(s) omitted (${diff.length} chars total).` +
-    ` Omitted: ${omitted.join(", ")}.` +
-    ` Read the full change in the working copy with \`git show <sha>\`.]\n`
-  );
-}
-
+// ── Prose prompt budget ──────────────────────────────────────────────────────
+// DELETED (migration-tier-4d Slice 4, residual iii): this module's own diff-capping cluster
+// (`capDiff`/`extractDiffFilePath`/`isLowRelevance`/`LOW_RELEVANCE_PATTERNS`/`MAX_PROMPT_DIFF_CHARS`,
+// plus its "Slice G" relevance-ordering tests) had ZERO remaining production callers — the real,
+// wired diff capper is `qa-engine/src/contexts/generation/infrastructure/prompt-cap.ts`'s own
+// `capDiff` (ported verbatim from this file, then independently bug-fixed in migration-tier-4c
+// Slice 5b), injected via `PromptBudgetAdapter` in `rewritten-engine-factory.ts`. `extractDiffFilePath`
+// was re-verified to have no live callers outside this file's own internals before deletion (the
+// design's flagged hazard) — confirmed via `rg` across `src/` and `qa-engine/`.
 export const MAX_PROMPT_BODY_CHARS = 4_000;
 
-// Caps free-form prose (e.g. a commit body) before it enters a prompt. Unlike capDiff there is no
+// Caps free-form prose (e.g. a commit body) before it enters a prompt. Unlike a diff there is no
 // per-file structure to preserve, so a single hard slice with a visible marker is correct. The
 // commit body is fully attacker-influenceable (any contributor writes it) and, unlike the first
 // line, has no natural length bound — so it MUST be capped before reaching the agent, exactly as

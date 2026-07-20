@@ -17,6 +17,19 @@
 // and "label rule" section headers rather than boxes. Color is OPT-IN (`opts.color`) so the
 // pure output stays deterministic for tests and clean when piped; the CLI enables it only on
 // an interactive TTY (and honors NO_COLOR).
+//
+// ── SHELL SURVIVOR (migration-tier-4d, Slice 3) ─────────────────────────────────────────────────
+// DECLARED a permanent shell survivor, not migration debt: this module holds zero decision logic —
+// it only renders already-decided signals (verdict, change-coverage ratio, oracle score, reviewer
+// verdict — all computed inside qa-engine and returned via its ports) into ANSI-styled prose for a
+// human operator. Its one production caller is `src/cli.ts` (renderRunReport, printed after a
+// manual run), itself a shell entry point; the visual language deliberately mirrors the separate Go
+// TUI (client/internal/ui), the shell's own presentation surface. CLI/TUI reporting is a
+// control-plane concern, not qa-engine business logic. (Discovered, not actioned here — out of this
+// fix's scope: `renderValueTag`'s own doc above, "the pipeline appends renderValueTag() to
+// run.outcome," describes the deleted legacy `src/pipeline.ts`; no current caller invokes
+// `renderValueTag` in production, only in this file's own test — a stale-doc/dead-export pair for a
+// future cleanup pass, not a shell-classification concern.)
 
 import type { RunVerdict } from "../types";
 import type { ErrorClass } from "./learning/taxonomy";

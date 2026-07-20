@@ -59,6 +59,10 @@ export const PROTECTED_PATHS: string[] = [
   "qa-engine/src/contexts/test-execution/infrastructure/code-execution.runner.ts",
   "qa-engine/src/contexts/test-execution/infrastructure/code-setup.ts",
   "qa-engine/src/shared-infrastructure/process-sandbox/sandbox.ts",
+  // migration-tier-4d Slice 1b: src/qa/execute.ts is deleted — replaced by this qa-engine home. It
+  // spawns agent-authored specs (untrusted) exactly like code-execution.runner.ts above, and was NOT
+  // protected before this slice — a real pre-existing gap this migration closes, not just parity.
+  "qa-engine/src/contexts/test-execution/infrastructure/e2e-execution.runner.ts",
   // 4. build/topology the canary cannot verify (image rebuild only)
   ".github/",
   "Dockerfile",

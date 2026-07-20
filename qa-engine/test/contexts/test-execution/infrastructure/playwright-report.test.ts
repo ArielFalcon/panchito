@@ -1,6 +1,11 @@
+// qa-engine/test/contexts/test-execution/infrastructure/playwright-report.test.ts
+// Moved from src/qa/playwright-report.test.ts (migration-tier-4d Slice 1a — playwright-report
+// migration, prep step ahead of the execute.ts body-move in Slice 1b). Byte-identical assertions
+// to the legacy file — only the import path changes, plus the inline QaCase type-only import,
+// which now reads from the qa-engine kernel's own canonical copy instead of src/types.ts.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parsePlaywrightReport, firstErrorContext } from "./playwright-report";
+import { parsePlaywrightReport, firstErrorContext } from "@contexts/test-execution/infrastructure/playwright-report.ts";
 
 test("maps nested specs to pass/fail cases", () => {
   const report = {
@@ -235,7 +240,7 @@ test("parsePlaywrightReport: a parsed QaCase carries the spec file basename from
   const parsed = parsePlaywrightReport(report);
   // Both cases must carry the enclosing suite title as .file
   for (const c of parsed.cases) {
-    assert.equal((c as import("../types").QaCase).file, "login.spec.ts", `expected file="login.spec.ts" on case "${c.name}", got ${JSON.stringify((c as import("../types").QaCase).file)}`);
+    assert.equal((c as import("@kernel/qa-case.ts").QaCase).file, "login.spec.ts", `expected file="login.spec.ts" on case "${c.name}", got ${JSON.stringify((c as import("@kernel/qa-case.ts").QaCase).file)}`);
   }
 });
 
@@ -255,7 +260,7 @@ test("parsePlaywrightReport: nested suite (describe block) — file is still the
   };
   const parsed = parsePlaywrightReport(report);
   assert.equal(parsed.cases.length, 1);
-  assert.equal((parsed.cases[0]! as import("../types").QaCase).file, "checkout.spec.ts");
+  assert.equal((parsed.cases[0]! as import("@kernel/qa-case.ts").QaCase).file, "checkout.spec.ts");
 });
 
 test("parsePlaywrightReport: a spec at the root suite (no file title) leaves file undefined", () => {
@@ -271,7 +276,7 @@ test("parsePlaywrightReport: a spec at the root suite (no file title) leaves fil
   const parsed = parsePlaywrightReport(report);
   assert.equal(parsed.cases.length, 1);
   // file is either undefined or empty — must NOT be a meaningful path
-  const file = (parsed.cases[0]! as import("../types").QaCase).file;
+  const file = (parsed.cases[0]! as import("@kernel/qa-case.ts").QaCase).file;
   assert.ok(!file || file === "", `orphan test should have no meaningful file; got ${JSON.stringify(file)}`);
 });
 

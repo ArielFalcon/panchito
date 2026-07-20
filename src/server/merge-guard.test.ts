@@ -46,6 +46,10 @@ test("isProtectedPath flags the gate-integrity surface (the fix must not weaken 
   assert.equal(isProtectedPath("qa-engine/src/contexts/test-execution/infrastructure/code-execution.runner.ts"), true);
   assert.equal(isProtectedPath("qa-engine/src/contexts/test-execution/infrastructure/code-setup.ts"), true);
   assert.equal(isProtectedPath("qa-engine/src/shared-infrastructure/process-sandbox/sandbox.ts"), true);
+  // migration-tier-4d Slice 1b: src/qa/execute.ts is deleted — replaced by this qa-engine home,
+  // which spawns agent-authored specs (untrusted) exactly like code-execution.runner.ts above. It
+  // was NOT protected before this slice — closing a real pre-existing gap, not just parity.
+  assert.equal(isProtectedPath("qa-engine/src/contexts/test-execution/infrastructure/e2e-execution.runner.ts"), true);
   // a non-test source file next to tests is still editable (glob is a strict .test.ts suffix).
   assert.equal(isProtectedPath("src/qa/change-coverage.ts"), false);
 });

@@ -13,9 +13,13 @@ import {
   parseModelRef,
   withTimeout,
   agentErrorToInfra,
+  createAgentDeps,
   type AgentDeps,
+  type RawAgentTransport,
+  type AgentTurnEvent,
 } from "@contexts/generation/infrastructure/agent-transport-policy.ts";
 import { createStallWatchdog } from "@contexts/generation/infrastructure/resilience/stall-watchdog.ts";
+import { recordCircuitFailure, resetCircuit } from "@contexts/generation/infrastructure/resilience/circuit-breaker.ts";
 
 // ─── withStallWatchdog ───────────────────────────────────────────────────────────────────────────
 
@@ -346,4 +350,244 @@ test("agentErrorToInfra classifies an embedded provider fault as infrastructure 
   const unknown = agentErrorToInfra({ name: "UnknownError", data: { message: "boom" } });
   assert.equal(isInfraError(unknown), true);
   assert.match(unknown.message, /not a test failure/i);
+});
+
+// ─── createAgentDeps (migration-tier-4d Slice 4, residual ii) ───────────────────────────────────
+// Approval/characterization tests: createAgentDeps was already the production transport POLICY
+// (the agent's critical path — every generate/review/repair round funnels through it) but had NO
+// direct unit test of its own before this slice; every existing test above exercises the DECORATOR
+// wrappers (withStallWatchdog/withSessionRegistration) against a hand-built fake AgentDeps, never
+// createAgentDeps(raw, collab) itself against a fake RawAgentTransport. These tests characterize the
+// 5 behaviors the design named: fallback-model retry on a transient fault, skip-on-abort/infra-error,
+// circuit-breaker gating, telemetry assembly, and sanitize-before-emit.
+
+function makeRawTransport(overrides: Partial<RawAgentTransport> = {}): RawAgentTransport {
+  return {
+    createSession: async (_cwd: string) => ({ id: "sess-default" }),
+    promptSession: async () => ({ parts: [{ type: "text", text: "default output" }] }),
+    abortSession: async () => {},
+    deleteSession: async () => {},
+    ...overrides,
+  };
+}
+
+test("createAgentDeps: open()/prompt()/dispose() delegate to the raw transport and return its text", async () => {
+  resetCircuit();
+  const raw = makeRawTransport({
+    createSession: async () => ({ id: "sess-1" }),
+    promptSession: async (args) => {
+      assert.equal(args.agent, "qa-generator");
+      assert.equal(args.text, "do the thing");
+      return { parts: [{ type: "text", text: "hello world" }] };
+    },
+  });
+  const deps = createAgentDeps(raw, { defaultPromptTimeoutMs: 5000, getFallbackModel: () => undefined });
+  const session = await deps.open("qa-generator", "/tmp");
+  const out = await session.prompt("do the thing");
+  assert.equal(out, "hello world");
+  await session.dispose();
+});
+
+test("createAgentDeps: retries on the fallback model after a transient (non-infra) primary-model fault", async () => {
+  resetCircuit();
+  let attempt = 0;
+  const raw = makeRawTransport({
+    createSession: async () => ({ id: "sess-2" }),
+    promptSession: async (args) => {
+      attempt++;
+      if (attempt === 1) {
+        assert.equal(args.model, undefined, "the primary attempt must not send a model override");
+        throw new Error("ECONNRESET transient network fault");
+      }
+      assert.deepEqual(args.model, { providerID: "opencode-go", modelID: "fallback-model" }, "the retry must target the resolved fallback model");
+      return { parts: [{ type: "text", text: "fallback succeeded" }] };
+    },
+  });
+  const deps = createAgentDeps(raw, {
+    defaultPromptTimeoutMs: 5000,
+    getFallbackModel: (agent) => (agent === "qa-generator" ? "opencode-go/fallback-model" : undefined),
+  });
+  const session = await deps.open("qa-generator", "/tmp");
+  const out = await session.prompt("do the thing");
+  assert.equal(out, "fallback succeeded");
+  assert.equal(attempt, 2, "exactly one retry (primary + fallback) must have happened");
+});
+
+test("createAgentDeps: an aborted signal skips the fallback retry even when one is configured", async () => {
+  resetCircuit();
+  let attempts = 0;
+  const controller = new AbortController();
+  const raw = makeRawTransport({
+    createSession: async () => ({ id: "sess-3" }),
+    promptSession: async () => {
+      attempts++;
+      controller.abort(); // the operator cancels while the request is in flight
+      throw new Error("operator cancel while in flight");
+    },
+  });
+  const deps = createAgentDeps(raw, {
+    defaultPromptTimeoutMs: 5000,
+    getFallbackModel: () => "opencode-go/should-never-be-used",
+  });
+  const session = await deps.open("qa-generator", "/tmp", { signal: controller.signal });
+  await assert.rejects(() => session.prompt("do the thing"));
+  assert.equal(attempts, 1, "an aborted signal must skip the fallback retry — a cancel must not be defeated by a retry");
+});
+
+test("createAgentDeps: an infra-class provider fault skips the fallback retry (same key, pointless to re-spend)", async () => {
+  resetCircuit();
+  let attempts = 0;
+  const raw = makeRawTransport({
+    createSession: async () => ({ id: "sess-4" }),
+    promptSession: async () => {
+      attempts++;
+      return {
+        agentError: { name: "ProviderAuthError", data: { providerID: "opencode-go", message: "out of credits" } },
+        parts: [],
+      };
+    },
+  });
+  const deps = createAgentDeps(raw, {
+    defaultPromptTimeoutMs: 5000,
+    getFallbackModel: () => "opencode-go/should-never-be-used",
+  });
+  const session = await deps.open("qa-generator", "/tmp");
+  await assert.rejects(
+    () => session.prompt("do the thing"),
+    (err: unknown) => isInfraError(err),
+    "an embedded provider fault must surface as a typed InfraError",
+  );
+  assert.equal(attempts, 1, "an infra-class fault (out-of-credits/auth) must skip the fallback retry entirely");
+});
+
+test("createAgentDeps: circuit-breaker gating — an OPEN circuit rejects prompt() before the raw transport is ever called, and resetCircuit() restores normal operation", async () => {
+  resetCircuit();
+  let promptCalls = 0;
+  const raw = makeRawTransport({
+    createSession: async () => ({ id: "sess-5" }),
+    promptSession: async () => {
+      promptCalls++;
+      return { parts: [{ type: "text", text: "ok" }] };
+    },
+  });
+  const deps = createAgentDeps(raw, { defaultPromptTimeoutMs: 5000, getFallbackModel: () => undefined });
+
+  // Force the circuit OPEN via the module's own threshold (5 consecutive recorded failures).
+  for (let i = 0; i < 5; i++) recordCircuitFailure();
+
+  const openSession = await deps.open("qa-generator", "/tmp");
+  // NOTE: checkCircuit() rejects SYNCHRONOUSLY (it throws before any Promise is constructed), unlike
+  // every other failure path in createAgentDeps (which fails through an async raw.promptSession call
+  // and so settles as a genuine Promise rejection). node:assert's assert.rejects does NOT convert a
+  // synchronous throw from its callback into a caught rejection (verified: it re-throws uncaught) —
+  // only `await`/try-catch handles both cases uniformly. Every real production caller already awaits
+  // session.prompt() inside an async function or a `new Promise` executor, both of which DO normalize
+  // a synchronous throw into a rejection, so this is a test-authoring gotcha, not a production bug.
+  let openCircuitError: unknown;
+  try {
+    await openSession.prompt("do the thing");
+  } catch (err) {
+    openCircuitError = err;
+  }
+  assert.ok(openCircuitError instanceof Error, "the OPEN circuit must reject the prompt");
+  assert.match((openCircuitError as Error).message, /circuit breaker is OPEN/);
+  assert.equal(promptCalls, 0, "checkCircuit() must reject BEFORE the raw transport's promptSession is ever invoked");
+
+  resetCircuit();
+  const closedSession = await deps.open("qa-generator", "/tmp");
+  const out = await closedSession.prompt("do the thing");
+  assert.equal(out, "ok", "after resetCircuit() a normal prompt succeeds again");
+  assert.equal(promptCalls, 1, "the raw transport is only reached once the circuit is closed");
+});
+
+test("createAgentDeps: telemetry assembly — onTurn receives a fully-populated AgentTurnEvent for a run with a runId", async () => {
+  resetCircuit();
+  const raw = makeRawTransport({
+    createSession: async () => ({ id: "sess-6" }),
+    promptSession: async () => ({
+      parts: [{ type: "text", text: "assembled output" }],
+      tokens: { input: 100, output: 50, reasoning: 10, cacheRead: 5, cacheWrite: 2 },
+      cost: 0.0123,
+    }),
+  });
+  const deps = createAgentDeps(raw, { defaultPromptTimeoutMs: 5000, getFallbackModel: () => undefined });
+  const turns: AgentTurnEvent[] = [];
+  const session = await deps.open("qa-generator", "/tmp", {
+    descriptor: { runId: "run-77", role: "qa-generator", objective: "write specs" },
+    onTurn: (t) => turns.push(t),
+  });
+  const out = await session.prompt("do the thing", { round: 3, isRepair: true, sectionSizes: { diff: 1200 } });
+  assert.equal(out, "assembled output");
+  assert.equal(turns.length, 1);
+  const t = turns[0]!;
+  assert.equal(t.runId, "run-77");
+  assert.equal(t.role, "qa-generator");
+  assert.equal(t.objective, "write specs");
+  assert.equal(t.round, 3);
+  assert.equal(t.isRepair, true);
+  assert.deepEqual(t.sectionSizes, { diff: 1200 });
+  assert.equal(t.tokensInput, 100);
+  assert.equal(t.tokensOutput, 50);
+  assert.equal(t.tokensReasoning, 10);
+  assert.equal(t.tokensCacheRead, 5);
+  assert.equal(t.tokensCacheWrite, 2);
+  assert.equal(t.cost, 0.0123);
+  assert.equal(t.outputText, "assembled output");
+});
+
+test("createAgentDeps: sanitize-before-emit — a leaked secret is redacted in the emitted turn event, but prompt() still resolves with the RAW text for the caller to parse", async () => {
+  resetCircuit();
+  const leaky = "here is the key sk-abcdefghijklmnopqrstuvwxyz1234 — do not print this";
+  const raw = makeRawTransport({
+    createSession: async () => ({ id: "sess-7" }),
+    promptSession: async () => ({ parts: [{ type: "text", text: leaky }] }),
+  });
+  const deps = createAgentDeps(raw, { defaultPromptTimeoutMs: 5000, getFallbackModel: () => undefined });
+  const turns: AgentTurnEvent[] = [];
+  const session = await deps.open("qa-generator", "/tmp", {
+    descriptor: { runId: "run-88" },
+    onTurn: (t) => turns.push(t),
+  });
+  const out = await session.prompt("do the thing");
+  assert.equal(out, leaky, "the caller-facing return value stays RAW so downstream JSON/verdict parsing is never corrupted by redaction");
+  assert.equal(turns.length, 1);
+  assert.doesNotMatch(turns[0]!.outputText, /sk-abcdefghijklmnopqrstuvwxyz1234/, "the emitted telemetry event must never carry the raw secret");
+  assert.match(turns[0]!.outputText, /\[REDACTED\]/, "the secret must be replaced with the canonical redaction marker before it reaches storage/logging");
+});
+
+test("createAgentDeps: the default turn sink calls collab.persistTurn when a runId is present and the caller supplies no onTurn override", async () => {
+  resetCircuit();
+  const raw = makeRawTransport({
+    createSession: async () => ({ id: "sess-8" }),
+    promptSession: async () => ({ parts: [{ type: "text", text: "persisted output" }] }),
+  });
+  const persisted: AgentTurnEvent[] = [];
+  const deps = createAgentDeps(raw, {
+    defaultPromptTimeoutMs: 5000,
+    getFallbackModel: () => undefined,
+    persistTurn: (t) => persisted.push(t),
+  });
+  const session = await deps.open("qa-generator", "/tmp", { descriptor: { runId: "run-99" } });
+  await session.prompt("do the thing");
+  assert.equal(persisted.length, 1);
+  assert.equal(persisted[0]!.runId, "run-99");
+  assert.equal(persisted[0]!.outputText, "persisted output");
+});
+
+test("createAgentDeps: no turn sink fires when the caller supplies neither a runId nor an onTurn override (no fabricated telemetry)", async () => {
+  resetCircuit();
+  const raw = makeRawTransport({
+    createSession: async () => ({ id: "sess-9" }),
+    promptSession: async () => ({ parts: [{ type: "text", text: "no telemetry" }] }),
+  });
+  let persistCalls = 0;
+  const deps = createAgentDeps(raw, {
+    defaultPromptTimeoutMs: 5000,
+    getFallbackModel: () => undefined,
+    persistTurn: () => { persistCalls++; },
+  });
+  const session = await deps.open("qa-generator", "/tmp");
+  const out = await session.prompt("do the thing");
+  assert.equal(out, "no telemetry");
+  assert.equal(persistCalls, 0, "no runId and no onTurn override means no telemetry sink fires at all");
 });

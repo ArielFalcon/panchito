@@ -1,17 +1,24 @@
-// src/contexts/test-execution/infrastructure/e2e-execution.strategy.ts
-// WRAP of src/qa/execute.ts runE2E (strangler: delegate, do not rewrite the runner). Maps the
-// typed ExecutionRequest onto the legacy opts and the legacy QaRunResult onto ExecutionResult,
-// then runs it through AdjudicateService so the runner-infra reclassification is centralized.
-// The runE2E fn is injected so this adapter is testable without Playwright.
+// qa-engine/src/contexts/test-execution/infrastructure/e2e-execution.strategy.ts
+// WRAP of runE2E (strangler: delegate, do not rewrite the runner). Maps the typed
+// ExecutionRequest onto the runner's opts and its return onto ExecutionResult, then runs it
+// through AdjudicateService so the runner-infra reclassification is centralized.
+// The runE2E fn stays INJECTED so this adapter is testable without Playwright.
+//
+// migration-tier-4d Slice 1b (e2e-execution migration): runE2E now lives in THIS SAME qa-engine
+// context (./e2e-execution.runner.ts), body-moved from src/qa/execute.ts — but this strategy's
+// RunE2eFn seam is deliberately KEPT injected rather than replaced with a direct internal call (a
+// correction of the migration's original proposal, which mis-cited migration-tier-4b's own
+// precedent: 4b's CodeExecutionStrategy kept ITS injected RunCodeFn too). Composition re-points the
+// closure to `(specDir, opts) => runE2E(specDir, opts, e2eExecuteDeps)` — DI is the testing strategy
+// (CLAUDE.md): this class stays Playwright-free in unit tests regardless of where the runner body
+// physically lives.
 //
 // Defense-in-depth note: AdjudicateService is applied here on top of runE2E, which already
-// performs the same reclassification internally (allFailuresAreRunnerInfra in execute.ts).
+// performs the same reclassification internally (allFailuresAreRunnerInfra in e2e-execution.runner.ts).
 // The double-pass is intentional and idempotent — adjudicate(adjudicate(verdict)) == adjudicate(verdict)
 // because infra-error is a terminal verdict that the service returns unchanged. This ensures the
 // typed boundary always carries a correctly-classified verdict regardless of whether the injected
 // runE2E stub (in tests) or the real runner performed the internal reclassification.
-//
-// Plan-6 composition wiring: pass (specDir, opts) => runE2E(specDir, opts, defaultExecuteDeps).
 import type {
   ExecutionStrategyPort,
   ExecutionRequest,

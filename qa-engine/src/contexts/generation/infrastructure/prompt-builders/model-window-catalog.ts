@@ -134,14 +134,24 @@ export function normalizeModelName(raw: string): string {
 // is invisible — every prompt would quietly use the conservative DEFAULT_WINDOW_TOKENS instead of the
 // model's real, larger window. Warn ONCE per (role, reason) so the mismatch is observable without
 // spamming the log on every assemble() call. Module-level set survives for the process lifetime.
+//
+// `outcome` (migration-tier-4d Slice 4, residual v — FIX): describes what ACTUALLY happens for THIS
+// call site. Most callers genuinely fall through to DEFAULT_WINDOW_TOKENS (the default below covers
+// them), but the D-4c-6 cross-source-disagreement call site does NOT fall through to anything — it
+// keeps using the runtime-resolved model's REAL window and only flags the mismatch for an operator to
+// confirm. The old hardcoded "fell through to the DEFAULT window" text was misleading there (nothing
+// fell through); this parameter lets that call site say what actually happened instead.
 const warnedFallbacks = new Set<string>();
-function warnFallbackOnce(role: string, reason: string): void {
+function warnFallbackOnce(
+  role: string,
+  reason: string,
+  outcome: string = `fell through to the DEFAULT window (${DEFAULT_WINDOW_TOKENS} tokens) — the assembled-prompt budget for this role is the conservative default, not its real model window`,
+): void {
   const key = `${role}:${reason}`;
   if (warnedFallbacks.has(key)) return;
   warnedFallbacks.add(key);
   console.warn(
-    `[model-window-catalog] role '${role}' fell through to the DEFAULT window (${DEFAULT_WINDOW_TOKENS} tokens): ${reason}. ` +
-      `The assembled-prompt budget for this role is the conservative default, not its real model window. ` +
+    `[model-window-catalog] role '${role}' ${outcome}: ${reason}. ` +
       `Confirm the role→model mapping in agents/opencode.json and the catalog in this file (see \`opencode models\`).`,
   );
 }
@@ -237,6 +247,7 @@ export function roleWindowBytes(
         role,
         `AgentRuntimeConfig.assignments resolved '${modelName}' but agents/opencode.json configures ` +
           `'${normalizeModelName(opencodeModel)}' for this role — using the runtime assignment (the source of truth for what actually executes)`,
+        `is using the RUNTIME-RESOLVED model's real window (NOT the default) despite a cross-source disagreement`,
       );
     }
 
