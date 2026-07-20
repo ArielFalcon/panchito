@@ -61,6 +61,11 @@ export interface VcsCommitResult {
   // overwhelming common case). Never fabricated: absent `denyModifiedTracked` (no guard wired)
   // still returns [], never undefined, so callers can always safely read `.length`.
   revertedDenylisted: string[];
+  // judgment-day round 3 (FIX E, both judges): the SUBSET of revertedDenylisted matching
+  // WriteConfinementService.isDangerousPath's narrower secret tier — see VcsWritePort.commit's own
+  // doc for the full rationale. Always an array (never undefined), same never-fabricated contract as
+  // revertedDenylisted.
+  revertedDangerous: string[];
 }
 
 type Git = (args: string[], cwd?: string) => Promise<string>;
@@ -138,7 +143,10 @@ export class VcsWriteAdapter implements VcsWritePort {
       }
       throw err;
     }
-    return { revertedDenylisted };
+    // judgment-day round 3 (FIX E, both judges): reuse the SAME isDangerousPath predicate
+    // classifyStrays already applies to dangerousByPath — never re-derive the secret-tier check.
+    const revertedDangerous = revertedDenylisted.filter((p) => this.pathDecoder.isDangerousPath(p));
+    return { revertedDenylisted, revertedDangerous };
   }
 
   async push(dir: string, branch: string): Promise<void> {

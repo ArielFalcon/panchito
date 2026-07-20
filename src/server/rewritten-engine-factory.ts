@@ -381,7 +381,7 @@ export function buildVcsPublish(
   // states secret-file writes apply "regardless of run target"; this wiring now matches that.
   const denyModifiedTracked = (path: string) => confinementClassifier.isCodeDenied(path);
   return {
-    async publish({ mirrorDir, branch }): Promise<{ changed: boolean; revertedDenylisted?: string[] }> {
+    async publish({ mirrorDir, branch }): Promise<{ changed: boolean; revertedDenylisted?: string[]; revertedDangerous?: string[] }> {
       // Apply local ignore patterns FIRST (same ordering as publish.ts's publishChanges) so both the
       // change check and the `git add` below silently skip installed deps/artifacts instead of
       // failing on an ignored path (the node_modules/.gitignore `git add` failure this ordering fixes).
@@ -393,9 +393,14 @@ export function buildVcsPublish(
       // judgment-day round 2 (FIX 3, HIGH): surface the tracked-file guard's own revert up to this
       // collaborator's caller (PublicationPortAdapter -> RunQaUseCase) — see VcsWritePort.commit's
       // own doc for why this must never stay silent.
-      const { revertedDenylisted } = await vcs.commit(mirrorDir, commitMsg, addDir, denyModifiedTracked);
+      //
+      // judgment-day round 3 (FIX E, both judges): VcsWriteAdapter.commit() now ALSO returns
+      // revertedDangerous (the isDangerousPath subset, computed inside the adapter via the SAME
+      // WriteConfinementService instance it already owns) — threaded straight through unchanged,
+      // never re-derived here.
+      const { revertedDenylisted, revertedDangerous } = await vcs.commit(mirrorDir, commitMsg, addDir, denyModifiedTracked);
       await vcs.push(mirrorDir, branch);
-      return { changed: true, revertedDenylisted };
+      return { changed: true, revertedDenylisted, revertedDangerous };
     },
   };
 }

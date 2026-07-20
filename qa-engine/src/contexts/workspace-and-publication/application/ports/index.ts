@@ -27,7 +27,15 @@ export interface VcsWritePort {
   // SAME gateSignals.confinement accumulator ConfinementPort.enforce() already feeds, and the
   // adapter itself ALSO logs loudly at the moment of revert (defense in depth: a trace exists even
   // if some future caller forgets to read the return value).
-  commit(dir: string, message: string, files: readonly string[], denyModifiedTracked?: (path: string) => boolean): Promise<{ revertedDenylisted: string[] }>;
+  //
+  // judgment-day round 3 (FIX E, both judges): `revertedDangerous` (also always an array) is the
+  // SUBSET of revertedDenylisted that matches WriteConfinementService.isDangerousPath's narrower
+  // secret tier (.env/.env.*/*.env, or a symlink escape) — the SAME predicate
+  // WriteConfinementAdapter.enforce() already uses to decide its own `dangerous` count. Computed
+  // HERE (the adapter has direct access to WriteConfinementService), not re-derived by a caller that
+  // cannot import this context's domain — a caller must never conflate "reverted" with "dangerous"
+  // again by re-implementing the secret-tier check itself.
+  commit(dir: string, message: string, files: readonly string[], denyModifiedTracked?: (path: string) => boolean): Promise<{ revertedDenylisted: string[]; revertedDangerous: string[] }>;
   push(dir: string, branch: string): Promise<void>;
   // git checkout -B <branch> — (re)creates the publish branch at the mirror's current HEAD.
   checkoutBranch(dir: string, branch: string): Promise<void>;

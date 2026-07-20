@@ -533,6 +533,11 @@ export interface PublicationPort {
     // shadow/quarantine/noop) and for every pre-existing caller/stub/test, matching this port's own
     // established backward-compat precedent.
     revertedDenylisted?: string[];
+    // judgment-day round 3 (FIX E, both judges): the SUBSET of revertedDenylisted matching the
+    // narrower secret tier (VcsWritePort.commit's own `revertedDangerous` doc) — surfaced the SAME
+    // way so RunQaUseCase can sum ONLY genuine secret-tier reverts toward gateSignals.confinement's
+    // `dangerous`, instead of conflating every revert with a secret-leak-severity signal.
+    revertedDangerous?: string[];
   }>;
 }
 // W3 fix (F1, dual-judge round): LearningPort.retrieve() previously returned bare trigger strings

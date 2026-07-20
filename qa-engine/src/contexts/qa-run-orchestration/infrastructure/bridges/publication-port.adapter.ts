@@ -71,6 +71,10 @@ export interface VcsPublishCollaborator {
     // RunQaUseCase can merge it into gateSignals.confinement. OPTIONAL: absent for every
     // pre-existing collaborator/stub/test, matching this port's own backward-compat precedent.
     revertedDenylisted?: string[];
+    // judgment-day round 3 (FIX E, both judges): the SUBSET of revertedDenylisted matching the
+    // narrower secret tier (VcsWritePort.commit's own `revertedDangerous` doc) — threaded through
+    // the SAME way, OPTIONAL for the SAME backward-compat reason.
+    revertedDangerous?: string[];
   }>;
 }
 
@@ -229,7 +233,7 @@ export class PublicationPortAdapter implements PublicationPort {
     tested?: { flow?: string; objective?: string }[];
     isCode?: boolean;
     parentRunId?: string;
-  }): Promise<{ outcome: string; revertedDenylisted?: string[] }> {
+  }): Promise<{ outcome: string; revertedDenylisted?: string[]; revertedDangerous?: string[] }> {
     // Audit fix (judgment-day): prefer the REAL per-run decision value when the caller supplies
     // one; fall back to the static composition-time ctx only when absent (backward-compat for
     // pre-existing callers that only ever passed {verdict, cases, logs} — see the port's own doc).
@@ -347,6 +351,9 @@ export class PublicationPortAdapter implements PublicationPort {
         return {
           outcome: `pr: ${pr.url}`,
           ...(written.revertedDenylisted?.length ? { revertedDenylisted: written.revertedDenylisted } : {}),
+          // judgment-day round 3 (FIX E, both judges): threaded the SAME way as revertedDenylisted
+          // above — never fabricated, absent/empty stays omitted.
+          ...(written.revertedDangerous?.length ? { revertedDangerous: written.revertedDangerous } : {}),
         };
       }
       case "issue": {
