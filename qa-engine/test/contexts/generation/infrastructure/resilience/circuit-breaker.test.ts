@@ -1,6 +1,9 @@
+// qa-engine/test/contexts/generation/infrastructure/resilience/circuit-breaker.test.ts
+// Moved from src/integrations/circuit-breaker.test.ts (migration-tier-4c Slice 2, D-4c-3) — the
+// circuit breaker is SDK-free policy, so its characterization tests move with it, unchanged.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { checkCircuit, recordCircuitFailure, recordCircuitSuccess, resetCircuit } from "./circuit-breaker";
+import { checkCircuit, recordCircuitFailure, recordCircuitSuccess, resetCircuit } from "@contexts/generation/infrastructure/resilience/circuit-breaker.ts";
 
 test("circuit opens after the threshold of consecutive failures, and resetCircuit clears it", () => {
   resetCircuit();

@@ -86,8 +86,11 @@ describe("codex circuit breaker state machine (T-P2-6 / AC2.6.1)", () => {
 
   test("codex and opencode breakers are independent — codex open does not affect opencode (isolation)", async () => {
     setup();
-    // Import the opencode circuit breaker and verify it has separate state
-    const { checkCircuit, resetCircuit } = await import("./circuit-breaker");
+    // Import the opencode circuit breaker and verify it has separate state. migration-tier-4c
+    // Slice 2: this breaker moved to qa-engine (SDK-free policy) — see agent-transport-policy.ts.
+    const { checkCircuit, resetCircuit } = await import(
+      "@contexts/generation/infrastructure/resilience/circuit-breaker"
+    );
 
     // Reset both
     resetCodexCircuit();

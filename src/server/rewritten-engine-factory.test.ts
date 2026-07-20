@@ -10,7 +10,15 @@ import { defaultMirrorDeps, type MirrorDeps } from "../integrations/repo-mirror"
 import { SqliteRunHistoryAdapter } from "./run-history-sqlite-adapter";
 import { SqliteLearningRepository } from "@contexts/cross-run-learning/infrastructure/sqlite-learning-repository.adapter";
 import { Sha } from "@kernel/sha";
-import { REVIEWER_TIMEOUT_MS, withUsageSink, withStallWatchdog, withSessionRegistration, activityRouter } from "../integrations/opencode-client";
+import {
+  REVIEWER_TIMEOUT_MS,
+  withUsageSink,
+  withStallWatchdog,
+  withSessionRegistration,
+  registerRunSession,
+  unregisterRunSession,
+  activityRouter,
+} from "../integrations/opencode-client";
 
 const cfg = (name: string): AppConfig => ({
   name,
@@ -798,7 +806,15 @@ test("createRewrittenEngineFactory wraps deps.getAgentDeps() so a session opened
     const app = cfg("factory-sse-registration");
     const config = buildRewrittenCompositionConfig(
       app,
-      { getAgentDeps: () => withUsageSink(withStallWatchdog(withSessionRegistration(rawGetAgentDeps()))) },
+      {
+        getAgentDeps: () =>
+          withUsageSink(
+            withStallWatchdog(
+              withSessionRegistration(rawGetAgentDeps(), { register: registerRunSession, unregister: unregisterRunSession }),
+              { stallMs: 180_000 },
+            ),
+          ),
+      },
       "qa-bot-abc1234-runSSE",
       { mode: "diff" },
     );

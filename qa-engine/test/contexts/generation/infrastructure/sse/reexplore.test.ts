@@ -1,6 +1,8 @@
+// qa-engine/test/contexts/generation/infrastructure/sse/reexplore.test.ts
+// Moved from src/integrations/reexplore.test.ts (migration-tier-4c Slice 3, D-4c-2).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { reexploreToolKind, reexploreKindFromEvent, ReexploreTracker } from "./reexplore";
+import { reexploreToolKind, reexploreKindFromEvent, ReexploreTracker } from "@contexts/generation/infrastructure/sse/reexplore.ts";
 
 // RE-2 — objective telemetry: count the agent's re-exploration tool calls (browser_navigate /
 // browser_snapshot / serena blast-radius) per cycle so we can prove RE-1 worked and detect when the

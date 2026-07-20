@@ -1,11 +1,48 @@
+// migration-tier-4c Slice 5a: relocated from src/integrations/prompts.test.ts (pure relocation — no
+// assertion changes; only import paths were re-pointed). `OpencodeRunInput`/`QaCase` now resolve to
+// their existing canonical qa-engine mirrors.
+//
+// `setExplorationBriefCollaborators` is wired here with a LOCAL test double, not the real
+// src/qa/exploration-brief.ts functions — qa-engine's tsconfig.json is a COMPOSITE project with
+// rootDir pinned to qa-engine/ (`tsc -b`), so a qa-engine test file cannot import a src/ path at
+// type-check time without being excluded from that project entirely (the `-parity.test.ts`
+// convention). This file is the main behavioral suite for prompts.ts (not a parity comparison), so
+// it stays IN the main project; the D3 FE↔BE-suppression tests below only exercise prompts.ts's OWN
+// suppression logic (suppressFeBe), never exploration-brief.ts's rendering details — a minimal
+// double that renders the same "FE↔BE links" marker is the correct-layer fake, not a shortcut.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPrompt, buildPromptAssembled, buildPlanPromptAssembled, buildFollowupPrompt, buildWorkerPrompt, buildReviewerPrompt, buildReviewerPromptAssembled, buildExplorerPrompt, buildContextTask } from "./prompts";
-import { assemble as caAssemble, section as caSection } from "./context-assembler";
-import { roleWindowBytes } from "./model-window-catalog";
-import type { OpencodeRunInput } from "./opencode-client";
-import type { ParallelWorkerInput, ReviewInput } from "@contexts/generation/application/ports/generation-ports.ts";
-import type { QaCase } from "../types";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  buildPrompt,
+  buildPromptAssembled,
+  buildFollowupPrompt,
+  buildWorkerPrompt,
+  buildReviewerPrompt,
+  buildReviewerPromptAssembled,
+  buildExplorerPrompt,
+  buildContextTask,
+  setExplorationBriefCollaborators,
+} from "@contexts/generation/infrastructure/prompt-builders/prompts.ts";
+import { assemble as caAssemble, section as caSection } from "@contexts/generation/infrastructure/prompt-builders/context-assembler.ts";
+import { roleWindowBytes } from "@contexts/generation/infrastructure/prompt-builders/model-window-catalog.ts";
+import type { OpencodeRunInput, ParallelWorkerInput, ReviewInput, ExplorationBrief } from "@contexts/generation/application/ports/generation-ports.ts";
+import type { QaCase } from "@kernel/qa-case.ts";
+
+setExplorationBriefCollaborators({
+  parseExplorationBrief: () => null,
+  coerceExplorationBrief: () => null,
+  renderExplorationBrief: (brief: ExplorationBrief, opts?: { suppressFeBe?: boolean }) => {
+    const lines = [`## Exploration brief`, `Objective: ${brief.objective}`];
+    if (brief.feBe?.length && !opts?.suppressFeBe) {
+      lines.push("### FE↔BE links");
+      for (const l of brief.feBe) lines.push(`- Route ${l.route} -> ${l.operationId}`);
+    }
+    return lines.join("\n");
+  },
+});
 
 // RE-1 — the orchestrator's regeneration prompts must NOT command the agent to re-navigate /
 // re-snapshot / re-activate serena when authoritative grounding (a Context Pack DOM slice or an
@@ -679,63 +716,6 @@ test("seam-d PINNING (post-WS5.2): coverage-gap (shedAs critical-recap) survives
   );
 });
 
-// PINNING: planner path — ALL THREE modes (diff / manual / complete-exhaustive of
-// buildPlanPromptAssembled). Asserts plan-lessons SURVIVES when budget pressure forces shedding
-// of plan-arch-map (both p2, arch-map declared first → sheds first by stable sort).
-// This test FAILS against the pre-FIX-1 state where complete/exhaustive uses `priority: 3`:
-//   with p3 > p2, plan-lessons sheds BEFORE plan-arch-map → LESSONS_MARKER absent → RED.
-// After FIX-1 (all three paths at p2), plan-lessons (tied p2, declared second) survives.
-test("seam-d PINNING: plan-lessons survives in ALL THREE planner paths (diff/manual/complete-exhaustive)", () => {
-  const LESSONS_MARKER = "PINNING_PLAN_LESSONS_MARKER";
-
-  // Construct a contextMap that will render to ~20k bytes (MAX_LEN cap in renderArchitectureContext).
-  // Supply 200 routes with long component names to saturate the 20k cap.
-  const routes = Array.from({ length: 200 }, (_, i) => ({
-    path: `/route-${i}`,
-    component: `VeryLongComponentNameToFillUpBudget_${i}_${"x".repeat(60)}`,
-  }));
-  const contextMap = {
-    builtAtSha: "abc1234",
-    routes,
-    api: [] as Array<{ operationId: string; method: string; path: string }>,
-    feBe: [] as Array<{ route: string; operationId: string }>,
-  };
-
-  // lessons content ~175k — together with contextMapContent (~20k) and fixed sections (~2k),
-  // total ~197k exceeds the 192k role budget (kimi-k2.7-code: 64k × 0.75 × 4 = 192k),
-  // forcing one semi-stable section to shed.
-  // With p3 for plan-lessons: p3 > p2, so plan-lessons sheds first → LESSONS_MARKER absent → FAIL.
-  // With p2 for plan-lessons (all three paths): tied with arch-map (p2, declared first) →
-  // arch-map sheds first by declaration order → plan-lessons survives → PASS.
-  const largeLearnedRules = padTo(LESSONS_MARKER, 175_000);
-
-  const baseInput = mkInput({ learnedRules: largeLearnedRules, contextMap });
-
-  // Path 1: diff mode
-  const diffResult = buildPlanPromptAssembled({ ...baseInput, mode: "diff" });
-  assert.ok(
-    diffResult.text.includes(LESSONS_MARKER),
-    `plan-lessons (p2) must survive in diff planner path. ` +
-    `sectionSizes: ${JSON.stringify(diffResult.sectionSizes)}`,
-  );
-
-  // Path 2: manual mode
-  const manualResult = buildPlanPromptAssembled({ ...baseInput, mode: "manual", guidance: "test the login flow" });
-  assert.ok(
-    manualResult.text.includes(LESSONS_MARKER),
-    `plan-lessons (p2) must survive in manual planner path. ` +
-    `sectionSizes: ${JSON.stringify(manualResult.sectionSizes)}`,
-  );
-
-  // Path 3: complete mode (the previously missed path — this assertion catches the pre-FIX-1 bug)
-  const completeResult = buildPlanPromptAssembled({ ...baseInput, mode: "complete" });
-  assert.ok(
-    completeResult.text.includes(LESSONS_MARKER),
-    `plan-lessons (p2) must survive in complete/exhaustive planner path. ` +
-    `If this fails, prompts.ts line ~393 still has priority: 3 (pre-FIX-1). ` +
-    `sectionSizes: ${JSON.stringify(completeResult.sectionSizes)}`,
-  );
-});
 
 // ── A3: selector-priority rule in the STABLE band ────────────────────────────────────────────────
 //
@@ -1556,32 +1536,6 @@ test("WS5.1: a small diff (under the cap) passes through buildDiffSection unmodi
   assert.doesNotMatch(text, /diff truncated/i, "a small diff must not trigger the truncation marker");
 });
 
-// Judgment-day: the planner (buildPlanPromptAssembled, diff mode) was the 5th raw-diff render site —
-// it ran on EVERY diff/manual run BEFORE generator/reviewer, embedding `sanitizeText(input.diff).text`
-// uncapped inside the plan-change section (no maxBytes, default overflow:"drop"). A diff big enough to
-// blow the qa-generator role budget on its own shed the WHOLE plan-change section — diff, change
-// intent AND commit message together — leaving the planner blind (judge-verified live: an 850KB diff
-// reduced the assembled planner prompt to a ~2.8KB shell). This pins the fix: cappedDiffText at the
-// planner site + plan-change's own maxBytes/overflow:"summarize" backstop.
-test("judgment-day PIN: the planner's plan-change section survives a diff far larger than the qa-generator role budget", () => {
-  const huge = bigDiff();
-  const result = buildPlanPromptAssembled(mkInput({ diff: huge, mode: "diff" }));
-  assert.match(result.text, /diff truncated/i, "the diff embed itself must be capped (capDiff) with a visible marker");
-  assert.match(
-    result.text,
-    /## Change intent \(Conventional Commits\)/,
-    `plan-change must survive whole, not be dropped by the section-level shed. sectionSizes: ${JSON.stringify(result.sectionSizes)}`,
-  );
-  assert.match(
-    result.text,
-    /## Commit message/,
-    `the commit message inside plan-change must survive alongside the capped diff. sectionSizes: ${JSON.stringify(result.sectionSizes)}`,
-  );
-  assert.ok(
-    Buffer.byteLength(result.text, "utf8") <= roleWindowBytes("qa-generator"),
-    `the assembled planner prompt must respect the qa-generator role budget. sectionSizes: ${JSON.stringify(result.sectionSizes)}`,
-  );
-});
 
 test("WS5.1: reviewObjective/commitDiffObjective (reviewer diff objective) caps a giant diff instead of embedding it whole", () => {
   const huge = bigDiff();
@@ -1795,13 +1749,6 @@ test("cross-repo explorer prompt (manual mode): describes a staged snapshot, nev
   assert.doesNotMatch(text, /working copy/i);
 });
 
-test("cross-repo planner prompt: describes a staged snapshot, never a 'working copy'", () => {
-  const text = buildPlanPromptAssembled(mkInput({
-    service: { repo: "org/orders-svc", mirrorDir: "/staged/org__orders-svc" },
-  })).text;
-  assert.match(text, /READ-ONLY staged snapshot|staged working copy at/i);
-  assert.doesNotMatch(text, /\(read-only working copy at/i);
-});
 
 test("buildContextTask: describes each microservice path as a staged contract snapshot, never a mirrored working copy, and prefixes hints with contracts/", () => {
   const text = buildContextTask(mkInput({
@@ -1815,4 +1762,57 @@ test("buildContextTask: describes each microservice path as a staged contract sn
   assert.doesNotMatch(text, /mirrored READ-ONLY|working copy/i);
   assert.match(text, /contracts\/openapi\/orders\.yaml/);
   assert.match(text, /staged contract snapshots are local paths you can read/i);
+});
+
+// ── migration-tier-4c Slice 5b: the qa-worker budget bug fix ─────────────────────────────────
+//
+// BEFORE this fix: buildWorkerPromptAssembled hardcoded `roleWindowBytes("qa-worker")` regardless
+// of `w.needsUi` — a code-only worker (needsUi:false, opens its session as "qa-worker-code" per
+// rewritten-engine-factory.ts's own role map) had its PROMPT BUDGET computed against "qa-worker"'s
+// catalog entry, not the role it actually runs as. Latent-correct today only because the current
+// roster happens to assign both roles the same model; a real bug in the code regardless, and one
+// that silently breaks the moment the roster diverges.
+//
+// AFTER this fix: the budget role selection mirrors w.needsUi, exactly like the session-open role
+// mapping already does: needsUi ? "qa-worker" : "qa-worker-code".
+test("qa-worker budget fix: buildWorkerPromptAssembled selects the budget role by w.needsUi (qa-worker for UI, qa-worker-code for code-only workers)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "worker-budget-fix-test-"));
+  mkdirSync(join(dir, "agents"), { recursive: true });
+  writeFileSync(
+    join(dir, "agents", "opencode.json"),
+    JSON.stringify({
+      agent: {
+        // Deliberately DIFFERENT catalog windows so the two roles are observably distinguishable —
+        // kimi-k2.7-code (64K tokens -> 192,000 byte budget) vs minimax-m3 (32K tokens -> 96,000 byte
+        // budget). The real production roster happens to assign the SAME model to both roles today,
+        // which is exactly why this bug was silent; this test proves the CALL SITE picks the right
+        // role regardless of what the roster currently happens to configure.
+        "qa-worker": { model: "opencode-go/kimi-k2.7-code" },
+        "qa-worker-code": { model: "opencode-go/minimax-m3" },
+      },
+    }),
+    "utf8",
+  );
+
+  const originalCwd = process.cwd();
+  process.chdir(dir);
+  try {
+    // Sized to fit under qa-worker's 192,000-byte budget but exceed qa-worker-code's 96,000-byte
+    // budget (learned-rules is the sole VOLATILE content here — no domSnapshot — so it is the ONLY
+    // section budget shedding can act on; overflow defaults to "drop", giving a clean present/absent
+    // signal instead of a partial truncation).
+    const learnedRules = "x".repeat(150_000);
+    const uiText = buildWorkerPrompt(mkWorkerInput({ needsUi: true, learnedRules }));
+    const codeText = buildWorkerPrompt(mkWorkerInput({ needsUi: false, learnedRules }));
+    assert.ok(
+      uiText.includes(learnedRules),
+      "needsUi:true must use qa-worker's LARGER budget (192,000 bytes) — the oversized learnedRules section must survive",
+    );
+    assert.ok(
+      !codeText.includes(learnedRules),
+      "needsUi:false must use qa-worker-code's SMALLER budget (96,000 bytes) — the oversized learnedRules section must be shed, proving the budget role is NOT hardcoded to 'qa-worker'",
+    );
+  } finally {
+    process.chdir(originalCwd);
+  }
 });

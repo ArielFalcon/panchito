@@ -1,6 +1,8 @@
+// qa-engine/test/contexts/generation/infrastructure/sse/agent-activity.test.ts
+// Moved from src/integrations/agent-activity.test.ts (migration-tier-4c Slice 3, D-4c-2).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { routeEvent, ActivityRouter } from "./agent-activity";
+import { routeEvent, ActivityRouter } from "@contexts/generation/infrastructure/sse/agent-activity.ts";
 
 const sessions = () => new Map([["s1", "run-1"]]);
 

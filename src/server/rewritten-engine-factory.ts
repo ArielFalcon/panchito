@@ -64,7 +64,19 @@ import type { AgentDeps } from "../integrations/opencode-client";
 import { REVIEWER_TIMEOUT_MS } from "../integrations/opencode-client";
 // WS6.2 (full-flow remediation, timeouts & operational observability): see
 // createRewrittenEngineFactory's own header comment for why these three wrappers are composed here.
-import { withUsageSink, withStallWatchdog, withSessionRegistration } from "../integrations/opencode-client";
+// migration-tier-4c Slice 2: withUsageSink/withStallWatchdog/withSessionRegistration now live in
+// qa-engine (re-exported from opencode-client unchanged); withSessionRegistration's collaborators are
+// no longer defaulted there (qa-engine cannot reach registerRunSession/unregisterRunSession on its
+// own), so this composition root injects them explicitly, and stallMs() is resolved here too (its
+// env read must stay shell-side).
+import {
+  withUsageSink,
+  withStallWatchdog,
+  withSessionRegistration,
+  registerRunSession,
+  unregisterRunSession,
+  stallMs,
+} from "../integrations/opencode-client";
 import type { RunPipelinePort, ObserverPort } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 import { buildProduction, type CompositionConfig } from "@contexts/qa-run-orchestration/composition/composition-root";
 import { Sha, shaMatches } from "@kernel/sha";
@@ -117,16 +129,22 @@ import { CodebaseMemoryClient } from "../../qa-engine/src/shared-infrastructure/
 // (not qa-engine/test/), so it is NOT subject to qa-engine/tsconfig.json's exclude list or the
 // tsconfig.parity.json split — it is covered by the root tsconfig.json project (which already
 // references qa-engine via TS project references) like any other src/ module.
+// migration-tier-4c Slice 5a/5b: prompts.ts + model-window-catalog.ts relocated to qa-engine's
+// generation/infrastructure/prompt-builders/ — re-pointed below. The ExplorationBriefAdapter twin
+// (D-4c-6) is wired in ../integrations/opencode-client.ts at ITS OWN module load (this file already
+// transitively imports that module below, for REVIEWER_TIMEOUT_MS/withUsageSink/etc.), so wiring it
+// there once covers both this composition root AND every other opencode-client.ts consumer — no
+// duplicate wiring needed here.
 import {
   buildPromptAssembled,
   buildWorkerPromptAssembled,
   buildReviewerPromptAssembled,
   buildExplorerPrompt,
   specFileForFlow,
-} from "../integrations/prompts";
+} from "@contexts/generation/infrastructure/prompt-builders/prompts";
 import { parseVerdict } from "../integrations/verdict-parse";
 import { parseReviewerVerdict, checkGeneratorVerdict, repairInstruction } from "../integrations/verdict-validate";
-import { roleWindowBytes } from "../integrations/model-window-catalog";
+import { roleWindowBytes } from "@contexts/generation/infrastructure/prompt-builders/model-window-catalog";
 import type { RepairPort } from "@contexts/generation/application/generate-tests.use-case.ts";
 import { runE2E, defaultExecuteDeps, defaultCleanupDeps } from "../qa/execute";
 // migration-tier-4b Slice 1: code-execution migration — src/qa/code-runner.ts is deleted; qa-engine
@@ -1339,7 +1357,13 @@ export function createRewrittenEngineFactory(
   const env = deps.env ?? process.env;
   const wrappedDeps: RewrittenEngineFactoryDeps = {
     ...deps,
-    getAgentDeps: () => withUsageSink(withStallWatchdog(withSessionRegistration(deps.getAgentDeps()))),
+    getAgentDeps: () =>
+      withUsageSink(
+        withStallWatchdog(
+          withSessionRegistration(deps.getAgentDeps(), { register: registerRunSession, unregister: unregisterRunSession }),
+          { stallMs: stallMs() },
+        ),
+      ),
   };
   return (appConfig: AppConfig, namespace: string, run: { mode: RunMode; guidance?: string; triggerRepo?: string }, observer?: ObserverPort): RunPipelinePort => {
     const cfg = buildRewrittenCompositionConfig(appConfig, wrappedDeps, namespace, run, observer);

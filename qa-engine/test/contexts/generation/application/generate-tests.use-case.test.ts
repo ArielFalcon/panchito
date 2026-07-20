@@ -7,8 +7,9 @@ import type { ManifestEntry } from "@contexts/generation/application/ports/index
 // ── B.3 unit tests: orchestration sequence through port stubs ─────────────────
 //
 // These tests verify the EXTRACTED use-case's orchestration contract.
-// The golden that proves behavior is preserved vs the legacy entrypoints
-// is the characterization test suite (B.2) — both must agree.
+// migration-tier-4c Slice 1 deleted the separate B.2 characterization golden
+// (generate-tests.characterization.test.ts) once its coverage was confirmed to have
+// moved here — B.3.1-B.3.5 below are now the live, sole re-pin of that behavior.
 
 // ── B.3.1 — basic orchestration sequence ─────────────────────────────────────
 test("B.3.1: renders → opens session → parses deliverable → reconciles manifest (sequence)", async () => {

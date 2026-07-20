@@ -7,7 +7,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assemble, section, Section } from "./context-assembler";
+// migration-tier-4c Slice 5a: relocated (alongside prompts.ts, its own primary consumer) from
+// src/integrations/context-assembler.ts to qa-engine.
+import { assemble, section, Section } from "@contexts/generation/infrastructure/prompt-builders/context-assembler.ts";
 
 // ── Canonical ordering ───────────────────────────────────────────────────────
 

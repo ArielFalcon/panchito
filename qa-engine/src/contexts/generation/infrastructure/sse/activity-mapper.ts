@@ -1,9 +1,15 @@
+// qa-engine/src/contexts/generation/infrastructure/sse/activity-mapper.ts
 // Maps ONE raw OpenCode event to 0..N contract RunEvent bodies for a known run.
 // This is the v2-ready, enriched successor to agent-activity.ts's router: it uses
 // every SDK signal worth surfacing (docs/tui-vnext.md §6) and NEVER surfaces model
 // prose — only structured tool/todo/command facts. Pure: `seq`/`ts`/dedup are the
 // gateway's concern, and it is unit-tested with synthetic fixtures shaped from the
 // @opencode-ai/sdk types, so it needs no live engine to validate.
+//
+// migration-tier-4c Slice 3 (D-4c-2, SSE two-tier split): moved WHOLE from
+// src/integrations/activity-mapper.ts — zero @opencode-ai/sdk import (it operates on the ALREADY
+// lowered `{ type, properties }` event shape), a rider alongside the EventStreamManager/
+// startScopedEventStream lifecycle migration (event-stream.ts, this directory).
 //
 // SDK facts used (types.gen.d.ts):
 //   message.part.updated → properties.part: Part   (sessionID lives on the part)
@@ -15,7 +21,7 @@
 //   command.executed → { sessionID, name, arguments }
 //   session.error    → { sessionID?, error }
 
-import type { RunEventBody } from "../contract/events";
+import type { RunEventBody } from "@kernel/contract/events.ts";
 
 export interface RawOpencodeEvent {
   type: string;

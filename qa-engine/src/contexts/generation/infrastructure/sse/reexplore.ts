@@ -1,3 +1,4 @@
+// qa-engine/src/contexts/generation/infrastructure/sse/reexplore.ts
 // RE-2 — objective re-exploration telemetry.
 //
 // The activity stream collapses every tool into a 4-value `kind` (activity-mapper.ts), so it cannot
@@ -5,8 +6,13 @@
 // collapse) to count the agent's re-exploration calls — browser navigation/snapshot and serena
 // blast-radius — per generation cycle. It is OBSERVABILITY ONLY: a high count is an efficiency datum,
 // never a quality defect, and must NOT be fed into the learning ledger.
+//
+// migration-tier-4c Slice 3 (D-4c-2, SSE two-tier split): moved WHOLE from
+// src/integrations/reexplore.ts ("live half" — the whole file was already 100% live, no dead half
+// found) — zero @opencode-ai/sdk import, a rider alongside the EventStreamManager/
+// startScopedEventStream lifecycle migration (event-stream.ts, this directory).
 
-import type { RawOpencodeEvent } from "./activity-mapper";
+import type { RawOpencodeEvent } from "./activity-mapper.ts";
 
 export type ReexploreKind = "navigate" | "snapshot" | "serena";
 

@@ -1,9 +1,10 @@
-// Unit tests for StallWatchdog. All timing is injected — no real clock delays.
-// TDD: these tests were written FIRST (RED → GREEN → REFACTOR).
+// qa-engine/test/contexts/generation/infrastructure/resilience/stall-watchdog.test.ts
+// Moved from src/integrations/stall-watchdog.test.ts (migration-tier-4c Slice 2, D-4c-3). All timing
+// is injected — no real clock delays.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createStallWatchdog } from "./stall-watchdog";
+import { createStallWatchdog } from "@contexts/generation/infrastructure/resilience/stall-watchdog.ts";
 
 // ─── deterministic timer helpers ────────────────────────────────────────────
 

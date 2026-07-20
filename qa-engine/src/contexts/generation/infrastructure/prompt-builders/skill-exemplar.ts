@@ -1,4 +1,21 @@
-import type { ScenarioArchetype } from "./curriculum";
+// migration-tier-4c Slice 5a: this file relocated from src/qa/learning/skill-exemplar.ts (prompts.ts's
+// own rider — prompts.ts is its ONLY production value-consumer, confirmed via a fresh grep before this
+// move). `ScenarioArchetype` structurally mirrors src/qa/learning/curriculum.ts's own type (a plain
+// string-literal union) — NOT imported: curriculum.ts stays in src/ (it has other, unrelated shell
+// consumers: src/server/intelligence-view.ts, src/server/history.ts), so qa-engine may not import it
+// (arch:check's one-way rule). Same "structurally mirror, never import" discipline this migration
+// program already uses for OcServiceLink/OcContractDrift/ParallelWorkerInput.
+export type ScenarioArchetype =
+  | "happy-path"
+  | "empty-state"
+  | "boundary-value"
+  | "invalid-input"
+  | "re-query-after-mutation"
+  | "concurrent-update"
+  | "permission-denied"
+  | "network-error"
+  | "loading-state"
+  | "stale-data";
 
 export type StructuralPattern =
   | { kind: "form"; hasOnSubmit: boolean; hasValidation: boolean }

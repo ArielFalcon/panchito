@@ -10,25 +10,88 @@
 //
 // The input types are imported TYPE-ONLY from opencode-client (erased at runtime), so although
 // opencode-client imports these functions as values, there is no runtime import cycle.
+//
+// migration-tier-4c Slice 5a: relocated from src/integrations/prompts.ts (pure relocation — the
+// string-assembly logic below is byte-for-byte unchanged; only imports were re-pointed, per a fresh
+// dependency audit run before this move):
+//   - sanitizeText/assertNoSecretLeak/SanitizeMode + capText/capDiff/extractDiffFilePath now resolve
+//     to their qa-engine ports (sanitize-text.ts / prompt-cap.ts) instead of src/orchestrator/
+//     sanitizer.ts — containsSecrets/assertNoSecretLeak were ADDED to sanitize-text.ts and
+//     extractDiffFilePath was newly EXPORTED from prompt-cap.ts (both were src/-only before; this is
+//     this migration's genuine new call site, per those modules' own "port it at its own call site
+//     when needed" policy) — extractDiffFilePath is otherwise UNCHANGED, verbatim.
+//   - ArchitectureContext/QaCase re-point to their EXISTING canonical qa-engine mirrors
+//     (generation-ports.ts / @kernel/qa-case.ts) — no new type, no shape change.
+//   - renderExplorationBrief now resolves through the (previously dormant) ExplorationBriefAdapter —
+//     REQUIRED, not optional: src/qa/exploration-brief.ts stays in shell (other, unrelated production
+//     value-consumers of parseExplorationBrief/coerceExplorationBrief were confirmed absent, but the
+//     design's own D-4c-6 explicitly calls for wiring this twin, not relocating its source), so this
+//     module needs an injection seam to keep working post-move without importing src/. See
+//     `setExplorationBriefCollaborators` below — wired from rewritten-engine-factory.ts (the
+//     composition root) at module load, mirroring the RawAgentTransport/RawEventStreamOpener
+//     late-bound-injection discipline already established in Slices 2/3.
+//   - matchExemplars/renderExemplarsForPrompt (skill-exemplar.ts) and detectStructuralPatterns
+//     (structural-pattern.ts) moved alongside this file as RIDERS (this file was their only
+//     production value-consumer) — same "riders move with the file they serve" precedent as Slice
+//     1/3's activity-mapper.ts/agent-activity.ts.
+//   - assemble/section/AssembledPrompt (context-assembler.ts) and roleWindowBytes
+//     (model-window-catalog.ts) moved alongside this file too (mechanically required: both are
+//     imported as plain siblings, `./context-assembler`/`./model-window-catalog`, which could not
+//     resolve if either stayed in src/ while this file moved to qa-engine).
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { sanitizeText, assertNoSecretLeak, capText, capDiff, extractDiffFilePath, type SanitizeMode } from "../orchestrator/sanitizer";
-import type { ArchitectureContext } from "../qa/context";
-import type { CommitIntent } from "@contexts/generation/application/ports/generation-ports.ts";
-import type { QaCase } from "../types";
+import { sanitizeText, assertNoSecretLeak, type SanitizeMode } from "../sanitize-text.ts";
+import { capText, capDiff, extractDiffFilePath } from "../prompt-cap.ts";
+import type { QaCase } from "@kernel/qa-case.ts";
 // Seam-2 break: these input contracts are canonical in the qa-engine generation context. Re-rooting
 // this type-only import off ./opencode-client dissolves the opencode-client ⇄ prompts cycle (the
 // generation-ports parity test keeps the legacy opencode-client copies structurally in sync).
-import type { OpencodeRunInput, ParallelWorkerInput, ReviewInput } from "@contexts/generation/application/ports/generation-ports.ts";
-import { renderExplorationBrief } from "../qa/exploration-brief";
-import { matchExemplars, renderExemplarsForPrompt } from "../qa/learning/skill-exemplar";
-import { detectStructuralPatterns } from "../qa/learning/structural-pattern";
-import { assemble, section, type AssembledPrompt } from "./context-assembler";
-import { roleWindowBytes } from "./model-window-catalog";
+// ArchitectureContext re-points here too (migration-tier-4c Slice 5a) — the SAME canonical mirror,
+// no shape change.
+import type {
+  ArchitectureContext,
+  CommitIntent,
+  OpencodeRunInput,
+  ParallelWorkerInput,
+  ReviewInput,
+  ExplorationBrief,
+} from "@contexts/generation/application/ports/generation-ports.ts";
+import { ExplorationBriefAdapter, type BriefFns } from "../exploration-brief.adapter.ts";
+import { matchExemplars, renderExemplarsForPrompt } from "./skill-exemplar.ts";
+import { detectStructuralPatterns } from "./structural-pattern.ts";
+import { assemble, section, type AssembledPrompt } from "./context-assembler.ts";
+import { roleWindowBytes } from "./model-window-catalog.ts";
 
 // Re-export AssembledPrompt so callers that use the assembled variants only need one import.
 export type { AssembledPrompt };
+
+// migration-tier-4c Slice 5a (D-4c-6 twin wiring): the previously-dormant ExplorationBriefAdapter
+// (built ahead of this relocation, parity-tested against src/qa/exploration-brief.ts — see that
+// adapter's own header) now gets a genuine production call path. `renderExplorationBrief`'s
+// underlying implementation stays in shell (src/qa/exploration-brief.ts has other internal
+// concerns and is not itself part of this migration's scope), so this module needs an injected
+// seam to keep calling it without importing src/ (arch:check's one-way rule). Mirrors the
+// RawAgentTransport (Slice 2) / RawEventStreamOpener (Slice 3) late-bound-injection pattern: a
+// module-level mutable slot + setter, wired ONCE by the composition root (rewritten-engine-factory.ts)
+// at module load. Throws loudly if a brief render is attempted before wiring — never a silent no-op
+// (CLAUDE.md's "surface integration errors loudly" invariant) — but every real production path wires
+// this before any run starts, and every test either wires it locally or never exercises `w.brief`/
+// `input.contextBrief` (renderBrief is only called when a brief is actually present).
+let explorationBriefAdapter: ExplorationBriefAdapter | undefined;
+
+export function setExplorationBriefCollaborators(fns: BriefFns): void {
+  explorationBriefAdapter = new ExplorationBriefAdapter(fns);
+}
+
+function renderBrief(brief: ExplorationBrief, opts?: { suppressFeBe?: boolean }): string {
+  if (!explorationBriefAdapter) {
+    throw new Error(
+      "prompts: renderExplorationBrief collaborator not wired — call setExplorationBriefCollaborators() at composition time (see rewritten-engine-factory.ts)",
+    );
+  }
+  return explorationBriefAdapter.render(brief, opts);
+}
 
 // The author's commit message as ONE block: subject + (optionally) body. The body is the richest
 // statement of intent; the subject alone is often too terse to derive a concrete objective from. The
@@ -66,8 +129,8 @@ const ACCEPTANCE_CRITERION_RULE =
 //
 // sdd/migration-wiring-phase-2 Slice 6b (diff→model egress boundary): this is THE diff→model site —
 // every call site below feeds a generator/explorer/reviewer prompt, never an Issue body (verified:
-// all 5 callers are buildPromptAssembled/buildCodeTask/buildExplorerPrompt/buildPlanPromptAssembled/
-// reviewObjective). WS5.4a ("model-bound diffs keep auth-shaped code that the aggressive Issue-bound
+// the 4 callers are buildPromptAssembled/buildCodeTask/buildExplorerPrompt/reviewObjective —
+// migration-tier-4c Slice 1 deleted the 5th, the dead buildPlanPromptAssembled). WS5.4a ("model-bound diffs keep auth-shaped code that the aggressive Issue-bound
 // pattern would redact") was never actually wired here — this function sanitized with the default
 // "issue" mode, silently defeating WS5.4a's own stated purpose for the diff itself (domSnapshot/
 // classificationReason DID get "model" mode; the diff embed did not). Fixed to "model" mode + the
@@ -203,7 +266,7 @@ export function buildWorkerPromptAssembled(w: ParallelWorkerInput): AssembledPro
     `- Namespace prefix for any data you create: ${w.namespace}`,
     `- Write EXACTLY this file: ${w.e2eRelDir}/${w.specFile}  — do not create or edit any other file.`,
     ...(w.needsUi ? [`- Import the shared harness: import { test, expect } from "../fixtures"`] : []),
-    ...(w.brief ? [``, renderExplorationBrief(w.brief)] : []),
+    ...(w.brief ? [``, renderBrief(w.brief)] : []),
   ].join("\n");
 
   // VOLATILE: injected a11y tree (changes per worker assignment based on route capture).
@@ -302,253 +365,17 @@ export function buildWorkerPromptAssembled(w: ParallelWorkerInput): AssembledPro
     section("worker-task", "task", taskHeader, { priority: 1 }),
     // CRITICAL recap: output contract at the end so it is the last thing the agent sees before replying.
     section("worker-output-contract", "critical-recap", outputContract, { priority: 1 }),
-  ], { budgetBytes: roleWindowBytes("qa-worker") });
+  // migration-tier-4c Slice 5b (qa-worker budget bug fix): the budget role must mirror w.needsUi,
+  // exactly like the session-open role mapping already does (rewritten-engine-factory.ts's
+  // worker/workerCode -> "qa-worker"/"qa-worker-code"). BEFORE this fix, a code-only worker
+  // (needsUi:false, opens its session as "qa-worker-code") had its prompt budget computed against
+  // "qa-worker"'s catalog entry regardless — latent-correct only because the current roster happens
+  // to assign both roles the same model.
+  ], { budgetBytes: roleWindowBytes(w.needsUi ? "qa-worker" : "qa-worker-code") });
 }
 
 export function buildWorkerPrompt(w: ParallelWorkerInput): string {
   return buildWorkerPromptAssembled(w).text;
-}
-// return STRUCTURED objectives (no spec files). It must question its own list (drop naive flows,
-// keep main use cases + MVP happy paths + relevant edge cases).
-//
-// Phase 1b: internally uses the ContextAssembler. Return type is unchanged (string).
-// Use buildPlanPromptAssembled() to get the sectionSizes map for telemetry.
-export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
-  // SEMI-STABLE: architecture map (stable for this run; changes between runs as the context evolves).
-  const contextMapContent = input.contextMap
-    ? [
-        ``,
-        `## Architecture map (FE↔BE — authoritative; distil the relevant links into each brief)`,
-        renderArchitectureContext(input.contextMap, input.mode === "diff" ? input.intent?.changedFiles : undefined) ?? "",
-        ``,
-        `IMPORTANT — each brief's \`routes[].path\` MUST be the CONCRETE, directly-navigable URL the`,
-        `worker will \`page.goto(...)\` (include any SPA/hash prefix, e.g. "/#!/owners"; for a parameterized`,
-        `route use a real existing instance, e.g. "/#!/owners/1"), NOT the abstract pattern. The orchestrator`,
-        `renders these to capture the live DOM for the workers, so an abstract or wrong route yields no grounding.`,
-      ].join("\n")
-    : "";
-
-  // SEMI-STABLE: lessons from past runs (stable for this run; evolves between runs).
-  const lessonsContent = input.learnedRules
-    ? [``, `## Lessons learned from past runs (factor these into the objectives you plan)`, input.learnedRules].join("\n")
-    : "";
-
-  // CRITICAL recap: the output format that must appear at the very end.
-  // For diff/manual the planner should say "no testable flow" when nothing applies;
-  // for complete/exhaustive it should say "already covered".
-  const outputFormatContent = (input.mode === "diff" || input.mode === "manual")
-    ? [
-        `## Output — end with ONLY this JSON (no spec files):`,
-        `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","needsUi":true,"brief":{"builtForSha":"<the sha above>","objective":"…","blastRadius":[{"symbol":"CheckoutService.pay","file":"src/checkout/checkout.service.ts","role":"applies the bulk discount and creates the order"}],"routes":[{"path":"/#!/checkout"}],"feBe":[{"route":"/checkout","operationId":"createOrder","via":"OrderClient.create"}],"contracts":[{"operationId":"createOrder","method":"POST","path":"/orders","fields":["items","total"]}],"risks":["assert the discounted total AFTER the cart re-queries"]}}]}`,
-        input.mode === "diff"
-          ? `If the commit's change is not testable through a user flow, output {"objectives":[],"reason":"<one-line explanation>"}.`
-          : `If the guidance does not yield any testable flow, output {"objectives":[],"reason":"<one-line explanation>"}.`,
-        `When returning an empty objectives array, ALWAYS include a one-line "reason" explaining why there is nothing to test.`,
-      ].join("\n")
-    : [
-        `## Output — end with ONLY this JSON (no spec files):`,
-        `{"objectives":[{"flow":"checkout","objective":"given a cart with >10 items, when paying, then the bulk discount is applied and the order is created","needsUi":true,"brief":{"builtForSha":"<the sha above>","objective":"…","blastRadius":[{"symbol":"CheckoutService.pay","file":"src/checkout/checkout.service.ts","role":"applies the bulk discount and creates the order"}],"routes":[{"path":"/#!/checkout"}],"feBe":[{"route":"/checkout","operationId":"createOrder","via":"OrderClient.create"}],"contracts":[{"operationId":"createOrder","method":"POST","path":"/orders","fields":["items","total"]}],"risks":["assert the discounted total AFTER the cart re-queries"]}}]}`,
-        `If every important flow is already well covered, output {"objectives":[],"reason":"<one-line explanation>"}.`,
-        `When returning an empty objectives array, ALWAYS include a one-line "reason" explaining why there is nothing to test.`,
-      ].join("\n");
-
-  // FIX 3: when the orchestrator already ran the read-only explorer pass (exploreForPack), its brief
-  // is forwarded here as input.contextBrief. The planner must USE it — the blast radius is already
-  // distilled — instead of paying for a second full Serena widen (find_referencing_symbols) that
-  // re-derives the same thing the explorer just produced. The brief is rendered as its own SEMI-STABLE
-  // section, and step 1 of the procedure switches to "trust the brief" when present.
-  const planBriefContent = input.contextBrief
-    ? [
-        ``,
-        `## Exploration brief (the blast radius was pre-mapped by the explorer pass — use it; do NOT redo the explorer's work)`,
-        renderExplorationBrief(input.contextBrief),
-        `Derive the objectives DIRECTLY from this brief's blast radius and routes. Do NOT re-run`,
-        `find_referencing_symbols to re-derive the same blast radius — that redoes the explorer's work`,
-        `and burns the planning budget. Exception: if the brief is clearly incomplete for a specific`,
-        `changed symbol (e.g. a key file is absent from the blast radius), you MAY run ONE targeted`,
-        `find_referencing_symbols call for that symbol only, then stop.`,
-        ``,
-      ].join("\n")
-    : "";
-
-  if (input.mode === "diff") {
-    // STABLE prefix: the planning procedure (same structure for every diff-mode plan session).
-    const planProcedure = [
-      `## Phase 1 of 2 — PLANNING ONLY. Do NOT write any .spec.ts in this phase.`,
-      input.contextBrief
-        ? `1. The blast radius is pre-mapped in the Exploration brief below — derive the affected user flows by REASONING over it (with the commit intent/diff). Do NOT redo the explorer's work: do NOT activate serena, do NOT re-run find_referencing_symbols wholesale, do NOT re-analyze the repo. Exception: if the brief is clearly incomplete for a specific changed symbol, you MAY run ONE targeted find_referencing_symbols for that symbol only, then stop.`
-        : `1. Activate serena (activate_project). Read the commit intent and diff below; derive the\n   affected user flows (use find_referencing_symbols to widen from the changed symbols).`,
-      `2. Plan one objective per INDEPENDENT affected flow. Do NOT plan flows the commit does not`,
-      `   touch; if everything fits one flow, return a single objective.`,
-      `   Each objective is a concrete acceptance criterion in given/when/then form, with the code`,
-      `   symbols it exercises. Set "needsUi": true when the flow involves page navigation or DOM`,
-      `   interaction, and "needsUi": false for pure logic.`,
-      `3. For each objective, include a distilled "brief" of its blast radius so the worker does NOT`,
-      `   re-read the code: blastRadius (each touched symbol with its file + a ONE-LINE role), the FE↔BE`,
-      `   links, the relevant contract facts (fields/enums/errors to assert), and risks/what-to-assert.`,
-      `   Set the brief's builtForSha to ${input.sha}. The worker trusts the brief for CODE but still`,
-      `   transcribes selectors from the injected a11y tree (workers have no browser MCP).`,
-      `4. For each needsUi objective, declare its candidate entry routes in the brief's \`routes[]\`:`,
-      `   the CONCRETE, directly-navigable URL the worker will page.goto(...) (include any SPA/hash`,
-      `   prefix, e.g. "/#!/owners"; for a parameterized route use a real instance, e.g. "/#!/owners/1").`,
-      `   Derive them from the code and the architecture map — do NOT navigate or open a browser. The`,
-      `   orchestrator renders these routes to capture the live DOM and injects each objective's tree`,
-      `   into its worker.`,
-    ].join("\n");
-
-    // SEMI-STABLE: the change intent + diff (specific to this commit but stable within this planning session).
-    // The planner derives the worker objectives from the commit intent, so it must read the FULL
-    // message (subject + body) via the shared renderCommitMessage helper — the same form buildTask
-    // and buildExplorerPrompt use. The body is the richest statement of intent; rendering only the
-    // subject (the old `- Message:` line) is exactly the drift the helper exists to prevent. The
-    // planner is always a first pass (never a regen), so the body is included.
-    const changeContent = [
-      `## Change intent (Conventional Commits)`,
-      `- Type: ${input.intent?.type ?? "unknown"}${input.intent?.breaking ? " (BREAKING)" : ""}`,
-      `- Changed files: ${sanitizeText(input.intent?.changedFiles?.join(", ") ?? "").text || "(unknown)"}`,
-      ``,
-      `## Commit message (the author's intent — derive each objective from this)`,
-      renderCommitMessage(input.intent, true),
-      ``,
-      `## Commit diff`,
-      "```diff",
-      // Judgment-day: the 5th raw-diff site — was the ONLY one still embedding input.diff
-      // uncapped. cappedDiffText is now the single way every site embeds a diff (see its doc).
-      cappedDiffText(input.diff),
-      "```",
-      ...(input.service
-        ? [
-            ``,
-            `## Cross-repo change (microservice)`,
-            `The commit belongs to the microservice ${input.service.repo}. A READ-ONLY staged snapshot`,
-            `(its OpenAPI/contract files + this commit's diff and changed files, NOT the full source) is`,
-            `at: ${input.service.mirrorDir}. Plan objectives for the FRONTEND flows that exercise the`,
-            `changed service behavior through the UI.`,
-          ]
-        : []),
-    ].join("\n");
-
-    // TASK: the opening line that names what this session is doing.
-    const taskContent = `Plan E2E test objectives for the blast radius of commit ${input.sha} of ${input.repo}.`;
-
-    return assemble([
-      section("plan-procedure", "stable-prefix", planProcedure, { priority: 1, cacheable: true }),
-      // Judgment-day: plan-change carried NO maxBytes, so overflow defaulted to "drop" — a diff
-      // over the 192,000B qa-generator budget shed the WHOLE section (diff + change intent +
-      // commit message), leaving the planner blind. Mirrors reviewer-objective's own backstop
-      // (56,000B sits above capDiff's 50,000-CHAR ceiling plus fixed-prose headroom;
-      // overflow:"summarize" so a residual overflow degrades to a visible truncation, never a drop).
-      section("plan-change", "semi-stable", changeContent, { priority: 1, language: "verbatim", maxBytes: 56_000, overflow: "summarize" }),
-      // FIX 3: the explorer's distilled brief (priority 1 so it ranks alongside the change scope — the
-      // planner reads it instead of re-widening). Absent when no orchestrator-level explorer ran.
-      ...(planBriefContent ? [section("plan-brief", "semi-stable", planBriefContent, { priority: 1 })] : []),
-      ...(contextMapContent ? [section("plan-arch-map", "semi-stable", contextMapContent, { priority: 2, cacheable: true })] : []),
-      // Seam d: plan-lessons priority p3→p2 so it sheds AFTER plan-arch-map (p2 declared first,
-      // stable sort) — aligns planner with the same signal-value hierarchy as the generator path.
-      ...(lessonsContent ? [section("plan-lessons", "semi-stable", lessonsContent, { priority: 2 })] : []),
-      section("plan-task", "task", taskContent, { priority: 1 }),
-      section("plan-output-format", "critical-recap", outputFormatContent, { priority: 1 }),
-    ], { budgetBytes: roleWindowBytes("qa-generator") });
-  }
-
-  // manual mode — the scope is the user's guidance, not a commit diff or whole-repo scan.
-  // The planner decomposes the guidance into independent flow objectives so large manual
-  // scopes fan out to workers the same way diff does. This is the unified diff/manual engine
-  // (Phase 5): only objective derivation differs (guidance vs commits), not the plan→dispatch logic.
-  if (input.mode === "manual") {
-    const guidance = sanitizeText((input.guidance ?? "(no guidance provided)").trim()).text;
-
-    // STABLE prefix: planning procedure for guidance-scoped runs.
-    const manualPlanProcedure = [
-      `## Phase 1 of 2 — PLANNING ONLY. Do NOT write any .spec.ts in this phase.`,
-      input.contextBrief
-        ? `1. The blast radius is pre-mapped in the Exploration brief below — derive the affected flows by REASONING over it (with the guidance). Do NOT redo the explorer's work: do NOT re-run find_referencing_symbols wholesale and do NOT re-analyze the blast radius. Exception: if the brief is clearly incomplete for a specific symbol the guidance covers, you MAY run ONE targeted find_referencing_symbols for that symbol only, then stop. You MAY also read the existing suite in ${input.e2eRelDir}/ to avoid duplicating already-covered flows.`
-        : `1. Activate serena (activate_project). Read the guidance below and the existing suite in\n   ${input.e2eRelDir}/ to understand the scope.`,
-      `2. Plan one objective per INDEPENDENT affected flow that the guidance asks to test. Stay`,
-      `   strictly within the guidance scope; do NOT plan flows the guidance does not mention.`,
-      `   If everything fits one flow, return a single objective.`,
-      `   Each objective is a concrete acceptance criterion in given/when/then form, with the code`,
-      `   symbols it exercises. Set "needsUi": true when the flow involves page navigation or DOM`,
-      `   interaction, and "needsUi": false for pure logic.`,
-      `3. For each objective, include a distilled "brief" of its blast radius so the worker does NOT`,
-      `   re-read the code: blastRadius (each touched symbol with its file + a ONE-LINE role), the FE↔BE`,
-      `   links, the relevant contract facts (fields/enums/errors to assert), and risks/what-to-assert.`,
-      `   Set the brief's builtForSha to ${input.sha}. The worker trusts the brief for CODE but still`,
-      `   transcribes selectors from the injected a11y tree (workers have no browser MCP).`,
-      `4. For each needsUi objective, declare its candidate entry routes in the brief's \`routes[]\`:`,
-      `   the CONCRETE, directly-navigable URL the worker will page.goto(...) (include any SPA/hash`,
-      `   prefix, e.g. "/#!/owners"). Derive them from the code and the existing suite — do NOT navigate`,
-      `   or open a browser. The orchestrator renders these routes to capture the live DOM and injects`,
-      `   each objective's tree into its worker.`,
-    ].join("\n");
-
-    // SEMI-STABLE: the guidance (verbatim user input — the scope driver for manual mode).
-    const guidanceContent = [
-      `## Guidance (the user's instruction — derive ALL objectives from this)`,
-      guidance,
-    ].join("\n");
-
-    // TASK: the opening line naming what this session is doing.
-    const manualTaskContent = `Plan E2E test objectives for ${input.repo} guided by the instruction above.`;
-
-    return assemble([
-      section("plan-procedure", "stable-prefix", manualPlanProcedure, { priority: 1, cacheable: true }),
-      section("plan-guidance", "semi-stable", guidanceContent, { priority: 1, language: "verbatim" }),
-      // FIX 3: same brief-reuse as diff — the explorer pass already mapped the blast radius for manual.
-      ...(planBriefContent ? [section("plan-brief", "semi-stable", planBriefContent, { priority: 1 })] : []),
-      ...(contextMapContent ? [section("plan-arch-map", "semi-stable", contextMapContent, { priority: 2, cacheable: true })] : []),
-      // Seam d: plan-lessons priority p3→p2 so it sheds AFTER plan-arch-map (p2 declared first,
-      // stable sort) — aligns planner with the same signal-value hierarchy as the generator path.
-      ...(lessonsContent ? [section("plan-lessons", "semi-stable", lessonsContent, { priority: 2 })] : []),
-      section("plan-task", "task", manualTaskContent, { priority: 1 }),
-      section("plan-output-format", "critical-recap", outputFormatContent, { priority: 1 }),
-    ], { budgetBytes: roleWindowBytes("qa-generator") });
-  }
-
-  // complete / exhaustive mode
-  const exhaustive = input.mode === "exhaustive";
-
-  // STABLE prefix: the planning procedure for complete/exhaustive.
-  const wholeProcedure = [
-    `## Phase 1 of 2 — PLANNING ONLY. Do NOT write any .spec.ts in this phase.`,
-    `1. Activate serena (activate_project) and build a COVERAGE + IMPORTANCE map: read the existing`,
-    `   specs in ${input.e2eRelDir}/ and the app code (get_symbols_overview, find_symbol,`,
-    `   find_referencing_symbols) to find the important user flows and which are NOT covered.`,
-    `2. Persist this map to ${input.e2eRelDir}/.qa/analysis.json (flows, covered vs uncovered,`,
-    `   importance, lastSha:"${input.sha}"); update it incrementally if it already exists.`,
-    exhaustive
-      ? `3. Plan objectives for EVERY important flow (the suite is regenerated from scratch).`
-      : `3. Plan objectives ONLY for the important UNCOVERED flows (the delta over the existing suite).`,
-    `   QUESTION your own list before finalizing: drop trivial/naive items (a single button, static`,
-    `   content); KEEP the main use cases, the MVP happy paths, AND the relevant edge cases`,
-    `   (boundaries, error paths, negative/invalid input). Each objective is a concrete acceptance`,
-    `   criterion in given/when/then form, with the code symbols it exercises.`,
-    `   For each objective, set "needsUi": true when the flow involves page navigation or DOM`,
-    `   interaction, and "needsUi": false for pure logic (validation, calculation, data transformation).`,
-    `   For each objective, include a distilled "brief" of its blast radius (blastRadius: each touched`,
-    `   symbol with its file + a ONE-LINE role; plus FE↔BE links, relevant contract facts, and risks)`,
-    `   so the worker does NOT re-read the code. Set the brief's builtForSha to ${input.sha}.`,
-  ].join("\n");
-
-  // TASK: the opening line naming what this session is doing.
-  const wholeTaskContent = exhaustive
-    ? `Audit the ENTIRE E2E suite of ${input.repo} and plan a full regeneration.`
-    : `Analyze the WHOLE repository ${input.repo} and plan where to GROW the E2E suite.`;
-
-  return assemble([
-    section("plan-procedure", "stable-prefix", wholeProcedure, { priority: 1, cacheable: true }),
-    ...(contextMapContent ? [section("plan-arch-map", "semi-stable", contextMapContent, { priority: 2, cacheable: true })] : []),
-    // Seam d: plan-lessons priority p3→p2 so it sheds AFTER plan-arch-map (p2 declared first,
-    // stable sort) — aligns complete/exhaustive planner with the same signal-value hierarchy as
-    // the diff and manual planner paths.
-    ...(lessonsContent ? [section("plan-lessons", "semi-stable", lessonsContent, { priority: 2 })] : []),
-    section("plan-task", "task", wholeTaskContent, { priority: 1 }),
-    section("plan-output-format", "critical-recap", outputFormatContent, { priority: 1 }),
-  ], { budgetBytes: roleWindowBytes("qa-generator") });
-}
-
-export function buildPlanPrompt(input: OpencodeRunInput): string {
-  return buildPlanPromptAssembled(input).text;
 }
 
 // Fase 3: the dynamic task for the read-only explorer (single-agent diff path). The "how" + the
@@ -753,7 +580,7 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
   // freed for other signal. When only the brief is present, feBe renders normally.
   const contextBriefContent = input.contextBrief
     ? [
-        renderExplorationBrief(input.contextBrief, { suppressFeBe: !!input.contextPack }),
+        renderBrief(input.contextBrief, { suppressFeBe: !!input.contextPack }),
         `(The brief above distilled the blast radius — do NOT re-read that code. Verify selectors against the live DOM.)`,
         ``,
       ].join("\n")

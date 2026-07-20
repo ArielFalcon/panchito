@@ -214,12 +214,20 @@ small pure ports → domain logic → heavy leaf-IO):
   `objective-signal/{domain/fault-injection-score.ts,
   infrastructure/fault-injection-oracle.adapter.ts}`) — both migrated in
   `sdd/migration-tier-1-2` (commits `68f92b8`, `3e4668d`; decisions doc
-  `2026-07-11-migration-tier-1-2-decisions.md`). Remaining, re-verified
-  **DEFERRED** against HEAD (`sdd/migration-tier-1-2/reverify`, discovery
-  #1240 — see that decisions doc §2 for the full register): `verdict-parse.ts`,
-  `taxonomy.ts`, `exploration-brief.ts`, `context-assembler.ts` — each now has
-  a HEAD-verified sole consumer that is itself not yet migration-ready (the
-  Tier-4 monolith, or a deliberately-unconverged wide-alias decoupling).
+  `2026-07-11-migration-tier-1-2-decisions.md`). ~~`context-assembler.ts`~~
+  **DONE** — relocated whole to `generation/infrastructure/prompt-builders/`
+  alongside `prompts.ts` (`sdd/migration-tier-4c` Slice 5a, commit `eea7aea`;
+  the dormant `ContextAssemblerAdapter` twin gained a genuine internal caller
+  in the same move). Remaining, re-verified **DEFERRED** against HEAD (same
+  discovery #1240 register): `taxonomy.ts`, `exploration-brief.ts` (its
+  render/parse/coerce functions are consumed by `prompts.ts` via a cross-
+  boundary late-bound adapter setter, `setExplorationBriefCollaborators` —
+  wired, but the file itself is deliberately NOT relocated; see
+  `2026-07-14-migration-tier-4c-decisions.md`), and `verdict-parse.ts`
+  (multi-consumer now — `codex-strategy.ts`, `verdict-validate.ts`,
+  `rewritten-engine-factory.ts`, `exploration-brief.ts` — explicitly
+  **descope-with-record**, not migrated in tier-4c; see that decisions doc's
+  Open Questions).
 - **Tier 2 — small, no twin yet**: ~~`oracle-types.ts`~~ **DONE (split)**
   (`OracleInput`/`ValueOracleResult` deleted — `ValueOracleResult` already had
   a byte-identical qa-engine home, `OracleInput` dissolved with no shared
@@ -228,15 +236,30 @@ small pure ports → domain logic → heavy leaf-IO):
   missing Stryker parity test was written FIRST, then the body moved into
   `stryker-mutation-oracle.adapter.ts`) — both migrated in
   `sdd/migration-tier-1-2` (commits `06444c2`, `8cabc58`, `3e4668d`; decisions
-  doc `2026-07-11-migration-tier-1-2-decisions.md`). Remaining, re-verified
-  **DEFERRED** against HEAD (same discovery #1240 register): `test-data.ts`,
-  `circuit-breaker.ts`, `codex-circuit-breaker.ts` (inside the
-  DECLARED `src/agent-runtime` shell survivor — not a migration candidate at
-  all), `model-window-catalog.ts` (still carries the known C4 split-brain
-  config bug, unfixed), `context.ts`, `learning/curriculum.ts` (D8
-  learning-store entanglement). `metadata.ts` moved OUT of this bullet — its
-  authoritative classification is now the Tier-3 gate decision below
-  (DEFER-Tier-4, co-deferred with the validate cluster).
+  doc `2026-07-11-migration-tier-1-2-decisions.md`). ~~`circuit-breaker.ts`~~
+  **DONE** — this doc's own 2026-07-09 entry had CONFLATED it with
+  `codex-circuit-breaker.ts` as both "inside the declared `src/agent-runtime`
+  shell survivor"; that was never accurate for `circuit-breaker.ts` (it lived
+  at `src/integrations/circuit-breaker.ts`, a distinct pure failure-count/
+  cooldown state machine with zero SDK coupling — `codex-circuit-breaker.ts`
+  is the unrelated file, a genuine D1 Codex-runtime primitive). Migrated whole
+  to `generation/infrastructure/resilience/circuit-breaker.ts`
+  (`sdd/migration-tier-4c` Slice 2, commit `38ff328`). ~~`model-window-
+  catalog.ts`~~ **DONE** — relocated to `generation/infrastructure/prompt-
+  builders/` and its known C4 split-brain config bug FIXED (D-4c-6:
+  `roleWindowBytes` now resolves the three visible roles from injected
+  runtime assignments first; `sdd/migration-tier-4c` Slice 5b, commit
+  `ba5bf4e`). ~~`context.ts`~~ **DONE** — see `context-assembler.ts`'s entry
+  in the Tier-1 bullet above (same file; this doc's own line-count estimate
+  for it was stale, corrected in the tier-4c decisions doc). Remaining,
+  re-verified **DEFERRED** against HEAD (same discovery #1240 register):
+  `test-data.ts`, `codex-circuit-breaker.ts` (the genuine D1 Codex-runtime
+  primitive, permanent shell — NOT a migration candidate, unlike
+  `circuit-breaker.ts` above which this doc previously and wrongly lumped
+  together with it), `learning/curriculum.ts` (D8 learning-store
+  entanglement). `metadata.ts` moved OUT of this bullet — its authoritative
+  classification is now the Tier-3 gate decision below (DEFER-Tier-4,
+  co-deferred with the validate cluster).
 - **Tier 3 — medium domain logic**: ~~`deploy-gate.ts`~~ **DONE (REDUCE)** —
   `shaMatches` relocated byte-identical to `qa-engine/src/shared-kernel/sha.ts`;
   the rest of the module (`waitForDeploy`/`DeployTarget`/`VersionInfo`/
@@ -265,12 +288,28 @@ small pure ports → domain logic → heavy leaf-IO):
   body-moved into `qa-engine/.../test-execution/infrastructure/
   {code-execution.runner.ts,code-setup.ts}` + `shared-infrastructure/
   process-sandbox/sandbox.ts`; decisions doc
-  `2026-07-12-migration-tier-4b-decisions.md`). Remaining: `execute.ts`,
-  `src/agent-runtime/*` (blocked on the DECIDE above), `prompts.ts` (named C4
-  target, unstarted, 2 known live bugs), `opencode-client.ts` (2100-LOC
-  monolith — decompose, don't port wholesale). Final step: dissolve
-  `rewritten-engine-factory.ts` + `run-history-sqlite-adapter.ts` into the
-  composition root and retire `seam-parity.contract.test.ts`.
+  `2026-07-12-migration-tier-4b-decisions.md`). ~~`prompts.ts`~~/
+  ~~`opencode-client.ts`~~ **DONE (decomposed, not ported wholesale, per this
+  doc's own instruction)** — `sdd/migration-tier-4c` (7 commits across
+  Slices 1-6; decisions doc `2026-07-14-migration-tier-4c-decisions.md`).
+  This line's "2 known live bugs" claim gave no specifics beyond a count.
+  ONE was reproduced and fixed (the `buildWorkerPromptAssembled` qa-worker/
+  -code budget-role bug, Slice 5b commit `cc0a4b6` — distinct from the
+  model-window-catalog D-4c-6 split-brain fix noted above). The SECOND is a
+  **best-effort inference, not a certainty** — no second bug was ever named
+  anywhere; Slice 5b identified and fixed engram bugfix #919 (`capDiff`
+  silently dropping an oversized first/only diff file, commit `a062844`) as
+  the strongest candidate found, flagged explicitly as inference in the
+  decisions doc. `opencode-client.ts` decomposed into a thin raw-SDK-closure
+  shell survivor — session transport/SSE policy, resilience, and prompt
+  builders all migrated to qa-engine (see the decisions doc for the full
+  two-tier split). Remaining: `execute.ts`, `src/agent-runtime/*` (blocked on
+  the DECIDE above), `verdict-parse.ts`/`verdict-validate.ts` (open design
+  question, explicitly descope-with-record in tier-4c — see the Tier-1
+  deferred bullet above). Final step: dissolve `rewritten-engine-factory.ts`
+  + `run-history-sqlite-adapter.ts` into the composition root and retire the
+  REMAINING (c)/(d)/(e) blocks of `seam-parity.contract.test.ts` — its (a)/(b)
+  blocks (`OpencodeRunInput`/`ReviewInput`) already retired in tier-4c Slice 6.
 
 Gray-zone calls to make explicit: `src/server/history.ts` (coexists with
 qa-engine's native `SqliteLearningRepository` — two learning stores in one
@@ -278,10 +317,15 @@ composition), `activity-mapper.ts`/`agent-activity.ts` (engine telemetry vs
 control-plane plumbing — lean shell), `value-report.ts`, `deploy-gate.ts`
 placement, `config-loader.ts` composition-mapping tension.
 
-**Hard sequencing constraints**: `seam-parity.contract.test.ts` pins
-`execute.ts`, `opencode-client.ts`, `run-history-sqlite-adapter.ts`,
-`rewritten-engine-factory.ts` by literal relative path and full field lists —
-those four migrate LAST, each move in lockstep with the test.
+**Hard sequencing constraints (updated post-tier-4c)**: `seam-parity.contract.test.ts`
+originally pinned `execute.ts`, `opencode-client.ts`, `run-history-sqlite-adapter.ts`,
+`rewritten-engine-factory.ts` by literal relative path and full field lists,
+requiring all four to migrate LAST in lockstep with the test. `opencode-client.ts`
+is now decomposed (tier-4c) and its own pin — the (a) GENERATION PROMPT / (b)
+REVIEW blocks (`OpencodeRunInput`/`ReviewInput`) — retired in Slice 6; the
+remaining three (`execute.ts`, `run-history-sqlite-adapter.ts`,
+`rewritten-engine-factory.ts`) still migrate LAST, each move in lockstep with
+the surviving (c)/(d)/(e) blocks.
 `qa-engine/tsconfig.parity.json` is the registry of every boundary-straddling
 file; anything crossing the boundary must be listed there or it is typechecked
 by nothing.
@@ -318,3 +362,16 @@ by nothing.
    prompt as a budgeted "Skill exemplars" section, keyed off
    `detectStructuralPatterns`'s `StructuralPattern[]` (`sdd/migration-wiring-
    phase-2` Slice 4, commit `8379da0`, rider `9e825a2`; decisions doc D-E).
+8. **RESOLVED** — the `opencode-client.ts`/`prompts.ts` cluster (this doc's
+   §4 Tier-4 "named C4 target" line) is DONE: decomposed across
+   `sdd/migration-tier-4c`'s 7 commits (Slices 1-6), not ported wholesale.
+   Two-tier split (raw SDK closure stays shell; policy/lifecycle/prompt
+   builders migrate to qa-engine), the local `ParallelWorkerInput` interface
+   escalation raised in Slice 1 (kept type-only, zero production callers,
+   solely for `generation-ports-parity.test.ts`'s AssertNever gate) resolved
+   in Slice 6 by deleting both together, `model-window-catalog.ts`'s C4
+   split-brain bug fixed (D-4c-6), and one of the "2 known live bugs" fixed
+   with certainty + one fixed as a flagged best-effort inference (see item
+   above and `2026-07-14-migration-tier-4c-decisions.md`). `verdict-parse.ts`/
+   `verdict-validate.ts` remain explicitly descoped-with-record, not part of
+   this closure.

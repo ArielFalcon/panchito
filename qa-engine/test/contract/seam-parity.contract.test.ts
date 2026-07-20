@@ -9,19 +9,18 @@
 //
 // Lives under qa-engine/test/contract/ (not test/contexts/.../bridges/) because it deliberately
 // imports BOTH root src/ (the legacy shape it audits against) AND qa-engine's @contexts/@kernel
-// aliases — the SAME "src/-importing seam" characterization tests already use (golden-parity.test.ts,
-// generation-ports-parity.test.ts). It is therefore excluded from qa-engine/tsconfig.json's
+// aliases — the SAME "src/-importing seam" characterization-test pattern this file itself
+// established. It is therefore excluded from qa-engine/tsconfig.json's
 // `include` and added to qa-engine/tsconfig.parity.json's `include` instead, mirroring that exact
 // precedent (see this repo's package.json `typecheck` script: tsc -b qa-engine/tsconfig.json, THEN
 // tsc --noEmit -p tsconfig.json, THEN tsc --noEmit -p qa-engine/tsconfig.parity.json — three
 // separate programs, each covering a disjoint file set).
 //
-// DESIGN — four describe-blocks, one per audited surface:
-//   a) GENERATION PROMPT — OpencodeRunInput (src/integrations/opencode-client.ts) vs what
-//      GenerationPortAdapter.generate() actually builds (fully-populated ctx + enrichment,
-//      recording GenerateTestsUseCase fake).
-//   b) REVIEW — ReviewInput (src/integrations/opencode-client.ts) vs ReviewPortAdapter.review()
-//      (fully-populated ctx + enrichment, recording rendering.renderReviewer fake).
+// DESIGN — three describe-blocks, one per audited surface (migration-tier-4c Slice 6 retired the
+// former (a) GENERATION PROMPT and (b) REVIEW blocks: OpencodeRunInput/ReviewInput's legacy
+// declarations in src/integrations/opencode-client.ts were deleted once prompts.ts's builders and
+// their canonical ports types fully migrated to qa-engine — see
+// docs/superpowers/2026-07-14-migration-tier-4c-decisions.md):
 //   c) EXECUTION — ExecuteOptions (src/qa/execute.ts) vs ExecutionPortAdapter.execute()'s
 //      ExecutionRequest mapping (ExecutionOpts bag + static ctx, recording strategy fake).
 //   d) PERSISTENCE — kernel RunOutcome vs SqliteRunHistoryAdapter's toLegacyRunOutcome mapping
@@ -38,15 +37,11 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { GenerationPortAdapter } from "@contexts/qa-run-orchestration/infrastructure/bridges/generation-port.adapter.ts";
-import { ReviewPortAdapter } from "@contexts/qa-run-orchestration/infrastructure/bridges/review-port.adapter.ts";
 import { ExecutionPortAdapter } from "@contexts/qa-run-orchestration/infrastructure/bridges/execution-port.adapter.ts";
 import { E2eExecutionStrategy } from "@contexts/test-execution/infrastructure/e2e-execution.strategy.ts";
 import { CodeExecutionStrategy } from "@contexts/test-execution/infrastructure/code-execution.strategy.ts";
-import { GenerateTestsUseCase, type GenerationPorts } from "@contexts/generation/application/generate-tests.use-case.ts";
 import type { RunOutcome as KernelRunOutcome } from "@kernel/run-outcome.ts";
 
-import type { OpencodeRunInput, ReviewInput } from "../../../src/integrations/opencode-client.ts";
 import type { ExecuteOptions } from "../../../src/qa/execute.ts";
 import { toLegacyRunOutcome, type RunHistorySqliteAdapterDeps, SqliteRunHistoryAdapter } from "../../../src/server/run-history-sqlite-adapter.ts";
 import { buildRewrittenCompositionConfig, type RewrittenEngineFactoryDeps } from "../../../src/server/rewritten-engine-factory.ts";
@@ -58,277 +53,6 @@ import type { AgentDeps } from "../../../src/integrations/opencode-client.ts";
 // so `assert.equal(captured.field, SENTINEL)` fails loudly if the adapter silently substitutes a
 // default, drops the field, or forwards the wrong one.
 const S = (field: string): string => `__SENTINEL__${field}__`;
-
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-// (a) GENERATION PROMPT surface — OpencodeRunInput vs GenerationPortAdapter
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdapter)", () => {
-  // Every field OpencodeRunInput declares (src/integrations/opencode-client.ts), enumerated by hand
-  // from the type — TypeScript's `satisfies Record<keyof OpencodeRunInput, true>` below fails
-  // COMPILATION the moment a field is added to the type without a matching entry here, closing the
-  // "future field silently unmapped" gap the mission calls out.
-  const ALL_FIELDS = {
-    repo: true, sha: true, diff: true, mirrorDir: true, e2eRelDir: true, namespace: true,
-    needsReview: true, target: true, mode: true, appName: true, baseUrl: true, intent: true,
-    guidance: true, openapi: true, fixCases: true, reviewCorrections: true, coverageGap: true,
-    selectorContradictions: true, learnedRules: true, domSnapshot: true, failureSourced: true,
-    runId: true, contextMap: true, explorer: true, contextBrief: true, contextPack: true,
-    staticSignal: true, diffArchetypes: true, existingSpecFiles: true, service: true, services: true,
-    serviceLinks: true, contractDrift: true, crossRepoImpact: true,
-    classificationReason: true, contradiction: true, structuralPatterns: true,
-  } satisfies Record<keyof OpencodeRunInput, true>;
-
-  // Fields the rewritten path deliberately sources OUTSIDE this adapter's ctx+enrichment, or that
-  // are genuinely NOT YET WIRED (a real finding — the orchestrator decides the fix). Every entry
-  // carries a reason; FIXME entries are confirmed-dropped fields with the evidence trail.
-  const ALLOWLIST: Record<string, string> = {
-    // Deliberately unmapped: this bridge doesn't drive prompt assembly for these — confirmed by
-    // reading src/integrations/prompts.ts's own consumers.
-    explorer: "explorer-pass gating is NOT wired on the rewritten path (no GenerationEnrichment/ctx slot exists for it; grep of ports/index.ts confirms) — FIXME: prompts.ts:647 gates the entire Fase-3 explorer pass on input.explorer, so it silently never fires on the rewritten path.",
-    contextBrief: "FIXME: no GenerationEnrichment/ctx slot exists (grep-confirmed) — prompts.ts renders the 'blast radius' plan-brief section from input.contextBrief; the rewritten path's PreGenerationGroundingPort produces a context PACK (enrichment.contextPack) instead, which is a DIFFERENT rendering path (prompts.ts:611) that partially covers this, but the raw ExplorationBrief object itself is never threaded.",
-    contextMap: "NOT dropped at this bridge — sourced via a DIFFERENT port (PreGenerationGroundingPort, composition-root.ts:cfg.contextMap), which folds it into enrichment.contextPack before this adapter ever sees it. Correct by design, not a gap.",
-    diffArchetypes: "FIXME: no GenerationEnrichment/ctx slot exists (grep-confirmed) — prompts.ts:829 renders a one-line 'change shape' hint from input.diffArchetypes (detectStructuralPatterns output). Dropped means the rewritten path never prioritises archetype-appropriate tests.",
-    structuralPatterns: "sdd/migration-wiring-phase-2 Slice 4 (D-E, restoration-only): NO GenerationEnrichment/ctx slot exists on THIS bridge — this adapter still never sets OpencodeRunInput.structuralPatterns (same class of gap as diffArchetypes immediately above, deliberately out of this slice's narrow scope). apply-batch-3 rider CLOSED the end-to-end gap at a DIFFERENT layer instead: prompts.ts (src/integrations/prompts.ts's skillExemplarsContent) now derives structuralPatterns from input.diff via detectStructuralPatterns when this field arrives absent, so a real run's prompt carries the exemplar section without this bridge ever populating it. This allowlist entry stays accurate for THIS layer; diffArchetypes' own gap (a different, one-line hint) remains genuinely open.",
-    failureSourced: "FIXME: no GenerationEnrichment/ctx slot exists (grep-confirmed) — prompts.ts:624,708,922 switches domSnapshot framing to 'GROUND TRUTH AT FAILURE' when true. domSnapshot itself IS threaded (enrichment.domSnapshot); the framing flag that changes how it's presented is not.",
-    service: "FIXME: no GenerationEnrichment/ctx/CompositionConfig slot exists (grep-confirmed) — prompts.ts renders cross-repo framing from input.service (the triggering microservice) at 6+ call sites (286-291,433-434,456-457,1246-1251). Cross-repo runs are a documented CLAUDE.md feature (\"Cross-repo runs (microservices)\"); this is a real gap for that feature on the rewritten path.",
-    services: "FIXME: no GenerationEnrichment/ctx/CompositionConfig slot exists (grep-confirmed, AppConfig.services IS real — src/orchestrator/schemas.ts) — prompts.ts:1069-1120 renders the full microservice-repo list (context mode). Same cross-repo gap as `service` above.",
-  };
-
-  test("OpencodeRunInput's own field list matches the allowlist + the adapter's mapped set exactly (no silent field added to either side)", () => {
-    const mapped = [
-      "repo", "sha", "diff", "mirrorDir", "e2eRelDir", "namespace", "needsReview", "target", "mode",
-      "appName", "guidance", "baseUrl", "reviewCorrections", "fixCases", "selectorContradictions",
-      "domSnapshot", "coverageGap", "intent", "learnedRules", "contextPack", "existingSpecFiles", "runId",
-      "openapi", "staticSignal", "serviceLinks", "contractDrift", "crossRepoImpact",
-      "classificationReason", "contradiction",
-    ];
-    const allFieldNames = Object.keys(ALL_FIELDS).sort();
-    const accountedFor = [...new Set([...mapped, ...Object.keys(ALLOWLIST)])].sort();
-    assert.deepEqual(
-      accountedFor,
-      allFieldNames,
-      "every OpencodeRunInput field must be either mapped by the adapter (asserted below) or listed in ALLOWLIST with a reason — a field in neither set is an unaudited gap",
-    );
-  });
-
-  test("generate() carries every mapped OpencodeRunInput field through with its sentinel value (fully-populated ctx + enrichment)", async () => {
-    let captured: OpencodeRunInput | undefined;
-    const recordingPorts: GenerationPorts = {
-      runtime: { openSession: async () => ({ prompt: async () => ({ output: "{}" }), dispose: async () => {} }) } as unknown as GenerationPorts["runtime"],
-      rendering: {
-        render: () => "",
-        renderMain: (input) => { captured = input; return { text: "", sectionSizes: {} }; },
-        renderWorker: () => ({ text: "", sectionSizes: {} }),
-        renderReviewer: () => ({ text: "", sectionSizes: {} }),
-        renderExplorer: () => "",
-        specFileForFlow: (f: string) => `${f}.spec.ts`,
-      },
-      verdicts: {
-        parseGenerator: () => ({ specs: [] }),
-        parseReview: () => ({ approved: true, corrections: [], parsed: true, valid: true, issues: [] }),
-      },
-      manifest: { read: async () => [], reconcile: async (_d, entries) => [...entries] },
-      budget: { capDiff: (d: string) => d, capText: (t: string) => t, budgetForRole: () => 100_000 },
-    };
-    const useCase = new GenerateTestsUseCase(recordingPorts);
-
-    const adapter = new GenerationPortAdapter(useCase, {
-      repo: S("repo"),
-      appName: S("appName"),
-      mirrorDir: S("mirrorDir"),
-      e2eRelDir: S("e2eRelDir"),
-      namespace: S("namespace"),
-      needsReview: true,
-      target: "e2e",
-      mode: "diff",
-      diff: S("ctx.diff"), // overridden by the dynamic `diff` arg below
-      guidance: S("guidance"),
-      baseUrl: S("baseUrl"),
-      openapi: S("openapi"),
-    });
-
-    await adapter.generate([], "/specDir", undefined, S("diff"), {
-      reviewCorrections: [S("reviewCorrections")],
-      fixCases: [{ name: S("fixCases.name"), status: "fail", detail: S("fixCases.detail") }],
-      selectorContradictions: [S("selectorContradictions")],
-      domSnapshot: S("domSnapshot"),
-      coverageGap: S("coverageGap"),
-      intent: { type: "feat", breaking: false, message: S("intent.message"), changedFiles: [S("intent.changedFiles")] },
-      sha: S("sha"),
-      learnedRules: [{ id: S("rule.id"), trigger: S("rule.trigger"), action: S("rule.action"), errorClass: "E-EXEC-FAIL", status: "active", confidence: "high" }],
-      contextPack: S("contextPack"),
-      existingSpecFiles: [S("existingSpecFiles")],
-      runId: S("runId"),
-      staticSignal: S("staticSignal"),
-      serviceLinks: [{
-        from: { repo: S("l.from.repo"), file: S("l.from.file"), symbol: S("l.from.symbol") },
-        to: { repo: S("l.to.repo"), file: S("l.to.file"), symbol: S("l.to.symbol") },
-        transport: "http", contractRef: S("l.contractRef"), confidence: 1, source: S("l.source"),
-      }],
-      contractDrift: [{
-        from: { repo: S("d.repo"), file: S("d.file"), symbol: S("d.symbol") }, verb: "GET", path: S("d.path"),
-      }],
-      crossRepoImpact: {
-        impactedLinks: [{
-          link: {
-            from: { repo: S("cri.l.from.repo"), file: S("cri.l.from.file"), symbol: S("cri.l.from.symbol") },
-            to: { repo: S("cri.l.to.repo"), file: S("cri.l.to.file"), symbol: S("cri.l.to.symbol") },
-            transport: "http", confidence: 1, source: S("cri.l.source"),
-          },
-          tier: "contract-file",
-        }],
-      },
-      classificationReason: S("classificationReason"),
-      contradiction: true,
-    });
-
-    assert.ok(captured, "renderMain must have been called — the generator session never ran");
-    const dyingLayer = "GenerationPortAdapter.generate() -> OpencodeRunInput (qa-engine/.../bridges/generation-port.adapter.ts)";
-
-    assert.equal(captured!.repo, S("repo"), `repo dropped at ${dyingLayer}`);
-    assert.equal(captured!.sha, S("sha"), `sha dropped at ${dyingLayer}`);
-    assert.equal(captured!.diff, S("diff"), `diff dropped at ${dyingLayer} (dynamic diff must win over ctx.diff)`);
-    assert.equal(captured!.mirrorDir, S("mirrorDir"), `mirrorDir dropped at ${dyingLayer}`);
-    assert.equal(captured!.e2eRelDir, S("e2eRelDir"), `e2eRelDir dropped at ${dyingLayer}`);
-    assert.equal(captured!.namespace, S("namespace"), `namespace dropped at ${dyingLayer}`);
-    // needsReview: GenerationPortAdapter itself passes ctx.needsReview through FAITHFULLY (verified
-    // by direct construction here, bypassing composition-root.ts). The "force false — kill the
-    // double reviewer" override (W2 fix F4) happens ONE LAYER UP, at composition-root.ts's own
-    // wireBridges() call site (which always constructs this adapter with needsReview:false,
-    // regardless of cfg.needsReview) — NOT inside this adapter. Asserting ctx.needsReview passes
-    // through unchanged here is what proves that override is a composition-root decision, not an
-    // adapter-level hardcode silently eating the field.
-    assert.equal(captured!.needsReview, true, `needsReview dropped/overridden at ${dyingLayer} (expected ctx.needsReview to pass through faithfully when this adapter is constructed directly)`);
-    assert.equal(captured!.target, "e2e", `target dropped at ${dyingLayer}`);
-    assert.equal(captured!.mode, "diff", `mode dropped at ${dyingLayer}`);
-    assert.equal(captured!.appName, S("appName"), `appName dropped at ${dyingLayer}`);
-    assert.equal(captured!.baseUrl, S("baseUrl"), `baseUrl dropped at ${dyingLayer} (THE live-run root cause this bridge's own header documents)`);
-    assert.equal(captured!.guidance, S("guidance"), `guidance dropped at ${dyingLayer}`);
-    assert.deepEqual(captured!.reviewCorrections, [S("reviewCorrections")], `reviewCorrections dropped at ${dyingLayer}`);
-    assert.deepEqual(captured!.fixCases, [{ name: S("fixCases.name"), status: "fail", detail: S("fixCases.detail") }], `fixCases dropped at ${dyingLayer}`);
-    assert.deepEqual(captured!.selectorContradictions, [S("selectorContradictions")], `selectorContradictions dropped at ${dyingLayer}`);
-    assert.equal(captured!.domSnapshot, S("domSnapshot"), `domSnapshot dropped at ${dyingLayer}`);
-    assert.equal(captured!.coverageGap, S("coverageGap"), `coverageGap dropped at ${dyingLayer}`);
-    assert.equal(captured!.intent?.message, S("intent.message"), `intent dropped at ${dyingLayer}`);
-    assert.ok(captured!.learnedRules?.includes(S("rule.trigger")), `learnedRules dropped/not-rendered at ${dyingLayer}`);
-    assert.equal(captured!.contextPack, S("contextPack"), `contextPack dropped at ${dyingLayer}`);
-    assert.deepEqual(captured!.existingSpecFiles, [S("existingSpecFiles")], `existingSpecFiles dropped at ${dyingLayer}`);
-    assert.equal(captured!.runId, S("runId"), `runId dropped at ${dyingLayer} (W5 fix: SSE session descriptor telemetry starved without it)`);
-    assert.equal(captured!.openapi, S("openapi"), `openapi dropped at ${dyingLayer} (W5 fix: app-static OpenAPI glob hint)`);
-    assert.equal(captured!.staticSignal, S("staticSignal"), `staticSignal dropped at ${dyingLayer} (Phase 4 blast-radius wiring: the code-graph advisory section never reaches the generator)`);
-    assert.deepEqual(captured!.serviceLinks?.[0]?.from.repo, S("l.from.repo"), `serviceLinks dropped at ${dyingLayer}`);
-    assert.equal(captured!.contractDrift?.[0]?.path, S("d.path"), `contractDrift dropped at ${dyingLayer}`);
-    assert.equal(captured!.crossRepoImpact?.impactedLinks[0]?.link.from.repo, S("cri.l.from.repo"), `crossRepoImpact dropped at ${dyingLayer}`);
-    assert.equal(captured!.crossRepoImpact?.impactedLinks[0]?.tier, "contract-file", `crossRepoImpact.impactedLinks[].tier dropped at ${dyingLayer}`);
-    assert.equal(captured!.classificationReason, S("classificationReason"), `classificationReason dropped at ${dyingLayer} (WS7.4)`);
-    assert.equal(captured!.contradiction, true, `contradiction dropped at ${dyingLayer} (WS7.4)`);
-  });
-});
-
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-// (b) REVIEW surface — ReviewInput vs ReviewPortAdapter
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-describe("seam-parity: REVIEW (ReviewInput vs ReviewPortAdapter)", () => {
-  const ALL_FIELDS = {
-    diff: true, specs: true, mirrorDir: true, e2eRelDir: true, baseUrl: true, intent: true,
-    guidance: true, appName: true, mode: true, target: true, learnedRules: true, domSnapshot: true,
-    runId: true, objective: true, priorCorrections: true, executionResult: true,
-  } satisfies Record<keyof ReviewInput, true>;
-
-  const ALLOWLIST: Record<string, string> = {
-    target: "NOT threaded by ReviewPortAdapter — ReviewInput.target is optional and only 'adjusts wording and spec paths' (opencode-client.ts comment); ReviewPortStaticContext carries no target field at all (grep-confirmed). Low-severity: the reviewer prompt defaults to e2e wording even for code-mode reviews on the rewritten path. FIXME candidate, not yet evidenced by a live run.",
-    intent: "NOT mapped to ReviewInput.intent directly — the bridge derives ReviewInput.objective from enrichment.intent.message instead (review-port.adapter.ts:86, mirrors legacy's `opts.guidance ?? intent?.message`). The raw CommitIntent object itself never reaches ReviewInput.intent, but its one consumed field (message) does, via a different field. Deliberate re-shape, not a drop.",
-    executionResult: "FIXME: no ReviewEnrichment slot exists (grep-confirmed) — opencode-client.ts documents this as a D4/D5 field: sanitized HTTP statuses + final URLs captured during Filter C execution, injected as an authoritative VOLATILE section so the reviewer weighs an objective 5xx before judging test code. Dropped means the rewritten-path reviewer never sees this evidence.",
-  };
-
-  test("ReviewInput's own field list matches the allowlist + the adapter's mapped set exactly", () => {
-    const mapped = ["diff", "specs", "mirrorDir", "e2eRelDir", "appName", "mode", "baseUrl", "guidance", "priorCorrections", "objective", "learnedRules", "domSnapshot", "runId"];
-    const allFieldNames = Object.keys(ALL_FIELDS).sort();
-    const accountedFor = [...new Set([...mapped, ...Object.keys(ALLOWLIST)])].sort();
-    assert.deepEqual(accountedFor, allFieldNames, "every ReviewInput field must be either mapped or allowlisted with a reason");
-  });
-
-  test("review() carries every mapped ReviewInput field through with its sentinel value (fully-populated ctx + enrichment)", async () => {
-    let captured: ReviewInput | undefined;
-    const adapter = new ReviewPortAdapter(
-      {
-        runtime: { openSession: async () => ({ prompt: async () => ({ output: "{}" }), dispose: async () => {} }) },
-        rendering: {
-          render: () => "",
-          renderMain: () => ({ text: "", sectionSizes: {} }),
-          renderWorker: () => ({ text: "", sectionSizes: {} }),
-          renderReviewer: (input) => { captured = input as ReviewInput; return { text: "", sectionSizes: {} }; },
-          renderExplorer: () => "",
-          specFileForFlow: (f: string) => `${f}.spec.ts`,
-        },
-        verdicts: { parseGenerator: () => ({ specs: [] }), parseReview: () => ({ approved: true, corrections: [], parsed: true, valid: true, issues: [] }) },
-      },
-      {
-        diff: S("ctx.diff"),
-        mirrorDir: S("mirrorDir"),
-        e2eRelDir: S("e2eRelDir"),
-        appName: S("appName"),
-        mode: "diff",
-        baseUrl: S("baseUrl"),
-        // guidance deliberately OMITTED here so the intent.message fallback (objective) is observable —
-        // ReviewPortAdapter's own contract: guidance wins over intent when both are present.
-      },
-    );
-
-    await adapter.review(
-      "/specDir",
-      [{ name: S("case.name"), status: "pass", file: S("case.file") }],
-      S("diff"),
-      {
-        priorCorrections: [S("priorCorrections")],
-        intent: { type: "feat", breaking: false, message: S("intent.message"), changedFiles: [] },
-        learnedRules: [{ id: S("rule.id"), trigger: S("rule.trigger"), action: S("rule.action"), errorClass: "E-EXEC-FAIL", status: "active", confidence: "high" }],
-        domSnapshot: S("domSnapshot"),
-        runId: S("runId"),
-      },
-    );
-
-    assert.ok(captured, "renderReviewer must have been called — the reviewer session never ran");
-    const dyingLayer = "ReviewPortAdapter.review() -> ReviewInput (qa-engine/.../bridges/review-port.adapter.ts)";
-
-    assert.equal(captured!.diff, S("diff"), `diff dropped at ${dyingLayer} (dynamic diff must win over ctx.diff)`);
-    assert.deepEqual(captured!.specs, [S("case.file")], `specs dropped at ${dyingLayer}`);
-    assert.equal(captured!.mirrorDir, S("mirrorDir"), `mirrorDir dropped at ${dyingLayer}`);
-    assert.equal(captured!.e2eRelDir, S("e2eRelDir"), `e2eRelDir dropped at ${dyingLayer}`);
-    assert.equal(captured!.appName, S("appName"), `appName dropped at ${dyingLayer}`);
-    assert.equal(captured!.mode, "diff", `mode dropped at ${dyingLayer}`);
-    assert.equal(captured!.baseUrl, S("baseUrl"), `baseUrl dropped at ${dyingLayer}`);
-    assert.deepEqual(captured!.priorCorrections, [S("priorCorrections")], `priorCorrections dropped at ${dyingLayer}`);
-    assert.equal(captured!.objective, S("intent.message"), `objective (derived from intent.message) dropped at ${dyingLayer}`);
-    assert.ok(captured!.learnedRules?.includes(S("rule.trigger")), `learnedRules dropped/not-rendered at ${dyingLayer}`);
-    assert.equal(captured!.domSnapshot, S("domSnapshot"), `domSnapshot dropped at ${dyingLayer}`);
-    assert.equal(captured!.runId, S("runId"), `runId dropped at ${dyingLayer} (W5 fix: reviewer session's own SSE descriptor telemetry starved without it)`);
-  });
-
-  test("review() carries ctx.guidance through verbatim (guidance wins over intent.message per the adapter's own documented contract)", async () => {
-    let captured: ReviewInput | undefined;
-    const adapter = new ReviewPortAdapter(
-      {
-        runtime: { openSession: async () => ({ prompt: async () => ({ output: "{}" }), dispose: async () => {} }) },
-        rendering: {
-          render: () => "",
-          renderMain: () => ({ text: "", sectionSizes: {} }),
-          renderWorker: () => ({ text: "", sectionSizes: {} }),
-          renderReviewer: (input) => { captured = input as ReviewInput; return { text: "", sectionSizes: {} }; },
-          renderExplorer: () => "",
-          specFileForFlow: (f: string) => `${f}.spec.ts`,
-        },
-        verdicts: { parseGenerator: () => ({ specs: [] }), parseReview: () => ({ approved: true, corrections: [], parsed: true, valid: true, issues: [] }) },
-      },
-      { diff: "", mirrorDir: "/m", e2eRelDir: "e2e", appName: "app", mode: "diff", guidance: S("guidance") },
-    );
-
-    await adapter.review("/specDir", [{ name: "c", status: "pass" }]);
-
-    assert.equal(captured!.guidance, S("guidance"), "guidance dropped at ReviewPortAdapter.review() -> ReviewInput");
-    assert.equal(captured!.objective, undefined, "objective must stay absent when guidance is present — guidance flows through .guidance, not .objective");
-  });
-});
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // (c) EXECUTION surface — ExecuteOptions vs ExecutionPortAdapter's ExecutionRequest mapping

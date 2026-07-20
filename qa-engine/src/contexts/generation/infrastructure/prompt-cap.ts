@@ -22,6 +22,17 @@
 // SECRET_AUDIT (secret redaction) stay in src/orchestrator/sanitizer.ts — that is a security
 // boundary concern outside PromptBudgetPort's contract (capDiff/capText/budgetForRole), and porting
 // it here would silently widen this module's scope beyond what Sub-Plan 7.2 item 4 asks for.
+//
+// migration-tier-4c Slice 5b: capDiff's first-file-section preamble-misclassification bug (engram
+// bugfix #919, registered 2026-07-02 while this port was first written — deliberately preserved
+// verbatim THEN, per the project's bug-register protocol: "fixes ship as separate declared changes
+// with their own tests") is NOW FIXED here, as that declared change (task 5b.5, re-deriving prompts.ts's
+// "2nd known bug" fresh at HEAD). This intentionally DIVERGES this module's capDiff from
+// src/orchestrator/sanitizer.ts's own (still-unfixed) copy — verified via a fresh grep that
+// sanitizer.ts's capDiff has ZERO remaining production callers (prompts.ts, its last one, now
+// imports this qa-engine port exclusively after Slice 5a's relocation), so the legacy copy is inert;
+// no parity test pins the two against each other for this function (unlike sanitizeText, which has
+// its own dedicated -parity.test.ts). See capDiff's own doc comment below for the fix detail.
 
 // ── Diff prompt budget (ported verbatim from sanitizer.ts) ──────────────────────────────────────
 export const MAX_PROMPT_DIFF_CHARS = 50_000;
@@ -52,25 +63,48 @@ function isLowRelevance(filePath: string): boolean {
 }
 
 // Extracts the file path from a "diff --git a/... b/..." header line.
-function extractDiffFilePath(section: string): string {
+// migration-tier-4c Slice 5a: exported (was module-private) — prompts.ts's cappedDiffText
+// (relocated from src/integrations/prompts.ts) needs this to pick a per-file-section sanitize mode
+// (see prompts.ts's own diffSectionMode doc), the SAME file-header parsing capDiff already does
+// internally below. No behavior change — this is the identical function, just no longer private.
+export function extractDiffFilePath(section: string): string {
   // "diff --git a/src/foo.ts b/src/foo.ts" — take the b/ path (post-rename destination)
   const m = /^diff --git a\/\S+ b\/(\S+)/m.exec(section);
   return m?.[1] ?? "";
 }
 
+// Anchored to the ABSOLUTE start of the string (no `m` flag) — used ONLY to decide whether
+// rawSections[0] is a real file section (starts with its own header) or a true preamble. Mirrors
+// prompts.ts's own DIFF_HEADER_RE discipline for the identical question in cappedDiffText.
+const DIFF_HEADER_START_RE = /^diff --git /;
+
 // Ported verbatim from sanitizer.ts's capDiff: keep whole per-file sections in RELEVANCE ORDER
 // until the budget is spent, then replace the rest with the list of omitted files. The agent always
 // has the full diff available in its working copy (`git show <sha>`), so nothing is lost — only the
 // prompt is bounded.
+//
+// migration-tier-4c Slice 5b (2nd known prompts.ts bug, engram bugfix #919 — re-derived + FIXED at
+// HEAD, per task 5b.5): `diff.split(/^(?=diff --git )/m)` does NOT always produce a leading
+// non-file "preamble" — when the diff starts immediately with `diff --git ` (the normal case for a
+// real git diff), rawSections[0] IS the first file's own section, not a preamble. BEFORE this fix,
+// rawSections[0] was ALWAYS treated as an unconditionally-kept preamble regardless, so an oversized
+// first (or only) file could vanish with zero trace under budget pressure while the omission marker
+// falsely claimed "0 file(s) omitted". FIXED: rawSections[0] is folded into `fileSections` (subject
+// to the SAME relevance-sort, budget-check, and omission-naming as any other file) whenever it
+// itself starts with its own "diff --git " header; only a TRUE preamble (e.g. a `git log -p` prefix
+// before the first file header) is still unconditionally kept.
 export function capDiff(diff: string, maxChars: number = MAX_PROMPT_DIFF_CHARS): string {
   if (diff.length <= maxChars) return diff;
   // Split into per-file sections; the leading chunk (before the first header) stays first.
   const rawSections = diff.split(/^(?=diff --git )/m);
 
+  const firstSection = rawSections[0] ?? "";
+  const hasRealPreamble = !DIFF_HEADER_START_RE.test(firstSection);
+
   // Relevance-order: high-relevance (changed source) first, low-relevance last.
   // Stable sort preserves the original file order within each group.
-  const preamble = rawSections[0] ?? "";
-  const fileSections = rawSections.slice(1);
+  const preamble = hasRealPreamble ? firstSection : "";
+  const fileSections = hasRealPreamble ? rawSections.slice(1) : rawSections;
   const highRelevance: string[] = [];
   const lowRelevance: string[] = [];
   for (const s of fileSections) {

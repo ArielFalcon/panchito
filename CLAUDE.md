@@ -67,8 +67,20 @@ First boot is slow (Serena installs via `uvx`). For a shadow run only
 | `agents` | **The agentic engine** — a supervisor fronting both runtimes (OpenCode via `opencode serve`; Codex via `codex exec`) + MCPs (Serena for code nav; engram for memory). Writes `.spec.ts` files into the working copy. | `agents/` |
 
 The **fundamental split**: deterministic infra (`src/`) is kept rigorously
-separate from the non-deterministic agent (`agents/`). They communicate over
-one HTTP boundary (`src/integrations/opencode-client.ts` ↔ `opencode serve`).
+separate from the non-deterministic agent (`agents/`). `src/integrations/
+opencode-client.ts` is the shell-resident I/O closure that talks to `opencode
+serve` over HTTP — but as of `migration-tier-4c` it is deliberately THIN: only
+the genuinely-raw `@opencode-ai/sdk` primitives (client construction,
+`session.create/prompt/abort/delete`, `event.subscribe`) plus a few permanent
+D1-family control-plane wrappers (`askAssistant`, `getOpenSessions`/
+`getOpenSessionCount`) stay here. Everything with domain/policy content —
+session-transport policy (fallback-model retry, circuit-breaker gating,
+turn/usage telemetry), the resilience primitives (`circuit-breaker.ts`,
+`stall-watchdog.ts`), the SSE/`EventStreamManager` lifecycle, and the prompt
+builders (`prompts.ts` and its riders) — lives in
+`qa-engine/src/contexts/generation/infrastructure/`, consuming the shell's
+raw primitives via injection (see
+`docs/superpowers/2026-07-14-migration-tier-4c-decisions.md`).
 
 ### The run flow — start here
 

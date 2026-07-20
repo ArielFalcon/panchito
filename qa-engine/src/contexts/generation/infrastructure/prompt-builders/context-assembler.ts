@@ -65,6 +65,8 @@
 // hygiene): it adds an outer guarantee. This means a prompt never exceeds the
 // role's configured budget, but sections can still be individually capped below it.
 
+import { ContextAssemblerAdapter } from "@contexts/generation/infrastructure/context-assembler.adapter.ts";
+
 // Options for assemble().
 export interface AssembleOpts {
   // Global byte budget for the assembled prompt. When provided and positive, the
@@ -169,7 +171,12 @@ function capToBytes(text: string, maxBytes: number, sectionId: string): string {
 // BEFORE final assembly: sections are shed (lowest priority first) until the total
 // fits. Every shed event is logged with section id, original bytes, and action.
 // See the module header for the full Phase-2 budget enforcement description.
-export function assemble(sections: Section[], opts: AssembleOpts = {}): AssembledPrompt {
+//
+// migration-tier-4c Slice 5b (D-4c-6 twin wiring): renamed to `assembleImpl` — the PUBLIC `assemble`
+// export below now delegates through the (previously dormant) `ContextAssemblerAdapter`, giving that
+// class a genuine, permanently-exercised production caller instead of parity-test-only. Pure
+// relocation of behavior: this function's body is byte-for-byte unchanged.
+function assembleImpl(sections: Section[], opts: AssembleOpts = {}): AssembledPrompt {
   // Sort by canonical role order, then by priority within each role.
   const sorted = [...sections].sort((a, b) => {
     const ra = ROLE_ORDER[a.role];
@@ -388,7 +395,10 @@ export function assemble(sections: Section[], opts: AssembleOpts = {}): Assemble
 // `priority` defaults to 0. `maxBytes` defaults to 0 (uncapped).
 // `overflow` defaults to "drop". `language` defaults to "scaffold".
 // `cacheable` defaults to false.
-export function section(
+//
+// migration-tier-4c Slice 5b (D-4c-6 twin wiring): renamed to `sectionImpl` — see `assembleImpl`'s
+// own doc above. Byte-for-byte unchanged.
+function sectionImpl(
   id: string,
   role: SectionRole,
   content: string | (() => string),
@@ -405,4 +415,29 @@ export function section(
     language: opts.language ?? "scaffold",
     ...(opts.shedAs ? { shedAs: opts.shedAs } : {}),
   };
+}
+
+// migration-tier-4c Slice 5b (D-4c-6 twin wiring): `ContextAssemblerAdapter` (qa-engine/contexts/
+// generation/infrastructure/context-assembler.adapter.ts) was built AHEAD of this relocation — a
+// thin, parity-tested pass-through class with ZERO production callers (only its own unit + parity
+// tests exercised it; see the "wired means FED" lesson in this migration program's memory). Now that
+// this file itself lives in qa-engine (no cross-boundary injection is needed for assemble/section —
+// both sides of that boundary collapsed once prompts.ts + context-assembler.ts moved together), the
+// adapter gets a genuine production call path here: EVERY `assemble`/`section` call (from prompts.ts
+// and any future qa-engine caller) now routes through this one constructed instance. Pure
+// indirection — `assembleImpl`/`sectionImpl` are unchanged, so behavior is byte-for-byte identical
+// (already proven by context-assembler.adapter-parity.test.ts).
+const defaultAssembler = new ContextAssemblerAdapter(assembleImpl, sectionImpl);
+
+export function assemble(sections: Section[], opts: AssembleOpts = {}): AssembledPrompt {
+  return defaultAssembler.assemble(sections, opts);
+}
+
+export function section(
+  id: string,
+  role: SectionRole,
+  content: string | (() => string),
+  opts: Partial<Pick<Section, "priority" | "maxBytes" | "cacheable" | "overflow" | "language" | "shedAs">> = {},
+): Section {
+  return defaultAssembler.section(id, role, content, opts);
 }
