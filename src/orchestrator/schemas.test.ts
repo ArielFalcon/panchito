@@ -119,8 +119,9 @@ test("ManifestEntrySchema accepts a well-formed entry", () => {
 test("ManifestEntrySchema rejects empty targets / empty objective — write uses the read invariant (Phase 3.1)", () => {
   // The write path (opencode-client) validates each entry with THIS schema before writing,
   // so it can never emit a manifest that read-validation would later reject (empty targets
-  // is a deliberate invariant — see qa/metadata.test.ts). The bad entry is dropped at write
-  // with a warning rather than corrupting e2e/.qa/manifest.json.
+  // is a deliberate invariant — see qa-engine's static-gate.checks.test.ts, migration-tier-4b
+  // Slice 3). The bad entry is dropped at write with a warning rather than corrupting
+  // e2e/.qa/manifest.json.
   assert.equal(ManifestEntrySchema.safeParse({ ...manifestEntry, targets: [] }).success, false);
   assert.equal(ManifestEntrySchema.safeParse({ ...manifestEntry, objective: "" }).success, false);
 });

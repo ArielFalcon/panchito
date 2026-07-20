@@ -205,7 +205,14 @@ export class PreGenerationGroundingPortAdapter implements PreGenerationGrounding
         let byFile = new Map<string, { flow: string; objective: string }>();
         try {
           const entries = await readManifest(this.ctx.e2eDir);
-          byFile = new Map(entries.filter((e) => e.file).map((e) => [e.file, { flow: e.flow, objective: e.objective }]));
+          // migration-tier-4b Slice 2: `file` is now OPTIONAL on the canonical ManifestEntry (a
+          // pre-4b/hand-edited entry may lack it) — a type-predicate filter is required so `e.file`
+          // narrows from `string | undefined` to `string` for the Map key below.
+          byFile = new Map(
+            entries
+              .filter((e): e is typeof e & { file: string } => Boolean(e.file))
+              .map((e) => [e.file, { flow: e.flow, objective: e.objective }]),
+          );
         } catch (err) {
           console.warn(`[qa] WARNING: manifest read failed (non-blocking, existingSpecFiles stays plain): ${err instanceof Error ? err.message : String(err)}`);
         }

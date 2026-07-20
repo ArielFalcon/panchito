@@ -244,28 +244,33 @@ small pure ports → domain logic → heavy leaf-IO):
   was already `DeployGatePortAdapter.waitUntilServing`, its own independent
   poll loop — no new port was needed after all) and deleted along with its
   test. Migrated in `sdd/migration-tier-3` (commit `73ce0a1`; decisions doc
-  `2026-07-11-migration-tier-3-decisions.md`). Remaining, re-classified
-  **DEFER-Tier-4** by that same change's gate decision (co-defer the whole
-  validate cluster — see that decisions doc §2): `playwright-report.ts`,
-  `reexplore.ts`, `learning/learning-rule.ts` (D8), `validate.ts`,
-  `code-validate.ts`, `metadata.ts` — the `StaticGateAdapter` overlap check
-  resolved to "co-defer", not "migrate now"; `validate.ts`/`metadata.ts` also
-  carry a confirmed manifest-shape divergence against qa-engine's own
-  generation-side `ManifestEntry` (same decisions doc §4) that makes them
-  Tier-4 design work, not a Tier-3 relocation.
+  `2026-07-11-migration-tier-3-decisions.md`). That change's own gate decision
+  co-deferred the whole validate cluster (see that decisions doc §2) pending
+  `code-runner.ts`'s migration + the manifest-shape reconciliation — both now
+  DONE: ~~`validate.ts`~~/~~`code-validate.ts`~~/~~`metadata.ts`~~ **DONE**
+  (`sdd/migration-tier-4b`, commit `038a8a3` — body-moved into qa-engine's
+  `static-gate.checks.ts`; decisions doc
+  `2026-07-12-migration-tier-4b-decisions.md`). Remaining **DEFER-Tier-4**:
+  `playwright-report.ts` (revisit: `execute.ts` decomposition, tier-4d),
+  `reexplore.ts` (revisit: `opencode-client.ts` decomposition, tier-4c),
+  `learning/learning-rule.ts` (DEFER D8, learning-store duality).
 - **Tier 4 — heavy leaf-IO, last**: ~~`repo-mirror.ts` (write side)~~,
   ~~`github.ts` (adapters exist; replace closures)~~, ~~`setup.ts`~~ — all
   three **DONE** (`sdd/migration-tier-4a`, commits `52eb2a2`/`096e42c`/
   `f467f71`; decisions doc `2026-07-11-migration-tier-4a-decisions.md`).
   `repo-mirror.ts` is a REDUCE, not a full delete — see that doc's §5 for
   the newly-discovered `src/index.ts` onboarding-job consumer that kept
-  `ensureMirror`/`ensureMirrorAtBranch` as thin wrappers instead. Remaining:
-  `code-runner.ts`, `execute.ts`, `src/agent-runtime/*` (blocked on the
-  DECIDE above), `prompts.ts` (named C4 target, unstarted, 2 known live
-  bugs), `opencode-client.ts` (2100-LOC monolith — decompose, don't port
-  wholesale). Final step: dissolve `rewritten-engine-factory.ts` +
-  `run-history-sqlite-adapter.ts` into the composition root and retire
-  `seam-parity.contract.test.ts`.
+  `ensureMirror`/`ensureMirrorAtBranch` as thin wrappers instead.
+  ~~`code-runner.ts`~~ **DONE** (`sdd/migration-tier-4b`, commit `afbde70` —
+  body-moved into `qa-engine/.../test-execution/infrastructure/
+  {code-execution.runner.ts,code-setup.ts}` + `shared-infrastructure/
+  process-sandbox/sandbox.ts`; decisions doc
+  `2026-07-12-migration-tier-4b-decisions.md`). Remaining: `execute.ts`,
+  `src/agent-runtime/*` (blocked on the DECIDE above), `prompts.ts` (named C4
+  target, unstarted, 2 known live bugs), `opencode-client.ts` (2100-LOC
+  monolith — decompose, don't port wholesale). Final step: dissolve
+  `rewritten-engine-factory.ts` + `run-history-sqlite-adapter.ts` into the
+  composition root and retire `seam-parity.contract.test.ts`.
 
 Gray-zone calls to make explicit: `src/server/history.ts` (coexists with
 qa-engine's native `SqliteLearningRepository` — two learning stores in one

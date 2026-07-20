@@ -1,160 +1,52 @@
-// Code mode (TestTarget "code"): test source-code logic WITHOUT a web environment
-// or Playwright. The agent writes tests in the repo's own framework/conventions;
-// the orchestrator installs the repo's dependencies and runs its test command,
-// classifying the outcome by EXIT CODE — binary pass/fail (no flaky concept).
+// qa-engine/src/contexts/test-execution/infrastructure/code-execution.runner.ts
+// Code mode (TestTarget "code"): test source-code logic WITHOUT a web environment or Playwright.
+// The agent writes tests in the repo's own framework/conventions; the orchestrator installs the
+// repo's dependencies (code-setup.ts, this file's sibling) and runs its test command, classifying
+// the outcome by EXIT CODE — binary pass/fail (no flaky concept).
 //
-// This is the code-mode analogue of setup.ts (install) + execute.ts (run+classify).
-// The project is auto-detected from the files present in the repo; the spawn is
-// injected so the orchestration is unit-testable and the real process is the only
-// uncovered boundary (mirroring the rest of src/qa/*).
+// migration-tier-4b Slice 1 (code-execution migration): body-moved from src/qa/code-runner.ts —
+// qa-engine now OWNS this body directly instead of CodeExecutionStrategy injecting a closure that
+// calls back into src/. Behavior-preserving: the 7-branch ecosystem matrix, module-scoping rules,
+// zero-test detection signatures, and exit-code classification are byte-identical to the legacy
+// implementation. Two deliberate, invariant-driven differences from the legacy body:
+//   1. `killTree` (a local, unexported helper at HEAD) is replaced by the canonical
+//      `ProcessKillPort`/`ProcessKillAdapter` (shared-kernel/shared-infrastructure) — this is the
+//      LAST of the four duplicate killTree copies named in process-kill.adapter.ts's own header,
+//      now retired.
+//   2. The privilege-drop `Sandbox` is INJECTED (not resolved internally via `resolveSandbox()`
+//      reading `process.env`) — CLAUDE.md's env-read confinement invariant forbids a NEW
+//      `process.env` read inside qa-engine/src; the composition-root shell
+//      (src/server/rewritten-engine-factory.ts) resolves the sandbox ONCE and passes it in, exactly
+//      like PANCHITO_ROOT/GITHUB_TOKEN are injected into tier-4a's adapters. See sandbox.ts's own
+//      header for the full rationale.
 //
-// Runtime note: the orchestrator image ships Node plus Python, Go, Rust, Maven
-// and Gradle (see the root Dockerfile). A missing runtime (e.g. image built without
-// a language) fails with ENOENT and is reported as infra-error, never a pass.
-// The runtimes live in the ORCHESTRATOR image, not the agents container — the
-// orchestrator spawns the test commands directly.
+// Runtime note: the orchestrator image ships Node plus Python, Go, Rust, Maven and Gradle (see the
+// root Dockerfile). A missing runtime (e.g. image built without a language) fails with ENOENT and is
+// reported as infra-error, never a pass. The runtimes live in the ORCHESTRATOR image, not the agents
+// container — the orchestrator spawns the test commands directly.
 
-import { spawn, execFileSync, type ChildProcess } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { QaCase, QaRunResult } from "../types";
-import { sanitizeText, containsSecrets, recordAudit } from "../orchestrator/sanitizer";
+import type { QaCase } from "@kernel/qa-case.ts";
+import type { RunVerdict } from "@kernel/run-verdict.ts";
+import { sanitizeText, type SecretDetection } from "@contexts/generation/infrastructure/sanitize-text.ts";
+import { ProcessKillAdapter } from "../../../shared-infrastructure/process-sandbox/process-kill.adapter.ts";
+import type { ProcessKillPort } from "@kernel/process-sandbox/process-kill.port.ts";
+import { scrubEnv } from "../../../shared-infrastructure/process-sandbox/scrub-env.ts";
+import { sandboxSpawnOptions, type Sandbox } from "../../../shared-infrastructure/process-sandbox/sandbox.ts";
 
-// ── Environment scrubbing for untrusted code execution ─────────────────────────
-// The watched repo's install and test commands run in the orchestrator process.
-// Passing the full process.env would give untrusted code GITHUB_TOKEN (push access
-// to the repo) and other secrets. This function strips credentials while preserving
-// the OS and language vars that package managers and test runners need to function.
-
-// Secret FAMILIES that must never reach untrusted code (prefix match — DOPPLER_TOKEN,
-// AWS_*, AZURE_* are all blocked). Defense-in-depth: the allowlist below is the real gate
-// (anything not allowed is dropped), but blocking secrets explicitly guards against an
-// allowlist entry accidentally widening to cover one.
-const BLOCKED_ENV_PREFIX = /^(?:GITHUB_TOKEN|GH_TOKEN|OPENCODE_API_KEY|WEBHOOK_SECRET|QA_API_TOKEN|DOPPLER_|AWS_|AZURE_|GCP_|GOOGLE_APPLICATION_CREDENTIALS|NPM_TOKEN|NODE_AUTH_TOKEN)/;
-
-// Allowed exact var names (OS + language essentials that are single vars, not families).
-const ALLOWED_ENV_EXACT = new Set([
-  "PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "TMPDIR", "TEMPDIR", "TMP", "TEMP",
-  "NODE_ENV", "CI", "PYTHON", "VIRTUAL_ENV", "GOPATH", "GOROOT", "GOPRIVATE", "GOPROXY",
-  "GONOSUMCHECK", "GOFLAGS", "GOCACHE", "JAVA_HOME", "M2_HOME", "M2_REPO", "M2", "NVM_DIR", "NODE_PATH", "NODE_OPTIONS",
-  "DISPLAY", "SSH_AUTH_SOCK", "COLORTERM", "NO_COLOR", "FORCE_COLOR", "DEBUG",
-  "PKG_CONFIG_PATH", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH",
-  // Playwright's browsers are baked at a NON-default path in the orchestrator image
-  // (PLAYWRIGHT_BROWSERS_PATH=/ms-playwright). The e2e execution spawns Playwright through
-  // scrubEnv; without this the child loses the path, falls back to the empty default cache
-  // (/root/.cache/ms-playwright) and EVERY run fails with "Executable doesn't exist" — a false
-  // `fail`, never an actual test result. The value is the orchestrator's own (not attacker
-  // input) and points only at browser binaries, so it is safe to forward.
-  "PLAYWRIGHT_BROWSERS_PATH",
-]);
-
-// Allowed var FAMILIES (prefix match — each token genuinely names a family of vars the
-// toolchain needs: npm registry/cache/proxy config, Cargo/Rust/Gradle/Maven homes, locale).
-const ALLOWED_ENV_PREFIX = /^(?:LC_|npm_config_|PIP_|CGO_|CARGO_|RUSTUP_|RUST_|GRADLE_|MAVEN_|PNPM_|YARN_|COREPACK_)/;
-
-// Builds a scrubbed environment for an UNTRUSTED spawn (the watched repo's own test/install
-// commands, or agent-written specs). Drops the orchestrator's secrets, keeps OS + language
-// vars. `extraAllowed` lets a caller widen the allowlist by prefix without ever overriding
-// the secret block — e2e passes /^DEV_/ to keep the app's login creds the specs need.
-// Kills the spawned process AND its descendants. Spawns are `detached: true` so the child
-// is its own process-group leader; `process.kill(-pid)` signals the whole group (npm/mvn/
-// gradle fork grandchildren that a plain `child.kill()` would orphan). Falls back to a direct
-// kill if the group send fails (e.g. the child already exited).
-function killTree(child: ChildProcess): void {
-  try {
-    if (child.pid) process.kill(-child.pid, "SIGKILL");
-    else child.kill("SIGKILL");
-  } catch {
-    try { child.kill("SIGKILL"); } catch { /* already gone */ }
-  }
-}
-
-export function scrubEnv(extraAllowed?: RegExp): Record<string, string> {
-  const env: Record<string, string> = {};
-  const dropped: string[] = [];
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined) continue;
-    if (BLOCKED_ENV_PREFIX.test(key)) continue; // secrets are blocked even if extraAllowed matches
-    if (ALLOWED_ENV_EXACT.has(key) || ALLOWED_ENV_PREFIX.test(key) || (extraAllowed?.test(key) ?? false)) {
-      env[key] = value;
-    } else {
-      dropped.push(key);
-    }
-  }
-  if (dropped.length > 0) {
-    console.warn(`[qa] scrubEnv dropped ${dropped.length} env var(s) not in allowlist: ${dropped.join(", ")}`);
-  }
-  return env;
-}
-
-// ── Privilege-drop sandbox for untrusted code execution (§21) ──────────────────
-// scrubEnv() removes SECRETS FROM THE ENVIRONMENT, but the watched repo's install/test/coverage
-// commands still run as the orchestrator's user (root, in the container) with its filesystem. That
-// lets a malicious or buggy test READ the root-owned API token (config/.api_token, 0600), TAMPER
-// with the orchestrator's own files (/app/src, node_modules), write SIBLING repos under
-// /app/.mirrors, or plant a .git hook that later runs as root on the publish `git commit`. We close
-// those by DROPPING PRIVILEGE: the untrusted spawns run as a dedicated unprivileged user (the
-// `sandbox` user baked into the image), and the run's working copy is chowned to it so it can only
-// write its OWN tree. NETWORK is intentionally left intact — Maven/Gradle resolve dependencies
-// during the test phase, so a network namespace would break the JVM target; egress restriction is a
-// deploy-layer control (see docker-compose.yml / docs/code-mode-sandbox.md).
-
-export interface Sandbox {
-  uid: number;
-  gid: number;
-  home: string;
-}
-
-// Resolves the sandbox identity, or null when privilege-drop does not apply (not root, not Linux,
-// explicitly disabled, or the sandbox home is absent → the image wasn't built with the user). When
-// null, spawns run as the current user exactly as before — so local `npm run qa` on macOS still works.
-export function resolveSandbox(
-  env: NodeJS.ProcessEnv = process.env,
-  platform: NodeJS.Platform = process.platform,
-  getuid: () => number = () => process.getuid?.() ?? -1,
-  homeExists: (p: string) => boolean = existsSync,
-): Sandbox | null {
-  if (env.CODE_SANDBOX === "off") return null; // operator escape hatch
-  if (platform !== "linux") return null; // uid/gid spawn needs POSIX privilege semantics
-  if (getuid() !== 0) return null; // only root can setuid to the sandbox user
-  const uid = Number(env.CODE_SANDBOX_UID ?? 1001);
-  const gid = Number(env.CODE_SANDBOX_GID ?? uid);
-  const home = env.CODE_SANDBOX_HOME ?? "/home/sandbox";
-  if (!Number.isInteger(uid) || uid <= 0 || !Number.isInteger(gid) || gid < 0) return null;
-  if (!homeExists(home)) {
-    console.warn(`[qa] code-mode sandbox DISABLED: home ${home} not found (image built without the sandbox user?). Untrusted code will run as the current user.`);
-    return null;
-  }
-  return { uid, gid, home };
-}
-
-// Spawn options that drop to the sandbox: the uid/gid plus a HOME pointing at the sandbox's own
-// writable home (so toolchain caches — ~/.m2, ~/.gradle, ~/.cache, ~/.cargo — never touch root's),
-// merged onto the scrubbed env. When `sandbox` is null this is just the scrubbed env (unchanged),
-// so the spawn runs exactly as before.
-export function sandboxSpawnOptions(
-  base: Record<string, string>,
-  sandbox: Sandbox | null,
-): { env: Record<string, string>; uid?: number; gid?: number } {
-  if (!sandbox) return { env: base };
-  return {
-    env: { ...base, HOME: sandbox.home, USER: "sandbox", LOGNAME: "sandbox" },
-    uid: sandbox.uid,
-    gid: sandbox.gid,
-  };
-}
-
-// Hand the run's working copy to the sandbox user so its install/test can write ONLY there. The
-// chown runs on the SOURCE tree (before install/deps), so it is cheap. `.git` is kept ROOT-owned: a
-// sandbox-writable `.git/hooks` would run as root on the orchestrator's next `git commit` (a classic
-// sandbox escape). Root retains full access regardless of ownership, so publish/mirror git ops are
-// unaffected. No-op when the sandbox does not apply.
-export function prepareSandboxWorkdir(repoDir: string, sandbox: Sandbox | null = resolveSandbox()): void {
-  if (!sandbox) return;
-  execFileSync("chown", ["-R", `${sandbox.uid}:${sandbox.gid}`, repoDir], { stdio: "ignore" });
-  const gitDir = join(repoDir, ".git");
-  if (existsSync(gitDir)) execFileSync("chown", ["-R", "0:0", gitDir], { stdio: "ignore" });
+// The structural shape runCodeTests returns. Declared locally (not imported from src/types.ts) so
+// this file stays src/-free — CodeExecutionStrategy's own RunCodeFn seam (a narrower, LOCAL
+// structural type) already establishes this pattern; QaCase/RunVerdict are the qa-engine kernel's
+// own canonical copies of the same fields src/types.ts's QaRunResult declares.
+export interface CodeRunResult {
+  sha: string;
+  verdict: RunVerdict;
+  passed: boolean;
+  cases: QaCase[];
+  logs: string;
 }
 
 export type Ecosystem = "node" | "python" | "go" | "rust" | "maven" | "gradle" | "unknown";
@@ -434,72 +326,6 @@ export function gitWorkingChanges(repoDir: string): string[] {
   }
 }
 
-// ── Setup (install deps) ──────────────────────────────────────────────────────
-
-export interface CodeSetupDeps {
-  detect(repoDir: string): CodeProject;
-  install(project: CodeProject, repoDir: string, opts?: { signal?: AbortSignal; timeoutMs?: number }): Promise<void>;
-  // Hands the working copy to the unprivileged sandbox user BEFORE any untrusted spawn (§21). Runs
-  // for every code-mode run — including the null-install ecosystems (Maven/Gradle/Rust) whose first
-  // untrusted spawn is the test itself — so it must execute before the install-null early return.
-  prepareWorkdir?(repoDir: string): void;
-}
-
-export async function setupCodeProject(
-  repoDir: string,
-  deps: CodeSetupDeps,
-  opts?: { signal?: AbortSignal; timeoutMs?: number },
-): Promise<void> {
-  const project = deps.detect(repoDir);
-  deps.prepareWorkdir?.(repoDir); // drop the working copy to the sandbox user before any spawn
-  if (!project.install) return;
-  if (opts?.signal?.aborted) throw new Error("code-mode install aborted by operator cancel");
-
-  // Race install against a timeout at the orchestration level (defense in depth: the real
-  // spawn below also SIGKILLs the child). A hung `npm ci`/`mvn`/`gradle` must not block the
-  // sequential queue forever — on timeout we reject, which the pipeline maps to infra-error.
-  const timeoutMs = opts?.timeoutMs ?? DEFAULT_CODE_MODE_TIMEOUT_MS;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`code-mode install timeout after ${timeoutMs}ms`)), timeoutMs);
-  });
-  try {
-    await Promise.race([deps.install(project, repoDir, opts), timeoutPromise]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-export const defaultCodeSetupDeps: CodeSetupDeps = {
-  detect: (repoDir) => detectCodeProject(repoDir),
-  prepareWorkdir: (repoDir) => prepareSandboxWorkdir(repoDir),
-  install: (project, repoDir, opts) =>
-    new Promise((resolve, reject) => {
-      const { cmd, args } = project.install!;
-      const child = spawn(cmd, args, { cwd: repoDir, detached: true, ...sandboxSpawnOptions(scrubEnv(), resolveSandbox()) });
-      let settled = false;
-      const settle = (err?: Error) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        err ? reject(err) : resolve();
-      };
-      const timeoutMs = opts?.timeoutMs ?? DEFAULT_CODE_MODE_TIMEOUT_MS;
-      const timer = setTimeout(() => {
-        killTree(child);
-        settle(new Error(`code-mode install timeout after ${timeoutMs}ms`));
-      }, timeoutMs);
-      opts?.signal?.addEventListener("abort", () => {
-        killTree(child);
-        settle(new Error("code-mode install aborted by operator cancel"));
-      }, { once: true });
-      child.on("error", (err) => settle(err instanceof Error ? err : new Error(String(err))));
-      child.on("close", (code) =>
-        settle(code === 0 ? undefined : new Error(`code-mode install failed (${cmd} ${args.join(" ")}, exit ${code})`)),
-      );
-    }),
-};
-
 // ── Execute (run tests, classify by exit code) ────────────────────────────────
 
 export interface CodeRunOutput {
@@ -514,6 +340,12 @@ export interface CodeExecuteDeps {
   // The scope basis when there is no input diff (manual/complete): the files the agent wrote.
   // Optional — absent ⇒ no derivation ⇒ whole-repo (the prior behavior). Default: git working changes.
   listWrites?(repoDir: string): string[];
+  // OPTIONAL diagnostic sink for a secret-redaction audit trail (src/orchestrator/sanitizer.ts's
+  // recordAudit/SECRET_AUDIT — a security-boundary concern this module does not import directly, to
+  // stay src/-free). Absent ⇒ no audit recorded (safe for every unit test that doesn't care about
+  // it). The composition-root shell (rewritten-engine-factory.ts) binds the REAL recordAudit into
+  // createDefaultCodeExecuteDeps's returned object, so production behavior is unchanged.
+  recordAudit?(runId: string, detection: SecretDetection): void;
 }
 
 export interface CodeExecuteOptions {
@@ -591,7 +423,7 @@ export async function runCodeTests(
   repoDir: string,
   opts: CodeExecuteOptions,
   deps: CodeExecuteDeps,
-): Promise<QaRunResult> {
+): Promise<CodeRunResult> {
   const detected = deps.detect(repoDir);
   // Module scoping: narrow the command to the changed module(s) on a monorepo, else fall back to the
   // whole repo. Scope basis = the input diff (diff mode) OR the agent's writes (manual/complete, which
@@ -613,7 +445,7 @@ export async function runCodeTests(
   }
 
   // Race the suite against a timeout. The timeout is enforced at the orchestrator
-  // level (defense in depth: the spawn in defaultCodeExecuteDeps also SIGKILLs the
+  // level (defense in depth: the spawn in createDefaultCodeExecuteDeps also SIGKILLs the
   // child on timeout, but this catch-all handles stubbed tests and edge cases).
   const runPromise = deps.runTests(project, repoDir, { signal: opts.signal, timeoutMs: opts.timeoutMs });
   const timeoutMs = opts.timeoutMs ?? DEFAULT_CODE_MODE_TIMEOUT_MS;
@@ -635,11 +467,16 @@ export async function runCodeTests(
     clearTimeout(timer);
   }
 
-  if (containsSecrets(out.logs)) {
+  // Single sanitizeText pass: `containsSecrets(out.logs)` (legacy's separate scan) is derivable from
+  // this SAME detection result (sanitizeText's default "issue" mode is byte-identical to
+  // containsSecrets's default "issue" mode — see src/orchestrator/sanitizer.ts's own AMENDMENT-1
+  // comment) — so this is a behavior-preserving refactor that drops a redundant second regex pass,
+  // not a semantic change: the warn fires under the EXACT same condition as before.
+  const sanitized = sanitizeText(out.logs);
+  if (sanitized.detection.redacted) {
     console.warn("[sanitizer] Secrets detected in code-test logs — redacting before publish");
   }
-  const sanitized = sanitizeText(out.logs);
-  recordAudit(opts.namespace, sanitized.detection);
+  deps.recordAudit?.(opts.namespace, sanitized.detection);
 
   const label = `${project.ecosystem} tests (${project.test.cmd} ${project.test.args.join(" ")})`;
 
@@ -701,47 +538,56 @@ function headTail(s: string, maxChars: number): string {
   return `${s.slice(0, half)}\n…[${s.length - maxChars} chars omitted]…\n${s.slice(-half)}`;
 }
 
-export const defaultCodeExecuteDeps: CodeExecuteDeps = {
-  detect: (repoDir) => detectCodeProject(repoDir),
-  listWrites: (repoDir) => gitWorkingChanges(repoDir),
-  runTests: (project, repoDir, opts) =>
-    new Promise((resolve) => {
-      const { cmd, args } = project.test;
-      const child = spawn(cmd, args, { cwd: repoDir, detached: true, ...sandboxSpawnOptions(scrubEnv(), resolveSandbox()) });
-      let stdout = "";
-      let stderr = "";
-      let resolved = false;
+// The REAL, spawning CodeExecuteDeps — a FACTORY (not a plain constant) because the privilege-drop
+// sandbox is now injected rather than resolved internally (see this file's header, difference #2).
+// `processKill` defaults to a fresh ProcessKillAdapter — mirrors CodebaseMemoryClient's own
+// constructor-default convention for the same shared-infrastructure primitive.
+export function createDefaultCodeExecuteDeps(
+  sandbox: Sandbox | null,
+  processKill: ProcessKillPort = new ProcessKillAdapter(),
+): CodeExecuteDeps {
+  return {
+    detect: (repoDir) => detectCodeProject(repoDir),
+    listWrites: (repoDir) => gitWorkingChanges(repoDir),
+    runTests: (project, repoDir, opts) =>
+      new Promise((resolve) => {
+        const { cmd, args } = project.test;
+        const child = spawn(cmd, args, { cwd: repoDir, detached: true, ...sandboxSpawnOptions(scrubEnv(), sandbox) });
+        let stdout = "";
+        let stderr = "";
+        let resolved = false;
 
-      const finish = (result: CodeRunOutput) => {
-        if (resolved) return;
-        resolved = true;
-        clearTimeout(timer);
-        resolve(result);
-      };
+        const finish = (result: CodeRunOutput) => {
+          if (resolved) return;
+          resolved = true;
+          clearTimeout(timer);
+          resolve(result);
+        };
 
-      // Timeout guard: a hung suite must not block the sequential queue forever.
-      // Kill the whole PROCESS TREE (npm/mvn/gradle fork grandchildren) and resolve as
-      // inconclusive infra, not a pass.
-      const timeoutMs = opts?.timeoutMs ?? DEFAULT_CODE_MODE_TIMEOUT_MS;
-      const timer = setTimeout(() => {
-        killTree(child);
-        finish({ exitCode: null, logs: `${stdout}\n${stderr}`, spawnError: `code-mode timeout after ${timeoutMs}ms` });
-      }, timeoutMs);
+        // Timeout guard: a hung suite must not block the sequential queue forever.
+        // Kill the whole PROCESS TREE (npm/mvn/gradle fork grandchildren) and resolve as
+        // inconclusive infra, not a pass.
+        const timeoutMs = opts?.timeoutMs ?? DEFAULT_CODE_MODE_TIMEOUT_MS;
+        const timer = setTimeout(() => {
+          processKill.killTree(child);
+          finish({ exitCode: null, logs: `${stdout}\n${stderr}`, spawnError: `code-mode timeout after ${timeoutMs}ms` });
+        }, timeoutMs);
 
-      // Operator cancel: the pipeline's AbortSignal fires → kill the suite immediately.
-      if (opts?.signal) {
-        opts.signal.addEventListener("abort", () => {
-          killTree(child);
-          finish({ exitCode: null, logs: `${stdout}\n${stderr}`, spawnError: "aborted by operator cancel" });
-        }, { once: true });
-      }
+        // Operator cancel: the pipeline's AbortSignal fires → kill the suite immediately.
+        if (opts?.signal) {
+          opts.signal.addEventListener("abort", () => {
+            processKill.killTree(child);
+            finish({ exitCode: null, logs: `${stdout}\n${stderr}`, spawnError: "aborted by operator cancel" });
+          }, { once: true });
+        }
 
-      child.stdout.on("data", (d) => (stdout += d));
-      child.stderr.on("data", (d) => (stderr += d));
-      child.on("error", (err) => finish({ exitCode: null, logs: `${stderr}${stdout}`, spawnError: String(err) }));
-      child.on("close", (code) => finish({ exitCode: code, logs: `${stdout}\n${stderr}`.trim() }));
-    }),
-};
+        child.stdout.on("data", (d) => (stdout += d));
+        child.stderr.on("data", (d) => (stderr += d));
+        child.on("error", (err) => finish({ exitCode: null, logs: `${stderr}${stdout}`, spawnError: String(err) }));
+        child.on("close", (code) => finish({ exitCode: code, logs: `${stdout}\n${stderr}`.trim() }));
+      }),
+  };
+}
 
 // ── Code-mode change coverage ─────────────────────────────────────────────────
 // Real change-coverage for code runs (the keystone). The repo's plain test command emits
@@ -783,9 +629,13 @@ export function coverageCommand(project: CodeProject, repoDir: string, c8Bin: st
 // runCodeCoverage produces coverage/lcov.info for the repo's suite, best-effort. Returns
 // without throwing on any failure (missing c8, non-node ecosystem, timeout, crash) so the
 // caller falls back to "unmeasured". It never reports pass/fail — only a side-effect report.
+// `sandbox` is INJECTED (see this file's header, difference #2) — the composition-root shell
+// resolves it once and passes it to every code-mode entry point (setup/execute/coverage) alike.
 export async function runCodeCoverage(
   repoDir: string,
+  sandbox: Sandbox | null,
   opts?: { signal?: AbortSignal; timeoutMs?: number },
+  processKill: ProcessKillPort = new ProcessKillAdapter(),
 ): Promise<void> {
   if (opts?.signal?.aborted) return;
   const c8Bin = resolveC8Bin();
@@ -793,7 +643,7 @@ export async function runCodeCoverage(
   const command = coverageCommand(detectCodeProject(repoDir), repoDir, c8Bin);
   if (!command) return;
   await new Promise<void>((resolve) => {
-    const child = spawn(command.cmd, command.args, { cwd: repoDir, detached: true, ...sandboxSpawnOptions(scrubEnv(), resolveSandbox()) });
+    const child = spawn(command.cmd, command.args, { cwd: repoDir, detached: true, ...sandboxSpawnOptions(scrubEnv(), sandbox) });
     let done = false;
     const finish = () => {
       if (done) return;
@@ -802,11 +652,11 @@ export async function runCodeCoverage(
       resolve();
     };
     const timer = setTimeout(() => {
-      killTree(child);
+      processKill.killTree(child);
       finish();
     }, opts?.timeoutMs ?? DEFAULT_CODE_MODE_TIMEOUT_MS);
     opts?.signal?.addEventListener("abort", () => {
-      killTree(child);
+      processKill.killTree(child);
       finish();
     }, { once: true });
     child.on("error", finish); // c8 missing or spawn failure → no report, no harm

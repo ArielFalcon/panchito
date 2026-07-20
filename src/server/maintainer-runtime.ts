@@ -31,7 +31,9 @@ import {
 import { recordFixFailure, readFixFailures, renderFailureMemory, realMemoryFs } from "./maintainer-memory";
 import { defaultMirrorDeps, authHeaderArgs, type MirrorDeps } from "../integrations/repo-mirror";
 import { github } from "../integrations/github";
-import { scrubEnv } from "../qa/code-runner";
+// migration-tier-4b Slice 1: scrubEnv's prior home (src/qa/code-runner.ts) is deleted this slice —
+// re-point to the qa-engine twin (narrow legacy allowlist, unchanged for this consumer).
+import { scrubEnv } from "../../qa-engine/src/shared-infrastructure/process-sandbox/scrub-env";
 import { logJson } from "../integrations/logger";
 import { RedactionPortAdapter } from "../orchestrator/sanitizer";
 import type { AgentDeps } from "../integrations/opencode-client";

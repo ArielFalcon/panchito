@@ -14,10 +14,19 @@
 // RealManifestEntry stopgap interface already matched. The upsert-by-id merge mechanic (preserve
 // unrelated entries; a re-upserted id is replaced, not merged field-by-field with its old value —
 // same as the real upsertManifest's `{ ...byId.get(e.id), ...e }` spread) is carried over exactly.
+//
+// migration-tier-4b Slice 2 (THE manifest reconciliation): the hand-rolled `manifestEntryViolation`
+// twin (a duplicate, already-drifted re-enforcement of src/orchestrator/schemas.ts's
+// ManifestEntrySchema) is REPLACED by the canonical `@kernel/manifest/manifest-entry.ts` validator —
+// ONE schema, shared by this write path AND the read-path static gate (checkManifest, via
+// metadata.ts). `ManifestEntry` (application/ports/index.ts) is now a re-export of the canonical
+// type: `targets`/`changeRef` are REQUIRED (closing the latent type/runtime mismatch), `file` stays
+// OPTIONAL (a pre-4b/hand-edited entry lacking it must not be rejected).
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { ManifestEntry } from "../application/ports/index.ts";
+import { manifestEntryViolation } from "@kernel/manifest/manifest-entry.ts";
 
 function manifestPath(specDir: string): string {
   return join(specDir, ".qa", "manifest.json");
@@ -34,20 +43,6 @@ function sha256File(path: string): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-// Minimal structural validation mirroring src/orchestrator/schemas.ts's ManifestEntrySchema (the
-// fields the real static gate actually enforces: non-empty id/objective/flow, non-empty targets,
-// non-empty changeRef.sha/type). Replicated locally rather than importing the legacy zod schema —
-// qa-engine/src must stay src/-free (CLAUDE.md invariant). Returns the first violation message, or
-// undefined when the entry is well-formed.
-function manifestEntryViolation(e: ManifestEntry): string | undefined {
-  if (!e.id || e.id.length === 0) return "missing 'id'";
-  if (!e.objective || e.objective.length === 0) return "missing 'objective'";
-  if (!e.flow || e.flow.length === 0) return "missing 'flow'";
-  if (!e.targets || e.targets.length === 0) return "empty 'targets'";
-  if (!e.changeRef || !e.changeRef.sha || !e.changeRef.type) return "missing or incomplete 'changeRef'";
-  return undefined;
 }
 
 // Fail-open by construction, ported from realManifestFs.read: a missing file, an unreadable file,
@@ -81,15 +76,28 @@ export async function readManifest(specDir: string): Promise<ManifestEntry[]> {
 // that passes the disk check but is malformed (empty objective/targets/etc.) is dropped with a
 // console.warn too, never corrupting the manifest. Both passes are loud (CLAUDE.md: never swallow
 // silently), matching legacy's console.warn-per-drop behavior exactly.
+//
+// migration-tier-4b Slice 2: `file` is now OPTIONAL on the canonical ManifestEntry (a pre-4b or
+// hand-edited entry may legitimately declare no file). The disk-existence check must distinguish
+// "file declared but NOT on disk" (a real phantom — drop it) from "no file declared at all" (not a
+// phantom — keep it, sha256 stays undefined, never fabricated). Collapsing both into "no sha256 ⇒
+// drop" (the pre-Slice-2 shape, where `file` was type-required so this distinction never mattered)
+// would now falsely flag every file-less entry as a phantom.
 function safetyFilter(specDir: string, entries: readonly ManifestEntry[]): ManifestEntry[] {
-  const withSha = entries.map((e) => ({ e, sha256: e.file ? sha256File(join(specDir, e.file)) : undefined }));
-  const onDisk = withSha.filter(({ e, sha256 }) => {
-    if (!sha256) {
-      console.warn(`[qa] WARNING: agent reported spec '${e.file}' in its manifest metadata but it is not on disk — dropping the phantom manifest entry.`);
-      return false;
-    }
-    return true;
-  }).map(({ e, sha256 }) => ({ ...e, sha256 }));
+  const withSha = entries.map((e) => {
+    if (!e.file) return { e, sha256: undefined, phantom: false }; // no file declared — not a phantom
+    const sha256 = sha256File(join(specDir, e.file));
+    return { e, sha256, phantom: sha256 === undefined };
+  });
+  const onDisk = withSha
+    .filter(({ e, phantom }) => {
+      if (phantom) {
+        console.warn(`[qa] WARNING: agent reported spec '${e.file}' in its manifest metadata but it is not on disk — dropping the phantom manifest entry.`);
+        return false;
+      }
+      return true;
+    })
+    .map(({ e, sha256 }) => (sha256 !== undefined ? { ...e, sha256 } : e));
 
   return onDisk.filter((e) => {
     const violation = manifestEntryViolation(e);

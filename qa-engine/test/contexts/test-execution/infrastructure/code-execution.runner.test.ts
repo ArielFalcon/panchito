@@ -1,25 +1,28 @@
+// qa-engine/test/contexts/test-execution/infrastructure/code-execution.runner.test.ts
+// Behavioral tests for the code-mode detection/scoping/execution body, moved from
+// src/qa/code-runner.test.ts (migration-tier-4b, Slice 1 — code-execution migration). Byte-identical
+// assertions to the legacy file (only the import path changes, plus the return-type rename
+// QaRunResult → CodeRunResult, which is structurally identical). setupCodeProject tests live in this
+// directory's own code-setup.test.ts sibling; resolveSandbox/sandboxSpawnOptions tests live in
+// shared-infrastructure/process-sandbox/sandbox.test.ts; scrubEnv tests live in that directory's own
+// scrub-env.test.ts (all pre-existing / already split, per code-runner.ts's own new home split).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import {
   detectCodeProject,
-  setupCodeProject,
   runCodeTests,
-  scrubEnv,
   coverageCommand,
-  resolveSandbox,
-  sandboxSpawnOptions,
   resolveChangedModules,
   scopeTestCommand,
   scopeForChangedFiles,
   failureDetail,
   parsePorcelain,
   effectiveChangedFiles,
-  DetectDeps,
-  CodeProject,
-  CodeExecuteDeps,
-  CodeSetupDeps,
-} from "./code-runner";
+  type DetectDeps,
+  type CodeProject,
+  type CodeExecuteDeps,
+} from "@contexts/test-execution/infrastructure/code-execution.runner.ts";
 
 // ── Module scoping (diff-driven) ──────────────────────────────────────────────
 function existsFrom(paths: string[]): (p: string) => boolean {
@@ -273,78 +276,6 @@ test("unknown ecosystem falls back to npm test (no install)", () => {
   assert.equal(p.install, null);
 });
 
-// A hung `npm ci`/`mvn`/`gradle` install must NOT block the sequential queue forever.
-// The install path needs the same timeout the test path has.
-test("code-mode install that hangs is killed by timeout (does not block the queue)", { timeout: 3000 }, async () => {
-  const project: CodeProject = { ecosystem: "node", install: { cmd: "npm", args: ["ci"] }, test: { cmd: "npm", args: ["test"] } };
-  const deps: CodeSetupDeps = { detect: () => project, install: () => new Promise(() => {}) }; // never resolves
-  await assert.rejects(() => setupCodeProject("/r", deps, { timeoutMs: 100 }), /timeout/i);
-});
-
-test("setupCodeProject runs install only when there is an install command", async () => {
-  let installed = 0;
-  const project: CodeProject = { ecosystem: "node", install: { cmd: "npm", args: ["ci"] }, test: { cmd: "npm", args: ["test"] } };
-  const deps: CodeSetupDeps = { detect: () => project, install: async () => { installed++; } };
-  await setupCodeProject("/r", deps);
-  assert.equal(installed, 1);
-
-  const noInstall: CodeSetupDeps = {
-    detect: () => ({ ecosystem: "rust", install: null, test: { cmd: "cargo", args: ["test"] } }),
-    install: async () => { installed++; },
-  };
-  await setupCodeProject("/r", noInstall);
-  assert.equal(installed, 1); // unchanged
-});
-
-test("setupCodeProject prepares the sandbox workdir even for a null-install ecosystem (before the early return)", async () => {
-  // §21: Maven/Gradle/Rust have no install step, but their FIRST untrusted spawn is the test —
-  // so the chown-to-sandbox must still run for them. prepareWorkdir must fire before install-null returns.
-  const prepared: string[] = [];
-  const deps: CodeSetupDeps = {
-    detect: () => ({ ecosystem: "maven", install: null, test: { cmd: "mvn", args: ["-B", "test"] } }),
-    install: async () => { throw new Error("install must not run for a null-install project"); },
-    prepareWorkdir: (repoDir) => prepared.push(repoDir),
-  };
-  await setupCodeProject("/work/repo", deps);
-  assert.deepEqual(prepared, ["/work/repo"]);
-});
-
-// §21 sandbox identity resolver — privilege-drop applies ONLY in the root-on-Linux container with
-// the baked-in user; everywhere else it must degrade to "no sandbox" so local runs are unaffected.
-test("resolveSandbox applies only as root on Linux with an existing home; degrades safely otherwise", () => {
-  const homeOk = () => true;
-  const asRoot = () => 0;
-  const base = { CODE_SANDBOX_UID: "1001" } as NodeJS.ProcessEnv;
-
-  // The shipping case: root + linux + home present → the sandbox identity.
-  assert.deepEqual(resolveSandbox(base, "linux", asRoot, homeOk), { uid: 1001, gid: 1001, home: "/home/sandbox" });
-
-  // Every disqualifier → null (run as the current user, unchanged behavior).
-  assert.equal(resolveSandbox(base, "darwin", asRoot, homeOk), null); // macOS local dev
-  assert.equal(resolveSandbox(base, "linux", () => 1000, homeOk), null); // not root
-  assert.equal(resolveSandbox({ CODE_SANDBOX: "off" }, "linux", asRoot, homeOk), null); // escape hatch
-  assert.equal(resolveSandbox(base, "linux", asRoot, () => false), null); // image lacks the user/home
-  assert.equal(resolveSandbox({ CODE_SANDBOX_UID: "0" }, "linux", asRoot, homeOk), null); // refuse uid 0
-
-  // Configurable uid/gid/home.
-  assert.deepEqual(
-    resolveSandbox({ CODE_SANDBOX_UID: "2000", CODE_SANDBOX_GID: "2001", CODE_SANDBOX_HOME: "/sb" }, "linux", asRoot, homeOk),
-    { uid: 2000, gid: 2001, home: "/sb" },
-  );
-});
-
-test("sandboxSpawnOptions: passthrough env when no sandbox; uid/gid + redirected HOME when sandboxed", () => {
-  const env = { PATH: "/usr/bin", HOME: "/root" };
-  assert.deepEqual(sandboxSpawnOptions(env, null), { env }); // unchanged, runs as current user
-
-  const opts = sandboxSpawnOptions(env, { uid: 1001, gid: 1001, home: "/home/sandbox" });
-  assert.equal(opts.uid, 1001);
-  assert.equal(opts.gid, 1001);
-  assert.equal(opts.env.HOME, "/home/sandbox"); // toolchain caches stay out of root's home
-  assert.equal(opts.env.USER, "sandbox");
-  assert.equal(opts.env.PATH, "/usr/bin"); // base preserved
-});
-
 const nodeProject: CodeProject = { ecosystem: "node", install: { cmd: "npm", args: ["ci"] }, test: { cmd: "npm", args: ["test"] } };
 
 test("exit code 0 => pass with one synthetic case", async () => {
@@ -497,114 +428,6 @@ test("logs are sanitized before returning", async () => {
   assert.doesNotMatch(run.logs, /ghp_aaaa/);
 });
 
-// Security: untrusted code (the watched repo's install and test commands) must never
-// receive secrets. GITHUB_TOKEN in the spawn env would let a malicious/compromised
-// repo push to itself — breaking the read-only security boundary.
-test("scrubEnv strips secrets but preserves language vars and OS essentials", () => {
-  const saved = { ...process.env };
-  try {
-    // Plant secrets that the watched repo must never see.
-    process.env.GITHUB_TOKEN = "ghp_fakeSecretValue123456";
-    process.env.OPENCODE_API_KEY = "opencode-go-fakeKeyValue12345";
-    process.env.WEBHOOK_SECRET = "whsec_fakeWebhookSecret";
-    process.env.QA_API_TOKEN = "qa_fakeApiTokenValue12345";
-    process.env.DOPPLER_TOKEN = "dp_fakeDopplerToken";
-    // Plant harmless vars that code-mode tools need.
-    process.env.PATH = "/custom/bin";
-    process.env.HOME = "/home/testuser";
-    process.env.GOPATH = "/home/testuser/go";
-    process.env.NODE_ENV = "test";
-    process.env.CI = "true";
-
-    const env = scrubEnv();
-
-    // Secrets MUST be absent.
-    assert.ok(!("GITHUB_TOKEN" in env), "GITHUB_TOKEN must not leak to untrusted code");
-    assert.ok(!("OPENCODE_API_KEY" in env), "OPENCODE_API_KEY must not leak to untrusted code");
-    assert.ok(!("WEBHOOK_SECRET" in env), "WEBHOOK_SECRET must not leak to untrusted code");
-    assert.ok(!("QA_API_TOKEN" in env), "QA_API_TOKEN must not leak to untrusted code");
-    assert.ok(!("DOPPLER_TOKEN" in env), "DOPPLER_TOKEN must not leak to untrusted code");
-
-    // Essential vars for package managers / test runners MUST be present.
-    assert.equal(env.PATH, "/custom/bin", "PATH must be preserved");
-    assert.equal(env.HOME, "/home/testuser", "HOME must be preserved");
-    assert.equal(env.GOPATH, "/home/testuser/go", "GOPATH must be preserved");
-    assert.equal(env.NODE_ENV, "test", "NODE_ENV must be preserved");
-    assert.equal(env.CI, "true", "CI must be preserved");
-  } finally {
-    // Restore original env so no side effects leak to other tests.
-    for (const key of Object.keys(process.env)) {
-      if (!(key in saved)) delete process.env[key];
-    }
-    Object.assign(process.env, saved);
-  }
-});
-
-test("scrubEnv preserves PLAYWRIGHT_BROWSERS_PATH so the e2e spawn can find the baked browsers", () => {
-  const saved = { ...process.env };
-  try {
-    // The orchestrator image bakes browsers at a non-default path; dropping this var makes
-    // Playwright fall back to the empty default cache → "Executable doesn't exist" on every run.
-    process.env.PLAYWRIGHT_BROWSERS_PATH = "/ms-playwright";
-    process.env.GITHUB_TOKEN = "ghp_fakeSecretValue123456";
-    const env = scrubEnv(/^DEV_/); // the exact prefix the e2e execution uses
-    assert.equal(env.PLAYWRIGHT_BROWSERS_PATH, "/ms-playwright", "PLAYWRIGHT_BROWSERS_PATH must reach the Playwright spawn");
-    assert.ok(!("GITHUB_TOKEN" in env), "secrets must still be dropped");
-  } finally {
-    for (const key of Object.keys(process.env)) {
-      if (!(key in saved)) delete process.env[key];
-    }
-    Object.assign(process.env, saved);
-  }
-});
-
-// e2e spawns need the app's DEV_* login creds (fixtures read DEV_TEST_USER/PASS) but must
-// still drop the orchestrator's own secrets. scrubEnv takes an extra-allowed prefix for this.
-test("scrubEnv with an extra-allowed prefix keeps DEV_* creds but still drops orchestrator secrets", () => {
-  const saved = { ...process.env };
-  try {
-    process.env.DEV_TEST_USER = "qauser";
-    process.env.DEV_TEST_PASS = "qapass";
-    process.env.GITHUB_TOKEN = "ghp_fakeSecretValue1234567890";
-    const env = scrubEnv(/^DEV_/);
-    assert.equal(env.DEV_TEST_USER, "qauser", "DEV_* must be kept for e2e login");
-    assert.equal(env.DEV_TEST_PASS, "qapass");
-    assert.ok(!("GITHUB_TOKEN" in env), "orchestrator secrets must still be dropped");
-  } finally {
-    for (const key of Object.keys(process.env)) {
-      if (!(key in saved)) delete process.env[key];
-    }
-    Object.assign(process.env, saved);
-  }
-});
-
-// The allowlist must keep whole FAMILIES of package-manager/locale vars (npm_config_*,
-// CARGO_*, LC_*, GRADLE_*), not just the bare prefix string — otherwise `npm ci` loses its
-// registry/cache/proxy config and Cargo/Gradle lose their home dirs.
-test("scrubEnv preserves prefix-family language vars (npm_config_*, CARGO_*, LC_*, GRADLE_*)", () => {
-  const saved = { ...process.env };
-  try {
-    process.env.npm_config_cache = "/cache";
-    process.env.npm_config_registry = "https://registry.local";
-    process.env.CARGO_HOME = "/home/u/.cargo";
-    process.env.LC_ALL = "C.UTF-8";
-    process.env.GRADLE_USER_HOME = "/home/u/.gradle";
-    process.env.DOPPLER_TOKEN = "dp_fakeSecret"; // a secret family → must STILL be dropped
-    const env = scrubEnv();
-    assert.equal(env.npm_config_cache, "/cache", "npm_config_* must be preserved (npm ci needs it)");
-    assert.equal(env.npm_config_registry, "https://registry.local");
-    assert.equal(env.CARGO_HOME, "/home/u/.cargo");
-    assert.equal(env.LC_ALL, "C.UTF-8");
-    assert.equal(env.GRADLE_USER_HOME, "/home/u/.gradle");
-    assert.ok(!("DOPPLER_TOKEN" in env), "DOPPLER_ secrets must still be blocked");
-  } finally {
-    for (const key of Object.keys(process.env)) {
-      if (!(key in saved)) delete process.env[key];
-    }
-    Object.assign(process.env, saved);
-  }
-});
-
 // A hanging test suite (infinite loop, hung network call, OOM) blocks the sequential
 // queue forever. Timeout must kill the process tree and resolve as infra-error.
 test("code-mode spawn that never completes is killed by timeout → infra-error", async () => {
@@ -633,4 +456,39 @@ test("code-mode spawn aborted via AbortSignal → infra-error", async () => {
   const run = await runCodeTests("/r", { namespace: "qa-bot-ab", signal: controller.signal }, deps);
   assert.equal(run.verdict, "infra-error");
   assert.match(run.logs, /aborted/i);
+});
+
+// migration-tier-4b Slice 1: recordAudit is now an OPTIONAL injected hook (CodeExecuteDeps.
+// recordAudit), not a hardcoded import (qa-engine stays src/-free). Pins that it fires exactly
+// when a secret was redacted, with the run's namespace and the detection result, and that a run
+// with no redaction never calls it.
+test("recordAudit hook fires with the run namespace + detection when a secret was redacted", async () => {
+  const calls: Array<[string, boolean]> = [];
+  const deps: CodeExecuteDeps = {
+    detect: () => nodeProject,
+    runTests: async () => ({ exitCode: 1, logs: "leaking token: ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa here" }),
+    recordAudit: (runId, detection) => calls.push([runId, detection.redacted]),
+  };
+  await runCodeTests("/r", { namespace: "qa-bot-audit" }, deps);
+  assert.deepEqual(calls, [["qa-bot-audit", true]]);
+});
+
+test("recordAudit hook is called with redacted:false when no secret was found (never skipped)", async () => {
+  const calls: Array<[string, boolean]> = [];
+  const deps: CodeExecuteDeps = {
+    detect: () => nodeProject,
+    runTests: async () => ({ exitCode: 0, logs: "12 passing" }),
+    recordAudit: (runId, detection) => calls.push([runId, detection.redacted]),
+  };
+  await runCodeTests("/r", { namespace: "qa-bot-clean" }, deps);
+  assert.deepEqual(calls, [["qa-bot-clean", false]]);
+});
+
+test("runCodeTests works with no recordAudit hook at all (optional — safe for unit tests that don't care)", async () => {
+  const deps: CodeExecuteDeps = {
+    detect: () => nodeProject,
+    runTests: async () => ({ exitCode: 0, logs: "12 passing" }),
+  };
+  const run = await runCodeTests("/r", { namespace: "qa-bot-noaudit" }, deps);
+  assert.equal(run.verdict, "pass");
 });

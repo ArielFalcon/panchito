@@ -858,11 +858,12 @@ export const defaultCaptureDomDeps: CaptureDomDeps = {
       writeFileSync(script, buildCaptureScript(join(e2eDir, "node_modules", "playwright")));
       let stdout = "";
       // detached → own process group so the timeout kill reaps the chromium grandchildren too (a
-      // plain child.kill would orphan them). scrubEnv(/^DEV_/) keeps the app's DEV_* login creds so
-      // gated routes snapshot the real page, not the login screen (same env as execute.ts).
+      // plain child.kill would orphan them). scrubEnv({ extraAllowed: /^DEV_/ }) keeps the app's
+      // DEV_* login creds so gated routes snapshot the real page, not the login screen (same env
+      // as execute.ts).
       const child = spawn("node", [script], {
         cwd: e2eDir,
-        env: { ...scrubEnv(/^DEV_/), PW_BASE_URL: baseUrl, PW_TEST_ID_ATTRIBUTE: testIdAttribute, PW_CAPTURE_INPUT: JSON.stringify({ baseUrl, routes }) },
+        env: { ...scrubEnv({ extraAllowed: /^DEV_/ }), PW_BASE_URL: baseUrl, PW_TEST_ID_ATTRIBUTE: testIdAttribute, PW_CAPTURE_INPUT: JSON.stringify({ baseUrl, routes }) },
         detached: true,
       });
       const timer = setTimeout(() => processKill.killTree(child), renderTimeoutFor(routes.length));

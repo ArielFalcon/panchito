@@ -85,6 +85,29 @@ test("cli() applies scrubEnv to the spawn env — an unscrubbed secret never rea
   }
 });
 
+// migration-tier-4b Slice 1 (gate DEFECT-2 fix, tier-4a regression check): scrubEnv's base allowlist
+// narrowed to the legacy set (no CBM_CACHE_DIR). This client must keep injecting it via extraExact
+// for its OWN spawn — a tier-4a consumer regression here would silently break codebase-memory's
+// docker-volume-mounted graph-store persistence.
+test("cli() still forwards CBM_CACHE_DIR to the spawn env after the scrubEnv narrow-base change (tier-4a regression check)", async () => {
+  const runner = new FakeRunner(async () => ({
+    exitCode: 0,
+    stdout: "{}",
+    stderr: "",
+    timedOut: false,
+  }));
+  const previous = process.env.CBM_CACHE_DIR;
+  process.env.CBM_CACHE_DIR = "/app/.codebase-memory";
+  try {
+    const client = new CodebaseMemoryClient(runner);
+    await client.cli("query_graph", "{}", "/repo");
+    assert.equal(runner.lastRequest?.env.CBM_CACHE_DIR, "/app/.codebase-memory", "CBM_CACHE_DIR must still reach the spawn env");
+  } finally {
+    if (previous === undefined) delete process.env.CBM_CACHE_DIR;
+    else process.env.CBM_CACHE_DIR = previous;
+  }
+});
+
 test("cli() passes command=codebase-memory-mcp, args=[cli, tool, jsonArg], and the given cwd/timeout through to the runner", async () => {
   const runner = new FakeRunner(async () => ({
     exitCode: 0,

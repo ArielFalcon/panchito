@@ -30,7 +30,6 @@
     "test/contexts/generation/infrastructure/exploration-brief.adapter-parity.test.ts",
     "test/contexts/generation/infrastructure/verdict-parser.adapter-parity.test.ts",
     "test/contexts/generation/infrastructure/plan-parser.adapter-parity.test.ts",
-    "test/contexts/test-execution/infrastructure/static-gate-validate-parity.test.ts",
     "test/contexts/generation/application/generate-tests.characterization.test.ts",
     "test/contexts/qa-run-orchestration/domain/helpers/error-class-parity.test.ts",
     "test/contexts/cross-run-learning/domain/rule-fold-parity.test.ts",

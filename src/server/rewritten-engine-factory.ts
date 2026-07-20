@@ -128,13 +128,31 @@ import { parseVerdict } from "../integrations/verdict-parse";
 import { parseReviewerVerdict, checkGeneratorVerdict, repairInstruction } from "../integrations/verdict-validate";
 import { roleWindowBytes } from "../integrations/model-window-catalog";
 import type { RepairPort } from "@contexts/generation/application/generate-tests.use-case.ts";
-import { validateSpecs, defaultValidateDeps } from "../qa/validate";
-import { validateCodeProject, defaultCodeValidateDeps } from "../qa/code-validate";
 import { runE2E, defaultExecuteDeps, defaultCleanupDeps } from "../qa/execute";
-import { runCodeTests, defaultCodeExecuteDeps, runCodeCoverage, detectCodeProject, scrubEnv } from "../qa/code-runner";
-import { setupCodeProject, defaultCodeSetupDeps } from "../qa/code-runner";
+// migration-tier-4b Slice 1: code-execution migration — src/qa/code-runner.ts is deleted; qa-engine
+// now owns the real body directly (code-execution.runner.ts / code-setup.ts / sandbox.ts). This
+// factory is the ONLY place CODE_SANDBOX* is read from process.env and injected downward (exactly
+// like PANCHITO_ROOT/GITHUB_TOKEN below) — see sandbox.ts's own header for why.
+import {
+  runCodeTests,
+  createDefaultCodeExecuteDeps,
+  runCodeCoverage,
+  detectCodeProject,
+} from "../../qa-engine/src/contexts/test-execution/infrastructure/code-execution.runner";
+// migration-tier-4b Slice 3: validate cluster migration — src/qa/validate.ts + code-validate.ts +
+// metadata.ts are deleted; qa-engine now owns the static gate's real body directly (both the e2e
+// checks and the code target's compile-feedback gate live in ONE relocated module).
+import {
+  validateSpecs,
+  defaultValidateDeps,
+  validateCodeProject,
+  defaultCodeValidateDeps,
+} from "../../qa-engine/src/contexts/test-execution/infrastructure/static-gate.checks";
+import { scrubEnv } from "../../qa-engine/src/shared-infrastructure/process-sandbox/scrub-env";
+import { resolveSandbox } from "../../qa-engine/src/shared-infrastructure/process-sandbox/sandbox";
+import { setupCodeProject, createDefaultCodeSetupDeps } from "../../qa-engine/src/contexts/test-execution/infrastructure/code-setup";
 import { requireEnv } from "../util/env";
-import { RedactionPortAdapter } from "../orchestrator/sanitizer";
+import { RedactionPortAdapter, recordAudit } from "../orchestrator/sanitizer";
 import { ensureMirror, ensureMirrorAtBranch, defaultMirrorDeps, workdirRoot, realGit, authHeaderArgs } from "../integrations/repo-mirror";
 import { stageServiceContext, serviceContextDir } from "./service-context";
 import { SqliteRunHistoryAdapter } from "./run-history-sqlite-adapter";
@@ -622,6 +640,11 @@ export function buildRewrittenCompositionConfig(
   // opencode-client.ts, which import sanitizer.ts's sanitizeText themselves). Stateless — safe to
   // construct once per composition.
   const redactionPort = new RedactionPortAdapter();
+  // migration-tier-4b Slice 1 (env-read confinement invariant): CODE_SANDBOX* is read HERE, in the
+  // shell, and the resolved Sandbox|null is injected into every code-mode entry point below
+  // (setup/execute/coverage) — qa-engine/src must never read process.env for this (see sandbox.ts's
+  // own header). Resolved once per run composition; the env does not change mid-run.
+  const codeSandbox = resolveSandbox(process.env);
   // P2b (post-cutover-remediation) Constraint 3: SINGLE source for the coverage policy. Previously
   // `coveragePolicyMode` (below) and `coveragePolicy` (further down, feeding DecideCoverageService)
   // independently re-read `app.qa.changeCoverage?.mode ?? "signal"` — two copies of the same value
@@ -749,6 +772,10 @@ export function buildRewrittenCompositionConfig(
     repair,
   });
 
+  // migration-tier-4b Slice 3: both staticGate and codeValidate now bind qa-engine's OWN
+  // static-gate.checks.ts body directly (validateSpecs/validateCodeProject) — StaticGateAdapter/
+  // CodeValidationStrategy no longer wrap a closure that calls back into src/qa/{validate,
+  // code-validate}.ts (both deleted this slice).
   const staticGate = new StaticGateAdapter({
     typecheck: defaultValidateDeps.typecheck,
     lint: defaultValidateDeps.lint,
@@ -757,14 +784,21 @@ export function buildRewrittenCompositionConfig(
     validateAll: (specDir) => validateSpecs(specDir, defaultValidateDeps),
   });
   // WS2.2 (full-flow remediation, code-mode restoration): Filter B for the CODE target — the
-  // compile-feedback gate ported from src/qa/code-validate.ts, wired here for the first time
-  // (previously the code target had NO pre-execution feedback at all; a compile error surfaced
-  // only as an opaque whole-build failure at execution). Mirrors the e2e staticGate's own
-  // construction immediately above.
+  // compile-feedback gate (previously the code target had NO pre-execution feedback at all; a
+  // compile error surfaced only as an opaque whole-build failure at execution). Mirrors the e2e
+  // staticGate's own construction immediately above.
   const codeValidate = new CodeValidationStrategy((repoDir, opts) => validateCodeProject(repoDir, defaultCodeValidateDeps, opts));
 
   const e2e = new E2eExecutionStrategy((specDir, opts) => runE2E(specDir, opts, defaultExecuteDeps));
-  const code = new CodeExecutionStrategy((repoDir, opts) => runCodeTests(repoDir, opts, defaultCodeExecuteDeps));
+  // migration-tier-4b Slice 1: createDefaultCodeExecuteDeps/createDefaultCodeSetupDeps are FACTORIES
+  // (not plain constants) because the privilege-drop sandbox is injected, not resolved internally
+  // (codeSandbox, computed once above). recordAudit is likewise injected — src/orchestrator/
+  // sanitizer.ts's SECRET_AUDIT diagnostic sink stays a security-boundary concern this factory owns,
+  // never imported into qa-engine/src (see code-execution.runner.ts's own CodeExecuteDeps.recordAudit
+  // doc). Bound once per composition, reused by both the execution strategy and setupCollaborators.code.
+  const codeExecuteDeps = { ...createDefaultCodeExecuteDeps(codeSandbox), recordAudit };
+  const codeSetupDeps = createDefaultCodeSetupDeps(codeSandbox);
+  const code = new CodeExecutionStrategy((repoDir, opts) => runCodeTests(repoDir, opts, codeExecuteDeps));
 
   // changedFiles: static `[]` placeholder — the SAME documented limitation as `diff: ""` above (no
   // per-run diff exists yet at composition time). ObjectiveSignalPortAdapter.measure() derives the
@@ -777,16 +811,17 @@ export function buildRewrittenCompositionConfig(
   const rawCollector = makeTargetCoverageCollector({ target, repoDir: mirrorDir, e2eDir, changedFiles: [] });
   // Code-mode coverage trigger (legacy parity: src/pipeline.ts:487 `if (input.target === "code")
   // await runCodeCoverage(input.repoDir).catch(() => {})`, BEFORE the lcov/Istanbul readers run —
-  // src/qa/code-runner.ts:786's own doc: "best-effort... never throws... caller falls back to
-  // unmeasured"). The rewritten collector composite (LcovCoverageAdapter/C8CoverageAdapter) reads
-  // conventional report paths passively; nothing in the rewritten path ever RUNS the repo's own
-  // instrumented test command to PRODUCE those reports — this wrapper closes that gap the same
+  // now qa-engine's own code-execution.runner.ts's doc: "best-effort... never throws... caller falls
+  // back to unmeasured"). The rewritten collector composite (LcovCoverageAdapter/C8CoverageAdapter)
+  // reads conventional report paths passively; nothing in the rewritten path ever RUNS the repo's
+  // own instrumented test command to PRODUCE those reports — this wrapper closes that gap the same
   // best-effort way legacy does (catch -> ignore, degrading to the collector's own fail-open "no
-  // report found" -> "unknown", never a crash).
+  // report found" -> "unknown", never a crash). codeSandbox (computed once above) is injected —
+  // runCodeCoverage no longer resolves it internally (env-read confinement invariant).
   const collector: typeof rawCollector = isCode
     ? {
         collect: async (specDir, namespace, changedFiles) => {
-          await runCodeCoverage(mirrorDir).catch(() => {});
+          await runCodeCoverage(mirrorDir, codeSandbox).catch(() => {});
           return rawCollector.collect(specDir, namespace, changedFiles);
         },
       }
@@ -937,15 +972,16 @@ export function buildRewrittenCompositionConfig(
     validationStrategies: { e2e: staticGate, code: codeValidate },
     executionStrategies: { e2e, code },
     // SetupPort (CLAUDE.md run-flow step 3): bootstraps the config/e2e seed into e2e/ (first run) +
-    // npm ci, or installs the repo's own deps for code mode. e2e is now qa-engine's own SetupAdapter
-    // (migration-tier-4a — src/qa/setup.ts is deleted); code stays the real src/qa/code-runner.ts
-    // setupCodeProject/defaultCodeSetupDeps (unmigrated, out of this slice's scope). specDir here is
-    // whatever WorkspacePortAdapter's checkout(sha) resolved (composition-root.ts's own contract) —
-    // e2eDir under the REAL per-run mirrorDir, not this factory's static placeholder mirrorDir/e2eDir
-    // above.
+    // npm ci, or installs the repo's own deps for code mode. Both e2e and code are now qa-engine's
+    // own bodies (e2e: SetupAdapter, migration-tier-4a; code: code-setup.ts's setupCodeProject,
+    // migration-tier-4b Slice 1 — src/qa/code-runner.ts is deleted). codeSetupDeps (built once above,
+    // sandbox-injected) is reused here — the SAME instance the execution strategy's codeExecuteDeps
+    // sibling shares its sandbox with. specDir here is whatever WorkspacePortAdapter's checkout(sha)
+    // resolved (composition-root.ts's own contract) — e2eDir under the REAL per-run mirrorDir, not
+    // this factory's static placeholder mirrorDir/e2eDir above.
     setupCollaborators: {
       e2e: (specDir, opts) => setupAdapter.setup(specDir, opts),
-      code: (specDir, opts) => setupCodeProject(specDir, defaultCodeSetupDeps, opts),
+      code: (specDir, opts) => setupCodeProject(specDir, codeSetupDeps, opts),
     },
     // CleanupPort (audit CRITICAL, task #33): orphan test-data cleanup — the SAME real
     // defaultCleanupDeps.runCleanup src/pipeline.ts's own defaultPipelineDeps() wires for the

@@ -9,7 +9,10 @@ import { writeFileSync, readFileSync, readdirSync, mkdtempSync, rmSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { QaRunResult, QaCase, CaseStatus } from "../types";
-import { scrubEnv } from "./code-runner";
+// migration-tier-4b Slice 1: src/qa/code-runner.ts (scrubEnv's prior home) is deleted this slice;
+// execute.ts is a Slice-1 "survivor" (its own migration is seam-pinned to 4d) and re-points to the
+// qa-engine twin — the NARROW legacy allowlist, unchanged, per the design's consumer sweep.
+import { scrubEnv } from "../../qa-engine/src/shared-infrastructure/process-sandbox/scrub-env";
 import { parsePlaywrightReport } from "./playwright-report";
 import { sanitizeText, containsSecrets, recordAudit } from "../orchestrator/sanitizer";
 import { parseAriaSnapshot } from "./dom-snapshot";
@@ -559,7 +562,7 @@ export const defaultCleanupDeps: CleanupDeps = {
         cwd: dir,
         // Agent-written specs run here: scrub the orchestrator's secrets (GITHUB_TOKEN etc.)
         // while keeping the app's DEV_* login creds the fixtures need.
-        env: { ...scrubEnv(/^DEV_/), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PW_CLEANUP: "1", ...(testIdAttribute ? { PW_TEST_ID_ATTRIBUTE: testIdAttribute } : {}) },
+        env: { ...scrubEnv({ extraAllowed: /^DEV_/ }), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PW_CLEANUP: "1", ...(testIdAttribute ? { PW_TEST_ID_ATTRIBUTE: testIdAttribute } : {}) },
         detached: true, // own process group → killTree can reap browser grandchildren
       });
       let settled = false;
@@ -645,7 +648,7 @@ export const defaultExecuteDeps: ExecuteDeps = {
         // playwright.config.ts resolves getByTestId correctly for the app's convention.
         // PW_ACTION_TIMEOUT_MS: optional per-target override of the seed's action auto-wait
         // bound (default 8000) so a slower DEV can widen it without editing the seed config.
-        env: { ...scrubEnv(/^DEV_/), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonPath, ...(testIdAttribute ? { PW_TEST_ID_ATTRIBUTE: testIdAttribute } : {}), ...(process.env.PW_ACTION_TIMEOUT_MS ? { PW_ACTION_TIMEOUT_MS: process.env.PW_ACTION_TIMEOUT_MS } : {}), ...(faultInject ? { QA_FAULT_INJECT: "1" } : {}), ...(failureCaptureDir ? { QA_FAILURE_CAPTURE_DIR: failureCaptureDir } : {}) },
+        env: { ...scrubEnv({ extraAllowed: /^DEV_/ }), PW_BASE_URL: baseUrl, PW_NAMESPACE: namespace, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonPath, ...(testIdAttribute ? { PW_TEST_ID_ATTRIBUTE: testIdAttribute } : {}), ...(process.env.PW_ACTION_TIMEOUT_MS ? { PW_ACTION_TIMEOUT_MS: process.env.PW_ACTION_TIMEOUT_MS } : {}), ...(faultInject ? { QA_FAULT_INJECT: "1" } : {}), ...(failureCaptureDir ? { QA_FAILURE_CAPTURE_DIR: failureCaptureDir } : {}) },
         detached: true, // own process group → killTree reaps npx/playwright/browser grandchildren
       });
 

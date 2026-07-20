@@ -24,9 +24,11 @@ import { dirname } from "node:path";
 //  3. The gate integrity surface — the maintainer's OWN pre-deploy gate is `npm test` +
 //     `npm run typecheck`. If a fix could edit the test suite or the tsconfig, a BROKEN fix could
 //     make itself "pass" by weakening the very gate that is supposed to reject it. The entrypoint
-//     (index.ts) sequences the safety layers + the canary swap, and code-runner.ts executes
-//     untrusted (agent-authored) code; an autonomous rewrite of either is too dangerous to ship
-//     unreviewed. A fix that legitimately needs to touch these is significant enough for a human.
+//     (index.ts) sequences the safety layers + the canary swap, and code-execution.runner.ts/
+//     code-setup.ts/sandbox.ts (migration-tier-4b Slice 1 — the qa-engine home that replaced
+//     src/qa/code-runner.ts) execute untrusted (agent-authored) code; an autonomous rewrite of
+//     either is too dangerous to ship unreviewed. A fix that legitimately needs to touch these is
+//     significant enough for a human.
 //  4. Build/topology the in-process canary cannot verify — the hot-swap only replaces src/ +
 //     package files; a Dockerfile/compose change takes effect only on an image rebuild, so
 //     the canary would pass while the real effect ships unverified.
@@ -42,11 +44,21 @@ export const PROTECTED_PATHS: string[] = [
   // sdd/migration-wiring-phase-2 Slice 7d: src/util/redact.ts is deleted — every consumer migrated
   // to the canonical RedactionPortAdapter (src/orchestrator/sanitizer.ts), the one remaining entry.
   "src/orchestrator/sanitizer.ts",
+  // migration-tier-4b: every scrubEnv consumer (untrusted code-execution spawns, execute.ts,
+  // maintainer-runtime.ts, and others) converged on this file — it holds BLOCKED_ENV_PREFIX/
+  // ALLOWED_ENV_EXACT/ALLOWED_ENV_PREFIX, the secret-leak allowlist for untrusted spawns. An
+  // unreviewed autonomous widening of this allowlist is exactly the failure mode this group exists
+  // to prevent.
+  "qa-engine/src/shared-infrastructure/process-sandbox/scrub-env.ts",
   // 3. gate integrity (the fix must not weaken what decides whether it deploys)
   "*.test.ts",
   "tsconfig.json",
   "src/index.ts",
-  "src/qa/code-runner.ts",
+  // migration-tier-4b Slice 1: src/qa/code-runner.ts is deleted — replaced by these three qa-engine
+  // homes (the design's gate CORRECTION 3: the exact new paths, not a single literal).
+  "qa-engine/src/contexts/test-execution/infrastructure/code-execution.runner.ts",
+  "qa-engine/src/contexts/test-execution/infrastructure/code-setup.ts",
+  "qa-engine/src/shared-infrastructure/process-sandbox/sandbox.ts",
   // 4. build/topology the canary cannot verify (image rebuild only)
   ".github/",
   "Dockerfile",
