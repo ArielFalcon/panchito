@@ -16,7 +16,12 @@
 // the port's own contract. `src/util/redact.ts`'s `[REDACTED_CREDENTIAL]` is a DIFFERENT mechanism
 // (env-value-driven shell-layer scrubbing) and is explicitly OUT of scope — see the spec's Phase 2
 // follow-up requirement.
-import { REDACTED, type RedactionPort } from "../../qa-engine/src/shared-kernel/ports/redaction.port";
+import { REDACTED, SecretLeakError, type RedactionPort } from "../../qa-engine/src/shared-kernel/ports/redaction.port";
+
+// Re-exported so src/ callers (prompts.ts, opencode-client.ts) import it from this module alongside
+// sanitizeText/containsSecrets, matching the design's own placement — see SecretLeakError's own doc
+// (qa-engine/src/shared-kernel/ports/redaction.port.ts) for why it is DEFINED in the shared kernel.
+export { SecretLeakError };
 
 export interface SecretDetection {
   redacted: boolean;
@@ -233,22 +238,50 @@ export function sanitizeText(input: string, mode: SanitizeMode = "issue"): { tex
   };
 }
 
-export function containsSecrets(text: string): boolean {
+// AMENDMENT 1 (migration-wiring-phase-2 Slice 6a, mode-aware guard fix): as originally shipped this
+// function destructured only `{ p, skip }` and never consulted `modelSkip` at all — every call
+// behaved like "issue" mode regardless of what boundary it guarded. That re-applied the aggressive
+// issue-mode api-key-assignment pattern to model-mode-sanitized text: `sanitizeText("secret: string",
+// "model")` correctly leaves a type annotation untouched (modelSkip, by design), but the old
+// `containsSecrets()` then flagged it anyway — a false positive on ordinary auth-shaped code (this
+// repo's own src/server/auth.ts carries these exact shapes, and runs code-mode QA on itself). Now
+// mode-aware: mirrors sanitizeText's own skip decision exactly — `mode` defaults to "issue" so every
+// pre-existing caller (execute.ts:274, code-runner.ts:638, RedactionPortAdapter.containsSecret) is
+// byte-identical; only an explicit "model" mode additionally consults modelSkip, the SAME two-tier
+// policy sanitizeText already implements.
+export function containsSecrets(text: string, mode: SanitizeMode = "issue"): boolean {
   if (!text) return false;
-  let masked = text.replace(/data:[^;]+;base64,[A-Za-z0-9+/=]+/gi, "");
-  for (const { p, skip } of NAMED_SECRET_PATTERNS) {
+  const masked = text.replace(/data:[^;]+;base64,[A-Za-z0-9+/=]+/gi, "");
+  for (const { p, skip, modelSkip } of NAMED_SECRET_PATTERNS) {
     // These are module-level /g regexes; .test()/.exec() advance and persist lastIndex,
     // which would make repeated calls alternate — reset so detection is deterministic.
     p.lastIndex = 0;
-    if (skip) {
-      // Only a non-skipped match counts as a real secret (a git SHA must not trip this).
+    const hasConditionalSkip = Boolean(skip) || (mode === "model" && Boolean(modelSkip));
+    if (hasConditionalSkip) {
+      // Only a match that neither `skip` (a recognised non-secret, e.g. a git SHA) nor, in "model"
+      // mode, `modelSkip` (an ordinary code shape — a type annotation, a bare call expression)
+      // excuses counts as a real secret.
       const ms = masked.match(p);
-      if (ms?.some((m) => !skip(m))) return true;
+      const isRealSecret = (m: string): boolean => !(skip?.(m) ?? false) && !(mode === "model" && modelSkip?.(m));
+      if (ms?.some(isRealSecret)) return true;
     } else if (p.test(masked)) {
       return true;
     }
   }
   return false;
+}
+
+// diff→model boundary (Slice 6b): the post-redaction fail-loud guard. Runs AFTER sanitizeText/redact
+// has already scrubbed the text; if a secret is STILL detectable, that is an invariant violation the
+// caller must never launder into a silent send — throw loudly rather than proceed. `boundary` is a
+// short label for the error message only (e.g. "diff→model"), so the two egress boundaries (this
+// one, and logs→Issue's own local mirror in publication-port.adapter.ts — qa-engine cannot import
+// this function, see SecretLeakError's own doc) produce distinguishable, greppable failures.
+export function assertNoSecretLeak(redactedText: string, mode: SanitizeMode, boundary: string): void {
+  if (containsSecrets(redactedText, mode)) {
+    console.error(`[sanitizer] ${boundary}: a secret survived redaction — refusing to proceed`);
+    throw new SecretLeakError(`${boundary}: a secret survived redaction — refusing to proceed`);
+  }
 }
 
 export const SECRET_AUDIT = new Map<string, number>();
@@ -267,6 +300,34 @@ export function recordAudit(runId: string, detection: SecretDetection): void {
   }
 }
 
+// sdd/migration-wiring-phase-2 Slice 7a (D-D a, env-value GAIN): env-driven verbatim secret-VALUE
+// detection, ported from src/util/redact.ts's secretValues() — the oracle this slice closes the gap
+// against. Kept OUT of the pure sanitizeText/containsSecrets functions (many callers invoke those
+// directly and rely on their byte-for-byte pattern-only contract, unaffected by env); env is
+// injected ONLY at this adapter boundary — this module is the ONE seam permitted to import
+// process.env for redaction, so qa-engine (which never constructs this class itself) stays
+// env-agnostic. Same NAME heuristic and length floor as redact.ts's secretValues, so nothing
+// redact.ts already caught is lost when a consumer migrates (spec's "no detection class lost").
+const ENV_SECRET_NAME = /(?:KEY|TOKEN|SECRET|PASSWORD|PASS)$/;
+const MIN_ENV_SECRET_LEN = 6;
+
+function envSecretValues(env: Record<string, string | undefined>): string[] {
+  const values: string[] = [];
+  for (const [name, value] of Object.entries(env)) {
+    if (value && value.length >= MIN_ENV_SECRET_LEN && ENV_SECRET_NAME.test(name)) values.push(value);
+  }
+  // Longest first so a secret value that is itself a substring of another is fully masked.
+  return values.sort((a, b) => b.length - a.length);
+}
+
+function stripEnvValues(text: string, env: Record<string, string | undefined>): string {
+  let out = text;
+  for (const value of envSecretValues(env)) {
+    if (out.includes(value)) out = out.split(value).join(REDACTED);
+  }
+  return out;
+}
+
 // sdd/migration-remediation Slice 6 (D-P2, RedactionPort unification): the formal port adapter for
 // the two egress boundaries (diff → model, logs → Issue). Wraps this module's own sanitizeText/
 // containsSecrets ("issue" mode — the aggressive, public-surface policy every existing caller of
@@ -275,10 +336,35 @@ export function recordAudit(runId: string, detection: SecretDetection): void {
 // Callers that need the diff→model "model"-mode narrowing keep calling `sanitizeText(text, "model")`
 // directly — this adapter's `redact` always uses the default "issue" mode, matching what
 // PublicationPortAdapter.sanitize (the logs→Issue boundary) has always used.
+//
+// sdd/migration-wiring-phase-2 Slice 7 (D-D): the ctor now accepts an injectable `env` (defaults to
+// `process.env`, so every pre-existing call site — e.g. `new RedactionPortAdapter()` in
+// rewritten-engine-factory.ts — is unaffected). `redact()` = env-value-strip(text, this.env) THEN
+// pattern-sanitizeText, per the design's explicit ordering. `redactText`/`redactError` are NEW
+// adapter-level convenience methods (env+pattern) for the shell consumers migrating off
+// src/util/redact.ts's `redactSecrets`/`redactError` (Slice 7b/7c) — same call shape, one canonical
+// mechanism, `[REDACTED]` placeholder instead of `[REDACTED_CREDENTIAL]`.
 export class RedactionPortAdapter implements RedactionPort {
+  constructor(private readonly env: Record<string, string | undefined> = process.env) {}
+
   redact(text: string): string {
-    return sanitizeText(text).text;
+    return sanitizeText(stripEnvValues(text, this.env)).text;
   }
+
+  // Alias for redact() with a name that mirrors redact.ts's old `redactSecrets` — shell consumers
+  // migrating in Slice 7b/7c swap `redactSecrets(text, env)` for `redactionPort.redactText(text)`
+  // with no other call-site restructuring (env is now bound at construction, not per-call).
+  redactText(text: string): string {
+    return this.redact(text);
+  }
+
+  // Mirrors redact.ts's old `redactError`: unwraps an Error's message (or stringifies any other
+  // thrown value) before running the same env+pattern redaction as redact()/redactText().
+  redactError(err: unknown): string {
+    const raw = err instanceof Error ? err.message : String(err);
+    return this.redact(raw);
+  }
+
   containsSecret(text: string): boolean {
     return containsSecrets(text);
   }
@@ -327,7 +413,10 @@ function isLowRelevance(filePath: string): boolean {
 }
 
 // Extracts the file path from a "diff --git a/... b/..." header line.
-function extractDiffFilePath(section: string): string {
+// Exported (judgment-day FIX 1) so prompts.ts's cappedDiffText can key its per-section sanitize
+// MODE (issue vs. model) off the same target path capDiff itself already parses out — one shared
+// extraction, no duplicated regex.
+export function extractDiffFilePath(section: string): string {
   // "diff --git a/src/foo.ts b/src/foo.ts" — take the b/ path (post-rename destination)
   const m = /^diff --git a\/\S+ b\/(\S+)/m.exec(section);
   return m?.[1] ?? "";

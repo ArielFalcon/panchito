@@ -48,6 +48,7 @@ import { isInfraError } from "../errors";
 import type { ArchitectureContext } from "../qa/context";
 import type { ExplorationBrief } from "../qa/exploration-brief";
 import { roleWindowBytes } from "./model-window-catalog";
+import { SecretLeakError } from "../orchestrator/sanitizer";
 
 // context.json is read from the WATCHED repo and committed by this system's own PRs, so it
 // is attacker-influenceable. It must be sanitized before reaching the test-writing agent.
@@ -128,9 +129,23 @@ test("buildPrompt includes the commit intent and specMetas instruction for deter
 });
 
 test("buildPrompt sanitizes the diff (defense in depth)", () => {
-  const p = buildPrompt({ ...input, diff: "password=hunter2" });
-  assert.doesNotMatch(p, /hunter2/);
+  // sdd/migration-wiring-phase-2 Slice 6b: cappedDiffText now sanitizes the diff in "model" mode
+  // (previously "issue" mode — see that function's own doc for why). A quoted-literal value is a
+  // real secret shape in EITHER mode (isModelModeSecretValue's own "a quoted literal is the
+  // deliberate secret shape" rule), so this fixture still proves the diff is never sent raw.
+  const p = buildPrompt({ ...input, diff: 'password="hunter2xyzSECRET"' });
+  assert.doesNotMatch(p, /hunter2xyzSECRET/);
   assert.match(p, /\[REDACTED\]/);
+});
+
+test("buildPrompt (Slice 6b, model mode): a bare short unquoted assignment is treated as code-shaped, not a secret — narrower than issue mode by design", () => {
+  // WS5.4a's own contract (sanitizer.ts's isModelModeSecretValue): model mode only redacts a quoted
+  // string literal or a high-entropy (>=12 chars, mixed-case, has-digit) bare token. "hunter2" is
+  // neither (7 chars, no uppercase) — model mode intentionally leaves it alone, trading a weak-secret
+  // false negative for not mangling ordinary auth-shaped code sent to the generator (the same
+  // trade-off that motivated adding "model" mode in the first place).
+  const p = buildPrompt({ ...input, diff: "password=hunter2" });
+  assert.match(p, /hunter2/, "model mode must not redact a short bare unquoted value — it reads as code, not a secret literal");
 });
 
 test("buildPrompt without review omits the reviewer instruction", () => {
@@ -686,6 +701,42 @@ test("FIX 2: maybeExplore still no-ops for manual REGEN passes (fix/review/cover
   );
   assert.equal(brief, null, "a regen pass must not re-explore");
   assert.deepEqual(opened, [], "no explorer session on a manual regen pass");
+});
+
+// ── judgment-day FIX 3: maybeExplore's best-effort catch must never swallow a SecretLeakError ──
+// The catch around the explorer prompt degrades ANY error to `null` (best-effort: the generator
+// explores inline instead). That masked a SecretLeakError from buildExplorerPrompt's cappedDiffText
+// call — the fail-loud egress guard is pointless if a wrapper silently launders it into "no brief".
+
+test("FIX 3: a SecretLeakError thrown inside the explorer path propagates — never swallowed by the best-effort wrapper", async () => {
+  const stub: AgentDeps = {
+    open: async () => ({
+      id: "s",
+      prompt: async () => {
+        throw new SecretLeakError("diff→model: a secret survived redaction — refusing to proceed");
+      },
+      dispose: async () => {},
+    }),
+  };
+  await assert.rejects(
+    () => maybeExplore({ ...input, explorer: true }, stub),
+    (err: unknown) => err instanceof SecretLeakError,
+    "a SecretLeakError raised while exploring must propagate, not degrade to a null brief",
+  );
+});
+
+test("FIX 3: a generic error inside the explorer path still degrades to null (best-effort behavior unaffected)", async () => {
+  const stub: AgentDeps = {
+    open: async () => ({
+      id: "s",
+      prompt: async () => {
+        throw new Error("network blip");
+      },
+      dispose: async () => {},
+    }),
+  };
+  const brief = await maybeExplore({ ...input, explorer: true }, stub);
+  assert.equal(brief, null, "a generic (non-secret-leak) error must still degrade to null — best-effort explorer is otherwise unchanged");
 });
 
 // ── Judgment-day fixes ───────────────────────────────────────────────────────

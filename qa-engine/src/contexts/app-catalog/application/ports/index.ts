@@ -3,7 +3,11 @@
 // RepoInfoPort talks to GitHub for repo metadata. App-specificity lives ONLY here (CLAUDE.md invariant).
 // The App aggregate + RepoResolutionService are domain (Plan 4); these are the driven seams.
 
-export interface ServiceConfig { repo: string; openapi?: string; versionUrl?: string; }
+// openapi mirrors the shell's real AppConfigSchema (src/orchestrator/schemas.ts): a service may
+// declare either one glob or several — widened (sdd/migration-wiring-phase-2 Slice 1, task 1.2) to
+// match AppServiceConfig's own identical widening (domain/app.aggregate.ts), so this port's
+// snapshot never narrows what the real config can legitimately carry.
+export interface ServiceConfig { repo: string; openapi?: string | string[]; versionUrl?: string; }
 export type RepoRole = "primary" | "service";
 export interface AppConfigSnapshot {
   name: string; repo: string; baseBranch: string;

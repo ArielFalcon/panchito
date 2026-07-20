@@ -35,12 +35,9 @@
     "test/contexts/generation/infrastructure/plan-parser.adapter-parity.test.ts",
     "test/contexts/test-execution/infrastructure/static-gate-validate-parity.test.ts",
     "test/contexts/generation/application/generate-tests.characterization.test.ts",
-    "test/contexts/qa-run-orchestration/domain/helpers/progress-gate-parity.test.ts",
-    "test/contexts/qa-run-orchestration/domain/helpers/selector-check-parity.test.ts",
     "test/contexts/qa-run-orchestration/domain/helpers/error-class-parity.test.ts",
     "test/contexts/generation/infrastructure/dom-snapshot-parity.test.ts",
     "test/contexts/generation/infrastructure/sanitize-text-parity.test.ts",
-    "test/contexts/generation/infrastructure/selector-catalog-window-parity.test.ts",
     "test/contexts/cross-run-learning/domain/rule-fold-parity.test.ts",
     "test/contract/seam-parity.contract.test.ts"
   ]

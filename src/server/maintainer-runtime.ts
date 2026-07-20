@@ -33,8 +33,12 @@ import { defaultMirrorDeps, authHeaderArgs, type MirrorDeps } from "../integrati
 import { github } from "../integrations/github";
 import { scrubEnv } from "../qa/code-runner";
 import { logJson } from "../integrations/logger";
-import { redactError } from "../util/redact";
+import { RedactionPortAdapter } from "../orchestrator/sanitizer";
 import type { AgentDeps } from "../integrations/opencode-client";
+
+// sdd/migration-wiring-phase-2 Slice 7b-2: the canonical redaction adapter (env+pattern) for this
+// file's incident/session-failure error logging, replacing src/util/redact.ts's redactError.
+const redactionPort = new RedactionPortAdapter();
 
 // The closure config the runtime needs from the composition root (index.ts). These are values that
 // only the entrypoint owns: the live job queue, the current agent deps, the entrypoint's
@@ -348,7 +352,7 @@ export function createMaintainerRuntime(cfg: MaintainerConfig, fx: MaintainerSid
           // install lifecycle, consistent with the scrubbed pre-deploy gate.
           fx.exec("npm install --no-audit --no-fund", { cwd: process.cwd(), stdio: "inherit", env: scrubEnv() });
         } catch (installErr) {
-          console.error(`[maintainer] post-swap npm install failed (${redactError(installErr)}) — restarting anyway; boot-guard is the backstop.`);
+          console.error(`[maintainer] post-swap npm install failed (${redactionPort.redactError(installErr)}) — restarting anyway; boot-guard is the backstop.`);
         }
         console.log("[maintainer] canary swap staged with rollback guard — restarting to verify, then promote.");
         fx.exit(0);
@@ -360,7 +364,7 @@ export function createMaintainerRuntime(cfg: MaintainerConfig, fx: MaintainerSid
       }
     } catch (err) {
       setMaintainerStatus("idle");
-      console.error(`[maintainer] session failed: ${redactError(err)}`);
+      console.error(`[maintainer] session failed: ${redactionPort.redactError(err)}`);
       // Mark incidents as needing manual attention
       for (const inc of pending) {
         updateIncident(inc.id, { status: "diagnosing" });

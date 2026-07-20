@@ -60,6 +60,16 @@ export interface RunInput {
   // structurally what RunQaInput expects), which forwards it to ChangeAnalysisPort.classify(sha,
   // {baseSha}) in diff mode. Absent (the common case) -> single-commit classification, unchanged.
   baseSha?: Sha;
+  // sdd/migration-wiring-phase-2 Slice 5 (D-F parentRunId producer): continuation provenance — the
+  // run this one continues. Sourced ONLY from the /continue API flow (src/server/api.ts
+  // handleContinue -> deps.continueRun -> src/index.ts's continueRun -> RunRequest.parentRunId,
+  // src/server/runner.ts). Threaded straight through by RewrittenOrchestratorAdapter.run(input) into
+  // RunQaUseCase.run(input) unchanged (this type is structurally what RunQaInput expects), which
+  // forwards it into PublicationPort.publish()'s own parentRunId field (already widened, Phase 1).
+  // Absent (the common case: webhook/manual/CLI runs) -> no continuation reference rendered, never
+  // fabricated. Intra-run regenerations (coverage-regen, FixLoop rounds) reuse this SAME `input`
+  // object for their own publish() calls — they structurally cannot invent a different parentRunId.
+  parentRunId?: string;
 }
 export interface RunPipelinePort {
   // signal is a SEPARATE transport arg (mirrors legacy runPipeline's own trailing signal
@@ -856,5 +866,22 @@ export interface ConfinementResult {
 }
 export interface ConfinementPort {
   enforce(mirrorDir: string, isCode: boolean, signal?: AbortSignal): Promise<ConfinementResult>;
+}
+
+// MirrorGcPort — sdd/migration-wiring-phase-2 Slice 2 (D-B mirror-gc). Keeps the mirror working
+// copies lean (orphaned object packs accumulate over time — `git gc` compacts them). The real
+// adapter (workspace-and-publication/infrastructure/mirror-gc.adapter.ts) wraps an injected git gc
+// fn. Local, duck-typed (this barrel's own "no cross-context import" rule) — the adapter never
+// imports this interface, it just matches its shape structurally.
+//
+// [SWAP] absent -> RunQaUseCase never calls prune(); no gc, the SAME backward-compatible posture
+// every other optional collaborator on this barrel establishes.
+//
+// Fault isolation (design D-B): a thrown prune() MUST be caught by the CALLER (RunQaUseCase),
+// logged loudly, and MUST NEVER alter the verdict or block the run from completing. This adapter
+// itself does NOT swallow errors (mirrors ConfinementPort's own "adapter throws, use-case catches"
+// split, immediately above).
+export interface MirrorGcPort {
+  prune(mirrorDir: string): Promise<void>;
 }
 

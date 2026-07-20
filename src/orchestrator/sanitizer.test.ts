@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sanitizeText, containsSecrets, SECRET_AUDIT, recordAudit, capText, MAX_PROMPT_BODY_CHARS, capDiff, MAX_PROMPT_DIFF_CHARS } from "./sanitizer";
+import { sanitizeText, containsSecrets, assertNoSecretLeak, SecretLeakError, SECRET_AUDIT, recordAudit, capText, MAX_PROMPT_BODY_CHARS, capDiff, MAX_PROMPT_DIFF_CHARS, RedactionPortAdapter } from "./sanitizer";
 
 test("redacts secrets (api key, token)", () => {
   const { text: out } = sanitizeText("const apiKey = sk-abc123XYZ\ntoken: ghs_supersecretvalue");
@@ -44,6 +44,95 @@ test("issue mode (explicit): identical to default — aggressive public-surface 
   const withDefault = sanitizeText("token = getToken();");
   const withExplicit = sanitizeText("token = getToken();", "issue");
   assert.deepEqual(withExplicit, withDefault);
+});
+
+// ── sdd/migration-wiring-phase-2 Slice 6a (AMENDMENT 1, mode-aware containsSecrets) ──────────────
+// As shipped, containsSecrets() never consulted modelSkip at all — every call behaved like "issue"
+// mode, re-flagging text sanitizeText(text,"model") had deliberately left untouched. This is the
+// EXACT false positive that would have thrown SecretLeakError on any diff touching ordinary
+// auth-shaped code once the Slice 6b guard is wired — this repo's own src/server/auth.ts carries
+// these shapes and this repo runs code-mode QA on itself. The regression fixtures below mirror
+// auth.ts's real signatures verbatim (function sign(data: string, secret: string): string,
+// issueSession(username: string, secret: string, ttlSeconds: number, ...), validateSession(token:
+// string, secret: string, now = Date.now())).
+test("containsSecrets: model mode does NOT flag auth.ts-shaped type annotations after model-mode redaction (regression, the guard's own safety gate)", () => {
+  const authShapes = [
+    "function sign(data: string, secret: string): string {",
+    "export function issueSession(username: string, secret: string, ttlSeconds: number, now = Date.now()): string {",
+    "export function validateSession(token: string, secret: string, now = Date.now()): string | null {",
+  ].join("\n");
+  const redacted = sanitizeText(authShapes, "model").text;
+  assert.equal(
+    containsSecrets(redacted, "model"),
+    false,
+    "a type annotation carries no secret value — model mode must not flag it (this would have thrown SecretLeakError on this repo's own auth.ts)",
+  );
+});
+
+test("containsSecrets: model mode does NOT flag a bare call expression assigned to a credential-named variable", () => {
+  const redacted = sanitizeText("const token = getToken();", "model").text;
+  assert.equal(containsSecrets(redacted, "model"), false, "a call expression carries no literal secret value");
+});
+
+test("containsSecrets: model mode STILL flags a quoted string literal assigned to a credential field", () => {
+  assert.equal(
+    containsSecrets('const password = "hunter2";', "model"),
+    true,
+    "a quoted literal is the real secret shape and model mode must still flag it (never redacted -> guard must fire)",
+  );
+});
+
+test("containsSecrets: model mode STILL flags a high-entropy bare token value", () => {
+  assert.equal(containsSecrets("token = aZ9kP2mQ7xR4tL6vB8nH1cJ3s", "model"), true, "a high-entropy bare token is still a real secret shape");
+});
+
+test("containsSecrets: issue mode (default) is byte-identical to pre-AMENDMENT-1 behavior — still flags a type annotation", () => {
+  assert.equal(containsSecrets("password: string;"), true, "issue mode (default) must keep the existing aggressive behavior unchanged");
+  assert.equal(containsSecrets("password: string;", "issue"), true, "issue mode (explicit) identical to default");
+});
+
+test("containsSecrets: issue mode never regresses on a genuine secret (byte-identical existing behavior)", () => {
+  assert.equal(containsSecrets("const apiKey = sk-abc123XYZsecretvalue"), true);
+});
+
+test("containsSecrets: false-positive tolerance — a git SHA covered by the base64-secret skip predicate never trips, in either mode", () => {
+  const sha = "a".repeat(40); // pure-hex run, the base64-secret pattern's own `skip` predicate
+  assert.equal(containsSecrets(sha), false, "issue mode must not flag a git SHA");
+  assert.equal(containsSecrets(sha, "model"), false, "model mode must not flag a git SHA either");
+});
+
+// ── sdd/migration-wiring-phase-2 Slice 6b — the post-redaction fail-loud guard ────────────────────
+// assertNoSecretLeak is the shared enforcement primitive both egress boundaries build on (diff→model
+// directly; logs→Issue via its own local mirror in publication-port.adapter.ts, which cannot import
+// this module — see SecretLeakError's own doc). Testing it directly proves the THROW mechanism
+// itself: sanitizeText/containsSecrets already share one pattern table with identical skip/modelSkip
+// logic, so a secret genuinely surviving THIS module's own redaction is not constructible today — the
+// guard exists as an invariant check against a FUTURE regression (a pattern added to one function but
+// not the other), and this is the test that would catch it.
+test("assertNoSecretLeak: throws SecretLeakError when the text still contains a detectable secret", () => {
+  assert.throws(
+    () => assertNoSecretLeak('const apiKey = "sk-live-abc123XYZsecretvalue"', "issue", "diff→model"),
+    SecretLeakError,
+  );
+});
+
+test("assertNoSecretLeak: the thrown error names the boundary (greppable, never a generic message)", () => {
+  try {
+    assertNoSecretLeak('const apiKey = "sk-live-abc123XYZsecretvalue"', "issue", "diff→model");
+    assert.fail("expected assertNoSecretLeak to throw");
+  } catch (err) {
+    assert.ok(err instanceof SecretLeakError);
+    assert.match((err as Error).message, /diff→model/);
+  }
+});
+
+test("assertNoSecretLeak: does NOT throw when the text is already clean (fully redacted diffs/logs pass through)", () => {
+  assert.doesNotThrow(() => assertNoSecretLeak(sanitizeText("const apiKey = sk-abc123XYZsecretvalue", "model").text, "model", "diff→model"));
+});
+
+test("assertNoSecretLeak: does NOT throw on an auth.ts-shaped diff in model mode (the guard's own false-positive gate)", () => {
+  const redacted = sanitizeText("password: string;\ntoken: string;", "model").text;
+  assert.doesNotThrow(() => assertNoSecretLeak(redacted, "model", "diff→model"));
 });
 
 test("capText passes short prose through unchanged", () => {
@@ -415,4 +504,88 @@ test("JD-R2: a PERFECT 2-char case-alternation blob (the deterministic adversari
   // and the real identifier (segments populate/Courses/... >= 3) still survives:
   const identifier = "populateCoursesDescriptionMultilingualUseCase";
   assert.equal(sanitizeText(identifier).text, identifier);
+});
+
+// sdd/migration-wiring-phase-2 Slice 7a (D-D a, env-value GAIN): RedactionPortAdapter must detect a
+// secret VALUE present verbatim in text, driven by env VAR NAME heuristics (parity with
+// src/util/redact.ts's secretValues/redactSecrets — the oracle this slice ports), even when no
+// NAMED_SECRET_PATTERNS entry recognizes the value's shape. Fixtures below are values pattern-based
+// sanitizeText alone genuinely misses (verified live: "oc-LIVE-key-998877" matches no
+// NAMED_SECRET_PATTERNS entry at all; "superSecretCodex42" is a 19-char bare token, one short of the
+// llm-api-key pattern's 20-char minimum) — the exact gap 7a closes, not a redundant assertion.
+test("RedactionPortAdapter.redact detects an env-value secret patterns alone would miss (no NAMED_SECRET_PATTERNS match)", () => {
+  const env = { OPENCODE_API_KEY: "oc-LIVE-key-998877" };
+  const adapter = new RedactionPortAdapter(env);
+  // Baseline: pattern-only sanitizeText genuinely misses this shape (proves the fixture is real).
+  assert.match(sanitizeText("provider rejected key oc-LIVE-key-998877").text, /oc-LIVE-key-998877/);
+  const out = adapter.redact("provider rejected key oc-LIVE-key-998877");
+  assert.doesNotMatch(out, /oc-LIVE-key-998877/);
+  assert.match(out, /\[REDACTED\]/);
+});
+
+test("RedactionPortAdapter.redact detects a second env-value gap fixture (bare token below the llm-api-key pattern's length floor)", () => {
+  const env = { CODEX_API_KEY: "superSecretCodex42" };
+  const adapter = new RedactionPortAdapter(env);
+  assert.match(sanitizeText("codex exec exited 1: bad CODEX key superSecretCodex42").text, /superSecretCodex42/);
+  const out = adapter.redact("codex exec exited 1: bad CODEX key superSecretCodex42");
+  assert.doesNotMatch(out, /superSecretCodex42/);
+  assert.match(out, /\[REDACTED\]/);
+});
+
+test("RedactionPortAdapter.redact applies env-value AND pattern-based detection together (both mechanisms coexist, no class lost)", () => {
+  const env = { OPENCODE_API_KEY: "oc-LIVE-key-998877" };
+  const adapter = new RedactionPortAdapter(env);
+  const out = adapter.redact("env leak oc-LIVE-key-998877 alongside a pattern hit token=ghs_supersecretvalue");
+  assert.doesNotMatch(out, /oc-LIVE-key-998877/);
+  assert.doesNotMatch(out, /ghs_supersecretvalue/);
+  assert.match(out, /\[REDACTED\]/);
+});
+
+test("RedactionPortAdapter.redact ignores env values shorter than the 6-char floor (parity with redact.ts's MIN_SECRET_LEN)", () => {
+  const env = { SHORT_TOKEN: "abcde" }; // 5 chars, below the floor
+  const adapter = new RedactionPortAdapter(env);
+  const out = adapter.redact("value is abcde here");
+  assert.match(out, /abcde/); // untouched — too short to treat as a real secret value
+});
+
+test("RedactionPortAdapter.redact ignores env vars whose NAME does not look like a secret (no false positive)", () => {
+  const env = { APP_NAME: "not-a-secret-value" };
+  const adapter = new RedactionPortAdapter(env);
+  const out = adapter.redact("app is called not-a-secret-value");
+  assert.match(out, /not-a-secret-value/);
+});
+
+test("RedactionPortAdapter() with no injected env defaults to process.env (real shell consumers stay covered)", () => {
+  const key = "PANCHITO_TEST_ENV_ADAPTER_TOKEN";
+  const value = "processEnvDefaultSecretABC123";
+  process.env[key] = value;
+  try {
+    const adapter = new RedactionPortAdapter();
+    const out = adapter.redact(`leaked ${value} in output`);
+    assert.doesNotMatch(out, new RegExp(value));
+  } finally {
+    delete process.env[key];
+  }
+});
+
+test("RedactionPortAdapter.redactText is a shell-consumer alias for redact (env+pattern)", () => {
+  const env = { OPENCODE_API_KEY: "oc-LIVE-key-998877" };
+  const adapter = new RedactionPortAdapter(env);
+  const out = adapter.redactText("leak oc-LIVE-key-998877 here");
+  assert.doesNotMatch(out, /oc-LIVE-key-998877/);
+  assert.match(out, /\[REDACTED\]/);
+});
+
+test("RedactionPortAdapter.redactError unwraps an Error instance through env+pattern redaction", () => {
+  const env = { CODEX_API_KEY: "superSecretCodex42" };
+  const adapter = new RedactionPortAdapter(env);
+  const out = adapter.redactError(new Error("codex exec exited 1: bad CODEX key superSecretCodex42"));
+  assert.doesNotMatch(out, /superSecretCodex42/);
+  assert.match(out, /\[REDACTED\]/);
+});
+
+test("RedactionPortAdapter.redactError stringifies a non-Error thrown value", () => {
+  const adapter = new RedactionPortAdapter({});
+  const out = adapter.redactError("plain string failure");
+  assert.equal(out, "plain string failure");
 });

@@ -60,6 +60,19 @@ export interface ArchitectureContext {
   flows?: FlowEntry[];
 }
 
+// sdd/migration-wiring-phase-2 Slice 4 (D-E skill-exemplar restore): a faithful structural mirror of
+// StructuralPattern (src/qa/learning/skill-exemplar.ts) — NOT imported, per this barrel's own "no
+// cross-context/no src import" rule (same precedent as every other type on this file, e.g.
+// ArchitectureContext above). Kept in lockstep with the legacy union by hand (generation-ports-parity
+// round-trip proves no shape drift).
+export type StructuralPattern =
+  | { kind: "form"; hasOnSubmit: boolean; hasValidation: boolean }
+  | { kind: "api-call"; method: string; hasRequestBody: boolean; hasErrorHandling: boolean }
+  | { kind: "stateful-cache"; sourceType: string; hasIndependentWritePath: boolean }
+  | { kind: "auth-flow"; hasLogin: boolean; hasSessionToken: boolean }
+  | { kind: "data-list"; hasFilter: boolean; hasPagination: boolean; hasEmptyState: boolean }
+  | { kind: "generic" };
+
 export interface BlastNode {
   symbol: string; // e.g. "CheckoutService.pay"
   file: string; // repo-relative file the symbol lives in
@@ -145,6 +158,13 @@ export interface OpencodeRunInput {
   // Surfaces the structural shape of the change as a ONE-LINE hint to the generator so it can
   // prioritise archetype-appropriate tests (e.g. "auth-flow, data-list"). Absent or empty = no hint.
   diffArchetypes?: string[];
+  // sdd/migration-wiring-phase-2 Slice 4 (D-E skill-exemplar restore): the FULL detected structural
+  // shapes (detectStructuralPatterns' own return type, restored src/qa/learning/structural-pattern.ts)
+  // — a richer sibling of diffArchetypes above (which carries only the `kind` strings). Fed into
+  // prompts.ts's matchExemplars/renderExemplarsForPrompt loop to render a "Skill exemplars" section.
+  // Absent or empty = no section (never fabricated). Restoration-only: no live production caller
+  // populates this yet (mirrors diffArchetypes' own still-open wiring gap into the rewritten engine).
+  structuralPatterns?: StructuralPattern[];
   // Seam b: deterministic list of existing spec file paths under e2eRelDir/**/*.spec.ts, enumerated
   // by the orchestrator from the filesystem before the session starts. When non-empty and mode is
   // diff or manual, rendered as an "existing-suite-manifest" semi-stable section so the generator

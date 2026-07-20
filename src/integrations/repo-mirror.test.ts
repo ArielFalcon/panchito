@@ -444,13 +444,13 @@ test("realGit scrubs inline x-access-token credentials from a failing spawn's er
     realGit(["-c", `url.https://x-access-token:${fakeToken}@github.com/.insteadOf=https://github.com/`, "clone", "file:///nonexistent/definitely-missing.git", "/tmp/qa-scrub-probe-target"], undefined),
     (err: Error) => {
       assert.ok(!err.message.includes(fakeToken), "the token must NOT appear in the error message");
-      // onboarding-hardening Slice 2: scrubGitError now delegates to redact.ts's redactSecrets,
-      // which replaces the whole x-access-token:TOKEN@ span with the SHARED placeholder
-      // ([REDACTED_CREDENTIAL]), not the old module-local "[REDACTED]" literal. This is an
-      // intentional, documented consequence of consolidating on one pattern source, not a
-      // regression — the diagnostic-shape goal (command stays readable, credential span gone)
-      // is preserved.
-      assert.match(err.message, /\[REDACTED_CREDENTIAL\]/, "the credential span must be redacted, not dropped (the command shape stays diagnosable)");
+      // sdd/migration-wiring-phase-2 Slice 7b-2: scrubGitError now delegates to the canonical
+      // RedactionPortAdapter (env+pattern, src/orchestrator/sanitizer.ts), which replaces the whole
+      // x-access-token:TOKEN@ span with the ONE canonical placeholder ([REDACTED]) shared by every
+      // egress boundary — not the old module-local util/redact.ts "[REDACTED_CREDENTIAL]" literal.
+      // Intentional, documented consequence of consolidating on one mechanism, not a regression —
+      // the diagnostic-shape goal (command stays readable, credential span gone) is preserved.
+      assert.match(err.message, /\[REDACTED\]/, "the credential span must be redacted, not dropped (the command shape stays diagnosable)");
       return true;
     },
   );
@@ -472,7 +472,7 @@ test("realGit scrubs the raw GITHUB_TOKEN value (no x-access-token prefix) from 
       realGit(["clone", `file:///nonexistent/definitely-missing.git?token=${rawToken}`, "/tmp/qa-scrub-probe-target-2"], undefined),
       (err: Error) => {
         assert.ok(!err.message.includes(rawToken), "the raw token value must NOT appear in the error message");
-        assert.match(err.message, /\[REDACTED_CREDENTIAL\]/, "the shared redaction placeholder must appear in its place");
+        assert.match(err.message, /\[REDACTED\]/, "the shared redaction placeholder must appear in its place");
         return true;
       },
     );

@@ -1,5 +1,5 @@
 import { defaultEnvStoreFs, applyEnvVars, type EnvStoreFs } from "./env-store";
-import { redactError } from "../util/redact";
+import { RedactionPortAdapter } from "../orchestrator/sanitizer";
 import {
   configFromEnv,
   defaultAgentRuntimeConfig,
@@ -39,6 +39,10 @@ export interface CreateAgentRuntimeManagerOptions {
 const PROVIDERS: AgentProvider[] = ["opencode", "codex"];
 const ROLES: Array<keyof AgentRuntimeConfig["assignments"]> = ["primary", "reviewer", "chat"];
 
+// sdd/migration-wiring-phase-2 Slice 7b-2: the canonical redaction adapter (env+pattern) for this
+// file's provider-health error reporting, replacing src/util/redact.ts's redactError.
+const redactionPort = new RedactionPortAdapter();
+
 export function createAgentRuntimeManager(opts: CreateAgentRuntimeManagerOptions): AgentRuntimeManager {
   const env = opts.env ?? process.env;
   const fs = opts.fs ?? defaultEnvStoreFs();
@@ -54,7 +58,7 @@ export function createAgentRuntimeManager(opts: CreateAgentRuntimeManagerOptions
         const h = await opts.strategies[provider].health();
         return [provider, { ...h, provider, configured: true }] as const;
       } catch (err) {
-        return [provider, { provider, status: "failed", configured: true, error: redactError(err) }] as const;
+        return [provider, { provider, status: "failed", configured: true, error: redactionPort.redactError(err) }] as const;
       }
     }));
     return Object.fromEntries(entries) as Record<AgentProvider, AgentProviderHealth>;

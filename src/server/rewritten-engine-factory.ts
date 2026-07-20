@@ -90,6 +90,7 @@ import { GitHubIssueAdapter } from "@contexts/workspace-and-publication/infrastr
 import { VcsWriteAdapter } from "@contexts/workspace-and-publication/infrastructure/vcs-write.adapter";
 import { CONFINEMENT_DENYLIST } from "@contexts/workspace-and-publication/domain/write-confinement.service";
 import { WriteConfinementAdapter } from "@contexts/workspace-and-publication/infrastructure/write-confinement.adapter";
+import { MirrorGcAdapter } from "@contexts/workspace-and-publication/infrastructure/mirror-gc.adapter";
 import type { VcsPublishCollaborator } from "@contexts/qa-run-orchestration/infrastructure/bridges/publication-port.adapter";
 import { makeTargetCoverageCollector } from "@contexts/objective-signal/infrastructure/target-coverage-collector";
 import { assembleChangeCoverage } from "@contexts/objective-signal/domain/assemble-change-coverage";
@@ -340,6 +341,16 @@ export function buildConfinement(
   },
 ): WriteConfinementAdapter {
   return new WriteConfinementAdapter({ git, realpath, isSymlink });
+}
+
+// sdd/migration-wiring-phase-2 Slice 2 (D-B mirror-gc): constructs the REAL MirrorGcPort
+// collaborator — realGit's own LOCAL `git gc --auto --quiet` (no auth decoration, mirrors
+// buildConfinement's own "confinement/gc never push or commit" rationale immediately above).
+// realGit resolves to Promise<string> (stdout); MirrorGcAdapter's injected gc fn contract is
+// Promise<void> — the trailing `.then(() => {})` discards the stdout, never widening the port's
+// own signature. Exported for direct unit testing (same precedent as buildConfinement above).
+export function buildMirrorGc(git: GitFn = realGit): MirrorGcAdapter {
+  return new MirrorGcAdapter((dir) => git(["gc", "--auto", "--quiet"], dir).then(() => {}));
 }
 
 // One-shot /version fetch + sha/health match — VersionPollFn's contract is a SINGLE probe per
@@ -941,6 +952,13 @@ export function buildRewrittenCompositionConfig(
     // context.json/the brief is absent. A future fix can thread these dynamically once
     // GenerationPortAdapter/ReviewPortAdapter grow the SAME "dynamic diff" seam pattern the diff
     // field already uses (composition-root.ts's own precedent for this class of gap).
+    //
+    // sdd/migration-wiring-phase-2 Slice 3 (D-C, RIDER 4) update: contextMap's per-run read-back IS
+    // now wired — but NOT here. PreGenerationGroundingPortAdapter.ground(specDir, ...) reads
+    // `${specDir}/.qa/context.json` fresh on every run (specDir = the REAL per-run mirrorDir, only
+    // known post-checkout — the composition-build-time gap this comment describes still holds for
+    // THIS field). `config.contextMap` genuinely stays absent here, by design, unchanged. prChangedFiles
+    // remains the one still-open gap this comment describes.
     // CRITICAL fix (live crash, judgment-day audit): baseUrl is app-static (the live DEV URL from
     // config), so it is correct to set it once here at composition time — unlike diff/mode/guidance,
     // there is no per-run value to thread. Without this, E2eExecutionStrategy.run() (wired via
@@ -1033,6 +1051,11 @@ export function buildRewrittenCompositionConfig(
     // (fail-open fault isolation makes it safe to run on every composition, not gated by app config)
     // — realGit local ops only, no auth decoration (confinement never pushes/commits).
     confinement: buildConfinement(),
+    // sdd/migration-wiring-phase-2 Slice 2 (D-B mirror-gc): wired UNCONDITIONALLY (fail-open fault
+    // isolation makes it safe to run on every composition, not gated by app config) — realGit local
+    // `git gc --auto --quiet`, no auth decoration (gc never pushes/commits, mirrors confinement's
+    // own rationale immediately above).
+    mirrorGc: buildMirrorGc(),
     reviewerApprovedForPublish: true,
     coverageBlocksForPublish: false,
     e2eChangedForPublish: true,
@@ -1046,6 +1069,11 @@ export function buildRewrittenCompositionConfig(
     // shared-kernel redaction.port.ts. PublicationPortCollaborators.sanitize's own type (`(text:
     // string) => string`) is unchanged (duck-typed) — only the implementation is formalized.
     sanitize: (text: string) => redactionPort.redact(text),
+    // sdd/migration-wiring-phase-2 Slice 6b (logs→Issue egress boundary): wired UNCONDITIONALLY,
+    // alongside sanitize above — the SAME RedactionPortAdapter instance, so production is never
+    // silently unguarded (PublicationPortCollaborators.containsSecret's own doc has the full
+    // contract). Post-redaction fail-loud check on the "issue" route only.
+    containsSecret: (text: string) => redactionPort.containsSecret(text),
 
     checkout,
     // Cross-repo composition (bug fix): a cross-repo run gates on the SERVICE's own versionUrl —

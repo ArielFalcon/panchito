@@ -8,8 +8,7 @@ import { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
 import { RUN_MODES, RunMode, TestTarget, RunRecord, engineStatus } from "../types";
 import { AppConfig } from "../orchestrator/config-loader";
-import { sanitizeText } from "../orchestrator/sanitizer";
-import { redactError } from "../util/redact";
+import { sanitizeText, RedactionPortAdapter } from "../orchestrator/sanitizer";
 import { buildRunContext, buildLearningContext, buildRunChatContext } from "./chat";
 import { buildHelpContext } from "./help";
 import { json, readBody } from "./helpers";
@@ -57,6 +56,12 @@ import type { RunEventStore } from "./run-events";
 import type { AgentTurnRecord, TelemetryAnalysis } from "./history";
 
 const TARGETS: TestTarget[] = ["e2e", "code"];
+
+// sdd/migration-wiring-phase-2 Slice 7b-1: the canonical redaction adapter (env+pattern, see
+// sanitizer.ts's own header) for this file's error-message responses, replacing src/util/redact.ts's
+// redactError. Module-scope singleton (stateless besides the injected env, default process.env),
+// matching this file's existing module-scope `sanitizeText` usage above.
+const redactionPort = new RedactionPortAdapter();
 
 // SSE durable-poll cadence: how often an open run-event stream re-reads the durable store
 // for events produced out-of-process and re-checks the record for a terminal state. Small
@@ -370,7 +375,7 @@ async function handleCreateRun(req: IncomingMessage, res: ServerResponse, deps: 
     try {
       sha = await deps.resolveRef(appConfig.repo, ref);
     } catch (err) {
-      json(res, 400, { error: redactError(err) });
+      json(res, 400, { error: redactionPort.redactError(err) });
       return true;
     }
   }
@@ -764,7 +769,7 @@ async function handleGetAgentConfig(res: ServerResponse, deps: ApiDeps): Promise
   try {
     contractJson(res, 200, PublicAgentConfigSchema, await deps.agentRuntime.getConfig());
   } catch (err) {
-    json(res, 502, { error: `agent runtime failed: ${redactError(err)}` });
+    json(res, 502, { error: `agent runtime failed: ${redactionPort.redactError(err)}` });
   }
   return true;
 }
@@ -796,7 +801,7 @@ async function handlePutAgentConfig(req: IncomingMessage, res: ServerResponse, d
     const result = await deps.agentRuntime.applyConfig(parsed.data);
     contractJson(res, 200, AgentConfigApplyResultSchema, result);
   } catch (err) {
-    const message = redactError(err);
+    const message = redactionPort.redactError(err);
     json(res, runtimeStatusFromErrorMessage(message), { error: message });
   }
   return true;
@@ -816,7 +821,7 @@ async function handleAgentModels(res: ServerResponse, deps: ApiDeps, rawProvider
     const models = await deps.agentRuntime.listModels(provider.data);
     contractJson(res, 200, AgentModelsResponseSchema, { provider: provider.data, models });
   } catch (err) {
-    json(res, 502, { error: `failed to list agent models: ${redactError(err)}` });
+    json(res, 502, { error: `failed to list agent models: ${redactionPort.redactError(err)}` });
   }
   return true;
 }
@@ -846,7 +851,7 @@ async function handleAgentRestart(req: IncomingMessage, res: ServerResponse, dep
     const health = await deps.agentRuntime.restart(parsed.data.provider);
     contractJson(res, 200, AgentRestartResponseSchema, { health });
   } catch (err) {
-    json(res, 502, { error: `failed to restart agent provider: ${redactError(err)}` });
+    json(res, 502, { error: `failed to restart agent provider: ${redactionPort.redactError(err)}` });
   }
   return true;
 }
@@ -1118,7 +1123,7 @@ async function handleCreateApp(req: IncomingMessage, res: ServerResponse, deps: 
     // env VALUES never travel back; CreateAppResult only carries the key names.
     contractJson(res, parsed.data.dryRun || parsed.data.validateOnly ? 200 : 201, CreateAppResultSchema, result);
   } catch (err) {
-    json(res, 500, { error: redactError(err) });
+    json(res, 500, { error: redactionPort.redactError(err) });
   }
   return true;
 }
@@ -1148,7 +1153,7 @@ async function handleUpdateApp(req: IncomingMessage, res: ServerResponse, deps: 
     }
     contractJson(res, 200, CreateAppResultSchema, result);
   } catch (err) {
-    json(res, 500, { error: redactError(err) });
+    json(res, 500, { error: redactionPort.redactError(err) });
   }
   return true;
 }
@@ -1161,7 +1166,7 @@ function handleDeleteApp(res: ServerResponse, deps: ApiDeps, name: string, purge
   try {
     contractJson(res, 200, DeleteAppResultSchema, deps.deleteApp(name, purge));
   } catch (err) {
-    const msg = redactError(err);
+    const msg = redactionPort.redactError(err);
     json(res, msg.includes("not found") ? 404 : 500, { error: msg });
   }
   return true;
@@ -1249,7 +1254,7 @@ async function handleListRepos(res: ServerResponse, deps: ApiDeps, owner: string
     const result = await deps.listRepos(owner, page);
     contractJson(res, 200, RepoListResponseSchema, result);
   } catch (err) {
-    const msg = redactError(err);
+    const msg = redactionPort.redactError(err);
     const status = msg.includes("not found") || msg.includes("no repos found") ? 404
       : msg.includes("token") || msg.includes("GITHUB_TOKEN") ? 401
       : 500;

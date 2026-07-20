@@ -75,7 +75,7 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
     runId: true, contextMap: true, explorer: true, contextBrief: true, contextPack: true,
     staticSignal: true, diffArchetypes: true, existingSpecFiles: true, service: true, services: true,
     serviceLinks: true, contractDrift: true, crossRepoImpact: true,
-    classificationReason: true, contradiction: true,
+    classificationReason: true, contradiction: true, structuralPatterns: true,
   } satisfies Record<keyof OpencodeRunInput, true>;
 
   // Fields the rewritten path deliberately sources OUTSIDE this adapter's ctx+enrichment, or that
@@ -88,6 +88,7 @@ describe("seam-parity: GENERATION PROMPT (OpencodeRunInput vs GenerationPortAdap
     contextBrief: "FIXME: no GenerationEnrichment/ctx slot exists (grep-confirmed) — prompts.ts renders the 'blast radius' plan-brief section from input.contextBrief; the rewritten path's PreGenerationGroundingPort produces a context PACK (enrichment.contextPack) instead, which is a DIFFERENT rendering path (prompts.ts:611) that partially covers this, but the raw ExplorationBrief object itself is never threaded.",
     contextMap: "NOT dropped at this bridge — sourced via a DIFFERENT port (PreGenerationGroundingPort, composition-root.ts:cfg.contextMap), which folds it into enrichment.contextPack before this adapter ever sees it. Correct by design, not a gap.",
     diffArchetypes: "FIXME: no GenerationEnrichment/ctx slot exists (grep-confirmed) — prompts.ts:829 renders a one-line 'change shape' hint from input.diffArchetypes (detectStructuralPatterns output). Dropped means the rewritten path never prioritises archetype-appropriate tests.",
+    structuralPatterns: "sdd/migration-wiring-phase-2 Slice 4 (D-E, restoration-only): NO GenerationEnrichment/ctx slot exists on THIS bridge — this adapter still never sets OpencodeRunInput.structuralPatterns (same class of gap as diffArchetypes immediately above, deliberately out of this slice's narrow scope). apply-batch-3 rider CLOSED the end-to-end gap at a DIFFERENT layer instead: prompts.ts (src/integrations/prompts.ts's skillExemplarsContent) now derives structuralPatterns from input.diff via detectStructuralPatterns when this field arrives absent, so a real run's prompt carries the exemplar section without this bridge ever populating it. This allowlist entry stays accurate for THIS layer; diffArchetypes' own gap (a different, one-line hint) remains genuinely open.",
     failureSourced: "FIXME: no GenerationEnrichment/ctx slot exists (grep-confirmed) — prompts.ts:624,708,922 switches domSnapshot framing to 'GROUND TRUTH AT FAILURE' when true. domSnapshot itself IS threaded (enrichment.domSnapshot); the framing flag that changes how it's presented is not.",
     service: "FIXME: no GenerationEnrichment/ctx/CompositionConfig slot exists (grep-confirmed) — prompts.ts renders cross-repo framing from input.service (the triggering microservice) at 6+ call sites (286-291,433-434,456-457,1246-1251). Cross-repo runs are a documented CLAUDE.md feature (\"Cross-repo runs (microservices)\"); this is a real gap for that feature on the rewritten path.",
     services: "FIXME: no GenerationEnrichment/ctx/CompositionConfig slot exists (grep-confirmed, AppConfig.services IS real — src/orchestrator/schemas.ts) — prompts.ts:1069-1120 renders the full microservice-repo list (context mode). Same cross-repo gap as `service` above.",
@@ -587,6 +588,11 @@ describe("seam-parity: COMPOSITION (CompositionConfig vs buildRewrittenCompositi
     e2eChangedForPublish: "IS supplied (true) — asserted below as a present case.",
     reviewerApprovedForPublish: "IS supplied (true) — asserted below as a present case.",
     sanitize: "IS supplied (the real sanitizeText, F4 CRITICAL security invariant) — asserted below as a present case.",
+    // sdd/migration-wiring-phase-2 Slice 6b (logs→Issue egress boundary): IS supplied (the SAME
+    // RedactionPortAdapter instance's containsSecret, wired alongside sanitize's own redact
+    // immediately above) — wired UNCONDITIONALLY, the SAME "IS supplied" precedent sanitize
+    // establishes. Asserted below as a present case.
+    containsSecret: "IS supplied (RedactionPortAdapter.containsSecret, wired alongside sanitize) — asserted below as a present case.",
     learningRepo: "IS supplied (SqliteLearningRepository) — asserted below as a present case.",
     // sdd/migration-remediation Slice 3 (P0 write-confinement wiring, D-P0b, task 3.6): IS supplied
     // (a WriteConfinementAdapter wrapping realGit — local ops, NO auth decoration — + node:fs
@@ -599,6 +605,11 @@ describe("seam-parity: COMPOSITION (CompositionConfig vs buildRewrittenCompositi
     // fault isolation, not app-config gated), the SAME "IS supplied" precedent confinement/
     // reflectorPort establish immediately above. Asserted below as a present case.
     processAudit: "IS supplied (ProcessAuditPortAdapter wrapping history.ts reads + recordIncident/setRuleStatusByHuman/markContextStale sinks) — asserted below as a present case.",
+    // sdd/migration-wiring-phase-2 Slice 2 (D-B mirror-gc, task 2.3): IS supplied (a MirrorGcAdapter
+    // wrapping realGit's own local `git gc --auto --quiet`, no auth decoration) — wired
+    // UNCONDITIONALLY (fail-open fault isolation, not app-config gated), the SAME "IS supplied"
+    // precedent confinement/processAudit establish immediately above. Asserted below as a present case.
+    mirrorGc: "IS supplied (MirrorGcAdapter wrapping realGit's local `git gc --auto --quiet`) — asserted below as a present case.",
   };
 
   function fakeAppConfig(overrides: Partial<AppConfig> = {}): AppConfig {
@@ -658,6 +669,9 @@ describe("seam-parity: COMPOSITION (CompositionConfig vs buildRewrittenCompositi
     assert.equal(cfg.e2eChangedForPublish, true, `e2eChangedForPublish dropped at ${dyingLayer}`);
     assert.equal(cfg.reviewerApprovedForPublish, true, `reviewerApprovedForPublish dropped at ${dyingLayer}`);
     assert.notEqual(cfg.sanitize, undefined, `sanitize (F4 CRITICAL security invariant) dropped at ${dyingLayer}`);
+    // sdd/migration-wiring-phase-2 Slice 6b: containsSecret must be wired unconditionally alongside
+    // sanitize — the SAME "IS supplied" assertion pattern immediately above.
+    assert.notEqual(cfg.containsSecret, undefined, `containsSecret (logs→Issue egress boundary, Slice 6b) dropped at ${dyingLayer}`);
     assert.notEqual(cfg.learningRepo, undefined, `learningRepo dropped at ${dyingLayer}`);
     // sdd/migration-remediation Slice 3 (task 3.6): confinement must be wired unconditionally (fail-open
     // fault isolation, not app-config gated) — the SAME "IS supplied" assertion pattern as sanitize/
@@ -667,6 +681,10 @@ describe("seam-parity: COMPOSITION (CompositionConfig vs buildRewrittenCompositi
     // open fault isolation, not app-config gated) — the SAME "IS supplied" assertion pattern as
     // confinement immediately above.
     assert.notEqual(cfg.processAudit, undefined, `processAudit (process-audit reconnect, D-P1b) dropped at ${dyingLayer}`);
+    // sdd/migration-wiring-phase-2 Slice 2 (task 2.3): mirrorGc must be wired unconditionally
+    // (fail-open fault isolation, not app-config gated) — the SAME "IS supplied" assertion pattern
+    // as confinement/processAudit immediately above.
+    assert.notEqual(cfg.mirrorGc, undefined, `mirrorGc (mirror-lifecycle wiring, D-B) dropped at ${dyingLayer}`);
     // W5 fix (seam-parity FIXME, flipped): readSpecSource IS wired now — assert it's a real file-read
     // collaborator, not just a truthy stub, by reading this very test file back through it.
     assert.equal(typeof cfg.readSpecSource, "function", `readSpecSource dropped at ${dyingLayer} (Lever-2 selector-contradiction check starves without it)`);

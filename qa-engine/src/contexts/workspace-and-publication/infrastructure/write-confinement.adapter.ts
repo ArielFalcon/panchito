@@ -22,8 +22,14 @@
 // workspace-and-publication may import the VCS write seam" gate (.dependency-cruiser.cjs): this file
 // is itself INSIDE workspace-and-publication, so it may freely import its own domain's
 // WriteConfinementService.
+//
+// sdd/migration-wiring-phase-2, Slice 9 (D-G, AMENDMENT 2): enforce() also pairs an UNSTAGED
+// fs-level agent rename (no git access, so a move surfaces as an independent ` D` + `??` pair, not
+// a git-native R line) via git's own content-similarity rename detection, closing the KNOWN
+// LIMITATION documented on WriteConfinementService.classifyStrays. See enforce()'s own inline
+// comment for the transient add-N -> diff -> reset sequence.
 import { join, sep } from "node:path";
-import { WriteConfinementService } from "../domain/write-confinement.service.ts";
+import { WriteConfinementService, type GitRename } from "../domain/write-confinement.service.ts";
 
 export type Git = (args: string[], cwd?: string) => Promise<string>;
 
@@ -98,6 +104,38 @@ export class WriteConfinementAdapter {
       }
     }
 
+    // ── unstaged fs-level rename pairing (Slice 9, D-G, AMENDMENT 2) ──────────────────────────
+    // The agent has no git access (read-only on watched repos), so its own `fs.rename` surfaces as
+    // two INDEPENDENT status lines with no git-native renameCounterpart: an in-area unstaged
+    // deletion (` D`, NOT staged, NOT already a stray under the target's rules — a legitimate
+    // agent-owned path) plus an out-of-area untracked stray (`??`, already in `untracked` above).
+    // Pair them using git's OWN content-similarity rename detection, never a hand-rolled heuristic:
+    // transiently `git add -N` (intent-to-add) the untracked candidates so they appear as additions
+    // in a working-tree diff, ask `git diff --find-renames` whether it pairs any of them with one
+    // of the in-area deletions, then hand the (adapter-computed) pairing evidence to the classifier's
+    // PURE pairUnstagedRenames decision. RIDER 2: the whole add-N -> diff -> reset sequence is
+    // wrapped in try/finally so `git reset` (undoing the transient intent-to-add) ALWAYS fires — on
+    // the happy path AND on any error mid-sequence — never leaving the index mutated.
+    const isConfined = (p: string): boolean => (isCode ? !this.classifier.isCodeDenied(p) : !this.classifier.isE2eStray(p));
+    const candidateDeleted = changes
+      .filter((c) => c.xy === " D" && c.renameCounterpart === undefined && isConfined(c.path))
+      .map((c) => c.path);
+    let restoredDeleted: string[] = [];
+    if (candidateDeleted.length > 0 && untracked.length > 0) {
+      let gitRenames: GitRename[] = [];
+      try {
+        await this.deps.git(["add", "-N", "--", ...untracked], mirrorDir);
+        const diffOut = await this.deps.git(
+          ["diff", "--find-renames", "-M50%", "--diff-filter=R", "--name-status", "HEAD"],
+          mirrorDir,
+        );
+        gitRenames = parseRenameNameStatus(diffOut, (raw) => this.classifier.decodeGitPath(raw));
+      } finally {
+        await this.deps.git(["reset", "--", ...untracked], mirrorDir);
+      }
+      restoredDeleted = this.classifier.pairUnstagedRenames(candidateDeleted, untracked, gitRenames).restore;
+    }
+
     // Revert tracked strays — staged-aware (unstage + restore working tree from HEAD).
     if (tracked.length > 0) {
       await this.deps.git(["restore", "--staged", "--worktree", "--source=HEAD", "--", ...tracked], mirrorDir);
@@ -106,13 +144,36 @@ export class WriteConfinementAdapter {
     if (untracked.length > 0) {
       await this.deps.git(["clean", "-f", "--", ...untracked], mirrorDir);
     }
+    // Restore the confirmed OLD side of a paired unstaged rename — recovers the moved content
+    // that git's own detection matched to a now-cleaned stray. --source=HEAD is explicit (not
+    // strictly required — the index already holds HEAD's content for an unstaged-only deletion —
+    // but matches the "restored from HEAD" contract these paths carry).
+    if (restoredDeleted.length > 0) {
+      await this.deps.git(["restore", "--source=HEAD", "--", ...restoredDeleted], mirrorDir);
+    }
 
     return {
-      strays: tracked.length + untracked.length,
+      // A paired unstaged rename counts as 2 strays (both sides), matching the existing convention
+      // for a git-detected staged rename (both sides land in `tracked` via classifyStrays above).
+      strays: tracked.length + untracked.length + restoredDeleted.length,
       // Dedup: a path can be BOTH a denylist secret (dangerousByPath) and an escaping symlink
       // (escapes); a plain sum would count it twice. The Set collapses the overlap to one.
       dangerous: new Set([...dangerousByPath, ...escapes]).size,
-      reverted: [...tracked, ...untracked],
+      reverted: [...tracked, ...untracked, ...restoredDeleted],
     };
   }
+}
+
+// Parse `git diff --find-renames --diff-filter=R --name-status HEAD` output (restricted to renames
+// only, via --diff-filter=R) into typed {from, to} pairs. Each matching line is `R<score>\told\tnew`
+// — paths are decoded through the SAME git-quote/octal-escape decoder `git status --porcelain`
+// output goes through (`decode`, injected as WriteConfinementService.decodeGitPath), so a non-ASCII
+// or otherwise-quoted filename composes correctly through the pairing path too.
+function parseRenameNameStatus(out: string, decode: (raw: string) => string): GitRename[] {
+  return out
+    .split("\n")
+    .filter((l) => l.startsWith("R"))
+    .map((l) => l.split("\t"))
+    .filter((parts): parts is [string, string, string] => parts.length === 3)
+    .map(([, from, to]) => ({ from: decode(from as string), to: decode(to as string) }));
 }

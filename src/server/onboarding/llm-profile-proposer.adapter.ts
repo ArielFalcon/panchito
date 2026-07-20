@@ -22,7 +22,7 @@
 import { dirname, sep } from "node:path";
 import type { AgentDeps } from "../../integrations/opencode-client";
 import { defaultAgentDeps } from "../../integrations/opencode-client";
-import { redactError } from "../../util/redact";
+import { RedactionPortAdapter } from "../../orchestrator/sanitizer";
 import { logJson } from "../../integrations/logger";
 import type { BoundaryProfile, RepoRef } from "@contexts/service-topology/domain/index.ts";
 import type {
@@ -39,6 +39,10 @@ export const PROPOSER_MODEL = "opencode-go/deepseek-v4-pro";
 
 /** Default per-session timeout when the caller doesn't override it via ctx.timeoutMs. */
 const DEFAULT_PROPOSER_TIMEOUT_MS = 5 * 60 * 1000;
+
+// sdd/migration-wiring-phase-2 Slice 7b-2: the canonical redaction adapter (env+pattern) for this
+// file's fail-open warn logging, replacing src/util/redact.ts's redactError.
+const redactionPort = new RedactionPortAdapter();
 
 /** A candidate degrades to this sentinel on a per-entry schema parse failure (see
  *  ProposerVerdictSchema); filter it before returning so a malformed sibling never poisons an
@@ -192,13 +196,14 @@ export class LlmProfileProposerAdapter implements ProfileProposerPort {
       // rejection/timeout, unparseable text — degrades to an empty round, never propagates.
       // Instrumented (do NOT silently swallow): emit exactly one structured warn with the redacted
       // real error + the context needed to confirm-or-refute the AGENT_SINGLE_PROVIDER correlation
-      // and identify the actual throw. redactError reads only err.message and scrubs it via the
-      // shared sanitizer — it never serializes structured SDK bodies or the stack (no new leak surface).
+      // and identify the actual throw. redactionPort.redactError reads only err.message and scrubs
+      // it via the canonical adapter (env+pattern) — it never serializes structured SDK bodies or
+      // the stack (no new leak surface).
       logJson("warn", "onboarding proposer round failed (fail-open, returning no candidates)", {
         app: this.ctx.app,
         model: this.model,
         singleProvider: process.env.AGENT_SINGLE_PROVIDER,
-        error: redactError(err),
+        error: redactionPort.redactError(err),
       });
       return [];
     }

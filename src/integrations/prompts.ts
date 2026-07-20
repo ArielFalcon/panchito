@@ -13,7 +13,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { sanitizeText, capText, capDiff } from "../orchestrator/sanitizer";
+import { sanitizeText, assertNoSecretLeak, capText, capDiff, extractDiffFilePath, type SanitizeMode } from "../orchestrator/sanitizer";
 import type { ArchitectureContext } from "../qa/context";
 import type { CommitIntent } from "../qa/commit-classify";
 import type { QaCase } from "../types";
@@ -22,6 +22,8 @@ import type { QaCase } from "../types";
 // generation-ports parity test keeps the legacy opencode-client copies structurally in sync).
 import type { OpencodeRunInput, ParallelWorkerInput, ReviewInput } from "@contexts/generation/application/ports/generation-ports.ts";
 import { renderExplorationBrief } from "../qa/exploration-brief";
+import { matchExemplars, renderExemplarsForPrompt } from "../qa/learning/skill-exemplar";
+import { detectStructuralPatterns } from "../qa/learning/structural-pattern";
 import { assemble, section, type AssembledPrompt } from "./context-assembler";
 import { roleWindowBytes } from "./model-window-catalog";
 
@@ -61,8 +63,70 @@ const ACCEPTANCE_CRITERION_RULE =
 // `diff --git` boundaries to split/rank files), then secret-scrubbed. Every render site MUST
 // use this — history shows per-site discipline does not scale (WS5.1 fixed 3 sites, the
 // reviewer fix found a 4th, judgment-day found a 5th in the planner).
+//
+// sdd/migration-wiring-phase-2 Slice 6b (diff→model egress boundary): this is THE diff→model site —
+// every call site below feeds a generator/explorer/reviewer prompt, never an Issue body (verified:
+// all 5 callers are buildPromptAssembled/buildCodeTask/buildExplorerPrompt/buildPlanPromptAssembled/
+// reviewObjective). WS5.4a ("model-bound diffs keep auth-shaped code that the aggressive Issue-bound
+// pattern would redact") was never actually wired here — this function sanitized with the default
+// "issue" mode, silently defeating WS5.4a's own stated purpose for the diff itself (domSnapshot/
+// classificationReason DID get "model" mode; the diff embed did not). Fixed to "model" mode + the
+// post-redaction fail-loud guard (AMENDMENT 1's assertNoSecretLeak): a secret that survives
+// model-mode redaction throws SecretLeakError rather than reaching the model silently.
+//
+// judgment-day FIX 1 (file-aware redaction): "model" mode's code-shape narrowing (WS5.4a) is correct
+// for a TS/JS/etc. source hunk (`password: string` reads as a type annotation, not a secret) but WRONG
+// for a config-file hunk (docker-compose.yml, .env, CI YAML), where an unquoted lowercase-key
+// credential IS the norm — applying "model" mode to the WHOLE diff let those leak. cappedDiffText now
+// re-splits the already-capped diff at each `diff --git` header (the same split capDiff itself uses)
+// and picks the sanitize mode PER SECTION from its target file's extension: "model" only for a known
+// CODE extension, "issue" (the aggressive, unnarrowed policy) for everything else — config files,
+// unknown/no extension, and any preamble before the first header. Each section is redacted AND
+// guarded (assertNoSecretLeak) independently, with that section's own mode. A diff with no file header
+// at all (several unit-test fixtures pass raw, header-less snippets as `diff`) has no file to key a
+// mode off, so the whole text keeps the prior "model" mode — unchanged for those callers.
+const CODE_FILE_EXTENSIONS = new Set([
+  // Every language this system's watched apps and self-maintenance target today (see CLAUDE.md's
+  // "Java + JavaScript/TypeScript" scope note) plus common ecosystems, so a diff hunk touching source
+  // code keeps model-mode's narrower, code-aware redaction instead of the config-file default.
+  "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "java", "go", "rs", "kt", "cs", "rb", "php", "swift",
+]);
+
+function diffSectionMode(filePath: string): SanitizeMode {
+  const base = filePath.split("/").pop() ?? filePath;
+  const dot = base.lastIndexOf(".");
+  const ext = dot > 0 ? base.slice(dot + 1).toLowerCase() : "";
+  return CODE_FILE_EXTENSIONS.has(ext) ? "model" : "issue";
+}
+
+const DIFF_HEADER_RE = /^diff --git /;
+
 function cappedDiffText(diff: string): string {
-  return sanitizeText(capDiff(diff)).text;
+  const capped = capDiff(diff);
+  // Re-split at each file header — mirrors capDiff's own `diff --git` split so the mode decision is
+  // keyed off the exact same file boundaries the cap already used. NOTE: when the text STARTS with
+  // "diff --git" (the normal case for a real `git diff`), JS split's zero-width lookahead does NOT
+  // yield a leading empty element — sections[0] IS the first file's own section, not a preamble. So
+  // "is this a preamble" is decided per-section (does it start with its own header), never by index.
+  const sections = capped.split(/^(?=diff --git )/m);
+  const hasFileHeader = sections.some((s) => DIFF_HEADER_RE.test(s));
+  if (!hasFileHeader) {
+    // No file header found at all — nothing to key a per-file mode off (see doc above).
+    const redacted = sanitizeText(capped, "model").text;
+    assertNoSecretLeak(redacted, "model", "diff→model");
+    return redacted;
+  }
+  return sections
+    .map((section) => {
+      // A section starting with its own "diff --git a/... b/<path>" header picks mode by that file's
+      // extension; any OTHER content (real preamble before the first header, e.g. a `git log -p`
+      // commit-header prefix) conservatively gets the aggressive "issue" mode.
+      const mode: SanitizeMode = DIFF_HEADER_RE.test(section) ? diffSectionMode(extractDiffFilePath(section)) : "issue";
+      const redacted = sanitizeText(section, mode).text;
+      assertNoSecretLeak(redacted, mode, "diff→model");
+      return redacted;
+    })
+    .join("");
 }
 
 // ── (functions appended below from the original module, verbatim) ────────────────────────────
@@ -988,6 +1052,43 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
       ? `Change shape (deterministic): ${input.diffArchetypes.join(", ")} — prioritise tests that exercise these`
       : "";
 
+  // sdd/migration-wiring-phase-2 Slice 4 (D-E skill-exemplar restore): matches each detected
+  // structural pattern against the built-in exemplar catalog (src/qa/learning/skill-exemplar.ts).
+  // matchExemplars() itself takes a SINGULAR StructuralPattern (not an array), so this consumer
+  // loops + flatMaps across input.structuralPatterns, then dedupes by exemplar name before
+  // rendering — a diff can independently match multiple patterns (e.g. a form AND an api-call), and
+  // some pattern shapes (data-list) can match more than one catalog entry on their own.
+  // renderExemplarsForPrompt([]) already returns "" for no match, so absent/empty/no-match all
+  // degrade to no section, never a fabricated heading.
+  //
+  // CHANGE-COVERAGE OBSERVATION marker (design D-E rationale): no deterministic oracle exists for
+  // "did the rich exemplar template change generation quality" — flagging here (+ engram) so a
+  // future audit can measure rich-exemplar vs one-line-diffArchetypes-hint defect-catch rate.
+  //
+  // apply-batch-3 rider (orchestrator-directed): Slice 4 wired structuralPatterns[] end-to-end but
+  // nothing on the live path ever populated it (verified: zero references in run-qa.use-case.ts,
+  // generation-port.adapter.ts, rewritten-engine-factory.ts — see seam-parity.contract.test.ts's own
+  // ALLOWLIST entry for this field) — so the spec's "archetype-matched templates re-enter the
+  // generation prompt" scenario went unmet for a real run. Derived HERE instead, at the layer that
+  // already holds the diff (this function already reads input.diff for cappedDiffText above), rather
+  // than adding new qa-engine plumbing: an explicitly-supplied input.structuralPatterns (every
+  // existing test, and any future enrichment path) still wins; only a genuinely absent/empty one
+  // falls back to a local derivation from the diff already in scope.
+  const skillExemplarsContent = (() => {
+    if (!isGenerationMode) return "";
+    const patterns = input.structuralPatterns?.length
+      ? input.structuralPatterns
+      : detectStructuralPatterns(input.diff, input.intent?.changedFiles ?? []);
+    const matched = patterns.flatMap((p) => matchExemplars(p));
+    const seenNames = new Set<string>();
+    const deduped = matched.filter((e) => {
+      if (seenNames.has(e.name)) return false;
+      seenNames.add(e.name);
+      return true;
+    });
+    return renderExemplarsForPrompt(deduped);
+  })();
+
   return assemble([
     // STABLE prefix: working rules (mode-specific but stable for the generator role per session).
     section("working-rules", "stable-prefix", workingRulesContent, { priority: 1, cacheable: true }),
@@ -1020,6 +1121,12 @@ export function buildPromptAssembled(input: OpencodeRunInput): AssembledPrompt {
     // C1: diff archetypes one-line hint (tiny semi-stable section, priority 3 alongside static-signal).
     // Absent when no archetypes or non-generation mode — no empty header emitted.
     ...(diffArchetypesContent ? [section("diff-archetypes", "semi-stable", diffArchetypesContent, { priority: 3 })] : []),
+    // sdd/migration-wiring-phase-2 Slice 4 (D-E skill-exemplar restore): matched exemplar templates,
+    // alongside diffArchetypes at priority 3 (feeds the SAME structural-shape signal, richer form).
+    // Byte-budget capped at ~1.5KB, matching design's "no window starvation" requirement — an
+    // over-budget match set is OMITTED ENTIRELY (overflow:"drop" default), never a mid-template
+    // truncation, and never starves another section's share of the role's window.
+    ...(skillExemplarsContent ? [section("skill-exemplars", "semi-stable", skillExemplarsContent, { priority: 3, maxBytes: 1536 })] : []),
     // VOLATILE priority 0: Context Pack (blast-radius + DOM + contracts, pushed by orchestrator).
     // Placed FIRST in VOLATILE so the ground-truth is nearest the task and within the
     // compaction-preserved tail. The domSnapshot (failure-point capture) stays at priority 1

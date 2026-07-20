@@ -7,7 +7,11 @@
 import { execFile } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { redactSecrets } from "../util/redact";
+import { RedactionPortAdapter } from "../orchestrator/sanitizer";
+
+// sdd/migration-wiring-phase-2 Slice 7b-2: the canonical redaction adapter (env+pattern) for this
+// module's spawn-boundary error scrubbing, replacing src/util/redact.ts's redactSecrets.
+const redactionPort = new RedactionPortAdapter();
 
 export type Git = (args: string[], cwd?: string) => Promise<string>;
 
@@ -190,13 +194,14 @@ export function hardenGitArgs(args: readonly string[]): string[] {
 // propagates into logs (the maintainer's session-failed handler once logged a real PAT in
 // plaintext), so every credential span is redacted HERE, at the spawn boundary, before the error
 // can escape. Stays module-private (the spawn boundary owns it) and keeps mutating the Error in
-// place — including err.cmd, which redactError alone does not touch. Delegates the actual pattern
-// matching to redact.ts's redactSecrets (onboarding-hardening Slice 2: one shared pattern source
-// for both the x-access-token:...@ shape and the live token-value split, instead of a duplicated
-// module-local copy).
+// place — including err.cmd, which the adapter's redactError (Error-only) alone does not touch.
+// sdd/migration-wiring-phase-2 Slice 7b-2: delegates to the canonical RedactionPortAdapter's
+// redactText (env+pattern, src/orchestrator/sanitizer.ts) — one shared mechanism for both the
+// x-access-token:...@ shape and the live token-value split, replacing src/util/redact.ts's
+// redactSecrets.
 function scrubGitError(err: Error & { cmd?: string }): Error {
-  err.message = redactSecrets(err.message);
-  if (typeof err.cmd === "string") err.cmd = redactSecrets(err.cmd);
+  err.message = redactionPort.redactText(err.message);
+  if (typeof err.cmd === "string") err.cmd = redactionPort.redactText(err.cmd);
   return err;
 }
 

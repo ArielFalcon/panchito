@@ -4,7 +4,14 @@ import { randomBytes } from "node:crypto";
 import { writeFileSync, readFileSync, chmodSync, rmSync, unlinkSync, existsSync } from "node:fs";
 import { JobQueue } from "./server/queue";
 import { handleWebhook } from "./server/webhook";
-import { loadAppConfig, loadAppConfigsByRepo, listAppConfigs } from "./orchestrator/config-loader";
+import { loadAppConfig, listAppConfigs } from "./orchestrator/config-loader";
+// sdd/migration-wiring-phase-2 Slice 1 (D-A): webhook cross-repo routing now resolves through the
+// qa-engine app-catalog context (a validated resolution/projection layer over these SAME
+// loadAppConfig/listAppConfigs shell loaders — config-loader.ts stays the raw+expandEnv reader,
+// unchanged) instead of the legacy loadAppConfigsByRepo direct scan. See resolveWebhookDispatch's
+// own header for the byte-identical-output contract this swap preserves.
+import { YamlAppConfigAdapter } from "../qa-engine/src/contexts/app-catalog/infrastructure/yaml-app-config.adapter";
+import { resolveWebhookDispatch, type WebhookDispatch } from "./server/webhook-routing";
 import { handleApi, ApiDeps } from "./server/api";
 import { authorizeBearer, issueSession } from "./server/auth";
 import { verifyGithubIdentity, authorizeUser } from "./server/github-auth";
@@ -45,11 +52,18 @@ import { buildServiceBoundaryResolver } from "@contexts/service-topology/infrast
 // {"repo_path": mirrorDir} alone performs the initial FULL index (project name derived from the
 // path server-side, no `project` key needed).
 import { CodebaseMemoryClient } from "../qa-engine/src/shared-infrastructure/code-graph/codebase-memory-client";
-import { redactError } from "./util/redact";
+import { RedactionPortAdapter } from "./orchestrator/sanitizer";
 
 const SELF_REPO = process.env.PANCHITO_REPO ?? "ArielFalcon/panchito";
 const ROOT = process.env.PANCHITO_ROOT ?? process.cwd();
 const TOKEN_FILE = join(ROOT, "config", ".api_token");
+// sdd/migration-wiring-phase-2 Slice 1 (D-A): constructed ONCE, injected with the SAME shell
+// loaders config-loader.ts's own callers use (no root override needed — both loaders default to
+// this file's identical process.env.PANCHITO_ROOT ?? process.cwd() computation independently).
+const appCatalog = new YamlAppConfigAdapter({ load: loadAppConfig, list: listAppConfigs });
+// sdd/migration-wiring-phase-2 Slice 7b-2: the canonical redaction adapter (env+pattern) for this
+// file's error-message responses, replacing src/util/redact.ts's redactError.
+const redactionPort = new RedactionPortAdapter();
 // Durable backing (OBS-01) lives in createDurableRunEventStore, shared with the CLI so every
 // trigger persists events identically: the live SSE stream survives a restart (e.g. the
 // maintainer hot-swap's process.exit) and eviction from the in-memory ring.
@@ -457,7 +471,7 @@ async function indexRepoForOnboarding(repo: string, mirrorDir: string): Promise<
     }
     return { repo, status: "ok", nodeCount };
   } catch (err) {
-    return { repo, status: "failed", error: redactError(err) };
+    return { repo, status: "failed", error: redactionPort.redactError(err) };
   }
 }
 
@@ -683,7 +697,7 @@ const server = createServer(async (req, res) => {
         req.destroy();
       }
     });
-    req.on("end", () => {
+    req.on("end", async () => {
       if (aborted) return;
       const sig = typeof req.headers["x-hub-signature-256"] === "string" ? req.headers["x-hub-signature-256"] : undefined;
       const result = handleWebhook(body, sig, { secret });
@@ -694,15 +708,28 @@ const server = createServer(async (req, res) => {
           return;
         }
         const { repo, sha, mode, guidance, baseSha } = result.payload;
-        const matches = loadAppConfigsByRepo(repo);
-        if (matches.length === 0) logJson("warn", "no config/apps entry for repo; event ignored", { repo });
-        for (const m of matches) {
+        // sdd/migration-wiring-phase-2 Slice 1 (D-A): routed through the app-catalog context's
+        // resolveByRepo (byte-identical to the legacy loadAppConfigsByRepo-driven dispatch it
+        // replaces — see webhook-routing.ts's own test for the pinned equivalence).
+        //
+        // judgment-day fix: this await had NO error boundary — a throw here (e.g. a catalog-level
+        // fault the per-config isolation below does not cover) became an unhandled rejection inside
+        // this "end" listener: res never ends, GitHub's webhook delivery hangs to its own timeout,
+        // and no run is ever enqueued. Mirrors the adjacent per-dispatch enqueueApiRun try/catch
+        // immediately below (log + 500 + return), one call earlier.
+        let dispatch: WebhookDispatch[];
+        try {
+          dispatch = await resolveWebhookDispatch(appCatalog, repo, { mode, guidance, baseSha });
+        } catch (err) {
+          logJson("error", "webhook dispatch resolution failed", { error: err instanceof Error ? err.message : String(err), repo, sha });
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ message: "internal error — could not resolve webhook dispatch" }));
+          return;
+        }
+        if (dispatch.length === 0) logJson("warn", "no config/apps entry for repo; event ignored", { repo });
+        for (const d of dispatch) {
           try {
-            if (m.role === "primary") {
-              enqueueApiRun(m.app.name, sha, m.app.code ? "code" : "e2e", mode, guidance, undefined, undefined, undefined, baseSha);
-            } else {
-              enqueueApiRun(m.app.name, sha, "e2e", "diff", guidance, undefined, undefined, repo);
-            }
+            enqueueApiRun(d.app, sha, d.target, d.mode, d.guidance, undefined, undefined, d.triggerRepo, d.baseSha);
           } catch (err) {
             logJson("error", "webhook enqueue failed", { error: err instanceof Error ? err.message : String(err), repo, sha });
             res.writeHead(500, { "Content-Type": "application/json" });

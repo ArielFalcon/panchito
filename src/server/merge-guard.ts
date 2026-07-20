@@ -39,7 +39,8 @@ export const PROTECTED_PATHS: string[] = [
   "src/server/self-update.ts",
   "src/server/merge-guard.ts",
   // 2. secret boundary
-  "src/util/redact.ts",
+  // sdd/migration-wiring-phase-2 Slice 7d: src/util/redact.ts is deleted — every consumer migrated
+  // to the canonical RedactionPortAdapter (src/orchestrator/sanitizer.ts), the one remaining entry.
   "src/orchestrator/sanitizer.ts",
   // 3. gate integrity (the fix must not weaken what decides whether it deploys)
   "*.test.ts",

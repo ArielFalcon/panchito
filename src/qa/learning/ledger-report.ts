@@ -1,10 +1,22 @@
 import type { LearningRule, RuleStatus, Confidence } from "./learning-rule";
-import { isWellFormedTrigger } from "./distiller";
 
 // Read-only, human-readable rendering of the learning ledger for audit. The ledger is governed
 // state owned by the deterministic orchestrator (the agent never writes it), but until now it was
 // only inspectable as opaque SQLite rows. This turns it into prose a reviewer can read and veto in
 // one pass. Pure (no I/O): the CLI in ledger-report-cli.ts feeds it the rows.
+
+// Re-homed from the deleted src/qa/learning/distiller.ts (migration-wiring-phase-2, Slice 8b-1):
+// ledger-report.ts was the sole live consumer of isWellFormedTrigger, so the check moves here
+// verbatim rather than surviving as the last reason to keep distiller.ts around. Canonical trigger
+// form is "Applies when <condition>" — see distiller.ts's history for the full rationale (git
+// blame); this module only needs the well-formedness predicate, not the canonicalization writer.
+const TRIGGER_PREFIX_RE = /^applies\s+when\b\s*/i;
+
+// A trigger is well-formed when it carries the canonical prefix AND a non-empty condition body.
+// Used by the ledger's static gate / audit view to flag (not drop) malformed rules.
+function isWellFormedTrigger(trigger: string): boolean {
+  return TRIGGER_PREFIX_RE.test(trigger) && trigger.replace(TRIGGER_PREFIX_RE, "").trim().length > 0;
+}
 
 // Plain-language labels for the auto-labeled taxonomy, so the report never leaks internal E-… codes.
 // Kept here rather than in taxonomy.ts to keep this an additive reporting module with no coupling

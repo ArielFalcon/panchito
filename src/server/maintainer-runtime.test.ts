@@ -215,7 +215,7 @@ test("triggerMaintainer redacts a secret-shaped error before logging the session
     assert.ok(logged.length > 0, "the session-failed line was logged");
     const line = logged.join("\n");
     assert.ok(!line.includes(secret), "the raw secret must not appear in the logged line");
-    assert.match(line, /\[REDACTED_CREDENTIAL\]/, "the logged line carries the shared redaction placeholder");
+    assert.match(line, /\[REDACTED\]/, "the logged line carries the shared redaction placeholder");
   } finally {
     console.error = originalError;
   }
@@ -286,7 +286,7 @@ test("triggerMaintainer redacts a token-shaped error before logging the post-swa
     const line = logged.join("\n");
     assert.ok(line.includes("post-swap npm install failed"), "the post-swap install failure line was logged");
     assert.ok(!line.includes(secret), "the raw token must not appear in the logged line");
-    assert.match(line, /\[REDACTED_CREDENTIAL\]/, "the logged line carries the shared redaction placeholder");
+    assert.match(line, /\[REDACTED\]/, "the logged line carries the shared redaction placeholder");
   } finally {
     console.error = originalError;
   }

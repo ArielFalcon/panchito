@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 // PARITY: the re-ported error-class helpers (Judgment-day D.7 FIX 4's dependency) must match
-// src/qa/learning/taxonomy.ts + src/qa/learning/labeler.ts's resolveErrorClass across a sample
+// src/qa/learning/taxonomy.ts's errorClassFromVerdict/errorClassFromCorrections across a sample
 // table — qa-run-orchestration must not import src/qa/learning/* directly, so this is a SEPARATE
-// re-port, not a re-use of the legacy module. This file imports src/qa/learning/taxonomy.ts +
-// src/qa/learning/labeler.ts, so it is added to the qa-engine typecheck "exclude" list (same
-// parity-import pattern as progress-gate-parity.test.ts / adjudicate-parity.test.ts).
+// re-port, not a re-use of the legacy module. This file imports src/qa/learning/taxonomy.ts, so it
+// is added to the qa-engine typecheck "exclude" list (same parity-import pattern as
+// progress-gate-parity.test.ts / adjudicate-parity.test.ts).
 import {
   errorClassFromVerdict,
   errorClassFromCorrections,
@@ -15,10 +15,21 @@ import {
   errorClassFromVerdict as legacyErrorClassFromVerdict,
   errorClassFromCorrections as legacyErrorClassFromCorrections,
 } from "../../../../../../src/qa/learning/taxonomy.ts";
-import { labelRunOutcome as legacyLabelRunOutcome } from "../../../../../../src/qa/learning/labeler.ts";
 
-// Legacy resolveErrorClass is module-private (not exported by labeler.ts) — probe it indirectly
-// through the exported labelRunOutcome(), reading back the errorClass field it computes.
+// FIXTURE-SNAPSHOT (migration-wiring-phase-2, Slice 8b-1): src/qa/learning/labeler.ts was deleted
+// (superseded by this module) — its resolveErrorClass (module-private, only reachable via the
+// exported labelRunOutcome()) is no longer available to import live. The expected outputs below
+// were captured by running the legacy labelRunOutcome() against these exact samples BEFORE
+// deletion; they pin the same fixed outcomes the live import used to assert against.
+//
+// WARNING (judgment-day round-1, frozen-snapshot discipline): LEGACY_RESOLVE_ERROR_CLASS_SNAPSHOT
+// below is a FROZEN oracle — the legacy source it was captured from (labeler.ts) no longer exists,
+// so there is no live re-derivation possible. If a change to error-class.ts's own resolveErrorClass
+// makes one of these assertions fail, that failure is signaling a REAL behavioral divergence from
+// the legacy oracle, not a stale fixture. Editing a snapshot VALUE here to make a failing test pass
+// silently rebaselines away that regression instead of fixing it — never do that without a written
+// justification (in the commit message or a comment here) for why the NEW value is the correct
+// behavior, checked against the surviving live logic this snapshot was pinned against.
 function legacyResolveErrorClass(input: {
   verdict: string;
   coverageRatio: number | null;
@@ -26,23 +37,27 @@ function legacyResolveErrorClass(input: {
   reviewerCorrections: string[];
   valueScore?: number | null;
 }): string | null {
-  const outcome = legacyLabelRunOutcome({
-    runId: "parity-probe",
-    app: "parity-app",
-    sha: "deadbeef",
-    mode: "diff",
-    target: "e2e",
-    verdict: input.verdict as never,
-    staticOk: true,
-    coverageRatio: input.coverageRatio,
-    minCoverageRatio: input.minCoverageRatio,
-    reviewerCorrections: input.reviewerCorrections,
-    flaky: input.verdict === "flaky",
-    retries: 0,
-    valueScore: input.valueScore ?? null,
-  });
-  return outcome.errorClass;
+  const key = JSON.stringify(input);
+  const snapshot = LEGACY_RESOLVE_ERROR_CLASS_SNAPSHOT[key];
+  if (snapshot === undefined) {
+    throw new Error(`No fixture snapshot for input: ${key} — add a captured legacy value before using a new sample.`);
+  }
+  return snapshot;
 }
+
+const LEGACY_RESOLVE_ERROR_CLASS_SNAPSHOT: Record<string, string | null> = {
+  '{"verdict":"invalid","coverageRatio":null,"minCoverageRatio":0.7,"reviewerCorrections":[]}': "E-STATIC",
+  '{"verdict":"fail","coverageRatio":null,"minCoverageRatio":0.7,"reviewerCorrections":[]}': "E-EXEC-FAIL",
+  '{"verdict":"flaky","coverageRatio":null,"minCoverageRatio":0.7,"reviewerCorrections":[]}': "E-FLAKY",
+  '{"verdict":"infra-error","coverageRatio":null,"minCoverageRatio":0.7,"reviewerCorrections":[]}': "E-INFRA",
+  '{"verdict":"pass","coverageRatio":0.25,"minCoverageRatio":0.7,"reviewerCorrections":[]}': "E-COVERAGE-GAP",
+  '{"verdict":"pass","coverageRatio":0.95,"minCoverageRatio":0.7,"reviewerCorrections":[]}': null,
+  '{"verdict":"pass","coverageRatio":null,"minCoverageRatio":0.7,"reviewerCorrections":[]}': null,
+  '{"verdict":"fail","coverageRatio":null,"minCoverageRatio":0.7,"reviewerCorrections":["[false-positive] x"]}': "E-EXEC-FAIL",
+  '{"verdict":"pass","coverageRatio":0.95,"minCoverageRatio":0.7,"reviewerCorrections":[],"valueScore":0.2}': "E-VALUE-SURVIVED",
+  '{"verdict":"pass","coverageRatio":0.95,"minCoverageRatio":0.7,"reviewerCorrections":[],"valueScore":0.85}': null,
+  '{"verdict":"skipped","coverageRatio":null,"minCoverageRatio":0.7,"reviewerCorrections":[]}': null,
+};
 
 test("PARITY: errorClassFromVerdict matches legacy across every verdict + coverage-ratio band", () => {
   const samples: Array<{ verdict: string; coverageRatio: number | null; minRatio: number }> = [

@@ -19,8 +19,12 @@ import type { ProfileProposerPort, ResolveLinksResult } from "@contexts/service-
 import type { BoundaryProfile, RepoRef } from "@contexts/service-topology/domain/index.ts";
 import { serializeBoundary, spliceBoundariesBlock } from "./write-boundaries";
 import { aggregateResolution, type ResolutionSummary } from "./resolution-summary";
-import { redactError } from "../../util/redact";
+import { RedactionPortAdapter } from "../../orchestrator/sanitizer";
 import { logJson } from "../../integrations/logger";
+
+// sdd/migration-wiring-phase-2 Slice 7c: the canonical redaction adapter (env+pattern) for this
+// job's error-message reporting, replacing src/util/redact.ts's redactError (8 call sites below).
+const redactionPort = new RedactionPortAdapter();
 
 /** const-object-then-type pattern (typescript SKILL) — never a raw string union. */
 export const ONBOARD_STATE = {
@@ -225,7 +229,7 @@ export function createOnboardingJob(deps: OnboardingJobDeps): OnboardingJob {
         `indexing ${repo} timed out`,
       );
     } catch (err) {
-      return { repo, status: REPO_INDEX_STATUS.failed, error: redactError(err) };
+      return { repo, status: REPO_INDEX_STATUS.failed, error: redactionPort.redactError(err) };
     }
   }
 
@@ -250,7 +254,7 @@ export function createOnboardingJob(deps: OnboardingJobDeps): OnboardingJob {
       // Defensive-only: indexOneRepo never throws, so this is a belt-and-suspenders guard against
       // an unforeseen synchronous failure in the loop itself. The phase still ends done/winner —
       // indexing is advisory (§2.5) — just without further per-repo progress.
-      status = { ...status, state: ONBOARD_STATE.done, error: redactError(err), finishedAt: new Date().toISOString() };
+      status = { ...status, state: ONBOARD_STATE.done, error: redactionPort.redactError(err), finishedAt: new Date().toISOString() };
     } finally {
       busy = false;
     }
@@ -296,7 +300,7 @@ export function createOnboardingJob(deps: OnboardingJobDeps): OnboardingJob {
           "resolving mirrors timed out",
         );
       } catch (err) {
-        fail(mirrorTimedOut ? "resolving mirrors timed out" : redactError(err));
+        fail(mirrorTimedOut ? "resolving mirrors timed out" : redactionPort.redactError(err));
         return;
       }
 
@@ -337,7 +341,7 @@ export function createOnboardingJob(deps: OnboardingJobDeps): OnboardingJob {
           "onboarding timed out",
         );
       } catch (err) {
-        fail(timedOut ? "onboarding timed out" : redactError(err));
+        fail(timedOut ? "onboarding timed out" : redactionPort.redactError(err));
         return;
       }
 
@@ -355,7 +359,7 @@ export function createOnboardingJob(deps: OnboardingJobDeps): OnboardingJob {
             resolution = aggregateResolution(resolved);
           } catch (err) {
             resolution = undefined; // advisory only — never flips the winner outcome
-            logJson("warn", "onboarding resolveLinks failed (advisory)", { error: redactError(err) });
+            logJson("warn", "onboarding resolveLinks failed (advisory)", { error: redactionPort.redactError(err) });
           }
         }
         status = { ...status, state: ONBOARD_STATE.done, outcome: ONBOARD_OUTCOME.winner, resolvedProfile: result.profile, resolution, finishedAt };
@@ -363,7 +367,7 @@ export function createOnboardingJob(deps: OnboardingJobDeps): OnboardingJob {
         status = { ...status, state: ONBOARD_STATE.done, outcome: ONBOARD_OUTCOME.noProfile, finishedAt };
       }
     } catch (err) {
-      fail(redactError(err));
+      fail(redactionPort.redactError(err));
     } finally {
       busy = false;
     }
@@ -411,13 +415,13 @@ export function createOnboardingJob(deps: OnboardingJobDeps): OnboardingJob {
       try {
         existing = deps.readConfig(path);
       } catch (err) {
-        return { ok: false, error: redactError(err) };
+        return { ok: false, error: redactionPort.redactError(err) };
       }
       try {
         const spliced = spliceBoundariesBlock(existing, lines);
         deps.writeConfig(path, spliced);
       } catch (err) {
-        return { ok: false, error: redactError(err) };
+        return { ok: false, error: redactionPort.redactError(err) };
       }
       // Boundaries are WRITTEN at this point — onboarding has durably succeeded regardless of
       // what indexing does next (design §2.1, §2.5). Indexing is fire-and-forget, mirroring
