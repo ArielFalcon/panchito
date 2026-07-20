@@ -99,7 +99,17 @@ const NAMED_SECRET_PATTERNS: Array<{ name: string; p: RegExp; skip?: (m: string)
   // requires the inner ':' so a bare scheme://host@ (no password) is left intact.
   { name: "url-credentials", p: /(?<=:\/\/)[^\s:/@]+:[^\s:/@]+(?=@)/g },
   // Bearer tokens leaking in command output (git http.extraHeader, curl -H, etc.)
-  { name: "bearer-token", p: /(?:Authorization|auth)\s*[:=]\s*Bearer\s+\S+/gi },
+  // judgment-day round 3 (FIX F.1, Judge B): the trailing value capture is quote-aware —
+  // `(?:"[^"]*"|'[^']*'|[^\s"']+)` instead of a bare `\S+`. A bare `\S+` greedily consumes a
+  // CLOSING quote that belongs to the surrounding prose, not the secret's own value (e.g. a
+  // reviewer's rejection quoting a UI element's accessible name: `name "Token: refresh" is NOT`
+  // — `\S+` matched `refresh"`, and replacing that whole span with "[REDACTED]" left an unbalanced
+  // opening quote, corrupting the line). The quoted-string branches consume a value's OWN matching
+  // quote pair as a unit (so a legitimately quoted secret like `password: "hunter2"` still redacts
+  // correctly); the bare-token branch excludes quote characters entirely, so it stops BEFORE a
+  // stray closing quote instead of swallowing it. Applied to every named pattern below that shares
+  // this same trailing-`\S+` shape (generic-credential, env-credential, api-key-assignment).
+  { name: "bearer-token", p: /(?:Authorization|auth)\s*[:=]\s*Bearer\s+(?:"[^"]*"|'[^']*'|[^\s"']+)/gi },
   // JWT: three base64url segments separated by dots
   { name: "jwt", p: /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g },
   // PEM private key blocks — multi‑line with lazy match
@@ -109,16 +119,19 @@ const NAMED_SECRET_PATTERNS: Array<{ name: string; p: RegExp; skip?: (m: string)
   // Generic credential assignments: credential/auth_token/access_key = value.
   // The [\"']? before the separator handles JSON formatting where a closing quote
   // separates the key from the colon: "password": "hunter2" (previously leaked).
-  { name: "generic-credential", p: /(?:credential|auth_token|access_key)[\"']?\s*[:=]\s*\S+/gi },
+  // judgment-day round 3 (FIX F.1): quote-aware value capture — see bearer-token's own comment above.
+  { name: "generic-credential", p: /(?:credential|auth_token|access_key)[\"']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s"']+)/gi },
   // ENV-VAR style credential names (UPPER_SNAKE ending in a credential word), e.g.
   // DEV_TEST_PASS=..., DEV_ENV_PASS=..., GITHUB_TOKEN=..., OPENCODE_API_KEY=... The
   // bare-keyword pattern below misses "PASS"/"KEY" as a suffix, so this covers the
   // system's own env credentials. Case-sensitive (UPPER) to limit false positives.
-  { name: "env-credential", p: /\b[A-Z][A-Z0-9_]*(?:PASS|PASSWORD|SECRET|TOKEN|KEY|PWD|CRED|CREDENTIAL)[A-Z0-9_]*[\"']?\s*[:=]\s*\S+/g },
+  // judgment-day round 3 (FIX F.1): quote-aware value capture — see bearer-token's own comment above.
+  { name: "env-credential", p: /\b[A-Z][A-Z0-9_]*(?:PASS|PASSWORD|SECRET|TOKEN|KEY|PWD|CRED|CREDENTIAL)[A-Z0-9_]*[\"']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s"']+)/g },
   // api_key/token/secret/password assignments — catch‑all; keep LAST among
   // assignment patterns so the more specific ones fire first.
   // modelSkip (WS5.4a): see this file's own header — twin of sanitizer.ts's own modelSkip.
-  { name: "api-key-assignment", p: /(?:api[_-]?key|token|secret|password|passwd|pwd)[\"']?\s*[:=]\s*\S+/gi, modelSkip: (m) => !isModelModeSecretValue(m) },
+  // judgment-day round 3 (FIX F.1): quote-aware value capture — see bearer-token's own comment above.
+  { name: "api-key-assignment", p: /(?:api[_-]?key|token|secret|password|passwd|pwd)[\"']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s"']+)/gi, modelSkip: (m) => !isModelModeSecretValue(m) },
   // base64‑encoded secrets (>40 chars of base64 chars), with data‑URI filter.
   // skip: a run of pure hex is a git SHA / digest (commit ids, lockfile hashes), NOT a
   // secret — redacting it turned the run header's SHA into "[REDACT" (the launcher omits
