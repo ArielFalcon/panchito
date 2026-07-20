@@ -119,6 +119,41 @@ test("SECURITY: a secret quoted in gateSignals.reviewerCorrections is redacted b
   assert.match(capturedPrompt!, /\[REDACTED\]/, "the redaction placeholder must appear in its place");
 });
 
+// judgment-day round 3 (FIX D, Judge B): the test above uses an llm-api-key-shaped secret, which
+// has no modelSkip predicate and so redacts identically under BOTH sanitizeText modes — it never
+// actually exercised which mode this call site uses. This test isolates the mode itself: a
+// `password: <short value>`-shaped secret is exactly the api-key-assignment pattern's modelSkip
+// escape hatch (WS5.4a) — "model" mode treats a short, low-entropy value as a code-shape
+// false-positive and does NOT redact it, while the stricter default ("issue") mode does. Every
+// sibling reviewer/selector-authored field in prompts.ts (reviewCorrections, priorCorrections,
+// selectorContradictions) was moved to the stricter default mode in round 2 (commit 8cc53bf) —
+// this call site's own header claims reviewerCorrections gets "the SAME redaction every sibling
+// model-bound field in prompts.ts already receives", which is false for the mode parameter.
+test("SECURITY: a low-entropy password-shaped secret in reviewerCorrections is redacted under the stricter default mode, matching every prompts.ts sibling", async () => {
+  let capturedPrompt: string | undefined;
+  const runtime = fakeRuntime({
+    prompt: async (text) => {
+      capturedPrompt = text;
+      return { output: validReflectionJson };
+    },
+  });
+  const repo = fakeRepo();
+  const adapter = new ReflectorPortAdapter({ runtime, repo, backfill: () => {}, cwd: "/mirror/app", app: "app" });
+
+  const input: ReflectionInput = {
+    ...baseInput,
+    gateSignals: { ...baseInput.gateSignals, reviewerCorrections: ["password: hunter2"] },
+  };
+  await adapter.reflect(input);
+
+  assert.ok(capturedPrompt, "expected the reflection prompt to be captured");
+  assert.ok(
+    !capturedPrompt!.includes("hunter2"),
+    "a password-shaped value in a reviewer correction must be redacted under the stricter default mode, not skipped as a code-shape false positive",
+  );
+  assert.match(capturedPrompt!, /\[REDACTED\]/, "the redaction placeholder must appear in its place");
+});
+
 test("reflect() never threads initialStatus — structural ADR-3 pin", async () => {
   let savedRule: LearningRule | undefined;
   const runtime = fakeRuntime({});
