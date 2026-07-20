@@ -602,11 +602,40 @@ test("buildVcsPublish (e2e target): changes under e2e/ -> checkout -B, add, comm
 
   const result = await vcsWrite.publish({ mirrorDir: "/mirrors/org/app", branch: "qa-bot/abc1234", sha: "abc1234" });
 
-  assert.deepEqual(result, { changed: true });
-  assert.deepEqual(calls.map(subcommandOf), ["status", "checkout", "add", "commit", "push"], "git write must follow the legacy contract's exact ordering: status-check -> checkout -B -> add -> commit -> push");
+  // sdd/security-hardening judgment-day round 2 (FIX 3): publish() now also surfaces
+  // revertedDenylisted (always an array, never absent, once a commit actually ran) so the caller
+  // can thread a reverted tamper into gateSignals.confinement — see VcsPublishCollaborator's own doc.
+  // judgment-day round 3 (FIX E): revertedDangerous (the isDangerousPath subset) is surfaced the
+  // SAME way, always an array once a commit actually ran.
+  assert.deepEqual(result, { changed: true, revertedDenylisted: [], revertedDangerous: [] });
+  // sdd/security-hardening judgment-day round 2 (FIX 2): the tracked-file denylist guard is now
+  // wired for EVERY target (not just isCode — see buildVcsPublish's own denyModifiedTracked doc), so
+  // commit() always issues its own `git diff --cached --name-status -M` before committing, even on
+  // the e2e target — one extra "diff" step in the write sequence.
+  assert.deepEqual(calls.map(subcommandOf), ["status", "checkout", "add", "diff", "commit", "push"], "git write must follow the legacy contract's exact ordering: status-check -> checkout -B -> add -> [tracked-denylist diff] -> commit -> push");
   assert.deepEqual(calls[1], ["checkout", "-B", "qa-bot/abc1234"], "checkout must target the SAME branch the PR will be opened against (ctx.branch, threaded through the vcsWrite.publish() call)");
   assert.deepEqual(calls[2], ["add", "--", "e2e"], "e2e target stages ONLY the e2e/ pathspec, never the whole repo");
-  assert.ok(calls[4]?.includes("--force-with-lease"), "push must force-with-lease (safe concurrent-push guard)");
+  assert.ok(calls[5]?.includes("--force-with-lease"), "push must force-with-lease (safe concurrent-push guard)");
+});
+
+// judgment-day round 3 (ALSO, Judge B): denyModifiedTracked is wired UNCONDITIONALLY in buildVcsPublish
+// (see its own header: "wired for EVERY target, not just isCode") — but every existing test above only
+// ever exercises mode: "diff". Structurally guaranteed (the wiring has no branch on `mode`), but that
+// guarantee was previously asserted only by inference, never pinned by a test that actually passes
+// mode: "context". This closes that gap the same way the e2e-target test above pins it for "diff".
+test("buildVcsPublish (context mode): the tracked-file denylist guard is ALSO wired for mode='context', not just diff/e2e/code", async () => {
+  const { git, calls } = fakeGit(" M e2e/.qa/context.json");
+  const vcsWrite = buildVcsPublish(false, "context", git, () => {});
+
+  const result = await vcsWrite.publish({ mirrorDir: "/mirrors/org/app", branch: "qa-bot/abc1234", sha: "abc1234" });
+
+  assert.deepEqual(result, { changed: true, revertedDenylisted: [], revertedDangerous: [] });
+  assert.deepEqual(
+    calls.map(subcommandOf),
+    ["status", "checkout", "add", "diff", "commit", "push"],
+    "context mode must ALSO issue the tracked-denylist diff step before committing, exactly like diff/e2e/code",
+  );
+  assert.deepEqual(calls[2], ["add", "--", "e2e/.qa/context.json"], "context mode stages ONLY the context artifact's exact pathspec");
 });
 
 // ── Adversarial-review CRITICALs (auth-on-push + commit identity) — the reason these slipped is
@@ -710,7 +739,7 @@ test("buildVcsPublish (code target): changes anywhere -> stages the whole tree p
 
   const result = await vcsWrite.publish({ mirrorDir: "/mirrors/org/panchito", branch: "qa-bot/def5678", sha: "def5678" });
 
-  assert.deepEqual(result, { changed: true });
+  assert.deepEqual(result, { changed: true, revertedDenylisted: [], revertedDangerous: [] });
   assert.deepEqual(calls[0], ["status", "--porcelain", "--", "."], "code target's status check scopes to '.', not 'e2e' (the whole tree, per publishCode's own CODE_ADD)");
   assert.deepEqual(calls[2], ["add", "--", "."], "code target stages the whole tree, matching legacy's publishCode(mirrorDir, ...) — never just e2e/");
 });

@@ -99,7 +99,26 @@ const NAMED_SECRET_PATTERNS: Array<{ name: string; p: RegExp; skip?: (m: string)
   // requires the inner ':' so a bare scheme://host@ (no password) is left intact.
   { name: "url-credentials", p: /(?<=:\/\/)[^\s:/@]+:[^\s:/@]+(?=@)/g },
   // Bearer tokens leaking in command output (git http.extraHeader, curl -H, etc.)
-  { name: "bearer-token", p: /(?:Authorization|auth)\s*[:=]\s*Bearer\s+\S+/gi },
+  // judgment-day round 3 (FIX F.1, Judge B) then round 4 (FIX I, Judge A): the trailing value
+  // capture is quote-AWARE for a legitimate quoted literal, but no longer stops early inside a bare
+  // value. Round 3 narrowed the bare branch to `[^\s"']+` to stop a value's match from swallowing a
+  // closing quote that belongs to the SURROUNDING prose (e.g. a reviewer's rejection quoting a UI
+  // element's accessible name: `name "Token: refresh" is NOT`). But that same narrowing made the
+  // bare branch stop at the FIRST quote inside the value itself, leaking everything after it
+  // (`token=abc"def` → `[REDACTED]"def`, the tail unredacted) — round 3 traded a cosmetic false
+  // positive for a real leak. Round 4 restores the bare branch to a greedy `\S+` (round 1's original,
+  // safe behavior — a secret's own value is always consumed whole) and resolves round 3's goal in
+  // code instead: `redactPreservingTrailingQuote` (below) inspects the FULL match after it is greedy-
+  // captured, and re-emits a trailing quote only when that quote is unbalanced within the match (i.e.
+  // it belongs to the enclosing prose, not the secret). The quoted-string branches are now also
+  // escape-aware (`"(?:\\.|[^"\\])*"` / the single-quote twin) so a quoted secret containing an
+  // escaped inner quote (`password="my\"quoted"`) matches to its REAL closing quote instead of the
+  // first unescaped one, which previously let the tail ship unredacted when a prose keyword like
+  // "secret:" false-matched ahead of the real assignment. Applied to every named pattern below that
+  // shares this same trailing-value-capture shape (generic-credential, env-credential,
+  // api-key-assignment) — kept in lockstep with this file's src/ twin (sanitizer.ts), see
+  // sanitize-text-parity.test.ts.
+  { name: "bearer-token", p: /(?:Authorization|auth)\s*[:=]\s*Bearer\s+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\S+)/gi },
   // JWT: three base64url segments separated by dots
   { name: "jwt", p: /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g },
   // PEM private key blocks — multi‑line with lazy match
@@ -109,16 +128,19 @@ const NAMED_SECRET_PATTERNS: Array<{ name: string; p: RegExp; skip?: (m: string)
   // Generic credential assignments: credential/auth_token/access_key = value.
   // The [\"']? before the separator handles JSON formatting where a closing quote
   // separates the key from the colon: "password": "hunter2" (previously leaked).
-  { name: "generic-credential", p: /(?:credential|auth_token|access_key)[\"']?\s*[:=]\s*\S+/gi },
+  // judgment-day round 3 (FIX F.1) then round 4 (FIX I): value capture — see bearer-token's own comment above.
+  { name: "generic-credential", p: /(?:credential|auth_token|access_key)[\"']?\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\S+)/gi },
   // ENV-VAR style credential names (UPPER_SNAKE ending in a credential word), e.g.
   // DEV_TEST_PASS=..., DEV_ENV_PASS=..., GITHUB_TOKEN=..., OPENCODE_API_KEY=... The
   // bare-keyword pattern below misses "PASS"/"KEY" as a suffix, so this covers the
   // system's own env credentials. Case-sensitive (UPPER) to limit false positives.
-  { name: "env-credential", p: /\b[A-Z][A-Z0-9_]*(?:PASS|PASSWORD|SECRET|TOKEN|KEY|PWD|CRED|CREDENTIAL)[A-Z0-9_]*[\"']?\s*[:=]\s*\S+/g },
+  // judgment-day round 3 (FIX F.1) then round 4 (FIX I): value capture — see bearer-token's own comment above.
+  { name: "env-credential", p: /\b[A-Z][A-Z0-9_]*(?:PASS|PASSWORD|SECRET|TOKEN|KEY|PWD|CRED|CREDENTIAL)[A-Z0-9_]*[\"']?\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\S+)/g },
   // api_key/token/secret/password assignments — catch‑all; keep LAST among
   // assignment patterns so the more specific ones fire first.
   // modelSkip (WS5.4a): see this file's own header — twin of sanitizer.ts's own modelSkip.
-  { name: "api-key-assignment", p: /(?:api[_-]?key|token|secret|password|passwd|pwd)[\"']?\s*[:=]\s*\S+/gi, modelSkip: (m) => !isModelModeSecretValue(m) },
+  // judgment-day round 3 (FIX F.1) then round 4 (FIX I): value capture — see bearer-token's own comment above.
+  { name: "api-key-assignment", p: /(?:api[_-]?key|token|secret|password|passwd|pwd)[\"']?\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\S+)/gi, modelSkip: (m) => !isModelModeSecretValue(m) },
   // base64‑encoded secrets (>40 chars of base64 chars), with data‑URI filter.
   // skip: a run of pure hex is a git SHA / digest (commit ids, lockfile hashes), NOT a
   // secret — redacting it turned the run header's SHA into "[REDACT" (the launcher omits
@@ -170,6 +192,23 @@ function isPathLikeRun(m: string): boolean {
   return segments.every((s) => s.length >= 1 && s.length <= 80);
 }
 
+// judgment-day round 4 (FIX I): resolves the round-3 quote goal in code instead of in the regex
+// itself (see bearer-token's own comment above for the full history). A value-capturing pattern's
+// bare branch is a greedy `\S+`, so it may legitimately swallow a trailing quote that is the value's
+// OWN embedded character (`abc"def`) or a quote that belongs to the SURROUNDING prose, not the
+// secret (`Token: refresh"`). The two are told apart by balance: if the same quote character also
+// appears earlier in the match, the trailing one is part of the secret's own (possibly-quoted) value
+// and stays fully redacted; if it does not, it is a lone, unbalanced delimiter that belongs to the
+// enclosing text and must be re-emitted so the surrounding prose/JSON/markup is not corrupted.
+function redactPreservingTrailingQuote(m: string): string {
+  const last = m[m.length - 1];
+  if (last === '"' || last === "'") {
+    const body = m.slice(0, -1);
+    if (!body.includes(last)) return REDACTED + last;
+  }
+  return REDACTED;
+}
+
 const INTERNAL_HOST_PATTERNS: RegExp[] = [
   // Private IPv4 ranges (10/8, 192.168/16, 172.16/12)
   /\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b/g,
@@ -202,7 +241,7 @@ export function sanitizeText(input: string, mode: SanitizeMode = "issue"): { tex
       if (skip?.(m)) return m; // a recognised non-secret (e.g. a git SHA) — leave it intact
       if (mode === "model" && modelSkip?.(m)) return m; // model-mode-only: not a real secret shape
       redactions++;
-      return REDACTED;
+      return redactPreservingTrailingQuote(m);
     });
     if (redactions > 0) {
       matchedPatterns.push(name);

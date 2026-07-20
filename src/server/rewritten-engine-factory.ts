@@ -116,7 +116,7 @@ import { GitHubIssueAdapter } from "@contexts/workspace-and-publication/infrastr
 import type { GitHubHttpDeps } from "@contexts/workspace-and-publication/infrastructure/github-http";
 import { SetupAdapter, nodeFsDeps } from "@contexts/workspace-and-publication/infrastructure/setup.adapter";
 import { VcsWriteAdapter } from "@contexts/workspace-and-publication/infrastructure/vcs-write.adapter";
-import { CONFINEMENT_DENYLIST } from "@contexts/workspace-and-publication/domain/write-confinement.service";
+import { CONFINEMENT_DENYLIST, WriteConfinementService } from "@contexts/workspace-and-publication/domain/write-confinement.service";
 import { WriteConfinementAdapter } from "@contexts/workspace-and-publication/infrastructure/write-confinement.adapter";
 import { MirrorGcAdapter } from "@contexts/workspace-and-publication/infrastructure/mirror-gc.adapter";
 import type { VcsPublishCollaborator } from "@contexts/qa-run-orchestration/infrastructure/bridges/publication-port.adapter";
@@ -357,6 +357,10 @@ export function buildVcsPublish(
   writeExcludesFn: (dir: string, patterns: readonly string[]) => void = writeExcludes,
 ): VcsPublishCollaborator {
   const vcs = new VcsWriteAdapter(withPublishGitDecorations(git), writeExcludesFn);
+  // sdd/security-hardening Slice 1: reused (not re-derived) for the commit-time tracked-file guard
+  // below — the SAME classifier the runtime WriteConfinementAdapter already uses, so the two guards
+  // can never drift on what counts as denylisted.
+  const confinementClassifier = new WriteConfinementService();
   const isContext = mode === "context";
   const addDir = isContext ? CONTEXT_PUBLISH_ADD : isCode ? CODE_PUBLISH_ADD : E2E_PUBLISH_ADD;
   // Legacy parity (src/integrations/publish.ts's publishContext: `excludes: []`): the context
@@ -364,8 +368,20 @@ export function buildVcsPublish(
   // nothing to filter — an empty list here matches legacy exactly rather than reusing the e2e/code
   // exclude split, which exists to filter directory-wide `git add`/`git status` scans.
   const excludes = isContext ? [] : isCode ? CODE_PUBLISH_EXCLUDES : E2E_PUBLISH_EXCLUDES;
+  // sdd/security-hardening Slice 1: the SECOND, independent, deterministic tracked-file guard (see
+  // VcsWritePort.commit's own header). Wired for EVERY target, not just isCode — an earlier revision
+  // scoped this to isCode only, reasoning "the e2e target's addDir=['e2e'] can never stage a
+  // repo-root denylisted path, so wiring the guard there would be a no-op". TRUE for the
+  // root-anchored CONFINEMENT_DENYLIST entries (Dockerfile exact-match, .github/ dir-prefix,
+  // docker-compose*/.gitattributes/.gitmodules) — an e2e/-nested path never collides with any of
+  // those (see the "no-false-positive" fixtures in rewritten-engine-factory.publish-excludes.test.ts).
+  // FALSE for `*.env`: isCodeDenied matches it via a tree-wide SUFFIX check (`f.endsWith(".env")`),
+  // not a root anchor, so a tracked `e2e/fixtures/creds.env` an agent modifies to embed a live secret
+  // WAS reaching a real publish — write-confinement.service.ts's own "dangerous tier" comment already
+  // states secret-file writes apply "regardless of run target"; this wiring now matches that.
+  const denyModifiedTracked = (path: string) => confinementClassifier.isCodeDenied(path);
   return {
-    async publish({ mirrorDir, branch }): Promise<{ changed: boolean }> {
+    async publish({ mirrorDir, branch }): Promise<{ changed: boolean; revertedDenylisted?: string[]; revertedDangerous?: string[] }> {
       // Apply local ignore patterns FIRST (same ordering as publish.ts's publishChanges) so both the
       // change check and the `git add` below silently skip installed deps/artifacts instead of
       // failing on an ignored path (the node_modules/.gitignore `git add` failure this ordering fixes).
@@ -374,9 +390,17 @@ export function buildVcsPublish(
       if (!changed) return { changed: false };
       await vcs.checkoutBranch(mirrorDir, branch);
       const commitMsg = isContext ? "docs(context): automated QA context map" : isCode ? "test(code): automated QA" : "test(e2e): automated QA";
-      await vcs.commit(mirrorDir, commitMsg, addDir);
+      // judgment-day round 2 (FIX 3, HIGH): surface the tracked-file guard's own revert up to this
+      // collaborator's caller (PublicationPortAdapter -> RunQaUseCase) — see VcsWritePort.commit's
+      // own doc for why this must never stay silent.
+      //
+      // judgment-day round 3 (FIX E, both judges): VcsWriteAdapter.commit() now ALSO returns
+      // revertedDangerous (the isDangerousPath subset, computed inside the adapter via the SAME
+      // WriteConfinementService instance it already owns) — threaded straight through unchanged,
+      // never re-derived here.
+      const { revertedDenylisted, revertedDangerous } = await vcs.commit(mirrorDir, commitMsg, addDir, denyModifiedTracked);
       await vcs.push(mirrorDir, branch);
-      return { changed: true };
+      return { changed: true, revertedDenylisted, revertedDangerous };
     },
   };
 }

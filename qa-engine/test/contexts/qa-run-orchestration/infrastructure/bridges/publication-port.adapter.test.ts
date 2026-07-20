@@ -395,6 +395,39 @@ test("PROD-BLOCKER: publish() invokes vcsWrite BEFORE pr.openWithAutoMerge on th
   assert.deepEqual(order, ["vcsWrite.publish", "pr.openWithAutoMerge"], "the git write must land BEFORE the PR is opened — the legacy contract's exact ordering");
 });
 
+// judgment-day round 2 (FIX 3, HIGH, both judges): the vcs-write tracked-file guard's own revert
+// must never be silent — this bridge threads vcsWrite.publish()'s `revertedDenylisted` straight
+// through to its own caller (RunQaUseCase), so it can be merged into gateSignals.confinement.
+test("FIX 3: publish() surfaces vcsWrite's revertedDenylisted on the 'pr' route", async () => {
+  const decide = new PublishDecisionService();
+  const pr = fakePr();
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const vcsWrite = { publish: async () => ({ changed: true, revertedDenylisted: ["Dockerfile"] }) };
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite, render: fakeRender() }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "pass", cases: [], logs: "", mirrorDir: "/mirrors/org/app", sha: "abc1234" });
+
+  assert.deepEqual(result.revertedDenylisted, ["Dockerfile"], "a reverted denylisted path must be surfaced to the caller, not swallowed at this bridge");
+});
+
+test("FIX 3: publish() omits revertedDenylisted when vcsWrite reports none (never fabricated)", async () => {
+  const decide = new PublishDecisionService();
+  const pr = fakePr();
+  const issue = fakeIssue();
+  const shadowLog = new ShadowLogAdapter(() => {});
+  const vcsWrite = { publish: async () => ({ changed: true }) };
+  const adapter = new PublicationPortAdapter({ decide, pr, issue, shadowLog, sanitize: identitySanitize, vcsWrite, render: fakeRender() }, {
+    repo: "org/app", branch: "qa-bot/abc1234", reviewerApproved: true, coverageBlocks: false, shadow: false, e2eChanged: true,
+  });
+
+  const result = await adapter.publish({ verdict: "pass", cases: [], logs: "", mirrorDir: "/mirrors/org/app", sha: "abc1234" });
+
+  assert.equal(result.revertedDenylisted, undefined);
+});
+
 test("PROD-BLOCKER: publish() threads mirrorDir/branch/sha from the decision + ctx into vcsWrite.publish", async () => {
   const decide = new PublishDecisionService();
   let seen: { mirrorDir: string; branch: string; sha: string } | undefined;

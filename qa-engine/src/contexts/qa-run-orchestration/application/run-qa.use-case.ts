@@ -1925,6 +1925,29 @@ export class RunQaUseCase {
         ...(resolveTested()?.length ? { tested: resolveTested() } : {}),
       });
       publishOutcome = published.outcome;
+      // judgment-day round 2 (FIX 3, HIGH): the vcs-write tracked-file denylist guard's own revert
+      // (VcsWritePort.commit's `revertedDenylisted`, surfaced through the "pr" route) must never be
+      // silent to the persisted run record — merge it into the SAME gateSignals.confinement
+      // accumulator ConfinementPort.enforce() already feeds, exactly like enforceConfinement()'s own
+      // merge above. Never fabricated: absent/empty revertedDenylisted (the overwhelming common
+      // case) leaves confinementAcc untouched.
+      //
+      // judgment-day round 3 (FIX E, both judges): `dangerous` used to add the FULL
+      // revertedDenylisted.length here — but WriteConfinementAdapter's own `dangerous` (the merge
+      // above) is scoped to the NARROWER secret tier (isDangerousPath), a deduped subset of strays.
+      // Counting every revert (e.g. a reverted Dockerfile/.github tamper) as "dangerous" inflated a
+      // severity signal a reviewer reads as "a secret nearly leaked". `revertedDangerous` is the
+      // PRE-CLASSIFIED subset the port surfaces (computed where WriteConfinementService.isDangerousPath
+      // is actually reachable — this use-case must never re-derive the secret-tier check itself,
+      // that IS the meta-lesson's "enumerate better" failure mode). Absent (a pre-FIX-E caller/stub)
+      // is fail-safe: treated as zero genuinely-dangerous reverts, never "everything is dangerous".
+      if (published.revertedDenylisted?.length) {
+        confinementAcc = {
+          strays: (confinementAcc?.strays ?? 0) + published.revertedDenylisted.length,
+          dangerous: (confinementAcc?.dangerous ?? 0) + (published.revertedDangerous?.length ?? 0),
+          reverted: [...(confinementAcc?.reverted ?? []), ...published.revertedDenylisted],
+        };
+      }
     }
 
     // sdd/migration-wiring-phase-2 Slice 2 (D-B mirror-gc): fires ONCE, here, at the tail of the

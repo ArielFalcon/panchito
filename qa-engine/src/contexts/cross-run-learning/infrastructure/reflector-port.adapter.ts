@@ -46,6 +46,19 @@
 import type { LearningRepositoryPort, LearningRule, ReflectionInput, StructuredReflection } from "../application/ports/index.ts";
 import type { AgentRuntimePort } from "@kernel/ports/agent-runtime.port.ts";
 import { capRuleFields, correctionToErrorClass, decideDistill } from "../domain/distill-rule.ts";
+// sdd/security-hardening Slice 3: the qa-engine-side canonical model-prompt sanitizer (CLAUDE.md
+// names this file explicitly as the diff/commit-body/reviewer-text → model prompt boundary). Reused
+// here (not re-implemented) so the reviewer-authored `gateSignals.reviewerCorrections` text gets the
+// SAME redaction every sibling model-bound field in prompts.ts already receives — the reviewer has
+// read/bash/glob on the actual repo files, so its rejection rationale can legitimately quote a secret.
+// judgment-day round 3 (FIX D, Judge B): buildReflectionPrompt below used to call this with the
+// "model" mode, which is STRICTLY WEAKER than the "issue" default — "model" mode's modelSkip escape
+// hatch (WS5.4a) treats a short, low-entropy `password: value`-shaped match as a code-shape false
+// positive and leaves it unredacted. Every sibling reviewer/selector-authored field in prompts.ts
+// (reviewCorrections, priorCorrections, selectorContradictions) moved to the stricter DEFAULT mode
+// in round 2 (commit 8cc53bf) — this call site was the one sibling the sweep missed. Call with no
+// mode argument so it defaults to "issue", matching every sibling instead of contradicting them.
+import { sanitizeText } from "@contexts/generation/infrastructure/sanitize-text.ts";
 
 // Bounded so a single reflect() call never fans out unbounded rule history when scanning for
 // dedup — mirrors legacy's own listAllLearningRules(app, limit) default cap (src/server/
@@ -138,7 +151,9 @@ function buildReflectionPrompt(input: ReflectionInput): string {
   ];
 
   if (input.gateSignals.reviewerCorrections.length > 0) {
-    signals.push(`reviewer corrections:\n${input.gateSignals.reviewerCorrections.map((c) => `  - ${c}`).join("\n")}`);
+    signals.push(
+      `reviewer corrections:\n${input.gateSignals.reviewerCorrections.map((c) => `  - ${sanitizeText(c).text}`).join("\n")}`,
+    );
   }
 
   return [
