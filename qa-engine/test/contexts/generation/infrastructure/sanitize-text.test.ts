@@ -109,6 +109,18 @@ test("BUGFIX (round 4): a prose keyword false-match does not let a quoted secret
   assert.match(out, / end$/, `the trailing prose after the secret must survive — got: ${JSON.stringify(out)}`);
 });
 
+// judgment-day round 4 (Judge B): the internal SPACE is what forces the quoted-literal branch — the
+// greedy bare `\S+` alternative stops at whitespace, so only the escape-aware `"(?:\\.|[^"\\])*"`
+// branch can consume the full value past the escaped inner quotes. Reverting that branch to the
+// naive `"[^"]*"` leaks `quoted\" value" end`; no other test reaches this code path.
+test("BUGFIX (round 4): escape-aware quoted branch — a quoted value with internal spaces and escaped quotes is fully redacted", () => {
+  const input = 'password="my \\"quoted\\" value" end';
+  const { text: out } = sanitizeText(input, "issue");
+  assert.doesNotMatch(out, /quoted/, `the escaped-quote interior must not leak — got: ${JSON.stringify(out)}`);
+  assert.match(out, /\[REDACTED\]/);
+  assert.match(out, / end$/, `the trailing prose after the secret must survive — got: ${JSON.stringify(out)}`);
+});
+
 // judgment-day round 3 (FIX F.2, both judges): DOCUMENTED KNOWN LIMITATION, not a bug — `password:
 // hunter2` and `Token: refresh` are the SAME "word: value" shape; no regex can distinguish a real
 // secret from a secret-shaped UI label (Judge A independently confirmed the over-redact tradeoff is
