@@ -5,8 +5,9 @@
 // ErrorClass stays in THIS context (no kernel leak) — modeled as a local string-literal union.
 // ReflectorPort is declared here (ADR-5, reflector-rewire design): its collaborators
 // (StructuredReflection, distiller, LearningRepositoryPort) all live in this context, so the port is
-// co-located with them rather than in qa-run-orchestration. ProcessAuditPort remains re-added
-// alongside its own impl in a later plan.
+// co-located with them rather than in qa-run-orchestration. ProcessAuditPort is declared here too
+// (sdd/migration-remediation Slice 5, D-P1b) — this IS the "later plan" this comment used to defer
+// to; see ProcessAuditPort's own header below for the full contract.
 
 import type { Sha } from "@kernel/sha.ts";
 import type { RunOutcome } from "@kernel/run-outcome.ts";
@@ -137,4 +138,25 @@ export interface ReflectionInput {
 // ReflectorPortAdapter's own header for the full fault-isolation contract.
 export interface ReflectorPort {
   reflect(input: ReflectionInput): Promise<void>;
+}
+
+// ProcessAuditPort (sdd/migration-remediation Slice 5, D-P1b): the deterministic post-run PROCESS
+// audit — the engine reflecting on its OWN run quality (recurring defects, ledger noise, review
+// churn), routing each finding to the right remediation. Co-located with ReflectorPort per this
+// file's own header note: both are off-path, best-effort, fault-isolated collaborators the use-case
+// invokes AFTER learning.fold() at each fold site. Unlike ReflectorPort, this port takes the FULL
+// (wide) kernel RunOutcome directly — no narrow ReflectionInput-style projection — because the
+// domain logic (cross-run-learning/domain/process-audit.ts) reasons over gateSignals.retries/
+// reviewerApproved/errorClass/verdict/sha, all of which already live on RunOutcome undisguised.
+// [SWAP]-optional collaborator on RunQaUseCaseDeps (qa-run-orchestration/application/run-qa.use-case.ts)
+// — absent means the audit never runs, the SAME "provable no-op" backward-compat posture
+// ReflectorPort/ConfinementPort already establish. The adapter (../infrastructure/
+// process-audit-port.adapter.ts) self-sources `recent` outcomes + `rules` via factory-injected reads
+// and dispatches findings to 3 sinks also injected from src via the factory — this context and this
+// port never import src/ directly. Fault-isolated + timeout-capped inside the adapter (mirrors
+// ReflectorPortAdapter's own documented fault-isolation contract) — a crash, a slow injected
+// read/sink, or a malformed finding never propagates past audit(); the use-case awaits with no extra
+// try/catch of its own, trusting the adapter's contract exactly like it trusts ReflectorPort's.
+export interface ProcessAuditPort {
+  audit(outcome: RunOutcome): Promise<void>;
 }

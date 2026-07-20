@@ -208,9 +208,9 @@ Codex consumes the **provider-neutral** mirror of these under `agent/` (`agent/r
   `jhipster-store`, `panchito`, …) are *interchangeable test targets, not design
   inputs* — never shape a code path "so app X passes"; reproduce on one,
   diagnose the root, generalize the solution. The ONLY legitimate
-  project-shaped constraint is **declared, deliberate scope** (e.g. the
-  static-signal toolchain covers Java + JavaScript/TypeScript by design *for
-  now*, widened later) — and even that lives in `config/` / the language
+  project-shaped constraint is **declared, deliberate scope** (e.g.
+  structural-signal analysis covers Java + JavaScript/TypeScript by design
+  *for now*, widened later) — and even that lives in `config/` / the language
   registry, never as an app-specific branch in `src/` (the next invariant). When
   a detected "bug" might be a deliberate guard from a past fix, confirm your
   change improves the root cause without regressing that guard before making it.

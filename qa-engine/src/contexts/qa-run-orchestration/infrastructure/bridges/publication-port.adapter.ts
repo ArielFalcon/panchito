@@ -66,11 +66,44 @@ export interface VcsPublishCollaborator {
   publish(input: { mirrorDir: string; branch: string; sha: string }): Promise<{ changed: boolean }>;
 }
 
+// sdd/migration-remediation Slice 4 (D-P1a, publication rendering + tested metadata): the PURE
+// distilled render functions (workspace-and-publication/domain/render-publication.ts's own
+// renderIssue/renderPrBody). This bridge cannot import that module directly — the SAME
+// no-vcs-write-in-agent-contexts arch-lint gate the header note above documents denies EVERY
+// contexts/* path other than workspace-and-publication (and the composition root, its one declared
+// exception) from importing anything under workspace-and-publication, type-only included. LOCAL
+// structural mirror, duck-typed, NOT imported — the SAME "the composition root wires the REAL
+// instance, this file only knows the shape" pattern as PublishDecisionCollaborator/
+// GitHubPrCollaborator/GitHubIssueCollaborator/ShadowLogCollaborator/VcsPublishCollaborator above.
+// Replaces this file's OWN pre-Slice-4 local renderBody()/renderAdjudicationSection()/
+// renderReviewerNoteSection() (deleted) — those had regressed to embedding `sanitize(logs)`
+// VERBATIM, a raw execution-log dump reaching a public Issue body (the spec's own MUST this slice
+// closes). REQUIRED (not optional, mirroring `decide`'s own required-ness): rendering the body is
+// this adapter's whole job on the "pr"/"issue"/"shadow" routes — there is no safe fallback shape.
+export interface PublicationRenderCollaborator {
+  issue(input: {
+    verdict: RunVerdict;
+    cases: readonly QaCase[];
+    sha?: string;
+    tested?: { flow?: string; objective?: string }[];
+    adjudication?: { class: string; confidence: string; reason: string };
+    reviewerNote?: string;
+  }): string;
+  prBody(input: {
+    sha?: string;
+    isCode: boolean;
+    tested?: { flow?: string; objective?: string }[];
+    parentRunId?: string;
+  }): string;
+}
+
 export interface PublicationPortCollaborators {
   decide: PublishDecisionCollaborator;
   pr: GitHubPrCollaborator;
   issue: GitHubIssueCollaborator;
   shadowLog: ShadowLogCollaborator;
+  // sdd/migration-remediation Slice 4 (D-P1a): see PublicationRenderCollaborator's own doc above.
+  render: PublicationRenderCollaborator;
   // WS5.4b (full-flow remediation, fail-closed publication default): CLAUDE.md "Sanitize data
   // leaving the system — execution logs -> Issue... pass through src/orchestrator/sanitizer.ts".
   // REQUIRED (was optional, defaulting to identity) — a default-to-identity sanitizer is a latent
@@ -109,53 +142,13 @@ export interface PublicationPortStaticContext {
 function renderTitle(verdict: RunVerdict, sanitize: (text: string) => string): string {
   return `qa-bot: ${sanitize(verdict)} run`;
 }
-// WS3.1 (adjudication -> Issue body): renders the FixLoop's own last adjudicator verdict — class,
-// confidence, reason — through the SAME sanitizer every other rendered field uses. Low confidence is
-// worded as an engine GUESS (a hint for the human, not a firm diagnosis) rather than a flat label,
-// since a low-confidence verdict is the adjudicator's own "ambiguous, stopping for human review"
-// branch (adjudicate.service.ts) — presenting it with the same confidence as a high-confidence
-// app_defect/5xx detection would overstate what the engine actually knows.
-function renderAdjudicationSection(
-  adjudication: { class: string; confidence: string; reason: string },
-  sanitize: (text: string) => string,
-): string[] {
-  const heading = adjudication.confidence === "low"
-    ? "Engine adjudication (low confidence — treat as a hint)"
-    : "Engine adjudication";
-  return [
-    "",
-    heading,
-    `- Class: ${sanitize(adjudication.class)}`,
-    `- Confidence: ${sanitize(adjudication.confidence)}`,
-    `- Reason: ${sanitize(adjudication.reason)}`,
-  ];
-}
-// Follow-up #28 (reviewer-outage observability hardening): renders the reviewer-unavailable
-// rationale ReviewPortAdapter's own catch block produces (review-port.adapter.ts's
-// `reviewer unavailable: ${reason}` marker) through the SAME sanitizer every other rendered field
-// uses — mirrors renderAdjudicationSection's own section-rendering shape immediately above. Scoped
-// tightly: the caller (run-qa.use-case.ts) only ever populates this for the reviewer-unavailable
-// fail-closed exit, never for a genuine reviewer rejection (corrections already signal that case).
-function renderReviewerNoteSection(note: string, sanitize: (text: string) => string): string[] {
-  return ["", "Reviewer unavailable", sanitize(note)];
-}
-function renderBody(
-  cases: readonly QaCase[],
-  logs: string,
-  sanitize: (text: string) => string,
-  adjudication: { class: string; confidence: string; reason: string } | undefined,
-  reviewerNote: string | undefined,
-): string {
-  const failing = cases
-    .filter((c) => c.status === "fail")
-    .map((c) => `- ${sanitize(c.name)}: ${c.detail ? sanitize(c.detail) : ""}`);
-  return [
-    sanitize(logs),
-    ...(failing.length > 0 ? ["", "Failing cases:", ...failing] : []),
-    ...(adjudication ? renderAdjudicationSection(adjudication, sanitize) : []),
-    ...(reviewerNote ? renderReviewerNoteSection(reviewerNote, sanitize) : []),
-  ].join("\n");
-}
+// sdd/migration-remediation Slice 4 (D-P1a): this file's OWN renderBody()/renderAdjudicationSection()/
+// renderReviewerNoteSection() (which embedded `sanitize(logs)` VERBATIM — a raw execution-log dump,
+// the exact regression this slice fixes) are REMOVED. The Issue/PR body is now rendered by the
+// injected `render` collaborator (PublicationRenderCollaborator above), whose REAL implementation —
+// workspace-and-publication/domain/render-publication.ts's renderIssue/renderPrBody — still renders
+// the engine-adjudication and reviewer-unavailable sections (WS3.1, Follow-up #28), just one call
+// away instead of inlined here. See publish()'s "issue"/"pr"/"shadow" cases below for the call sites.
 
 export class PublicationPortAdapter implements PublicationPort {
   constructor(
@@ -171,6 +164,15 @@ export class PublicationPortAdapter implements PublicationPort {
       throw new Error(
         "PublicationPortAdapter: 'sanitize' is a REQUIRED collaborator (fail-closed publication default, WS5.4b) — " +
           "the composition root must inject the real sanitizeText; refusing to default to identity.",
+      );
+    }
+    // sdd/migration-remediation Slice 4 (D-P1a): the SAME fail-closed posture as sanitize above — a
+    // composition that forgets to wire the real render functions must throw loudly at construction
+    // time, never silently fall back to a raw-log embed (the regression this slice fixes).
+    if (typeof this.deps.render?.issue !== "function" || typeof this.deps.render?.prBody !== "function") {
+      throw new Error(
+        "PublicationPortAdapter: 'render' is a REQUIRED collaborator (Slice 4, publication rendering) — " +
+          "the composition root must inject the real renderIssue/renderPrBody (workspace-and-publication/domain/render-publication.ts); refusing to fall back to a raw-log embed.",
       );
     }
   }
@@ -205,6 +207,11 @@ export class PublicationPortAdapter implements PublicationPort {
     // backward-compat precedent as every other dynamic field on this method.
     mirrorDir?: string;
     sha?: string;
+    // sdd/migration-remediation Slice 4 (D-P1a): see PublicationPort.publish()'s own doc
+    // (qa-run-orchestration/application/ports/index.ts) for the full contract on all three fields.
+    tested?: { flow?: string; objective?: string }[];
+    isCode?: boolean;
+    parentRunId?: string;
   }): Promise<{ outcome: string }> {
     // Audit fix (judgment-day): prefer the REAL per-run decision value when the caller supplies
     // one; fall back to the static composition-time ctx only when absent (backward-compat for
@@ -222,7 +229,35 @@ export class PublicationPortAdapter implements PublicationPort {
     // composition root (src/server/rewritten-engine-factory.ts).
     const sanitize = this.deps.sanitize;
     const title = renderTitle(decision.verdict, sanitize);
-    const body = renderBody(decision.cases, decision.logs, sanitize, decision.adjudication, decision.reviewerNote);
+    // sdd/migration-remediation Slice 4 (D-P1a): the Issue and PR bodies are now DISTINCT, distilled
+    // renders (the spec's own MUST) instead of one shared renderBody() — built lazily per route
+    // below (a route that never opens either never pays for rendering it). `decision.logs` is
+    // deliberately NEVER read here: render-publication.ts's RenderIssueInput carries no logs field
+    // at all, so a raw log dump cannot reach either body even by accident (the regression this slice
+    // fixes — the OLD renderBody() embedded `sanitize(logs)` verbatim). Each composed body is
+    // sanitized ONCE, as a whole string, satisfying "every rendered field passes the injected
+    // sanitizer" without threading sanitize through the pure render functions themselves (see
+    // render-publication.ts's own header for the full rationale).
+    const issueBody = (): string =>
+      sanitize(
+        this.deps.render.issue({
+          verdict: decision.verdict,
+          cases: decision.cases,
+          ...(decision.sha ? { sha: decision.sha } : {}),
+          ...(decision.tested?.length ? { tested: decision.tested } : {}),
+          ...(decision.adjudication ? { adjudication: decision.adjudication } : {}),
+          ...(decision.reviewerNote ? { reviewerNote: decision.reviewerNote } : {}),
+        }),
+      );
+    const prBodyText = (): string =>
+      sanitize(
+        this.deps.render.prBody({
+          ...(decision.sha ? { sha: decision.sha } : {}),
+          isCode: decision.isCode ?? false,
+          ...(decision.tested?.length ? { tested: decision.tested } : {}),
+          ...(decision.parentRunId ? { parentRunId: decision.parentRunId } : {}),
+        }),
+      );
     // F3: Issue creation routes to the triggering repo when supplied; PR creation always targets
     // ctx.repo (the primary repo) — never the trigger repo.
     const issueRepo = decision.issueRepo ?? this.ctx.repo;
@@ -243,9 +278,9 @@ export class PublicationPortAdapter implements PublicationPort {
           e2eChanged: decision.e2eChanged ?? this.ctx.e2eChanged,
         });
         if (underlying.outcome === "pr") {
-          await this.deps.shadowLog.openPr(this.ctx.repo, this.ctx.branch, title, body);
+          await this.deps.shadowLog.openPr(this.ctx.repo, this.ctx.branch, title, prBodyText());
         } else if (underlying.outcome === "issue") {
-          await this.deps.shadowLog.openIssue?.(issueRepo, title, body);
+          await this.deps.shadowLog.openIssue?.(issueRepo, title, issueBody());
         }
         // quarantine/noop suppressed side effects have nothing to preview — the reason says it all.
         return { outcome: `shadow: ${publishDecision.reason} (would: ${underlying.outcome})` };
@@ -288,11 +323,11 @@ export class PublicationPortAdapter implements PublicationPort {
         if (!written.changed) {
           return { outcome: "noop: vcsWrite reported no changes to publish — the suite already covers the change, no PR opened" };
         }
-        const pr = await this.deps.pr.openWithAutoMerge(this.ctx.repo, this.ctx.branch, title, body);
+        const pr = await this.deps.pr.openWithAutoMerge(this.ctx.repo, this.ctx.branch, title, prBodyText());
         return { outcome: `pr: ${pr.url}` };
       }
       case "issue": {
-        const issue = await this.deps.issue.open(issueRepo, title, body);
+        const issue = await this.deps.issue.open(issueRepo, title, issueBody());
         return { outcome: `issue: ${issue.url}` };
       }
       case "quarantine":

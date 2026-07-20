@@ -25,12 +25,13 @@ import type {
   ServiceLinksPort,
   ServiceLink,
   CrossRepoImpactPort,
+  ConfinementPort,
 } from "@contexts/qa-run-orchestration/application/ports/index.ts";
 // reflector-rewire (design ADR-1/ADR-4/ADR-5): ReflectorPort/ReflectionInput are declared in
 // cross-run-learning (co-located with StructuredReflection/LearningRepositoryPort), NOT in this
 // context's own ports barrel — same cross-context import precedent as LearningRepositoryPort
 // (composition-root.ts / learning-port.adapter.ts).
-import type { ReflectorPort, ReflectionInput } from "@contexts/cross-run-learning/application/ports/index.ts";
+import type { ReflectorPort, ReflectionInput, ProcessAuditPort } from "@contexts/cross-run-learning/application/ports/index.ts";
 import { BlastRadius } from "@kernel/blast-radius.ts";
 import { ok, err } from "@kernel/result.ts";
 import type { RunOutcome } from "@kernel/run-outcome.ts";
@@ -1979,6 +1980,104 @@ test("reflector-rewire: RunOutcome.reflection stays undefined on the use-case's 
   // tests (reflector-port.adapter.test.ts), not re-tested here.
   assert.equal(reflectCallCount, 1, "reflector.reflect() must have been called (static-gate invalid is gate-true)");
   assert.equal(savedReflection, undefined, "RunOutcome.reflection is NOT populated by this use-case's own save() call — back-fill happens host-side via updateRunOutcomeReflection (ADR-2), never inside RunQaUseCase");
+});
+
+// ── sdd/migration-remediation Slice 5 (P1 process-audit reconnect, D-P1b): ProcessAuditPort is
+// [SWAP]-optional and invoked at BOTH fold sites (mirrors reflector) under the EXACT SAME gate as
+// reflector — shouldDistillLearning(...) AND verdict !== "flaky" AND errorClass not in
+// {E-INFRA, E-FLAKY}. Fault isolation/timeouts are the ADAPTER's own contract (see
+// process-audit-port.adapter.test.ts) — this use-case awaits audit() with no extra try/catch of its
+// own, exactly like it does for reflector.reflect(). ──────────────────────────────────────────────
+
+function makeFakeProcessAudit(onAudit: (outcome: RunOutcome) => void): ProcessAuditPort {
+  return {
+    audit: async (outcome) => { onAudit(outcome); },
+  };
+}
+
+test("process-audit: flaky verdict — learning.fold() IS called (fold gate unchanged), processAudit.audit() is NOT called (stricter gate, mirrors reflector)", async () => {
+  let foldCallCount = 0;
+  let auditCallCount = 0;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "flaky", cases: [{ name: "checkout", status: "flaky" as const }], logs: "" }),
+  });
+  ports.learning.fold = async () => { foldCallCount++; };
+  const processAudit = makeFakeProcessAudit(() => { auditCallCount++; });
+  const useCase = new RunQaUseCase({ ...ports, processAudit, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "process-audit-flaky-fold-yes-audit-no" });
+
+  assert.equal(out.decision.verdict, "flaky");
+  assert.equal(foldCallCount, 1, "learning.fold() must still be called on a flaky verdict");
+  assert.equal(auditCallCount, 0, "processAudit.audit() must NOT be called on a flaky verdict — same stricter gate as reflector");
+});
+
+test("process-audit: static-gate invalid (errorClass=E-STATIC, TERMINAL fold site) — learning.fold() AND processAudit.audit() are BOTH called with the persisted outcome", async () => {
+  let foldCallCount = 0;
+  let capturedOutcome: RunOutcome | undefined;
+  const { ports } = stubPorts({ validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }) });
+  ports.learning.fold = async () => { foldCallCount++; };
+  const processAudit = makeFakeProcessAudit((outcome) => { capturedOutcome = outcome; });
+  const useCase = new RunQaUseCase({ ...ports, processAudit, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "process-audit-static-invalid-terminal-both-called" });
+
+  assert.equal(out.decision.verdict, "invalid");
+  assert.equal(out.errorClass, "E-STATIC");
+  assert.equal(foldCallCount, 1, "learning.fold() must be called on a static-gate invalid");
+  assert.ok(capturedOutcome, "processAudit.audit() must be called on a static-gate invalid (the TERMINAL fold site)");
+  assert.equal(capturedOutcome?.verdict, "invalid");
+  assert.equal(capturedOutcome?.errorClass, "E-STATIC");
+  assert.equal(capturedOutcome?.runId, "process-audit-static-invalid-terminal-both-called");
+});
+
+test("process-audit: fail run with a real errorClass (E-EXEC-FAIL, MAINLINE fold site) — learning.fold() AND processAudit.audit() are BOTH called", async () => {
+  let foldCallCount = 0;
+  let auditCallCount = 0;
+  let capturedOutcome: RunOutcome | undefined;
+  const { ports } = stubPorts({
+    execute: async () => ({ verdict: "fail" as const, cases: [{ name: "checkout", status: "fail" as const, detail: "assertion failed" }], logs: "x" }),
+  });
+  ports.learning.fold = async () => { foldCallCount++; };
+  const processAudit = makeFakeProcessAudit((outcome) => { auditCallCount++; capturedOutcome = outcome; });
+  const useCase = new RunQaUseCase({ ...ports, processAudit, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "process-audit-mainline-real-errorclass" });
+
+  assert.equal(out.decision.verdict, "fail");
+  assert.equal(out.errorClass, "E-EXEC-FAIL");
+  assert.equal(foldCallCount, 1, "learning.fold() must be called on a genuine failure (MAINLINE fold site)");
+  assert.equal(auditCallCount, 1, "processAudit.audit() must be called on a genuine failure (MAINLINE fold site)");
+  assert.equal(capturedOutcome?.errorClass, "E-EXEC-FAIL");
+});
+
+test("process-audit: a clean green run (errorClass:null) — learning.fold() IS called, processAudit.audit() is NOT called (same WS1.2 null-guard reflect shares)", async () => {
+  let foldCallCount = 0;
+  let auditCallCount = 0;
+  const { ports } = stubPorts(); // default execute() => clean pass, coverageRatio stays null
+  ports.learning.fold = async () => { foldCallCount++; };
+  const processAudit = makeFakeProcessAudit(() => { auditCallCount++; });
+  const useCase = new RunQaUseCase({ ...ports, processAudit, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "process-audit-clean-pass-fold-yes-audit-no" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(out.errorClass, null);
+  assert.equal(foldCallCount, 1, "learning.fold() must still be called on a clean pass");
+  assert.equal(auditCallCount, 0, "processAudit.audit() must NOT be called on a clean pass — no qualifying failure to audit");
+});
+
+test("process-audit: processAudit dep ABSENT ([SWAP]-optional) — a gate-true outcome still runs fold, audit is skipped without error", async () => {
+  let foldCallCount = 0;
+  const { ports } = stubPorts({ validate: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"] }) });
+  ports.learning.fold = async () => { foldCallCount++; };
+  // No `processAudit` key at all — mirrors every pre-existing composition that has not wired one yet.
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "process-audit-absent-no-behavior-change" });
+
+  assert.equal(out.decision.verdict, "invalid");
+  assert.equal(foldCallCount, 1, "learning.fold() must still run when processAudit is unwired — dormant, pre-cutover-equivalent behavior");
 });
 
 // ── SETUP phase (CLAUDE.md run-flow step 3): "bootstrap the config/e2e seed into e2e/, then npm ci;
@@ -5127,4 +5226,249 @@ test("no-op honored: a genuine agent no-op (parsed:true + approved + zero specs)
   const out = await useCase.run({ ...baseInput, runId: "genuine-no-op-parsed-true-skips" });
 
   assert.equal(out.decision.verdict, "skipped", "a genuine parsed no-op is a valid skip, never infra-error");
+});
+
+// ── sdd/migration-remediation Slice 3 (P0 write-confinement wiring, D-P0b amended for multi-point
+// enforcement — see RunQaUseCaseDeps.confinement's own header + apply-progress for the deviation
+// rationale from the design's own "once, immediately before publish" text) ─────────────────────────
+
+function makeFakeConfinement(
+  onEnforce: (mirrorDir: string, isCode: boolean) => { strays: number; dangerous: number; reverted: string[] } | Error,
+): ConfinementPort {
+  return {
+    enforce: async (mirrorDir, isCode) => {
+      const result = onEnforce(mirrorDir, isCode);
+      if (result instanceof Error) throw result;
+      return result;
+    },
+  };
+}
+
+test("confinement wiring: green-pr — enforce() is called at least twice (after the initial generate() AND once more immediately before publish), not just once", async () => {
+  const calls: Array<{ mirrorDir: string; isCode: boolean }> = [];
+  const { ports } = stubPorts();
+  const confinement = makeFakeConfinement((mirrorDir, isCode) => {
+    calls.push({ mirrorDir, isCode });
+    return { strays: 0, dangerous: 0, reverted: [] };
+  });
+  const useCase = new RunQaUseCase({ ...ports, confinement, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "confinement-green-pr-multi-point" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.ok(calls.length >= 2, `expected at least 2 enforce() calls (after generate + before publish), got ${calls.length}`);
+  for (const call of calls) {
+    assert.equal(call.mirrorDir, "/tmp/qa-golden", "enforce() must receive this run's REAL mirrorDir");
+    assert.equal(call.isCode, false, "enforce() must receive this run's REAL isCode target");
+  }
+});
+
+test("confinement wiring: [SWAP] absent — no collaborator wired means zero enforce() calls and no gateSignals.confinement field (never fabricated)", async () => {
+  const { ports, savedOutcomes } = stubPorts();
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig }); // no `confinement` key at all
+
+  const out = await useCase.run({ ...baseInput, runId: "confinement-absent-no-op" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(savedOutcomes[0]?.gateSignals.confinement, undefined, "gateSignals.confinement must be entirely absent, never a fabricated {strays:0,...}");
+});
+
+test("confinement wiring: FixLoop engagement — enforce() runs after EACH FixLoop regeneration round, not only once", async () => {
+  let executeCalls = 0;
+  const calls: Array<{ mirrorDir: string; isCode: boolean }> = [];
+  const { ports } = stubPorts({
+    execute: async () => {
+      executeCalls++;
+      // First execute (post static-gate) fails -> engages the FixLoop; the retry passes so the loop
+      // terminates promptly — mirrors this file's own pre-existing FixLoop-trigger fixture.
+      if (executeCalls === 1) {
+        return { verdict: "fail", cases: [{ name: "owners", status: "fail", detail: "boom" }], logs: "" };
+      }
+      return { verdict: "pass", cases: [{ name: "owners", status: "pass" }], logs: "" };
+    },
+  });
+  const confinement = makeFakeConfinement((mirrorDir, isCode) => {
+    calls.push({ mirrorDir, isCode });
+    return { strays: 0, dangerous: 0, reverted: [] };
+  });
+  const useCase = new RunQaUseCase({ ...ports, confinement, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "confinement-fixloop-multi-point" });
+
+  assert.notEqual(out.decision.verdict, "invalid", "sanity: the run must reach the FixLoop, not hold invalid earlier");
+  // Initial generate() (1) + the FixLoop's own regen round (1) + the pre-publish call (1) = at least 3.
+  assert.ok(calls.length >= 3, `expected at least 3 enforce() calls across the initial generate + FixLoop regen + pre-publish, got ${calls.length}`);
+});
+
+test("confinement wiring: agent-no-op skip still persists confinement telemetry — a stray caught before the skip never vanishes from the saved outcome", async () => {
+  // The initial generate() always runs enforceConfinement() before the approved+zero-specs guard is
+  // evaluated, so a no-op skip can legitimately carry a populated confinementAcc. The skip exit path
+  // must thread it into toRunOutcome like the mainline (1904) and terminal (2459) exits do — a run
+  // that ends "skipped" after the guard reverted a stray must still show that in its audit trail.
+  const { ports, savedOutcomes } = stubPorts({
+    generate: async () => ({ specs: [], approved: true, parsed: true }),
+  });
+  const confinement = makeFakeConfinement(() => ({ strays: 1, dangerous: 0, reverted: ["stray.txt"] }));
+  const useCase = new RunQaUseCase({ ...ports, confinement, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "confinement-noop-skip-telemetry" });
+
+  assert.equal(out.decision.verdict, "skipped");
+  assert.deepEqual(
+    savedOutcomes[0]?.gateSignals.confinement,
+    { strays: 1, dangerous: 0, reverted: ["stray.txt"] },
+    "the agent-no-op skip exit must persist gateSignals.confinement, matching the other toRunOutcome call sites",
+  );
+});
+
+test("confinement wiring: fault isolation — a thrown enforce() is caught, logged, and NEVER alters the verdict or blocks publish", async () => {
+  let publishCallCount = 0;
+  const { ports, savedOutcomes } = stubPorts({
+    publish: async () => { publishCallCount++; return { outcome: "pr: https://example.test/pr/1" }; },
+  });
+  const confinement = makeFakeConfinement(() => new Error("git restore failed: permission denied"));
+  const useCase = new RunQaUseCase({ ...ports, confinement, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "confinement-fault-isolated" });
+
+  assert.equal(out.decision.verdict, "pass", "a confinement failure must never alter the run's verdict");
+  assert.equal(publishCallCount, 1, "publish() must still be called despite every enforce() call throwing");
+  assert.ok(
+    (savedOutcomes[0]?.gateSignals.confinement?.dangerous ?? 0) > 0,
+    "a fault-isolated enforce() failure must still be recorded — dangerous is the most prominent signal the existing gate-signal shape allows",
+  );
+});
+
+test("confinement wiring: successful results across every enforce() call are MERGED into one gateSignals.confinement summary (summed/concatenated, never overwritten)", async () => {
+  let callIndex = 0;
+  const { ports, savedOutcomes } = stubPorts();
+  const confinement = makeFakeConfinement(() => {
+    callIndex++;
+    return callIndex === 1
+      ? { strays: 1, dangerous: 0, reverted: ["stray-a.ts"] }
+      : { strays: 0, dangerous: 1, reverted: ["stray-b.env"] };
+  });
+  const useCase = new RunQaUseCase({ ...ports, confinement, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "confinement-merge-summary" });
+
+  assert.equal(out.decision.verdict, "pass");
+  const persisted = savedOutcomes[0]?.gateSignals.confinement;
+  assert.ok(persisted, "gateSignals.confinement must be present when confinement is wired and ran");
+  assert.equal(persisted?.strays, 1, "strays must be SUMMED across calls, not overwritten by the last call");
+  assert.equal(persisted?.dangerous, 1, "dangerous must be SUMMED across calls");
+  assert.deepEqual(persisted?.reverted, ["stray-a.ts", "stray-b.env"], "reverted must be CONCATENATED across calls, not replaced");
+});
+
+test("confinement wiring: code target — enforce() receives isCode:true", async () => {
+  const calls: Array<{ mirrorDir: string; isCode: boolean }> = [];
+  const { ports } = stubPorts();
+  const confinement = makeFakeConfinement((mirrorDir, isCode) => {
+    calls.push({ mirrorDir, isCode });
+    return { strays: 0, dangerous: 0, reverted: [] };
+  });
+  const useCase = new RunQaUseCase({ ...ports, confinement, config: { ...baseConfig, isCode: true } });
+
+  await useCase.run({ ...baseInput, runId: "confinement-code-target", target: "code" });
+
+  assert.ok(calls.length >= 1);
+  for (const call of calls) assert.equal(call.isCode, true);
+});
+
+test("confinement wiring: a regression run (generating:false) makes no enforce() call for the (never-invoked) initial generate, but still enforces once before publish", async () => {
+  const calls: Array<{ mirrorDir: string; isCode: boolean }> = [];
+  const { ports } = stubPorts({
+    classify: async () => ({ action: "regression", reason: "docs-only change", diff: "" }),
+  });
+  const confinement = makeFakeConfinement((mirrorDir, isCode) => {
+    calls.push({ mirrorDir, isCode });
+    return { strays: 0, dangerous: 0, reverted: [] };
+  });
+  const useCase = new RunQaUseCase({ ...ports, confinement, config: baseConfig });
+
+  await useCase.run({ ...baseInput, runId: "confinement-regression-run" });
+
+  assert.equal(calls.length, 1, "a regression run never calls the real GenerationPort, so only the pre-publish enforce() call fires");
+});
+
+// ── sdd/migration-remediation Slice 4 (D-P1a, task 4.4) — `tested` metadata sourcing precedence.
+// resolveTested() prefers the FixLoop's own FINAL regen specMetas when the loop engaged and produced
+// any; falls back to the initial/static-fix-loop generation's own specMetas otherwise. Never throws
+// or fabricates when neither source has anything. ─────────────────────────────────────────────────
+
+test("Slice 4 (task 4.4): tested is sourced from the initial generation's specMetas when the FixLoop never engages (clean first-try pass)", async () => {
+  let publishedTested: { flow?: string; objective?: string }[] | undefined;
+  const { ports } = stubPorts({
+    generate: async () => ({
+      specs: ["checkout.spec.ts"],
+      approved: true,
+      specMetas: [{ flow: "Checkout", objective: "user can pay with a saved card" }],
+    }),
+    publish: async (decision) => { publishedTested = decision.tested; return { outcome: "pr" }; },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "tested-initial-only" });
+
+  assert.equal(out.decision.verdict, "pass", "sanity: no failure, so the FixLoop never engages");
+  assert.deepEqual(publishedTested, [{ flow: "Checkout", objective: "user can pay with a saved card" }]);
+});
+
+test("Slice 4 (task 4.4): tested prefers the FixLoop's FINAL regen specMetas once the loop engages and regenerates", async () => {
+  let publishedTested: { flow?: string; objective?: string }[] | undefined;
+  let executeCalls = 0;
+  const { ports } = stubPorts({
+    // The initial call (no fixCases enrichment) returns the INITIAL specMetas; the FixLoop's own
+    // regen call (fixCases populated by the aggregate) returns the FixLoop's own, DIFFERENT specMetas
+    // — resolveTested() must prefer the latter once it exists.
+    generate: async (_objectives, _specDir, _signal, _diff, enrichment) => {
+      if (enrichment?.fixCases?.length) {
+        return {
+          specs: ["checkout.spec.ts"],
+          approved: true,
+          specMetas: [{ flow: "Checkout (fixed)", objective: "retry with the corrected selector" }],
+        };
+      }
+      return {
+        specs: ["checkout.spec.ts"],
+        approved: true,
+        specMetas: [{ flow: "Checkout (stale)", objective: "the pre-fix, now-superseded objective" }],
+      };
+    },
+    execute: async () => {
+      executeCalls++;
+      if (executeCalls === 1) {
+        return { verdict: "fail", cases: [{ name: "checkout", status: "fail", detail: "boom" }], logs: "" };
+      }
+      return { verdict: "pass", cases: [{ name: "checkout", status: "pass" }], logs: "" };
+    },
+    publish: async (decision) => { publishedTested = decision.tested; return { outcome: "pr" }; },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "tested-fixloop-final" });
+
+  assert.notEqual(out.decision.verdict, "invalid", "sanity: the run must reach the FixLoop");
+  assert.deepEqual(
+    publishedTested,
+    [{ flow: "Checkout (fixed)", objective: "retry with the corrected selector" }],
+    "the FixLoop's own final regen's specMetas must win over the initial (now-stale) generation's specMetas",
+  );
+});
+
+test("Slice 4 (task 4.4): absent specMetas everywhere never throws and publish() receives no tested field", async () => {
+  let publishedDecisionHadTestedKey = true;
+  const { ports } = stubPorts({
+    generate: async () => ({ specs: ["checkout.spec.ts"], approved: true }),
+    publish: async (decision) => {
+      publishedDecisionHadTestedKey = "tested" in decision && decision.tested !== undefined;
+      return { outcome: "pr" };
+    },
+  });
+  const useCase = new RunQaUseCase({ ...ports, config: baseConfig });
+
+  const out = await useCase.run({ ...baseInput, runId: "tested-absent-everywhere" });
+
+  assert.equal(out.decision.verdict, "pass");
+  assert.equal(publishedDecisionHadTestedKey, false, "no specMetas source existed this run, so `tested` must be entirely omitted — never a fabricated empty array");
 });

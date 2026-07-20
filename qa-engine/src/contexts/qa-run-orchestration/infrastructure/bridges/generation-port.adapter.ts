@@ -186,6 +186,12 @@ export interface GenerationPortResult {
   // verdict (empty/errored session), so the orchestrator can distinguish a genuine agent no-op from a
   // runtime failure instead of silently skipping. See GenerationResult.parsed's own doc.
   parsed?: boolean;
+  // sdd/migration-remediation Slice 4 (D-P1a): the agent's own per-spec metadata (flow/objective),
+  // narrowed from GenerateTestsUseCase's GenerationResult.specMetas (ManifestEntry[], generate-
+  // tests.use-case.ts) — see GenerationPort.generate()'s own doc (ports/index.ts) for the full
+  // port-boundary-projection rationale. Only flow/objective survive this bridge; file/targets/
+  // changeRef/sha256 stay internal to generation's own manifest reconciliation.
+  specMetas?: { flow?: string; objective?: string }[];
 }
 
 export class GenerationPortAdapter implements GenerationPort {
@@ -296,6 +302,12 @@ export class GenerationPortAdapter implements GenerationPort {
       approved: generated.approved,
       ...(generated.note !== undefined ? { note: generated.note } : {}),
       ...(generated.parsed !== undefined ? { parsed: generated.parsed } : {}),
+      // sdd/migration-remediation Slice 4 (D-P1a): project down to the narrow flow/objective shape
+      // GenerationPort.generate()'s return type declares — never leak the fuller ManifestEntry
+      // (file/targets/changeRef/sha256) across this port boundary.
+      ...(generated.specMetas?.length
+        ? { specMetas: generated.specMetas.map((m) => ({ flow: m.flow, objective: m.objective })) }
+        : {}),
     };
 
     if (this.collaborators.readSpecSource && generated.specs.length > 0) {

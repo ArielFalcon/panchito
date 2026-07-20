@@ -106,6 +106,15 @@ export interface FixLoopGenerateResult {
   // generate() call's own output. Absent/empty ⇒ Lever-2 finds nothing to check against for this
   // round (matches the legacy's `haveTrees && result != null` guard degrading to `[]`).
   specSources?: string[];
+  // sdd/migration-remediation Slice 4 (D-P1a, publication rendering + tested metadata): the CURRENT
+  // round's per-spec metadata (flow/objective), the SAME "what was tested" data GenerationPort's own
+  // widened return carries (ports/index.ts). A narrow port-boundary projection (only the two fields
+  // ever rendered — the SAME discipline as ports/index.ts's own RetrievedRule), not the full
+  // ManifestEntry shape. Absent/empty when the composed generation adapter has no readSpecMetas
+  // collaborator or the round produced none — never fabricated. Read at the END of run() (see
+  // FixLoopResult.lastSpecMetas below) so a caller can prefer the FixLoop's OWN final regen's tested
+  // metadata over the pre-loop initial generation's (which can go stale once the loop rewrites specs).
+  specMetas?: { flow?: string; objective?: string }[];
 }
 export interface FixLoopGenerationPort {
   generate(input: FixLoopGenerateInput): Promise<FixLoopGenerateResult>;
@@ -175,6 +184,13 @@ export interface FixLoopResult {
   // or maxRetries=0).
   lastAdjudicatorVerdict: AdjudicatorVerdict | undefined;
   coverageNamespace: string;
+  // sdd/migration-remediation Slice 4 (D-P1a): the LAST regen round's own specMetas (lastRegenResult's
+  // own field, at the moment the loop exits) — mirrors lastAdjudicatorVerdict's own "never fabricated"
+  // contract. undefined when the loop never regenerated (verdict!=='fail' on entry, generating=false,
+  // maxRetries=0, or every regen round the loop DID run produced no specMetas). The caller (RunQaUseCase)
+  // prefers this over the pre-loop initial generation's own specMetas when both exist — the FixLoop's
+  // final regen is the freshest "what was tested" evidence once the loop has rewritten specs.
+  lastSpecMetas: { flow?: string; objective?: string }[] | undefined;
 }
 
 const failCount = (r: FixLoopRun): number => r.cases.filter((c) => c.status === "fail").length;
@@ -431,6 +447,10 @@ export class FixLoop {
       realBugDetected,
       lastAdjudicatorVerdict: adjVerdict,
       coverageNamespace: coverageNs,
+      // sdd/migration-remediation Slice 4 (D-P1a): lastRegenResult is undefined when the loop never
+      // regenerated (the SAME condition lastAdjudicatorVerdict's own undefined default reflects) —
+      // ?.specMetas on undefined is undefined, never a fabricated [].
+      lastSpecMetas: lastRegenResult?.specMetas,
     };
   }
 }

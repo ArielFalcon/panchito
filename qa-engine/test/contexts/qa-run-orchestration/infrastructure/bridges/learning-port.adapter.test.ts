@@ -11,6 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { LearningPortAdapter } from "@contexts/qa-run-orchestration/infrastructure/bridges/learning-port.adapter.ts";
+import { renderLearnedRules } from "@contexts/qa-run-orchestration/infrastructure/bridges/generation-port.adapter.ts";
 import { StubLearningRepository } from "@contexts/cross-run-learning/infrastructure/stub-learning-repository.adapter.ts";
 import type { LearningRepositoryPort, LearningRule } from "@contexts/cross-run-learning/application/ports/index.ts";
 import { Sha } from "@kernel/sha.ts";
@@ -214,6 +215,81 @@ test("retrieve() with a rejecting incrementUsage does NOT reject the caller's ow
   const adapter = new LearningPortAdapter(repo, "app", 20, undefined, () => {});
 
   await assert.doesNotReject(() => adapter.retrieve(Sha.of("abc1234")));
+});
+
+// ── Slice 7.1 (sdd/migration-remediation, verify-first spike -> confirmed fix): retrieve() had NO
+// char-budget step — only the count limit (DEFAULT_RETRIEVE_LIMIT). An oversized rule set could
+// reach the generator prompt uncapped. Legacy oracle: src/qa/learning/retrieval.ts's retrieveRules()
+// budget-fits (fitRulesToBudget) BEFORE recording usage, so usageCount/retrieved-ids reflect EXACTLY
+// what the generator sees — no phantom "used" rules truncated out of the render. ─────────────────
+
+function makeRule(id: string, trigger: string, action: string): LearningRule {
+  return {
+    id, trigger, action, errorClass: "E-EXEC-FAIL", archetype: null, status: "active",
+    confidence: "high", usageCount: 0, outcomeCount: 0, oracleOutcomeCount: 0, successRate: null,
+    lastVerified: null, source: "run", at: new Date().toISOString(),
+  };
+}
+
+test("retrieve() drops the lowest-ranked (tail) rules until the rendered prompt section fits the char budget", async () => {
+  // topRules() returns rules already ranked best-first (RuleGovernanceService's own contract) —
+  // r1 is the highest-ranked, r3 the lowest.
+  const rules: LearningRule[] = [
+    makeRule("r1", "trigger one padded to a realistic length for a rule description", "action one padded to a realistic length for a rule fix"),
+    makeRule("r2", "trigger two padded to a realistic length for a rule description", "action two padded to a realistic length for a rule fix"),
+    makeRule("r3", "trigger three padded to a realistic length for a rule description", "action three padded to a realistic length for a rule fix"),
+  ];
+  const repo: LearningRepositoryPort = {
+    save: async () => {},
+    topRules: async () => rules,
+    applyOutcome: async () => {},
+  };
+  // Budget fits exactly the first rule's rendered section, not all three — derived from the SAME
+  // render function the generation bridge actually uses, so the test is not fragile to header text.
+  const oneRuleBudget = renderLearnedRules([
+    { id: "r1", trigger: rules[0]!.trigger, action: rules[0]!.action, errorClass: rules[0]!.errorClass, status: "active", confidence: "high" },
+  ]).length;
+  const adapter = new LearningPortAdapter(repo, "app", 20, undefined, undefined, oneRuleBudget);
+
+  const result = await adapter.retrieve(Sha.of("abc1234"));
+
+  assert.deepEqual(result.map((r) => r.id), ["r1"], "only the highest-ranked (head) rule fits the budget — lowest-ranked tail rules are dropped");
+});
+
+test("retrieve() calls incrementUsage with EXACTLY the budget-fitted set, never the phantom untrimmed set", async () => {
+  const rules: LearningRule[] = [
+    makeRule("r1", "trigger one padded to a realistic length for a rule description", "action one padded to a realistic length for a rule fix"),
+    makeRule("r2", "trigger two padded to a realistic length for a rule description", "action two padded to a realistic length for a rule fix"),
+  ];
+  let incrementedIds: readonly string[] | undefined;
+  const repo: LearningRepositoryPort = {
+    save: async () => {},
+    topRules: async () => rules,
+    applyOutcome: async () => {},
+    incrementUsage: async (ids) => { incrementedIds = ids; },
+  };
+  const oneRuleBudget = renderLearnedRules([
+    { id: "r1", trigger: rules[0]!.trigger, action: rules[0]!.action, errorClass: rules[0]!.errorClass, status: "active", confidence: "high" },
+  ]).length;
+  const adapter = new LearningPortAdapter(repo, "app", 20, undefined, undefined, oneRuleBudget);
+
+  await adapter.retrieve(Sha.of("abc1234"));
+
+  assert.deepEqual(incrementedIds, ["r1"], "usage must be recorded on exactly what the generator will see — never a rule truncated out of the render");
+});
+
+test("retrieve() with a generously large budget returns every retrieved rule unchanged (no truncation when it already fits)", async () => {
+  const rule = makeRule("r1", "short trigger", "short action");
+  const repo: LearningRepositoryPort = {
+    save: async () => {},
+    topRules: async () => [rule],
+    applyOutcome: async () => {},
+  };
+  const adapter = new LearningPortAdapter(repo, "app");
+
+  const result = await adapter.retrieve(Sha.of("abc1234"));
+
+  assert.deepEqual(result.map((r) => r.id), ["r1"], "a rule set that already fits the default budget must not be trimmed");
 });
 
 test("retrieve() tolerates a store without incrementUsage wired (optional method, off-path)", async () => {

@@ -4,7 +4,7 @@ import { sanitizeText, containsSecrets, SECRET_AUDIT, recordAudit, capText, MAX_
 
 test("redacts secrets (api key, token)", () => {
   const { text: out } = sanitizeText("const apiKey = sk-abc123XYZ\ntoken: ghs_supersecretvalue");
-  assert.match(out, /\[REDACTED_SECRET\]/);
+  assert.match(out, /\[REDACTED\]/);
   assert.doesNotMatch(out, /sk-abc123XYZ/);
 });
 
@@ -14,30 +14,30 @@ test("redacts secrets (api key, token)", () => {
 // Testing the change SITE, not the constant redaction of a real secret (already covered above).
 test("model mode: does NOT redact a type annotation shaped like a credential field", () => {
   const { text: out } = sanitizeText("password: string;", "model");
-  assert.doesNotMatch(out, /REDACTED_SECRET/, "a type annotation carries no secret value");
+  assert.doesNotMatch(out, /REDACTED/, "a type annotation carries no secret value");
   assert.match(out, /password: string;/);
 });
 
 test("model mode: does NOT redact a bare call expression assigned to a credential-named variable", () => {
   const { text: out } = sanitizeText("const token = getToken();", "model");
-  assert.doesNotMatch(out, /REDACTED_SECRET/, "a call expression carries no literal secret value");
+  assert.doesNotMatch(out, /REDACTED/, "a call expression carries no literal secret value");
   assert.match(out, /getToken\(\)/);
 });
 
 test("model mode: STILL redacts a quoted string literal assigned to a credential field", () => {
   const { text: out } = sanitizeText('const password = "hunter2";', "model");
-  assert.match(out, /REDACTED_SECRET/, "a quoted literal is the real secret shape and must still redact");
+  assert.match(out, /REDACTED/, "a quoted literal is the real secret shape and must still redact");
   assert.doesNotMatch(out, /hunter2/);
 });
 
 test("model mode: STILL redacts a high-entropy bare token value", () => {
   const { text: out } = sanitizeText("token = aZ9kP2mQ7xR4tL6vB8nH1cJ3s", "model");
-  assert.match(out, /REDACTED_SECRET/, "a high-entropy bare token is still a real secret shape");
+  assert.match(out, /REDACTED/, "a high-entropy bare token is still a real secret shape");
 });
 
 test("issue mode (default, unchanged): a type annotation is STILL redacted — aggressive public-surface policy", () => {
   const { text: out } = sanitizeText("password: string;");
-  assert.match(out, /REDACTED_SECRET/, "the default (Issue-bound) mode keeps the aggressive pattern");
+  assert.match(out, /REDACTED/, "the default (Issue-bound) mode keeps the aggressive pattern");
 });
 
 test("issue mode (explicit): identical to default — aggressive public-surface policy", () => {
@@ -62,19 +62,19 @@ test("redacts a bare LLM provider key (sk-...) with no adjacent keyword", () => 
   const key = "sk-proj-abcDEF0123456789ghijKLMNopqrstuvWX";
   const { text: out } = sanitizeText(`const k = "${key}"; // committed by mistake`);
   assert.doesNotMatch(out, /sk-proj-/);
-  assert.match(out, /\[REDACTED_SECRET\]/);
+  assert.match(out, /\[REDACTED\]/);
 });
 
 test("redacts a bare Slack token (xoxb-...)", () => {
   const { text: out } = sanitizeText("notify('xoxb-1234567890-ABCDEFghijkl')");
   assert.doesNotMatch(out, /xoxb-1234567890/);
-  assert.match(out, /\[REDACTED_SECRET\]/);
+  assert.match(out, /\[REDACTED\]/);
 });
 
 test("redacts the password in a DB connection string but keeps the host", () => {
   const { text: out } = sanitizeText("DATABASE_URL=postgres://admin:s3cr3tP4ss@db.internal:5432/app");
   assert.doesNotMatch(out, /s3cr3tP4ss/);
-  assert.match(out, /\[REDACTED_SECRET\]/);
+  assert.match(out, /\[REDACTED\]/);
   assert.match(out, /db\.internal/); // host left readable
 });
 
@@ -98,7 +98,7 @@ test("redacts private IPs", () => {
 
 test("redacts email (PII)", () => {
   const { text: out } = sanitizeText("user: ana.perez@company.com created the order");
-  assert.match(out, /\[REDACTED_PII\]/);
+  assert.match(out, /\[REDACTED\]/);
   assert.doesNotMatch(out, /ana\.perez@company\.com/);
 });
 
@@ -170,32 +170,32 @@ test("SECRET_AUDIT does not record zero redactions", () => {
 
 test("redacts Slack webhook URL", () => {
   const { text: out } = sanitizeText("webhook: https://hooks.slack.com/services/T00/B00/xyz123");
-  assert.match(out, /\[REDACTED_SECRET\]/);
+  assert.match(out, /\[REDACTED\]/);
   assert.doesNotMatch(out, /hooks\.slack\.com/);
 });
 
 test("redacts Stripe key", () => {
   const { text: out } = sanitizeText("key: sk_test_fake000000000000000000000000");
-  assert.match(out, /\[REDACTED_SECRET\]/);
+  assert.match(out, /\[REDACTED\]/);
   assert.doesNotMatch(out, /sk_test_/);
 });
 
 test("redacts API key in query string", () => {
   const { text: out } = sanitizeText("GET /?token=abc123&other=val");
-  assert.match(out, /\[REDACTED_SECRET\]/);
+  assert.match(out, /\[REDACTED\]/);
   assert.doesNotMatch(out, /token=abc123/);
 });
 
 test("redacts generic credential", () => {
   const { text: out } = sanitizeText("credential: my-secret-value");
-  assert.match(out, /\[REDACTED_SECRET\]/);
+  assert.match(out, /\[REDACTED\]/);
   assert.doesNotMatch(out, /my-secret-value/);
 });
 
 test("redacts base64 secret", () => {
   const long64 = "dGhpc2lzYXZlcnlsb25nYmFzZTY0c3RyaW5ndGhhdGNvdWxkYmVhc2VjcmV0";
   const { text: out } = sanitizeText(`data: ${long64}`);
-  assert.match(out, /\[REDACTED_SECRET\]/);
+  assert.match(out, /\[REDACTED\]/);
   assert.doesNotMatch(out, new RegExp(long64));
 });
 
@@ -205,30 +205,30 @@ test("does NOT redact a git SHA / hex digest as a base64 secret", () => {
   const sha = "9f6edf0a1b2c3d4e5f60718293a4b5c6d7e8f901";
   const { text: out, detection } = sanitizeText(`sha ${sha} done`);
   assert.match(out, new RegExp(sha), "the SHA must survive sanitization");
-  assert.doesNotMatch(out, /\[REDACTED_SECRET\]/);
+  assert.doesNotMatch(out, /\[REDACTED\]/);
   assert.equal(detection.redacted, false);
   assert.equal(containsSecrets(sha), false);
   // A 64-char hex digest (sha256) is likewise not a secret.
   const sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-  assert.doesNotMatch(sanitizeText(sha256).text, /\[REDACTED_SECRET\]/);
+  assert.doesNotMatch(sanitizeText(sha256).text, /\[REDACTED\]/);
 });
 
 test("preserves data URIs (not redacted as base64)", () => {
   const dataUri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
   const { text: out } = sanitizeText(`before ${dataUri} after`);
   assert.match(out, /data:image\/png;base64,/);
-  assert.doesNotMatch(out, /\[REDACTED_SECRET\].*after/);
+  assert.doesNotMatch(out, /\[REDACTED\].*after/);
 });
 
 test("redacts AWS access key", () => {
   const { text: out } = sanitizeText("AKIAIOSFODNN7EXAMPLE");
-  assert.match(out, /\[REDACTED_SECRET\]/);
+  assert.match(out, /\[REDACTED\]/);
   assert.doesNotMatch(out, /AKIA/);
 });
 
 test("redacts GitHub token", () => {
   const { text: out } = sanitizeText("token: ghp_abcdefghijklmnopqrstuvwxyz1234567890AB");
-  assert.match(out, /\[REDACTED_SECRET\]/);
+  assert.match(out, /\[REDACTED\]/);
   assert.doesNotMatch(out, /ghp_/);
 });
 
@@ -237,14 +237,14 @@ test("redacts PEM private key", () => {
 MIIEpAIBAAKCAQEA0Z3...
 -----END RSA PRIVATE KEY-----`;
   const { text: out } = sanitizeText(pem);
-  assert.match(out, /\[REDACTED_SECRET\]/);
+  assert.match(out, /\[REDACTED\]/);
   assert.doesNotMatch(out, /BEGIN RSA PRIVATE KEY/);
 });
 
 test("redacts env-var style credentials incl. the system's own DEV_*_PASS", () => {
   for (const secret of ["DEV_TEST_PASS=SuperSecret123!", "DEV_ENV_PASS: hunter2", "GITHUB_TOKEN=ghp_x", "OPENCODE_API_KEY=sk-abc"]) {
     const { text: out, detection } = sanitizeText(secret);
-    assert.match(out, /\[REDACTED_SECRET\]/, `should redact: ${secret}`);
+    assert.match(out, /\[REDACTED\]/, `should redact: ${secret}`);
     assert.equal(detection.redacted, true);
     assert.equal(containsSecrets(secret), true);
   }
@@ -355,11 +355,11 @@ test("Slice G capDiff: multiple source files — all kept before any lockfile is
   assert.ok(result.includes("src/b.ts"), "second source file preserved");
 });
 
-test("does NOT redact deep repo file paths as base64 secrets — a >=40-char run of letters+slashes IS a real Java package path (redacting it mangled diffs sent to the model into '[REDACTED_SECRET].java')", () => {
+test("does NOT redact deep repo file paths as base64 secrets — a >=40-char run of letters+slashes IS a real Java package path (redacting it mangled diffs sent to the model into '[REDACTED].java')", () => {
   const path = "src/main/java/es/name/restaurants/application/service/impl/CourseApplicationServiceImpl.java";
   const { text: out } = sanitizeText(`+++ b/${path}\n- \`createNewCourse\` (${path})`);
   assert.match(out, /CourseApplicationServiceImpl\.java/);
-  assert.doesNotMatch(out, /\[REDACTED_SECRET\]/);
+  assert.doesNotMatch(out, /\[REDACTED\]/);
 });
 
 test("still redacts genuine long base64 secrets (with +/= chars, or with no path-shaped slashes)", () => {
@@ -368,7 +368,7 @@ test("still redacts genuine long base64 secrets (with +/= chars, or with no path
   const { text: out } = sanitizeText(`${withPlusEquals}\n${flatNoSlashes}`);
   assert.doesNotMatch(out, /QWxhZGRpbjpvcGVu/);
   assert.doesNotMatch(out, /AbC0123456789dEf/);
-  assert.match(out, /\[REDACTED_SECRET\]/);
+  assert.match(out, /\[REDACTED\]/);
 });
 
 test("does NOT redact long Java identifiers or paths with >30-char segments (both are code, not base64)", () => {
@@ -377,7 +377,7 @@ test("does NOT redact long Java identifiers or paths with >30-char segments (bot
   const { text: out } = sanitizeText(`- \`${identifier}\` (${longSegPath})`);
   assert.match(out, /populateCoursesDescriptionMultilingualUseCase/);
   assert.match(out, /CourseSearcherAlgorithmTemplate\.java/);
-  assert.doesNotMatch(out, /\[REDACTED_SECRET\]/);
+  assert.doesNotMatch(out, /\[REDACTED\]/);
 });
 
 // JD FIX 2: isPathLikeRun's no-slash escape was ANY pure-letter run — too loose, it let an
@@ -388,7 +388,7 @@ test("JD-FIX2: a camelCase identifier (45 chars, no digits) still survives — e
   assert.equal(identifier.length, 45);
   const { text: out } = sanitizeText(`- \`${identifier}\``);
   assert.match(out, /populateCoursesDescriptionMultilingualUseCase/);
-  assert.doesNotMatch(out, /\[REDACTED_SECRET\]/);
+  assert.doesNotMatch(out, /\[REDACTED\]/);
 });
 
 test("JD-FIX2: a 45-char ALL-LOWERCASE alpha run (no case transition) IS redacted, not code-shaped", () => {
@@ -396,7 +396,7 @@ test("JD-FIX2: a 45-char ALL-LOWERCASE alpha run (no case transition) IS redacte
   assert.equal(blob.length, 45);
   const { text: out } = sanitizeText(`token blob: ${blob}`);
   assert.doesNotMatch(out, new RegExp(blob));
-  assert.match(out, /\[REDACTED_SECRET\]/);
+  assert.match(out, /\[REDACTED\]/);
 });
 
 test("JD-FIX2: a 70-char camelCase-shaped run (>64 chars) IS redacted — length cap wins over shape", () => {
@@ -404,14 +404,14 @@ test("JD-FIX2: a 70-char camelCase-shaped run (>64 chars) IS redacted — length
   assert.equal(blob.length, 70);
   const { text: out } = sanitizeText(`value=${blob}`);
   assert.doesNotMatch(out, new RegExp(blob));
-  assert.match(out, /\[REDACTED_SECRET\]/);
+  assert.match(out, /\[REDACTED\]/);
 });
 
 test("JD-R2: a PERFECT 2-char case-alternation blob (the deterministic adversarial shape) IS redacted — the identifier escape requires at least one word-segment >= 3 chars", () => {
   const alternating = "AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEfGhIjKlMnOp"; // 42 chars, every segment exactly 2
   const { text: out } = sanitizeText(alternating);
   assert.doesNotMatch(out, /AbCdEfGhIjKl/);
-  assert.match(out, /\[REDACTED_SECRET\]/);
+  assert.match(out, /\[REDACTED\]/);
   // and the real identifier (segments populate/Courses/... >= 3) still survives:
   const identifier = "populateCoursesDescriptionMultilingualUseCase";
   assert.equal(sanitizeText(identifier).text, identifier);

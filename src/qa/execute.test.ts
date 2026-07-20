@@ -93,7 +93,7 @@ test("runs, maps cases and SANITIZES the logs", async () => {
   assert.equal(run.passed, false);
   assert.equal(run.cases.length, 2);
   assert.doesNotMatch(run.logs, /ghs_aaaa/); // secret redacted
-  assert.match(run.logs, /\[REDACTED_SECRET\]/);
+  assert.match(run.logs, /\[REDACTED\]/);
 });
 
 test("classifies flaky when there are unstable cases and none fail", async () => {

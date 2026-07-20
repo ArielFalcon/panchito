@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPrompt, buildPromptAssembled, buildPlanPromptAssembled, buildFollowupPrompt, buildWorkerPrompt, buildReviewerPrompt, buildExplorerPrompt, buildContextTask } from "./prompts";
+import { buildPrompt, buildPromptAssembled, buildPlanPromptAssembled, buildFollowupPrompt, buildWorkerPrompt, buildReviewerPrompt, buildReviewerPromptAssembled, buildExplorerPrompt, buildContextTask } from "./prompts";
 import { assemble as caAssemble, section as caSection } from "./context-assembler";
+import { roleWindowBytes } from "./model-window-catalog";
 import type { OpencodeRunInput } from "./opencode-client";
 import type { ParallelWorkerInput, ReviewInput } from "@contexts/generation/application/ports/generation-ports.ts";
 import type { QaCase } from "../types";
@@ -992,7 +993,7 @@ test("S2.4(6): serviceLinks string fields pass through the local s() sanitize wr
   };
   const text = buildPrompt(mkInput({ serviceLinks: [dirtyLink] }));
   assert.ok(!text.includes("sk-abc123XYZsecretvalue"), "a secret-shaped string in a serviceLinks field must be redacted by the sanitize wrapper, never passed through raw");
-  assert.match(text, /REDACTED_SECRET/, "the sanitize wrapper must have actually redacted the secret pattern");
+  assert.match(text, /REDACTED/, "the sanitize wrapper must have actually redacted the secret pattern");
 });
 
 // ── Slice C (structural-signals-expansion, design §3.6/C-R6): inline "[IMPACTED:<tier>]" markers on
@@ -1288,7 +1289,7 @@ test("A-R3(6): worker prompt serviceLinks string fields pass through the local s
   };
   const text = buildWorkerPrompt(mkWorkerInput({ serviceLinks: [dirtyLink] }));
   assert.ok(!text.includes("sk-abc123XYZsecretvalue"), "a secret-shaped string in a worker serviceLinks field must be redacted, never passed through raw");
-  assert.match(text, /REDACTED_SECRET/, "the sanitize wrapper must have actually redacted the secret pattern");
+  assert.match(text, /REDACTED/, "the sanitize wrapper must have actually redacted the secret pattern");
 });
 
 // ── WS5.1: capDiff is wired at every render boundary that embeds the raw diff ───────────────────
@@ -1339,6 +1340,117 @@ test("WS5.1: a small diff (under the cap) passes through buildDiffSection unmodi
   const text = buildPrompt(mkInput({ diff: small, mode: "diff" }));
   assert.ok(text.includes("export function foo()"), "a small diff must render in full");
   assert.doesNotMatch(text, /diff truncated/i, "a small diff must not trigger the truncation marker");
+});
+
+// Judgment-day: the planner (buildPlanPromptAssembled, diff mode) was the 5th raw-diff render site —
+// it ran on EVERY diff/manual run BEFORE generator/reviewer, embedding `sanitizeText(input.diff).text`
+// uncapped inside the plan-change section (no maxBytes, default overflow:"drop"). A diff big enough to
+// blow the qa-generator role budget on its own shed the WHOLE plan-change section — diff, change
+// intent AND commit message together — leaving the planner blind (judge-verified live: an 850KB diff
+// reduced the assembled planner prompt to a ~2.8KB shell). This pins the fix: cappedDiffText at the
+// planner site + plan-change's own maxBytes/overflow:"summarize" backstop.
+test("judgment-day PIN: the planner's plan-change section survives a diff far larger than the qa-generator role budget", () => {
+  const huge = bigDiff();
+  const result = buildPlanPromptAssembled(mkInput({ diff: huge, mode: "diff" }));
+  assert.match(result.text, /diff truncated/i, "the diff embed itself must be capped (capDiff) with a visible marker");
+  assert.match(
+    result.text,
+    /## Change intent \(Conventional Commits\)/,
+    `plan-change must survive whole, not be dropped by the section-level shed. sectionSizes: ${JSON.stringify(result.sectionSizes)}`,
+  );
+  assert.match(
+    result.text,
+    /## Commit message/,
+    `the commit message inside plan-change must survive alongside the capped diff. sectionSizes: ${JSON.stringify(result.sectionSizes)}`,
+  );
+  assert.ok(
+    Buffer.byteLength(result.text, "utf8") <= roleWindowBytes("qa-generator"),
+    `the assembled planner prompt must respect the qa-generator role budget. sectionSizes: ${JSON.stringify(result.sectionSizes)}`,
+  );
+});
+
+test("WS5.1: reviewObjective/commitDiffObjective (reviewer diff objective) caps a giant diff instead of embedding it whole", () => {
+  const huge = bigDiff();
+  const reviewInput: ReviewInput = {
+    diff: huge,
+    specs: ["flows/checkout.spec.ts"],
+    mirrorDir: "/mirrors/org__app",
+    e2eRelDir: "e2e",
+    appName: "testapp",
+    mode: "diff",
+  };
+  const text = buildReviewerPrompt(reviewInput);
+  assert.ok(text.length < huge.length, "the reviewer prompt must be smaller than the raw uncapped diff");
+  assert.match(text, /diff truncated/i, "a visible truncation marker must be present");
+  assert.match(text, /git show/, "the marker must point the agent at `git show <sha>` for the full diff");
+});
+
+test("reviewer defense-in-depth: a >capDiff diff never starves the specs/dom sections", () => {
+  const huge = bigDiff();
+  const { text } = buildReviewerPromptAssembled({
+    diff: huge,
+    specs: ["flows/checkout.spec.ts"],
+    mirrorDir: "/mirrors/org__app",
+    e2eRelDir: "e2e",
+    appName: "testapp",
+    mode: "diff",
+    domSnapshot: "button: Submit\nheading: Checkout",
+  });
+  assert.match(text, /diff truncated/i, "the objective must be capped, not dropped");
+  assert.match(text, /## Specs to review/, "reviewer-specs must survive");
+  assert.match(text, /Live DEV DOM/, "reviewer-dom must survive");
+  assert.ok(
+    Buffer.byteLength(text, "utf8") <= roleWindowBytes("qa-reviewer"),
+    "the assembled reviewer prompt must respect the reviewer role's byte budget",
+  );
+});
+
+test("WS5.1: a small diff (under the cap) at the reviewer site passes through unmodified", () => {
+  const small = "diff --git a/src/foo.ts b/src/foo.ts\n+export function foo() {}\n";
+  const reviewInput: ReviewInput = {
+    diff: small,
+    specs: ["flows/checkout.spec.ts"],
+    mirrorDir: "/mirrors/org__app",
+    e2eRelDir: "e2e",
+    appName: "testapp",
+    mode: "diff",
+  };
+  const text = buildReviewerPrompt(reviewInput);
+  assert.ok(text.includes("export function foo()"), "a small diff must render in full");
+  assert.doesNotMatch(text, /diff truncated/i, "a small diff must not trigger the truncation marker");
+});
+
+// ── Judgment-day round 2 (reviewer-budget-starvation): the "reviewer defense-in-depth" test above
+// never actually reaches the reviewer-dom/reviewer-specs maxBytes backstops — capDiff already bounds
+// the diff to ~50,000 chars before the section-level cap ever sees it, so reverting the
+// maxBytes/overflow additions on those sections still passes it trivially. This test drives an
+// oversized DOM snapshot directly (independent of the diff/capDiff) so the reviewer-dom section's
+// OWN 20,000B cap is what fires.
+test("reviewer defense-in-depth actually FIRES: an oversized DOM snapshot alone (no huge diff) triggers the reviewer-dom maxBytes backstop", () => {
+  const oversizedDom = padTo("button: Submit\nheading: Checkout\n", 25_000);
+  const { text } = buildReviewerPromptAssembled({
+    diff: "diff --git a/src/foo.ts b/src/foo.ts\n+export function foo() {}\n",
+    specs: ["flows/checkout.spec.ts"],
+    mirrorDir: "/mirrors/org__app",
+    e2eRelDir: "e2e",
+    appName: "testapp",
+    mode: "diff",
+    domSnapshot: oversizedDom,
+  });
+  assert.match(
+    text,
+    /## Live DEV DOM/,
+    "reviewer-dom must be PRESENT despite exceeding its own 20,000B cap — a 'drop' overflow policy would omit it entirely",
+  );
+  assert.match(
+    text,
+    /capped at 20000 bytes/,
+    "the visible per-section truncation marker naming reviewer-dom's own maxBytes must appear",
+  );
+  assert.ok(
+    Buffer.byteLength(text, "utf8") <= roleWindowBytes("qa-reviewer"),
+    "the assembled reviewer prompt must still respect the reviewer role's byte budget",
+  );
 });
 
 // ── WS5.2: coverage-gap must survive its own regen prompt ────────────────────────────────────────

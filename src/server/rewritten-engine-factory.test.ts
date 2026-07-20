@@ -61,6 +61,9 @@ test("buildRewrittenCompositionConfig maps an e2e AppConfig into a complete Comp
   assert.ok(config.githubIssue, "githubIssue collaborator must be wired");
   assert.ok(config.vcsWrite, "PROD-BLOCKER fix: vcsWrite collaborator must be wired — without it the 'pr' route throws at publish() time instead of silently opening a PR against an unpushed branch");
   assert.equal(typeof config.checkout, "function");
+  assert.ok(config.confinement, "sdd/migration-remediation Slice 3: ConfinementPort collaborator must be wired");
+  assert.ok(config.reflectorPort, "reflector-rewire: ReflectorPort collaborator must be wired");
+  assert.ok(config.processAudit, "sdd/migration-remediation Slice 5: ProcessAuditPort collaborator must be wired");
 });
 
 // ── follow-up #27: bounded contract-repair (RepairPort) wired into the rewritten production path ──
@@ -571,7 +574,7 @@ async function withEnv(vars: Record<string, string | undefined>, body: () => Pro
 
 test("buildVcsPublish (e2e target): no changes under e2e/ -> reports changed:false and only queries status (skip-if-no-changes, no checkout/commit/push)", async () => {
   const { git, calls } = fakeGit("   \n  ");
-  const vcsWrite = buildVcsPublish(false, git, () => {});
+  const vcsWrite = buildVcsPublish(false, "diff", git, () => {});
 
   const result = await vcsWrite.publish({ mirrorDir: "/mirrors/org/app", branch: "qa-bot/abc1234", sha: "abc1234" });
 
@@ -581,7 +584,7 @@ test("buildVcsPublish (e2e target): no changes under e2e/ -> reports changed:fal
 
 test("buildVcsPublish (e2e target): changes under e2e/ -> checkout -B, add, commit, push, in that order, scoped to the e2e/ pathspec", async () => {
   const { git, calls } = fakeGit(" M e2e/login.spec.ts");
-  const vcsWrite = buildVcsPublish(false, git, () => {});
+  const vcsWrite = buildVcsPublish(false, "diff", git, () => {});
 
   const result = await vcsWrite.publish({ mirrorDir: "/mirrors/org/app", branch: "qa-bot/abc1234", sha: "abc1234" });
 
@@ -608,7 +611,7 @@ test("buildVcsPublish (e2e target): changes under e2e/ -> checkout -B, add, comm
 test("CRITICAL auth-on-push: buildVcsPublish's push carries authHeaderArgs() (-c url.insteadOf token rewrite) when GITHUB_TOKEN is set — legacy parity with publish.ts:124", async () => {
   await withEnv({ GITHUB_TOKEN: "testtoken123" }, async () => {
     const { git, calls } = fakeGit(" M e2e/login.spec.ts");
-    const vcsWrite = buildVcsPublish(false, git, () => {});
+    const vcsWrite = buildVcsPublish(false, "diff", git, () => {});
 
     await vcsWrite.publish({ mirrorDir: "/mirrors/org/app", branch: "qa-bot/abc1234", sha: "abc1234" });
 
@@ -632,7 +635,7 @@ test("CRITICAL auth-on-push: buildVcsPublish's push carries authHeaderArgs() (-c
 test("CRITICAL auth-on-push: without GITHUB_TOKEN the push argv has NO auth prefix (authHeaderArgs() returns [] — tokenless environments, legacy parity)", async () => {
   await withEnv({ GITHUB_TOKEN: undefined }, async () => {
     const { git, calls } = fakeGit(" M e2e/login.spec.ts");
-    const vcsWrite = buildVcsPublish(false, git, () => {});
+    const vcsWrite = buildVcsPublish(false, "diff", git, () => {});
 
     await vcsWrite.publish({ mirrorDir: "/mirrors/org/app", branch: "qa-bot/abc1234", sha: "abc1234" });
 
@@ -644,7 +647,7 @@ test("CRITICAL auth-on-push: without GITHUB_TOKEN the push argv has NO auth pref
 test("CRITICAL commit-identity: buildVcsPublish's commit carries -c user.name/-c user.email with legacy's exact env fallbacks (fresh mirrors have NO git identity — a bare commit hard-fails 'Author identity unknown')", async () => {
   await withEnv({ GIT_AUTHOR_NAME: undefined, GIT_AUTHOR_EMAIL: undefined }, async () => {
     const { git, calls } = fakeGit(" M e2e/login.spec.ts");
-    const vcsWrite = buildVcsPublish(false, git, () => {});
+    const vcsWrite = buildVcsPublish(false, "diff", git, () => {});
 
     await vcsWrite.publish({ mirrorDir: "/mirrors/org/app", branch: "qa-bot/abc1234", sha: "abc1234" });
 
@@ -660,7 +663,7 @@ test("CRITICAL commit-identity: buildVcsPublish's commit carries -c user.name/-c
 test("CRITICAL commit-identity: GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL override the fallbacks (same env vars legacy read, resolved at CALL time)", async () => {
   await withEnv({ GIT_AUTHOR_NAME: "qa-ops", GIT_AUTHOR_EMAIL: "qa-ops@example.com" }, async () => {
     const { git, calls } = fakeGit(" M src/orders.ts");
-    const vcsWrite = buildVcsPublish(true, git, () => {});
+    const vcsWrite = buildVcsPublish(true, "diff", git, () => {});
 
     await vcsWrite.publish({ mirrorDir: "/mirrors/org/panchito", branch: "qa-bot/def5678", sha: "def5678" });
 
@@ -676,7 +679,7 @@ test("CRITICAL commit-identity: GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL override the fa
 test("CRITICAL decorations are scoped: status/checkout/add stay UNDECORATED (no auth, no identity — only push needs auth, only commit needs identity, matching legacy's per-call-site discipline)", async () => {
   await withEnv({ GITHUB_TOKEN: "testtoken123", GIT_AUTHOR_NAME: undefined, GIT_AUTHOR_EMAIL: undefined }, async () => {
     const { git, calls } = fakeGit(" M e2e/login.spec.ts");
-    const vcsWrite = buildVcsPublish(false, git, () => {});
+    const vcsWrite = buildVcsPublish(false, "diff", git, () => {});
 
     await vcsWrite.publish({ mirrorDir: "/mirrors/org/app", branch: "qa-bot/abc1234", sha: "abc1234" });
 
@@ -688,7 +691,7 @@ test("CRITICAL decorations are scoped: status/checkout/add stay UNDECORATED (no 
 
 test("buildVcsPublish (code target): changes anywhere -> stages the whole tree pathspec '.', not 'e2e'", async () => {
   const { git, calls } = fakeGit(" M src/orders.ts");
-  const vcsWrite = buildVcsPublish(true, git, () => {});
+  const vcsWrite = buildVcsPublish(true, "diff", git, () => {});
 
   const result = await vcsWrite.publish({ mirrorDir: "/mirrors/org/panchito", branch: "qa-bot/def5678", sha: "def5678" });
 
@@ -700,7 +703,7 @@ test("buildVcsPublish (code target): changes anywhere -> stages the whole tree p
 test("buildVcsPublish writes gitignore-style excludes BEFORE checking for changes (so an ignored path like node_modules/ never fails `git add`)", async () => {
   const { git, calls } = fakeGit(" M e2e/login.spec.ts");
   const excludesWritten: { dir: string; patterns: readonly string[] }[] = [];
-  const vcsWrite = buildVcsPublish(false, git, (dir, patterns) => { excludesWritten.push({ dir, patterns }); });
+  const vcsWrite = buildVcsPublish(false, "diff", git, (dir, patterns) => { excludesWritten.push({ dir, patterns }); });
 
   await vcsWrite.publish({ mirrorDir: "/mirrors/org/app", branch: "qa-bot/abc1234", sha: "abc1234" });
 

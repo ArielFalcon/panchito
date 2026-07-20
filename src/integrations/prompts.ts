@@ -57,6 +57,14 @@ const ACCEPTANCE_CRITERION_RULE =
   `cart re-queries"). Write the test to ASSERT that outcome, not merely that the flow runs: the spec ` +
   `MUST fail if this specific behavior regresses.`;
 
+// THE single way to embed a commit diff into any prompt: capped FIRST (capDiff needs raw
+// `diff --git` boundaries to split/rank files), then secret-scrubbed. Every render site MUST
+// use this — history shows per-site discipline does not scale (WS5.1 fixed 3 sites, the
+// reviewer fix found a 4th, judgment-day found a 5th in the planner).
+function cappedDiffText(diff: string): string {
+  return sanitizeText(capDiff(diff)).text;
+}
+
 // ── (functions appended below from the original module, verbatim) ────────────────────────────
 // A spec filename derived from a flow, safe for the filesystem and Playwright's testMatch.
 export function specFileForFlow(flow: string): string {
@@ -340,7 +348,9 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
       ``,
       `## Commit diff`,
       "```diff",
-      sanitizeText(input.diff).text,
+      // Judgment-day: the 5th raw-diff site — was the ONLY one still embedding input.diff
+      // uncapped. cappedDiffText is now the single way every site embeds a diff (see its doc).
+      cappedDiffText(input.diff),
       "```",
       ...(input.service
         ? [
@@ -359,7 +369,12 @@ export function buildPlanPromptAssembled(input: OpencodeRunInput): AssembledProm
 
     return assemble([
       section("plan-procedure", "stable-prefix", planProcedure, { priority: 1, cacheable: true }),
-      section("plan-change", "semi-stable", changeContent, { priority: 1, language: "verbatim" }),
+      // Judgment-day: plan-change carried NO maxBytes, so overflow defaulted to "drop" — a diff
+      // over the 192,000B qa-generator budget shed the WHOLE section (diff + change intent +
+      // commit message), leaving the planner blind. Mirrors reviewer-objective's own backstop
+      // (56,000B sits above capDiff's 50,000-CHAR ceiling plus fixed-prose headroom;
+      // overflow:"summarize" so a residual overflow degrades to a visible truncation, never a drop).
+      section("plan-change", "semi-stable", changeContent, { priority: 1, language: "verbatim", maxBytes: 56_000, overflow: "summarize" }),
       // FIX 3: the explorer's distilled brief (priority 1 so it ranks alongside the change scope — the
       // planner reads it instead of re-widening). Absent when no orchestrator-level explorer ran.
       ...(planBriefContent ? [section("plan-brief", "semi-stable", planBriefContent, { priority: 1 })] : []),
@@ -510,11 +525,11 @@ export function buildExplorerPrompt(input: OpencodeRunInput): string {
     ``,
     `## Commit diff`,
     "```diff",
-    // WS5.1: capDiff runs on the raw diff BEFORE sanitizeText — see buildDiffSection's own note.
+    // WS5.1: capDiff runs on the raw diff BEFORE sanitizeText — see cappedDiffText's own note.
     // The explorer prompt carried NO budget at all before this fix (unlike buildPromptAssembled's
     // assembler-enforced budget, this is a plain string builder with no shedding), so a giant diff
     // here was strictly unbounded.
-    sanitizeText(capDiff(input.diff)).text,
+    cappedDiffText(input.diff),
     "```",
     ...(input.baseUrl ? [``, `Route context only — you do NOT navigate; selectors stay unverified. LIVE DEV URL: ${input.baseUrl}`] : []),
     ...(input.service
@@ -1350,8 +1365,8 @@ function buildCodeTask(input: OpencodeRunInput): string {
     ``,
     `## Commit diff`,
     "```diff",
-    // WS5.1: capDiff runs on the raw diff BEFORE sanitizeText — see buildDiffSection's own note.
-    sanitizeText(capDiff(input.diff)).text,
+    // WS5.1: capDiff runs on the raw diff BEFORE sanitizeText — see cappedDiffText's own note.
+    cappedDiffText(input.diff),
     "```",
     ``,
     `Test the changed logic DIRECTLY (no web, no browser, no Playwright): call the changed functions/`,
@@ -1530,7 +1545,7 @@ function buildDiffSection(input: OpencodeRunInput): string {
   return [
     `## Commit diff`,
     "```diff",
-    sanitizeText(capDiff(input.diff)).text,
+    cappedDiffText(input.diff),
     "```",
   ].join("\n");
 }
@@ -1572,7 +1587,11 @@ export function reviewObjective(input: ReviewInput): { subject: string; heading:
   const commitDiffObjective = () => ({
     subject: "this commit",
     heading: `## Commit diff`,
-    body: ["```diff", sanitizeText(input.diff).text, "```"],
+    // WS5.1-parity: cap BEFORE sanitizing — capDiff splits on `diff --git` file-header boundaries,
+    // so it must see the raw diff structure; sanitizeText only redacts secret-shaped substrings and
+    // never touches those boundaries, so running it second is safe. All diff render sites now go
+    // through the single cappedDiffText helper (see its own doc for the history).
+    body: ["```diff", cappedDiffText(input.diff), "```"],
     targetNoun: "the change",
   });
   // diff and code-mode runs are commit-driven: the commit's changed code is the objective.
@@ -1817,16 +1836,25 @@ export function buildReviewerPromptAssembled(input: ReviewInput): AssembledPromp
     // STABLE prefix: reviewing instructions (stable for the reviewer role).
     section("reviewer-instructions", "stable-prefix", instructionsContent, { priority: 2, cacheable: true }),
     // SEMI-STABLE: the objective (commit diff for diff mode, guidance for manual, etc.).
-    section("reviewer-objective", "semi-stable", objectiveContent, { priority: 1, language: "verbatim" }),
+    // Reviewer-budget-starvation fix: a local maxBytes backstop with overflow:"summarize" (never
+    // "drop") so a residual overflow degrades to a visibly-marked truncation instead of being
+    // silently shed whole by the cross-section budget pass. 56,000B sits above capDiff's 50,000-CHAR
+    // ceiling (a multibyte-heavy capped diff can still exceed 50,000 bytes) plus fixed-prose headroom.
+    section("reviewer-objective", "semi-stable", objectiveContent, { priority: 1, language: "verbatim", maxBytes: 56_000, overflow: "summarize" }),
     // VOLATILE: DOM grounding (priority 1 — first in VOLATILE so it precedes the spec contents that
     // reference it; the instructions refer to it position-independently as "the Live DEV DOM section").
-    ...(domContent ? [section("reviewer-dom", "volatile", domContent, { priority: 1 })] : []),
+    // 20,000B mirrors the reviewer-corrections idiom; overflow:"summarize" for a visible-marker
+    // truncation instead of a silent whole-section drop.
+    ...(domContent ? [section("reviewer-dom", "volatile", domContent, { priority: 1, maxBytes: 20_000, overflow: "summarize" })] : []),
     // VOLATILE: runtime execution result — authoritative orchestrator evidence (HTTP statuses,
     // final URLs). Priority 1.5 (after DOM, before specs) so the reviewer weighs the objective
     // 5xx signal before reading test code. Absent when execution evidence is not available.
     ...(executionResultContent ? [section("reviewer-execution-result", "volatile", executionResultContent, { priority: 1.5 })] : []),
-    // VOLATILE: spec contents (priority 2 — the primary content the reviewer judges).
-    section("reviewer-specs", "volatile", specContent, { priority: 2 }),
+    // VOLATILE: spec contents (priority 2 — the primary content the reviewer judges). 44,000B is a
+    // belt-and-suspenders backstop just above renderReviewSpecs's own 40,000B inline cap; a realistic
+    // 2-4 spec payload is never truncated by this section-level cap. overflow:"summarize" — the
+    // payload the reviewer exists to read must never be silently dropped.
+    section("reviewer-specs", "volatile", specContent, { priority: 2, maxBytes: 44_000, overflow: "summarize" }),
     // VOLATILE: proven app-specific learned rules (priority 3 — supplementary reject criteria).
     ...(learnedRulesContent ? [section("reviewer-learned-rules", "volatile", learnedRulesContent, { priority: 3 })] : []),
     // VOLATILE: Phase 4 prior-round corrections (priority 4 — convergence context; lowest priority

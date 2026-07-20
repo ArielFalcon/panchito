@@ -28,7 +28,7 @@
 import { join } from "node:path";
 import type { Sha } from "@kernel/sha.ts";
 import type { RunMode, TestTarget } from "@kernel/run-mode.ts";
-import type { RunPipelinePort, ObserverPort, RunHistoryPort } from "../application/ports/index.ts";
+import type { RunPipelinePort, ObserverPort, RunHistoryPort, ConfinementPort } from "../application/ports/index.ts";
 import { RewrittenOrchestratorAdapter, type RewrittenOrchestratorAdapterDeps } from "../infrastructure/rewritten-orchestrator.adapter.ts";
 import { selectEngine } from "./pipeline-engine-flag.ts";
 
@@ -71,8 +71,15 @@ import { DecideCoverageService, type CoveragePolicy, type ChangeCoverage } from 
 import type { CoverageCollectorPort, ValueOraclePort } from "@contexts/objective-signal/application/ports/index.ts";
 import { PublishDecisionService } from "@contexts/workspace-and-publication/domain/publish-decision.service.ts";
 import { ShadowLogAdapter } from "@contexts/workspace-and-publication/infrastructure/shadow-log.adapter.ts";
+// sdd/migration-remediation Slice 4 (D-P1a): this composition root is the ONE declared exception to
+// the no-vcs-write-in-agent-contexts arch-lint gate (this file's own header, "the composition root
+// ... its one declared exception") — it may import workspace-and-publication directly, which is how
+// the REAL renderIssue/renderPrBody reach PublicationPortAdapter without that bridge ever importing
+// workspace-and-publication itself (see publication-port.adapter.ts's own PublicationRenderCollaborator
+// doc for the full boundary rationale).
+import { renderIssue, renderPrBody } from "@contexts/workspace-and-publication/domain/render-publication.ts";
 import type { VcsReadPort } from "@contexts/change-analysis/application/ports/index.ts";
-import type { LearningRepositoryPort, ReflectorPort } from "@contexts/cross-run-learning/application/ports/index.ts";
+import type { LearningRepositoryPort, ReflectorPort, ProcessAuditPort } from "@contexts/cross-run-learning/application/ports/index.ts";
 import { StubLearningRepository } from "@contexts/cross-run-learning/infrastructure/stub-learning-repository.adapter.ts";
 
 // The static per-run + collaborator surface every bridge needs. Real construction of each
@@ -302,6 +309,29 @@ export interface CompositionConfig {
   // updateRunOutcomeReflection backfill, both src/-only collaborators this composition root must
   // never import). Threaded straight through to RunQaUseCaseDeps.reflector — no default, no wrapping.
   reflectorPort?: ReflectorPort;
+
+  // ConfinementPort collaborator (sdd/migration-remediation Slice 3, P0 write-confinement wiring,
+  // D-P0b) — [SWAP]-optional, mirrors reflectorPort's own "absent -> no-op" precedent immediately
+  // above. Unlike learningRepo, there is no stub default constructed here: the production factory
+  // (src/server/rewritten-engine-factory.ts, the ONE module permitted to import both qa-engine's
+  // aliases AND root src/) is the ONLY place that can construct a real WriteConfinementAdapter (it
+  // needs realGit — local ops, NO auth decoration — + node:fs realpathSync/lstatSync, both src-only
+  // collaborators this composition root must never import; dependency-cruiser's own
+  // no-vcs-write-in-agent-contexts gate also confines the concrete adapter class itself to living
+  // inside workspace-and-publication/infrastructure). Threaded straight through to
+  // RunQaUseCaseDeps.confinement below — no default, no wrapping (same posture as reflectorPort).
+  confinement?: ConfinementPort;
+
+  // ProcessAuditPort collaborator (sdd/migration-remediation Slice 5, P1 process-audit reconnect,
+  // D-P1b) — [SWAP]-optional, mirrors reflectorPort's own "absent -> no-op" precedent immediately
+  // above. Unlike learningRepo, there is no stub default constructed here: the production factory
+  // (src/server/rewritten-engine-factory.ts, the ONE module permitted to import both qa-engine's
+  // aliases AND root src/) is the ONLY place that can construct a real ProcessAuditPortAdapter (it
+  // needs the recent-outcomes/rules reads + the 3 sinks — recordIncident/setRuleStatusByHuman/
+  // markContextStale — all src-only collaborators this composition root must never import).
+  // Threaded straight through to RunQaUseCaseDeps.processAudit below — no default, no wrapping (same
+  // posture as reflectorPort/confinement).
+  processAudit?: ProcessAuditPort;
 
   // WorkspacePort collaborator — resolves a Sha to its working-copy mirrorDir. Cross-repo routing
   // stays OPAQUE inside this fn (the bridge's own documented scope for Plan 6).
@@ -623,6 +653,11 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
       issue: cfg.githubIssue,
       shadowLog: new ShadowLogAdapter(),
       sanitize: cfg.sanitize,
+      // sdd/migration-remediation Slice 4 (D-P1a): the REAL pure render functions — universal, not
+      // app/environment-specific, so (unlike sanitize/vcsWrite) there is no CompositionConfig field
+      // for this: every composition (production AND shadow, which reuses this SAME wireBridges()
+      // call) gets the identical real renderer, unconditionally.
+      render: { issue: renderIssue, prBody: renderPrBody },
       // PROD-BLOCKER fix: threads the composition's real git-write collaborator (constructed in
       // rewritten-engine-factory.ts from VcsWriteAdapter + the CODE_ADD/E2E_ADD pathspec dispatch) —
       // conditionally spread so a composition that never wires one (buildShadow's own override below
@@ -671,6 +706,14 @@ function wireBridges(cfg: CompositionConfig): Omit<RewrittenOrchestratorAdapterD
     // entirely (never a fabricated no-op stub), matching the [SWAP]-optional contract this port
     // documents at its own declaration site above.
     ...(cfg.reflectorPort ? { reflector: cfg.reflectorPort } : {}),
+    // sdd/migration-remediation Slice 3 (P0 write-confinement wiring, D-P0b): mirrors reflectorPort's
+    // own conditional-spread precedent immediately above — absent cfg.confinement means
+    // RunQaUseCaseDeps.confinement is omitted entirely (never a fabricated no-op stub).
+    ...(cfg.confinement ? { confinement: cfg.confinement } : {}),
+    // sdd/migration-remediation Slice 5 (P1 process-audit reconnect, D-P1b): mirrors reflectorPort's/
+    // confinement's own conditional-spread precedent immediately above — absent cfg.processAudit
+    // means RunQaUseCaseDeps.processAudit is omitted entirely (never a fabricated no-op stub).
+    ...(cfg.processAudit ? { processAudit: cfg.processAudit } : {}),
     config: {
       needsReview: cfg.needsReview,
       shadow: cfg.shadow,

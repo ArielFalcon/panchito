@@ -53,7 +53,7 @@
 //      straight into prompt assembly).
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
-import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, realpathSync, lstatSync } from "node:fs";
 import type { AppConfig } from "../orchestrator/config-loader";
 import type { AgentDeps } from "../integrations/opencode-client";
 // WS6.1 (full-flow remediation, timeouts & operational observability): the purpose-built reviewer
@@ -88,6 +88,8 @@ import { FaultInjectionOracleAdapter } from "@contexts/objective-signal/infrastr
 import { GitHubPrAdapter } from "@contexts/workspace-and-publication/infrastructure/github-pr.adapter";
 import { GitHubIssueAdapter } from "@contexts/workspace-and-publication/infrastructure/github-issue.adapter";
 import { VcsWriteAdapter } from "@contexts/workspace-and-publication/infrastructure/vcs-write.adapter";
+import { CONFINEMENT_DENYLIST } from "@contexts/workspace-and-publication/domain/write-confinement.service";
+import { WriteConfinementAdapter } from "@contexts/workspace-and-publication/infrastructure/write-confinement.adapter";
 import type { VcsPublishCollaborator } from "@contexts/qa-run-orchestration/infrastructure/bridges/publication-port.adapter";
 import { makeTargetCoverageCollector } from "@contexts/objective-signal/infrastructure/target-coverage-collector";
 import { assembleChangeCoverage } from "@contexts/objective-signal/domain/assemble-change-coverage";
@@ -129,7 +131,7 @@ import { runCodeTests, defaultCodeExecuteDeps, runCodeCoverage } from "../qa/cod
 import { setupE2eProject, defaultSetupDeps } from "../qa/setup";
 import { setupCodeProject, defaultCodeSetupDeps } from "../qa/code-runner";
 import { github } from "../integrations/github";
-import { sanitizeText } from "../orchestrator/sanitizer";
+import { RedactionPortAdapter } from "../orchestrator/sanitizer";
 import { runMutationOracle, realMutationDeps } from "../qa/learning/mutation-code";
 import { runFaultInjectionOracle, defaultFaultInjectionDeps } from "../qa/learning/fault-injection-e2e";
 import { shaMatches } from "../env/deploy-gate";
@@ -137,9 +139,11 @@ import { ensureMirror, ensureMirrorAtBranch, defaultMirrorDeps, workdirRoot, rea
 import { stageServiceContext, serviceContextDir } from "./service-context";
 import { SqliteRunHistoryAdapter } from "./run-history-sqlite-adapter";
 import { SqliteLearningRepository, type LearningStore } from "@contexts/cross-run-learning/infrastructure/sqlite-learning-repository.adapter";
-import { listLearningRules, listAllLearningRules, upsertLearningRule, incrementRuleUsage, recordRuleOutcome, updateRunOutcomeReflection } from "./history";
+import { listLearningRules, listAllLearningRules, upsertLearningRule, incrementRuleUsage, recordRuleOutcome, updateRunOutcomeReflection, listRunOutcomes, setRuleStatusByHuman, markContextStale } from "./history";
+import { recordIncident } from "./maintainer";
 import { preventionOutcome } from "@contexts/cross-run-learning/domain/rule-fold";
 import { ReflectorPortAdapter, REFLECT_TIMEOUT_MS } from "@contexts/cross-run-learning/infrastructure/reflector-port.adapter";
+import { ProcessAuditPortAdapter } from "@contexts/cross-run-learning/infrastructure/process-audit-port.adapter";
 import { YamlBoundaryProfileAdapter } from "@contexts/service-topology/infrastructure/yaml-boundary-profile.adapter";
 import { expandEnv } from "../orchestrator/config-loader";
 
@@ -180,14 +184,41 @@ export function roleToAgentName(role: AgentRole): string {
 // exactly: e2e publishes only the `e2e/` dir (publishE2e-shaped); code publishes the whole tree minus
 // installed deps/build output/run artifacts (publishCode-shaped) — the SAME split Execution/Setup/
 // Validation adapters already make on `cfg.isCode` elsewhere in this factory.
+//
+// sdd/migration-remediation D1 (docs/superpowers/2026-07-10-migration-remediation-decisions.md):
+// - `e2e/.qa/service-context/` is excluded on BOTH targets — src/server/service-context.ts writes
+//   cross-repo service snapshots there, and CODE_PUBLISH_ADD=["."] stages the whole tree, so a
+//   code-target run would leak another repo's staged context into the PR just as readily as an
+//   e2e-target run would.
+// - The e2e entries for coverage/measured.json are anchored with an `e2e/` prefix. A gitignore-style
+//   pattern with a slash NOT at the very end (a "mid-pattern slash") is anchored to the directory of
+//   the exclude file itself — for `.git/info/exclude` that is the repo root, never `e2e/`. The
+//   PRE-FIX entries `.qa/coverage/` / `.qa/measured.json` therefore excluded NOTHING (they looked for
+//   `<root>/.qa/coverage/`, never the real `<root>/e2e/.qa/coverage/`) — verified with a real
+//   git-status fixture test (rewritten-engine-factory.publish-excludes.test.ts), not an
+//   array-membership assertion (membership would have passed on the broken anchoring).
+// - `node_modules/` stays UNPREFIXED deliberately: a pattern with no slash at all (only a trailing
+//   one) is NOT anchored and matches at any depth — prefixing it would narrow it to only the
+//   top-level `e2e/node_modules/` and stop matching nested occurrences.
 const E2E_PUBLISH_ADD = ["e2e"];
-const E2E_PUBLISH_EXCLUDES = ["node_modules/", ".qa/coverage/", ".qa/measured.json"];
+const E2E_PUBLISH_EXCLUDES = ["node_modules/", "e2e/.qa/coverage/", "e2e/.qa/measured.json", "e2e/.qa/service-context/"];
 const CODE_PUBLISH_ADD = ["."];
+// sdd/migration-remediation Slice 7.2 (verify-first spike -> confirmed fix): context mode stages
+// ONLY the FE<->BE architecture map, never seed fixtures or specs. Legacy oracle: src/integrations/
+// publish.ts's own CONTEXT_ADD = ["e2e/.qa/context.json"]. CONFIRMED DEFECT this closes:
+// buildVcsPublish(isCode) previously dispatched ONLY on isCode — context-mode runs are never
+// isCode (they are e2e-shaped), so a context-mode run reaching "pr" fell through to
+// E2E_PUBLISH_ADD (["e2e"]), staging the WHOLE e2e/ tree instead of just the context artifact.
+const CONTEXT_PUBLISH_ADD = ["e2e/.qa/context.json"];
+// sdd/migration-remediation D2: CONFINEMENT_DENYLIST (write-confinement.service.ts) is spread in
+// here so the code-target commit-time allowlist actually denies the same paths write-confinement
+// denies mid-run (.env*, .github/, Dockerfile, docker-compose*, .gitattributes, .gitmodules) — this
+// makes confinement's fault-isolated fail-open posture genuine defense-in-depth over a real
+// deterministic guard for the code target, not the only guard (CODE_PUBLISH_ADD=["."] stages the
+// whole tree, unlike the e2e target's hard `e2e/` allowlist).
 const CODE_PUBLISH_EXCLUDES = [
   "node_modules/",
-  ".env",
-  ".env.*",
-  "*.env",
+  ...CONFINEMENT_DENYLIST,
   "dist/",
   "build/",
   "__pycache__/",
@@ -198,6 +229,7 @@ const CODE_PUBLISH_EXCLUDES = [
   ".next/",
   "coverage/",
   "e2e/.qa/coverage/",
+  "e2e/.qa/service-context/",
   ".stryker-tmp/",
   "stryker.conf.json",
   "reports/mutation/",
@@ -254,12 +286,23 @@ function withPublishGitDecorations(git: GitFn): GitFn {
 // prefixes instead of only recording bare argv (the gap that let both CRITICALs slip first time).
 export function buildVcsPublish(
   isCode: boolean,
+  // sdd/migration-remediation Slice 7.2: REQUIRED (no default) — every call site must state its
+  // mode explicitly rather than silently falling back, so a future new mode can never reach this
+  // dispatch un-considered. `mode === "context"` OVERRIDES the isCode-based addDir/excludes split
+  // entirely (context runs are never isCode, so without this override they fell through to the
+  // e2e branch — see CONTEXT_PUBLISH_ADD's own doc for the confirmed defect this closes).
+  mode: RunMode,
   git: GitFn = realGit,
   writeExcludesFn: (dir: string, patterns: readonly string[]) => void = writeExcludes,
 ): VcsPublishCollaborator {
   const vcs = new VcsWriteAdapter(withPublishGitDecorations(git), writeExcludesFn);
-  const addDir = isCode ? CODE_PUBLISH_ADD : E2E_PUBLISH_ADD;
-  const excludes = isCode ? CODE_PUBLISH_EXCLUDES : E2E_PUBLISH_EXCLUDES;
+  const isContext = mode === "context";
+  const addDir = isContext ? CONTEXT_PUBLISH_ADD : isCode ? CODE_PUBLISH_ADD : E2E_PUBLISH_ADD;
+  // Legacy parity (src/integrations/publish.ts's publishContext: `excludes: []`): the context
+  // artifact is staged by its OWN exact pathspec, never a directory scan, so exclude patterns have
+  // nothing to filter — an empty list here matches legacy exactly rather than reusing the e2e/code
+  // exclude split, which exists to filter directory-wide `git add`/`git status` scans.
+  const excludes = isContext ? [] : isCode ? CODE_PUBLISH_EXCLUDES : E2E_PUBLISH_EXCLUDES;
   return {
     async publish({ mirrorDir, branch }): Promise<{ changed: boolean }> {
       // Apply local ignore patterns FIRST (same ordering as publish.ts's publishChanges) so both the
@@ -269,12 +312,34 @@ export function buildVcsPublish(
       const changed = await vcs.hasChanges(mirrorDir, addDir);
       if (!changed) return { changed: false };
       await vcs.checkoutBranch(mirrorDir, branch);
-      const commitMsg = isCode ? "test(code): automated QA" : "test(e2e): automated QA";
+      const commitMsg = isContext ? "docs(context): automated QA context map" : isCode ? "test(code): automated QA" : "test(e2e): automated QA";
       await vcs.commit(mirrorDir, commitMsg, addDir);
       await vcs.push(mirrorDir, branch);
       return { changed: true };
     },
   };
+}
+
+// sdd/migration-remediation Slice 3 (P0 write-confinement wiring, D-P0b): constructs the REAL
+// ConfinementPort collaborator — realGit (LOCAL ops only: git status/restore/clean; deliberately NOT
+// wrapped in withPublishGitDecorations, since confinement never pushes or commits, so no auth/
+// identity decoration is needed) + node:fs realpathSync + an isSymlink probe built on lstatSync
+// (a failed lstat means the path was deleted mid-check, not a symlink — never thrown past this probe,
+// matching WriteConfinementAdapter's own "lstat pre-filter" contract). Exported for direct unit
+// testing (same precedent as buildVcsPublish above) — a test can inject a fake git/realpath/isSymlink
+// to pin the exact real-git-fixture behavior without touching this host's actual filesystem.
+export function buildConfinement(
+  git: GitFn = realGit,
+  realpath: (p: string) => string = realpathSync,
+  isSymlink: (p: string) => boolean = (p) => {
+    try {
+      return lstatSync(p).isSymbolicLink();
+    } catch {
+      return false; // deleted mid-check or otherwise unreadable — never a symlink escape
+    }
+  },
+): WriteConfinementAdapter {
+  return new WriteConfinementAdapter({ git, realpath, isSymlink });
 }
 
 // One-shot /version fetch + sha/health match — VersionPollFn's contract is a SINGLE probe per
@@ -510,6 +575,12 @@ export function buildRewrittenCompositionConfig(
   const isCode = app.code === true;
   const target: "e2e" | "code" = isCode ? "code" : "e2e";
   const e2eRelDir = "e2e";
+  // sdd/migration-remediation Slice 6 (D-P2, RedactionPort unification): the ONE canonical
+  // redaction collaborator for both egress boundaries this factory wires (logs → Issue via
+  // `sanitize` below; diff → model is wired directly in src/integrations/prompts.ts and
+  // opencode-client.ts, which import sanitizer.ts's sanitizeText themselves). Stateless — safe to
+  // construct once per composition.
+  const redactionPort = new RedactionPortAdapter();
   // P2b (post-cutover-remediation) Constraint 3: SINGLE source for the coverage policy. Previously
   // `coveragePolicyMode` (below) and `coveragePolicy` (further down, feeding DecideCoverageService)
   // independently re-read `app.qa.changeCoverage?.mode ?? "signal"` — two copies of the same value
@@ -957,15 +1028,24 @@ export function buildRewrittenCompositionConfig(
     // "pr" route, see that file's own header). Dispatched by isCode exactly like
     // validationStrategies/executionStrategies/setupCollaborators above (e2e publishes only e2e/;
     // code publishes the whole tree minus installed deps/build output).
-    vcsWrite: buildVcsPublish(isCode),
+    vcsWrite: buildVcsPublish(isCode, run.mode),
+    // sdd/migration-remediation Slice 3 (P0 write-confinement wiring, D-P0b): wired UNCONDITIONALLY
+    // (fail-open fault isolation makes it safe to run on every composition, not gated by app config)
+    // — realGit local ops only, no auth decoration (confinement never pushes/commits).
+    confinement: buildConfinement(),
     reviewerApprovedForPublish: true,
     coverageBlocksForPublish: false,
     e2eChangedForPublish: true,
-    // F4 fix (CRITICAL security invariant): the REAL sanitizeText (this module is the E.3 seam
+    // F4 fix (CRITICAL security invariant): the REAL redaction adapter (this module is the E.3 seam
     // permitted to import src/ — see this file's own header) — PublicationPortAdapter's renderBody/
     // renderTitle apply it to every log/case-detail/note reaching an Issue/PR body, matching
     // src/report/reporter.ts's own `s = (v) => sanitizeText(v).text` precedent for the legacy engine.
-    sanitize: (text: string) => sanitizeText(text).text,
+    // sdd/migration-remediation Slice 6 (D-P2, RedactionPort unification): formalized as
+    // RedactionPortAdapter (wraps sanitizer.ts's sanitizeText/containsSecrets, "issue" mode) instead
+    // of an ad hoc lambda — the canonical placeholder is `[REDACTED]`, sourced from qa-engine's
+    // shared-kernel redaction.port.ts. PublicationPortCollaborators.sanitize's own type (`(text:
+    // string) => string`) is unchanged (duck-typed) — only the implementation is formalized.
+    sanitize: (text: string) => redactionPort.redact(text),
 
     checkout,
     // Cross-repo composition (bug fix): a cross-repo run gates on the SERVICE's own versionUrl —
@@ -1032,6 +1112,40 @@ export function buildRewrittenCompositionConfig(
       cwd: mirrorDir,
       app: app.name,
       timeoutMs: Number((deps.env ?? process.env).REFLECTOR_TIMEOUT_MS) || REFLECT_TIMEOUT_MS,
+    }),
+    // sdd/migration-remediation Slice 5 (P1 process-audit reconnect, D-P1b): this factory is the ONE
+    // module permitted to import both qa-engine's @contexts aliases AND root src/, so it is the ONLY
+    // place that can construct a real ProcessAuditPortAdapter — the 2 factory-injected READS
+    // (history.ts's listRunOutcomes/listLearningRules, the SAME SQLite table reflectorPort/
+    // learningRepo above already read) and the 3 SINKS (recordEngineIncident -> maintainer.ts's
+    // recordIncident; deprecateRule -> history.ts's setRuleStatusByHuman(id,"deprecated"), the
+    // `reason` argument discarded exactly like legacy's own pipeline.ts wiring did; invalidateContext
+    // -> history.ts's markContextStale, true on success matching legacy's try/catch-and-return
+    // shape) are all src-only collaborators qa-engine itself must never import.
+    processAudit: new ProcessAuditPortAdapter({
+      app: app.name,
+      readRecentOutcomes: (a, limit) => listRunOutcomes(a, limit),
+      readRules: (a, limit) => listLearningRules(a, limit),
+      deprecateRule: (ruleId) => { setRuleStatusByHuman(ruleId, "deprecated"); },
+      recordEngineIncident: (finding) =>
+        recordIncident({
+          source: "process-audit",
+          severity: finding.severity === "error" ? "error" : "warn",
+          summary: finding.summary,
+          // finding.diagnosis is never populated by this port today (Layer 2 LLM root-cause
+          // diagnosis is deferred — see process-audit.ts's own SCOPE NOTE); kept conditional so a
+          // future diagnosis producer needs no change here.
+          detail: [finding.evidence, finding.diagnosis ? `\nLIKELY ROOT CAUSE: ${finding.diagnosis}` : ""].join(""),
+        }),
+      invalidateContext: (reason) => {
+        try {
+          markContextStale(app.name);
+          console.log(`[audit] marked context stale for ${app.name} — rebuilds next run (${reason})`);
+          return true;
+        } catch {
+          return false; // best-effort — mirrors legacy's own try/catch-and-return-false shape
+        }
+      },
     }),
     ...(observer ? { observer } : {}),
   };

@@ -57,6 +57,7 @@ import type {
   ContractDrift,
   CrossRepoImpactPort,
   CrossRepoImpact,
+  ConfinementPort,
 } from "./ports/index.ts";
 import { REVIEWER_UNAVAILABLE_MARKER } from "./ports/index.ts";
 import { decide, type RunEvidence } from "../domain/run-decision.service.ts";
@@ -74,7 +75,7 @@ import { checkPreExecGrounding, checkPersistingAmbiguity } from "../domain/pre-e
 // (co-located with StructuredReflection/LearningRepositoryPort), not in this context's own ports
 // barrel — same cross-context import precedent as LearningRepositoryPort (composition-root.ts /
 // learning-port.adapter.ts already import from @contexts/cross-run-learning/application/ports).
-import type { ReflectorPort, ReflectionInput } from "@contexts/cross-run-learning/application/ports/index.ts";
+import type { ReflectorPort, ReflectionInput, ProcessAuditPort } from "@contexts/cross-run-learning/application/ports/index.ts";
 // WS1.5 (full-flow remediation): detectArchetype is the diff's structural-shape detector (pure
 // domain logic, same cross-context import precedent as ReflectorPort/ReflectionInput above).
 import { detectArchetype } from "@contexts/cross-run-learning/domain/distill-rule.ts";
@@ -256,6 +257,35 @@ export interface RunQaUseCaseDeps {
   // with no extra try/catch of its own, trusting the adapter's own documented fault-isolation
   // contract (ReflectorPortAdapter's header).
   reflector?: ReflectorPort;
+  // [SWAP] absent -> confinement enforcement never runs; no revert, no gateSignals.confinement (the
+  // SAME backward-compatible posture reflector/crossRepoImpact/serviceLinks/structuralSignal already
+  // establish). sdd/migration-remediation Slice 3 (P0 write-confinement wiring, D-P0b, amended for
+  // multi-point enforcement — see apply-progress for the deviation from the design's own "once,
+  // immediately before publish" text): invoked after EVERY GenerationPort.generate() call this
+  // use-case makes (the initial call, the W1 pre-exec-grounding corrective regen, the static-fix
+  // repair loop's own regen rounds, the FixLoop's own per-round regen, the coverage-gap enforce-mode
+  // regen, and the reviewer-correction regen) AND once more immediately before EVERY publish() call —
+  // the faithful rewritten-architecture equivalent of the legacy's "after each agent turn and again
+  // before publish" contract (true per-turn hooks live inside the bridged agent session, on the src
+  // side, unreachable from this use-case). Fault-isolated: a thrown enforce() (including a failed
+  // revert) is caught by THIS use-case (never the adapter, see ConfinementPort's own header), logged
+  // LOUDLY via console.error, and never alters the verdict or blocks publish. Every call's result
+  // this run makes is MERGED (summed/concatenated) into one gateSignals.confinement value — see
+  // this method's own confinementAcc/enforceConfinement local for the merge contract.
+  confinement?: ConfinementPort;
+  // [SWAP] absent -> audit() is never invoked at either fold site; learning.fold() is UNAFFECTED
+  // (dormant, pre-cutover-equivalent — the SAME backward-compatible posture reflector/confinement/
+  // crossRepoImpact/serviceLinks/structuralSignal already establish). sdd/migration-remediation
+  // Slice 5 (P1 process-audit reconnect, D-P1b): when present, invoked AFTER learning.fold() at
+  // EACH fold site, under the EXACT SAME condition this use-case already computes for reflector
+  // (shouldDistillLearning(...) AND verdict !== "flaky" AND errorClass not in {E-INFRA, E-FLAKY}) —
+  // see this use-case's own reflect/audit call sites for the literal duplicated condition (kept as a
+  // separate, independently-optional check rather than a shared boolean, so processAudit and
+  // reflector stay fully independent [SWAP] collaborators — one being absent never affects the
+  // other). Fault-isolated + timeout-capped by the adapter itself (ProcessAuditPortAdapter's own
+  // documented contract, mirrors ReflectorPortAdapter's) — this use-case awaits audit() with no
+  // extra try/catch of its own, trusting that contract exactly like it trusts reflector's.
+  processAudit?: ProcessAuditPort;
   config?: Partial<RunQaConfig>;
 }
 
@@ -387,6 +417,46 @@ export class RunQaUseCase {
 
     // Phase: prepare (WorkspacePort).
     const workspace = await this.deps.workspace.prepare(input.sha);
+
+    // sdd/migration-remediation Slice 3 (P0 write-confinement wiring, D-P0b amended for multi-point
+    // enforcement — see RunQaUseCaseDeps.confinement's own header for the full contract and the
+    // apply-progress artifact for the deviation rationale from the design's own "once, immediately
+    // before publish" text). [SWAP] absent this.deps.confinement -> every call below is a no-op.
+    //
+    // confinementAcc merges every enforce() call's result into ONE final gateSignals.confinement
+    // value (the field is a single per-run summary, not a per-call log) — undefined until the first
+    // call completes (success or fault-isolated failure), so a caller that never wired confinement
+    // (or whose run reaches no generate()/publish() call at all) never threads a fabricated
+    // {strays:0,...} into the persisted outcome.
+    let confinementAcc: { strays: number; dangerous: number; reverted: string[] } | undefined;
+    const enforceConfinement = async (): Promise<void> => {
+      if (!this.deps.confinement) return;
+      try {
+        const result = await this.deps.confinement.enforce(workspace.mirrorDir, cfg.isCode, signal);
+        confinementAcc = {
+          strays: (confinementAcc?.strays ?? 0) + result.strays,
+          dangerous: (confinementAcc?.dangerous ?? 0) + result.dangerous,
+          reverted: [...(confinementAcc?.reverted ?? []), ...result.reverted],
+        };
+      } catch (err) {
+        // CLAUDE.md invariant ("surface integration errors loudly — never swallow errors into an
+        // empty result") + design D-P0b's own fault-isolation contract: log LOUDLY, never throw, never
+        // alter the verdict or block publish. A thrown enforce() (including a failed revert) means
+        // this call's own strays/dangerous/reverted are unknowable (ConfinementPort's own contract:
+        // the adapter never swallows a git error, so nothing was returned) — `dangerous` is the most
+        // prominent signal the existing gate-signal shape allows without fabricating a path or a
+        // false "reverted" claim (RunOutcome.gateSignals.confinement's shape is fixed, no error field
+        // — design D-P0b: "no RunOutcome type change").
+        console.error(
+          `[qa] write-confinement enforcement FAILED (fault-isolated — run continues, never blocks publish): ${err instanceof Error ? err.message : String(err)}`,
+        );
+        confinementAcc = {
+          strays: confinementAcc?.strays ?? 0,
+          dangerous: (confinementAcc?.dangerous ?? 0) + 1,
+          reverted: confinementAcc?.reverted ?? [],
+        };
+      }
+    };
 
     // Phase: classify (ChangeAnalysisPort). Only "diff" mode runs classifyCommit (CLAUDE.md "Run
     // modes") — the others always generate.
@@ -707,6 +777,10 @@ export class RunQaUseCase {
     let generated = generating
       ? await this.deps.generation.generate([], workspace.specDir, signal, classificationDiff, baseEnrichment)
       : { specs: [] as string[], approved: true };
+    // sdd/migration-remediation Slice 3: confinement after every agent-write-capable generate() call
+    // — only when `generating` genuinely invoked the real GenerationPort (the regression branch's
+    // synthetic stand-in above never wrote anything, so there is nothing to enforce against).
+    if (generating) await enforceConfinement();
 
     // Diagnosability fix (live-run root cause): when generation comes back with ZERO specs AND
     // approved===false, the agent almost always left an explanatory note (e.g. "no LIVE DEV URL
@@ -763,6 +837,7 @@ export class RunQaUseCase {
       const skipped = this.skippedResult(cfg.needsReview ? generated.approved : undefined);
       const skippedOutcome = this.toRunOutcome(input, skipped.decision, [], 0, null, skipped.errorClass, {
         reviewerApproved: skipped.gateSignals.reviewerApproved,
+        ...(confinementAcc !== undefined ? { confinement: confinementAcc } : {}),
       });
       await this.deps.runHistory.save(skippedOutcome);
       return { ...skipped, outcome: skippedOutcome };
@@ -786,6 +861,12 @@ export class RunQaUseCase {
     // the engine's own diagnosis, not just a bare class string. Same "never fabricated" contract:
     // stays undefined for every run whose FixLoop never engaged.
     let lastAdjudicatorVerdict: AdjudicatorVerdict | undefined;
+    // sdd/migration-remediation Slice 4 (D-P1a, publication rendering + tested metadata): the
+    // FixLoop's own FINAL regen round's specMetas (FixLoopResult.lastSpecMetas), hoisted + captured
+    // at the SAME site as lastAdjudicatorVerdict above. Stays undefined for every run whose FixLoop
+    // never regenerated (never fabricated) — resolveTested() below (defined once `lastGenerated`
+    // exists) is the SINGLE place that decides which source wins.
+    let fixLoopFinalSpecMetas: { flow?: string; objective?: string }[] | undefined;
 
     // Phase: pre-exec grounding gate (Plan 7-R B5). [SWAP] absent PreExecGroundingPort -> the whole
     // phase (W1 below + the W2 re-check further down) is a no-op; the counters stay the literal 0
@@ -826,6 +907,8 @@ export class RunQaUseCase {
         ...baseEnrichment,
         selectorContradictions: w1Corrections,
       });
+      // sdd/migration-remediation Slice 3: confinement after the W1 corrective regen.
+      await enforceConfinement();
       if (corrected.specs.length > 0) {
         generated = corrected;
       }
@@ -867,6 +950,21 @@ export class RunQaUseCase {
     this.deps.observer?.onStep("validate");
     let validation = await this.deps.validation.validate(workspace.specDir, validateChangedFiles);
     let lastGenerated = generated;
+    // sdd/migration-remediation Slice 4 (D-P1a): resolves the design's own open question ("P1 tested
+    // staleness: specMetas from initial generate may lag FixLoop regens") — binding orchestrator
+    // clarification: prefer the FixLoop's FINAL specMetas when the loop engaged and produced any
+    // (fresher "what was tested" evidence once the loop has rewritten specs), fall back to
+    // `lastGenerated`'s own specMetas otherwise (the latest attempt reaching this point — the initial
+    // generation, or a static-fix repair round's own regen, whichever ran last). Defined here (after
+    // `lastGenerated` exists, before the static-fix loop below can reassign it) so it is safe to call
+    // from EVERY publish-adjacent call site in this method, including both terminalResult() exits
+    // below (~1038/1118) that fire BEFORE the FixLoop block ever runs — at those two call sites
+    // `fixLoopFinalSpecMetas` is still undefined, so this naturally and correctly falls through to
+    // `lastGenerated.specMetas`, never a stale/wrong FixLoop value from a PRIOR run. Never fabricated:
+    // returns undefined when neither source has anything (the caller's own "tested" section is then
+    // omitted, matching the port's own negative scenario).
+    const resolveTested = (): { flow?: string; objective?: string }[] | undefined =>
+      fixLoopFinalSpecMetas?.length ? fixLoopFinalSpecMetas : lastGenerated.specMetas;
     let staticFixRounds = 0;
     while (!validation.ok && !validation.infra && generating && lastGenerated.specs.length > 0 && staticFixRounds < MAX_STATIC_FIX_ROUNDS) {
       // Plan 7.2 (closes the INFO gap in engram #916): a cancel requested mid-repair must stop the
@@ -892,6 +990,9 @@ export class RunQaUseCase {
         ...baseEnrichment,
         fixCases: [{ name: "static-gate", status: "fail", detail: staticGateErrorDetail }],
       });
+      // sdd/migration-remediation Slice 3: confinement after each static-fix repair round, before the
+      // round's own re-validate — matches the spec's "reverted before validate" acceptance bar.
+      await enforceConfinement();
       validation = await this.deps.validation.validate(workspace.specDir, validateChangedFiles);
     }
 
@@ -963,6 +1064,11 @@ export class RunQaUseCase {
       const staticGateNote = [validation.errors.slice(0, 2).join("\n\n") || undefined, generationNote]
         .filter((part): part is string => Boolean(part))
         .join("\n\n") || undefined;
+      // sdd/migration-remediation Slice 3: once more immediately before this exit's own publish()
+      // call (terminalResult dispatches to publish() below when sideEffect !== "none") — no further
+      // generate() call happens between here and that publish, so this IS "immediately before
+      // publish" for this exit.
+      await enforceConfinement();
       return await this.terminalResult(
         validation.infra ? "infra-error" : "invalid",
         cfg,
@@ -988,6 +1094,14 @@ export class RunQaUseCase {
         // every other diff-mode enrichment reuses — null outside diff mode (classificationDiff stays
         // undefined there).
         detectArchetype(classificationDiff, classificationIntent?.changedFiles ?? []),
+        // sdd/migration-remediation Slice 3: the run's merged confinement accumulator as of the
+        // enforceConfinement() call immediately above.
+        confinementAcc,
+        // sdd/migration-remediation Slice 4 (D-P1a): this exit fires strictly BEFORE the FixLoop block
+        // ever runs (static-gate invalid is a post-generate/pre-execute exit), so resolveTested()
+        // naturally resolves to `lastGenerated.specMetas` here — the latest generation attempt
+        // reaching this point (the static-fix loop's own repair rounds, if any, above).
+        resolveTested(),
       );
     }
 
@@ -1036,6 +1150,10 @@ export class RunQaUseCase {
         .filter((part): part is string => Boolean(part))
         .join("\n\n");
       console.error("[qa] health pre-flight failed before execute:", healthNote);
+      // sdd/migration-remediation Slice 3: confinement still runs here for its REVERT side effect
+      // even though this exit's own sideEffect is "none" (no publish call) — generation already ran
+      // before this health pre-flight, so any stray write it left must still be reverted.
+      await enforceConfinement();
       return await this.terminalResult(
         "infra-error",
         cfg,
@@ -1061,6 +1179,13 @@ export class RunQaUseCase {
         // terminalResult("invalid", ...) call above — inert here (this infra-error exit never
         // reaches the reflect gate, verdict-gated to "invalid" only), but never fabricated either.
         detectArchetype(classificationDiff, classificationIntent?.changedFiles ?? []),
+        // sdd/migration-remediation Slice 3: the run's merged confinement accumulator as of the
+        // enforceConfinement() call immediately above.
+        confinementAcc,
+        // sdd/migration-remediation Slice 4 (D-P1a): this exit ALSO fires strictly before the FixLoop
+        // block runs (mid-run health pre-flight is post-generate/post-static-fix-loop, pre-execute) —
+        // resolveTested() naturally resolves to `lastGenerated.specMetas` here too.
+        resolveTested(),
       );
     }
     if (signal?.aborted) {
@@ -1185,6 +1310,9 @@ export class RunQaUseCase {
             ...(mergedSelectorContradictions.length ? { selectorContradictions: mergedSelectorContradictions } : {}),
             ...(fixLoopInput.domSnapshot ? { domSnapshot: fixLoopInput.domSnapshot } : {}),
           });
+          // sdd/migration-remediation Slice 3: confinement after each FixLoop regeneration round —
+          // the faithful equivalent of "after each agent turn" for the FixLoop's own retry cycle.
+          await enforceConfinement();
           // Pre-exec grounding corrections are a ONE-SHOT repair (mirrors legacy's own W1 posture —
           // never re-threaded into every subsequent FixLoop round once they've been offered once);
           // clear them after this first FixLoop regen so later rounds rely solely on the FixLoop's
@@ -1197,7 +1325,17 @@ export class RunQaUseCase {
           // FixLoopGenerateResult.specSources, fresh every round"). Previously dropped here, so every
           // round after the first re-armed Lever-2 with an empty array regardless of what the
           // GenerationPort adapter actually produced.
-          return { specs: r.specs, approved: r.approved, note: r.note, specSources: r.specSources };
+          return {
+            specs: r.specs,
+            approved: r.approved,
+            note: r.note,
+            specSources: r.specSources,
+            // sdd/migration-remediation Slice 4 (D-P1a): forward THIS round's own specMetas back to
+            // the aggregate — stored as FixLoopGenerateResult.specMetas (lastRegenResult's own field),
+            // read once at the END of fixLoop.run() as FixLoopResult.lastSpecMetas. Mirrors this SAME
+            // closure's own specSources-forwarding precedent immediately above.
+            ...(r.specMetas ? { specMetas: r.specMetas } : {}),
+          };
         },
       };
       const fixLoopSelectorCheck: FixLoopSelectorCheckPort = {
@@ -1273,6 +1411,11 @@ export class RunQaUseCase {
       // WS3.1: capture the FULL verdict object (class + confidence + reason) at the SAME site, for
       // the publish() call site below.
       lastAdjudicatorVerdict = fixLoopResult.lastAdjudicatorVerdict;
+      // sdd/migration-remediation Slice 4 (D-P1a): capture the FixLoop's own final regen's specMetas
+      // at the SAME site — resolveTested() (defined above, before the static-fix loop) prefers this
+      // over `lastGenerated.specMetas` once it is non-empty. undefined when the loop never
+      // regenerated, matching FixLoopResult.lastSpecMetas' own "never fabricated" contract.
+      fixLoopFinalSpecMetas = fixLoopResult.lastSpecMetas;
     }
 
     // executedRed override (task #42): captured here, BEFORE the `if (run.verdict === "pass")`
@@ -1382,6 +1525,9 @@ export class RunQaUseCase {
           ...baseEnrichment,
           coverageGap: gap,
         });
+        // sdd/migration-remediation Slice 3: confinement after the enforce-mode coverage-gap regen,
+        // before its own re-validate/re-execute below.
+        await enforceConfinement();
         if (regen.specs.length > 0) {
           const regenValidation = await this.deps.validation.validate(workspace.specDir, validateChangedFiles);
           if (regenValidation.ok) {
@@ -1611,6 +1757,8 @@ export class RunQaUseCase {
           ...baseEnrichment,
           reviewCorrections: reviewResult.corrections,
         });
+        // sdd/migration-remediation Slice 3: confinement after the reviewer-correction regen.
+        await enforceConfinement();
         if (regen.specs.length === 0) {
           // A regeneration that produced no reviewable specs was never judged — it must NOT inherit
           // the generator's self-approval (mirrors legacy's round>0 empty-result guard, :1607-1611).
@@ -1679,6 +1827,10 @@ export class RunQaUseCase {
     // service repo must file its Issue in the TRIGGERING repo, the SAME repo input.triggerRepo
     // already names elsewhere in this method (the measure-phase cross-repo guard, above). Absent ->
     // the adapter falls back to its own static ctx.repo (the primary repo), unaffected.
+    // sdd/migration-remediation Slice 3: once more immediately before this mainline publish() call —
+    // catches any stray write from the review loop's own reviewer-correction regen (already enforced
+    // above) plus anything else that landed in the mirror since the last enforce() call.
+    await enforceConfinement();
     let publishOutcome: string | undefined;
     if (decision.sideEffect !== "none") {
       const published = await this.deps.publication.publish({
@@ -1705,6 +1857,19 @@ export class RunQaUseCase {
         // service's own decide() switch), so this is the ONLY place these values are needed.
         mirrorDir: workspace.mirrorDir,
         sha: input.sha.toString(),
+        // sdd/migration-remediation Slice 4 (D-P1a): `isCode` selects the PR body's wording
+        // (render-publication.ts's own renderPrBody); `tested` is resolveTested()'s own precedence
+        // (FixLoop-final-over-initial-generation, see that helper's own doc above) — absent/empty
+        // omits the "Covers:"/"What was tested" section entirely, never fabricated.
+        //
+        // parentRunId: deliberately OMITTED — the SAME class of documented gap as e2eChanged above.
+        // RunQaInput carries no parentRunId field today (the rewritten engine's continuation-
+        // provenance wiring — legacy parity: src/report/reporter.ts's PrBodyInput.parentRunId,
+        // src/server/runner.ts's own parentRunId chain — is a KNOWN GAP); PublicationPort.publish()'s
+        // type is already widened to accept one (ports/index.ts) so a FUTURE caller with a real
+        // source can thread it, but fabricating a value here would be worse than omitting it.
+        isCode: cfg.isCode,
+        ...(resolveTested()?.length ? { tested: resolveTested() } : {}),
       });
       publishOutcome = published.outcome;
     }
@@ -1804,6 +1969,11 @@ export class RunQaUseCase {
         // post-cutover-remediation P3 (unit 4): the FixLoop's own adjudicator verdict class, captured
         // above when the loop engaged — undefined for a clean first-try pass.
         adjudicationClass: lastAdjudicatorVerdictClass,
+        // sdd/migration-remediation Slice 3: the run's merged confinement accumulator across every
+        // enforce() call this run made (initial generate, W1/static-fix/FixLoop/coverage-gap/
+        // reviewer-correction regens, and the pre-publish call immediately above) — conditional
+        // spread, never fabricated when confinement was never wired.
+        ...(confinementAcc !== undefined ? { confinement: confinementAcc } : {}),
       });
       await this.deps.runHistory.save(mainlineOutcome);
 
@@ -1869,6 +2039,32 @@ export class RunQaUseCase {
           type: "log.line",
           level: "info",
           text: `[qa] reflect() for run ${mainlineOutcome.runId} took ${reflectMs}ms`,
+        });
+      }
+
+      // sdd/migration-remediation Slice 5 (P1 process-audit reconnect, D-P1b): mirrors the reflect
+      // block immediately above — the EXACT SAME gate condition, duplicated rather than shared, so
+      // processAudit and reflector remain fully independent [SWAP] collaborators (RunQaUseCaseDeps.
+      // processAudit's own header explains why). Fault-isolated + timeout-capped by the adapter
+      // itself — no extra try/catch here, mirroring the reflect call immediately above.
+      if (
+        this.deps.processAudit &&
+        shouldDistillLearning(cfg.isCode, decision.verdict, mainlineOutcome.adjudication?.class) &&
+        decision.verdict !== "flaky" &&
+        mainlineOutcome.errorClass !== "E-INFRA" &&
+        mainlineOutcome.errorClass !== "E-FLAKY" &&
+        mainlineOutcome.errorClass != null &&
+        mainlineOutcome.errorClass !== ""
+      ) {
+        // WS6.3-style duration telemetry, mirrors the reflect call's own convention immediately
+        // above — makes the audit's own cost visible on the existing run-event "log.line" channel.
+        const auditStartedAt = Date.now();
+        await this.deps.processAudit.audit(mainlineOutcome);
+        const auditMs = Date.now() - auditStartedAt;
+        this.deps.observer?.onEvent({
+          type: "log.line",
+          level: "info",
+          text: `[qa] processAudit.audit() for run ${mainlineOutcome.runId} took ${auditMs}ms`,
         });
       }
     }
@@ -2060,6 +2256,13 @@ export class RunQaUseCase {
       // site (skipped/invalid/infra-error, all pre-FixLoop) omits it and gets undefined, matching
       // this field's own kernel-level "never fabricated" contract.
       adjudicationClass?: string;
+      // sdd/migration-remediation Slice 3 (P0 write-confinement wiring): the run's MERGED confinement
+      // accumulator (across every enforce() call this run made) — only threaded by a caller that
+      // genuinely ran confinement (this.deps.confinement wired AND at least one enforce() call
+      // completed, success or fault-isolated failure). Absent -> the field is omitted entirely from
+      // gateSignals (never a fabricated {strays:0,...}), matching every other [SWAP]-optional
+      // telemetry field's own "never ran" contract on this same bag.
+      confinement?: { strays: number; dangerous: number; reverted: string[] };
     },
   ) {
     const gateCoverageRatio = coverageRatio;
@@ -2110,6 +2313,9 @@ export class RunQaUseCase {
         // Slice C (structural-signals-expansion, design §3.8): the fourth telemetry field, THIS
         // slice's own commit — same conditional-spread discipline as the three Slice B fields above.
         ...(extra?.crossRepoImpactedCount !== undefined ? { crossRepoImpactedCount: extra.crossRepoImpactedCount } : {}),
+        // sdd/migration-remediation Slice 3: conditional-spread (never fabricated), matching the
+        // Slice B/C telemetry fields' own discipline immediately above.
+        ...(extra?.confinement !== undefined ? { confinement: extra.confinement } : {}),
       },
       rulesRetrieved: extra?.rulesRetrieved ?? [],
       ...(extra?.note !== undefined ? { note: extra.note } : {}),
@@ -2284,6 +2490,18 @@ export class RunQaUseCase {
     // Defaults to null for a caller that predates this fix or has no diff to analyze — never
     // fabricated, same "never ran" convention as groundingSignals' own default above.
     archetype: string | null = null,
+    // sdd/migration-remediation Slice 3 (P0 write-confinement wiring): the run's merged confinement
+    // accumulator, captured by the caller's own enforceConfinement() call immediately before invoking
+    // this helper (RunQaUseCaseDeps.confinement's own header). Undefined for a caller that predates
+    // this fix, or a run whose confinement collaborator is unwired / never produced a result — never
+    // fabricated, matching every other optional trailing param's own "never ran" convention above.
+    confinement?: { strays: number; dangerous: number; reverted: string[] },
+    // sdd/migration-remediation Slice 4 (D-P1a): the caller's own resolveTested() result, captured
+    // immediately before invoking this helper — goes AFTER confinement (Slice 3's own trailing param),
+    // matching Batch 3's own handoff note ("if Slice 4 needs to add its own trailing param to
+    // terminalResult, it goes AFTER confinement, not before"). Undefined for a caller that predates
+    // this fix, or a run with no generation-sourced specMetas to report — never fabricated.
+    tested?: { flow?: string; objective?: string }[],
   ): Promise<RunQaResult> {
     const decision = decide({
       verdict,
@@ -2317,6 +2535,13 @@ export class RunQaUseCase {
         reviewerApproved: reviewerApprovedForOutcome,
         coverageBlocks: false,
         ...(input.triggerRepo ? { issueRepo: input.triggerRepo } : {}),
+        // sdd/migration-remediation Slice 4 (D-P1a): `isCode` is always known here (cfg is a required
+        // param of this helper); `tested` is the caller's own resolveTested() result, threaded
+        // straight through. Both routes this helper can ever reach ("issue"/"shadow"/"quarantine"/
+        // "noop" — decide()'s own switch never resolves "invalid"/"infra-error" to "pr") still render
+        // this metadata into the Issue body's own "What was tested" section when present.
+        isCode: cfg.isCode,
+        ...(tested?.length ? { tested } : {}),
       });
       publishOutcome = published.outcome;
     }
@@ -2340,6 +2565,9 @@ export class RunQaUseCase {
         // a non-empty array reaches the persisted RunOutcome so the terminal `learning.fold()` call
         // below is no longer a structural no-op for rule-outcome attribution.
         ...(rulesRetrieved.length ? { rulesRetrieved } : {}),
+        // sdd/migration-remediation Slice 3: the caller's own confinement accumulator, captured
+        // immediately before invoking this helper — conditional-spread, never fabricated.
+        ...(confinement !== undefined ? { confinement } : {}),
       });
       await this.deps.runHistory.save(terminalOutcome);
       // post-cutover-remediation P3 (unit 4): the SAME shouldDistillLearning guard as the mainline
@@ -2392,6 +2620,28 @@ export class RunQaUseCase {
           type: "log.line",
           level: "info",
           text: `[qa] reflect() for run ${terminalOutcome.runId} took ${reflectMs}ms`,
+        });
+      }
+
+      // sdd/migration-remediation Slice 5 (P1 process-audit reconnect, D-P1b): mirrors the terminal
+      // reflect block immediately above — same duplicated-gate rationale as the mainline site (see
+      // RunQaUseCaseDeps.processAudit's own header). Structural belt-and-braces on
+      // errorClass!=="E-INFRA"/"E-FLAKY" for the SAME reason the reflect block above documents (this
+      // path's `verdict==="invalid"` narrowing makes it currently unreachable, kept for parity).
+      if (
+        this.deps.processAudit &&
+        verdict === "invalid" &&
+        shouldDistillLearning(cfg.isCode, verdict, terminalOutcome.adjudication?.class) &&
+        terminalOutcome.errorClass !== "E-INFRA" &&
+        terminalOutcome.errorClass !== "E-FLAKY"
+      ) {
+        const auditStartedAt = Date.now();
+        await this.deps.processAudit.audit(terminalOutcome);
+        const auditMs = Date.now() - auditStartedAt;
+        this.deps.observer?.onEvent({
+          type: "log.line",
+          level: "info",
+          text: `[qa] processAudit.audit() for run ${terminalOutcome.runId} took ${auditMs}ms`,
         });
       }
     }

@@ -175,6 +175,52 @@ test("buildProduction omits reflector entirely when cfg.reflectorPort is absent 
   assert.equal(outcome.verdict, "pass");
 });
 
+// ── sdd/migration-remediation Slice 5 (P1 process-audit reconnect, D-P1b): confirms the composition
+// root threads cfg.processAudit through to RunQaUseCaseDeps.processAudit — mirrors the reflectorPort
+// smoke test immediately above, same black-box style through the public buildProduction() entry
+// point. ──────────────────────────────────────────────────────────────────────────────────────────
+
+test("buildProduction wires cfg.processAudit through to RunQaUseCase — a static-gate invalid run reaches processAudit.audit()", async () => {
+  let auditCallCount = 0;
+  const cfg = fakeConfig({
+    validationStrategies: {
+      e2e: { validateAll: async () => ({ ok: false, errors: ["[lint] no-wait-for-timeout"], infra: false }) },
+      code: { validate: async () => ({ ok: true, errors: [], infra: false }) },
+    },
+    processAudit: {
+      audit: async () => { auditCallCount++; },
+    },
+  });
+
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, cfg);
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "e2e",
+    runId: "composition-root-process-audit-smoke",
+  });
+
+  assert.equal(outcome.verdict, "invalid");
+  assert.equal(auditCallCount, 1, "cfg.processAudit must be wired through to RunQaUseCaseDeps.processAudit — a static-gate invalid is gate-true");
+});
+
+test("buildProduction omits processAudit entirely when cfg.processAudit is absent — no behavior change on a green pass", async () => {
+  const port = buildProduction({ [PIPELINE_ENGINE]: "rewritten" }, fakeConfig());
+
+  const outcome = await port.run({
+    app: "app",
+    sha: Sha.of("abc1234"),
+    source: "manual",
+    mode: "diff",
+    target: "e2e",
+    runId: "composition-root-process-audit-absent-smoke",
+  });
+
+  assert.equal(outcome.verdict, "pass");
+});
+
 // ── buildShadow: always rewritten, shadow-log publication, no side effects ────────────────────
 
 test("buildShadow always returns a RewrittenOrchestratorAdapter regardless of PIPELINE_ENGINE", () => {
