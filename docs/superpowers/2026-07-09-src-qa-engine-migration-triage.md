@@ -253,12 +253,17 @@ small pure ports → domain logic → heavy leaf-IO):
   carry a confirmed manifest-shape divergence against qa-engine's own
   generation-side `ManifestEntry` (same decisions doc §4) that makes them
   Tier-4 design work, not a Tier-3 relocation.
-- **Tier 4 — heavy leaf-IO, last**: `repo-mirror.ts` (write side),
-  `github.ts` (adapters exist; replace closures), `setup.ts`, `code-runner.ts`,
-  `execute.ts`, `src/agent-runtime/*` (blocked on the DECIDE above),
-  `prompts.ts` (named C4 target, unstarted, 2 known live bugs),
-  `opencode-client.ts` (2100-LOC monolith — decompose, don't port wholesale).
-  Final step: dissolve `rewritten-engine-factory.ts` +
+- **Tier 4 — heavy leaf-IO, last**: ~~`repo-mirror.ts` (write side)~~,
+  ~~`github.ts` (adapters exist; replace closures)~~, ~~`setup.ts`~~ — all
+  three **DONE** (`sdd/migration-tier-4a`, commits `52eb2a2`/`096e42c`/
+  `f467f71`; decisions doc `2026-07-11-migration-tier-4a-decisions.md`).
+  `repo-mirror.ts` is a REDUCE, not a full delete — see that doc's §5 for
+  the newly-discovered `src/index.ts` onboarding-job consumer that kept
+  `ensureMirror`/`ensureMirrorAtBranch` as thin wrappers instead. Remaining:
+  `code-runner.ts`, `execute.ts`, `src/agent-runtime/*` (blocked on the
+  DECIDE above), `prompts.ts` (named C4 target, unstarted, 2 known live
+  bugs), `opencode-client.ts` (2100-LOC monolith — decompose, don't port
+  wholesale). Final step: dissolve `rewritten-engine-factory.ts` +
   `run-history-sqlite-adapter.ts` into the composition root and retire
   `seam-parity.contract.test.ts`.
 

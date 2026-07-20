@@ -3,12 +3,13 @@
 // maps SetupPort.setup(specDir, signal?) onto whichever collaborator matches the run's target,
 // mirroring ExecutionPortAdapter's own target-dispatch pattern exactly (same file, same discipline).
 //
-// The collaborators are duck-typed callbacks matching src/qa/setup.ts's setupE2eProject(e2eDir,
-// deps, opts?) and src/qa/code-runner.ts's setupCodeProject(repoDir, deps, opts?) call shape — the
-// composition root/factory bind the REAL functions + their real *Deps (defaultSetupDeps /
-// defaultCodeSetupDeps) into these two slots; this adapter never re-implements bootstrap/install
-// logic itself (qa-engine must not depend on src/, so it cannot import setupE2eProject/
-// setupCodeProject directly — only their call SHAPE is pinned here).
+// The collaborators are duck-typed callbacks: `code` still matches src/qa/code-runner.ts's
+// setupCodeProject(repoDir, deps, opts?) call shape (unmigrated, out of scope for migration-tier-4a) —
+// the factory binds the real function + defaultCodeSetupDeps into that slot. `e2e` is now bound to
+// qa-engine's OWN SetupAdapter.setup(e2eDir, opts?) (migration-tier-4a — the real bootstrap/install
+// logic relocated from the now-deleted src/qa/setup.ts); this bridge still never re-implements it —
+// only the call SHAPE is pinned here, kept duck-typed on purpose so `e2e`/`code` stay symmetric even
+// though one collaborator is qa-engine-native and the other is still src-bound.
 //
 // A throw from either collaborator propagates verbatim (never caught here) — CLAUDE.md's invariant:
 // a setup failure is infra-error, never a code verdict. RunQaUseCase.run is the layer that maps the
@@ -19,7 +20,7 @@ import type { TestTarget } from "@kernel/run-mode.ts";
 export type SetupFn = (dir: string, opts?: { signal?: AbortSignal }) => Promise<void>;
 
 export interface SetupPortCollaborators {
-  e2e: SetupFn; // bound to setupE2eProject(e2eDir, defaultSetupDeps)
+  e2e: SetupFn; // bound to qa-engine's own SetupAdapter.setup (migration-tier-4a)
   code: SetupFn; // bound to setupCodeProject(repoDir, defaultCodeSetupDeps)
 }
 

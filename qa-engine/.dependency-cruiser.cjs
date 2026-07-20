@@ -51,15 +51,20 @@ module.exports = {
       to: { path: "contexts/workspace-and-publication" },
     },
     {
-      // migration-tier-1-2, Slice 5: qa-engine is meant to be src-free — the composition factory
-      // (src/server/rewritten-engine-factory.ts) is the ONLY sanctioned src<->qa-engine bridge, and
-      // it lives in src/, outside this rule's `from` scope. The only other sanctioned, TEMPORARY
-      // src/ importers are `*-parity.test.ts` files (pre-deletion pins) — those live under
-      // qa-engine/test/, also outside this rule's `from` scope (qa-engine/src/ only), so they never
-      // trip this gate.
+      // migration-tier-1-2, Slice 5 (corrected judgment-day round-1: the prior comment's "ONLY
+      // sanctioned src<->qa-engine bridge" framing was stale/inaccurate). The direction actually
+      // enforced here is ONE-WAY: qa-engine/src/ may never import src/ (below). The OPPOSITE
+      // direction — src/ importing qa-engine/src/ — is open by design (the shell consumes the
+      // engine, not the reverse) and is NOT machine-enforced by this rule; src/server/
+      // rewritten-engine-factory.ts (the composition factory) is one such importer, but not the
+      // only one — src/integrations/repo-mirror.ts (MirrorProvisionAdapter, migration-tier-4a),
+      // src/orchestrator/sanitizer.ts, src/server/webhook-routing.ts, and src/contract/{commands,
+      // events}.ts all predate or postdate it and import qa-engine/src/ deliberately too. `*-parity.
+      // test.ts` files under qa-engine/test/ (pre-deletion pins) are also outside this rule's
+      // `from` scope (qa-engine/src/ only), so none of the above ever trips this gate.
       name: "no-src-import-in-qa-engine",
       severity: "error",
-      comment: "No qa-engine production module may import src/ — qa-engine stays src-free by construction; the composition factory in src/server/ is the sole bridge.",
+      comment: "No qa-engine production module may import src/ — qa-engine stays src-free by construction. The opposite direction (src/ importing qa-engine/src/) is open by design: the shell consumes the engine, never the reverse.",
       from: { path: "^qa-engine/src/" },
       to: { path: "^src/" },
     },

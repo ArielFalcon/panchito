@@ -510,11 +510,11 @@ test("two calls to buildRewrittenCompositionConfig with DIFFERENT namespaces pro
 });
 
 // ── F5 (HIGH) — GitHubPrAdapter's own `base` param defaults to "main" when the caller omits it
-// (github-pr.adapter.ts:14); this factory previously never passed app.baseBranch at all, so every
+// (github-pr.adapter.ts); this factory previously never passed app.baseBranch at all, so every
 // app with a non-"main" default branch silently targeted the wrong PR base branch. Verified via
 // structural introspection of the constructed GitHubPrAdapter's own private `base` field — the
-// collaborator cannot be invoked directly in this test file (its injected createPullRequest wraps
-// the REAL github.createPullRequest, which requires GITHUB_TOKEN + real network), so pinning the
+// collaborator cannot be invoked directly in this test file (its injected fetch/authHeaders build
+// the REAL HTTP call, which requires GITHUB_TOKEN + real network), so pinning the
 // constructor-injected value is the faithful, side-effect-free way to assert this wiring.
 
 test("F5: buildRewrittenCompositionConfig wires githubPr with app.baseBranch as the PR base", () => {
@@ -605,8 +605,9 @@ test("buildVcsPublish (e2e target): changes under e2e/ -> checkout -B, add, comm
 // that the first round's fakes only recorded argv without pinning the auth/identity prefixes.
 // realGit (src/integrations/repo-mirror.ts:203-208) is a BARE execFile wrapper: it applies
 // hardenGitArgs (hooks/safe.directory) + GIT_TERMINAL_PROMPT=0 but NEVER prepends authHeaderArgs()
-// — auth in this codebase is per CALL SITE (syncMirror :73/:78, resolveRef :221, legacy publish
-// :124 `[...authHeaderArgs(), "push", ...]`). Likewise fresh mirrors have NO git identity (nothing
+// — auth in this codebase is per CALL SITE (repo-mirror's ensureMirror/ensureMirrorAtBranch
+// wrappers, resolveRef :221, legacy publish :124 `[...authHeaderArgs(), "push", ...]`). Likewise
+// fresh mirrors have NO git identity (nothing
 // in Dockerfile/compose/repo-mirror configures one), which is why legacy committed with
 // `-c user.name=<GIT_AUTHOR_NAME ?? "panchito"> -c user.email=<GIT_AUTHOR_EMAIL ?? "panchito@users.
 // noreply.github.com">` (publish.ts:107-108,120-123). buildVcsPublish now decorates the injected

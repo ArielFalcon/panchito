@@ -88,6 +88,8 @@ import { StrykerMutationOracleAdapter } from "@contexts/objective-signal/infrast
 import { FaultInjectionOracleAdapter } from "@contexts/objective-signal/infrastructure/fault-injection-oracle.adapter";
 import { GitHubPrAdapter } from "@contexts/workspace-and-publication/infrastructure/github-pr.adapter";
 import { GitHubIssueAdapter } from "@contexts/workspace-and-publication/infrastructure/github-issue.adapter";
+import type { GitHubHttpDeps } from "@contexts/workspace-and-publication/infrastructure/github-http";
+import { SetupAdapter, nodeFsDeps } from "@contexts/workspace-and-publication/infrastructure/setup.adapter";
 import { VcsWriteAdapter } from "@contexts/workspace-and-publication/infrastructure/vcs-write.adapter";
 import { CONFINEMENT_DENYLIST } from "@contexts/workspace-and-publication/domain/write-confinement.service";
 import { WriteConfinementAdapter } from "@contexts/workspace-and-publication/infrastructure/write-confinement.adapter";
@@ -130,9 +132,8 @@ import { validateSpecs, defaultValidateDeps } from "../qa/validate";
 import { validateCodeProject, defaultCodeValidateDeps } from "../qa/code-validate";
 import { runE2E, defaultExecuteDeps, defaultCleanupDeps } from "../qa/execute";
 import { runCodeTests, defaultCodeExecuteDeps, runCodeCoverage, detectCodeProject, scrubEnv } from "../qa/code-runner";
-import { setupE2eProject, defaultSetupDeps } from "../qa/setup";
 import { setupCodeProject, defaultCodeSetupDeps } from "../qa/code-runner";
-import { github } from "../integrations/github";
+import { requireEnv } from "../util/env";
 import { RedactionPortAdapter } from "../orchestrator/sanitizer";
 import { ensureMirror, ensureMirrorAtBranch, defaultMirrorDeps, workdirRoot, realGit, authHeaderArgs } from "../integrations/repo-mirror";
 import { stageServiceContext, serviceContextDir } from "./service-context";
@@ -246,8 +247,9 @@ type GitFn = (args: string[], cwd?: string) => Promise<string>;
 
 // Adversarial-review CRITICALs (auth-on-push + commit identity): realGit is a BARE execFile wrapper
 // — it applies hardenGitArgs (hooks/safe.directory) + GIT_TERMINAL_PROMPT=0 but NEVER prepends
-// authHeaderArgs(); auth in this codebase is applied per CALL SITE (repo-mirror's own syncMirror/
-// resolveRef, legacy publish.ts:124 `[...authHeaderArgs(), "push", ...]`). Likewise a fresh mirror
+// authHeaderArgs(); auth in this codebase is applied per CALL SITE (repo-mirror's own
+// ensureMirror/ensureMirrorAtBranch wrappers + resolveRef, legacy publish.ts:124
+// `[...authHeaderArgs(), "push", ...]`). Likewise a fresh mirror
 // has NO git identity configured anywhere (Dockerfile/compose/repo-mirror set none), which is why
 // legacy committed with `-c user.name=<GIT_AUTHOR_NAME ?? "panchito"> -c user.email=
 // <GIT_AUTHOR_EMAIL ?? "panchito@users.noreply.github.com">` (publish.ts:107-108,120-123). Without
@@ -349,6 +351,36 @@ export function buildConfinement(
 // own signature. Exported for direct unit testing (same precedent as buildConfinement above).
 export function buildMirrorGc(git: GitFn = realGit): MirrorGcAdapter {
   return new MirrorGcAdapter((dir) => git(["gc", "--auto", "--quiet"], dir).then(() => {}));
+}
+
+// migration-tier-4a: the REAL GitHubHttpDeps collaborator GitHubPrAdapter/GitHubIssueAdapter consume
+// — the global fetch + an authHeaders() closure built from requireEnv("GITHUB_TOKEN"), read at CALL
+// time (same "env read per call, not at construction" precedent authHeaderArgs()/withPublishGitDecorations
+// above already follow for git auth). This is the ONLY place GITHUB_TOKEN is read for the
+// watched-repo publish path — qa-engine's adapters never read env or import src/. Exported for direct
+// unit testing (same precedent as buildVcsPublish/buildConfinement/buildMirrorGc above).
+export function githubHttpDeps(fetchFn: typeof fetch = fetch): GitHubHttpDeps {
+  return {
+    fetch: (url, init) => fetchFn(url, init),
+    authHeaders: () => ({ Authorization: `Bearer ${requireEnv("GITHUB_TOKEN")}` }),
+  };
+}
+
+// migration-tier-4a: constructs the REAL SetupAdapter — the collaborator now bound into
+// CompositionConfig.setupCollaborators.e2e (replacing the deleted src/qa/setup.ts's
+// setupE2eProject/defaultSetupDeps). `fs` is qa-engine's own nodeFsDeps (real node:fs, src-free);
+// `runner` is the SAME SandboxedBinaryRunnerAdapter+ProcessKillAdapter pairing this factory already
+// constructs for the mutation oracle below; `seedDir` inlines src/qa/setup.ts's old seedDir()
+// formula (PANCHITO_ROOT env, defaulting to cwd) — this is the ONLY place that env is read for e2e
+// setup, matching the env-agnostic-adapter invariant every other injected secret/path in this file
+// follows (mirrors mirrorRoot's own workdirRoot() precedent immediately below). Exported for direct
+// unit testing (same precedent as buildVcsPublish/buildConfinement/buildMirrorGc/githubHttpDeps above).
+export function buildSetupAdapter(): SetupAdapter {
+  return new SetupAdapter({
+    fs: nodeFsDeps,
+    runner: new SandboxedBinaryRunnerAdapter({ processKill: new ProcessKillAdapter() }),
+    seedDir: join(process.env.PANCHITO_ROOT ?? process.cwd(), "config", "e2e"),
+  });
 }
 
 // One-shot /version fetch + sha/health match — VersionPollFn's contract is a SINGLE probe per
@@ -850,6 +882,12 @@ export function buildRewrittenCompositionConfig(
   // repositories racing over the same table.
   const learningRepo = new SqliteLearningRepository(historyLearningStore(app.name));
 
+  // migration-tier-4a: ONE SetupAdapter instance per composed run — see buildSetupAdapter's own
+  // header. Constructed once here (not per-call inside setupCollaborators.e2e below) so every setup()
+  // invocation on this composition reuses the same real fs/runner wiring, mirroring learningRepo's
+  // own "single source, not re-constructed per call" precedent immediately above.
+  const setupAdapter = buildSetupAdapter();
+
   return {
     repo: app.repo,
     appName: app.name,
@@ -899,13 +937,14 @@ export function buildRewrittenCompositionConfig(
     validationStrategies: { e2e: staticGate, code: codeValidate },
     executionStrategies: { e2e, code },
     // SetupPort (CLAUDE.md run-flow step 3): bootstraps the config/e2e seed into e2e/ (first run) +
-    // npm ci, or installs the repo's own deps for code mode — the SAME real src/qa/setup.ts /
-    // src/qa/code-runner.ts functions defaultPipelineDeps() wires for the legacy engine, so both
-    // engines set up a fresh mirror identically. specDir here is whatever WorkspacePortAdapter's
-    // checkout(sha) resolved (composition-root.ts's own contract) — e2eDir under the REAL per-run
-    // mirrorDir, not this factory's static placeholder mirrorDir/e2eDir above.
+    // npm ci, or installs the repo's own deps for code mode. e2e is now qa-engine's own SetupAdapter
+    // (migration-tier-4a — src/qa/setup.ts is deleted); code stays the real src/qa/code-runner.ts
+    // setupCodeProject/defaultCodeSetupDeps (unmigrated, out of this slice's scope). specDir here is
+    // whatever WorkspacePortAdapter's checkout(sha) resolved (composition-root.ts's own contract) —
+    // e2eDir under the REAL per-run mirrorDir, not this factory's static placeholder mirrorDir/e2eDir
+    // above.
     setupCollaborators: {
-      e2e: (specDir, opts) => setupE2eProject(specDir, defaultSetupDeps, opts),
+      e2e: (specDir, opts) => setupAdapter.setup(specDir, opts),
       code: (specDir, opts) => setupCodeProject(specDir, defaultCodeSetupDeps, opts),
     },
     // CleanupPort (audit CRITICAL, task #33): orphan test-data cleanup — the SAME real
@@ -1059,19 +1098,16 @@ export function buildRewrittenCompositionConfig(
     // cfg.shadow is true (composition-root.ts wireBridges() wires that unconditionally), so a
     // shadow-mode app never fires these even on this REAL path.
     // F5 fix (HIGH): GitHubPrAdapter defaults its own `base` param to "main" when omitted
-    // (github-pr.adapter.ts:14) — this call previously never passed app.baseBranch at all, so every
+    // (github-pr.adapter.ts) — this call previously never passed app.baseBranch at all, so every
     // app with a non-"main" default branch (mirrors legacy's own `app.baseBranch ?? "main"` used
     // throughout src/pipeline.ts, e.g. :1214/:1430/:3138/:3222) would silently target the wrong base
     // branch for its suite PR.
-    githubPr: new GitHubPrAdapter(
-      {
-        createPullRequest: (repo, args) => github.createPullRequest(repo, args),
-        enableAutoMerge: (nodeId) => github.enableAutoMerge(nodeId),
-        mergePullRequest: (repo, number) => github.mergePullRequest(repo, number),
-      },
-      app.baseBranch ?? "main",
-    ),
-    githubIssue: new GitHubIssueAdapter((repo, title, body) => github.openIssue(repo, title, body)),
+    // migration-tier-4a: GitHubPrAdapter/GitHubIssueAdapter now own their GitHub HTTP directly — no
+    // more closures wrapping src/integrations/github.ts's `github` object. githubHttpDeps() (below)
+    // is the ONLY place GITHUB_TOKEN is read for this watched-repo publish path (requireEnv, same
+    // env-agnostic-adapter invariant every other injected secret in this file follows).
+    githubPr: new GitHubPrAdapter(githubHttpDeps(), app.baseBranch ?? "main"),
+    githubIssue: new GitHubIssueAdapter(githubHttpDeps()),
     // PROD-BLOCKER fix: the REAL git-write collaborator — stages/commits/pushes the agent's generated
     // tests to the PR branch BEFORE githubPr.openWithAutoMerge() is called (PublicationPortAdapter's
     // "pr" route, see that file's own header). Dispatched by isCode exactly like

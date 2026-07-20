@@ -3,11 +3,29 @@
 // (the tests, committed via PR). The app is never built or started: the system
 // under test is the DEV environment. git/exists are injected so the logic is
 // verifiable without touching disk or network in tests.
+//
+// migration-tier-4a: the provisioning ARGV ensureMirror/ensureMirrorAtBranch actually RUN (clone/
+// fetch/checkout-f/clean, index.lock+set-url self-heal) now lives in qa-engine's src-free
+// MirrorProvisionAdapter. This module stays the credentialed-git supplier — realGit/authHeaderArgs/
+// tokenlessUrl/hardenGitArgs/scrubGitError/assertHexSha never leave src — and keeps exporting
+// `ensureMirror`/`ensureMirrorAtBranch` with their ORIGINAL byte-identical public signature
+// `(repo, sha|branch, deps: MirrorDeps): Promise<string>` as THIN WRAPPERS that adapt MirrorDeps into
+// MirrorProvisionDeps and delegate. The wrapper is required, not cosmetic: src/index.ts's onboarding
+// job calls `ensureMirrorAtBranch` directly (a SECOND production consumer beyond the composition
+// factory's checkout closure) — re-verified against HEAD before this slice, since the migration
+// design's decision table did not originally account for it. The decorated `git` fn prepends
+// authHeaderArgs() for clone/fetch only, mirroring rewritten-engine-factory.ts's own
+// withPublishGitDecorations precedent for push/commit — so the RELOCATED adapter's own argv never
+// carries a credential, while every existing caller/test here observes byte-identical behavior.
+// judgment-day round-1: this module's own assertBranchName (branch-name validation) was removed as
+// orphaned — the provisioning delegate (MirrorProvisionAdapter) validates the branch itself via its
+// own deliberately-duplicated copy (qa-engine may not import src/), so no caller here ever needed it.
 
 import { execFile } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { RedactionPortAdapter } from "../orchestrator/sanitizer";
+import { MirrorProvisionAdapter, type MirrorProvisionDeps } from "../../qa-engine/src/contexts/workspace-and-publication/infrastructure/mirror-provision.adapter";
 
 // sdd/migration-wiring-phase-2 Slice 7b-2: the canonical redaction adapter (env+pattern) for this
 // module's spawn-boundary error scrubbing, replacing src/util/redact.ts's redactSecrets.
@@ -57,31 +75,21 @@ export function authHeaderArgs(): string[] {
     : [];
 }
 
-// Brings the mirror up to date with origin: tokenless clone when missing, fetch when
-// present. On the existing-dir path it first self-heals two failure modes:
-//   1. A stale `.git/index.lock` — BOTH the QA runner and the onboarding job
-//      (src/server/onboarding/onboarding-job.ts) provision mirrors against this same shared
-//      working tree, so a stale lock can originate from either side's abruptly-interrupted
-//      provisioning. The onboarding-hardening mirror-race guard (RunnerDeps.isOnboardingActive,
-//      src/server/runner.ts) is what serializes the two in the normal case — it makes onboarding
-//      and QA runs never provision the same mirror concurrently — but does not by itself prevent a
-//      lock left behind by a genuinely interrupted run (process crash, forced kill) on either side;
-//      this self-heal remains the backstop for that case.
-//   2. A token embedded in origin's URL — mirrors cloned before the tokenless-URL
-//      policy persist the credential in .git/config; `remote set-url` (idempotent,
-//      cheap) scrubs it on the next run.
-async function syncMirror(repo: string, deps: MirrorDeps): Promise<string> {
-  const root = deps.root ?? workdirRoot();
-  const dir = join(root, repo.replaceAll("/", "__"));
-  if (!deps.exists(dir)) {
-    await deps.git([...authHeaderArgs(), "clone", tokenlessUrl(repo), dir]);
-  } else {
-    const indexLock = join(dir, ".git", "index.lock");
-    if (deps.exists(indexLock)) deps.removeFile(indexLock);
-    await deps.git(["remote", "set-url", "origin", tokenlessUrl(repo)], dir);
-    await deps.git([...authHeaderArgs(), "fetch", "origin"], dir);
-  }
-  return dir;
+// Adapts this module's MirrorDeps (git/exists/removeFile/root, the shape every existing caller and
+// test already injects) into MirrorProvisionAdapter's MirrorProvisionDeps: `root` resolves through
+// the SAME workdirRoot() fallback as before, `remoteUrl` wraps tokenlessUrl (GIT_REMOTE_BASE-aware),
+// and `git` is decorated to prepend authHeaderArgs() for clone/fetch ONLY — mirroring
+// rewritten-engine-factory.ts's own withPublishGitDecorations precedent (push/commit there;
+// clone/fetch here) — so the relocated adapter's own argv never carries a credential while the
+// decorated call observed by a caller-supplied `deps.git` stays byte-identical to before this slice.
+function toProvisionDeps(deps: MirrorDeps): MirrorProvisionDeps {
+  return {
+    root: deps.root ?? workdirRoot(),
+    exists: deps.exists,
+    removeFile: deps.removeFile,
+    remoteUrl: tokenlessUrl,
+    git: (args, cwd) => (args[0] === "clone" || args[0] === "fetch" ? deps.git([...authHeaderArgs(), ...args], cwd) : deps.git(args, cwd)),
+  };
 }
 
 // Leaves the working copy PRISTINE at the SHA. `checkout -f` discards changes to
@@ -89,33 +97,21 @@ async function syncMirror(repo: string, deps: MirrorDeps): Promise<string> {
 // `clean -fd` removes untracked files (leftover specs), EXCEPT node_modules so
 // the e2e project's deps are not reinstalled on every run. Without this, runs
 // that do not publish would contaminate the next one (or break the checkout).
+//
+// THIN WRAPPER (migration-tier-4a) — see this module's own header for why the public signature stays
+// byte-identical while the provisioning ARGV itself now lives in qa-engine's MirrorProvisionAdapter.
 export async function ensureMirror(repo: string, sha: string, deps: MirrorDeps): Promise<string> {
-  assertHexSha(sha);
-  const dir = await syncMirror(repo, deps);
-  await deps.git(["checkout", "-f", sha], dir);
-  await deps.git(["clean", "-fd", "-e", "node_modules"], dir);
-  return dir;
-}
-
-// A branch name passed to git as a positional arg must never be parseable as an
-// option (no leading '-') nor as a rev range ('..'). Same injection-closing rationale
-// as assertHexSha for SHAs coming from an attacker-controlled webhook.
-const BRANCH_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
-export function assertBranchName(branch: string): void {
-  if (!BRANCH_RE.test(branch) || branch.includes("..")) {
-    throw new Error(`invalid branch name: ${JSON.stringify(branch)}`);
-  }
+  return new MirrorProvisionAdapter(toProvisionDeps(deps)).ensureMirror(repo, sha);
 }
 
 // Pristine working copy at the HEAD of origin/<branch> (not at a specific SHA).
 // Used for the PRIMARY repo of a cross-repo run: the triggering commit belongs to a
 // service repo, so the front is checked out at its own base branch instead.
+//
+// THIN WRAPPER (migration-tier-4a) — see this module's own header; src/index.ts's onboarding job
+// calls this directly, so the signature MUST stay byte-identical.
 export async function ensureMirrorAtBranch(repo: string, branch: string, deps: MirrorDeps): Promise<string> {
-  assertBranchName(branch);
-  const dir = await syncMirror(repo, deps);
-  await deps.git(["checkout", "-f", `origin/${branch}`], dir);
-  await deps.git(["clean", "-fd", "-e", "node_modules"], dir);
-  return dir;
+  return new MirrorProvisionAdapter(toProvisionDeps(deps)).ensureMirrorAtBranch(repo, branch);
 }
 
 // Diff of commit `sha` against its parent (content only, without the header).
