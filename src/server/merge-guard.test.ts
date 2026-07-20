@@ -51,6 +51,39 @@ test("isProtectedPath flags the secret boundary (a fix must never weaken what sc
   assert.equal(isProtectedPath("qa-engine/src/contexts/qa-run-orchestration/infrastructure/bridges/publication-port.adapter.ts"), true);
 });
 
+// judgment-day round 3 (FIX C, Judge A): three control-plane auth files were BOTH unscanned (not
+// under a SECURITY_SENSITIVE_SURFACE_ROOTS root) AND unprotected — a weakening edit to any of them
+// passed silently. auth.ts mints/validates the HMAC session token; github-auth.ts is the push/admin
+// authorization rule gating control-plane access; webhook.ts's verifySignature is the HMAC gate on
+// who can trigger a run at all. None lives under either existing surface root (both are qa-engine
+// dirs; these are src/server/ standalone files) — added as exact PROTECTED_PATHS entries rather than
+// promoting all of src/server/ to a root, which would force review of ~40 unrelated files (views,
+// metrics, telemetry, queue, …) with no genuine security content.
+test("isProtectedPath flags the control-plane auth boundary (FIX C)", () => {
+  assert.equal(isProtectedPath("src/server/auth.ts"), true);
+  assert.equal(isProtectedPath("src/server/github-auth.ts"), true);
+  assert.equal(isProtectedPath("src/server/webhook.ts"), true);
+});
+
+// judgment-day round 3 (FIX C, Judge A): generation/infrastructure/ is where model-bound prompts are
+// assembled and sanitized — literally the directory the 4th and 5th unsanitized-prompt-site defects
+// lived in (only sanitize-text.ts was protected; every sibling, including prompts.ts itself, was
+// not). qa-run-orchestration/infrastructure/bridges/ is the port-implementation layer wiring EVERY
+// domain security boundary (write-confinement, publication, GitHub) into the use case — only
+// publication-port.adapter.ts was protected. Per-file judgment on exactly this class of surface has
+// now failed 5 times (the meta-lesson) — rather than add a partial, reasoned allowlist here too, both
+// directories are wholesale PROTECTED_PATHS prefixes: every file in them, present or future, requires
+// human review. The residual is zero by construction, not by review, and needs no NOT_SECURITY_SENSITIVE
+// entries at all.
+test("isProtectedPath flags the whole generation/infrastructure and orchestration bridges surface (FIX C)", () => {
+  assert.equal(isProtectedPath("qa-engine/src/contexts/generation/infrastructure/prompt-builders/prompts.ts"), true);
+  assert.equal(isProtectedPath("qa-engine/src/contexts/generation/infrastructure/dom-snapshot.ts"), true);
+  assert.equal(isProtectedPath("qa-engine/src/contexts/generation/infrastructure/route-catalog.ts"), true);
+  assert.equal(isProtectedPath("qa-engine/src/contexts/generation/infrastructure/sse/reexplore.ts"), true);
+  assert.equal(isProtectedPath("qa-engine/src/contexts/qa-run-orchestration/infrastructure/bridges/execution-port.adapter.ts"), true);
+  assert.equal(isProtectedPath("qa-engine/src/contexts/qa-run-orchestration/infrastructure/bridges/deploy-gate-port.adapter.ts"), true);
+});
+
 // judgment-day round 2 (FIX 6, both judges): the PRIOR version of this test used a basename-prefix
 // heuristic (SENSITIVE_BASENAME_PREFIXES) as a stand-in for completeness — Judge B planted
 // `secret-guard.service.ts` and Judge A planted `secrets.ts`/`confine.ts`/`egress.ts`, all inside

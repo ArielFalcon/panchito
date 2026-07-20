@@ -89,6 +89,16 @@ export const PROTECTED_PATHS: string[] = [
   // scrub-env.ts itself.
   "qa-engine/src/shared-infrastructure/process-sandbox/sandboxed-binary-runner.ts",
   "qa-engine/src/shared-infrastructure/process-sandbox/sandboxed-binary-runner.adapter.ts",
+  // judgment-day round 3 (FIX A, Judge A): was misclassified NOT_SECURITY_SENSITIVE as a "lifecycle
+  // utility, no env/secret handling" — a CATEGORY ERROR. The risk isn't secret handling, it's
+  // sandbox/timeout-confinement integrity: every real caller (sandboxed-binary-runner.adapter.ts,
+  // code-execution.runner.ts, e2e-execution.runner.ts, static-gate.checks.ts, code-setup.ts,
+  // stryker-mutation-oracle.adapter.ts, dom-snapshot.ts, codebase-memory-client.ts) instantiates
+  // `new ProcessKillAdapter()` with NO args, i.e. runs through the DEFAULT kill fn. A neutered
+  // default silently stops killing untrusted agent-authored processes on timeout/abort while every
+  // test (which all inject their own kill fn) stays green. Same risk class as the spawn primitives
+  // directly above, which this file's own header says it is the ONE consolidated kill for.
+  "qa-engine/src/shared-infrastructure/process-sandbox/process-kill.adapter.ts",
   // The composition root — wires RedactionPortAdapter, WriteConfinementAdapter, VcsWriteAdapter,
   // CODE_PUBLISH_EXCLUDES, and every GitHub adapter. An autonomous edit here can rewire ANY security
   // port to a weaker (or fake) implementation without ever touching the port/adapter files
@@ -107,6 +117,39 @@ export const PROTECTED_PATHS: string[] = [
   // The logs→Issue containsSecret fail-loud call site — an autonomous fix could remove the guard
   // that refuses to ship a secret-carrying Issue body.
   "qa-engine/src/contexts/qa-run-orchestration/infrastructure/bridges/publication-port.adapter.ts",
+  // judgment-day round 3 (FIX C, Judge A): the control-plane auth boundary — unscanned AND
+  // unprotected before this fix. auth.ts mints/validates the HMAC session token for the control-plane
+  // API (weakening it is a full auth bypass). github-auth.ts is the push/admin authorization rule
+  // gating who the control plane trusts. webhook.ts's verifySignature (~line 21) is the HMAC gate on
+  // who can trigger a run at all. Listed as exact paths (not a src/server/ root) — promoting the
+  // whole directory would force review of ~40 unrelated files (views, metrics, telemetry, queue, …)
+  // with no genuine security content, which is exactly the noise the invert-the-default design exists
+  // to avoid manufacturing.
+  "src/server/auth.ts",
+  "src/server/github-auth.ts",
+  "src/server/webhook.ts",
+  // judgment-day round 3 (FIX C, Judge A): generation/infrastructure/ is where model-bound prompts
+  // are assembled and sanitized — literally the directory the 4th and 5th unsanitized-prompt-site
+  // defects lived in (sanitize-text.ts was the only protected file; every sibling, including
+  // prompts.ts itself, was not). Blanket-protected as a directory prefix (27 files today) rather than
+  // promoted to a SECURITY_SENSITIVE_SURFACE_ROOTS root with a per-file NOT_SECURITY_SENSITIVE
+  // allowlist: per-file judgment on exactly this class of surface (which fields are "model-bound
+  // enough" to matter) is the same reasoning move that produced the FIX D defect this same round —
+  // wholesale protection needs no such judgment and its residual is zero by construction.
+  "qa-engine/src/contexts/generation/infrastructure/",
+  // judgment-day round 3 (FIX C, Judge A): the port-implementation layer wiring EVERY domain security
+  // boundary (write-confinement, publication, GitHub, deploy-gate) into the use case — only
+  // publication-port.adapter.ts (above) was protected; the other ~20 files, including the ones that
+  // bridge git/GitHub/credential-bearing ports, were not. Same wholesale-prefix rationale as
+  // generation/infrastructure/ above (21 files today).
+  "qa-engine/src/contexts/qa-run-orchestration/infrastructure/bridges/",
+  // judgment-day round 3 (FIX B, Judge A): was misclassified NOT_SECURITY_SENSITIVE as "shadow mode
+  // degrades observability, not the security boundary" — wrong on its face. This file IS the
+  // boundary keeping `qa.shadow: true` apps (portfolio, petclinic, jhipster-store per CLAUDE.md) from
+  // ever performing a real git/GitHub write; an edit adding a real call alongside the console.log
+  // turns shadow mode into live-write mode for repos that never opted in, silently, for every test
+  // that only regex-matches the log line.
+  "qa-engine/src/contexts/workspace-and-publication/infrastructure/shadow-log.adapter.ts",
   // 3. gate integrity (the fix must not weaken what decides whether it deploys)
   "*.test.ts",
   "tsconfig.json",
@@ -159,6 +202,20 @@ export function isProtectedPath(file: string): boolean {
 //   - shared-infrastructure/process-sandbox/ — the untrusted-code-execution boundary (group 2/3's own
 //     "agent-authored code" rationale): scrub-env's secret-leak allowlist plus the spawn primitives
 //     that actually run untrusted binaries with that (already-scrubbed) env.
+//
+// judgment-day round 3 (FIX C, Judge A): this pair of roots left real security surface both unscanned
+// and unprotected — generation/infrastructure/ (model-prompt assembly/sanitization) and
+// qa-run-orchestration/infrastructure/bridges/ (the port-implementation layer wiring every domain
+// security boundary into the use case) each had only ONE of their ~20-27 files protected. Rather than
+// widen THIS roots+allowlist mechanism a third time (more per-file judgment on exactly the class of
+// surface that has now produced 5 confirmed defects from wrong reasoning), those two directories are
+// instead PROTECTED_PATHS wholesale prefixes above — 100% coverage by construction, no allowlist, no
+// judgment call to get wrong. The roots list below stays scoped to the original two directories, whose
+// existing NOT_SECURITY_SENSITIVE entries are still individually reasoned and reviewed; this is a
+// declared-surface gate over a reviewed list for THESE two roots specifically, not a claim that
+// SECURITY_SENSITIVE_SURFACE_ROOTS covers the whole repo's security-relevant code — the control-plane
+// auth files (src/server/auth.ts, github-auth.ts, webhook.ts) and the two directories above are
+// covered by PROTECTED_PATHS directly instead, for the reasons stated at each entry.
 export const SECURITY_SENSITIVE_SURFACE_ROOTS: string[] = [
   "qa-engine/src/contexts/workspace-and-publication/",
   "qa-engine/src/shared-infrastructure/process-sandbox/",
@@ -172,18 +229,19 @@ export const NOT_SECURITY_SENSITIVE: string[] = [
   // shadow|quarantine|noop) — no I/O, no secret handling, no git write; a regression here is caught
   // by its own heavily-covered *.test.ts (already protected by the gate-integrity group above).
   "qa-engine/src/contexts/workspace-and-publication/domain/publish-decision.service.ts",
-  // Thin GitHub API callers — both consume the injected github-http.ts client (which IS protected,
-  // it owns the auth-header injection) and carry no credential of their own.
+  // Thin GitHub API caller — consumes the injected github-http.ts client (which IS protected, it
+  // owns the auth-header injection) and carries no credential of its own.
   "qa-engine/src/contexts/workspace-and-publication/infrastructure/github-issue.adapter.ts",
+  // judgment-day round 3 (ALSO, Judge A): SAFE, but the ORIGINAL rationale here ("thin API caller,
+  // carries no credential") was the wrong stated reason — that's equally true of github-issue.adapter.ts
+  // above, yet doesn't by itself stop an autonomous "fix" from silently reordering or dropping the
+  // auto-merge-then-direct-merge fallback. The real reason this file survives autonomous editing is
+  // that github-pr.adapter.test.ts pins the exact call count/sequence for the happy path, the
+  // auto-merge-unavailable fallback, AND the double-failure path tightly enough to break on the
+  // obvious escalation (already protected by the gate-integrity group's `*.test.ts` entry above).
   "qa-engine/src/contexts/workspace-and-publication/infrastructure/github-pr.adapter.ts",
   // `git gc --auto` only — no credential, no write-confinement/publish interaction.
   "qa-engine/src/contexts/workspace-and-publication/infrastructure/mirror-gc.adapter.ts",
-  // Shadow mode's whole purpose is REPLACING a real side effect with a log line — it never performs
-  // a real git write, PR, or Issue; weakening it degrades observability, not the security boundary.
-  "qa-engine/src/contexts/workspace-and-publication/infrastructure/shadow-log.adapter.ts",
-  // Process-tree kill on timeout/abort — lifecycle utility, no env/secret handling of its own (the
-  // env it's handed is already scrubbed upstream by the caller).
-  "qa-engine/src/shared-infrastructure/process-sandbox/process-kill.adapter.ts",
 ];
 
 export function isSecuritySensitiveSurface(file: string): boolean {
